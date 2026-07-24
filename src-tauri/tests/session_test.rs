@@ -6,6 +6,7 @@
 //!   2. `kill` reaps the child (no zombie)
 //!   3. transcript file exists and is redacted
 
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -146,6 +147,84 @@ fn write_and_resize_on_unknown_session_return_errors_not_panics() {
     assert!(manager.write("no-such-session", "hi\n").is_err());
     assert!(manager.resize("no-such-session", 80, 24).is_err());
     assert!(manager.kill("no-such-session").is_err());
+}
+
+/// Task (founder feedback, 2026-07-24 — Bruno, verbatim): "the user can add
+/// multiple sessions within one project" — this is `SessionManager` doing
+/// exactly what the sidebar's per-project "+"/⌘T button already calls
+/// (`session_create` in `commands.rs` -> this same `create`), just exercised
+/// directly rather than through a GUI click that couldn't be automated in
+/// this environment (no Accessibility/Screen-Recording/Safari-remote-
+/// automation permission available to drive the real Tauri window). Proves
+/// three concurrent same-project sessions are independent on every axis that
+/// matters: distinct ids, no cross-talk between their output streams, and
+/// killing one leaves its siblings alive and still responsive.
+#[test]
+fn multiple_concurrent_sessions_in_the_same_project_are_independent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (tx, rx) = mpsc::channel::<(String, Vec<u8>)>();
+    let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
+        let _ = tx.send((id.to_string(), chunk.to_vec()));
+    });
+    let manager = SessionManager::new(tmp.path().to_path_buf(), sink);
+
+    let a = manager.create(shell_request(tmp.path())).unwrap();
+    let b = manager.create(shell_request(tmp.path())).unwrap();
+    let c = manager.create(shell_request(tmp.path())).unwrap();
+
+    assert_ne!(a.id, b.id);
+    assert_ne!(b.id, c.id);
+    assert_ne!(a.id, c.id);
+    for s in [&a, &b, &c] {
+        assert_eq!(s.project, "demo");
+    }
+
+    manager.write(&a.id, "echo FROM_A\n").unwrap();
+    manager.write(&b.id, "echo FROM_B\n").unwrap();
+    manager.write(&c.id, "echo FROM_C\n").unwrap();
+
+    let mut seen: HashMap<String, String> = HashMap::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline
+        && !(seen.get(&a.id).is_some_and(|s| s.contains("FROM_A"))
+            && seen.get(&b.id).is_some_and(|s| s.contains("FROM_B"))
+            && seen.get(&c.id).is_some_and(|s| s.contains("FROM_C")))
+    {
+        if let Ok((id, chunk)) = rx.recv_timeout(Duration::from_millis(200)) {
+            seen.entry(id).or_default().push_str(&String::from_utf8_lossy(&chunk));
+        }
+    }
+
+    assert!(seen.get(&a.id).is_some_and(|s| s.contains("FROM_A")), "a's output: {:?}", seen.get(&a.id));
+    assert!(seen.get(&b.id).is_some_and(|s| s.contains("FROM_B")), "b's output: {:?}", seen.get(&b.id));
+    assert!(seen.get(&c.id).is_some_and(|s| s.contains("FROM_C")), "c's output: {:?}", seen.get(&c.id));
+
+    // No cross-talk: each session's stream carries only its own marker.
+    assert!(!seen[&a.id].contains("FROM_B") && !seen[&a.id].contains("FROM_C"));
+    assert!(!seen[&b.id].contains("FROM_A") && !seen[&b.id].contains("FROM_C"));
+    assert!(!seen[&c.id].contains("FROM_A") && !seen[&c.id].contains("FROM_B"));
+
+    // Killing one session (closing that tab) leaves its siblings alive...
+    manager.kill(&b.id).unwrap();
+    assert!(manager.pid(&a.id).is_some(), "a should still be alive after b is killed");
+    assert!(manager.pid(&c.id).is_some(), "c should still be alive after b is killed");
+
+    // ...and still genuinely responsive, not just present in the map.
+    manager.write(&a.id, "echo STILL_ALIVE_A\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut still_alive = false;
+    while Instant::now() < deadline {
+        if let Ok((id, chunk)) = rx.recv_timeout(Duration::from_millis(200)) {
+            if id == a.id && String::from_utf8_lossy(&chunk).contains("STILL_ALIVE_A") {
+                still_alive = true;
+                break;
+            }
+        }
+    }
+    assert!(still_alive, "session a should still be responsive after a sibling was killed");
+
+    manager.kill(&a.id).unwrap();
+    manager.kill(&c.id).unwrap();
 }
 
 #[test]
