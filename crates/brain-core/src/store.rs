@@ -151,6 +151,30 @@ fn row_to_job(row: &rusqlite::Row) -> rusqlite::Result<QueueJob> {
     })
 }
 
+/// A row from `pending_notes` (Task 7.1's review-mode gate), joined with its
+/// node for display purposes — `title`/`path` mirror the node's
+/// `label`/`path` at query time rather than being duplicated into
+/// `pending_notes` itself, so they can never drift out of sync with the
+/// node they describe.
+#[derive(Debug, Clone)]
+pub struct PendingNote {
+    pub node_id: String,
+    pub project: String,
+    pub title: String,
+    pub path: Option<String>,
+    pub created: i64,
+}
+
+fn row_to_pending_note(row: &rusqlite::Row) -> rusqlite::Result<PendingNote> {
+    Ok(PendingNote {
+        node_id: row.get(0)?,
+        project: row.get(1)?,
+        title: row.get(2)?,
+        path: row.get(3)?,
+        created: row.get(4)?,
+    })
+}
+
 pub fn now_ts() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -298,11 +322,17 @@ impl Store {
         if fts_query.is_empty() {
             return Ok(vec![]);
         }
+        // LEFT JOIN + `p.node_id IS NULL`: exclude anything awaiting review
+        // (Task 7.1's `pending_notes` gate) from search results, same as
+        // `get_context`'s memory-notes projection — "not auto-committed live
+        // into search/briefings" per PLAN.md's review-mode bullet.
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {cols} FROM nodes_fts f
              JOIN nodes n ON n.id = f.id
+             LEFT JOIN pending_notes p ON p.node_id = n.id
              WHERE nodes_fts MATCH ?1
                AND (?2 IS NULL OR n.project = ?2)
+               AND p.node_id IS NULL
              ORDER BY rank
              LIMIT ?3",
             cols = NODE_COLS
@@ -507,5 +537,86 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    // --- Task 7.1: review-mode gate (`pending_notes`) ----------------------
+
+    /// Marks `node_id` as awaiting review — called by `Memory::
+    /// write_note_with_status` when the `review_memory` setting is on.
+    /// Idempotent (a re-drain of the same session can't produce a duplicate
+    /// row).
+    pub fn mark_pending(&self, node_id: &str, project: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO pending_notes (node_id, project, created) VALUES (?1, ?2, ?3)
+             ON CONFLICT(node_id) DO UPDATE SET created=excluded.created",
+            params![node_id, project, now_ts()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether `node_id` is currently awaiting review.
+    pub fn is_pending(&self, node_id: &str) -> rusqlite::Result<bool> {
+        let found: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT node_id FROM pending_notes WHERE node_id = ?1",
+                params![node_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// Every pending note, optionally scoped to one project, newest first —
+    /// the review-panel list. Joins `nodes` for `title`/`path` so the UI
+    /// doesn't need a second round trip per row.
+    pub fn pending_notes(&self, project: Option<&str>) -> rusqlite::Result<Vec<PendingNote>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.node_id, p.project, n.label, n.path, p.created
+             FROM pending_notes p JOIN nodes n ON n.id = p.node_id
+             WHERE (?1 IS NULL OR p.project = ?1)
+             ORDER BY p.created DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![project], row_to_pending_note)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Approves a pending note: removes it from `pending_notes`, which is
+    /// the whole visibility gate (`search`/`get_context` immediately stop
+    /// hiding it). The node and its `.md` file are untouched — approving
+    /// doesn't rewrite content, only lifts the review hold. Returns `false`
+    /// if `node_id` wasn't pending (nothing to do, not an error — e.g. a
+    /// stale UI click after someone else already approved it).
+    pub fn approve_pending(&self, node_id: &str) -> rusqlite::Result<bool> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM pending_notes WHERE node_id = ?1", params![node_id])?;
+        Ok(changed > 0)
+    }
+
+    /// Discards a pending note: deletes the node, its FTS row, every edge
+    /// touching it (e.g. the `Touched` edges to files it referenced), and
+    /// its `pending_notes` row. Returns the deleted `Node` (so the caller —
+    /// `feedback.rs`'s Tauri command — can also remove its `.md` file from
+    /// disk; `Store` itself never touches the filesystem) or `None` if
+    /// `node_id` wasn't pending.
+    pub fn discard_pending(&self, node_id: &str) -> rusqlite::Result<Option<Node>> {
+        if !self.is_pending(node_id)? {
+            return Ok(None);
+        }
+        let node = self.get_node(node_id)?;
+        self.conn.execute(
+            "DELETE FROM edges WHERE src = ?1 OR dst = ?1",
+            params![node_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM nodes_fts WHERE id = ?1", params![node_id])?;
+        self.conn
+            .execute("DELETE FROM nodes WHERE id = ?1", params![node_id])?;
+        self.conn
+            .execute("DELETE FROM pending_notes WHERE node_id = ?1", params![node_id])?;
+        Ok(node)
     }
 }

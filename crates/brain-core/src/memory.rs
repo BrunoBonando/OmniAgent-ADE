@@ -53,6 +53,28 @@ impl<'a> Memory<'a> {
         body: &str,
         origin: Origin,
     ) -> io::Result<PathBuf> {
+        self.write_note_with_status(project, title, body, origin, false)
+            .map(|(path, _id)| path)
+    }
+
+    /// Same as [`Memory::write_note`], plus Task 7.1's review-mode gate:
+    /// when `pending` is true, the frontmatter gets a `status: pending` line
+    /// and the new node is registered in `Store::mark_pending` — the single
+    /// mechanism `search`/`get_context` use to hide it until someone
+    /// approves or discards it (see `store.rs`'s `pending_notes` docs).
+    /// Returns the node id alongside the path (unlike `write_note`) because
+    /// Task 7.1's caller (`brain-ingest::enrich::write_session_summary`)
+    /// needs it immediately after to attach `Touched` edges — recomputing
+    /// the id via `slugify` a second time at the call site would just be
+    /// duplicating logic that already lives here.
+    pub fn write_note_with_status(
+        &self,
+        project: &str,
+        title: &str,
+        body: &str,
+        origin: Origin,
+        pending: bool,
+    ) -> io::Result<(PathBuf, String)> {
         let redacted_body = redact(body);
         let project_dir = self.brain_dir.join(project);
         fs::create_dir_all(&project_dir)?;
@@ -67,7 +89,9 @@ impl<'a> Memory<'a> {
             Origin::MachineSummary => "machine",
             Origin::Extracted => "extracted",
         };
-        let contents = format!("---\norigin: {origin_str}\n---\n\n# {title}\n\n{redacted_body}\n");
+        let status_line = if pending { "status: pending\n" } else { "" };
+        let contents =
+            format!("---\norigin: {origin_str}\n{status_line}---\n\n# {title}\n\n{redacted_body}\n");
         fs::write(&path, &contents)?;
 
         let id = format!("{project}:memory:{filename}");
@@ -84,6 +108,12 @@ impl<'a> Memory<'a> {
             })
             .expect("brain db write failed");
 
+        if pending {
+            self.store
+                .mark_pending(&id, project)
+                .expect("brain db write failed");
+        }
+
         for target in extract_relative_links(&redacted_body) {
             let dst_id = format!("{project}:doc:{target}");
             let _ = self.store.upsert_edge(&Edge {
@@ -94,7 +124,26 @@ impl<'a> Memory<'a> {
             });
         }
 
-        Ok(path)
+        Ok((path, id))
+    }
+
+    /// Rewrites a note's on-disk `status: pending` frontmatter line to
+    /// `status: approved` after `Store::approve_pending` lifts the DB-level
+    /// hold — keeps the Markdown file honest as the record of what actually
+    /// happened (DESIGN.md 3.5: "Markdown is ground truth for memory").
+    /// The DB row is what actually gates visibility; this is a best-effort
+    /// consistency pass, so a missing/unwritable file is swallowed rather
+    /// than failing the approve action (the note is still visible either
+    /// way once `approve_pending` has run).
+    pub fn mark_note_approved_on_disk(path: &Path) {
+        let Ok(contents) = fs::read_to_string(path) else {
+            return;
+        };
+        if !contents.contains("status: pending\n") {
+            return;
+        }
+        let updated = contents.replacen("status: pending\n", "status: approved\n", 1);
+        let _ = fs::write(path, updated);
     }
 
     pub fn read_all(&self, project: &str) -> io::Result<Vec<PathBuf>> {
@@ -179,5 +228,66 @@ mod tests {
 
         let hits = store.search("summary", Some("p1"), 10).unwrap();
         assert_eq!(hits[0].origin, Origin::MachineSummary);
+    }
+
+    #[test]
+    fn write_note_with_status_pending_lands_with_frontmatter_and_hidden_from_search() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let memory = Memory::new(&store, dir.path());
+
+        let (path, id) = memory
+            .write_note_with_status(
+                "p1",
+                "Session: add auth",
+                "did some session work",
+                Origin::MachineSummary,
+                true,
+            )
+            .unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("status: pending\n"), "{contents}");
+        assert!(store.is_pending(&id).unwrap());
+
+        // Task 7.1: pending notes are hidden from search until approved.
+        let hits = store.search("session", Some("p1"), 10).unwrap();
+        assert!(hits.is_empty(), "{hits:?}");
+
+        store.approve_pending(&id).unwrap();
+        let hits = store.search("session", Some("p1"), 10).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn write_note_with_status_false_behaves_like_write_note() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let memory = Memory::new(&store, dir.path());
+
+        let (path, id) = memory
+            .write_note_with_status("p1", "Note", "body", Origin::UserAuthored, false)
+            .unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(!contents.contains("status:"), "{contents}");
+        assert!(!store.is_pending(&id).unwrap());
+    }
+
+    #[test]
+    fn mark_note_approved_on_disk_rewrites_the_status_line() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let memory = Memory::new(&store, dir.path());
+
+        let (path, _id) = memory
+            .write_note_with_status("p1", "Pending note", "body", Origin::MachineSummary, true)
+            .unwrap();
+
+        Memory::mark_note_approved_on_disk(&path);
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("status: approved\n"), "{contents}");
+        assert!(!contents.contains("status: pending"), "{contents}");
     }
 }

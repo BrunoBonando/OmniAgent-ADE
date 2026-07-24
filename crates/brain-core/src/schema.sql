@@ -43,3 +43,18 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Phase 7 review-mode gate: a node id present here is a machine-generated
+-- Memory note awaiting approval (`review_memory` setting = "true"). Its
+-- presence — not a column on `nodes` — is the single source of truth for
+-- "pending": Store::search() and get_context()'s memory-notes projection
+-- both hide any node listed here until the row is removed (approve) or the
+-- node itself is deleted alongside it (discard). A brand-new table rather
+-- than an ALTER TABLE on `nodes` so opening an existing brain.db (Bruno's
+-- real dogfood data dir, already past Phase 6) never needs a migration step
+-- beyond the already-idempotent `CREATE TABLE IF NOT EXISTS`.
+CREATE TABLE IF NOT EXISTS pending_notes (
+    node_id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    created INTEGER NOT NULL
+);

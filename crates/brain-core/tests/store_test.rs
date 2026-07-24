@@ -301,6 +301,96 @@ fn settings_round_trip() {
 }
 
 #[test]
+fn pending_notes_round_trip_mark_list_approve_discard() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .upsert_node(&node("p1:memory:note-1.md", NodeKind::Memory, "p1", "Session: add auth"))
+        .unwrap();
+
+    assert!(!store.is_pending("p1:memory:note-1.md").unwrap());
+    store.mark_pending("p1:memory:note-1.md", "p1").unwrap();
+    assert!(store.is_pending("p1:memory:note-1.md").unwrap());
+
+    let pending = store.pending_notes(Some("p1")).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].node_id, "p1:memory:note-1.md");
+    assert_eq!(pending[0].title, "Session: add auth");
+
+    // Scoped to a different project -> empty.
+    assert!(store.pending_notes(Some("p2")).unwrap().is_empty());
+    // Unscoped -> still finds it.
+    assert_eq!(store.pending_notes(None).unwrap().len(), 1);
+
+    let approved = store.approve_pending("p1:memory:note-1.md").unwrap();
+    assert!(approved);
+    assert!(!store.is_pending("p1:memory:note-1.md").unwrap());
+    assert!(store.pending_notes(Some("p1")).unwrap().is_empty());
+    // Node itself survives approval untouched.
+    assert!(store.get_node("p1:memory:note-1.md").unwrap().is_some());
+}
+
+#[test]
+fn approve_pending_on_a_non_pending_id_returns_false_not_an_error() {
+    let store = Store::open_in_memory().unwrap();
+    assert!(!store.approve_pending("does-not-exist").unwrap());
+}
+
+#[test]
+fn discard_pending_deletes_node_edges_and_the_pending_row() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .upsert_node(&node("p1:memory:note-1.md", NodeKind::Memory, "p1", "Session: add auth"))
+        .unwrap();
+    store
+        .upsert_node(&node("p1:a.ts", NodeKind::File, "p1", "a.ts"))
+        .unwrap();
+    store
+        .upsert_edge(&Edge {
+            src: "p1:memory:note-1.md".into(),
+            dst: "p1:a.ts".into(),
+            kind: EdgeKind::Touched,
+            weight: 1.0,
+        })
+        .unwrap();
+    store.mark_pending("p1:memory:note-1.md", "p1").unwrap();
+
+    let deleted = store.discard_pending("p1:memory:note-1.md").unwrap();
+    assert!(deleted.is_some());
+    assert_eq!(deleted.unwrap().id, "p1:memory:note-1.md");
+
+    assert!(store.get_node("p1:memory:note-1.md").unwrap().is_none());
+    assert!(store.pending_notes(Some("p1")).unwrap().is_empty());
+    // The Touched edge is gone too (its src no longer exists).
+    assert!(store.neighbors("p1:a.ts", 10).unwrap().is_empty());
+}
+
+#[test]
+fn discard_pending_on_a_non_pending_id_returns_none_and_deletes_nothing() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .upsert_node(&node("p1:a.ts", NodeKind::File, "p1", "a.ts"))
+        .unwrap();
+
+    let deleted = store.discard_pending("p1:a.ts").unwrap();
+    assert!(deleted.is_none());
+    assert!(store.get_node("p1:a.ts").unwrap().is_some(), "must not delete a non-pending node");
+}
+
+#[test]
+fn search_excludes_pending_notes() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .upsert_node(&node("p1:memory:note-1.md", NodeKind::Memory, "p1", "unique-search-term"))
+        .unwrap();
+    store.mark_pending("p1:memory:note-1.md", "p1").unwrap();
+
+    assert!(store.search("unique-search-term", None, 10).unwrap().is_empty());
+
+    store.approve_pending("p1:memory:note-1.md").unwrap();
+    assert_eq!(store.search("unique-search-term", None, 10).unwrap().len(), 1);
+}
+
+#[test]
 fn settings_survive_reopen() {
     let dir = tempdir().unwrap();
     {
