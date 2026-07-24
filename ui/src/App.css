@@ -326,6 +326,28 @@ code {
   box-shadow: 0 0 4px rgba(232, 162, 61, 0.7);
 }
 
+/* Founder feedback (2026-07-24): a session somewhere in this project needs
+   the user's attention — visible even while a different project is
+   selected, or the Map view is up front (this row renders regardless of
+   `view`). Same `--danger` red as `.tab-pill-attention-dot`, same "sticky
+   dot" idiom as the amber stale-dot right next to it, distinct color so the
+   two read as different kinds of signal (health vs. "look at this now"). */
+.project-row-attention-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+  flex: 0 0 auto;
+  box-shadow: 0 0 4px rgba(229, 72, 77, 0.7);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-row-attention-dot {
+    animation: none;
+  }
+}
+
 .project-row-paused {
   font-size: 9.5px;
   letter-spacing: 0.04em;
@@ -507,6 +529,26 @@ code {
   border-left-color: var(--signal);
 }
 
+/* Founder feedback (2026-07-24): which specific session in this project
+   needs attention, not just "the project" — same red dot idiom as
+   `.tab-pill-attention-dot`/`.project-row-attention-dot`, sized for this
+   smaller sub-row. */
+.project-row-tab.has-attention {
+  color: var(--danger);
+  border-left-color: var(--danger);
+}
+
+.project-row-tab-attention-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 4px rgba(229, 72, 77, 0.7);
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
 .sidebar-view-toggle {
   display: flex;
   gap: 2px;
@@ -640,6 +682,7 @@ code {
 }
 
 .tab-pill {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -663,6 +706,32 @@ code {
   border-color: var(--signal-dim);
 }
 
+/* Attention badge (founder feedback, 2026-07-24) — a small dot pinned to
+   the pill's top-right corner, deliberately outside the flex-row flow so it
+   never reshuffles the rename-input/close-button layout next to it.
+   `--danger` red, distinct from every other existing indicator's color
+   (engine-tinted `.tab-pill-dot`, amber `--warning` stale/pressure dots,
+   blue `--signal` ingesting dot) — "look here" reads differently from
+   "caution"/"in progress". `pointer-events: none` so it never steals a
+   click meant for the pill or the close button under it. */
+.tab-pill.has-attention {
+  border-color: var(--danger);
+}
+
+.tab-pill-attention-dot {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  border: 1.5px solid var(--void);
+  box-shadow: 0 0 5px rgba(229, 72, 77, 0.8);
+  pointer-events: none;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
 .tab-pill-dot {
   width: 6px;
   height: 6px;
@@ -671,7 +740,8 @@ code {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tab-pill-dot {
+  .tab-pill-dot,
+  .tab-pill-attention-dot {
     animation: none;
   }
 }

@@ -11,6 +11,15 @@
 // completely untouched, this only changes what the pill prints
 // (`tabDisplayLabel`: the custom label if set, else the engine name, same
 // as every tab already showed before this).
+//
+// Attention badge (founder feedback, 2026-07-24 — Bruno, verbatim: "every
+// claude session[...] can require attention, generate a badge"):
+// `tab.needsAttention` (set by `App.tsx`'s `session-attention:{id}` Tauri
+// listener, cleared by the reducer on activation — `state/sessions.ts`)
+// renders as `.tab-pill-attention-dot`, a small dot positioned in the
+// pill's corner — deliberately not reusing `.tab-pill-dot` (that one's the
+// per-engine activity indicator, `ENGINE_COLOR`-tinted and always visible)
+// or colliding with the rename-input/close-button real estate.
 import { useState } from "react";
 import {
   PRESSURE_THRESHOLD,
@@ -77,12 +86,20 @@ export default function TabBar({
                 {group.tabs.map((tab) => (
                   <div
                     key={tab.id}
-                    className={`tab-pill${tab.id === activeTabId ? " is-active" : ""}`}
+                    className={`tab-pill${tab.id === activeTabId ? " is-active" : ""}${tab.needsAttention ? " has-attention" : ""}`}
                     style={{ borderLeftColor: ENGINE_COLOR[tab.engine] }}
                     onClick={() => {
                       if (renamingId !== tab.id) onActivateTab(tab.id);
                     }}
                   >
+                    {tab.needsAttention && (
+                      <span
+                        className="tab-pill-attention-dot"
+                        role="status"
+                        aria-label={`${tabDisplayLabel(tab)} needs your attention`}
+                        title="Needs your attention"
+                      />
+                    )}
                     <span className="tab-pill-dot" style={{ background: ENGINE_COLOR[tab.engine] }} />
                     {renamingId === tab.id ? (
                       <input

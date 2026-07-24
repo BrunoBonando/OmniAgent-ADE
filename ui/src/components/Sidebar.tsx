@@ -20,6 +20,15 @@
 // does NOT replace the FirstRun bulk "point at a parent folder full of
 // repos" flow (kept as-is, still reachable the same way it always was);
 // it's a second, faster, single-project path that coexists with it.
+//
+// Attention badge (founder feedback, 2026-07-24 — Bruno, verbatim: "every
+// claude session[...] can require attention, generate a badge"): a red dot
+// on `project-row-main` (`attentionByProject`, derived from `TabInfo.
+// needsAttention` — `state/sessions.ts`) whenever any session in that
+// project needs the user's notice, plus a smaller one on the specific
+// `project-row-tab` sub-row so it's clear which session. This is the
+// "visible even if looking at a different project" half of the feature —
+// `TabBar.tsx` owns the other half, the badge on the tab pill itself.
 import { useCallback, useEffect, useState } from "react";
 import logo from "../assets/omniagent-logo.png";
 import { PRESSURE_THRESHOLD, isUnderPressure, tabDisplayLabel, tabsByProject, type ProjectInfo, type TabInfo } from "../state/sessions";
@@ -82,6 +91,14 @@ export default function Sidebar({
   const [addProjectOpen, setAddProjectOpen] = useState(false);
   const grouped = tabsByProject(tabs);
   const sessionCountByProject = new Map(grouped.map((g) => [g.project, g.tabs.length]));
+  // Founder feedback (2026-07-24): a session's attention badge must stay
+  // visible from the sidebar even while looking at a different project's
+  // tabs, or the Map view — this is the whole reason the badge lives at two
+  // levels (`TabBar`'s per-pill dot, and this per-project one), not just on
+  // the tab pill itself.
+  const attentionByProject = new Map(
+    grouped.map((g) => [g.project, g.tabs.some((t) => t.needsAttention)]),
+  );
   const underPressure = isUnderPressure(tabs);
 
   const [pausedProjects, setPausedProjects] = useState<Set<string>>(new Set());
@@ -208,6 +225,7 @@ export default function Sidebar({
               const isSelected = project.id === selectedProjectId;
               const isPaused = pausedProjects.has(project.id);
               const isStale = staleness.get(project.id)?.stale ?? false;
+              const hasAttention = attentionByProject.get(project.id) ?? false;
               return (
                 <li key={project.id} className={`project-row${isSelected ? " is-selected" : ""}`}>
                   <button
@@ -215,6 +233,13 @@ export default function Sidebar({
                     onClick={() => onSelectProject(project)}
                     title={project.path ?? project.id}
                   >
+                    {hasAttention && (
+                      <span
+                        className="project-row-attention-dot"
+                        role="status"
+                        title="A session in this project needs your attention"
+                      />
+                    )}
                     {isStale && <span className="project-row-stale-dot" title="Stale — hasn't been re-ingested in a while" />}
                     <span className="project-row-label">{project.label}</span>
                     {isPaused && <span className="project-row-paused">paused</span>}
@@ -254,9 +279,12 @@ export default function Sidebar({
                         .tabs.map((tab) => (
                           <li key={tab.id}>
                             <button
-                              className={`project-row-tab${tab.id === activeTabId ? " is-active" : ""}`}
+                              className={`project-row-tab${tab.id === activeTabId ? " is-active" : ""}${tab.needsAttention ? " has-attention" : ""}`}
                               onClick={() => onActivateTab(tab.id)}
                             >
+                              {tab.needsAttention && (
+                                <span className="project-row-tab-attention-dot" aria-hidden="true" />
+                              )}
                               {tabDisplayLabel(tab)}
                             </button>
                           </li>
