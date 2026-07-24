@@ -2695,6 +2695,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "brain-core",
+ "brain-ingest",
  "libc",
  "mcp-server",
  "portable-pty",

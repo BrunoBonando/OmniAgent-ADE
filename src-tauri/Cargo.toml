@@ -31,4 +31,5 @@ mcp-server = { path = "../crates/mcp-server" }
 [dev-dependencies]
 tempfile = "3"
 libc = "0.2"
+brain-ingest = { path = "../crates/brain-ingest" }
 

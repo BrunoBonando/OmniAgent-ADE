@@ -476,4 +476,36 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    /// Every node in the DB, any project. The whole-brain counterpart to
+    /// `nodes_for_project` (Task 6.1's `map_graph project: None` view). A
+    /// full table scan — whole-brain callers are expected to be rare next
+    /// to per-project queries, so this trades a bit of scan cost for not
+    /// needing an N-query fan-out over `list_projects()`.
+    pub fn all_nodes(&self) -> rusqlite::Result<Vec<Node>> {
+        let mut stmt = self.conn.prepare(&format!("SELECT {NODE_COLS} FROM nodes"))?;
+        let rows = stmt
+            .query_map([], row_to_node)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Every edge in the DB, any project. The whole-brain counterpart to
+    /// `edges_for_project`, used the same way by `map_graph`.
+    pub fn all_edges(&self) -> rusqlite::Result<Vec<Edge>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT src, dst, kind, weight FROM edges")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(Edge {
+                    src: row.get(0)?,
+                    dst: row.get(1)?,
+                    kind: EdgeKind::from_str(&row.get::<_, String>(2)?),
+                    weight: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }

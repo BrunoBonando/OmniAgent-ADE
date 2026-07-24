@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod map_feed;
 pub mod sessions;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -53,6 +54,7 @@ pub fn run() {
             commands::brain_briefing,
             commands::settings_get,
             commands::settings_set,
+            map_feed::map_graph,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

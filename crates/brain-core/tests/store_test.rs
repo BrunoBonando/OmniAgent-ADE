@@ -142,6 +142,38 @@ fn nodes_and_edges_for_project_scope_correctly() {
 }
 
 #[test]
+fn all_nodes_and_all_edges_span_every_project() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .upsert_node(&node("p1:a.ts", NodeKind::File, "p1", "a.ts"))
+        .unwrap();
+    store
+        .upsert_node(&node("p2:c.ts", NodeKind::File, "p2", "c.ts"))
+        .unwrap();
+    store
+        .upsert_edge(&Edge {
+            src: "p1:a.ts".into(),
+            dst: "p2:c.ts".into(),
+            kind: EdgeKind::References,
+            weight: 1.0,
+        })
+        .unwrap();
+
+    let all_nodes = store.all_nodes().unwrap();
+    assert_eq!(all_nodes.len(), 2);
+    assert!(all_nodes.iter().any(|n| n.project == "p1"));
+    assert!(all_nodes.iter().any(|n| n.project == "p2"));
+
+    // Unlike edges_for_project (which requires both endpoints in the same
+    // project), all_edges returns every edge regardless of project scope —
+    // this cross-project edge would be invisible to edges_for_project.
+    let all_edges = store.all_edges().unwrap();
+    assert_eq!(all_edges.len(), 1);
+    assert_eq!(all_edges[0].src, "p1:a.ts");
+    assert_eq!(all_edges[0].dst, "p2:c.ts");
+}
+
+#[test]
 fn default_data_dir_honors_env_override_and_falls_back() {
     // Both branches live in one test to avoid a cross-test race on the
     // process-global env var (tests in this binary run concurrently).
