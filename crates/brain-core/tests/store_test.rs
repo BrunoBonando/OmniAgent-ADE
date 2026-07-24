@@ -244,3 +244,40 @@ fn fts_survives_reopen() {
     let hits = store.search("parse", None, 10).unwrap();
     assert_eq!(hits.len(), 1);
 }
+
+#[test]
+fn settings_round_trip() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(store.get_setting("default_engine:demo").unwrap(), None);
+
+    store
+        .set_setting("default_engine:demo", "codex")
+        .unwrap();
+    assert_eq!(
+        store.get_setting("default_engine:demo").unwrap(),
+        Some("codex".to_string())
+    );
+
+    // Upsert overwrites rather than duplicating/erroring.
+    store
+        .set_setting("default_engine:demo", "shell")
+        .unwrap();
+    assert_eq!(
+        store.get_setting("default_engine:demo").unwrap(),
+        Some("shell".to_string())
+    );
+}
+
+#[test]
+fn settings_survive_reopen() {
+    let dir = tempdir().unwrap();
+    {
+        let store = Store::open(dir.path()).unwrap();
+        store.set_setting("layout", r#"{"tabs":[]}"#).unwrap();
+    }
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(
+        store.get_setting("layout").unwrap(),
+        Some(r#"{"tabs":[]}"#.to_string())
+    );
+}

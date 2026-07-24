@@ -26,6 +26,7 @@ anyhow = "1"
 base64 = "0.22"
 portable-pty = "0.9"
 brain-core = { path = "../crates/brain-core" }
+mcp-server = { path = "../crates/mcp-server" }
 
 [dev-dependencies]
 tempfile = "3"

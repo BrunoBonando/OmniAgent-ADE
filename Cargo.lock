@@ -2696,6 +2696,7 @@ dependencies = [
  "base64 0.22.1",
  "brain-core",
  "libc",
+ "mcp-server",
  "portable-pty",
  "serde",
  "serde_json",

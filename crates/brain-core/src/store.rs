@@ -431,6 +431,29 @@ impl Store {
         Ok(())
     }
 
+    /// Reads a value from the `settings` key/value table (Task 5.2: per-project
+    /// default engine, restorable tab layout, etc.). `None` when the key has
+    /// never been set.
+    pub fn get_setting(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    /// Upserts a value in the `settings` table.
+    pub fn set_setting(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     /// All edges whose endpoints are both nodes of `project`. Used by community
     /// detection to build the project's adjacency without an N+1 neighbors() scan.
     pub fn edges_for_project(&self, project: &str) -> rusqlite::Result<Vec<Edge>> {
