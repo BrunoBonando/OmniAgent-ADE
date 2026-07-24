@@ -68,3 +68,63 @@ export async function sessionResize(id: string, cols: number, rows: number): Pro
 export async function sessionKill(id: string): Promise<void> {
   await invoke("session_kill", { id });
 }
+
+// ---------------------------------------------------------------- brain map
+// Task 6.1's frozen `map_graph` wire contract, verbatim (see
+// `src-tauri/src/map_feed.rs`'s module doc): `kind` is lowercase
+// snake_case, `size` is a member count for collapsed `"community"` hubs and
+// `1` for everything else.
+export interface MapNode {
+  id: string;
+  kind: string;
+  label: string;
+  project: string;
+  size: number;
+}
+
+export interface MapLink {
+  src: string;
+  dst: string;
+  kind: string;
+  weight: number;
+}
+
+export interface MapGraph {
+  nodes: MapNode[];
+  links: MapLink[];
+}
+
+/** `project: null` = whole-brain view (every ingested project) — the brain
+ * map's default; `expanded` lists community node ids to show expanded;
+ * `filter` is an ALLOW-list of `NodeKind` wire-strings (empty = everything). */
+export async function mapGraph(
+  project: string | null,
+  expanded: string[],
+  filter: string[],
+): Promise<MapGraph> {
+  return invoke<MapGraph>("map_graph", { project, expanded, filter });
+}
+
+export interface MapNodeBacklink {
+  edge_kind: string;
+  id: string;
+  kind: string;
+  label: string;
+  project: string;
+}
+
+export interface MapNodeDetail {
+  id: string;
+  kind: string;
+  label: string;
+  project: string;
+  path?: string;
+  summary?: string;
+  backlinks: MapNodeBacklink[];
+}
+
+/** `null` when the id doesn't exist (e.g. a stale click after re-ingest) —
+ * not an error, so the detail panel can render "not found" cleanly. */
+export async function mapNodeDetail(id: string): Promise<MapNodeDetail | null> {
+  return invoke<MapNodeDetail | null>("map_node_detail", { id });
+}
