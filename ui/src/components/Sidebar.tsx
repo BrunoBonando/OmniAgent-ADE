@@ -15,6 +15,10 @@ interface SidebarProps {
   onSelectProject: (project: ProjectInfo) => void;
   onNewTabInProject: (project: ProjectInfo) => void;
   onActivateTab: (id: string) => void;
+  /** Task 6.2: the workspace/map view toggle. Optional so this component
+   * still type-checks for any test that doesn't care about it. */
+  view?: "workspace" | "map";
+  onSetView?: (view: "workspace" | "map") => void;
 }
 
 export default function Sidebar({
@@ -25,6 +29,8 @@ export default function Sidebar({
   onSelectProject,
   onNewTabInProject,
   onActivateTab,
+  view = "workspace",
+  onSetView,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const grouped = tabsByProject(tabs);
@@ -41,6 +47,27 @@ export default function Sidebar({
         >
           {tabs.length}/{PRESSURE_THRESHOLD}
         </span>
+      </div>
+
+      <div className="sidebar-view-toggle" role="tablist" aria-label="View">
+        <button
+          role="tab"
+          aria-selected={view === "workspace"}
+          className={view === "workspace" ? "is-active" : ""}
+          onClick={() => onSetView?.("workspace")}
+          title="Terminal workspace"
+        >
+          &gt;_ Workspace
+        </button>
+        <button
+          role="tab"
+          aria-selected={view === "map"}
+          className={view === "map" ? "is-active" : ""}
+          onClick={() => onSetView?.("map")}
+          title="Brain map"
+        >
+          &#10022; Map
+        </button>
       </div>
 
       <div className="sidebar-projects">

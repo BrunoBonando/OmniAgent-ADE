@@ -1,14 +1,13 @@
-// The workspace shell (PLAN.md Phase 5, Task 5.2). This is currently the
-// *only* view the app renders — there is no view-switcher yet. Phase 6 (the
-// brain map pane) needs to add one; see the module-level comment at the
-// bottom of this file for exactly what to hook into.
+// The app shell: a `view` switch between the Phase 5 terminal workspace and
+// the Phase 6 brain map (see the module-level comment at the bottom of this
+// file, written by the Phase 5 agent, for the integration plan this follows).
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import "./App.css";
 import Sidebar from "./components/Sidebar";
-import TabBar from "./components/TabBar";
-import Terminal from "./components/Terminal";
+import Workspace from "./components/Workspace";
 import EnginePicker from "./components/EnginePicker";
 import CommandPalette from "./components/CommandPalette";
+import BrainMap from "./map/BrainMap";
 import {
   GLOBAL_DEFAULT_ENGINE_KEY,
   LAYOUT_SETTING_KEY,
@@ -24,6 +23,8 @@ import {
 } from "./state/sessions";
 import { getBriefing, listProjects, sessionCreate, sessionKill, settingsGet, settingsSet } from "./lib/tauri";
 
+type View = "workspace" | "map";
+
 function App() {
   const [state, dispatch] = useReducer(sessionsReducer, initialSessionsState);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -31,6 +32,7 @@ function App() {
   const [pickerDefault, setPickerDefault] = useState<Engine>("claude");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [view, setView] = useState<View>("workspace");
   const restoredRef = useRef(false);
 
   // ---- boot: load the sidebar's project list + restore the last layout --
@@ -134,6 +136,11 @@ function App() {
           tab: { id: info.id, project: info.project, engine, cwd: info.cwd, createdAt: info.created },
         });
         void settingsSet(defaultEngineSettingKey(project.id), engine);
+        // Cross-view integration point (Task 6.2): the map's "Open terminal
+        // here" action calls `requestNewTab` too (via `onOpenTerminal`
+        // below), so landing back in the workspace here covers both
+        // origins — a no-op when we were already there.
+        setView("workspace");
       } catch (err) {
         console.error("failed to create session", err);
         setErrorBanner(`Couldn't start ${engine} in ${project.label}: ${err}`);
@@ -187,33 +194,24 @@ function App() {
           onSelectProject={(p) => setSelectedProjectId(p.id)}
           onNewTabInProject={(p) => void requestNewTab(p)}
           onActivateTab={activateTab}
+          view={view}
+          onSetView={setView}
         />
-        <div className="workspace">
-          <TabBar
-            projects={state.projects}
-            tabs={state.tabs}
-            activeTabId={state.activeTabId}
-            onActivateTab={activateTab}
-            onCloseTab={(id) => void closeTab(id)}
-            onNewTabInProject={(p) => void requestNewTab(p)}
-          />
-          <div className="terminal-area">
-            {state.tabs.map((tab) => (
-              <Terminal key={tab.id} sessionId={tab.id} visible={tab.id === state.activeTabId} />
-            ))}
-            {state.tabs.length === 0 && (
-              <div className="empty-workspace">
-                <div className="empty-workspace-prompt">&gt;_</div>
-                <p>No terminal open.</p>
-                <p className="empty-workspace-hint">
-                  {state.projects.length === 0
-                    ? "Ingest a project, then press ⌘T."
-                    : `⌘T to start one in ${selectedProject?.label ?? "the selected project"}.`}
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
+        <Workspace
+          projects={state.projects}
+          tabs={state.tabs}
+          activeTabId={state.activeTabId}
+          selectedProjectLabel={selectedProject?.label}
+          onActivateTab={activateTab}
+          onCloseTab={(id) => void closeTab(id)}
+          onNewTabInProject={(p) => void requestNewTab(p)}
+          hidden={view !== "workspace"}
+        />
+        <BrainMap
+          projects={state.projects}
+          onOpenTerminal={(p) => void requestNewTab(p)}
+          hidden={view !== "map"}
+        />
       </div>
 
       {pickerProject && (
@@ -240,28 +238,35 @@ function App() {
 export default App;
 
 // ---------------------------------------------------------------------------
-// Notes for Phase 6 (brain map pane) — read this before wiring the map in.
+// Phase 6 integration notes (superseded the Phase 5 agent's plan above,
+// which this followed almost verbatim — kept as a record of what changed
+// and why, for whoever touches this next):
 //
-// - This file is the entire app today: there is no router and no
-//   view-switcher. `<App>` renders the workspace (Sidebar + TabBar +
-//   terminal-area) unconditionally.
-// - State lives in one `useReducer(sessionsReducer, ...)` here in `App.tsx`
-//   (see `src/state/sessions.ts` for the reducer/actions/types — it's
-//   framework-free on purpose). Local UI state (selected project, palette
-//   open, engine-picker target) is plain `useState` alongside it.
-// - Suggested integration: add a top-level view switcher (e.g. a `view:
-//   "workspace" | "map"` piece of state, or promote to a tiny router) and
-//   move the current JSX under `app-body` into its own `<Workspace>`
-//   component so `<App>` becomes `{view === "workspace" ? <Workspace/> :
-//   <BrainMap/>}`. The Sidebar is a natural place for the view toggle
-//   (e.g. a second header icon next to the OMNIAGENT wordmark).
-// - `brain_query`/`brain_get_context` (see `src/lib/tauri.ts`) are already
-//   general-purpose brain-read commands on the Rust side — the map's data
-//   feed (`map_graph`, per PLAN.md Task 6.1) should be a new Tauri command
-//   alongside them in `src-tauri/src/commands.rs`, not a new query path.
-// - "Open terminal here" from a future map detail panel should reuse
-//   `requestNewTab`'s shape (project -> engine picker -> session_create):
-//   lift `requestNewTab`/`confirmNewTab` out of `App.tsx` into a shared
-//   hook if the map pane needs to trigger the same flow from outside the
-//   sidebar/tab-bar.
+// - `view: "workspace" | "map"` state lives here, toggled from the Sidebar
+//   (two header buttons next to the OMNIAGENT wordmark).
+// - `<Workspace>` (`components/Workspace.tsx`) and `<BrainMap>`
+//   (`map/BrainMap.tsx`) are BOTH always mounted — never `{view === "x" ?
+//   A : B}` — visibility is CSS-only (`hidden` prop -> `display: none`).
+//   This deviates from the Phase 5 note's literal ternary suggestion on
+//   purpose: `<Terminal>` (inside `<Workspace>`) already relies on staying
+//   mounted across tab switches so it doesn't miss `session-output:{id}`
+//   events fired while it's in the background (see `Terminal.tsx`'s own
+//   doc comment) — unmounting the whole `<Workspace>` on a view switch
+//   would silently drop live PTY output the same way. Keeping `<BrainMap>`
+//   mounted too is a free bonus: camera position, expand/filter state, and
+//   the force simulation all survive switching back to the workspace and
+//   forth again, instead of re-fetching and re-laying-out every time.
+// - `requestNewTab`/`confirmNewTab` stayed in `App.tsx` rather than moving
+//   to a shared hook (the note above suggested that as one option) —
+//   `<BrainMap>` just receives `onOpenTerminal={(p) =>
+//   void requestNewTab(p)}` as a prop, same shape the Sidebar/TabBar/
+//   CommandPalette already use. `confirmNewTab` now also does
+//   `setView("workspace")` after a successful `session_create`, which is
+//   the actual cross-view integration point: click "Open terminal here" on
+//   a map node -> engine picker -> session created -> view flips back to
+//   the workspace with the new tab focused (the reducer's `tab/opened`
+//   already sets `activeTabId`).
+// - `map_graph`/`map_node_detail` (see `src/lib/tauri.ts`) are the map's
+//   own Tauri commands (`src-tauri/src/map_feed.rs`), following the same
+//   thin-wrapper pattern as `brain_query`/`brain_briefing`.
 // ---------------------------------------------------------------------------
