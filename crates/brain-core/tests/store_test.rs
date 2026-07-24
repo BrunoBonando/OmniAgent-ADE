@@ -160,6 +160,73 @@ fn default_data_dir_honors_env_override_and_falls_back() {
 }
 
 #[test]
+fn enqueue_job_round_trips_through_pending_jobs() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .enqueue_job("project_summary", r#"{"node_id":"p1"}"#)
+        .unwrap();
+
+    let pending = store.pending_jobs(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, id);
+    assert_eq!(pending[0].kind, "project_summary");
+    assert_eq!(pending[0].payload, r#"{"node_id":"p1"}"#);
+    assert_eq!(pending[0].status, "pending");
+}
+
+#[test]
+fn enqueue_job_dedupes_against_an_existing_pending_job() {
+    let store = Store::open_in_memory().unwrap();
+    let first = store
+        .enqueue_job("project_summary", r#"{"node_id":"p1"}"#)
+        .unwrap();
+    let second = store
+        .enqueue_job("project_summary", r#"{"node_id":"p1"}"#)
+        .unwrap();
+
+    assert_eq!(
+        first, second,
+        "should return the existing pending job, not a duplicate"
+    );
+    assert_eq!(store.pending_jobs(10).unwrap().len(), 1);
+}
+
+#[test]
+fn enqueue_job_allows_a_new_job_once_the_prior_one_is_no_longer_pending() {
+    let store = Store::open_in_memory().unwrap();
+    let first = store
+        .enqueue_job("project_summary", r#"{"node_id":"p1"}"#)
+        .unwrap();
+    store
+        .set_job_status(first, "done", r#"{"node_id":"p1"}"#)
+        .unwrap();
+
+    let second = store
+        .enqueue_job("project_summary", r#"{"node_id":"p1"}"#)
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(store.pending_jobs(10).unwrap().len(), 1);
+    assert_eq!(store.jobs_with_status("done", 10).unwrap().len(), 1);
+}
+
+#[test]
+fn set_job_status_updates_status_and_payload() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .enqueue_job("project_summary", r#"{"node_id":"p1"}"#)
+        .unwrap();
+
+    store
+        .set_job_status(id, "failed", r#"{"node_id":"p1","error":"boom"}"#)
+        .unwrap();
+
+    assert!(store.pending_jobs(10).unwrap().is_empty());
+    let failed = store.jobs_with_status("failed", 10).unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].payload, r#"{"node_id":"p1","error":"boom"}"#);
+}
+
+#[test]
 fn fts_survives_reopen() {
     let dir = tempdir().unwrap();
     {

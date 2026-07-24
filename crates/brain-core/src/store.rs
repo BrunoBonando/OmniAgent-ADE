@@ -128,6 +128,29 @@ pub struct Edge {
     pub weight: f32,
 }
 
+/// A row from `enrich_queue` (Phase 4): one unit of headless-LLM enrichment
+/// work. `payload` is caller-defined JSON — kept minimal (typically just the
+/// target node id) since enrichment reads fresh context from the store at
+/// drain time rather than snapshotting it into the queue.
+#[derive(Debug, Clone)]
+pub struct QueueJob {
+    pub id: i64,
+    pub kind: String,
+    pub payload: String,
+    pub status: String,
+    pub created: i64,
+}
+
+fn row_to_job(row: &rusqlite::Row) -> rusqlite::Result<QueueJob> {
+    Ok(QueueJob {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        payload: row.get(2)?,
+        status: row.get(3)?,
+        created: row.get(4)?,
+    })
+}
+
 pub fn now_ts() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -353,6 +376,59 @@ impl Store {
             .query_map(params![project], row_to_node)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Adds a pending enrichment job (Phase 4). Dedupes against an existing
+    /// *pending* job of the same `kind` + `payload` and returns that job's id
+    /// instead of inserting a duplicate — re-ingesting a project you just
+    /// ingested a moment ago, or the fs watcher firing twice, shouldn't pile
+    /// up repeat LLM calls for jobs no drain has touched yet.
+    pub fn enqueue_job(&self, kind: &str, payload: &str) -> rusqlite::Result<i64> {
+        let existing: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM enrich_queue WHERE kind = ?1 AND payload = ?2 AND status = 'pending'",
+                params![kind, payload],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+        self.conn.execute(
+            "INSERT INTO enrich_queue (kind, payload, status, created) VALUES (?1, ?2, 'pending', ?3)",
+            params![kind, payload, now_ts()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Pending enrichment jobs, oldest first (FIFO drain order).
+    pub fn pending_jobs(&self, limit: usize) -> rusqlite::Result<Vec<QueueJob>> {
+        self.jobs_with_status("pending", limit)
+    }
+
+    /// Enrichment jobs in a given `status` ("pending" | "done" | "failed"),
+    /// oldest first. Exposed generically (not just `pending_jobs`) so callers
+    /// and tests can inspect drain outcomes.
+    pub fn jobs_with_status(&self, status: &str, limit: usize) -> rusqlite::Result<Vec<QueueJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, payload, status, created FROM enrich_queue
+             WHERE status = ?1 ORDER BY id LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![status, limit as i64], row_to_job)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Updates a job's status (and payload — e.g. to record a failure
+    /// reason) after `drain_queue` processes it.
+    pub fn set_job_status(&self, id: i64, status: &str, payload: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE enrich_queue SET status = ?1, payload = ?2 WHERE id = ?3",
+            params![status, payload, id],
+        )?;
+        Ok(())
     }
 
     /// All edges whose endpoints are both nodes of `project`. Used by community
