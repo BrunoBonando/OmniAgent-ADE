@@ -41,6 +41,10 @@ enum Command {
     },
     /// Print project/node counts for the whole brain.
     Stats,
+    /// Drain pending enrichment jobs (project/community summaries) through
+    /// the user's own `claude` CLI, headless. Offline or missing CLI: prints
+    /// 0 drained, exits 0 — jobs stay queued for next time.
+    Drain,
 }
 
 fn main() -> Result<()> {
@@ -108,6 +112,11 @@ fn main() -> Result<()> {
                 println!("  {} ({}): {} nodes", p.label, p.project, nodes.len());
             }
             println!("total nodes across all projects: {total_nodes}");
+        }
+        Command::Drain => {
+            let engine = brain_ingest::enrich::ClaudeEngine;
+            let done = brain_ingest::enrich::drain_queue(&store, &engine)?;
+            println!("drained {done} job(s)");
         }
     }
     Ok(())

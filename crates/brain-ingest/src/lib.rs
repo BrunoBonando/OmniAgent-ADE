@@ -7,6 +7,7 @@
 pub mod code;
 pub mod community;
 pub mod docs;
+pub mod enrich;
 pub mod gitmine;
 mod paths;
 pub mod walk;
@@ -78,6 +79,15 @@ pub fn ingest_project(store: &Store, root: &Path, name: &str) -> Result<IngestSt
     stats.edges += docs::extract(store, root, name, &files)?;
     stats.edges += gitmine::mine(store, root, name, &file_ids)?;
     stats.communities = community::detect(store, name)?;
+
+    // Phase 4: queue a fresh project summary every time the project's
+    // extracted graph changes. `enqueue_job` dedupes against an
+    // already-pending job for this project, so re-ingests between drains
+    // don't pile up duplicate LLM calls.
+    store.enqueue_job(
+        "project_summary",
+        &serde_json::json!({ "node_id": name }).to_string(),
+    )?;
 
     Ok(stats)
 }

@@ -66,6 +66,12 @@ pub fn detect(store: &Store, project: &str) -> Result<usize> {
                 weight: 1.0,
             })?;
         }
+        // Phase 4: queue a summary for this community too (dedupes against
+        // an already-pending job the same way project_summary does).
+        store.enqueue_job(
+            "community_summary",
+            &serde_json::json!({ "node_id": community_id }).to_string(),
+        )?;
         count += 1;
     }
     Ok(count)
