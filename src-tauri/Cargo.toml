@@ -27,9 +27,12 @@ base64 = "0.22"
 portable-pty = "0.9"
 brain-core = { path = "../crates/brain-core" }
 mcp-server = { path = "../crates/mcp-server" }
+# Task 7.1: the app now ticks brain-ingest's enrichment drain loop itself
+# (see lib.rs's background thread) — previously only a dev-dependency for
+# map_feed.rs's tests, which ingested the fixture to exercise the map feed.
+brain-ingest = { path = "../crates/brain-ingest" }
 
 [dev-dependencies]
 tempfile = "3"
 libc = "0.2"
-brain-ingest = { path = "../crates/brain-ingest" }
 

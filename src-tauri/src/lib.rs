@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod feedback;
 pub mod map_feed;
 pub mod sessions;
 
@@ -7,6 +8,19 @@ use tauri::{Emitter, Manager};
 
 use commands::BrainState;
 use sessions::SessionManager;
+
+/// How often the background enrichment worker drains `enrich_queue`
+/// (`project_summary`/`community_summary`/Task 7.1's `session_summary`).
+/// PLAN.md Task 7.1 names this exact cadence: "Phase 4 worker, now spawned
+/// as a background thread in the app on a 60 s tick". Phase 4/5's own
+/// reports named this as a gap — nothing before this task actually spawned
+/// it, so without this loop `session_summary` jobs (and project/community
+/// summaries) would only ever drain via a manual `brain drain` CLI call,
+/// which defeats "compounds automatically" (DESIGN.md's whole pitch for
+/// this phase). Plain `std::thread::spawn` + sleep loop, matching this
+/// crate's existing background-thread style (`sessions.rs`'s PTY reader
+/// threads) rather than pulling in an async runtime for one timer.
+const DRAIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -40,7 +54,62 @@ pub fn run() {
                 let payload = STANDARD.encode(chunk);
                 let _ = handle.emit(&format!("session-output:{id}"), payload);
             });
-            app.manage(SessionManager::new(data_dir, sink));
+
+            // Task 7.1: the feedback-loop hook. Opens its own short-lived
+            // `Store` connection per session end rather than sharing the
+            // Mutex-guarded one behind `BrainState` — SQLite handles
+            // multiple local connections to the same `brain.db` file fine
+            // for this write volume (one INSERT per session end), and doing
+            // it this way avoids threading a second reference to
+            // `BrainState` through `SessionManager`'s constructor just for
+            // this.
+            let feedback_data_dir = data_dir.clone();
+            let end_hook: sessions::SessionEndHook = std::sync::Arc::new(move |event| {
+                match brain_core::Store::open(&feedback_data_dir) {
+                    Ok(store) => {
+                        if let Err(e) = feedback::on_session_end(&store, event) {
+                            eprintln!(
+                                "omniagent-ade: failed to enqueue session_summary for {}: {e}",
+                                event.id
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "omniagent-ade: failed to open brain store for the feedback hook: {e}"
+                    ),
+                }
+            });
+            app.manage(SessionManager::new(data_dir.clone(), sink).with_end_hook(end_hook));
+
+            // Task 7.1 / gap flagged in Phase 4's own report: nothing before
+            // this spawned a periodic drain, so enrichment (including this
+            // phase's session_summary jobs) only ever ran via a manual
+            // `brain drain` CLI call. This thread is what makes the
+            // feedback loop — and project/community summaries — actually
+            // run unattended, per PLAN.md Task 7.1's own wording.
+            let drain_data_dir = data_dir;
+            std::thread::spawn(move || {
+                let engine = brain_ingest::enrich::ClaudeEngine;
+                loop {
+                    std::thread::sleep(DRAIN_INTERVAL);
+                    match brain_core::Store::open(&drain_data_dir) {
+                        Ok(store) => {
+                            match brain_ingest::enrich::drain_queue(&store, &drain_data_dir, &engine)
+                            {
+                                Ok(n) if n > 0 => {
+                                    eprintln!("omniagent-ade: drained {n} enrichment job(s)")
+                                }
+                                Ok(_) => {}
+                                Err(e) => eprintln!("omniagent-ade: drain_queue error: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!(
+                            "omniagent-ade: failed to open brain store for the drain loop: {e}"
+                        ),
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -56,6 +125,9 @@ pub fn run() {
             commands::settings_set,
             map_feed::map_graph,
             map_feed::map_node_detail,
+            feedback::pending_notes_list,
+            feedback::pending_notes_approve,
+            feedback::pending_notes_discard,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -61,6 +61,31 @@ use brain_core::{now_ts, redact::redact};
 /// tests supply one that pushes to an `mpsc` channel.
 pub type OutputSink = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
 
+/// Everything Phase 7's feedback loop needs to know about a session that
+/// just ended — the argument to [`SessionEndHook`]. Fired once per session,
+/// whichever way it ended (see [`SessionManager::kill`] and the natural-exit
+/// path in `spawn_reader_thread`), always *after* the transcript's final
+/// flush is guaranteed on disk (same ordering guarantee `kill()` already
+/// gives its callers for the transcript file itself — see the module docs
+/// on `SessionHandle::reader_thread`), so `event.transcript_path` is always
+/// safe to read in full by the time a hook observes it.
+#[derive(Debug, Clone)]
+pub struct SessionEndEvent {
+    pub id: String,
+    pub project: String,
+    pub cwd: String,
+    pub engine: String,
+    pub transcript_path: PathBuf,
+}
+
+/// Invoked once per ended session — the hook point PLAN.md's Task 7.1 names
+/// ("extend `sessions.rs`'s kill/exit path"). `lib.rs` wires this at boot
+/// (via [`SessionManager::with_end_hook`]) to `feedback::on_session_end`,
+/// which enqueues the `session_summary` enrichment job; plain
+/// `SessionManager::new` callers (most existing tests) get no hook at all —
+/// this is additive, not a required wiring step for every caller.
+pub type SessionEndHook = Arc<dyn Fn(&SessionEndEvent) + Send + Sync>;
+
 /// Public shape returned by `session_create` — the Task 5.2 UI contract.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
@@ -91,6 +116,13 @@ struct SessionHandle {
     /// Temp `--mcp-config` file for `claude` sessions, if any; removed on
     /// kill/natural-exit cleanup.
     mcp_config_path: Option<PathBuf>,
+    /// Carried from the original `CreateSessionRequest` purely so
+    /// [`SessionManager::kill`] can build a [`SessionEndEvent`] without a
+    /// second lookup once the handle's already been removed from the
+    /// registry (see `kill`'s body) — nothing PTY-related reads these.
+    project: String,
+    cwd: String,
+    engine: String,
     /// The background PTY-reader thread (see `spawn_reader_thread`).
     /// `SessionManager::kill` joins this before returning, so the transcript's
     /// final flush is guaranteed to have happened by the time `kill()`
@@ -110,6 +142,9 @@ pub struct SessionManager {
     data_dir: PathBuf,
     sink: OutputSink,
     sessions: Arc<Mutex<HashMap<String, SessionHandle>>>,
+    /// Phase 7 feedback-loop hook, `None` by default (see [`SessionEndHook`]
+    /// and [`SessionManager::with_end_hook`]).
+    on_end: Option<SessionEndHook>,
 }
 
 impl SessionManager {
@@ -119,7 +154,20 @@ impl SessionManager {
             data_dir,
             sink,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            on_end: None,
         }
+    }
+
+    /// Builder-style setter for the Phase 7 feedback-loop hook. `lib.rs`
+    /// calls this once at boot, after constructing the manager, to register
+    /// `feedback::on_session_end`. Kept as a separate setter rather than a
+    /// third `new()` parameter so every existing `SessionManager::new(...)`
+    /// call site (this file's own tests, `session_test.rs`, ...) keeps
+    /// compiling unchanged — the feedback loop is additive wiring, not a
+    /// required constructor argument.
+    pub fn with_end_hook(mut self, hook: SessionEndHook) -> Self {
+        self.on_end = Some(hook);
+        self
     }
 
     /// Spawns a real PTY running the requested engine and registers it.
@@ -180,6 +228,10 @@ impl SessionManager {
             lifecycle_path,
             self.sink.clone(),
             Arc::clone(&self.sessions),
+            self.on_end.clone(),
+            req.project.clone(),
+            req.cwd.clone(),
+            req.engine.clone(),
         );
 
         let handle = SessionHandle {
@@ -187,6 +239,9 @@ impl SessionManager {
             writer,
             child,
             mcp_config_path,
+            project: req.project.clone(),
+            cwd: req.cwd.clone(),
+            engine: req.engine.clone(),
             reader_thread,
         };
 
@@ -268,6 +323,20 @@ impl SessionManager {
         drop(handle.writer);
         drop(handle.master);
         let _ = handle.reader_thread.join();
+
+        // Phase 7 feedback loop: fire only after the join above, so the
+        // hook (which reads the transcript file's tail) always sees the
+        // final flush, never a partial line still sitting in the reader
+        // thread's buffer.
+        if let Some(hook) = &self.on_end {
+            hook(&SessionEndEvent {
+                id: id.to_string(),
+                project: handle.project,
+                cwd: handle.cwd,
+                engine: handle.engine,
+                transcript_path: transcript_path(&self.data_dir, id),
+            });
+        }
 
         Ok(())
     }
@@ -471,7 +540,11 @@ fn append_lifecycle_event(path: &Path, event: &LifecycleEvent) -> Result<()> {
 /// the registry (i.e. nobody has already called `SessionManager::kill`,
 /// which removes it and reaps synchronously itself) — this covers natural
 /// exits (e.g. the user typing `exit` in a shell session) so those don't
-/// leave zombies either.
+/// leave zombies either. Also fires the Phase 7 `on_end` hook (if any) on
+/// that same natural-exit path — `SessionManager::kill` fires it itself for
+/// the explicit-kill path, so between the two, every session end is
+/// covered exactly once.
+#[allow(clippy::too_many_arguments)]
 fn spawn_reader_thread(
     id: String,
     mut reader: Box<dyn Read + Send>,
@@ -479,6 +552,10 @@ fn spawn_reader_thread(
     lifecycle_path: PathBuf,
     sink: OutputSink,
     sessions: Arc<Mutex<HashMap<String, SessionHandle>>>,
+    on_end: Option<SessionEndHook>,
+    project: String,
+    cwd: String,
+    engine: String,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut transcript_file = OpenOptions::new()
@@ -538,6 +615,16 @@ fn spawn_reader_thread(
                 killed: false,
             },
         );
+
+        if let Some(hook) = &on_end {
+            hook(&SessionEndEvent {
+                id,
+                project,
+                cwd,
+                engine,
+                transcript_path,
+            });
+        }
     })
 }
 
