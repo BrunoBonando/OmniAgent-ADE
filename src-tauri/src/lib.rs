@@ -55,6 +55,7 @@ pub fn run() {
             commands::settings_get,
             commands::settings_set,
             map_feed::map_graph,
+            map_feed::map_node_detail,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

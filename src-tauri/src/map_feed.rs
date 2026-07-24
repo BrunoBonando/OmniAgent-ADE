@@ -291,6 +291,83 @@ pub fn build_map_graph(
     Ok(MapGraph { nodes, links })
 }
 
+/// One graph neighbor of a node-detail lookup: the typed edge plus a flat
+/// projection of the neighboring node (id/kind/label/project — no
+/// path/summary, since the detail panel only needs enough to render a
+/// clickable backlink row and re-fetch full detail on demand).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MapNodeBacklink {
+    pub edge_kind: String,
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub project: String,
+}
+
+/// The full record behind Task 6.2's detail panel — everything
+/// [`MapNode`] deliberately omits (`path`, `summary`) plus its graph
+/// neighbors. A *new* command rather than a change to [`MapNode`]/
+/// [`MapGraph`]: Task 6.1's wire contract is frozen, and the map canvas
+/// itself never needs `path`/`summary` for the thousands of nodes it
+/// renders every frame — only the one node a user actually clicks.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MapNodeDetail {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub project: String,
+    pub path: Option<String>,
+    pub summary: Option<String>,
+    pub backlinks: Vec<MapNodeBacklink>,
+}
+
+/// Cap on backlinks returned per detail lookup — mirrors `mcp_server::tools`'
+/// own `RELATED_LIMIT` (25): a detail panel is a human-scannable list, not a
+/// full adjacency dump.
+const DETAIL_BACKLINKS_LIMIT: usize = 25;
+
+/// The `map_node_detail` Tauri command backing Task 6.2's detail panel:
+/// looks up one node by id and its graph neighbors. `Ok(None)` (not an
+/// error) when the id doesn't exist — e.g. a stale click after the brain
+/// re-ingested — so the UI can show "not found" instead of an error toast.
+#[tauri::command]
+pub fn map_node_detail(
+    id: String,
+    brain: State<'_, BrainState>,
+) -> Result<Option<MapNodeDetail>, String> {
+    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    build_map_node_detail(&store, &id).map_err(|e| e.to_string())
+}
+
+/// Pure `Store` in, `Option<MapNodeDetail>` out — same split as
+/// [`build_map_graph`], for the same reason (directly unit-testable, no
+/// Tauri involved).
+pub fn build_map_node_detail(store: &Store, id: &str) -> anyhow::Result<Option<MapNodeDetail>> {
+    let Some(node) = store.get_node(id)? else {
+        return Ok(None);
+    };
+    let neighbors = store.neighbors(id, DETAIL_BACKLINKS_LIMIT)?;
+    let backlinks = neighbors
+        .into_iter()
+        .map(|(edge, n)| MapNodeBacklink {
+            edge_kind: edge_kind_str(edge.kind).to_string(),
+            id: n.id,
+            kind: kind_str(n.kind).to_string(),
+            label: n.label,
+            project: n.project,
+        })
+        .collect();
+    Ok(Some(MapNodeDetail {
+        id: node.id,
+        kind: kind_str(node.kind).to_string(),
+        label: node.label,
+        project: node.project,
+        path: node.path,
+        summary: node.summary,
+        backlinks,
+    }))
+}
+
 /// Deterministically truncates `nodes` to at most `limit` entries: highest
 /// `size` first (community hubs represent the most collapsed information,
 /// so they carry the most signal per visible node — plain nodes are all
@@ -649,5 +726,63 @@ mod tests {
         brain_ingest::ingest_project(&store, &fixture_root(), "sample-project").unwrap();
         let graph = build_map_graph(&store, Some("sample-project"), &[], &[]).unwrap();
         assert_eq!(graph.nodes.iter().filter(|n| n.kind == "community").count(), 3);
+    }
+
+    // --- Task 6.2's `map_node_detail` command, backing the detail panel ---
+
+    #[test]
+    fn node_detail_returns_none_for_unknown_id() {
+        let store = ingested_fixture_store();
+        let detail = build_map_node_detail(&store, "sample-project:does-not-exist").unwrap();
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn node_detail_returns_path_and_summary_the_map_graph_response_omits() {
+        let store = ingested_fixture_store();
+        store
+            .upsert_node(&Node {
+                summary: Some("Handles login.".to_string()),
+                ..store
+                    .get_node("sample-project:src/auth.ts")
+                    .unwrap()
+                    .expect("fixture has src/auth.ts")
+            })
+            .unwrap();
+
+        let detail = build_map_node_detail(&store, "sample-project:src/auth.ts")
+            .unwrap()
+            .expect("node exists");
+
+        assert_eq!(detail.id, "sample-project:src/auth.ts");
+        assert_eq!(detail.kind, "file");
+        assert_eq!(detail.project, "sample-project");
+        assert_eq!(detail.path.as_deref(), Some("src/auth.ts"));
+        assert_eq!(detail.summary.as_deref(), Some("Handles login."));
+    }
+
+    #[test]
+    fn node_detail_includes_typed_backlinks() {
+        let store = ingested_fixture_store();
+
+        let detail = build_map_node_detail(&store, "sample-project:src/auth.ts")
+            .unwrap()
+            .expect("node exists");
+
+        assert!(
+            detail.backlinks.iter().any(|b| b.edge_kind == "contains"
+                && b.id == "sample-project:src/auth.ts#login"
+                && b.kind == "code_entity"),
+            "{:?}",
+            detail.backlinks
+        );
+        assert!(
+            detail
+                .backlinks
+                .iter()
+                .any(|b| b.edge_kind == "imports" && b.id == "sample-project:src/util.ts"),
+            "{:?}",
+            detail.backlinks
+        );
     }
 }
