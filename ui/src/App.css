@@ -338,6 +338,11 @@ code {
   color: var(--ink-faint);
 }
 
+.sidebar-footer-triggers {
+  display: flex;
+  gap: 6px;
+}
+
 .sidebar-about-trigger {
   width: 18px;
   height: 18px;
@@ -810,6 +815,141 @@ code {
 
 .about-close:hover {
   border-color: var(--ink-dim);
+}
+
+/* --------------------------------------------------------- review panel
+   Task 7.1: the review-mode toggle + pending session-summary list. Reuses
+   .overlay-backdrop and the engine-picker/command-palette/about-panel's
+   shared frame (width, radius, shadow) rather than a fourth near-identical
+   ruleset. */
+
+.review-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  width: 480px;
+  max-width: 90vw;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  padding: 18px 20px;
+  gap: 4px;
+}
+
+.review-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.review-panel-header h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.review-panel-close {
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.review-panel-close:hover {
+  color: var(--ink);
+}
+
+.review-panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+.review-panel-hint {
+  margin: 4px 0 12px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.review-panel-error {
+  color: var(--warning);
+  font-size: 11.5px;
+  margin-bottom: 10px;
+}
+
+.review-panel-loading,
+.review-panel-empty {
+  color: var(--ink-faint);
+  font-size: 12px;
+  padding: 10px 0;
+}
+
+.review-panel-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  border-top: 1px solid var(--line-soft);
+}
+
+.review-panel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.review-panel-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.review-panel-row-project {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--signal);
+}
+
+.review-panel-row-title {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-panel-row-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.review-panel-row-actions button {
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+}
+
+.review-panel-row-actions button:hover {
+  border-color: var(--ink-dim);
+}
+
+.review-panel-discard {
+  color: var(--warning);
 }
 
 /* ---------------------------------------------------------------- brain map

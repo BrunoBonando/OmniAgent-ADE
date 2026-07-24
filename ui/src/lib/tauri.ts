@@ -128,3 +128,32 @@ export interface MapNodeDetail {
 export async function mapNodeDetail(id: string): Promise<MapNodeDetail | null> {
   return invoke<MapNodeDetail | null>("map_node_detail", { id });
 }
+
+// --------------------------------------------------------------- Task 7.1
+// Review-mode: the `review_memory` setting itself is read/written through
+// the generic `settingsGet`/`settingsSet` above (same as any other
+// settings-table entry) — only the pending-notes list/approve/discard need
+// their own commands, backed by `src-tauri/src/feedback.rs`.
+
+export interface PendingNote {
+  node_id: string;
+  project: string;
+  title: string;
+  path?: string;
+  created: number;
+}
+
+/** `project: null` lists pending notes across every project. */
+export async function pendingNotesList(project: string | null): Promise<PendingNote[]> {
+  return invoke<PendingNote[]>("pending_notes_list", { project });
+}
+
+export async function pendingNotesApprove(nodeId: string): Promise<void> {
+  await invoke("pending_notes_approve", { nodeId });
+}
+
+export async function pendingNotesDiscard(nodeId: string): Promise<void> {
+  await invoke("pending_notes_discard", { nodeId });
+}
+
+export const REVIEW_MEMORY_SETTING_KEY = "review_memory";

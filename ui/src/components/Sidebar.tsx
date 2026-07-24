@@ -6,6 +6,7 @@ import { useState } from "react";
 import logo from "../assets/omniagent-logo.png";
 import { PRESSURE_THRESHOLD, isUnderPressure, tabsByProject, type ProjectInfo, type TabInfo } from "../state/sessions";
 import AboutPanel from "./AboutPanel";
+import ReviewPanel from "./ReviewPanel";
 
 interface SidebarProps {
   projects: ProjectInfo[];
@@ -33,6 +34,7 @@ export default function Sidebar({
   onSetView,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const grouped = tabsByProject(tabs);
   const sessionCountByProject = new Map(grouped.map((g) => [g.project, g.tabs.length]));
   const underPressure = isUnderPressure(tabs);
@@ -128,12 +130,23 @@ export default function Sidebar({
 
       <div className="sidebar-footer">
         <span className="sidebar-hint">⌘K search &nbsp;·&nbsp; ⌘T new tab</span>
-        <button className="sidebar-about-trigger" onClick={() => setAboutOpen(true)} aria-label="About OmniAgent ADE">
-          i
-        </button>
+        <span className="sidebar-footer-triggers">
+          <button
+            className="sidebar-about-trigger"
+            onClick={() => setReviewOpen(true)}
+            aria-label="Review session summaries"
+            title="Review session summaries"
+          >
+            ✓
+          </button>
+          <button className="sidebar-about-trigger" onClick={() => setAboutOpen(true)} aria-label="About OmniAgent ADE">
+            i
+          </button>
+        </span>
       </div>
 
       {aboutOpen && <AboutPanel onClose={() => setAboutOpen(false)} />}
+      {reviewOpen && <ReviewPanel onClose={() => setReviewOpen(false)} />}
     </aside>
   );
 }
