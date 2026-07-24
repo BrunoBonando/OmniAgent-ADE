@@ -2,6 +2,7 @@
 // the Phase 6 brain map (see the module-level comment at the bottom of this
 // file, written by the Phase 5 agent, for the integration plan this follows).
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "./App.css";
 import Sidebar from "./components/Sidebar";
 import Workspace from "./components/Workspace";
@@ -134,6 +135,7 @@ function App() {
               cwd: info.cwd,
               createdAt: info.created,
               label: t.label,
+              needsAttention: false,
             });
           } catch (err) {
             // DESIGN 3.1: engines "restart fresh" on relaunch — if one
@@ -161,6 +163,60 @@ function App() {
     if (!restoredRef.current) return;
     void settingsSet(LAYOUT_SETTING_KEY, serializeLayout(state.tabs));
   }, [state.tabs]);
+
+  // ---- session-attention:{id} events (founder feedback, 2026-07-24) -----
+  // Same subscription style `Terminal.tsx` already uses for
+  // `session-output:{id}` (`void listen(event, cb).then((unlisten) => ...)`)
+  // — the difference is *where* it's done: `Terminal.tsx` subscribes once
+  // per mounted session because it only ever cares about its own id, but
+  // the attention badge has to update the Sidebar/TabBar for a session that
+  // isn't the active tab's Terminal, so it lives here instead, subscribing
+  // per tab id and diffing against `state.tabs` as tabs open/close (rather
+  // than tearing everything down and resubscribing on every tab change,
+  // which would risk a real event landing in the gap). `attentionListeners`
+  // holds either a resolved `UnlistenFn` or a temporary cancel-flag closure
+  // for a subscription still in flight — see the resolution branch below
+  // for why that matters when a tab closes before its `listen()` call
+  // returns.
+  const attentionListeners = useRef<Map<string, UnlistenFn>>(new Map());
+  useEffect(() => {
+    const listeners = attentionListeners.current;
+    const liveIds = new Set(state.tabs.map((t) => t.id));
+
+    for (const [id, unlisten] of listeners) {
+      if (!liveIds.has(id)) {
+        unlisten();
+        listeners.delete(id);
+      }
+    }
+
+    for (const id of liveIds) {
+      if (listeners.has(id)) continue;
+      let cancelled = false;
+      listeners.set(id, () => {
+        cancelled = true;
+      });
+      void listen(`session-attention:${id}`, () => {
+        dispatch({ type: "tab/attention", id });
+      }).then((unlisten) => {
+        if (cancelled) {
+          unlisten();
+          return;
+        }
+        listeners.set(id, unlisten);
+      });
+    }
+  }, [state.tabs]);
+
+  // Unsubscribe everything on unmount (App.tsx only ever unmounts with the
+  // whole window closing, but this keeps the pattern honest/symmetric).
+  useEffect(() => {
+    const listeners = attentionListeners.current;
+    return () => {
+      for (const unlisten of listeners.values()) unlisten();
+      listeners.clear();
+    };
+  }, []);
 
   // ---- default the sidebar's "current project" once projects arrive -----
   useEffect(() => {
@@ -205,7 +261,14 @@ function App() {
         const info = await sessionCreate(project.id, engine, cwd, briefing);
         dispatch({
           type: "tab/opened",
-          tab: { id: info.id, project: info.project, engine, cwd: info.cwd, createdAt: info.created },
+          tab: {
+            id: info.id,
+            project: info.project,
+            engine,
+            cwd: info.cwd,
+            createdAt: info.created,
+            needsAttention: false,
+          },
         });
         void settingsSet(defaultEngineSettingKey(project.id), engine);
         // Cross-view integration point (Task 6.2): the map's "Open terminal

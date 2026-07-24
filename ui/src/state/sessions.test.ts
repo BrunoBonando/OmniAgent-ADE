@@ -17,7 +17,7 @@ import {
 } from "./sessions";
 
 function tab(id: string, project: string, engine: TabInfo["engine"] = "claude"): TabInfo {
-  return { id, project, engine, cwd: `/tmp/${project}`, createdAt: 0 };
+  return { id, project, engine, cwd: `/tmp/${project}`, createdAt: 0, needsAttention: false };
 }
 
 describe("sessionsReducer — tab/opened", () => {
@@ -81,6 +81,82 @@ describe("sessionsReducer — tab/activated", () => {
     const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
     const next = sessionsReducer(state, { type: "tab/activated", id: "ghost" });
     expect(next.activeTabId).toBe("a");
+  });
+
+  // Founder feedback, 2026-07-24: activating a tab is "the user actually
+  // looked at it" — clears any pending attention badge.
+  it("clears needsAttention on the activated tab", () => {
+    const state: SessionsState = {
+      projects: [],
+      tabs: [{ ...tab("a", "p1"), needsAttention: true }, tab("b", "p1")],
+      activeTabId: "b",
+    };
+    const next = sessionsReducer(state, { type: "tab/activated", id: "a" });
+    expect(next.activeTabId).toBe("a");
+    expect(next.tabs.find((t) => t.id === "a")?.needsAttention).toBe(false);
+  });
+
+  it("leaves other tabs' needsAttention untouched", () => {
+    const state: SessionsState = {
+      projects: [],
+      tabs: [{ ...tab("a", "p1"), needsAttention: true }, { ...tab("b", "p1"), needsAttention: true }],
+      activeTabId: "a",
+    };
+    const next = sessionsReducer(state, { type: "tab/activated", id: "a" });
+    expect(next.tabs.find((t) => t.id === "a")?.needsAttention).toBe(false);
+    expect(next.tabs.find((t) => t.id === "b")?.needsAttention).toBe(true);
+  });
+
+  it("activating a tab with no pending attention returns the same tabs array (no unnecessary rebuild)", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1"), tab("b", "p1")], activeTabId: "b" };
+    const next = sessionsReducer(state, { type: "tab/activated", id: "a" });
+    expect(next.tabs).toBe(state.tabs);
+  });
+
+  it("activating an unknown tab id is a no-op even when other tabs need attention", () => {
+    const state: SessionsState = {
+      projects: [],
+      tabs: [{ ...tab("a", "p1"), needsAttention: true }],
+      activeTabId: "a",
+    };
+    const next = sessionsReducer(state, { type: "tab/activated", id: "ghost" });
+    expect(next).toBe(state);
+  });
+});
+
+describe("sessionsReducer — tab/attention", () => {
+  it("sets needsAttention on the matching tab, leaving others untouched", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1"), tab("b", "p1")], activeTabId: "a" };
+    const next = sessionsReducer(state, { type: "tab/attention", id: "b" });
+    expect(next.tabs.find((t) => t.id === "a")?.needsAttention).toBe(false);
+    expect(next.tabs.find((t) => t.id === "b")?.needsAttention).toBe(true);
+  });
+
+  it("setting it on the already-active tab still flags it (clearing only happens on (re-)activation)", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const next = sessionsReducer(state, { type: "tab/attention", id: "a" });
+    expect(next.tabs[0].needsAttention).toBe(true);
+  });
+
+  it("is idempotent when fired repeatedly for the same tab (debounced upstream, but the reducer shouldn't care)", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const once = sessionsReducer(state, { type: "tab/attention", id: "a" });
+    const twice = sessionsReducer(once, { type: "tab/attention", id: "a" });
+    expect(twice.tabs[0].needsAttention).toBe(true);
+  });
+
+  it("firing it for an unknown tab id is a no-op", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const next = sessionsReducer(state, { type: "tab/attention", id: "ghost" });
+    expect(next).toBe(state);
+  });
+
+  it("round trips: attention set, then tab activation clears it", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const flagged = sessionsReducer(state, { type: "tab/attention", id: "a" });
+    expect(flagged.tabs[0].needsAttention).toBe(true);
+    const cleared = sessionsReducer(flagged, { type: "tab/activated", id: "a" });
+    expect(cleared.tabs[0].needsAttention).toBe(false);
   });
 });
 

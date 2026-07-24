@@ -22,7 +22,19 @@ export interface ProjectInfo {
 /** A live terminal tab. `id` is the Rust `SessionInfo.id` (real PTY session).
  * `label` is an optional user-set custom name (double-click a tab in
  * `TabBar` to set one) — falls back to `engine` when unset. See
- * `tabDisplayLabel`. */
+ * `tabDisplayLabel`.
+ *
+ * `needsAttention` (founder feedback, 2026-07-24 — Bruno, verbatim: "every
+ * claude session can notify the app whenever it needs attention[...]
+ * generate a badge"): set by the `tab/attention` action when a
+ * `session-attention:{id}` Tauri event arrives (`sessions.rs`'s PTY reader
+ * thread pattern-matches the raw output stream for Claude's own
+ * tool-permission-prompt text — see that file's module docs for the full
+ * investigation), cleared by `tab/activated` — the same action every
+ * existing tab-focus path (`TabBar`, `Sidebar`'s per-project tab list,
+ * `CommandPalette`) already dispatches through `onActivateTab`, so "the
+ * user actually looked at this tab" needs no new UI wiring, just this
+ * reducer case doing one more thing. */
 export interface TabInfo {
   id: string;
   project: string;
@@ -30,6 +42,7 @@ export interface TabInfo {
   cwd: string;
   createdAt: number;
   label?: string;
+  needsAttention: boolean;
 }
 
 export interface SessionsState {
@@ -50,6 +63,7 @@ export type SessionsAction =
   | { type: "tab/closed"; id: string }
   | { type: "tab/activated"; id: string }
   | { type: "tab/renamed"; id: string; label: string }
+  | { type: "tab/attention"; id: string }
   | { type: "layout/restored"; tabs: TabInfo[] };
 
 /**
@@ -89,9 +103,30 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
       return { ...state, tabs, activeTabId };
     }
 
-    case "tab/activated":
+    case "tab/activated": {
+      const target = state.tabs.find((t) => t.id === action.id);
+      if (!target) return state;
+      // Activating a tab is the one place "the user actually looked at
+      // this" gets observed — clear its badge here rather than adding a
+      // second action every activation call site would need to remember to
+      // also dispatch. Skips the tabs-array rebuild when there was nothing
+      // to clear, so repeatedly clicking an already-active, already-quiet
+      // tab doesn't churn a new array on every render.
+      if (!target.needsAttention) return { ...state, activeTabId: action.id };
+      return {
+        ...state,
+        activeTabId: action.id,
+        tabs: state.tabs.map((t) => (t.id === action.id ? { ...t, needsAttention: false } : t)),
+      };
+    }
+
+    case "tab/attention": {
       if (!state.tabs.some((t) => t.id === action.id)) return state;
-      return { ...state, activeTabId: action.id };
+      return {
+        ...state,
+        tabs: state.tabs.map((t) => (t.id === action.id ? { ...t, needsAttention: true } : t)),
+      };
+    }
 
     case "tab/renamed": {
       if (!state.tabs.some((t) => t.id === action.id)) return state;
