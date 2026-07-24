@@ -1,4 +1,6 @@
-import { defineConfig } from "vite";
+// `vitest/config`'s defineConfig re-exports Vite's, typed with the `test`
+// block below included — plain `vite`'s defineConfig doesn't know that key.
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 // @ts-expect-error process is a nodejs global
@@ -28,5 +30,14 @@ export default defineConfig(async () => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+  },
+
+  // vitest (ui/src/**/*.test.ts[x]) — jsdom for the handful of component
+  // tests, but most of Task 5.2's coverage is plain reducer/pure-function
+  // tests in ui/src/state/*.test.ts that don't need a DOM at all.
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: ["./src/test/setup.ts"],
   },
 }));
