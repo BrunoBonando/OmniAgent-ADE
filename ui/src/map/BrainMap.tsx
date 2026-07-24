@@ -25,6 +25,7 @@ import { useGraphData } from "./useGraphData";
 import { applyRadialPositions, clearPins } from "./RadialLayout";
 import { dagLevelDistanceFor, hierarchyLinks } from "./HierarchyLayout";
 import { colorForKind, isHubKind } from "./palette";
+import { shouldShowNodeLabel } from "./labelVisibility";
 import Lens from "./Lens";
 import DetailPanel from "./DetailPanel";
 import type { GraphLink, GraphNode } from "./graphTransform";
@@ -95,6 +96,15 @@ export default function BrainMap({ projects, onOpenTerminal, hidden, livePollMs 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const fgRef = useRef<ForceGraphMethods<GraphNode, GraphLink> | undefined>(undefined);
   const lastBackgroundClickRef = useRef<number>(0);
+  // The currently-hovered node id (Bruno's zoom/hover-gated labels ask —
+  // see `labelVisibility.ts`). A ref, not `useState`: `paintNode` runs on
+  // react-force-graph-2d's own render loop, not React's, so it can read
+  // `.current` directly every frame without needing a React re-render on
+  // every hover change (mousemove-driven hover transitions are frequent
+  // enough that re-rendering the whole pane — Lens, stats, topbar — on each
+  // one would be exactly the kind of unnecessary per-frame-adjacent work
+  // this task also asked to check for).
+  const hoveredNodeIdRef = useRef<string | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [searchInput, setSearchInput] = useState("");
   const [searchMiss, setSearchMiss] = useState(false);
@@ -199,21 +209,23 @@ export default function BrainMap({ projects, onOpenTerminal, hidden, livePollMs 
   }, [searchInput, data.nodes]);
 
   // ---- canvas paint --------------------------------------------------
+  // Post-ship feedback (Bruno, 2026-07-24): "extremely smooth... not the
+  // text, only show texts if you zoom enough... or when you hover... also
+  // very important to not focus too much on this functionality — the main
+  // focus is an ADE" — this dropped the earlier per-node radial-gradient
+  // glow entirely (it was a `createRadialGradient` + extra `fill()`
+  // allocated on *every* node on *every* frame — real GC/rasterization cost
+  // at the "tens of thousands of nodes" scale DESIGN.md targets, and,
+  // checked against the g-brain reference screenshots, not actually what
+  // the reference does: individual nodes there are flat dots, no halo). The
+  // flat dot + hub ring stroke is both cheaper and the more faithful, less
+  // "shouty" match to the reference — the map is a supporting pane, not the
+  // product.
   const paintNode = useCallback((node: NodeObject<GraphNode>, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const r = nodeRadius(node);
     const color = colorForKind(node.kind);
     const x = node.x ?? 0;
     const y = node.y ?? 0;
-
-    // Glow: a soft radial gradient behind the solid dot — the "glowing
-    // node" HUD language from the g-brain reference.
-    const gradient = ctx.createRadialGradient(x, y, 0, x, y, r * 2.2);
-    gradient.addColorStop(0, `${color}55`);
-    gradient.addColorStop(1, `${color}00`);
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.arc(x, y, r * 2.2, 0, 2 * Math.PI, false);
-    ctx.fill();
 
     ctx.fillStyle = color;
     ctx.beginPath();
@@ -233,9 +245,14 @@ export default function BrainMap({ projects, onOpenTerminal, hidden, livePollMs 
       ctx.stroke();
     }
 
-    // Labels: always for hubs (there are few, and they're the map's
-    // landmarks); for leaves, only once zoomed in enough to stay legible.
-    const showLabel = isHubKind(node.kind) || globalScale > 2.2;
+    // Labels: gated by `shouldShowNodeLabel` (labelVisibility.ts) — bare
+    // dot until zoomed in, hovered, or a hub landmark; the ALWAYS-draw-the-
+    // glyph / SOMETIMES-draw-the-text split this task asked for.
+    const showLabel = shouldShowNodeLabel({
+      kind: node.kind,
+      globalScale,
+      isHovered: hoveredNodeIdRef.current === node.id,
+    });
     if (showLabel) {
       const fontSize = Math.max(3, 11 / globalScale);
       ctx.font = `${fontSize}px "JetBrains Mono", monospace`;
@@ -244,6 +261,29 @@ export default function BrainMap({ projects, onOpenTerminal, hidden, livePollMs 
       ctx.fillStyle = "#c9d3de";
       ctx.fillText(node.label, x, y + r + 2);
     }
+  }, []);
+
+  const handleNodeHover = useCallback((node: NodeObject<GraphNode> | null) => {
+    hoveredNodeIdRef.current = node ? String(node.id) : null;
+    // react-force-graph-2d's `autoPauseRedraw` (on by default, and left on
+    // — see the `hidden`-driven pause/resume effect below for why an
+    // always-repainting loop is the wrong tradeoff for "extremely smooth")
+    // skips the canvas repaint whenever the sim is idle and the camera
+    // isn't moving — exactly the common case a user hovers in, on an
+    // already-settled graph. `nodeCanvasObject` reading `hoveredNodeIdRef`
+    // isn't part of the library's own "does this need a redraw"
+    // bookkeeping, so — verified directly against the library's source and
+    // empirically against a live instance — a hover-triggered label change
+    // otherwise sits invisible until something else (a pan/zoom, a live
+    // simulation tick) happens to force a repaint. `zoom()` (get) ->
+    // `zoom(get)` (set) is a same-value round trip through the one public
+    // API that unconditionally flips the library's internal redraw flag as
+    // a side effect, without visibly moving the camera or (like
+    // `d3ReheatSimulation` would) un-settling every node's position just to
+    // reveal a label.
+    const fg = fgRef.current;
+    const currentZoom = fg?.zoom();
+    if (fg && typeof currentZoom === "number") fg.zoom(currentZoom);
   }, []);
 
   const paintNodePointerArea = useCallback(
@@ -346,6 +386,7 @@ export default function BrainMap({ projects, onOpenTerminal, hidden, livePollMs 
             dagLevelDistance={ui.layout === "hierarchy" ? dagLevelDistance : null}
             onDagError={(loopIds) => console.warn("brain map: dag cycle detected, skipping dag layout for", loopIds)}
             onNodeClick={handleNodeClick}
+            onNodeHover={handleNodeHover}
             onBackgroundClick={handleBackgroundClick}
             cooldownTime={8000}
             warmupTicks={ui.layout === "radial" ? 60 : 0}
