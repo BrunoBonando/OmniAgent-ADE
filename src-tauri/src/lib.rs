@@ -55,10 +55,32 @@ pub fn run() {
                 .map_err(|e| format!("failed to open brain store at {data_dir:?}: {e}"))?;
             app.manage(brain);
 
+            let output_handle = handle.clone();
             let sink: sessions::OutputSink = std::sync::Arc::new(move |id: &str, chunk: &[u8]| {
                 let payload = STANDARD.encode(chunk);
-                let _ = handle.emit(&format!("session-output:{id}"), payload);
+                let _ = output_handle.emit(&format!("session-output:{id}"), payload);
             });
+
+            // Founder feedback (Bruno, 2026-07-24): a session that needs the
+            // user's attention (right now: a Claude Code tool-permission
+            // prompt — see `sessions.rs`'s module docs, "Attention
+            // detection", for what was tried and why this is what's real)
+            // should surface a badge until the user actually looks at that
+            // tab. `sessions::SessionManager`'s PTY reader thread already
+            // does the detection + per-session debouncing; this closure is
+            // just the same thin Tauri-emit adapter `sink` above already is
+            // for `session-output:{id}`, following the same naming
+            // convention (`session-attention:{id}`). Payload is just the
+            // fire timestamp (unix seconds) — nothing in the frontend reads
+            // it today, it's here for the same reason lifecycle events carry
+            // one (cheap to have, useful if a "how long has this been
+            // waiting" affordance shows up later).
+            let attention_handle = handle.clone();
+            let attention_sink: sessions::AttentionSink =
+                std::sync::Arc::new(move |id: &str| {
+                    let _ = attention_handle
+                        .emit(&format!("session-attention:{id}"), brain_core::now_ts());
+                });
 
             // Task 7.1: the feedback-loop hook. Opens its own short-lived
             // `Store` connection per session end rather than sharing the
@@ -84,7 +106,11 @@ pub fn run() {
                     ),
                 }
             });
-            app.manage(SessionManager::new(data_dir.clone(), sink).with_end_hook(end_hook));
+            app.manage(
+                SessionManager::new(data_dir.clone(), sink)
+                    .with_end_hook(end_hook)
+                    .with_attention_sink(attention_sink),
+            );
 
             // Task 8.1: onboarding/rebuild ingestion progress, polled by the
             // frontend via `roots::ingestion_status` every ~2s.

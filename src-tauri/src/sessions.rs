@@ -38,6 +38,70 @@
 //! to the user's own `~/.claude/*`, project `CLAUDE.md`, or any global MCP
 //! config — every bit of wiring is a per-invocation CLI flag on the child
 //! process we spawn, never a file we edit.
+//!
+//! ## Attention detection (founder feedback, 2026-07-24)
+//! Bruno: "every claude session[...] can notify the app whenever it needs
+//! attention[...] that session can require attention, generate a badge".
+//! Investigated three candidate signals before picking one:
+//!
+//! 1. **Claude Code's `Notification` hook event** — real, but every way to
+//!    wire it (`~/.claude/settings.json`, a project's `.claude/settings.
+//!    json`) requires the user to configure their own install, which is
+//!    exactly what DESIGN principle 5 rules out. `claude --help` has no
+//!    per-invocation hook flag (`--settings <file-or-json>` loads *general*
+//!    settings for one invocation — same throwaway-file trick this module
+//!    already uses for `--mcp-config` — but hooks specifically shell out to
+//!    an arbitrary command, and configuring that non-interactively still
+//!    reads as "asking the user to set something up" the moment it's their
+//!    own persistent `settings.json` a plain terminal `claude` would also
+//!    see; a throwaway `--settings` hook would be per-invocation and
+//!    config-free in principle, but see #2 below for why a PTY-stream
+//!    signal made this moot). Ruled out as the primary mechanism.
+//! 2. **Plain BEL (`0x07`)** — empirically, stock `claude` (2.1.219) only
+//!    ever emits `0x07` as the string terminator of `OSC` escape sequences
+//!    (window-title updates, `ESC ] 0 ; <title> BEL`), which fire
+//!    continuously during any activity (every spinner frame), not
+//!    specifically at attention-worthy moments. A raw BEL count is pure
+//!    noise here — verified by driving a real `claude` session through a
+//!    Python-PTY probe and diffing BEL positions against a hex dump; every
+//!    single occurrence traced back to a title-terminator, none to a
+//!    standalone "ring the bell" gesture. Ruled out.
+//! 3. **`OSC 777 notify` (`ESC ] 777 ; notify ; warp://cli-agent ; <json>
+//!    BEL`)** — real, structured, and genuinely tempting: stock `claude`
+//!    emits this with a machine-readable `{"event": "..."}` payload
+//!    (`permission_request`, `stop`, `idle_prompt`, etc. — exactly the
+//!    taxonomy Bruno described) whenever it's running with
+//!    `TERM_PROGRAM=WarpTerminal` in its environment. But it's gated behind
+//!    more than that single env var (setting only `TERM_PROGRAM` while
+//!    stripping the rest of Warp's `WARP_*` vars does **not** unlock it —
+//!    verified empirically), and reverse-engineering the rest of an
+//!    undocumented, third-party terminal's proprietary detection heuristic
+//!    just to spoof it crosses the line DESIGN principle 5 draws ("the
+//!    engine runs completely unmodified... exactly as in a plain
+//!    terminal") — we'd be lying to `claude` about its host, not just
+//!    observing its stock behavior. Ruled out as something to build on,
+//!    even though it's a genuinely interesting integration to know about.
+//!
+//! **What's actually implemented**: plain-text pattern matching on the raw
+//! PTY stream for the literal marker `"Do you want to proceed?"` /
+//! `"Do you want to"` ([`ATTENTION_MARKERS`]) — the exact copy stock
+//! `claude` prints in its tool-permission confirmation dialog (verified
+//! against both a Bash-tool and a Write-tool prompt; the two use different
+//! trailing wording — "...proceed?" vs "...create notes.txt?" — but share
+//! the "Do you want to" opening, which is what's actually matched). This is
+//! honestly the fragile, version-coupled fallback the founder brief itself
+//! anticipated ("don't force a solution that doesn't reflect reality") —
+//! it requires zero configuration and zero engine spoofing, which is the
+//! one property that mattered most here. Not hard-gated to `engine ==
+//! "claude"` (see `spawn_reader_thread`'s doc comment for why — in short,
+//! that would make it untestable through a real PTY without an actual
+//! `claude` process, network access, and a live conversation); in practice
+//! this is still effectively Claude-specific, since it's Claude Code's own
+//! UI copy no other stock engine would print. Matches are debounced per
+//! session via [`AttentionDebouncer`] so a single pending prompt's redraw
+//! storm (dozens of re-renders a second while nothing has actually changed)
+//! fires one
+//! event, not hundreds.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -46,6 +110,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -85,6 +150,15 @@ pub struct SessionEndEvent {
 /// `SessionManager::new` callers (most existing tests) get no hook at all —
 /// this is additive, not a required wiring step for every caller.
 pub type SessionEndHook = Arc<dyn Fn(&SessionEndEvent) + Send + Sync>;
+
+/// Invoked with just the session id when the PTY reader thread decides a
+/// live session needs the user's attention (see the module docs' "Attention
+/// detection" section for what triggers this and why). `lib.rs` wires this
+/// at boot to emit `session-attention:{id}`, matching the existing
+/// `session-output:{id}` naming convention; tests supply one that pushes to
+/// a channel. Already debounced per session ([`AttentionDebouncer`]) by the
+/// time this is called — callers don't need their own rate limiting.
+pub type AttentionSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Public shape returned by `session_create` — the Task 5.2 UI contract.
 #[derive(Debug, Clone, Serialize)]
@@ -145,6 +219,9 @@ pub struct SessionManager {
     /// Phase 7 feedback-loop hook, `None` by default (see [`SessionEndHook`]
     /// and [`SessionManager::with_end_hook`]).
     on_end: Option<SessionEndHook>,
+    /// Founder-feedback attention hook, `None` by default (see
+    /// [`AttentionSink`] and [`SessionManager::with_attention_sink`]).
+    on_attention: Option<AttentionSink>,
 }
 
 impl SessionManager {
@@ -155,6 +232,7 @@ impl SessionManager {
             sink,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             on_end: None,
+            on_attention: None,
         }
     }
 
@@ -167,6 +245,18 @@ impl SessionManager {
     /// required constructor argument.
     pub fn with_end_hook(mut self, hook: SessionEndHook) -> Self {
         self.on_end = Some(hook);
+        self
+    }
+
+    /// Builder-style setter for the founder-feedback attention hook —
+    /// same additive shape as [`with_end_hook`](Self::with_end_hook) and for
+    /// the same reason: every existing `SessionManager::new(...)` call site
+    /// keeps compiling unchanged. `lib.rs` calls this once at boot to wire
+    /// `session-attention:{id}` emission; most tests never call it, which
+    /// makes the reader thread skip the (cheap but non-zero) detection work
+    /// entirely — see `spawn_reader_thread`.
+    pub fn with_attention_sink(mut self, sink: AttentionSink) -> Self {
+        self.on_attention = Some(sink);
         self
     }
 
@@ -229,6 +319,7 @@ impl SessionManager {
             self.sink.clone(),
             Arc::clone(&self.sessions),
             self.on_end.clone(),
+            self.on_attention.clone(),
             req.project.clone(),
             req.cwd.clone(),
             req.engine.clone(),
@@ -544,6 +635,23 @@ fn append_lifecycle_event(path: &Path, event: &LifecycleEvent) -> Result<()> {
 /// that same natural-exit path — `SessionManager::kill` fires it itself for
 /// the explicit-kill path, so between the two, every session end is
 /// covered exactly once.
+///
+/// Also runs the founder-feedback attention detection (module docs'
+/// "Attention detection" section) when `on_attention` is `Some` and
+/// `on_attention` is `Some` — scanning every chunk against a small rolling
+/// window (`ATTENTION_MARKERS`) and firing through it, debounced per session
+/// by `AttentionDebouncer`. Skipped entirely (not just a no-op check) when
+/// no sink was registered, so this adds zero work to the common test/
+/// manual-example path that doesn't care. Not hard-gated to `engine ==
+/// "claude"` even though `ATTENTION_MARKERS` is Claude-Code-specific UI
+/// copy: in practice only a `claude` session's own TUI would ever produce
+/// it, and gating on the engine string would make this untestable through a
+/// real PTY without spawning an actual `claude` process (network calls, a
+/// live API key, and an interactive trust/permission dance an automated
+/// test can't drive) — `attention_marker_burst_fires_exactly_one_debounced_
+/// event` in `tests/session_test.rs` instead proves the wiring the same
+/// dependency-free way the existing redaction test does, with a `shell`
+/// session `echo`ing the marker text.
 #[allow(clippy::too_many_arguments)]
 fn spawn_reader_thread(
     id: String,
@@ -553,6 +661,7 @@ fn spawn_reader_thread(
     sink: OutputSink,
     sessions: Arc<Mutex<HashMap<String, SessionHandle>>>,
     on_end: Option<SessionEndHook>,
+    on_attention: Option<AttentionSink>,
     project: String,
     cwd: String,
     engine: String,
@@ -567,12 +676,31 @@ fn spawn_reader_thread(
         let mut pending = String::new();
         let mut buf = [0u8; 8192];
 
+        // Attention detection only runs when a sink is actually registered
+        // (see this function's doc comment for why it's not also hard-gated
+        // to `engine == "claude"`).
+        let watch_for_attention = on_attention.is_some();
+        let mut attention_window = String::new();
+        let mut attention_debouncer = AttentionDebouncer::new(ATTENTION_COOLDOWN);
+
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     let chunk = &buf[..n];
                     sink(&id, chunk);
+
+                    if watch_for_attention {
+                        attention_window.push_str(&String::from_utf8_lossy(chunk));
+                        trim_to_last_n_bytes(&mut attention_window, ATTENTION_WINDOW_BYTES);
+                        if contains_attention_marker(&attention_window)
+                            && attention_debouncer.should_fire(Instant::now())
+                        {
+                            if let Some(attention_sink) = &on_attention {
+                                attention_sink(&id);
+                            }
+                        }
+                    }
 
                     pending.push_str(&String::from_utf8_lossy(chunk));
                     flush_complete_lines(&mut pending, &mut transcript_file);
@@ -641,6 +769,96 @@ fn write_redacted(file: &mut Option<std::fs::File>, text: &str) {
         let redacted = redact(text);
         let _ = f.write_all(redacted.as_bytes());
         let _ = f.flush();
+    }
+}
+
+// -------------------------------------------------------------------------
+// Founder-feedback attention detection (see module docs for the
+// investigation this came out of).
+// -------------------------------------------------------------------------
+
+/// Text stock `claude` prints when it genuinely needs the user — currently
+/// just the shared opening of its tool-permission confirmation dialog
+/// (verified against both a Bash-tool prompt, "Do you want to proceed?",
+/// and a Write-tool prompt, "Do you want to create notes.txt?" — the
+/// trailing wording differs per tool, the opening doesn't). A list, not a
+/// single `&str`, so a future marker (a different dialog's wording, if one
+/// turns out not to share this opening) is a one-line addition, not a
+/// matching-logic change.
+const ATTENTION_MARKERS: &[&str] = &["Do you want to"];
+
+/// How much of the raw (un-redacted) output stream is kept around purely to
+/// catch an `ATTENTION_MARKERS` entry split across two PTY `read()` calls.
+/// Unlike the transcript's line-buffered redaction, this can't wait for a
+/// bare `\n` to flush before checking — Claude's full-screen TUI redraws
+/// with cursor-positioning escapes and `\r`, not bare newlines (see the
+/// module docs on why the transcript logic has the same problem) — so this
+/// is just a small rolling window instead. The longest marker here is well
+/// under 64 bytes; 4096 is generous slack for a cheap `contains` scan.
+const ATTENTION_WINDOW_BYTES: usize = 4096;
+
+/// Minimum time between two `session-attention` events for the same
+/// session. Chosen empirically: a real pending permission prompt was
+/// observed redrawing its box roughly twice a second while the user hadn't
+/// touched anything yet (a PTY probe run during this task's investigation
+/// counted 100+ redraws over 51 real seconds) — without debouncing, every
+/// single redraw would independently re-match the marker and fire another
+/// event. 15s comfortably collapses an entire redraw storm into one event.
+/// It's not trying to bound "how fresh can a second, genuinely different
+/// prompt's badge be" — the frontend badge is a sticky boolean cleared only
+/// on tab focus (`ui/src/state/sessions.ts`'s `tab/activated` case), not a
+/// toast, so a suppressed event during the cooldown never hides a real
+/// attention need; it just avoids re-announcing one already flagged.
+const ATTENTION_COOLDOWN: Duration = Duration::from_secs(15);
+
+fn contains_attention_marker(text: &str) -> bool {
+    ATTENTION_MARKERS.iter().any(|marker| text.contains(marker))
+}
+
+/// Keeps `s` at most `max_bytes` long by dropping from the front, snapping
+/// the cut point forward to the nearest `char` boundary (a `String` can't be
+/// sliced/drained mid-character) — at most a few bytes' extra slack per
+/// call since UTF-8 characters are never more than 4 bytes.
+fn trim_to_last_n_bytes(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut cut = s.len() - max_bytes;
+    while cut < s.len() && !s.is_char_boundary(cut) {
+        cut += 1;
+    }
+    s.drain(..cut);
+}
+
+/// Per-session rate limiter for attention events — see [`ATTENTION_COOLDOWN`]
+/// for the reasoning behind the default duration. Takes `Instant` as an
+/// explicit parameter (rather than calling `Instant::now()` internally) so
+/// its own tests can drive it with synthetic, zero-real-time timestamps
+/// instead of sleeping — `Instant + Duration` arithmetic is deterministic
+/// and doesn't require a real clock to advance.
+struct AttentionDebouncer {
+    cooldown: Duration,
+    last_fired: Option<Instant>,
+}
+
+impl AttentionDebouncer {
+    fn new(cooldown: Duration) -> Self {
+        Self { cooldown, last_fired: None }
+    }
+
+    /// Call once per marker match. Returns `true` exactly when the caller
+    /// should actually fire the attention event (first-ever match, or the
+    /// cooldown has elapsed since the last one it approved) — and records
+    /// `now` as the new "last fired" instant whenever it does.
+    fn should_fire(&mut self, now: Instant) -> bool {
+        let fire = match self.last_fired {
+            None => true,
+            Some(last) => now.duration_since(last) >= self.cooldown,
+        };
+        if fire {
+            self.last_fired = Some(now);
+        }
+        fire
     }
 }
 
@@ -720,5 +938,80 @@ mod tests {
         let contents = std::fs::read_to_string(&file_path).unwrap();
         assert!(!contents.contains("abc123"), "{contents}");
         assert!(contents.contains("[redacted]"));
+    }
+
+    #[test]
+    fn attention_marker_matches_both_observed_permission_dialog_wordings() {
+        // The two real dialogs this was verified against (module docs):
+        // a Bash-tool prompt and a Write-tool prompt, different trailing
+        // wording, shared opening.
+        assert!(contains_attention_marker("Do you want to proceed?"));
+        assert!(contains_attention_marker("Do you want to create notes.txt?"));
+        // Realistic surrounding noise (cursor-position junk, box-drawing
+        // characters) shouldn't defeat the match — it's a substring check.
+        assert!(contains_attention_marker(
+            "\u{2502} Bash command \u{2502}\nDo you want to proceed?\n\u{2570}\u{2500}\u{256f}"
+        ));
+    }
+
+    #[test]
+    fn attention_marker_ignores_unrelated_output() {
+        assert!(!contains_attention_marker("hi\n"));
+        assert!(!contains_attention_marker("Quick safety check: Is this a project you trust?"));
+        assert!(!contains_attention_marker(""));
+    }
+
+    #[test]
+    fn trim_to_last_n_bytes_snaps_to_a_char_boundary() {
+        // "é" is 2 bytes (0xC3 0xA9) — a naive byte-offset cut here would
+        // land mid-character and panic on `drain`.
+        let mut s = "xé".to_string();
+        assert_eq!(s.len(), 3);
+        trim_to_last_n_bytes(&mut s, 2);
+        // Cut point (byte 1) isn't a boundary, so it snaps forward to byte
+        // 3 (the whole "é" survives, "x" gets dropped) rather than panicking.
+        assert_eq!(s, "é");
+    }
+
+    #[test]
+    fn trim_to_last_n_bytes_is_a_no_op_under_the_limit() {
+        let mut s = "short".to_string();
+        trim_to_last_n_bytes(&mut s, 4096);
+        assert_eq!(s, "short");
+    }
+
+    #[test]
+    fn attention_debouncer_fires_once_for_a_burst_then_again_after_cooldown() {
+        // Pure, no real sleeping — Instant + Duration arithmetic is
+        // deterministic, so this drives the debouncer with synthetic
+        // timestamps exactly like a real redraw storm would produce them,
+        // without spending 15 real seconds per test run.
+        let mut debouncer = AttentionDebouncer::new(Duration::from_secs(15));
+        let t0 = Instant::now();
+
+        // First match in a fresh session: always fires.
+        assert!(debouncer.should_fire(t0));
+
+        // A burst of re-matches within the cooldown window (mirrors the
+        // empirically observed ~2 redraws/sec while a prompt sits pending)
+        // must not fire again.
+        for i in 1..=20u64 {
+            let t = t0 + Duration::from_millis(i * 400); // spans ~8s, well under 15s
+            assert!(
+                !debouncer.should_fire(t),
+                "burst re-match at +{}ms should have been suppressed",
+                i * 400
+            );
+        }
+
+        // Right at the boundary: still within cooldown, still suppressed.
+        assert!(!debouncer.should_fire(t0 + Duration::from_millis(14_999)));
+
+        // Once the cooldown has fully elapsed, a fresh match fires again.
+        let t_after = t0 + Duration::from_secs(15);
+        assert!(debouncer.should_fire(t_after));
+
+        // ...and that new firing starts its own fresh cooldown window.
+        assert!(!debouncer.should_fire(t_after + Duration::from_secs(1)));
     }
 }

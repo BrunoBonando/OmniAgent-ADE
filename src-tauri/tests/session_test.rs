@@ -237,3 +237,65 @@ fn resize_a_live_session_succeeds() {
 
     manager.kill(&info.id).unwrap();
 }
+
+/// Founder feedback (2026-07-24 — Bruno, verbatim): "every claude session
+/// can notify the app whenever it needs attention". `sessions.rs`'s module
+/// docs record the investigation (hooks need user config -> out; plain BEL
+/// is just OSC-title-terminator noise -> out; `OSC 777 notify` is real but
+/// gated behind an undocumented Warp-only handshake -> out) that landed on
+/// plain-text matching against the exact copy stock `claude` prints in its
+/// tool-permission dialog. This test can't spawn a real `claude` (no API
+/// key / network / trusted-workspace prompt in CI, and the input here would
+/// need to go through Claude's own conversation loop rather than just being
+/// echoed), so it proves the wiring the same dependency-free way
+/// `transcript_file_exists_and_secrets_are_redacted` above proves
+/// redaction: a `shell` session `echo`ing the exact marker text stands in
+/// for Claude printing it (the reader thread's detection is a plain
+/// substring match on raw output — see `spawn_reader_thread`'s doc comment
+/// for why it's deliberately not hard-gated to `engine == "claude"`, this
+/// test is exactly why). A *real* end-to-end proof against an actual
+/// `claude` CLI is `examples/manual_attention_verify.rs`, run by hand per
+/// its own doc comment.
+#[test]
+fn attention_marker_burst_fires_exactly_one_debounced_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (tx, rx) = mpsc::channel::<String>();
+
+    let attention_hits: omniagent_ade_lib::sessions::AttentionSink = {
+        let tx = tx.clone();
+        Arc::new(move |id: &str| {
+            let _ = tx.send(id.to_string());
+        })
+    };
+
+    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
+        .with_attention_sink(attention_hits);
+    let info = manager.create(shell_request(tmp.path())).unwrap();
+
+    // Simulate the exact marker text arriving in a burst — a real pending
+    // permission prompt redraws its box repeatedly while the user hasn't
+    // acted, which is exactly the storm `AttentionDebouncer` exists to
+    // collapse into one event.
+    for _ in 0..5 {
+        manager
+            .write(&info.id, "echo 'Do you want to proceed?'\n")
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    // Give the reader thread a little more time to drain the last echo.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let mut hits = Vec::new();
+    while let Ok(id) = rx.recv_timeout(Duration::from_millis(200)) {
+        hits.push(id);
+    }
+
+    assert_eq!(
+        hits,
+        vec![info.id.clone()],
+        "expected exactly one debounced attention event for the burst, got: {hits:?}"
+    );
+
+    manager.kill(&info.id).unwrap();
+}
