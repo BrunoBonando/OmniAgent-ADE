@@ -4,7 +4,7 @@
 
 use brain_core::{NodeKind, Origin, Store};
 use brain_ingest::enrich::{drain_queue, FakeEngine};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -49,7 +49,7 @@ fn draining_with_fake_engine_writes_project_summary_with_machine_origin() {
     brain_ingest::ingest_project(&store, &fixture_root(), "sample-project").unwrap();
 
     let engine = FakeEngine::always_ok("A sample project used to test ingestion.");
-    let done = drain_queue(&store, &engine).unwrap();
+    let done = drain_queue(&store, Path::new("/tmp"), &engine).unwrap();
     assert!(done >= 1);
 
     let project_node = store.get_node("sample-project").unwrap().unwrap();
@@ -66,7 +66,7 @@ fn draining_with_fake_engine_also_summarizes_communities() {
     brain_ingest::ingest_project(&store, &fixture_root(), "sample-project").unwrap();
 
     let engine = FakeEngine::always_ok("Auth-related files working together.");
-    drain_queue(&store, &engine).unwrap();
+    drain_queue(&store, Path::new("/tmp"), &engine).unwrap();
 
     let community_nodes: Vec<_> = store
         .nodes_for_project("sample-project")
@@ -92,7 +92,7 @@ fn missing_engine_leaves_ingested_jobs_pending_and_never_errors() {
     assert!(pending_before >= 1);
 
     let engine = FakeEngine::always_unavailable();
-    let done = drain_queue(&store, &engine).unwrap();
+    let done = drain_queue(&store, Path::new("/tmp"), &engine).unwrap();
 
     assert_eq!(done, 0);
     assert_eq!(store.pending_jobs(50).unwrap().len(), pending_before);

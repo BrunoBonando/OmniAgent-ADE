@@ -115,7 +115,7 @@ fn main() -> Result<()> {
         }
         Command::Drain => {
             let engine = brain_ingest::enrich::ClaudeEngine;
-            let done = brain_ingest::enrich::drain_queue(&store, &engine)?;
+            let done = brain_ingest::enrich::drain_queue(&store, &data_dir, &engine)?;
             println!("drained {done} job(s)");
         }
     }
