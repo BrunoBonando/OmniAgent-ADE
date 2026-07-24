@@ -1,6 +1,6 @@
-pub mod store;
 pub mod memory;
 pub mod redact;
+pub mod store;
 
-pub use store::{Edge, EdgeKind, Node, NodeKind, Origin, Store};
 pub use memory::Memory;
+pub use store::{now_ts, Edge, EdgeKind, Node, NodeKind, Origin, Store};

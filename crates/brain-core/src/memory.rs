@@ -67,22 +67,22 @@ impl<'a> Memory<'a> {
             Origin::MachineSummary => "machine",
             Origin::Extracted => "extracted",
         };
-        let contents = format!(
-            "---\norigin: {origin_str}\n---\n\n# {title}\n\n{redacted_body}\n"
-        );
+        let contents = format!("---\norigin: {origin_str}\n---\n\n# {title}\n\n{redacted_body}\n");
         fs::write(&path, &contents)?;
 
         let id = format!("{project}:memory:{filename}");
-        self.store.upsert_node(&Node {
-            id: id.clone(),
-            kind: NodeKind::Memory,
-            project: project.to_string(),
-            label: title.to_string(),
-            path: Some(path.to_string_lossy().to_string()),
-            summary: Some(redacted_body.chars().take(280).collect()),
-            origin,
-            updated: now_ts(),
-        }).expect("brain db write failed");
+        self.store
+            .upsert_node(&Node {
+                id: id.clone(),
+                kind: NodeKind::Memory,
+                project: project.to_string(),
+                label: title.to_string(),
+                path: Some(path.to_string_lossy().to_string()),
+                summary: Some(redacted_body.chars().take(280).collect()),
+                origin,
+                updated: now_ts(),
+            })
+            .expect("brain db write failed");
 
         for target in extract_relative_links(&redacted_body) {
             let dst_id = format!("{project}:doc:{target}");
@@ -125,7 +125,12 @@ mod tests {
         let memory = Memory::new(&store, dir.path());
 
         let path = memory
-            .write_note("p1", "Chose SQLite", "Because it is embedded.", Origin::UserAuthored)
+            .write_note(
+                "p1",
+                "Chose SQLite",
+                "Because it is embedded.",
+                Origin::UserAuthored,
+            )
             .unwrap();
 
         assert!(path.exists());
@@ -144,7 +149,12 @@ mod tests {
         let memory = Memory::new(&store, dir.path());
 
         let path = memory
-            .write_note("p1", "Debug session", "API_KEY=abc123 was the bug", Origin::MachineSummary)
+            .write_note(
+                "p1",
+                "Debug session",
+                "API_KEY=abc123 was the bug",
+                Origin::MachineSummary,
+            )
             .unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
@@ -159,7 +169,12 @@ mod tests {
         let memory = Memory::new(&store, dir.path());
 
         memory
-            .write_note("p1", "Auto summary", "did some work", Origin::MachineSummary)
+            .write_note(
+                "p1",
+                "Auto summary",
+                "did some work",
+                Origin::MachineSummary,
+            )
             .unwrap();
 
         let hits = store.search("summary", Some("p1"), 10).unwrap();

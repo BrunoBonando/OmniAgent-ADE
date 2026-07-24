@@ -1,5 +1,5 @@
 use rusqlite::{params, Connection, OptionalExtension};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Store {
@@ -151,6 +151,20 @@ fn row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
 const NODE_COLS: &str = "id, kind, project, label, path, summary, origin, updated";
 
 impl Store {
+    /// Resolves the local-first data directory: honors the `OMNIAGENT_ADE_DATA_DIR`
+    /// env var override (used by tests and by `OMNIAGENT_ADE_DATA_DIR=... brain ingest`
+    /// manual runs) and otherwise falls back to
+    /// `~/Library/Application Support/OmniAgent-ADE` per the Global Constraints.
+    pub fn default_data_dir() -> PathBuf {
+        if let Ok(dir) = std::env::var("OMNIAGENT_ADE_DATA_DIR") {
+            if !dir.trim().is_empty() {
+                return PathBuf::from(dir);
+            }
+        }
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        PathBuf::from(home).join("Library/Application Support/OmniAgent-ADE")
+    }
+
     /// Opens (creating if absent) the brain database under `data_dir/brain.db`.
     pub fn open(data_dir: &Path) -> rusqlite::Result<Store> {
         std::fs::create_dir_all(data_dir).expect("create data dir");
@@ -233,7 +247,12 @@ impl Store {
             .optional()
     }
 
-    pub fn search(&self, query: &str, scope: Option<&str>, limit: usize) -> rusqlite::Result<Vec<Node>> {
+    pub fn search(
+        &self,
+        query: &str,
+        scope: Option<&str>,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Node>> {
         let fts_query = format!("{}*", query.replace('"', ""));
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {cols} FROM nodes_fts f
@@ -293,11 +312,47 @@ impl Store {
     }
 
     pub fn list_projects(&self) -> rusqlite::Result<Vec<Node>> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!("SELECT {NODE_COLS} FROM nodes WHERE kind = 'project' ORDER BY label"))?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {NODE_COLS} FROM nodes WHERE kind = 'project' ORDER BY label"
+        ))?;
         let rows = stmt
             .query_map([], row_to_node)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// All nodes belonging to `project`, any kind. Used by ingestion (community
+    /// detection needs the whole project subgraph) and by callers that want to
+    /// inspect ingest results (stats, tests) without a text query.
+    pub fn nodes_for_project(&self, project: &str) -> rusqlite::Result<Vec<Node>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {NODE_COLS} FROM nodes WHERE project = ?1"))?;
+        let rows = stmt
+            .query_map(params![project], row_to_node)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// All edges whose endpoints are both nodes of `project`. Used by community
+    /// detection to build the project's adjacency without an N+1 neighbors() scan.
+    pub fn edges_for_project(&self, project: &str) -> rusqlite::Result<Vec<Edge>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.src, e.dst, e.kind, e.weight
+             FROM edges e
+             JOIN nodes s ON s.id = e.src
+             JOIN nodes d ON d.id = e.dst
+             WHERE s.project = ?1 AND d.project = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![project], |row| {
+                Ok(Edge {
+                    src: row.get(0)?,
+                    dst: row.get(1)?,
+                    kind: EdgeKind::from_str(&row.get::<_, String>(2)?),
+                    weight: row.get(3)?,
+                })
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
