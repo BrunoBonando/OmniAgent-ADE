@@ -1,0 +1,22 @@
+[package]
+name = "brain-ingest"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+brain-core = { path = "../brain-core" }
+ignore = "0.4"
+tree-sitter = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-rust = "0.23"
+notify = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "brain"
+path = "src/bin/brain.rs"
