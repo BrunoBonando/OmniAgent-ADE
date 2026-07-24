@@ -81,6 +81,35 @@ fn delete_project_extracted_keeps_user_authored() {
 }
 
 #[test]
+fn search_with_hyphens_and_operator_characters_does_not_error() {
+    // Regression: FTS5's query grammar treats bare -, :, (, " as operators
+    // (NOT / column-filter / grouping) independent of the content tokenizer,
+    // so an unsanitized query like "co-change" used to crash with a raw SQL
+    // parse error ("no such column: change") instead of just finding
+    // nothing or matching sensibly.
+    let store = Store::open_in_memory().unwrap();
+    store
+        .upsert_node(&node(
+            "p1:a.ts",
+            NodeKind::File,
+            "p1",
+            "co-change candidate",
+        ))
+        .unwrap();
+
+    let no_match = store
+        .search("nothing-will-ever-match-this-xyz", None, 10)
+        .unwrap();
+    assert!(no_match.is_empty());
+
+    let punctuation_only = store.search("---:::(((", None, 10).unwrap();
+    assert!(punctuation_only.is_empty());
+
+    let multi_word = store.search("co change", None, 10).unwrap();
+    assert_eq!(multi_word.len(), 1);
+}
+
+#[test]
 fn nodes_and_edges_for_project_scope_correctly() {
     let store = Store::open_in_memory().unwrap();
     store

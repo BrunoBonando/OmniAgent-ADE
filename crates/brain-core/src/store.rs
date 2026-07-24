@@ -150,6 +150,24 @@ fn row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
 
 const NODE_COLS: &str = "id, kind, project, label, path, summary, origin, updated";
 
+/// Turns free-text user input into a safe FTS5 MATCH expression: splits on
+/// anything that isn't alphanumeric/underscore and wraps each token as a
+/// quoted prefix term (`"foo"*`), ANDed by FTS5's default juxtaposition.
+/// Quoting matters because FTS5's *query* grammar treats bare `-`, `:`, `(`,
+/// `"`, etc. as operators (NOT, column filter, grouping, ...) independent of
+/// how the content tokenizer split those same characters at insert time —
+/// an unquoted search for e.g. "co-change" or "foo:bar" otherwise fails with
+/// a raw SQL parse error ("no such column: ...") instead of just finding
+/// nothing. Empty input (or input that's all punctuation) yields "".
+fn sanitize_fts_query(query: &str) -> String {
+    query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|tok| !tok.is_empty())
+        .map(|tok| format!("\"{tok}\"*"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl Store {
     /// Resolves the local-first data directory: honors the `OMNIAGENT_ADE_DATA_DIR`
     /// env var override (used by tests and by `OMNIAGENT_ADE_DATA_DIR=... brain ingest`
@@ -253,7 +271,10 @@ impl Store {
         scope: Option<&str>,
         limit: usize,
     ) -> rusqlite::Result<Vec<Node>> {
-        let fts_query = format!("{}*", query.replace('"', ""));
+        let fts_query = sanitize_fts_query(query);
+        if fts_query.is_empty() {
+            return Ok(vec![]);
+        }
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {cols} FROM nodes_fts f
              JOIN nodes n ON n.id = f.id
