@@ -157,3 +157,74 @@ export async function pendingNotesDiscard(nodeId: string): Promise<void> {
 }
 
 export const REVIEW_MEMORY_SETTING_KEY = "review_memory";
+
+// --------------------------------------------------------------- Task 8.1
+// Onboarding (FirstRun) + degradation surfaces (Sidebar's stale/pause menu,
+// the map pane's enrichment-backlog badge, AboutPanel's "Rebuild brain").
+// `src-tauri/src/roots.rs` is the single Rust module behind every command
+// here.
+
+export interface IngestionStatus {
+  running: boolean;
+  projects_total: number;
+  projects_done: number;
+  current_project?: string;
+  total_nodes: number;
+  error?: string;
+}
+
+/** Persists `path` as a known project root and starts ingesting every
+ * project discovered under it, in the background (poll `ingestionStatus`). */
+export async function rootsStartIngest(path: string): Promise<void> {
+  await invoke("roots_start_ingest", { path });
+}
+
+export async function ingestionStatus(): Promise<IngestionStatus> {
+  return invoke<IngestionStatus>("ingestion_status");
+}
+
+/** Every project root the user has ever picked. Empty = true first run. */
+export async function rootsList(): Promise<string[]> {
+  return invoke<string[]>("roots_list");
+}
+
+/** The project with the most nodes — the first-tab-to-offer target once
+ * onboarding ingestion completes. `null` if the brain is still empty. */
+export async function rootsBiggestProject(): Promise<ProjectInfo | null> {
+  return invoke<ProjectInfo | null>("roots_biggest_project");
+}
+
+export async function rootsPausedProjects(): Promise<string[]> {
+  return invoke<string[]>("roots_paused_projects");
+}
+
+export async function rootsSetPaused(project: string, paused: boolean): Promise<void> {
+  await invoke("roots_set_paused", { project, paused });
+}
+
+export interface ProjectStaleness {
+  project: string;
+  last_ingested?: number;
+  stale: boolean;
+}
+
+export async function rootsStaleness(): Promise<ProjectStaleness[]> {
+  return invoke<ProjectStaleness[]>("roots_staleness");
+}
+
+/** Manual "re-check" action for one project (sidebar context menu). */
+export async function rootsReingestProject(project: string): Promise<void> {
+  await invoke("roots_reingest_project", { project });
+}
+
+/** "Rebuild brain": deletes brain.db and re-ingests every known root from
+ * scratch (Markdown memory is untouched). Returns immediately; watch
+ * `ingestionStatus` for progress, same as onboarding. */
+export async function rootsRebuild(): Promise<void> {
+  await invoke("roots_rebuild");
+}
+
+/** The map pane's "enrichment queued (N)" degradation badge. */
+export async function enrichQueuePendingCount(): Promise<number> {
+  return invoke<number>("enrich_queue_pending_count");
+}

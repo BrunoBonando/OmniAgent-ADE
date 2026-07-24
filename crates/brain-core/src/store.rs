@@ -461,6 +461,18 @@ impl Store {
         Ok(())
     }
 
+    /// Count of jobs currently `pending` (Task 8.1's map-pane "enrichment
+    /// queued (N)" badge) — a plain `COUNT(*)` rather than `pending_jobs(..)
+    /// .len()` so the degradation badge doesn't pull every row's `payload`
+    /// text off disk just to size a number.
+    pub fn pending_job_count(&self) -> rusqlite::Result<usize> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM enrich_queue WHERE status = 'pending'",
+            [],
+            |r| r.get(0),
+        )
+    }
+
     /// Reads a value from the `settings` key/value table (Task 5.2: per-project
     /// default engine, restorable tab layout, etc.). `None` when the key has
     /// never been set.
@@ -482,6 +494,22 @@ impl Store {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Every row in the `settings` table. Task 8.1's "Rebuild brain" reads
+    /// this before wiping `brain.db`: project roots, per-project pause
+    /// flags, `review_memory`, the persisted tab layout, and per-project
+    /// default engines are lightweight user config, not derived graph data
+    /// (DESIGN.md's "the whole DB is rebuildable" rule is about the
+    /// *extracted* graph, not the user's settings) — capturing them here
+    /// lets the caller restore every setting into the freshly recreated
+    /// database afterward instead of silently forgetting them.
+    pub fn all_settings(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT key, value FROM settings")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// All edges whose endpoints are both nodes of `project`. Used by community

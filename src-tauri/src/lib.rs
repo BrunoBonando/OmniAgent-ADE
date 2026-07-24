@@ -1,12 +1,14 @@
 pub mod commands;
 pub mod feedback;
 pub mod map_feed;
+pub mod roots;
 pub mod sessions;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tauri::{Emitter, Manager};
 
 use commands::BrainState;
+use roots::IngestionState;
 use sessions::SessionManager;
 
 /// How often the background enrichment worker drains `enrich_queue`
@@ -32,6 +34,9 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Task 8.1: FirstRun's native folder picker ("Where do your
+        // projects live?").
+        .plugin(tauri_plugin_dialog::init())
         // Standard macOS app menu (App/Edit/Window submenus — Quit, Hide,
         // Cut/Copy/Paste/Select All, Close Window, Minimize). App-specific
         // shortcuts (⌘T new tab, ⌘K command palette) are handled in the
@@ -81,6 +86,10 @@ pub fn run() {
             });
             app.manage(SessionManager::new(data_dir.clone(), sink).with_end_hook(end_hook));
 
+            // Task 8.1: onboarding/rebuild ingestion progress, polled by the
+            // frontend via `roots::ingestion_status` every ~2s.
+            app.manage(IngestionState::new());
+
             // Task 7.1 / gap flagged in Phase 4's own report: nothing before
             // this spawned a periodic drain, so enrichment (including this
             // phase's session_summary jobs) only ever ran via a manual
@@ -128,6 +137,16 @@ pub fn run() {
             feedback::pending_notes_list,
             feedback::pending_notes_approve,
             feedback::pending_notes_discard,
+            roots::roots_start_ingest,
+            roots::ingestion_status,
+            roots::roots_list,
+            roots::roots_biggest_project,
+            roots::roots_paused_projects,
+            roots::roots_set_paused,
+            roots::roots_staleness,
+            roots::roots_reingest_project,
+            roots::roots_rebuild,
+            commands::enrich_queue_pending_count,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

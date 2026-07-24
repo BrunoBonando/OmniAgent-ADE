@@ -391,6 +391,38 @@ fn search_excludes_pending_notes() {
 }
 
 #[test]
+fn pending_job_count_reflects_only_pending_status() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(store.pending_job_count().unwrap(), 0);
+
+    let a = store.enqueue_job("project_summary", r#"{"node_id":"p1"}"#).unwrap();
+    store.enqueue_job("project_summary", r#"{"node_id":"p2"}"#).unwrap();
+    assert_eq!(store.pending_job_count().unwrap(), 2);
+
+    store.set_job_status(a, "done", r#"{"node_id":"p1"}"#).unwrap();
+    assert_eq!(store.pending_job_count().unwrap(), 1);
+}
+
+#[test]
+fn all_settings_lists_every_row() {
+    let store = Store::open_in_memory().unwrap();
+    assert!(store.all_settings().unwrap().is_empty());
+
+    store.set_setting("project_roots", r#"["/tmp/x"]"#).unwrap();
+    store.set_setting("review_memory", "true").unwrap();
+
+    let mut rows = store.all_settings().unwrap();
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            ("project_roots".to_string(), r#"["/tmp/x"]"#.to_string()),
+            ("review_memory".to_string(), "true".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn settings_survive_reopen() {
     let dir = tempdir().unwrap();
     {

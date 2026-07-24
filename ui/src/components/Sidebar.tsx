@@ -2,11 +2,21 @@
 // Store::list_projects() directly, no daemon round trip. Renders a real,
 // non-broken empty state when the brain has nothing ingested yet — the
 // common case on a fresh dev run.
-import { useState } from "react";
+//
+// Task 8.1 degradation surfaces added here: a "stale" dot on any project
+// whose last (re)ingest is past the threshold, and the "⋯" context menu
+// (pause-ingestion toggle + manual re-check) — see `ProjectMenu.tsx`.
+import { useCallback, useEffect, useState } from "react";
 import logo from "../assets/omniagent-logo.png";
 import { PRESSURE_THRESHOLD, isUnderPressure, tabsByProject, type ProjectInfo, type TabInfo } from "../state/sessions";
+import { rootsPausedProjects, rootsReingestProject, rootsSetPaused, rootsStaleness, type ProjectStaleness } from "../lib/tauri";
 import AboutPanel from "./AboutPanel";
 import ReviewPanel from "./ReviewPanel";
+import ProjectMenu from "./ProjectMenu";
+
+/** How often to refresh pause/staleness state in the background — cheap
+ * settings/`list_projects` reads, not worth a live push mechanism for v1. */
+const DEGRADATION_POLL_MS = 20000;
 
 interface SidebarProps {
   projects: ProjectInfo[];
@@ -38,6 +48,57 @@ export default function Sidebar({
   const grouped = tabsByProject(tabs);
   const sessionCountByProject = new Map(grouped.map((g) => [g.project, g.tabs.length]));
   const underPressure = isUnderPressure(tabs);
+
+  const [pausedProjects, setPausedProjects] = useState<Set<string>>(new Set());
+  const [staleness, setStaleness] = useState<Map<string, ProjectStaleness>>(new Map());
+  const [menuProjectId, setMenuProjectId] = useState<string | null>(null);
+  const [menuBusy, setMenuBusy] = useState(false);
+
+  const reloadDegradationState = useCallback(() => {
+    rootsPausedProjects()
+      .then((ids) => setPausedProjects(new Set(ids)))
+      .catch((err) => console.error("roots_paused_projects failed", err));
+    rootsStaleness()
+      .then((rows) => setStaleness(new Map(rows.map((r) => [r.project, r]))))
+      .catch((err) => console.error("roots_staleness failed", err));
+  }, []);
+
+  useEffect(() => {
+    reloadDegradationState();
+    const interval = window.setInterval(reloadDegradationState, DEGRADATION_POLL_MS);
+    return () => window.clearInterval(interval);
+  }, [reloadDegradationState]);
+
+  const togglePause = useCallback(
+    async (project: ProjectInfo) => {
+      setMenuBusy(true);
+      try {
+        await rootsSetPaused(project.id, !pausedProjects.has(project.id));
+        reloadDegradationState();
+      } catch (err) {
+        console.error(`roots_set_paused(${project.id}) failed`, err);
+      } finally {
+        setMenuBusy(false);
+      }
+    },
+    [pausedProjects, reloadDegradationState],
+  );
+
+  const reingest = useCallback(
+    async (project: ProjectInfo) => {
+      setMenuBusy(true);
+      try {
+        await rootsReingestProject(project.id);
+        reloadDegradationState();
+      } catch (err) {
+        console.error(`roots_reingest_project(${project.id}) failed`, err);
+      } finally {
+        setMenuBusy(false);
+        setMenuProjectId(null);
+      }
+    },
+    [reloadDegradationState],
+  );
 
   return (
     <aside className="sidebar">
@@ -87,6 +148,8 @@ export default function Sidebar({
             {projects.map((project) => {
               const count = sessionCountByProject.get(project.id) ?? 0;
               const isSelected = project.id === selectedProjectId;
+              const isPaused = pausedProjects.has(project.id);
+              const isStale = staleness.get(project.id)?.stale ?? false;
               return (
                 <li key={project.id} className={`project-row${isSelected ? " is-selected" : ""}`}>
                   <button
@@ -94,7 +157,9 @@ export default function Sidebar({
                     onClick={() => onSelectProject(project)}
                     title={project.path ?? project.id}
                   >
+                    {isStale && <span className="project-row-stale-dot" title="Stale — hasn't been re-ingested in a while" />}
                     <span className="project-row-label">{project.label}</span>
+                    {isPaused && <span className="project-row-paused">paused</span>}
                     {count > 0 && <span className="project-row-count">{count}</span>}
                   </button>
                   <button
@@ -105,6 +170,25 @@ export default function Sidebar({
                   >
                     +
                   </button>
+                  <button
+                    className="project-row-menu-trigger"
+                    onClick={() => setMenuProjectId(project.id)}
+                    aria-label={`${project.label} options`}
+                    title="Pause / re-check"
+                  >
+                    ⋯
+                  </button>
+                  {menuProjectId === project.id && (
+                    <ProjectMenu
+                      project={project}
+                      paused={isPaused}
+                      staleness={staleness.get(project.id)}
+                      busy={menuBusy}
+                      onTogglePause={() => void togglePause(project)}
+                      onReingest={() => void reingest(project)}
+                      onClose={() => setMenuProjectId(null)}
+                    />
+                  )}
                   {count > 0 && (
                     <ul className="project-row-tabs">
                       {grouped

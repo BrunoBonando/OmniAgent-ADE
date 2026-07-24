@@ -29,6 +29,14 @@ import Lens from "./Lens";
 import DetailPanel from "./DetailPanel";
 import type { GraphLink, GraphNode } from "./graphTransform";
 import type { ProjectInfo } from "../state/sessions";
+import { enrichQueuePendingCount } from "../lib/tauri";
+
+/** Task 8.1's degradation badge: how often to poll the enrichment backlog
+ * count. Independent of (and much lighter than) `livePollMs` — this runs at
+ * a fixed, low cadence the whole time the map is mounted, not just during
+ * onboarding, since a stale-summary backlog can build up any time the
+ * user's `claude` CLI is offline. */
+const ENRICH_BACKLOG_POLL_MS = 8000;
 
 const RADIAL_RING_RADIUS = 320;
 const DOUBLE_CLICK_MS = 350;
@@ -51,11 +59,38 @@ interface BrainMapProps {
    * and the force simulation survive toggling back to the workspace view;
    * visibility is CSS-only. */
   hidden: boolean;
+  /** Task 8.1: set by `App.tsx` to ~2s while onboarding/rebuild ingestion is
+   * running, so the map's own `useGraphData` re-fetches and visibly grows
+   * in near-real-time — "the map pane growing live IS the onboarding"
+   * (DESIGN.md 4). `undefined` the rest of the time (no polling overhead). */
+  livePollMs?: number;
 }
 
-export default function BrainMap({ projects, onOpenTerminal, hidden }: BrainMapProps) {
+export default function BrainMap({ projects, onOpenTerminal, hidden, livePollMs }: BrainMapProps) {
   const [ui, dispatch] = useReducer(mapUiReducer, initialMapUiState);
-  const { data, loading, error } = useGraphData(null, ui.expanded, ui.filter);
+  const { data, loading, error } = useGraphData(null, ui.expanded, ui.filter, livePollMs);
+  const [enrichBacklog, setEnrichBacklog] = useState(0);
+
+  // Degradation surface: the enrichment queue backlog badge (Task 8.1).
+  // Runs on its own fixed cadence regardless of `hidden` — cheap (a single
+  // COUNT query) and the badge should already read correctly the instant
+  // the user switches back into this view, not a poll-cycle later.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      enrichQueuePendingCount()
+        .then((n) => {
+          if (!cancelled) setEnrichBacklog(n);
+        })
+        .catch((err) => console.error("enrich_queue_pending_count failed", err));
+    };
+    tick();
+    const interval = window.setInterval(tick, ENRICH_BACKLOG_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const fgRef = useRef<ForceGraphMethods<GraphNode, GraphLink> | undefined>(undefined);
@@ -275,6 +310,15 @@ export default function BrainMap({ projects, onOpenTerminal, hidden }: BrainMapP
           />
           {searchMiss && <span className="brain-map-search-miss">no match in the loaded view</span>}
         </div>
+
+        {enrichBacklog > 0 && (
+          <span
+            className="brain-map-enrich-badge"
+            title={`${enrichBacklog} enrichment job${enrichBacklog === 1 ? "" : "s"} waiting for your claude CLI (offline, or just busy) — the graph works lexically in the meantime`}
+          >
+            enrichment queued ({enrichBacklog})
+          </span>
+        )}
 
         <button
           className="brain-map-fullscreen"

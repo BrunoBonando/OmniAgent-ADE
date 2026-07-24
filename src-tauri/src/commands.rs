@@ -116,6 +116,15 @@ pub fn settings_set(key: String, value: String, brain: State<'_, BrainState>) ->
     store.set_setting(&key, &value).map_err(|e| e.to_string())
 }
 
+/// Task 8.1's map-pane "enrichment queued (N)" badge — a thin wrapper over
+/// `Store::pending_job_count`, same lock-then-delegate pattern as every
+/// other command in this file.
+#[tauri::command]
+pub fn enrich_queue_pending_count(brain: State<'_, BrainState>) -> Result<usize, String> {
+    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    store.pending_job_count().map_err(|e| e.to_string())
+}
+
 const BRIEFING_LIST_CAP: usize = 8;
 
 /// Pure rendering of a `get_context` JSON blob into the markdown block

@@ -8,6 +8,7 @@ import Workspace from "./components/Workspace";
 import EnginePicker from "./components/EnginePicker";
 import CommandPalette from "./components/CommandPalette";
 import BrainMap from "./map/BrainMap";
+import FirstRun from "./onboarding/FirstRun";
 import {
   GLOBAL_DEFAULT_ENGINE_KEY,
   LAYOUT_SETTING_KEY,
@@ -21,9 +22,28 @@ import {
   type ProjectInfo,
   type TabInfo,
 } from "./state/sessions";
-import { getBriefing, listProjects, sessionCreate, sessionKill, settingsGet, settingsSet } from "./lib/tauri";
+import {
+  getBriefing,
+  ingestionStatus,
+  listProjects,
+  rootsList,
+  sessionCreate,
+  sessionKill,
+  settingsGet,
+  settingsSet,
+  type IngestionStatus,
+} from "./lib/tauri";
 
 type View = "workspace" | "map";
+
+/** Task 8.1: how often `App.tsx` polls `ingestion_status` — PLAN.md's own
+ * cadence ("called every ~2s from the frontend while ingestion runs"). This
+ * one poll loop backs BOTH FirstRun's onboarding HUD and BrainMap's
+ * `livePollMs` live-growth feed (and, incidentally, the post-"Rebuild
+ * brain" project-list refresh) — see the boot-adjacent effect below for
+ * why a single, always-running poll is simpler than start/stop plumbing
+ * threaded through three different triggers. */
+const INGESTION_POLL_MS = 2000;
 
 function App() {
   const [state, dispatch] = useReducer(sessionsReducer, initialSessionsState);
@@ -35,17 +55,68 @@ function App() {
   const [view, setView] = useState<View>("workspace");
   const restoredRef = useRef(false);
 
+  // ---- Task 8.1: onboarding gating + the always-on ingestion status poll -
+  const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null); // null = still checking
+  const [firstRunDismissed, setFirstRunDismissed] = useState(false);
+  const [ingestion, setIngestion] = useState<IngestionStatus | null>(null);
+  const wasIngestingRef = useRef(false);
+
+  const reloadProjects = useCallback(async () => {
+    try {
+      const projects = await listProjects();
+      dispatch({ type: "projects/loaded", projects });
+    } catch (err) {
+      console.error("failed to load projects", err);
+      setErrorBanner(`Couldn't load projects from the brain: ${err}`);
+    }
+  }, []);
+
+  // Polls `ingestion_status` at a fixed cadence for the app's whole
+  // lifetime rather than starting/stopping around each of its three
+  // triggers (first-run picker, "Rebuild brain", a future "add another
+  // folder") — one cheap mutex-guarded read every 2s is negligible, and it
+  // means FirstRun/BrainMap/AboutPanel never have to coordinate who owns
+  // starting or stopping the loop. Whenever `running` flips true -> false,
+  // the project list (which "Rebuild brain" especially can change
+  // wholesale) is refreshed exactly once.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const status = await ingestionStatus();
+        if (cancelled) return;
+        setIngestion(status);
+        if (status.running) {
+          wasIngestingRef.current = true;
+        } else if (wasIngestingRef.current) {
+          wasIngestingRef.current = false;
+          void reloadProjects();
+        }
+      } catch (err) {
+        console.error("ingestion_status poll failed", err);
+      }
+    };
+    void tick();
+    const interval = window.setInterval(tick, INGESTION_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [reloadProjects]);
+
   // ---- boot: load the sidebar's project list + restore the last layout --
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
+      await reloadProjects();
+
       try {
-        const projects = await listProjects();
-        if (!cancelled) dispatch({ type: "projects/loaded", projects });
+        const roots = await rootsList();
+        if (!cancelled) setNeedsOnboarding(roots.length === 0);
       } catch (err) {
-        console.error("failed to load projects", err);
-        if (!cancelled) setErrorBanner(`Couldn't load projects from the brain: ${err}`);
+        console.error("failed to load project roots", err);
+        if (!cancelled) setNeedsOnboarding(false); // fail open — never trap the user behind a broken check
       }
 
       try {
@@ -211,8 +282,18 @@ function App() {
           projects={state.projects}
           onOpenTerminal={(p) => void requestNewTab(p)}
           hidden={view !== "map"}
+          livePollMs={ingestion?.running ? INGESTION_POLL_MS : undefined}
         />
       </div>
+
+      {needsOnboarding === true && !firstRunDismissed && (
+        <FirstRun
+          ingestion={ingestion}
+          onRequestView={setView}
+          onOpenTerminal={(p) => void requestNewTab(p)}
+          onDismiss={() => setFirstRunDismissed(true)}
+        />
+      )}
 
       {pickerProject && (
         <EnginePicker
