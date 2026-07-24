@@ -195,9 +195,22 @@ pub fn get_context(ctx: &ToolContext, args: &Value) -> Result<Value, ToolError> 
 
     let nodes = ctx.store.nodes_for_project(project).map_err(internal)?;
 
+    // Task 7.1: a session-summary Memory note awaiting review (`pending_notes`)
+    // must not show up in the briefing until approved — "not auto-committed
+    // live into ... briefings" per PLAN.md's review-mode bullet. Same gate
+    // `Store::search` applies, applied here since `nodes_for_project` itself
+    // stays ungated (the brain map still renders pending nodes informationally).
+    let pending_ids: std::collections::HashSet<String> = ctx
+        .store
+        .pending_notes(Some(project))
+        .map_err(internal)?
+        .into_iter()
+        .map(|p| p.node_id)
+        .collect();
+
     let mut memory_nodes: Vec<&Node> = nodes
         .iter()
-        .filter(|n| n.kind == NodeKind::Memory)
+        .filter(|n| n.kind == NodeKind::Memory && !pending_ids.contains(&n.id))
         .collect();
     memory_nodes.sort_by_key(|n| std::cmp::Reverse(n.updated));
 
@@ -565,6 +578,44 @@ mod tests {
         assert_eq!(result["recent_decisions"].as_array().unwrap().len(), 1);
         assert_eq!(result["memory_notes"].as_array().unwrap().len(), 2);
         assert!(result["related_projects"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_context_hides_pending_memory_notes_until_approved() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let ctx = ToolContext {
+            store: &store,
+            data_dir: dir.path(),
+        };
+        store
+            .upsert_node(&Node {
+                summary: Some("A project.".into()),
+                ..node("p1", NodeKind::Project, "p1", "p1")
+            })
+            .unwrap();
+
+        let memory = Memory::new(&store, dir.path());
+        let (_path, note_id) = memory
+            .write_note_with_status(
+                "p1",
+                "Session: add auth",
+                "did some work",
+                Origin::MachineSummary,
+                true,
+            )
+            .unwrap();
+
+        let result = get_context(&ctx, &json!({"project": "p1"})).unwrap();
+        assert!(
+            result["memory_notes"].as_array().unwrap().is_empty(),
+            "{result:?}"
+        );
+
+        store.approve_pending(&note_id).unwrap();
+
+        let result = get_context(&ctx, &json!({"project": "p1"})).unwrap();
+        assert_eq!(result["memory_notes"].as_array().unwrap().len(), 1);
     }
 
     #[test]
