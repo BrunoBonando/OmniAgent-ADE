@@ -6,13 +6,35 @@
 // Task 8.1 degradation surfaces added here: a "stale" dot on any project
 // whose last (re)ingest is past the threshold, and the "⋯" context menu
 // (pause-ingestion toggle + manual re-check) — see `ProjectMenu.tsx`.
+//
+// Founder feedback (Bruno, 2026-07-24, verbatim): "Open one terminal, and
+// start from there... the user can add multiple sessions within one project
+// or add a new project (item on the left)". Before this, the ONLY way a
+// project appeared here was via ingestion (either the `brain` CLI or the
+// FirstRun bulk-root picker) — the empty state literally told the user to
+// run a CLI command and relaunch, which is the opposite of "start from
+// there". The persistent "+" trigger below and the rewritten empty state
+// are the fix: `AddProjectModal` calls `add_project` (`src-tauri/src/
+// roots.rs`), which creates the sidebar row synchronously and ingests it on
+// a background thread — see that command's own doc comment for why. This
+// does NOT replace the FirstRun bulk "point at a parent folder full of
+// repos" flow (kept as-is, still reachable the same way it always was);
+// it's a second, faster, single-project path that coexists with it.
 import { useCallback, useEffect, useState } from "react";
 import logo from "../assets/omniagent-logo.png";
-import { PRESSURE_THRESHOLD, isUnderPressure, tabsByProject, type ProjectInfo, type TabInfo } from "../state/sessions";
-import { rootsPausedProjects, rootsReingestProject, rootsSetPaused, rootsStaleness, type ProjectStaleness } from "../lib/tauri";
+import { PRESSURE_THRESHOLD, isUnderPressure, tabDisplayLabel, tabsByProject, type ProjectInfo, type TabInfo } from "../state/sessions";
+import {
+  rootsPausedProjects,
+  rootsReingestProject,
+  rootsSetPaused,
+  rootsStaleness,
+  type IngestionStatus,
+  type ProjectStaleness,
+} from "../lib/tauri";
 import AboutPanel from "./AboutPanel";
 import ReviewPanel from "./ReviewPanel";
 import ProjectMenu from "./ProjectMenu";
+import AddProjectModal from "./AddProjectModal";
 
 /** How often to refresh pause/staleness state in the background — cheap
  * settings/`list_projects` reads, not worth a live push mechanism for v1. */
@@ -26,6 +48,16 @@ interface SidebarProps {
   onSelectProject: (project: ProjectInfo) => void;
   onNewTabInProject: (project: ProjectInfo) => void;
   onActivateTab: (id: string) => void;
+  /** The "+" Add Project flow: called with the freshly-created project the
+   * instant `add_project` returns (well before ingestion finishes). */
+  onProjectAdded: (project: ProjectInfo) => void;
+  /** Owned centrally by `App.tsx` (already polling every ~2s for the
+   * degradation badges / FirstRun / BrainMap) and simply forwarded here —
+   * backs the small "ingesting…" indicator next to the wordmark, the reuse
+   * of that existing poll loop this task asked for rather than a second
+   * one. Optional so this component still type-checks for tests that don't
+   * care about it. */
+  ingestion?: IngestionStatus | null;
   /** Task 6.2: the workspace/map view toggle. Optional so this component
    * still type-checks for any test that doesn't care about it. */
   view?: "workspace" | "map";
@@ -40,11 +72,14 @@ export default function Sidebar({
   onSelectProject,
   onNewTabInProject,
   onActivateTab,
+  onProjectAdded,
+  ingestion,
   view = "workspace",
   onSetView,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [addProjectOpen, setAddProjectOpen] = useState(false);
   const grouped = tabsByProject(tabs);
   const sessionCountByProject = new Map(grouped.map((g) => [g.project, g.tabs.length]));
   const underPressure = isUnderPressure(tabs);
@@ -104,12 +139,32 @@ export default function Sidebar({
     <aside className="sidebar">
       <div className="sidebar-header">
         <span className="sidebar-wordmark">OMNIAGENT</span>
-        <span
-          className={`pressure-badge${underPressure ? " is-hot" : ""}`}
-          title={`${tabs.length} live session${tabs.length === 1 ? "" : "s"} (pressure badge past ${PRESSURE_THRESHOLD})`}
-        >
-          {tabs.length}/{PRESSURE_THRESHOLD}
-        </span>
+        <div className="sidebar-header-actions">
+          {ingestion?.running && (
+            <span
+              className="sidebar-ingesting"
+              role="status"
+              title={`Ingesting${ingestion.current_project ? ` ${ingestion.current_project}` : ""}… runs in the background, terminals stay usable.`}
+            >
+              <span className="sidebar-ingesting-dot" aria-hidden="true" />
+              ingesting
+            </span>
+          )}
+          <button
+            className="sidebar-add-project-trigger"
+            onClick={() => setAddProjectOpen(true)}
+            aria-label="Add project"
+            title="Add project"
+          >
+            +
+          </button>
+          <span
+            className={`pressure-badge${underPressure ? " is-hot" : ""}`}
+            title={`${tabs.length} live session${tabs.length === 1 ? "" : "s"} (pressure badge past ${PRESSURE_THRESHOLD})`}
+          >
+            {tabs.length}/{PRESSURE_THRESHOLD}
+          </span>
+        </div>
       </div>
 
       <div className="sidebar-view-toggle" role="tablist" aria-label="View">
@@ -137,11 +192,14 @@ export default function Sidebar({
         {projects.length === 0 ? (
           <div className="sidebar-empty">
             <img src={logo} alt="" className="sidebar-empty-logo" />
-            <p className="sidebar-empty-title">No projects ingested yet</p>
+            <p className="sidebar-empty-title">No projects yet</p>
             <p className="sidebar-empty-hint">
-              Run <code>brain ingest &lt;folder&gt;</code> to point the brain at your projects,
-              then relaunch — the sidebar fills in automatically.
+              Add a project folder to open your first terminal — ingestion happens quietly in the
+              background.
             </p>
+            <button className="sidebar-empty-cta" onClick={() => setAddProjectOpen(true)}>
+              + Add Project
+            </button>
           </div>
         ) : (
           <ul className="project-list">
@@ -199,7 +257,7 @@ export default function Sidebar({
                               className={`project-row-tab${tab.id === activeTabId ? " is-active" : ""}`}
                               onClick={() => onActivateTab(tab.id)}
                             >
-                              {tab.engine}
+                              {tabDisplayLabel(tab)}
                             </button>
                           </li>
                         ))}
@@ -231,6 +289,15 @@ export default function Sidebar({
 
       {aboutOpen && <AboutPanel onClose={() => setAboutOpen(false)} />}
       {reviewOpen && <ReviewPanel onClose={() => setReviewOpen(false)} />}
+      {addProjectOpen && (
+        <AddProjectModal
+          onAdded={(project) => {
+            setAddProjectOpen(false);
+            onProjectAdded(project);
+          }}
+          onClose={() => setAddProjectOpen(false)}
+        />
+      )}
     </aside>
   );
 }

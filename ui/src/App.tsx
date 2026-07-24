@@ -133,6 +133,7 @@ function App() {
               engine: t.engine,
               cwd: info.cwd,
               createdAt: info.created,
+              label: t.label,
             });
           } catch (err) {
             // DESIGN 3.1: engines "restart fresh" on relaunch — if one
@@ -222,6 +223,28 @@ function App() {
 
   const activateTab = useCallback((id: string) => dispatch({ type: "tab/activated", id }), []);
 
+  const renameTab = useCallback(
+    (id: string, label: string) => dispatch({ type: "tab/renamed", id, label }),
+    [],
+  );
+
+  // ---- the sidebar's "+" Add Project flow (founder feedback, 2026-07-24):
+  // `add_project` already upserted the node and returned its `ProjectInfo`
+  // synchronously, so there's no need to await `reloadProjects` before
+  // acting on it — select it and go straight into the engine picker
+  // (`requestNewTab`, the exact same flow the per-project "+"/⌘T already
+  // use) so a terminal is one more click away immediately. `reloadProjects`
+  // still runs, non-blocking, so the sidebar row appears without waiting
+  // for the next `ingestion_status` poll's post-run refresh.
+  const handleProjectAdded = useCallback(
+    (project: ProjectInfo) => {
+      void reloadProjects();
+      setSelectedProjectId(project.id);
+      void requestNewTab(project);
+    },
+    [reloadProjects, requestNewTab],
+  );
+
   const closeTab = useCallback(async (id: string) => {
     try {
       await sessionKill(id);
@@ -265,6 +288,8 @@ function App() {
           onSelectProject={(p) => setSelectedProjectId(p.id)}
           onNewTabInProject={(p) => void requestNewTab(p)}
           onActivateTab={activateTab}
+          onProjectAdded={handleProjectAdded}
+          ingestion={ingestion}
           view={view}
           onSetView={setView}
         />
@@ -276,6 +301,7 @@ function App() {
           onActivateTab={activateTab}
           onCloseTab={(id) => void closeTab(id)}
           onNewTabInProject={(p) => void requestNewTab(p)}
+          onRenameTab={renameTab}
           hidden={view !== "workspace"}
         />
         <BrainMap

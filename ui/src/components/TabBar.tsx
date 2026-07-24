@@ -3,7 +3,23 @@
 // the signature element tying the tab affordance to Bruno's actual
 // hardware-mixer mental model (see the frontend-design pass notes), and a
 // genuine legibility win once more than a couple of tabs are open.
-import { PRESSURE_THRESHOLD, isUnderPressure, tabsByProject, type ProjectInfo, type TabInfo } from "../state/sessions";
+//
+// Session renaming (founder feedback, 2026-07-24 — Bruno, verbatim: "They
+// can rename a session and so on"): double-click a tab's label to edit it
+// inline. Pure UI state (`TabInfo.label`, `state/sessions.ts`'s
+// `tab/renamed` action) — `session_create`'s engine-spawning logic is
+// completely untouched, this only changes what the pill prints
+// (`tabDisplayLabel`: the custom label if set, else the engine name, same
+// as every tab already showed before this).
+import { useState } from "react";
+import {
+  PRESSURE_THRESHOLD,
+  isUnderPressure,
+  tabDisplayLabel,
+  tabsByProject,
+  type ProjectInfo,
+  type TabInfo,
+} from "../state/sessions";
 import { ENGINE_COLOR } from "../theme";
 
 interface TabBarProps {
@@ -13,6 +29,7 @@ interface TabBarProps {
   onActivateTab: (id: string) => void;
   onCloseTab: (id: string) => void;
   onNewTabInProject: (project: ProjectInfo) => void;
+  onRenameTab: (id: string, label: string) => void;
 }
 
 export default function TabBar({
@@ -22,10 +39,24 @@ export default function TabBar({
   onActivateTab,
   onCloseTab,
   onNewTabInProject,
+  onRenameTab,
 }: TabBarProps) {
   const grouped = tabsByProject(tabs);
   const projectLabel = (id: string) => projects.find((p) => p.id === id)?.label ?? id;
   const underPressure = isUnderPressure(tabs);
+
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+
+  function startRename(tab: TabInfo) {
+    setRenamingId(tab.id);
+    setDraft(tabDisplayLabel(tab));
+  }
+
+  function commitRename() {
+    if (renamingId) onRenameTab(renamingId, draft);
+    setRenamingId(null);
+  }
 
   return (
     <div className="tab-bar-wrap">
@@ -48,17 +79,50 @@ export default function TabBar({
                     key={tab.id}
                     className={`tab-pill${tab.id === activeTabId ? " is-active" : ""}`}
                     style={{ borderLeftColor: ENGINE_COLOR[tab.engine] }}
-                    onClick={() => onActivateTab(tab.id)}
+                    onClick={() => {
+                      if (renamingId !== tab.id) onActivateTab(tab.id);
+                    }}
                   >
                     <span className="tab-pill-dot" style={{ background: ENGINE_COLOR[tab.engine] }} />
-                    <span className="tab-pill-label">{tab.engine}</span>
+                    {renamingId === tab.id ? (
+                      <input
+                        className="tab-pill-rename-input"
+                        value={draft}
+                        autoFocus
+                        size={Math.max(4, draft.length || 1)}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => setDraft(e.target.value)}
+                        onBlur={commitRename}
+                        onKeyDown={(e) => {
+                          e.stopPropagation();
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            commitRename();
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            setRenamingId(null);
+                          }
+                        }}
+                      />
+                    ) : (
+                      <span
+                        className="tab-pill-label"
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          startRename(tab);
+                        }}
+                        title="Double-click to rename"
+                      >
+                        {tabDisplayLabel(tab)}
+                      </span>
+                    )}
                     <button
                       className="tab-pill-close"
                       onClick={(e) => {
                         e.stopPropagation();
                         onCloseTab(tab.id);
                       }}
-                      aria-label={`Close ${tab.engine} tab in ${projectLabel(tab.project)}`}
+                      aria-label={`Close ${tabDisplayLabel(tab)} tab in ${projectLabel(tab.project)}`}
                     >
                       ×
                     </button>

@@ -4,7 +4,7 @@
 // search/navigation; this just proves the retrieval path end-to-end.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { searchBrain, type BrainSearchHit } from "../lib/tauri";
-import type { ProjectInfo, TabInfo } from "../state/sessions";
+import { tabDisplayLabel, type ProjectInfo, type TabInfo } from "../state/sessions";
 import { ENGINE_COLOR } from "../theme";
 
 interface CommandPaletteProps {
@@ -50,7 +50,7 @@ export default function CommandPalette({
       kind: "switch-tab",
       id: tab.id,
       engine: tab.engine,
-      label: `Switch to ${projectLabel(tab.project)} — ${tab.engine}`,
+      label: `Switch to ${projectLabel(tab.project)} — ${tabDisplayLabel(tab)}`,
     }));
     const newTabActions: Action[] = projects.map((project) => ({
       kind: "new-tab",
@@ -183,7 +183,7 @@ export default function CommandPalette({
               </li>
             )}
             {actions.length === 0 && !query.trim() && (
-              <li className="command-palette-empty">No projects yet — ingest one with the `brain` CLI.</li>
+              <li className="command-palette-empty">No projects yet — click + Add Project in the sidebar.</li>
             )}
           </ul>
         )}

@@ -18,6 +18,7 @@ interface WorkspaceProps {
   onActivateTab: (id: string) => void;
   onCloseTab: (id: string) => void;
   onNewTabInProject: (project: ProjectInfo) => void;
+  onRenameTab: (id: string, label: string) => void;
   hidden: boolean;
 }
 
@@ -29,6 +30,7 @@ export default function Workspace({
   onActivateTab,
   onCloseTab,
   onNewTabInProject,
+  onRenameTab,
   hidden,
 }: WorkspaceProps) {
   return (
@@ -40,6 +42,7 @@ export default function Workspace({
         onActivateTab={onActivateTab}
         onCloseTab={onCloseTab}
         onNewTabInProject={onNewTabInProject}
+        onRenameTab={onRenameTab}
       />
       <div className="terminal-area">
         {tabs.map((tab) => (
@@ -51,7 +54,7 @@ export default function Workspace({
             <p>No terminal open.</p>
             <p className="empty-workspace-hint">
               {projects.length === 0
-                ? "Ingest a project, then press ⌘T."
+                ? "Add a project (+ in the sidebar), then press ⌘T."
                 : `⌘T to start one in ${selectedProjectLabel ?? "the selected project"}.`}
             </p>
           </div>

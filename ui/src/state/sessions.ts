@@ -19,13 +19,17 @@ export interface ProjectInfo {
   path: string | null;
 }
 
-/** A live terminal tab. `id` is the Rust `SessionInfo.id` (real PTY session). */
+/** A live terminal tab. `id` is the Rust `SessionInfo.id` (real PTY session).
+ * `label` is an optional user-set custom name (double-click a tab in
+ * `TabBar` to set one) — falls back to `engine` when unset. See
+ * `tabDisplayLabel`. */
 export interface TabInfo {
   id: string;
   project: string;
   engine: Engine;
   cwd: string;
   createdAt: number;
+  label?: string;
 }
 
 export interface SessionsState {
@@ -45,6 +49,7 @@ export type SessionsAction =
   | { type: "tab/opened"; tab: TabInfo }
   | { type: "tab/closed"; id: string }
   | { type: "tab/activated"; id: string }
+  | { type: "tab/renamed"; id: string; label: string }
   | { type: "layout/restored"; tabs: TabInfo[] };
 
 /**
@@ -88,6 +93,17 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
       if (!state.tabs.some((t) => t.id === action.id)) return state;
       return { ...state, activeTabId: action.id };
 
+    case "tab/renamed": {
+      if (!state.tabs.some((t) => t.id === action.id)) return state;
+      const trimmed = action.label.trim();
+      return {
+        ...state,
+        tabs: state.tabs.map((t) =>
+          t.id === action.id ? { ...t, label: trimmed.length > 0 ? trimmed : undefined } : t,
+        ),
+      };
+    }
+
     case "layout/restored":
       return {
         ...state,
@@ -98,6 +114,13 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
     default:
       return state;
   }
+}
+
+/** What a tab's chrome (`TabBar`, `Sidebar`, `CommandPalette`) should
+ * actually print: the custom rename if the user set one, else the engine
+ * name — the pre-rename default every tab already displayed. */
+export function tabDisplayLabel(tab: TabInfo): string {
+  return tab.label && tab.label.length > 0 ? tab.label : tab.engine;
 }
 
 /** Tabs grouped per project, project order = first-seen order (stable, no re-sort on new tabs within a known project). */
@@ -149,11 +172,14 @@ export function cycleEngine(current: Engine, direction: 1 | -1): Engine {
 
 /** The shape persisted under `LAYOUT_SETTING_KEY` — engines are restarted
  * fresh on restore (DESIGN 3.1: no PTY resurrection), so only the inputs to
- * a fresh `session_create` call are kept, never the old session id. */
+ * a fresh `session_create` call are kept, never the old session id. `label`
+ * is the one piece of pure UI state worth carrying across a restart (a
+ * rename with no other effect on the session), so it rides along here too. */
 export interface PersistedTab {
   project: string;
   engine: Engine;
   cwd: string;
+  label?: string;
 }
 export interface Layout {
   tabs: PersistedTab[];
@@ -161,7 +187,12 @@ export interface Layout {
 
 export function serializeLayout(tabs: TabInfo[]): string {
   const layout: Layout = {
-    tabs: tabs.map(({ project, engine, cwd }) => ({ project, engine, cwd })),
+    tabs: tabs.map(({ project, engine, cwd, label }) => ({
+      project,
+      engine,
+      cwd,
+      ...(label ? { label } : {}),
+    })),
   };
   return JSON.stringify(layout);
 }
@@ -174,7 +205,11 @@ export function deserializeLayout(raw: string | null | undefined): PersistedTab[
     if (!Array.isArray(parsed.tabs)) return [];
     return parsed.tabs.filter(
       (t): t is PersistedTab =>
-        !!t && typeof t.project === "string" && typeof t.cwd === "string" && isEngine(t.engine),
+        !!t &&
+        typeof t.project === "string" &&
+        typeof t.cwd === "string" &&
+        isEngine(t.engine) &&
+        (t.label === undefined || typeof t.label === "string"),
     );
   } catch {
     return [];

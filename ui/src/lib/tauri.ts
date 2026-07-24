@@ -217,6 +217,15 @@ export async function rootsReingestProject(project: string): Promise<void> {
   await invoke("roots_reingest_project", { project });
 }
 
+/** The sidebar's persistent "+": adds exactly one project at `path`
+ * (`name` optional, defaults server-side to the folder basename). Creates
+ * the project node immediately — returns as soon as it's queryable via
+ * `listProjects`, never waits for ingestion, which continues in the
+ * background (poll `ingestionStatus`, same channel as onboarding/rebuild). */
+export async function addProject(path: string, name?: string): Promise<ProjectInfo> {
+  return invoke<ProjectInfo>("add_project", { path, name: name ?? null });
+}
+
 /** "Rebuild brain": deletes brain.db and re-ingests every known root from
  * scratch (Markdown memory is untouched). Returns immediately; watch
  * `ingestionStatus` for progress, same as onboarding. */

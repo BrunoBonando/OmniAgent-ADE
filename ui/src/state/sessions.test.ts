@@ -10,6 +10,7 @@ import {
   resolveDefaultEngine,
   serializeLayout,
   sessionsReducer,
+  tabDisplayLabel,
   tabsByProject,
   type SessionsState,
   type TabInfo,
@@ -80,6 +81,47 @@ describe("sessionsReducer — tab/activated", () => {
     const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
     const next = sessionsReducer(state, { type: "tab/activated", id: "ghost" });
     expect(next.activeTabId).toBe("a");
+  });
+});
+
+describe("sessionsReducer — tab/renamed", () => {
+  it("sets a custom label on the matching tab, leaving others untouched", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1"), tab("b", "p1")], activeTabId: "a" };
+    const next = sessionsReducer(state, { type: "tab/renamed", id: "a", label: "backend fix" });
+    expect(next.tabs.find((t) => t.id === "a")?.label).toBe("backend fix");
+    expect(next.tabs.find((t) => t.id === "b")?.label).toBeUndefined();
+  });
+
+  it("trims surrounding whitespace", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const next = sessionsReducer(state, { type: "tab/renamed", id: "a", label: "  spaced out  " });
+    expect(next.tabs[0].label).toBe("spaced out");
+  });
+
+  it("a blank label clears back to the engine default", () => {
+    const withLabel: SessionsState = {
+      projects: [],
+      tabs: [{ ...tab("a", "p1"), label: "custom" }],
+      activeTabId: "a",
+    };
+    const next = sessionsReducer(withLabel, { type: "tab/renamed", id: "a", label: "   " });
+    expect(next.tabs[0].label).toBeUndefined();
+  });
+
+  it("renaming an unknown tab id is a no-op", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const next = sessionsReducer(state, { type: "tab/renamed", id: "ghost", label: "x" });
+    expect(next).toBe(state);
+  });
+});
+
+describe("tabDisplayLabel", () => {
+  it("falls back to the engine name when no custom label is set", () => {
+    expect(tabDisplayLabel(tab("a", "p1", "codex"))).toBe("codex");
+  });
+
+  it("prefers the custom label once one is set", () => {
+    expect(tabDisplayLabel({ ...tab("a", "p1"), label: "my session" })).toBe("my session");
   });
 });
 
@@ -182,5 +224,18 @@ describe("layout serialize/deserialize round trip", () => {
       ],
     });
     expect(deserializeLayout(raw)).toEqual([{ project: "p1", engine: "claude", cwd: "/tmp/p1" }]);
+  });
+
+  it("round trips a renamed tab's custom label so it survives a relaunch", () => {
+    const tabs = [{ ...tab("sess-1", "p1", "codex"), label: "backend fix" }];
+    const json = serializeLayout(tabs);
+    const restored = deserializeLayout(json);
+    expect(restored).toEqual([{ project: "p1", engine: "codex", cwd: "/tmp/p1", label: "backend fix" }]);
+  });
+
+  it("omits the label key entirely for un-renamed tabs (existing layouts stay unaffected)", () => {
+    const json = serializeLayout([tab("a", "p1")]);
+    expect(JSON.parse(json).tabs[0]).not.toHaveProperty("label");
+    expect(deserializeLayout(json)).toEqual([{ project: "p1", engine: "claude", cwd: "/tmp/p1" }]);
   });
 });
