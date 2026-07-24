@@ -423,6 +423,68 @@ fn all_settings_lists_every_row() {
 }
 
 #[test]
+fn with_transaction_commits_all_writes_together() {
+    let store = Store::open_in_memory().unwrap();
+    let result: Result<(), rusqlite::Error> = store.with_transaction(|s| {
+        s.upsert_node(&node("p1:a.ts", NodeKind::File, "p1", "a.ts"))?;
+        s.upsert_node(&node("p1:b.ts", NodeKind::File, "p1", "b.ts"))?;
+        s.upsert_edge(&Edge {
+            src: "p1:a.ts".into(),
+            dst: "p1:b.ts".into(),
+            kind: EdgeKind::Imports,
+            weight: 1.0,
+        })?;
+        Ok(())
+    });
+    assert!(result.is_ok());
+
+    assert_eq!(store.nodes_for_project("p1").unwrap().len(), 2);
+    assert_eq!(store.neighbors("p1:a.ts", 10).unwrap().len(), 1);
+}
+
+#[test]
+fn with_transaction_rolls_back_every_write_on_error() {
+    let store = Store::open_in_memory().unwrap();
+    // Pre-existing state, untouched by the failed transaction below.
+    store
+        .upsert_node(&node("p1:pre-existing.ts", NodeKind::File, "p1", "pre-existing.ts"))
+        .unwrap();
+
+    let result: Result<(), Box<dyn std::error::Error>> = store.with_transaction(|s| {
+        s.upsert_node(&node("p1:a.ts", NodeKind::File, "p1", "a.ts"))?;
+        s.upsert_node(&node("p1:b.ts", NodeKind::File, "p1", "b.ts"))?;
+        Err("simulated failure partway through a batch".into())
+    });
+    assert!(result.is_err());
+
+    // Neither write from the failed closure landed...
+    assert!(store.get_node("p1:a.ts").unwrap().is_none());
+    assert!(store.get_node("p1:b.ts").unwrap().is_none());
+    // ...and the pre-existing row is untouched (rollback didn't nuke the DB).
+    assert!(store.get_node("p1:pre-existing.ts").unwrap().is_some());
+}
+
+#[test]
+fn with_transaction_batches_many_writes_and_they_all_land() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .with_transaction::<_, _, rusqlite::Error>(|s| {
+            for i in 0..500 {
+                s.upsert_node(&node(
+                    &format!("p1:f{i}.ts"),
+                    NodeKind::File,
+                    "p1",
+                    &format!("f{i}.ts"),
+                ))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(store.nodes_for_project("p1").unwrap().len(), 500);
+}
+
+#[test]
 fn settings_survive_reopen() {
     let dir = tempdir().unwrap();
     {

@@ -35,61 +35,77 @@ pub struct IngestStats {
 /// this project is cleared first via `delete_project_extracted`, so stale
 /// entries from deleted/renamed files don't linger) and, since every pass is
 /// deterministic over the same on-disk state, the same community layout.
+///
+/// Every DB write for the whole project — the delete-and-reingest,
+/// per-file/per-entity/per-edge upserts, community assignment, and the
+/// summary-job enqueue — runs inside a single `Store::with_transaction`
+/// rather than each auto-committing individually. Before this, a
+/// medium-sized project could issue thousands of individual commits, each
+/// briefly taking SQLite's write lock; even under WAL that's a lot of
+/// wasted per-statement transaction overhead, and under the old
+/// rollback-journal default it's what made concurrent UI reads stall during
+/// ingestion (see `brain-core::Store::open`'s doc comment and
+/// `examples/concurrency_repro.rs`). One transaction per project also makes
+/// a project's ingest atomic: a failure partway through (e.g. a git-mining
+/// error) rolls back the whole project's writes instead of leaving it
+/// half-updated.
 pub fn ingest_project(store: &Store, root: &Path, name: &str) -> Result<IngestStats> {
-    store.delete_project_extracted(name)?;
+    store.with_transaction(|store| {
+        store.delete_project_extracted(name)?;
 
-    store.upsert_node(&Node {
-        id: name.to_string(),
-        kind: NodeKind::Project,
-        project: name.to_string(),
-        label: name.to_string(),
-        path: Some(root.to_string_lossy().to_string()),
-        summary: None,
-        origin: Origin::Extracted,
-        updated: now_ts(),
-    })?;
-
-    let files = walk::walk_files(root);
-    let mut stats = IngestStats::default();
-    let mut file_ids: HashSet<String> = HashSet::new();
-
-    for file in &files {
-        let Some(rel) = rel_posix(root, file) else {
-            continue;
-        };
-        let id = format!("{name}:{rel}");
         store.upsert_node(&Node {
-            id: id.clone(),
-            kind: NodeKind::File,
+            id: name.to_string(),
+            kind: NodeKind::Project,
             project: name.to_string(),
-            label: rel.clone(),
-            path: Some(rel),
+            label: name.to_string(),
+            path: Some(root.to_string_lossy().to_string()),
             summary: None,
             origin: Origin::Extracted,
             updated: now_ts(),
         })?;
-        file_ids.insert(id);
-        stats.files += 1;
-    }
 
-    let code_stats = code::extract(store, root, name, &files)?;
-    stats.entities += code_stats.entities;
-    stats.edges += code_stats.edges;
+        let files = walk::walk_files(root);
+        let mut stats = IngestStats::default();
+        let mut file_ids: HashSet<String> = HashSet::new();
 
-    stats.edges += docs::extract(store, root, name, &files)?;
-    stats.edges += gitmine::mine(store, root, name, &file_ids)?;
-    stats.communities = community::detect(store, name)?;
+        for file in &files {
+            let Some(rel) = rel_posix(root, file) else {
+                continue;
+            };
+            let id = format!("{name}:{rel}");
+            store.upsert_node(&Node {
+                id: id.clone(),
+                kind: NodeKind::File,
+                project: name.to_string(),
+                label: rel.clone(),
+                path: Some(rel),
+                summary: None,
+                origin: Origin::Extracted,
+                updated: now_ts(),
+            })?;
+            file_ids.insert(id);
+            stats.files += 1;
+        }
 
-    // Phase 4: queue a fresh project summary every time the project's
-    // extracted graph changes. `enqueue_job` dedupes against an
-    // already-pending job for this project, so re-ingests between drains
-    // don't pile up duplicate LLM calls.
-    store.enqueue_job(
-        "project_summary",
-        &serde_json::json!({ "node_id": name }).to_string(),
-    )?;
+        let code_stats = code::extract(store, root, name, &files)?;
+        stats.entities += code_stats.entities;
+        stats.edges += code_stats.edges;
 
-    Ok(stats)
+        stats.edges += docs::extract(store, root, name, &files)?;
+        stats.edges += gitmine::mine(store, root, name, &file_ids)?;
+        stats.communities = community::detect(store, name)?;
+
+        // Phase 4: queue a fresh project summary every time the project's
+        // extracted graph changes. `enqueue_job` dedupes against an
+        // already-pending job for this project, so re-ingests between drains
+        // don't pile up duplicate LLM calls.
+        store.enqueue_job(
+            "project_summary",
+            &serde_json::json!({ "node_id": name }).to_string(),
+        )?;
+
+        Ok(stats)
+    })
 }
 
 /// Finds every immediate subdirectory of `root` that looks like a project:

@@ -231,18 +231,104 @@ impl Store {
     }
 
     /// Opens (creating if absent) the brain database under `data_dir/brain.db`.
+    ///
+    /// Sets three connection-level pragmas *every* open, not just on first
+    /// creation, because the app runs several independent connections
+    /// against the same on-disk file concurrently (`BrainState`'s
+    /// UI-facing connection, the ingestion background thread's own
+    /// connection, and the 60s enrichment drain loop's own connection — see
+    /// `roots.rs`/`lib.rs`) and `synchronous`/`busy_timeout` are
+    /// per-connection, not persisted in the database file:
+    ///
+    /// - `journal_mode = WAL`: SQLite's default rollback-journal mode takes
+    ///   an exclusive lock for the brief moment a writer commits, which
+    ///   blocks every other connection's reads *and* writes until it
+    ///   releases — with thousands of individual commits during a project
+    ///   ingest, that adds up to noticeable UI stalls (empirically
+    ///   reproduced in `examples/concurrency_repro.rs`: read latency spikes
+    ///   from a ~1.5ms baseline to 300ms-1s+ while a concurrent write loop
+    ///   runs against the pre-WAL code). WAL lets readers keep reading a
+    ///   consistent snapshot while a writer appends to the WAL file, so
+    ///   concurrent reads no longer queue up behind commits. This *is*
+    ///   persisted in the db file, so setting it redundantly on reopen is a
+    ///   cheap no-op, not a correctness requirement — it's set every time
+    ///   for clarity and because a pre-existing non-WAL `brain.db` from
+    ///   before this fix needs it set at least once per file to switch over.
+    /// - `busy_timeout = 5000`: rusqlite does not set a default (SQLite's
+    ///   own default is 0 — instant `SQLITE_BUSY` on any residual lock
+    ///   conflict, e.g. WAL's own brief writer-vs-writer exclusion). 5s
+    ///   gives a real conflict time to clear instead of surfacing as a
+    ///   user-visible error.
+    /// - `synchronous = NORMAL`: the standard pairing with WAL (skips an
+    ///   fsync on every commit, only fsyncing at WAL checkpoints), safe here
+    ///   because `brain.db` is explicitly a rebuildable derived cache, not
+    ///   the source of truth — DESIGN.md's "the whole DB is rebuildable [by
+    ///   re-ingesting]" (see `roots.rs`'s `rebuild_brain`/`rebuild_store`).
+    ///   The only durability this trades away is surviving an OS-level
+    ///   power loss / hard crash between commits (an application crash
+    ///   alone is still safe: WAL + NORMAL is crash-safe, just not
+    ///   power-loss-safe) — for a local dev tool's cache-like graph DB, a
+    ///   `brain rebuild`/re-ingest after a rare power-loss event is an
+    ///   acceptable tradeoff for the throughput win on every ordinary
+    ///   commit.
     pub fn open(data_dir: &Path) -> rusqlite::Result<Store> {
         std::fs::create_dir_all(data_dir).expect("create data dir");
         let conn = Connection::open(data_dir.join("brain.db"))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
+        )?;
         conn.execute_batch(include_str!("schema.sql"))?;
         Ok(Store { conn })
     }
 
     /// In-memory store, for tests only.
+    ///
+    /// No WAL pragma here: `:memory:` databases have no shared file to
+    /// write a WAL against (SQLite treats the pragma as a silent no-op,
+    /// reporting journal_mode "memory" regardless), and each `:memory:`
+    /// connection is its own private, unshared database — there is no
+    /// concurrent-access scenario for `open_in_memory` to protect against,
+    /// unlike `open`.
     pub fn open_in_memory() -> rusqlite::Result<Store> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(include_str!("schema.sql"))?;
         Ok(Store { conn })
+    }
+
+    /// Runs `f` inside a single explicit `BEGIN`/`COMMIT` transaction
+    /// instead of letting each statement `f` issues autocommit on its own —
+    /// additive batching support for callers doing many writes in a loop
+    /// (`brain-ingest::ingest_project`'s per-file/per-entity/per-edge
+    /// upserts), without changing `upsert_node`/`upsert_edge`'s own
+    /// signatures or behavior for one-off callers (`mcp-server`,
+    /// `feedback.rs`, `memory.rs` all keep calling them individually,
+    /// each auto-committing exactly as before). Rolls back and propagates
+    /// `f`'s error if it returns `Err`, so a failure partway through a
+    /// batch (e.g. mid-project-ingest) can't leave a half-written project
+    /// in the graph. Not reentrant — calling this from inside another
+    /// `with_transaction` (or any other open transaction on the same
+    /// connection) will error on the nested `BEGIN`; every current caller
+    /// only ever does one top-level call per `Store`/thread.
+    pub fn with_transaction<F, T, E>(&self, f: F) -> Result<T, E>
+    where
+        F: FnOnce(&Store) -> Result<T, E>,
+        E: From<rusqlite::Error>,
+    {
+        self.conn.execute_batch("BEGIN")?;
+        match f(self) {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(v)
+            }
+            Err(e) => {
+                // Best-effort rollback: if the connection is in a state
+                // where even ROLLBACK fails, propagate f's original error
+                // rather than the rollback failure — that's the actionable
+                // one.
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 
     pub fn upsert_node(&self, n: &Node) -> rusqlite::Result<()> {
@@ -646,5 +732,72 @@ impl Store {
         self.conn
             .execute("DELETE FROM pending_notes WHERE node_id = ?1", params![node_id])?;
         Ok(node)
+    }
+}
+
+#[cfg(test)]
+mod pragma_tests {
+    // In-crate (not `tests/`) so these can reach `Store::conn`, which is
+    // `pub(crate)` — an external integration-test crate can't see it.
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn open_sets_wal_journal_mode_and_it_persists_across_reopen() {
+        let dir = tempdir().unwrap();
+        let mode: String = {
+            let store = Store::open(dir.path()).unwrap();
+            store
+                .conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(mode.to_lowercase(), "wal");
+
+        // WAL is persisted in the database file itself, so a fresh
+        // connection to the same file reports WAL even though `open`
+        // re-issues the pragma redundantly on every call.
+        let mode_after_reopen: String = {
+            let store = Store::open(dir.path()).unwrap();
+            store
+                .conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(mode_after_reopen.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn open_sets_busy_timeout_and_synchronous_normal() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+
+        let busy_timeout: i64 = store
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(busy_timeout, 5000);
+
+        // synchronous: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA.
+        let synchronous: i64 = store
+            .conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1, "expected NORMAL (1)");
+    }
+
+    #[test]
+    fn open_in_memory_is_unaffected_by_the_wal_pragma() {
+        // :memory: databases can't use WAL (no shared file to write it
+        // against) and are never accessed by more than one connection, so
+        // open_in_memory deliberately does not set journal_mode=WAL. This
+        // documents that it still works and reports SQLite's own "memory"
+        // mode, not "wal".
+        let store = Store::open_in_memory().unwrap();
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "memory");
     }
 }
