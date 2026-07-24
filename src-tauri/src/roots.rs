@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use brain_core::{now_ts, Store};
+use brain_core::{now_ts, Node, NodeKind, Origin, Store};
 use serde::Serialize;
 use tauri::State;
 
@@ -54,6 +54,15 @@ use crate::commands::BrainState;
 const PROJECT_ROOTS_KEY: &str = "project_roots";
 const PAUSE_PREFIX: &str = "ingest_paused:";
 const LAST_INGESTED_PREFIX: &str = "last_ingested:";
+/// Individually-added projects (Bruno's founder-feedback fast path, task
+/// [`add_project`]): `{id: path}` JSON, distinct from [`PROJECT_ROOTS_KEY`]
+/// because the two have different walk semantics — a "root" is a parent
+/// folder `discover_projects` scans for *many* project subdirectories,
+/// while an entry here is already one exact project directory that must be
+/// re-ingested directly (via [`ingest_one`]), never walked. Read by
+/// [`roots_rebuild`] so a project added this way survives "Rebuild brain"
+/// instead of silently vanishing because it isn't under any known root.
+const PROJECT_PATHS_KEY: &str = "project_paths";
 
 /// A project not (re)ingested by the app in this long is reported "stale" by
 /// [`roots_staleness`]. `ponytail:` a flat constant rather than a settings
@@ -76,6 +85,24 @@ fn add_root(store: &Store, path: &str) -> Result<()> {
         roots.push(path.to_string());
         store.set_setting(PROJECT_ROOTS_KEY, &serde_json::to_string(&roots)?)?;
     }
+    Ok(())
+}
+
+/// Every individually-added project (`add_project`), `id -> path`.
+fn get_project_paths(store: &Store) -> Result<HashMap<String, String>> {
+    let raw = store.get_setting(PROJECT_PATHS_KEY)?;
+    Ok(match raw {
+        Some(s) => serde_json::from_str(&s).unwrap_or_default(),
+        None => HashMap::new(),
+    })
+}
+
+/// Records (or overwrites, keyed by `id`) one individually-added project's
+/// path so a future "Rebuild brain" knows to re-ingest it directly.
+fn add_project_path(store: &Store, id: &str, path: &str) -> Result<()> {
+    let mut paths = get_project_paths(store)?;
+    paths.insert(id.to_string(), path.to_string());
+    store.set_setting(PROJECT_PATHS_KEY, &serde_json::to_string(&paths)?)?;
     Ok(())
 }
 
@@ -153,16 +180,40 @@ impl Default for IngestionState {
     }
 }
 
+/// Ingests one project and folds the result into `status` — the
+/// per-project body shared by the bulk discovery loop
+/// ([`ingest_roots_in_background`]) and the single-project fast path
+/// ([`ingest_project_in_background`]).
+fn run_one_ingest(store: &Store, name: &str, dir: &Path, status: &IngestionState) {
+    status.update(|s| s.current_project = Some(name.to_string()));
+    if let Err(e) = ingest_one(store, name, dir) {
+        eprintln!("omniagent-ade: ingest of {name} failed: {e}");
+        status.update(|s| s.error = Some(format!("{name}: {e}")));
+    }
+    let total_nodes = store.all_nodes().map(|n| n.len()).unwrap_or(0);
+    status.update(|s| {
+        s.projects_done += 1;
+        s.total_nodes = total_nodes;
+    });
+}
+
 /// Runs on a background thread (spawned by [`roots_start_ingest`] /
 /// [`rebuild_brain`]): discovers projects under `roots` (skipping any
-/// already-known project marked paused) and ingests each in turn, updating
-/// `status` as it goes so [`ingestion_status`] has something fresh to
-/// report. Opens its own `Store` connection rather than sharing
-/// `BrainState`'s — same rationale as `lib.rs`'s drain-loop thread: SQLite
-/// handles multiple local connections to one `brain.db` fine at this write
-/// volume, and it avoids threading a `'static` reference to `BrainState`
-/// through here.
-fn ingest_roots_in_background(data_dir: PathBuf, roots: Vec<String>, status: IngestionState) {
+/// already-known project marked paused), adds `extra_projects` (already-
+/// known exact project directories — [`add_project`]'s individually-tracked
+/// projects, re-ingested on rebuild without being walked/rediscovered), and
+/// ingests each in turn, updating `status` as it goes so [`ingestion_status`]
+/// has something fresh to report. Opens its own `Store` connection rather
+/// than sharing `BrainState`'s — same rationale as `lib.rs`'s drain-loop
+/// thread: SQLite handles multiple local connections to one `brain.db` fine
+/// at this write volume, and it avoids threading a `'static` reference to
+/// `BrainState` through here.
+fn ingest_roots_in_background(
+    data_dir: PathBuf,
+    roots: Vec<String>,
+    extra_projects: Vec<(String, PathBuf)>,
+    status: IngestionState,
+) {
     std::thread::spawn(move || {
         let store = match Store::open(&data_dir) {
             Ok(s) => s,
@@ -179,6 +230,7 @@ fn ingest_roots_in_background(data_dir: PathBuf, roots: Vec<String>, status: Ing
         for root in &roots {
             discovered.extend(brain_ingest::discover_projects(Path::new(root)));
         }
+        discovered.extend(extra_projects);
 
         status.update(|s| {
             *s = IngestionStatus {
@@ -193,21 +245,53 @@ fn ingest_roots_in_background(data_dir: PathBuf, roots: Vec<String>, status: Ing
                 status.update(|s| s.projects_done += 1);
                 continue;
             }
-            status.update(|s| s.current_project = Some(name.clone()));
-            if let Err(e) = ingest_one(&store, name, dir) {
-                eprintln!("omniagent-ade: ingest of {name} failed: {e}");
-                status.update(|s| s.error = Some(format!("{name}: {e}")));
-            }
-            let total_nodes = store.all_nodes().map(|n| n.len()).unwrap_or(0);
-            status.update(|s| {
-                s.projects_done += 1;
-                s.total_nodes = total_nodes;
-            });
+            run_one_ingest(&store, name, dir, &status);
         }
 
         status.update(|s| {
             s.running = false;
             s.current_project = None;
+        });
+    });
+}
+
+/// [`add_project`]'s "return immediately, ingest invisibly after" half:
+/// spawns a background thread (own `Store` connection, same reasoning as
+/// [`ingest_roots_in_background`]) that ingests exactly one already-known
+/// project directory. Updates the *same* shared [`IngestionState`] the bulk
+/// onboarding/rebuild flows use — so the frontend's existing
+/// `ingestion_status` poll picks this up for free, no second channel — but
+/// additively rather than resetting the whole snapshot, so it composes
+/// safely if a bulk ingest happens to be running at the same moment (a
+/// destructive `*s = IngestionStatus { .. }` reset here would clobber that
+/// run's in-flight progress counters).
+fn ingest_project_in_background(data_dir: PathBuf, name: String, dir: PathBuf, status: IngestionState) {
+    std::thread::spawn(move || {
+        let store = match Store::open(&data_dir) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("omniagent-ade: add_project background ingest failed to open store: {e}");
+                return;
+            }
+        };
+
+        status.update(|s| {
+            s.running = true;
+            s.projects_total += 1;
+        });
+
+        run_one_ingest(&store, &name, &dir, &status);
+
+        status.update(|s| {
+            // Only clear `running` once every project this state object
+            // currently knows about (this one, plus any concurrent bulk
+            // run's own projects) has reported done — see the doc comment
+            // above on why this is additive rather than an unconditional
+            // reset.
+            if s.projects_done >= s.projects_total {
+                s.running = false;
+                s.current_project = None;
+            }
         });
     });
 }
@@ -235,7 +319,7 @@ pub fn roots_start_ingest(
         add_root(&store, &path).map_err(|e| e.to_string())?;
     }
 
-    ingest_roots_in_background(brain.data_dir.clone(), vec![path], ingestion.inner().clone());
+    ingest_roots_in_background(brain.data_dir.clone(), vec![path], Vec::new(), ingestion.inner().clone());
     Ok(())
 }
 
@@ -289,6 +373,114 @@ fn biggest_project(store: &Store) -> Result<Option<ProjectSummary>> {
         }
     }
     Ok(best.map(|(p, _)| p))
+}
+
+// ----------------------------------------------------------- add project
+//
+// Founder feedback, 2026-07-24 (Bruno, verbatim): "Open one terminal, and
+// start from there. The overall graph is done always internally, not per
+// folder. That means that the user can add multiple sessions within one
+// project or add a new project (item on the left) with a new number of
+// terminals / agents." Before this, the sidebar's project list came ENTIRELY
+// from `list_projects()` — i.e. from nodes ingestion itself created — so a
+// user could not add a project and get a terminal without first triggering
+// and waiting on a full ingest. [`add_project`] fixes that: it upserts the
+// `Project` node and records the path *synchronously* (so it's in the
+// sidebar the instant this command returns), then kicks off [`ingest_one`]
+// on a background thread and returns immediately — ingestion fills in the
+// richer graph data invisibly afterward via the same upsert-by-id the rest
+// of this module already relies on (a later `ingest_one` re-upsert is a
+// no-op from the user's point of view: same id, richer `summary`/edges).
+//
+// Deliberately does NOT reuse [`discover_projects`]/[`add_root`]: those walk
+// a ROOT folder's *immediate subdirectories* looking for many projects
+// (Phase 8's bulk "point at a parent folder full of repos" onboarding flow,
+// kept as-is here) — feeding `add_project`'s exact single project directory
+// into that machinery would make it misread the project's own
+// subdirectories as separate projects. [`PROJECT_PATHS_KEY`] is the small,
+// parallel extension that keeps this project rediscoverable by "Rebuild
+// brain" without conflating the two shapes.
+
+/// Derives a project id from an optional user-supplied `name`, falling back
+/// to `dir`'s folder basename — the same "the directory name is the project
+/// name" convention [`discover_projects`]/[`ingest_one`] already use
+/// elsewhere, so an added project ingests under one consistent id whether
+/// it's named explicitly or left at its default.
+fn project_id_for(dir: &Path, name: Option<&str>) -> Result<String> {
+    if let Some(trimmed) = name.map(str::trim) {
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    dir.file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("{} has no usable folder name", dir.display()))
+}
+
+/// The pure body behind [`add_project`] — takes plain `&BrainState`/
+/// `&IngestionState` rather than Tauri's `State<'_, T>` so it's directly
+/// unit-testable (this module's established split, e.g. [`rebuild_store`]
+/// behind [`roots_rebuild`]).
+fn add_project_impl(
+    brain: &BrainState,
+    ingestion: &IngestionState,
+    path: &str,
+    name: Option<&str>,
+) -> Result<ProjectSummary> {
+    let dir = PathBuf::from(path);
+    if !dir.is_dir() {
+        anyhow::bail!("{path} is not a directory");
+    }
+    let id = project_id_for(&dir, name)?;
+
+    let summary = {
+        let store = brain
+            .store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("brain store mutex poisoned"))?;
+        store.upsert_node(&Node {
+            id: id.clone(),
+            kind: NodeKind::Project,
+            project: id.clone(),
+            label: id.clone(),
+            path: Some(path.to_string()),
+            summary: None,
+            origin: Origin::Extracted,
+            updated: now_ts(),
+        })?;
+        add_project_path(&store, &id, path)?;
+        ProjectSummary {
+            id: id.clone(),
+            label: id.clone(),
+            path: Some(path.to_string()),
+        }
+    };
+
+    // Not gated behind the same "ingestion already running" check
+    // `roots_start_ingest`/`roots_rebuild` use: this ingest runs on its own
+    // `Store` connection and updates `IngestionState` additively (see
+    // `ingest_project_in_background`'s doc comment), so it composes safely
+    // alongside a concurrent bulk run instead of needing exclusivity with it.
+    ingest_project_in_background(brain.data_dir.clone(), id, dir, ingestion.clone());
+
+    Ok(summary)
+}
+
+/// Adds exactly one project at `path` (Bruno's "open one terminal, and
+/// start from there" — the sidebar's persistent "+"). `name` is the
+/// optional user-edited display name/id (defaults to `path`'s folder
+/// basename). Returns as soon as the `Project` node exists and is
+/// queryable via `list_projects` — never waits for ingestion, which
+/// continues on a background thread.
+#[tauri::command]
+pub fn add_project(
+    path: String,
+    name: Option<String>,
+    brain: State<'_, BrainState>,
+    ingestion: State<'_, IngestionState>,
+) -> Result<ProjectSummary, String> {
+    add_project_impl(brain.inner(), ingestion.inner(), &path, name.as_deref()).map_err(|e| e.to_string())
 }
 
 // -------------------------------------------------------- pause / staleness
@@ -388,16 +580,27 @@ pub fn roots_rebuild(brain: State<'_, BrainState>, ingestion: State<'_, Ingestio
         return Err("ingestion is already running".to_string());
     }
 
-    let roots = {
+    let (roots, extra_projects) = {
         let mut guard = brain.store.lock().map_err(|e| e.to_string())?;
         let preserved: HashMap<String, String> = guard.all_settings().map_err(|e| e.to_string())?.into_iter().collect();
         let roots = get_roots(&guard).map_err(|e| e.to_string())?;
+        // Individually-added projects (`add_project`) aren't under any
+        // known root, so they'd otherwise vanish after a rebuild — carry
+        // them forward explicitly. `preserved` already captured
+        // `PROJECT_PATHS_KEY` above, so it survives into the fresh store
+        // too; this is just what tells the background ingest to actually
+        // re-ingest each of them.
+        let extra_projects: Vec<(String, PathBuf)> = get_project_paths(&guard)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(id, path)| (id, PathBuf::from(path)))
+            .collect();
         let fresh = rebuild_store(&brain.data_dir, &preserved).map_err(|e| e.to_string())?;
         *guard = fresh;
-        roots
+        (roots, extra_projects)
     };
 
-    ingest_roots_in_background(brain.data_dir.clone(), roots, ingestion.inner().clone());
+    ingest_roots_in_background(brain.data_dir.clone(), roots, extra_projects, ingestion.inner().clone());
     Ok(())
 }
 
@@ -618,6 +821,7 @@ mod tests {
         ingest_roots_in_background(
             data_dir.path().to_path_buf(),
             vec![projects_root.path().to_string_lossy().into_owned()],
+            Vec::new(),
             status.clone(),
         );
 
@@ -665,6 +869,7 @@ mod tests {
         ingest_roots_in_background(
             data_dir.path().to_path_buf(),
             vec![projects_root.path().to_string_lossy().into_owned()],
+            Vec::new(),
             status.clone(),
         );
 
@@ -683,5 +888,142 @@ mod tests {
             store.get_node("paused-project").unwrap().is_none(),
             "paused project must not actually be ingested"
         );
+    }
+
+    #[test]
+    fn ingest_roots_in_background_also_ingests_extra_projects_outside_any_root() {
+        let data_dir = tempdir().unwrap();
+        let standalone = tempdir().unwrap();
+        std::fs::create_dir_all(standalone.path().join(".git")).unwrap();
+        std::fs::write(standalone.path().join("a.ts"), "export const a = 1;\n").unwrap();
+
+        let status = IngestionState::new();
+        ingest_roots_in_background(
+            data_dir.path().to_path_buf(),
+            Vec::new(), // no bulk roots at all — proves `extra_projects` alone is enough
+            vec![("standalone".to_string(), standalone.path().to_path_buf())],
+            status.clone(),
+        );
+
+        let mut snap = status.snapshot();
+        for _ in 0..200 {
+            if !snap.running && snap.projects_total > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            snap = status.snapshot();
+        }
+
+        assert_eq!(snap.projects_total, 1);
+        assert_eq!(snap.projects_done, 1);
+
+        let store = Store::open(data_dir.path()).unwrap();
+        assert!(store.get_node("standalone").unwrap().is_some());
+    }
+
+    #[test]
+    fn project_paths_round_trip_and_overwrite_by_id() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(get_project_paths(&store).unwrap().is_empty());
+
+        add_project_path(&store, "p1", "/tmp/p1").unwrap();
+        add_project_path(&store, "p2", "/tmp/p2").unwrap();
+        add_project_path(&store, "p1", "/tmp/p1-moved").unwrap(); // overwrite by id
+
+        let paths = get_project_paths(&store).unwrap();
+        assert_eq!(paths.get("p1").map(String::as_str), Some("/tmp/p1-moved"));
+        assert_eq!(paths.get("p2").map(String::as_str), Some("/tmp/p2"));
+    }
+
+    #[test]
+    fn add_project_creates_the_node_and_records_the_path_immediately() {
+        let data_dir = tempdir().unwrap();
+        let project_dir = tempdir().unwrap();
+        let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
+        let ingestion = IngestionState::new();
+
+        let path = project_dir.path().to_string_lossy().into_owned();
+        let summary = add_project_impl(&brain, &ingestion, &path, Some("My Project")).unwrap();
+
+        assert_eq!(summary.id, "My Project");
+        assert_eq!(summary.label, "My Project");
+        assert_eq!(summary.path.as_deref(), Some(path.as_str()));
+
+        // Queryable RIGHT AWAY — no waiting on ingestion.
+        let store = brain.store.lock().unwrap();
+        let node = store.get_node("My Project").unwrap().expect("node created synchronously");
+        assert_eq!(node.kind, NodeKind::Project);
+        assert_eq!(node.path.as_deref(), Some(path.as_str()));
+
+        let paths = get_project_paths(&store).unwrap();
+        assert_eq!(paths.get("My Project").map(String::as_str), Some(path.as_str()));
+    }
+
+    #[test]
+    fn add_project_defaults_the_id_to_the_folder_basename_when_no_name_given() {
+        let data_dir = tempdir().unwrap();
+        let project_dir = tempdir().unwrap();
+        let expected_id = project_dir.path().file_name().unwrap().to_string_lossy().into_owned();
+        let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
+        let ingestion = IngestionState::new();
+
+        let summary = add_project_impl(
+            &brain,
+            &ingestion,
+            &project_dir.path().to_string_lossy(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(summary.id, expected_id);
+    }
+
+    #[test]
+    fn add_project_rejects_a_path_that_is_not_a_directory() {
+        let data_dir = tempdir().unwrap();
+        let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
+        let ingestion = IngestionState::new();
+
+        let err = add_project_impl(&brain, &ingestion, "/definitely/not/a/real/path-xyz-nope", None).unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{err}");
+    }
+
+    #[test]
+    fn add_project_kicks_off_background_ingestion_without_blocking_the_caller() {
+        let data_dir = tempdir().unwrap();
+        let project_root = tempdir().unwrap();
+        std::fs::create_dir_all(project_root.path().join(".git")).unwrap();
+        std::fs::write(project_root.path().join("a.ts"), "export const a = 1;\n").unwrap();
+        let project_name = project_root.path().file_name().unwrap().to_string_lossy().into_owned();
+
+        let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
+        let ingestion = IngestionState::new();
+
+        let started = std::time::Instant::now();
+        let summary = add_project_impl(&brain, &ingestion, &project_root.path().to_string_lossy(), None).unwrap();
+        // Returns essentially immediately — well before a real ingest (even
+        // of this tiny fixture) could plausibly have completed if this were
+        // synchronous.
+        assert!(started.elapsed() < std::time::Duration::from_millis(200), "{:?}", started.elapsed());
+        assert_eq!(summary.id, project_name);
+
+        let mut snap = ingestion.snapshot();
+        for _ in 0..200 {
+            if !snap.running && snap.projects_done > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            snap = ingestion.snapshot();
+        }
+
+        assert!(!snap.running, "{snap:?}");
+        assert_eq!(snap.projects_done, 1);
+
+        // The background ingest actually ran to completion (stamped
+        // last_ingested via ingest_one) using its OWN store connection —
+        // proves this didn't just fake it by relying on the synchronous
+        // upsert alone.
+        let store = Store::open(data_dir.path()).unwrap();
+        assert!(store.get_setting(&last_ingested_key(&project_name)).unwrap().is_some());
     }
 }
