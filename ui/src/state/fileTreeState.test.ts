@@ -3,6 +3,7 @@ import {
   accentForEntry,
   clampFileTreeWidth,
   DRAG_START_THRESHOLD_PX,
+  excludeSelectedDescendants,
   extensionOf,
   FILE_TREE_MAX_WIDTH,
   FILE_TREE_MIN_WIDTH,
@@ -11,8 +12,10 @@ import {
   iconKindForEntry,
   isExpanded,
   isValidDropTarget,
+  migratePathKeys,
   nextDefaultCreateName,
   parentDirOf,
+  prunePathKeys,
   resolveCreateTargetDir,
   resolveDragPayload,
   resolveRowDoubleClick,
@@ -368,5 +371,144 @@ describe("fileTreeState — resize", () => {
 
   it("clamps the drag result to the maximum", () => {
     expect(widthFromDrag(260, 500, -1000)).toBe(FILE_TREE_MAX_WIDTH);
+  });
+});
+
+describe("fileTreeState — migratePathKeys (Bug 3: rename/move cache migration)", () => {
+  it("moves an expanded path's entry from its old key to its new key", () => {
+    const expanded = new Set(["/p/src"]);
+    const { expanded: nextExpanded } = migratePathKeys("/p/src", "/p/lib", expanded, new Map());
+    expect(nextExpanded.has("/p/src")).toBe(false);
+    expect(nextExpanded.has("/p/lib")).toBe(true);
+  });
+
+  it("moves the children cache entry from its old key to its new key, carrying the cached listing forward", () => {
+    const srcChildren: DirEntry[] = [{ name: "util.ts", path: "/p/src/util.ts", is_dir: false }];
+    const children = new Map<string, unknown>([["/p/src", srcChildren]]);
+    const { children: nextChildren } = migratePathKeys("/p/src", "/p/lib", new Set(), children);
+    expect(nextChildren.has("/p/src")).toBe(false);
+    expect(nextChildren.get("/p/lib")).toBe(srcChildren);
+  });
+
+  it("never mutates the input expanded/children — always returns fresh collections", () => {
+    const expanded = new Set(["/p/src"]);
+    const children = new Map<string, unknown>([["/p/src", []]]);
+    const result = migratePathKeys("/p/src", "/p/lib", expanded, children);
+    expect(expanded.has("/p/src")).toBe(true); // untouched
+    expect(children.has("/p/src")).toBe(true); // untouched
+    expect(result.expanded).not.toBe(expanded);
+    expect(result.children).not.toBe(children);
+  });
+
+  it("leaves unrelated expanded/children entries untouched", () => {
+    const expanded = new Set(["/p/src", "/p/docs"]);
+    const children = new Map<string, unknown>([
+      ["/p/src", []],
+      ["/p/docs", []],
+    ]);
+    const result = migratePathKeys("/p/src", "/p/lib", expanded, children);
+    expect(result.expanded.has("/p/docs")).toBe(true);
+    expect(result.children.has("/p/docs")).toBe(true);
+  });
+
+  it("also re-keys expanded/cached DESCENDANTS of the renamed/moved path", () => {
+    const expanded = new Set(["/p/src", "/p/src/nested"]);
+    const children = new Map<string, unknown>([
+      ["/p/src", []],
+      ["/p/src/nested", [{ name: "deep.ts", path: "/p/src/nested/deep.ts", is_dir: false }]],
+    ]);
+    const result = migratePathKeys("/p/src", "/p/lib", expanded, children);
+    expect(result.expanded.has("/p/src/nested")).toBe(false);
+    expect(result.expanded.has("/p/lib/nested")).toBe(true);
+    expect(result.children.has("/p/src/nested")).toBe(false);
+    expect(result.children.get("/p/lib/nested")).toEqual([
+      { name: "deep.ts", path: "/p/src/nested/deep.ts", is_dir: false },
+    ]);
+  });
+
+  it("does not confuse a sibling whose name merely starts with the same prefix", () => {
+    // /p/src-old must NOT be treated as a descendant of /p/src.
+    const expanded = new Set(["/p/src", "/p/src-old"]);
+    const result = migratePathKeys("/p/src", "/p/lib", expanded, new Map());
+    expect(result.expanded.has("/p/src-old")).toBe(true); // untouched
+    expect(result.expanded.has("/p/lib-old")).toBe(false); // not incorrectly migrated
+  });
+});
+
+describe("fileTreeState — prunePathKeys (Bug 3: delete cache pruning)", () => {
+  it("removes a deleted path's expanded entry", () => {
+    const expanded = new Set(["/p/src", "/p/docs"]);
+    const { expanded: next } = prunePathKeys(["/p/src"], expanded, new Map());
+    expect(next.has("/p/src")).toBe(false);
+    expect(next.has("/p/docs")).toBe(true);
+  });
+
+  it("removes a deleted path's children cache entry", () => {
+    const children = new Map<string, unknown>([
+      ["/p/src", []],
+      ["/p/docs", []],
+    ]);
+    const { children: next } = prunePathKeys(["/p/src"], new Set(), children);
+    expect(next.has("/p/src")).toBe(false);
+    expect(next.has("/p/docs")).toBe(true);
+  });
+
+  it("also removes a deleted directory's DESCENDANTS' expanded/children entries", () => {
+    const expanded = new Set(["/p/src", "/p/src/nested"]);
+    const children = new Map<string, unknown>([
+      ["/p/src", []],
+      ["/p/src/nested", [{ name: "deep.ts", path: "/p/src/nested/deep.ts", is_dir: false }]],
+    ]);
+    const result = prunePathKeys(["/p/src"], expanded, children);
+    expect(result.expanded.has("/p/src/nested")).toBe(false);
+    expect(result.children.has("/p/src/nested")).toBe(false);
+  });
+
+  it("prunes multiple deleted paths in one pass", () => {
+    const expanded = new Set(["/p/a", "/p/b", "/p/c"]);
+    const result = prunePathKeys(["/p/a", "/p/b"], expanded, new Map());
+    expect(result.expanded).toEqual(new Set(["/p/c"]));
+  });
+
+  it("never mutates the input collections", () => {
+    const expanded = new Set(["/p/src"]);
+    const children = new Map<string, unknown>([["/p/src", []]]);
+    prunePathKeys(["/p/src"], expanded, children);
+    expect(expanded.has("/p/src")).toBe(true);
+    expect(children.has("/p/src")).toBe(true);
+  });
+
+  it("does not prune a sibling whose name merely starts with the same prefix", () => {
+    const expanded = new Set(["/p/src", "/p/src-old"]);
+    const result = prunePathKeys(["/p/src"], expanded, new Map());
+    expect(result.expanded.has("/p/src-old")).toBe(true);
+  });
+});
+
+describe("fileTreeState — excludeSelectedDescendants (Bug 4: multi-select drag-move)", () => {
+  it("excludes a selected descendant of another selected path", () => {
+    expect(excludeSelectedDescendants(["/proj/src", "/proj/src/a.ts"])).toEqual(["/proj/src"]);
+  });
+
+  it("keeps unrelated top-level paths in the selection", () => {
+    const result = excludeSelectedDescendants(["/proj/src", "/proj/docs"]);
+    expect(result.sort()).toEqual(["/proj/docs", "/proj/src"]);
+  });
+
+  it("collapses a deeply nested descendant to just its top-level ancestor", () => {
+    expect(excludeSelectedDescendants(["/proj/src", "/proj/src/a/b.ts", "/proj/src/a"])).toEqual(["/proj/src"]);
+  });
+
+  it("returns every path unchanged when none are nested inside each other", () => {
+    const paths = ["/proj/a.ts", "/proj/b.ts"];
+    expect(excludeSelectedDescendants(paths)).toEqual(paths);
+  });
+
+  it("does not treat a same-prefix sibling as a descendant", () => {
+    expect(excludeSelectedDescendants(["/proj/src", "/proj/src-old"])).toEqual(["/proj/src", "/proj/src-old"]);
+  });
+
+  it("handles an empty selection", () => {
+    expect(excludeSelectedDescendants([])).toEqual([]);
   });
 });

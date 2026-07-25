@@ -84,6 +84,76 @@ export function flattenVisibleEntries(
   return out;
 }
 
+// ------------------------------------------------------ path-keyed caches
+// Bug 3: `expanded`/`children` are keyed by absolute path, but a successful
+// rename/move/delete changes which path an item lives at (or removes it
+// entirely) — only the parent directory's OWN listing gets refreshed by the
+// caller, so nothing else ever rekeys/prunes these two caches on its own.
+// Left alone: a renamed, previously-expanded folder renders collapsed (its
+// `expanded` entry is still keyed by the old path) and, worse, if something
+// new later occupies the exact path a deleted folder used to have, it
+// inherits that deleted folder's stale `children` cache entry. Both helpers
+// below are pure (`FileTree.tsx` supplies the actual `expanded`/`children`
+// state and applies the result via `setExpanded`/`setChildren`) and treat a
+// path's descendants (not just the path itself) the same way, since a
+// renamed/moved/deleted directory's own expanded/cached subtree is exactly
+// as stale as the directory itself.
+//
+// `${path}/` prefix matching (not a bare `startsWith(path)`) is deliberate —
+// otherwise `/p/src` would wrongly swallow an unrelated sibling like
+// `/p/src-old`.
+
+function isPathOrDescendant(candidate: string, path: string): boolean {
+  return candidate === path || candidate.startsWith(`${path}/`);
+}
+
+/** After a successful rename/move of `oldPath` -> `newPath`: rekeys
+ * `oldPath`'s own `expanded`/`children` entries (and every descendant's) to
+ * live under `newPath` instead, carrying whatever was cached forward rather
+ * than dropping it — a moved-but-still-expanded folder stays expanded, at
+ * its new path, showing the listing it already had (nothing is invalidated;
+ * the parent directory's own refetch is a separate, existing concern). */
+export function migratePathKeys<T>(
+  oldPath: string,
+  newPath: string,
+  expanded: ExpandedPaths,
+  children: ReadonlyMap<string, T>,
+): { expanded: ExpandedPaths; children: Map<string, T> } {
+  function rekey(path: string): string {
+    if (path === oldPath) return newPath;
+    if (path.startsWith(`${oldPath}/`)) return newPath + path.slice(oldPath.length);
+    return path;
+  }
+
+  const nextExpanded = new Set<string>();
+  for (const path of expanded) nextExpanded.add(rekey(path));
+
+  const nextChildren = new Map<string, T>();
+  for (const [path, value] of children) nextChildren.set(rekey(path), value);
+
+  return { expanded: nextExpanded, children: nextChildren };
+}
+
+/** After a successful delete of `deletedPaths`: strips their own
+ * `expanded`/`children` entries (and every descendant's) out entirely — a
+ * deleted folder's cached listing must never resurface just because a later
+ * create/rename happens to land something new at the exact same path. */
+export function prunePathKeys<T>(
+  deletedPaths: readonly string[],
+  expanded: ExpandedPaths,
+  children: ReadonlyMap<string, T>,
+): { expanded: ExpandedPaths; children: Map<string, T> } {
+  const isRemoved = (path: string) => deletedPaths.some((deleted) => isPathOrDescendant(path, deleted));
+
+  const nextExpanded = new Set<string>();
+  for (const path of expanded) if (!isRemoved(path)) nextExpanded.add(path);
+
+  const nextChildren = new Map<string, T>();
+  for (const [path, value] of children) if (!isRemoved(path)) nextChildren.set(path, value);
+
+  return { expanded: nextExpanded, children: nextChildren };
+}
+
 // ------------------------------------------------------------ multi-select
 // Cmd-click toggles one item in/out of the selection; Shift-click selects
 // the contiguous range between the last plain/cmd click (the "anchor") and
@@ -285,6 +355,21 @@ export function isValidDropTarget(targetDirPath: string, draggedPaths: readonly 
     if (targetDirPath === parentDirOf(dragged)) return false;
   }
   return true;
+}
+
+/** Bug 4: a shift-click range-select always orders parent before child in
+ * the visible tree order, so a selection can legally contain both a folder
+ * AND one of its own already-visible descendants. `commitDrag` issues one
+ * `move_path` call per selected path sequentially — moving the parent first
+ * invalidates the descendant's captured original path before its own call
+ * runs, so that call fails even though the descendant DID move correctly
+ * (nested inside its relocated parent). Filtering the selection down to just
+ * its top-level ancestors before issuing any move calls avoids this
+ * entirely: a selected descendant's move happens for free, as part of its
+ * selected ancestor's own move, so it's never sent as a separate,
+ * doomed-to-fail request. */
+export function excludeSelectedDescendants(paths: readonly string[]): string[] {
+  return paths.filter((path) => !paths.some((other) => other !== path && isPathOrDescendant(path, other)));
 }
 
 // --------------------------------------------------------- create (new)
