@@ -772,24 +772,77 @@ code {
 /* `.mosaic-window` renders one pane's chrome (header via `renderToolbar` +
    body). The library's own `.mosaic-window-toolbar` box (height/background/
    box-shadow) is neutralized here — `.pane-header` inside it (rendered by
-   `PaneHeader.tsx`) owns the actual look. */
-.pane-window.mosaic-window {
+   `PaneHeader.tsx`) owns the actual look.
+
+   Bug fix (founder screenshot, 2026-07-25): a bright white band was showing
+   through directly in/under the pane header. Root cause, confirmed via a
+   live DOM inspection (real dev server + Playwright): react-mosaic-
+   component's own stylesheet (`react-mosaic-component.css`, imported by
+   `Workspace.tsx`) ends up LATER in the cascade than this file (`App.css`
+   is imported by `App.tsx` before it imports `Workspace.tsx`, which is what
+   pulls the library CSS in) — so at equal selector specificity (both were
+   two classes, e.g. `.mosaic-window .mosaic-window-toolbar` vs
+   `.pane-window .mosaic-window-toolbar`), the library's later-loaded white/
+   30px/box-shadow rule was winning over this override every time, not the
+   reverse. `getComputedStyle` on a live pane confirmed it: `.mosaic-window-
+   toolbar` and `.mosaic-window-body` were BOTH still `background:
+   rgb(255,255,255)` from the library's stock (non-"mosaic-blueprint-theme")
+   CSS. The toolbar's white was visible because nothing paints over it; the
+   body's white wasn't, because xterm.js's own opaque canvas layers happen
+   to cover the whole body first — same bug, just invisible there today.
+   Fix: every selector below now includes `.pane-grid` too (three classes,
+   `.pane-grid .pane-window .mosaic-window-toolbar` etc.), which
+   out-specifies the library's two-class rules regardless of import/cascade
+   order — the robust fix, not a fragile reliance on import ordering that
+   could silently regress again on a future refactor. Also covers
+   `.mosaic-window-additional-actions-bar`/`-body-overlay` (two more
+   library-default-white boxes `MosaicWindow` always renders, currently
+   zero-height/`display:none` since this app never opens react-mosaic's own
+   "additional controls" affordance — not visibly broken today, but the same
+   unguarded-white-default class of bug, fixed here for the same reason
+   while already in this rule block). */
+.pane-grid .pane-window.mosaic-window {
   background: var(--void);
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
 }
 
-.pane-window .mosaic-window-toolbar {
+.pane-grid .pane-window .mosaic-window-toolbar {
   height: auto;
   background: transparent;
   box-shadow: none;
 }
 
-.pane-window .mosaic-window-body {
+.pane-grid .pane-window .mosaic-window-body {
   background: var(--void);
   border-bottom-left-radius: 8px;
   border-bottom-right-radius: 8px;
+}
+
+.pane-grid .pane-window .mosaic-window-additional-actions-bar,
+.pane-grid .pane-window .mosaic-window-body-overlay {
+  background: var(--void);
+}
+
+/* The other half of the same bug: `renderToolbar`'s return value is wrapped
+   in a plain, class-less `<div>` (`Workspace.tsx` needs a real DOM node
+   there for react-dnd's `connectDragSource`, see that file's own comment) —
+   as a bare flex child of `.mosaic-window-toolbar` with no `flex`/`width`
+   of its own, it was only ever shrink-to-fit-sized to `.pane-header`'s
+   content, not stretched across the row. So even once the toolbar's own
+   background was fixed above, a wide strip of raw (now-fixed, but
+   previously white) toolbar background was still showing to the right of
+   the header content in every pane wider than that content — `.pane-header`
+   -spacer` was pushing the branch pill/buttons apart from the label, but
+   with nothing to actually push against on the right. `.pane-toolbar-wrap`
+   (the class added to that wrapper div) makes it a full-width flex
+   container so `.pane-header`'s own `width: 100%` finally means the whole
+   row. */
+.pane-toolbar-wrap {
+  display: flex;
+  width: 100%;
+  min-width: 0;
 }
 
 .pane-header {

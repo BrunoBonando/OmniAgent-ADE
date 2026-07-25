@@ -155,7 +155,10 @@ function ProjectPaneGrid({
                   // connectors"), rejecting a custom component even with
                   // forwardRef. This `<div>` is that required native
                   // wrapper; `PaneHeader` owns all the actual layout.
-                  <div>
+                  // `pane-toolbar-wrap` (App.css) stretches it to fill the
+                  // toolbar row — see App.css's own comment on that class
+                  // for the white-band bug this is half the fix for.
+                  <div className="pane-toolbar-wrap">
                     <PaneHeader
                       tab={tab}
                       projectLabel={projectLabel}
