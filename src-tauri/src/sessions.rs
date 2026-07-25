@@ -675,6 +675,13 @@ fn spawn_reader_thread(
 
         let mut pending = String::new();
         let mut buf = [0u8; 8192];
+        // Decodes chunks for the transcript/attention paths only (see its
+        // doc comment) — buffers an incomplete trailing multi-byte
+        // sequence across reads instead of lossy-converting each raw
+        // chunk independently, which would otherwise corrupt any
+        // multi-byte character split across two `read()`s. The raw
+        // `chunk` handed to `sink` below is untouched by this.
+        let mut utf8_decoder = Utf8ChunkDecoder::new();
 
         // Attention detection only runs when a sink is actually registered
         // (see this function's doc comment for why it's not also hard-gated
@@ -690,8 +697,14 @@ fn spawn_reader_thread(
                     let chunk = &buf[..n];
                     sink(&id, chunk);
 
+                    // Decoded once per chunk and reused for both
+                    // consumers below — they observe the identical raw
+                    // byte stream, so a character split across two reads
+                    // must reassemble identically for each.
+                    let decoded = utf8_decoder.decode(chunk);
+
                     if watch_for_attention {
-                        attention_window.push_str(&String::from_utf8_lossy(chunk));
+                        attention_window.push_str(&decoded);
                         trim_to_last_n_bytes(&mut attention_window, ATTENTION_WINDOW_BYTES);
                         if contains_attention_marker(&attention_window)
                             && attention_debouncer.should_fire(Instant::now())
@@ -702,12 +715,19 @@ fn spawn_reader_thread(
                         }
                     }
 
-                    pending.push_str(&String::from_utf8_lossy(chunk));
+                    pending.push_str(&decoded);
                     flush_complete_lines(&mut pending, &mut transcript_file);
                 }
                 Err(_) => break,
             }
         }
+
+        // EOF: flush any incomplete trailing sequence still held by the
+        // decoder (see `Utf8ChunkDecoder::finish`'s doc comment) before
+        // the final pending flush below, so the last few bytes of a
+        // torn-off character at the very end of the stream aren't
+        // silently lost.
+        pending.push_str(&utf8_decoder.finish());
 
         if !pending.is_empty() {
             write_redacted(&mut transcript_file, &pending);
@@ -754,6 +774,104 @@ fn spawn_reader_thread(
             });
         }
     })
+}
+
+/// Incrementally decodes a stream of raw PTY byte chunks as UTF-8,
+/// buffering any incomplete trailing multi-byte sequence across calls
+/// instead of lossy-converting each raw `read()` result independently.
+///
+/// PTY `read()`s aren't UTF-8-boundary-aligned: a multi-byte character
+/// (box-drawing glyphs like `─│╭╮╰╯` from a TUI redraw, emoji, non-ASCII
+/// text) can have its bytes split across two separate reads. Calling
+/// `String::from_utf8_lossy` on each raw chunk independently (the bug this
+/// type fixes) replaces *both* halves with `U+FFFD`, since neither half is
+/// valid UTF-8 on its own, even though the two halves concatenated are
+/// perfectly valid. This type instead keeps up to 3 trailing undecoded
+/// bytes (the most a valid UTF-8 sequence can still be missing) from one
+/// `decode()` call, prepends them to the next chunk, and only
+/// lossy-converts the portion that's genuinely, unambiguously invalid —
+/// using `std::str::from_utf8`'s error to distinguish "incomplete, might
+/// still become valid" (`error_len() == None`, at the very end of the
+/// slice) from "genuinely invalid" (`error_len() == Some(_)`), exactly how
+/// a streaming UTF-8 decoder is supposed to work.
+///
+/// Deliberately NOT used for the raw byte stream handed to `sink` (the
+/// live terminal view) — xterm.js handles raw bytes correctly on its own,
+/// and buffering there would add latency to the live render path for zero
+/// benefit. Only the transcript (`pending`) and attention-detection
+/// (`attention_window`) paths, which both need real decoded text rather
+/// than raw bytes, go through this.
+struct Utf8ChunkDecoder {
+    /// Trailing bytes from the previous `decode()` call that didn't form a
+    /// complete, valid UTF-8 sequence yet — never more than 3 bytes (the
+    /// longest a UTF-8 sequence can be missing and still possibly become
+    /// valid with more bytes).
+    carry: Vec<u8>,
+}
+
+impl Utf8ChunkDecoder {
+    fn new() -> Self {
+        Self { carry: Vec::new() }
+    }
+
+    /// Decodes one raw chunk, prepending any carry-over from the previous
+    /// call. Returns the decoded text; any incomplete trailing sequence is
+    /// retained internally rather than returned, to be prepended to the
+    /// *next* `decode()` call.
+    fn decode(&mut self, chunk: &[u8]) -> String {
+        self.carry.extend_from_slice(chunk);
+
+        let mut out = String::new();
+        let mut start = 0usize;
+        loop {
+            match std::str::from_utf8(&self.carry[start..]) {
+                Ok(s) => {
+                    out.push_str(s);
+                    self.carry.clear();
+                    return out;
+                }
+                Err(e) => {
+                    let valid_up_to = e.valid_up_to();
+                    // Safe: `from_utf8` already told us this sub-slice is
+                    // valid UTF-8.
+                    out.push_str(
+                        std::str::from_utf8(&self.carry[start..start + valid_up_to]).unwrap(),
+                    );
+                    match e.error_len() {
+                        Some(bad_len) => {
+                            // A genuinely invalid byte sequence (not just
+                            // incomplete) -- lossy-replace it, same as
+                            // `from_utf8_lossy` would, and keep decoding
+                            // whatever comes after it in this same chunk.
+                            out.push('\u{FFFD}');
+                            start += valid_up_to + bad_len;
+                        }
+                        None => {
+                            // The tail is a valid-so-far but incomplete
+                            // sequence (ran out of bytes, not into a bad
+                            // one) -- carry it over instead of guessing.
+                            let tail = self.carry[start + valid_up_to..].to_vec();
+                            self.carry = tail;
+                            return out;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Call once at EOF: there's no more data coming, so any bytes still
+    /// held in `carry` are genuinely incomplete (not just "waiting for the
+    /// next chunk") and are lossy-replaced rather than silently dropped —
+    /// matching `from_utf8_lossy`'s behavior for the same bytes.
+    fn finish(&mut self) -> String {
+        if self.carry.is_empty() {
+            return String::new();
+        }
+        let out = String::from_utf8_lossy(&self.carry).into_owned();
+        self.carry.clear();
+        out
+    }
 }
 
 fn flush_complete_lines(pending: &mut String, file: &mut Option<std::fs::File>) {
@@ -938,6 +1056,68 @@ mod tests {
         let contents = std::fs::read_to_string(&file_path).unwrap();
         assert!(!contents.contains("abc123"), "{contents}");
         assert!(contents.contains("[redacted]"));
+    }
+
+    #[test]
+    fn transcript_reassembles_a_multibyte_char_split_across_two_pty_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("t.log");
+        let mut file = Some(std::fs::File::create(&file_path).unwrap());
+
+        // "a─b" -- U+2500 BOX DRAWINGS LIGHT HORIZONTAL, UTF-8 bytes
+        // E2 94 80 -- split mid-character across two separate PTY
+        // `read()` feeds, the exact repro confirmed in review. Real PTY
+        // reads aren't UTF-8-boundary-aligned; box-drawing glyphs like
+        // this are exactly what a TUI redraw (Claude Code's own
+        // full-screen UI) streams constantly.
+        let full = "a─b\n";
+        let bytes = full.as_bytes();
+        assert_eq!(bytes, &[0x61, 0xE2, 0x94, 0x80, 0x62, 0x0A]);
+        let chunk1 = &bytes[..3]; // 'a' + the first 2 bytes of the 3-byte sequence
+        let chunk2 = &bytes[3..]; // the sequence's last byte + "b\n"
+
+        let mut decoder = Utf8ChunkDecoder::new();
+        let mut pending = String::new();
+
+        pending.push_str(&decoder.decode(chunk1));
+        flush_complete_lines(&mut pending, &mut file);
+        pending.push_str(&decoder.decode(chunk2));
+        flush_complete_lines(&mut pending, &mut file);
+
+        drop(file);
+        let contents = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(contents, full, "{contents:?}");
+        assert!(
+            !contents.contains('\u{FFFD}'),
+            "multi-byte char split across reads must not corrupt to U+FFFD: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn utf8_chunk_decoder_still_lossy_replaces_genuinely_invalid_bytes() {
+        // 0xFF is never valid UTF-8 (standalone or as a lead byte) -- this
+        // isn't an incomplete-sequence case, so it must still become
+        // U+FFFD immediately, same as `from_utf8_lossy` would, rather than
+        // being carried over forever waiting for bytes that would never
+        // complete it.
+        let mut decoder = Utf8ChunkDecoder::new();
+        let decoded = decoder.decode(&[b'x', 0xFF, b'y']);
+        assert_eq!(decoded, "x\u{FFFD}y");
+        assert_eq!(decoder.finish(), "", "nothing left carried over");
+    }
+
+    #[test]
+    fn utf8_chunk_decoder_finish_flushes_a_truly_incomplete_trailing_sequence_at_eof() {
+        // If the byte stream ends (EOF) mid-character, there's no more
+        // data ever coming for that sequence -- `finish()` must still
+        // surface it (lossy-replaced) rather than silently dropping those
+        // final bytes forever.
+        let mut decoder = Utf8ChunkDecoder::new();
+        // First two bytes of "─" (E2 94 80), never followed by the third.
+        let decoded = decoder.decode(&[0x61, 0xE2, 0x94]);
+        assert_eq!(decoded, "a", "the incomplete tail must be carried, not lost or corrupted");
+        let trailing = decoder.finish();
+        assert_eq!(trailing, "\u{FFFD}");
     }
 
     #[test]
