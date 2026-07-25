@@ -2259,13 +2259,39 @@ code {
    secondary text) for visual consistency across the shell's two "small
    file-ish panel" surfaces. */
 .file-tree {
-  width: 260px;
+  /* `width` no longer comes from here (Task 9, founder follow-up 2026-07-25:
+     "make sure that we're able to resize the right panel") — it's an inline
+     style driven by `FileTree.tsx`'s own state, persisted via
+     `FILE_TREE_WIDTH_SETTING_KEY`. `min-width`/`max-width` mirror the same
+     bounds `fileTreeState.ts`'s `clampFileTreeWidth` enforces, as a pure-CSS
+     backstop. */
+  min-width: 180px;
+  max-width: 560px;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  position: relative;
   background: var(--panel);
   border-left: 1px solid var(--line);
+}
+
+/* Drag handle on the panel's LEFT edge (it's docked on the right side of
+   `app-body`) — straddles the existing border so the hit target is wider
+   than the 1px hairline without visually thickening it at rest. */
+.file-tree-resize-handle {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 5;
+}
+
+.file-tree-resize-handle:hover,
+.file-tree-resize-handle:active {
+  background: var(--signal-dim);
 }
 
 .file-tree-header {
@@ -2308,6 +2334,29 @@ code {
   background: var(--panel-raised);
 }
 
+/* New File / New Folder (Task 7) — literal short text triggers rather than a
+   glyph, matching `Sidebar.tsx`'s own `.sidebar-filetree-trigger` ("files")
+   convention; the "+" prefix reuses the "create/add" meaning that glyph
+   already carries everywhere else in this app (Sidebar's add-project/
+   new-terminal-in-project triggers, PaneHeader's split button). */
+.file-tree-new {
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.file-tree-new:hover {
+  color: var(--ink);
+  background: var(--panel-raised);
+}
+
 .file-tree-body {
   flex: 1;
   min-height: 0;
@@ -2340,8 +2389,9 @@ code {
 .file-tree-row {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
   padding-right: 6px;
+  position: relative;
 }
 
 .file-tree-row:hover {
@@ -2352,12 +2402,41 @@ code {
   opacity: 1;
 }
 
+/* Selection highlight (Task 2/3) — same tinted-background + magenta
+   left-edge-bar language as `.project-row.is-selected` in the sidebar, so
+   "selected" reads identically everywhere in the shell. `box-shadow` rather
+   than `border-left` so it doesn't shift the row's inner padding. */
+.file-tree-row.is-selected {
+  background: #493c4e;
+  box-shadow: inset 3px 0 0 0 var(--accent-select);
+}
+
+.file-tree-row.is-selected:hover {
+  background: #4f4054;
+}
+
+/* Drag-and-drop-to-move (Task 6) — dim the item(s) actually being dragged,
+   and ring-highlight whichever folder row is currently a valid drop target
+   under the pointer (Finder's own "highlight the target folder on
+   drag-over" behavior). Plain mouse-event-driven dragging (not HTML5 DnD —
+   see `fileTreeState.ts`'s module doc), so these are ordinary React-state
+   classes, not `:hover`/`[dragover]` pseudo-states. */
+.file-tree-row.is-drag-source {
+  opacity: 0.45;
+}
+
+.file-tree-row.is-drop-target {
+  background: rgba(77, 141, 255, 0.16);
+  box-shadow: inset 0 0 0 1.5px var(--signal);
+  border-radius: 4px;
+}
+
 .file-tree-row-main {
   flex: 1;
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   background: transparent;
   border: none;
   color: var(--ink);
@@ -2365,6 +2444,10 @@ code {
   font-size: 11.5px;
   text-align: left;
   padding: 4px 4px;
+}
+
+.file-tree-icon {
+  flex: 0 0 auto;
 }
 
 .file-tree-chevron {
@@ -2421,11 +2504,107 @@ code {
   opacity: 1;
 }
 
+/* Root-level drop target (Task 6) — dropping onto empty tree space moves an
+   item to the project root; highlight the whole scroll area the same way a
+   drop-target row is highlighted, rather than inventing a second treatment. */
+.file-tree-body.is-drop-target {
+  box-shadow: inset 0 0 0 1.5px var(--signal);
+  background: rgba(77, 141, 255, 0.06);
+}
+
+/* Inline rename (Task 5) — same input treatment as
+   `.pane-header-rename-input` (PaneHeader.tsx's own inline rename), reused
+   verbatim rather than inventing a second rename-input look. */
+.file-tree-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--void);
+  border: 1px solid var(--signal-dim);
+  border-radius: 3px;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 3px 5px;
+  margin: 2px 0;
+  outline: none;
+}
+
 .file-tree-action-message {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--warning);
   padding: 6px 14px;
   line-height: 1.4;
   border-top: 1px solid var(--line);
+}
+
+.file-tree-action-message span {
+  overflow-wrap: anywhere;
+}
+
+.file-tree-action-message button {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+/* --------------------------------------------------------- file tree menu
+   Task 4: the right-click context menu. Same small-popover house style as
+   `.project-menu` (transparent click-away backdrop, `--panel`/`--line`
+   surface) but positioned at the cursor (`left`/`top` set inline from the
+   click coordinates) rather than anchored under a fixed trigger row. */
+.file-tree-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+}
+
+.file-tree-menu {
+  position: fixed;
+  z-index: 56;
+  min-width: 178px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-tree-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+
+.file-tree-menu button:hover {
+  background: var(--panel-raised);
+}
+
+.file-tree-menu-danger {
+  color: var(--danger);
+}
+
+.file-tree-menu-sep {
+  height: 1px;
+  background: var(--line);
+  margin: 4px 2px;
 }
