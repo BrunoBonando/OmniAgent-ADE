@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { addPane, paneIds, removePane, syncPaneTree } from "./paneGrid";
+import {
+  addPane,
+  buildLayoutTree,
+  layoutCaption,
+  LAYOUT_PRESETS,
+  nominalGridShape,
+  paneIds,
+  removePane,
+  syncPaneTree,
+} from "./paneGrid";
 import type { PaneTree } from "./paneGrid";
 
 function row(children: PaneTree[]): PaneTree {
@@ -134,5 +143,91 @@ describe("syncPaneTree", () => {
 
   it("stays null when there is nothing to add", () => {
     expect(syncPaneTree(null, [])).toBeNull();
+  });
+});
+
+// ------------------------------------------------------------------------
+// NewWorkspaceModal's LAYOUT presets (2/4/6/8) — see this file's own doc
+// comment on `buildLayoutTree` for why `addPane`/`syncPaneTree` above can't
+// express these shapes (they only ever append flat siblings to a row).
+describe("nominalGridShape", () => {
+  it("maps every preset to its (rows, cols) grid shape", () => {
+    expect(nominalGridShape(2)).toEqual({ rows: 1, cols: 2 });
+    expect(nominalGridShape(4)).toEqual({ rows: 2, cols: 2 });
+    expect(nominalGridShape(6)).toEqual({ rows: 2, cols: 3 });
+    expect(nominalGridShape(8)).toEqual({ rows: 2, cols: 4 });
+  });
+
+  it("LAYOUT_PRESETS lists exactly the four presets in ascending order", () => {
+    expect(LAYOUT_PRESETS).toEqual([2, 4, 6, 8]);
+  });
+});
+
+describe("layoutCaption", () => {
+  it("describes the 2 preset as a side-by-side split, not a '1x2 grid'", () => {
+    expect(layoutCaption(2)).toBe("Side-by-side split");
+  });
+
+  it("describes 4/6/8 as an RxC grid layout", () => {
+    expect(layoutCaption(4)).toBe("2×2 grid layout");
+    expect(layoutCaption(6)).toBe("2×3 grid layout");
+    expect(layoutCaption(8)).toBe("2×4 grid layout");
+  });
+});
+
+describe("buildLayoutTree", () => {
+  it("returns null for an empty id list", () => {
+    expect(buildLayoutTree([], 4)).toBeNull();
+  });
+
+  it("returns the bare leaf for a single id, regardless of preset", () => {
+    expect(buildLayoutTree(["a"], 8)).toBe("a");
+  });
+
+  it("preset 2 with exactly 2 ids: a plain row split (the reference's left/right two-way split)", () => {
+    expect(buildLayoutTree(["a", "b"], 2)).toEqual(row(["a", "b"]));
+  });
+
+  it("preset 4 with exactly 4 ids: a literal 2x2 grid (column of two 2-wide rows)", () => {
+    const tree = buildLayoutTree(["a", "b", "c", "d"], 4);
+    expect(tree).toEqual(column([row(["a", "b"]), row(["c", "d"])]));
+  });
+
+  it("preset 6 with exactly 6 ids: a literal 2x3 grid", () => {
+    const tree = buildLayoutTree(["a", "b", "c", "d", "e", "f"], 6);
+    expect(tree).toEqual(column([row(["a", "b", "c"]), row(["d", "e", "f"])]));
+  });
+
+  it("preset 8 with exactly 8 ids: a literal 2x4 grid", () => {
+    const tree = buildLayoutTree(["a", "b", "c", "d", "e", "f", "g", "h"], 8);
+    expect(tree).toEqual(column([row(["a", "b", "c", "d"]), row(["e", "f", "g", "h"])]));
+  });
+
+  it("fewer ids than the preset's nominal count: fits in one row, no pointless empty panes or column wrap", () => {
+    // 2 checked agents but the "4" (2x2) preset chosen — no placeholder
+    // panes for the unchecked slots, just the 2 real ones arranged as a
+    // single row (the preset is a hint, never an enforced slot count).
+    expect(buildLayoutTree(["a", "b"], 4)).toEqual(row(["a", "b"]));
+  });
+
+  it("odd leftover row gets a bare leaf, not a pointless 1-child split", () => {
+    const tree = buildLayoutTree(["a", "b", "c"], 4);
+    expect(tree).toEqual(column([row(["a", "b"]), "c"]));
+  });
+
+  it("more ids than the preset's nominal count: extra panes just make another row, nothing is dropped", () => {
+    // 5 checked agents with the "4" (2x2, cols=2) preset chosen -> 3 rows
+    // of up to 2 rather than silently discarding the 5th selection.
+    const tree = buildLayoutTree(["a", "b", "c", "d", "e"], 4);
+    expect(tree).toEqual(column([row(["a", "b"]), row(["c", "d"]), "e"]));
+    expect(paneIds(tree).sort()).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it("every id from the input is present exactly once in the built tree, for every preset", () => {
+    const ids = ["a", "b", "c", "d", "e", "f", "g"];
+    for (const preset of LAYOUT_PRESETS) {
+      const tree = buildLayoutTree(ids, preset);
+      expect(paneIds(tree).sort()).toEqual([...ids].sort());
+    }
   });
 });

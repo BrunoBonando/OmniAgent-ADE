@@ -70,6 +70,7 @@ export const initialSessionsState: SessionsState = {
 export type SessionsAction =
   | { type: "projects/loaded"; projects: ProjectInfo[] }
   | { type: "tab/opened"; tab: TabInfo }
+  | { type: "tabs/opened_bulk"; tabs: TabInfo[] }
   | { type: "tab/closed"; id: string }
   | { type: "tab/activated"; id: string }
   | { type: "tab/renamed"; id: string; label: string }
@@ -103,6 +104,26 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
         tabs: [...state.tabs, action.tab],
         activeTabId: action.tab.id,
       };
+
+    // NewWorkspaceModal's bulk-create: every session in the newly-created
+    // workspace lands in a single dispatch (never a `tab/opened` per
+    // session) so a brand-new project's `ProjectPaneGrid` (Workspace.tsx)
+    // mounts directly with its whole final tab set already present in one
+    // render — see `paneGrid.ts`'s `buildLayoutTree` doc for why an
+    // incremental, one-at-a-time reveal would both defeat the chosen
+    // LAYOUT preset's arrangement and risk remounting already-open panes
+    // mid-batch. Same "newest tab becomes active" rule as `tab/opened`,
+    // generalized to the last tab in the batch. A no-op for an empty batch
+    // (every session in the batch failed to create — the caller still has
+    // something to show via the error banner, just no new tabs to add).
+    case "tabs/opened_bulk": {
+      if (action.tabs.length === 0) return state;
+      return {
+        ...state,
+        tabs: [...state.tabs, ...action.tabs],
+        activeTabId: action.tabs[action.tabs.length - 1].id,
+      };
+    }
 
     case "tab/closed": {
       const idx = state.tabs.findIndex((t) => t.id === action.id);

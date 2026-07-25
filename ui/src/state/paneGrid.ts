@@ -105,3 +105,83 @@ export function syncPaneTree(tree: PaneTree | null, desiredIds: string[]): PaneT
   }
   return next;
 }
+
+// ----------------------------------------------------------------------
+// NewWorkspaceModal's LAYOUT presets (BridgeSpace "New Workspace" dialog
+// reference — a founder screenshot described precisely, no image file
+// checked in; see NewWorkspaceModal.tsx's module doc) — the "2"/"4"/"6"/"8"
+// preset cards, each previewing an RxC grid glyph. `addPane`/`syncPaneTree`
+// above are deliberately dumb: every pane after the first two is always
+// appended as a flat sibling of the root split (see `addPane`'s own doc —
+// that flatness is load-bearing for mount stability). Neither function can
+// produce an actual 2x2/2x3/2x4 grid shape, so a genuinely new pure
+// function is needed for "arrange this fresh batch of panes into the
+// chosen preset's grid" — this is that function, used exactly once, when
+// NewWorkspaceModal's bulk session-create seeds a brand-new project's pane
+// grid (see `ProjectPaneGrid`'s `initialTree` prop in `Workspace.tsx`).
+// Every pane opened/closed *after* that initial arrangement still goes
+// through the ordinary `addPane`/`removePane`/`syncPaneTree` path above,
+// unchanged.
+export const LAYOUT_PRESETS = [2, 4, 6, 8] as const;
+export type LayoutPreset = (typeof LAYOUT_PRESETS)[number];
+
+/** The (rows, cols) grid shape a preset represents when given exactly
+ * `preset` panes — what the modal's glyph icon previews, and what
+ * `buildLayoutTree` below targets as its row-wrap width for any actual
+ * pane count (see that function's own doc for how counts that don't
+ * exactly match `preset` are handled). "2" is a single row of 2 (the
+ * reference's plain left/right split, not a "1x2 grid"); "4"/"6"/"8" are
+ * always 2 rows, growing wider (2/3/4 columns) rather than taller — matches
+ * the reference's own glyphs (2x2, 2x3, 2x4). */
+export function nominalGridShape(preset: LayoutPreset): { rows: number; cols: number } {
+  switch (preset) {
+    case 2:
+      return { rows: 1, cols: 2 };
+    case 4:
+      return { rows: 2, cols: 2 };
+    case 6:
+      return { rows: 2, cols: 3 };
+    case 8:
+      return { rows: 2, cols: 4 };
+  }
+}
+
+/** The plain-language caption NewWorkspaceModal shows under whichever
+ * LAYOUT card is currently selected (the reference screenshot's own
+ * example: "2×2 grid layout" under the selected "4" card). */
+export function layoutCaption(preset: LayoutPreset): string {
+  const { rows, cols } = nominalGridShape(preset);
+  return rows === 1 ? "Side-by-side split" : `${rows}×${cols} grid layout`;
+}
+
+/**
+ * Arranges a freshly-created batch of pane ids into the chosen layout
+ * preset's grid shape — wraps `ids` into rows of `nominalGridShape(preset)
+ * .cols` (left to right, top to bottom), then stacks those rows in a
+ * column split (a single row needs no column wrapper). A row left with
+ * exactly one id renders as a bare leaf rather than a pointless 1-child
+ * split, mirroring `addPane`/`removePane`'s own "no pointless single-child
+ * split" rule above.
+ *
+ * The preset is an **arrangement-style hint, not an enforced slot count**
+ * (NewWorkspaceModal's own product decision — see its module doc): this
+ * never invents empty/placeholder panes to pad a short list up to the
+ * preset's nominal count (checking only 2 agents under the "4" (2x2)
+ * preset just gives a plain 2-wide row, not a 2x2 grid with two blank
+ * cells), and never drops ids past the nominal count either (checking 5
+ * agents under "4" wraps into a third, shorter row rather than silently
+ * discarding the 5th) — `react-mosaic-component` trees aren't hard-capped,
+ * so there's no real ceiling to enforce.
+ */
+export function buildLayoutTree(ids: string[], preset: LayoutPreset): PaneTree | null {
+  if (ids.length === 0) return null;
+  if (ids.length === 1) return ids[0];
+
+  const { cols } = nominalGridShape(preset);
+  const rows: PaneTree[] = [];
+  for (let i = 0; i < ids.length; i += cols) {
+    const rowIds = ids.slice(i, i + cols);
+    rows.push(rowIds.length === 1 ? rowIds[0] : { type: "split", direction: "row", children: rowIds });
+  }
+  return rows.length === 1 ? rows[0] : { type: "split", direction: "column", children: rows };
+}

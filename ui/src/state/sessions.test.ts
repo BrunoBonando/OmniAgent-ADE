@@ -350,3 +350,46 @@ describe("layout serialize/deserialize round trip", () => {
     expect(deserializeLayout(json)).toEqual([{ project: "p1", engine: "claude", cwd: "/tmp/p1" }]);
   });
 });
+
+describe("sessionsReducer — tabs/opened_bulk", () => {
+  // NewWorkspaceModal's bulk-create: all N of a brand-new project's sessions
+  // land in ONE dispatch (never one `tab/opened` per session) so
+  // `ProjectPaneGrid` (Workspace.tsx) mounts directly with the full,
+  // final tab set already present -- see paneGrid.ts's `buildLayoutTree`
+  // doc and Workspace.tsx's `initialTree` prop for why an incremental,
+  // one-at-a-time reveal would defeat the chosen LAYOUT preset's
+  // arrangement and risk remounting already-open panes.
+  it("appends every tab in one go and activates the last one", () => {
+    const next = sessionsReducer(initialSessionsState, {
+      type: "tabs/opened_bulk",
+      tabs: [tab("a", "p1"), tab("b", "p1", "codex"), tab("c", "p1", "shell")],
+    });
+    expect(next.tabs.map((t) => t.id)).toEqual(["a", "b", "c"]);
+    expect(next.activeTabId).toBe("c");
+  });
+
+  it("appends onto whatever tabs already existed, rather than replacing them", () => {
+    const before: SessionsState = { projects: [], tabs: [tab("x", "other")], activeTabId: "x" };
+    const next = sessionsReducer(before, {
+      type: "tabs/opened_bulk",
+      tabs: [tab("a", "p1"), tab("b", "p1")],
+    });
+    expect(next.tabs.map((t) => t.id)).toEqual(["x", "a", "b"]);
+    expect(next.activeTabId).toBe("b");
+  });
+
+  it("is a no-op when the batch is empty (e.g. every session in the batch failed to create)", () => {
+    const before: SessionsState = { projects: [], tabs: [tab("x", "p1")], activeTabId: "x" };
+    const next = sessionsReducer(before, { type: "tabs/opened_bulk", tabs: [] });
+    expect(next).toBe(before);
+  });
+
+  it("a single-tab batch behaves the same as tab/opened", () => {
+    const next = sessionsReducer(initialSessionsState, {
+      type: "tabs/opened_bulk",
+      tabs: [tab("a", "p1")],
+    });
+    expect(next.tabs.map((t) => t.id)).toEqual(["a"]);
+    expect(next.activeTabId).toBe("a");
+  });
+});
