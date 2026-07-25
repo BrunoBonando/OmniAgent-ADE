@@ -25,6 +25,16 @@ once_cell = "1.21.4"
 # never `std::fs::remove_file`/`remove_dir_all` — so a "deleted" file always
 # lands in the real macOS Trash, never a permanent unlink.
 trash = "5"
+# Import-detection (Part A, founder ask 2026-07-25: detect other dev tools'
+# known project lists so a new user doesn't add folders one at a time).
+# `import_detect.rs` reads VS-Code-family (VS Code / Cursor) `state.vscdb`
+# SQLite files — a foreign app's own DB, unrelated to this crate's own
+# `brain_core::Store`, so it gets its own dependency here rather than
+# routing through `brain-core` (which stays scoped to the brain's own
+# storage model). Same version + "bundled" feature `brain-core` already
+# uses, so the workspace only ever links one vendored libsqlite3; "backup"
+# is left off since this module only ever runs read-only queries.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [[bin]]
 name = "brain"

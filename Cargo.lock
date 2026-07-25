@@ -389,6 +389,7 @@ dependencies = [
  "once_cell",
  "predicates",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
