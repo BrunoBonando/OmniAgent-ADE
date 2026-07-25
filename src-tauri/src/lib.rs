@@ -116,6 +116,24 @@ pub fn run() {
             // frontend via `roots::ingestion_status` every ~2s.
             app.manage(IngestionState::new());
 
+            // Part A file tree write side (founder feedback, 2026-07-25):
+            // one registry of per-directory `notify` watchers, backing
+            // `commands::watch_dir`/`unwatch_dir` so the file tree can
+            // reflect external changes (Finder, an agent, git) without a
+            // manual refresh. Same "closure captures the AppHandle, wired
+            // once in .setup()" pattern as `sink`/`attention_sink` above —
+            // see `brain_ingest::dirwatch`'s module doc for the full
+            // lifecycle design (idempotent watch, no leaked watchers).
+            let dirwatch_handle = handle.clone();
+            let dirwatch_sink: brain_ingest::dirwatch::ChangeSink =
+                std::sync::Arc::new(move |path: &std::path::Path| {
+                    let _ = dirwatch_handle.emit(
+                        &format!("dir-changed:{}", path.display()),
+                        brain_core::now_ts(),
+                    );
+                });
+            app.manage(brain_ingest::dirwatch::DirWatchRegistry::new(dirwatch_sink));
+
             // Task 7.1 / gap flagged in Phase 4's own report: nothing before
             // this spawned a periodic drain, so enrichment (including this
             // phase's session_summary jobs) only ever ran via a manual
@@ -155,6 +173,14 @@ pub fn run() {
             commands::session_kill,
             commands::git_branch,
             commands::list_dir,
+            commands::rename_path,
+            commands::move_path,
+            commands::duplicate_path,
+            commands::delete_to_trash,
+            commands::create_file,
+            commands::create_dir,
+            commands::watch_dir,
+            commands::unwatch_dir,
             commands::brain_query,
             commands::brain_get_context,
             commands::brain_briefing,

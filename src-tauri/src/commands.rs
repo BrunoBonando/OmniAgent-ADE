@@ -269,6 +269,109 @@ pub fn list_dir(path: String) -> Result<Vec<brain_ingest::walk::DirEntry>, Strin
     brain_ingest::walk::list_dir(std::path::Path::new(&path))
 }
 
+// ------------------------------------------------------------------------
+// File tree write side (Part A — backend only; the Finder-like UI on top of
+// these is a follow-up task). Founder feedback, 2026-07-25, verbatim: "make
+// sure the file view works correctly, with it's own file visualization. It
+// must work exactly like the Finder from Mac OS."
+//
+// Every command below is a thin wrapper — identical house style to
+// `list_dir` above — over `brain_ingest::fileops`, which does the real work
+// AND the real safety enforcement (path-traversal/symlink rejection scoped
+// to `project_root`, collision handling, routing deletes through the real
+// macOS Trash). See that module's doc comment for the full safety model;
+// nothing here re-derives or duplicates it. `project_root` is always
+// `ProjectInfo.path` on the frontend — the project whose file tree is
+// currently showing the entry being acted on.
+// ------------------------------------------------------------------------
+
+/// Renames a file/folder in place (same parent directory). `new_name` must
+/// be a bare filename (no path separators — that's a move, see
+/// [`move_path`]). Returns the new full path.
+#[tauri::command]
+pub fn rename_path(project_root: String, path: String, new_name: String) -> Result<String, String> {
+    brain_ingest::fileops::rename_path(
+        std::path::Path::new(&project_root),
+        std::path::Path::new(&path),
+        &new_name,
+    )
+    .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Moves a file/folder into a different directory (same basename, new
+/// parent) — what drag-and-drop-to-reparent in the frontend calls. Returns
+/// the new full path.
+#[tauri::command]
+pub fn move_path(project_root: String, path: String, new_parent_dir: String) -> Result<String, String> {
+    brain_ingest::fileops::move_path(
+        std::path::Path::new(&project_root),
+        std::path::Path::new(&path),
+        std::path::Path::new(&new_parent_dir),
+    )
+    .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Copies a file, or recursively copies a directory, into the same parent
+/// with the next free Finder-style " copy"/" copy N" name. Returns the new
+/// full path.
+#[tauri::command]
+pub fn duplicate_path(project_root: String, path: String) -> Result<String, String> {
+    brain_ingest::fileops::duplicate_path(std::path::Path::new(&project_root), std::path::Path::new(&path))
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Moves the file/folder to the macOS system Trash — never a permanent
+/// delete (see `brain_ingest::fileops`'s module doc).
+#[tauri::command]
+pub fn delete_to_trash(project_root: String, path: String) -> Result<(), String> {
+    brain_ingest::fileops::delete_to_trash(std::path::Path::new(&project_root), std::path::Path::new(&path))
+}
+
+/// Creates a new empty file named `name` inside `parent_dir`. Errors on a
+/// name collision (the frontend prompts) rather than auto-incrementing an
+/// "untitled 2" style name. Returns the new full path.
+#[tauri::command]
+pub fn create_file(project_root: String, parent_dir: String, name: String) -> Result<String, String> {
+    brain_ingest::fileops::create_file(
+        std::path::Path::new(&project_root),
+        std::path::Path::new(&parent_dir),
+        &name,
+    )
+    .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Creates a new empty folder named `name` inside `parent_dir`. Same
+/// collision policy as [`create_file`]. Returns the new full path.
+#[tauri::command]
+pub fn create_dir(project_root: String, parent_dir: String, name: String) -> Result<String, String> {
+    brain_ingest::fileops::create_dir(
+        std::path::Path::new(&project_root),
+        std::path::Path::new(&parent_dir),
+        &name,
+    )
+    .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Starts watching `path` (one directory level, non-recursive — matches
+/// `list_dir`'s own semantics) for external changes, so the file tree can
+/// refresh itself when a file/folder is created/deleted/renamed outside the
+/// app while that directory is expanded. Idempotent: calling this again for
+/// a path that's already watched is a no-op, not a duplicate watcher. Emits
+/// `dir-changed:{path}` (via the sink wired in `lib.rs`'s `.setup()`) on any
+/// change within that directory. See `brain_ingest::dirwatch`'s module doc
+/// for the full lifecycle design.
+#[tauri::command]
+pub fn watch_dir(path: String, watcher: State<'_, brain_ingest::dirwatch::DirWatchRegistry>) -> Result<(), String> {
+    watcher.watch(std::path::Path::new(&path))
+}
+
+/// Stops watching `path` — call when the frontend collapses that directory
+/// in the tree. A no-op (not an error) if it wasn't being watched.
+#[tauri::command]
+pub fn unwatch_dir(path: String, watcher: State<'_, brain_ingest::dirwatch::DirWatchRegistry>) -> Result<(), String> {
+    watcher.unwatch(std::path::Path::new(&path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +422,137 @@ mod tests {
     fn list_dir_returns_an_error_for_a_path_that_does_not_exist() {
         let err = list_dir("/no/such/path/omniagent-ade-list-dir-command-test".to_string());
         assert!(err.is_err());
+    }
+
+    // -------------------------------------------------- fileops command wrappers
+    //
+    // The real safety enforcement and every edge case is already covered
+    // exhaustively in `brain_ingest::fileops`'s own test suite (including
+    // symlink-escape traversal). These are smoke tests proving the
+    // `String` <-> `Path` plumbing and error propagation work end to end
+    // through the actual `#[tauri::command]` functions the frontend calls —
+    // same "thin wrapper, real logic tested elsewhere" split `list_dir`
+    // above already has (`walk::list_dir`'s tests vs. these).
+
+    #[test]
+    fn rename_path_command_renames_and_returns_the_new_path() {
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "hi").unwrap();
+
+        let new_path = rename_path(
+            root.path().to_string_lossy().into_owned(),
+            root.path().join("a.txt").to_string_lossy().into_owned(),
+            "b.txt".to_string(),
+        )
+        .unwrap();
+
+        assert!(new_path.ends_with("b.txt"), "{new_path}");
+        assert!(std::path::Path::new(&new_path).exists());
+    }
+
+    #[test]
+    fn move_path_command_moves_and_returns_the_new_path() {
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "hi").unwrap();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+
+        let new_path = move_path(
+            root.path().to_string_lossy().into_owned(),
+            root.path().join("a.txt").to_string_lossy().into_owned(),
+            root.path().join("sub").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        assert!(new_path.ends_with("sub/a.txt"), "{new_path}");
+    }
+
+    #[test]
+    fn duplicate_path_command_returns_the_finder_copy_name() {
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "hi").unwrap();
+
+        let dup = duplicate_path(
+            root.path().to_string_lossy().into_owned(),
+            root.path().join("a.txt").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        assert!(dup.ends_with("a copy.txt"), "{dup}");
+    }
+
+    #[test]
+    fn create_file_and_create_dir_commands_work() {
+        let root = tempdir().unwrap();
+        let root_str = root.path().to_string_lossy().into_owned();
+
+        let file = create_file(root_str.clone(), root_str.clone(), "new.txt".to_string()).unwrap();
+        assert!(std::path::Path::new(&file).is_file());
+
+        let dir = create_dir(root_str.clone(), root_str, "newdir".to_string()).unwrap();
+        assert!(std::path::Path::new(&dir).is_dir());
+    }
+
+    #[test]
+    fn delete_to_trash_command_removes_the_file_from_its_original_location() {
+        let root = tempdir().unwrap();
+        let file = root.path().join("omniagent-ade-commands-test-trash-me.txt");
+        std::fs::write(&file, "bye").unwrap();
+
+        delete_to_trash(
+            root.path().to_string_lossy().into_owned(),
+            file.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn fileops_commands_reject_a_dotdot_traversal_attempt_outside_the_root() {
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "top secret").unwrap();
+
+        let traversal = format!(
+            "{}/../{}/secret.txt",
+            root.path().display(),
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
+
+        let err = delete_to_trash(root.path().to_string_lossy().into_owned(), traversal.clone());
+        assert!(err.is_err(), "traversal delete must be rejected");
+
+        let err = rename_path(root.path().to_string_lossy().into_owned(), traversal, "pwned.txt".to_string());
+        assert!(err.is_err(), "traversal rename must be rejected");
+
+        assert_eq!(std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(), "top secret");
+    }
+
+    // ------------------------------------------------------------- dirwatch
+
+    #[test]
+    fn dir_watch_registry_watch_and_unwatch_are_directly_usable_outside_tauri_state() {
+        // `watch_dir`/`unwatch_dir` themselves are one-line `State<'_, T>`
+        // delegations (same as every other stateful command in this file,
+        // e.g. `session_create`/`brain_query` above) — untestable without a
+        // full Tauri app harness, and, per this codebase's own convention,
+        // not unit-tested at that thin a layer (see e.g. `BrainState`'s
+        // tests, which exercise the state type directly rather than the
+        // `#[tauri::command]` wrapper). `DirWatchRegistry` itself has its
+        // own full lifecycle test suite in `brain_ingest::dirwatch`; this
+        // just proves the type this file's commands delegate to is the same
+        // one, wired the same way.
+        let dir = tempdir().unwrap();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls_clone = calls.clone();
+        let sink: brain_ingest::dirwatch::ChangeSink =
+            std::sync::Arc::new(move |p: &std::path::Path| calls_clone.lock().unwrap().push(p.to_path_buf()));
+        let registry = brain_ingest::dirwatch::DirWatchRegistry::new(sink);
+
+        registry.watch(dir.path()).unwrap();
+        assert_eq!(registry.watched_count(), 1);
+        registry.unwatch(dir.path()).unwrap();
+        assert_eq!(registry.watched_count(), 0);
     }
 
     #[test]
