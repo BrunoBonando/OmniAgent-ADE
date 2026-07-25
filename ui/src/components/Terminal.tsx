@@ -19,29 +19,43 @@ interface TerminalProps {
 }
 
 // Matches the --void/--ink/--signal tokens in App.css — xterm doesn't read
-// CSS custom properties, so the HUD palette is duplicated here once.
+// CSS custom properties, so the HUD palette is duplicated here once (keep
+// both in sync — see App.css's own :root comment).
+//
+// Founder pane-grid rebuild (2026-07): background/foreground/black/
+// brightBlack/selectionBackground/cursorAccent below were re-sampled from
+// docs/reference/bridgespace-pane-grid-reference.png to match App.css's new
+// --void/--ink/--ink-faint/--line tokens exactly, so a pane's terminal body
+// has no visible seam against its own chrome. The ANSI red/green/yellow/
+// blue/magenta/cyan (+ bright variants) are deliberately left as they were:
+// the reference shows BridgeMind's own parsed-output rendering, not a raw
+// terminal, so there's no real ANSI palette to sample there (and this task
+// is explicitly not building that structured-output view — see
+// docs/DESIGN.md's v1 cut list) — changing colors real CLI tools rely on
+// (git status, ls, test runners) for no sampled reason would be a guess,
+// which the brief was explicit about not doing.
 const HUD_THEME = {
-  background: "#0a0d12",
-  foreground: "#c9d3de",
+  background: "#2a2c37",
+  foreground: "#d7d8e0",
   cursor: "#4d8dff",
-  cursorAccent: "#0a0d12",
-  selectionBackground: "#1f2733",
-  black: "#0a0d12",
+  cursorAccent: "#2a2c37",
+  selectionBackground: "#3c3845",
+  black: "#2a2c37",
   red: "#e5484d",
   green: "#43c98f",
   yellow: "#e8a23d",
   blue: "#4d8dff",
   magenta: "#8b7cf6",
   cyan: "#5fd4c8",
-  white: "#c9d3de",
-  brightBlack: "#66748a",
+  white: "#d7d8e0",
+  brightBlack: "#6b6d78",
   brightRed: "#ff6b70",
   brightGreen: "#5eeaa8",
   brightYellow: "#ffbb5c",
   brightBlue: "#78a9ff",
   brightMagenta: "#a996ff",
   brightCyan: "#7fe8dc",
-  brightWhite: "#eef2f7",
+  brightWhite: "#f4f5f7",
 };
 
 function base64ToBytes(b64: string): Uint8Array {

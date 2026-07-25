@@ -1,24 +1,49 @@
 /* OmniAgent ADE — workspace shell design tokens (Task 5.2).
    Dark HUD chrome echoing the g-brain reference (docs/reference/) without
    duplicating its literal palette — the map pane (Phase 6) owns that.
-   Monospace-first: this is a terminal-first cockpit, not a marketing page. */
+   Monospace-first: this is a terminal-first cockpit, not a marketing page.
+
+   Founder pane-grid rebuild (2026-07): Bruno sent a screenshot of
+   BridgeSpace, docs/reference/bridgespace-pane-grid-reference.png, and
+   said the dark mode should also be like this. The base tokens below (void,
+   panel, panel-raised, line, line-soft, the ink family, and the engine
+   colors claude/codex/shell) were all re-sampled directly from that image
+   with a small PIL script, not eyeballed, so the whole shell's dark theme,
+   not just the new pane grid, now matches it. signal, danger, and warning
+   are left untouched: the reference has no clean sampleable equivalent for
+   either (no blue accent, and its diff red/green are scoped to BridgeMind's
+   own parsed-output rendering, which is explicitly out of scope here, see
+   docs/DESIGN.md and the task's own note about that being a separate,
+   deliberately-deferred feature), so inventing values for them would be a
+   guess rather than a sampled value. */
 
 :root {
-  --void: #0a0d12;
-  --panel: #10151c;
-  --panel-raised: #141b24;
-  --line: #1f2733;
-  --line-soft: #171e28;
-  --ink: #c9d3de;
-  --ink-dim: #66748a;
-  --ink-faint: #3c4657;
+  --void: #2a2c37; /* pane body / outer gutter bg — sampled (900,600) */
+  --panel: #31323d; /* sidebar / titlebar bg — sampled (200,440) */
+  --panel-raised: #3a3744; /* raised surface — close to the focused-pane-header/branch-pill family */
+  --line: #3c3845; /* hairline borders — sampled branch-pill border */
+  --line-soft: #322f3b;
+  --ink: #eef0f2; /* primary text — sampled pane-header/branch-pill text */
+  --ink-dim: #9a9ba6; /* secondary labels e.g. "WORKSPACES" */
+  --ink-faint: #6b6d78;
   --signal: #4d8dff;
   --signal-dim: #2c4f8f;
-  --claude: #e8a23d;
-  --codex: #8b7cf6;
-  --shell: #43c98f;
+  /* Engine dot colors — see theme.ts's own comment for the exact sample
+     coordinates; kept in sync with ENGINE_COLOR there. */
+  --claude: #b696f2;
+  --codex: #a2e7f9;
+  --shell: #9a9ca6;
   --danger: #e5484d;
   --warning: #e8a23d;
+  /* New for the pane grid: the sidebar's selection accent (the reference's
+     magenta left-edge stripe on the selected workspace row, sampled
+     (61,255)) and the two pane-header tones (a neutral header for
+     background panes, a subtly accent-tinted one for the focused pane —
+     sampled (900,165) vs the codex/antigravity/zsh panes' (1085,165)-family
+     #30323d). */
+  --accent-select: #ed81c3;
+  --pane-header: #30323d;
+  --pane-header-focus: #3c3744;
 
   --mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -277,8 +302,21 @@ code {
   position: relative;
 }
 
+/* Founder pane-grid rebuild: the reference screenshot's selected-workspace
+   row is a tinted background plus a magenta left-edge accent bar (sampled
+   (200,255) for the tint, (61,255) for the bar — same magenta as
+   --accent-select, which also happens to be the reference's antigravity
+   engine dot, purely coincidental reuse of one accent color, not a
+   semantic link). `box-shadow` for the bar rather than `border-left` so it
+   doesn't shift the row's inner padding. */
 .project-row.is-selected {
-  background: var(--panel-raised);
+  background: #493c4e;
+  box-shadow: inset 3px 0 0 0 var(--accent-select);
+}
+
+.project-row.is-selected .project-row-count {
+  color: var(--accent-select);
+  background: rgba(237, 129, 195, 0.16);
 }
 
 .project-row-main {
@@ -617,18 +655,33 @@ code {
   border-color: var(--ink-dim);
 }
 
-/* ------------------------------------------------------------- workspace */
+/* ------------------------------------------------------------- workspace
+   Founder pane-grid rebuild: the old single-tab-visible-at-a-time TabBar
+   strip (`.tab-bar*`/`.tab-pill*`) is gone — `TabBar.tsx` is deleted, its
+   features (engine dot, rename-on-dblclick, attention badge, close button)
+   re-housed in `PaneHeader.tsx`'s per-pane header bar below. The grid itself
+   is `react-mosaic-component` (`Workspace.tsx`); this file only themes it. */
 
 .workspace {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
-.tab-bar-wrap {
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
+/* One per project with any open tab (`Workspace.tsx`'s `<ProjectPaneGrid>`)
+   — every one of them stays in the DOM and mounted for as long as that
+   project has open sessions; only the non-selected ones' `display` is
+   toggled off here. See that file's module doc for why this (rather than
+   a portal) is what actually keeps `<Terminal>` instances alive across a
+   sidebar project switch. */
+.pane-grid-project {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  position: relative;
 }
 
 .pressure-warning {
@@ -638,112 +691,6 @@ code {
   font-size: 11px;
   padding: 5px 14px;
   border-bottom: 1px solid rgba(232, 162, 61, 0.3);
-}
-
-.tab-bar {
-  display: flex;
-  align-items: stretch;
-  gap: 4px;
-  padding: 6px 10px;
-  overflow-x: auto;
-}
-
-.tab-bar-empty {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--ink-faint);
-  padding: 6px 4px;
-}
-
-.tab-bar-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 6px;
-  border-right: 1px solid var(--line);
-}
-
-.tab-bar-group:last-child {
-  border-right: none;
-}
-
-.tab-bar-group-label {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  color: var(--ink-faint);
-  text-transform: uppercase;
-}
-
-.tab-bar-group-tabs {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.tab-pill {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--panel-raised);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--line);
-  border-radius: 5px;
-  padding: 4px 6px 4px 8px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--ink-dim);
-}
-
-.tab-pill:hover {
-  color: var(--ink);
-}
-
-.tab-pill.is-active {
-  color: var(--ink);
-  background: #182130;
-  border-color: var(--signal-dim);
-}
-
-/* Attention badge (founder feedback, 2026-07-24) — a small dot pinned to
-   the pill's top-right corner, deliberately outside the flex-row flow so it
-   never reshuffles the rename-input/close-button layout next to it.
-   `--danger` red, distinct from every other existing indicator's color
-   (engine-tinted `.tab-pill-dot`, amber `--warning` stale/pressure dots,
-   blue `--signal` ingesting dot) — "look here" reads differently from
-   "caution"/"in progress". `pointer-events: none` so it never steals a
-   click meant for the pill or the close button under it. */
-.tab-pill.has-attention {
-  border-color: var(--danger);
-}
-
-.tab-pill-attention-dot {
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--danger);
-  border: 1.5px solid var(--void);
-  box-shadow: 0 0 5px rgba(229, 72, 77, 0.8);
-  pointer-events: none;
-  animation: pulse 1.6s ease-in-out infinite;
-}
-
-.tab-pill-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  animation: pulse 2.4s ease-in-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tab-pill-dot,
-  .tab-pill-attention-dot {
-    animation: none;
-  }
 }
 
 @keyframes pulse {
@@ -756,56 +703,185 @@ code {
   }
 }
 
-/* Session renaming — Bruno, 2026-07-24: "They can rename a session and so
-   on". Double-click `.tab-pill-label` to swap it for this inline input;
-   Enter/blur commits, Escape cancels (`TabBar.tsx`). */
-.tab-pill-rename-input {
+/* ---------------------------------------------------------- pane grid
+   `<Mosaic className="pane-grid">` — react-mosaic-component's own base
+   stylesheet (react-mosaic-component.css) supplies the layout mechanics
+   (absolute positioning, split-handle hit areas, drop-target overlays);
+   everything below re-themes it to the sampled palette instead of pulling
+   in its `mosaic-blueprint-theme`. */
+
+.pane-grid.mosaic {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+  background: var(--void);
+}
+
+.pane-grid .mosaic-tile {
+  margin: 6px;
+}
+
+.pane-grid .mosaic-split:hover {
+  background: var(--line);
+}
+
+.pane-grid .mosaic-split .mosaic-split-line {
+  background: transparent;
+}
+
+.pane-grid .mosaic-split:hover .mosaic-split-line {
+  background: var(--signal-dim);
+}
+
+.pane-grid .drop-target-container .drop-target {
+  background: rgba(237, 129, 195, 0.14);
+  border: 2px solid var(--accent-select);
+  border-radius: 8px;
+}
+
+/* `.mosaic-window` renders one pane's chrome (header via `renderToolbar` +
+   body). The library's own `.mosaic-window-toolbar` box (height/background/
+   box-shadow) is neutralized here — `.pane-header` inside it (rendered by
+   `PaneHeader.tsx`) owns the actual look. */
+.pane-window.mosaic-window {
+  background: var(--void);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.pane-window .mosaic-window-toolbar {
+  height: auto;
+  background: transparent;
+  box-shadow: none;
+}
+
+.pane-window .mosaic-window-body {
+  background: var(--void);
+  border-bottom-left-radius: 8px;
+  border-bottom-right-radius: 8px;
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 34px;
+  padding: 0 8px 0 12px;
+  background: var(--pane-header);
+  border-bottom: 1px solid var(--line);
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.pane-header.is-focused {
+  background: var(--pane-header-focus);
+  color: var(--ink);
+}
+
+.pane-header.has-attention {
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+
+.pane-header-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+.pane-header-attention-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 4px rgba(229, 72, 77, 0.7);
+  flex: 0 0 auto;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-header-dot,
+  .pane-header-attention-dot {
+    animation: none;
+  }
+}
+
+.pane-header-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+}
+
+.pane-header-project {
+  color: var(--ink-faint);
+}
+
+.pane-header-rename-input {
   background: var(--void);
   border: 1px solid var(--signal-dim);
   border-radius: 3px;
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: 12px;
   padding: 1px 4px;
   outline: none;
 }
 
-.tab-pill-close {
-  background: transparent;
-  border: none;
-  color: inherit;
-  font-size: 13px;
-  line-height: 1;
-  padding: 0 2px;
-  opacity: 0.6;
+.pane-header-spacer {
+  flex: 1;
+  min-width: 4px;
 }
 
-.tab-pill-close:hover {
-  opacity: 1;
+.pane-header-branch {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.pane-header-btn {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--ink-dim);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.pane-header-btn:hover {
+  background: var(--panel-raised);
+  color: var(--ink);
+}
+
+.pane-header-btn.pane-header-btn-close:hover {
   color: var(--danger);
 }
 
-.tab-bar-add {
-  background: transparent;
-  border: 1px dashed var(--line);
-  color: var(--ink-faint);
-  border-radius: 5px;
-  width: 24px;
-  height: 24px;
-  font-size: 13px;
-  line-height: 1;
-}
-
-.tab-bar-add:hover {
-  color: var(--ink);
-  border-color: var(--ink-dim);
-}
-
-.terminal-area {
-  flex: 1;
+.pane-body {
   position: relative;
-  min-height: 0;
-  background: var(--void);
+  height: 100%;
+  width: 100%;
 }
 
 .terminal-surface {

@@ -48,6 +48,16 @@ export interface TabInfo {
 export interface SessionsState {
   projects: ProjectInfo[];
   tabs: TabInfo[];
+  /** Before the BridgeSpace pane-grid rebuild this was "which tab is the
+   * *only* one currently displayed" (the old `TabBar`/single-terminal-area
+   * shell). Now that `Workspace.tsx` shows every session in the selected
+   * project as a simultaneously-visible pane, this means "which pane last
+   * had focus" instead — still cleared-on-activate (below), still what
+   * clears a pane's attention badge, still what `PaneHeader` highlights.
+   * `App.tsx`'s `activateTab` also keeps `selectedProjectId` (its own,
+   * separate piece of state) in sync with this tab's project, so "activate"
+   * always brings the right grid on screen too — that part lives outside
+   * this reducer since `selectedProjectId` isn't part of `SessionsState`. */
   activeTabId: string | null;
 }
 

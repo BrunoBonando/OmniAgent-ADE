@@ -69,6 +69,14 @@ export async function sessionKill(id: string): Promise<void> {
   await invoke("session_kill", { id });
 }
 
+/** The pane header's git-branch pill (Task: BridgeSpace pane-grid rebuild).
+ * `null` when `path` isn't inside a git repo, or `git` itself isn't
+ * available — never throws, so one pane's missing branch never breaks the
+ * grid (see `src-tauri/src/commands.rs::git_branch`'s own doc comment). */
+export async function gitBranch(path: string): Promise<string | null> {
+  return invoke<string | null>("git_branch", { path });
+}
+
 // ---------------------------------------------------------------- brain map
 // Task 6.1's frozen `map_graph` wire contract, verbatim (see
 // `src-tauri/src/map_feed.rs`'s module doc): `kind` is lowercase

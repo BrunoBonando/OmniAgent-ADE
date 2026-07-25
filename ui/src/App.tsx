@@ -284,7 +284,26 @@ function App() {
     [pickerProject],
   );
 
-  const activateTab = useCallback((id: string) => dispatch({ type: "tab/activated", id }), []);
+  // Activating a tab is now also "the grid you're looking at should show
+  // it" — the pane grid (Workspace.tsx) only ever displays the *selected*
+  // project's sessions as panes, unlike the old single-tab-visible TabBar
+  // strip which could show any project's tab regardless of the sidebar
+  // selection. So every activation path (Sidebar's per-project tab list,
+  // CommandPalette's "switch to", a pane header gaining focus) keeps
+  // `selectedProjectId` in sync with whichever tab it's activating —
+  // otherwise "switch to X" could focus a tab whose grid isn't even on
+  // screen. `activeTabId` itself keeps its pre-existing job (which pane
+  // last had focus — used to clear its attention badge, and to know which
+  // pane to visually highlight); see `state/sessions.ts`'s `TabInfo` doc for
+  // the reducer side of this.
+  const activateTab = useCallback(
+    (id: string) => {
+      const tab = state.tabs.find((t) => t.id === id);
+      if (tab) setSelectedProjectId(tab.project);
+      dispatch({ type: "tab/activated", id });
+    },
+    [state.tabs],
+  );
 
   const renameTab = useCallback(
     (id: string, label: string) => dispatch({ type: "tab/renamed", id, label }),
@@ -360,6 +379,7 @@ function App() {
           projects={state.projects}
           tabs={state.tabs}
           activeTabId={state.activeTabId}
+          selectedProjectId={selectedProjectId}
           selectedProjectLabel={selectedProject?.label}
           onActivateTab={activateTab}
           onCloseTab={(id) => void closeTab(id)}

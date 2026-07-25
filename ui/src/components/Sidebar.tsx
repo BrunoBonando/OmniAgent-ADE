@@ -28,7 +28,9 @@
 // project needs the user's notice, plus a smaller one on the specific
 // `project-row-tab` sub-row so it's clear which session. This is the
 // "visible even if looking at a different project" half of the feature —
-// `TabBar.tsx` owns the other half, the badge on the tab pill itself.
+// `PaneHeader.tsx` (the terminal grid's per-pane header, née `TabBar.tsx`
+// before the BridgeSpace pane-grid rebuild) owns the other half, the badge
+// on the pane itself.
 import { useCallback, useEffect, useState } from "react";
 import logo from "../assets/omniagent-logo.png";
 import { PRESSURE_THRESHOLD, isUnderPressure, tabDisplayLabel, tabsByProject, type ProjectInfo, type TabInfo } from "../state/sessions";
