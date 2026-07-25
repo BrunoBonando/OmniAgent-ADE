@@ -2371,8 +2371,13 @@ code {
   flex: 0 0 auto;
   width: 10px;
   display: inline-block;
-  color: var(--ink-faint);
-  font-size: 9px;
+  /* --ink-dim rather than the more common --ink-faint used for muted
+     secondary text elsewhere in this panel — an expand/collapse affordance
+     needs to actually read at a glance, not just be present for a screen
+     reader; --ink-faint measured too low-contrast against --panel in a
+     real screenshot pass. */
+  color: var(--ink-dim);
+  font-size: 10px;
   transition: transform 0.1s ease;
 }
 
