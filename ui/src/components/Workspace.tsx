@@ -64,7 +64,7 @@ import { Mosaic, MosaicWindow, type MosaicNode } from "react-mosaic-component";
 import "react-mosaic-component/react-mosaic-component.css";
 import PaneHeader from "./PaneHeader";
 import Terminal from "./Terminal";
-import { syncPaneTree, type PaneTree } from "../state/paneGrid";
+import { paneIds, syncPaneTree, type PaneTree } from "../state/paneGrid";
 import {
   isUnderPressure,
   PRESSURE_THRESHOLD,
@@ -93,6 +93,14 @@ interface ProjectPaneGridProps {
   onCloseTab: (id: string) => void;
   onNewTabInProject: (project: ProjectInfo) => void;
   onRenameTab: (id: string, label: string) => void;
+  /** NewWorkspaceModal's bulk-create: when this project's very first
+   * render already has its whole tab set present (see `sessions.ts`'s
+   * `tabs/opened_bulk`), and this tree's leaf ids are EXACTLY that set,
+   * seed the grid with this shape instead of the ordinary flat-row
+   * `syncPaneTree` build — see the effect below and `paneGrid.ts`'s
+   * `buildLayoutTree` doc. `undefined`/non-matching is the normal path,
+   * unchanged from before this prop existed. */
+  initialTree?: PaneTree | null;
 }
 
 /** One project's grid — always mounted for as long as that project has any
@@ -110,6 +118,7 @@ function ProjectPaneGrid({
   onCloseTab,
   onNewTabInProject,
   onRenameTab,
+  initialTree,
 }: ProjectPaneGridProps) {
   const [tree, setTree] = useState<PaneTree | null>(null);
   const idsKey = tabs.map((t) => t.id).join(" ");
@@ -117,10 +126,27 @@ function ProjectPaneGrid({
   useEffect(() => {
     const ids = idsKey.length > 0 ? idsKey.split(" ") : [];
     setTree((prev) => {
+      // `prev === null` only ever true on this instance's very first
+      // relevant render (see `initialTree`'s own doc above) — once
+      // anything has been synced in, it's never null again for the rest
+      // of this component's mounted lifetime (a project dropping to 0
+      // tabs unmounts `ProjectPaneGrid` entirely, see `Workspace`'s
+      // `grouped` filter below, rather than resetting this to null in
+      // place). Matching on the exact leaf-id SET (not just "some
+      // initialTree exists") means an unrelated/stale `initialTree` value
+      // can never misfire onto a project it wasn't built for — session
+      // ids are unique, so an exact-set match only ever happens for the
+      // batch it was actually computed from.
+      if (prev === null && initialTree) {
+        const initialIds = paneIds(initialTree);
+        if (initialIds.length === ids.length && initialIds.every((id) => ids.includes(id))) {
+          return initialTree;
+        }
+      }
       const next = syncPaneTree(prev, ids);
       return next === prev ? prev : next;
     });
-  }, [idsKey]);
+  }, [idsKey, initialTree]);
 
   const tabsById = useMemo(() => new Map(tabs.map((t) => [t.id, t])), [tabs]);
 
@@ -197,6 +223,12 @@ interface WorkspaceProps {
   onNewTabInProject: (project: ProjectInfo) => void;
   onRenameTab: (id: string, label: string) => void;
   hidden: boolean;
+  /** NewWorkspaceModal's bulk-create: `projectId -> PaneTree` hints for a
+   * project's very first grid render, keyed by project id — see
+   * `ProjectPaneGridProps.initialTree`'s doc. Optional so every existing
+   * caller/test that only ever opens tabs one at a time (⌘T, the map's
+   * "Open terminal here") is unaffected. */
+  initialLayouts?: Map<string, PaneTree>;
 }
 
 export default function Workspace({
@@ -210,6 +242,7 @@ export default function Workspace({
   onNewTabInProject,
   onRenameTab,
   hidden,
+  initialLayouts,
 }: WorkspaceProps) {
   const projectLabel = useCallback(
     (id: string) => projects.find((p) => p.id === id)?.label ?? id,
@@ -250,6 +283,7 @@ export default function Workspace({
             onCloseTab={onCloseTab}
             onNewTabInProject={onNewTabInProject}
             onRenameTab={onRenameTab}
+            initialTree={initialLayouts?.get(g.project)}
           />
         );
       })}
