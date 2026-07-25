@@ -69,6 +69,29 @@ export async function sessionKill(id: string): Promise<void> {
   await invoke("session_kill", { id });
 }
 
+// ------------------------------------------------------------- file tree
+// Founder feedback, 2026-07-25 (verbatim): "nice to have a folder/file
+// navigation on the right panel." `list_dir` (src-tauri/src/commands.rs,
+// thin wrapper over brain_ingest::walk::list_dir) lists exactly one
+// directory level, gitignore-aware — `FileTree.tsx` calls it lazily, once
+// per expand, never eagerly recursing a whole project tree.
+
+export interface DirEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+export async function listDir(path: string): Promise<DirEntry[]> {
+  return invoke<DirEntry[]>("list_dir", { path });
+}
+
+/** Settings-table key for the file tree panel's collapsed/expanded state
+ * (same "true"/"false" string convention `REVIEW_MEMORY_SETTING_KEY`
+ * already uses) — persisted so a hidden/shown choice survives relaunch,
+ * same pattern as `LAYOUT_SETTING_KEY`. */
+export const FILE_TREE_VISIBLE_SETTING_KEY = "file_tree_visible";
+
 /** The pane header's git-branch pill (Task: BridgeSpace pane-grid rebuild).
  * `null` when `path` isn't inside a git repo, or `git` itself isn't
  * available — never throws, so one pane's missing branch never breaks the
