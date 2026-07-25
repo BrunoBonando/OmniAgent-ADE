@@ -270,6 +270,256 @@ fn claude_code_candidates(home: &Path) -> Vec<ImportCandidate> {
     out.into_iter().filter_map(to_candidate).collect()
 }
 
+// -------------------------------------------------------- VS Code / Cursor
+//
+// Both are the same VS-Code-fork architecture: a `state.vscdb` SQLite file
+// with a plain `key TEXT, value BLOB` `ItemTable`, `value` holding a JSON
+// string. Cursor's own install isn't on this machine (see the module doc's
+// "unverified" note); everything below was written and tested against VS
+// Code's real database, then reused verbatim for Cursor at its own
+// app-support path.
+
+/// `ItemTable` keys read for "recent folders", and why.
+///
+/// [`RECENTLY_OPENED_KEY`] (`history.recentlyOpenedPathsList`) is VS Code's
+/// actual "recent folders you can reopen" list — the semantically correct
+/// source. It is tried first. But on the real machine this was built
+/// against (VS Code 1.130.0), that key is **absent** from `ItemTable`
+/// entirely (confirmed: a full dump of all 212 keys in the real
+/// `state.vscdb` has no key containing "recent" or "opened" at all — only
+/// `workbench.editor.languageDetectionOpenedLanguages.global`, which is
+/// unrelated). Rather than depend on a key that may simply not exist for a
+/// given install/profile, [`TERMINAL_DIRS_KEY`]
+/// (`terminal.history.entries.dirs`) is also read and unioned in: it *is*
+/// present and populated on this machine with ~20 real project-root paths
+/// (confirmed via direct `sqlite3` inspection — `/Users/bonando/Documents/
+/// Bruno.Digital/OmniAgent`, `.../BrunoDigital-Website`, `.../My-Brain`,
+/// ...). It's technically "directories used in the integrated terminal",
+/// not "recently opened folders/workspaces" — a distinction the founder's
+/// own brief for this task calls out — but for a developer who works from
+/// integrated terminals it correlates strongly with real project roots,
+/// and it's the only one of the two that's actually populated here. Both
+/// are read and their real, existing-directory results unioned (deduped by
+/// resolved path) rather than picking just one, so this works whether a
+/// given VS Code install/version has one, the other, both, or (gracefully)
+/// neither.
+const RECENTLY_OPENED_KEY: &str = "history.recentlyOpenedPathsList";
+const TERMINAL_DIRS_KEY: &str = "terminal.history.entries.dirs";
+
+fn vscode_state_db_path(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/Code/User/globalStorage/state.vscdb")
+}
+
+/// Cursor's app-support path, by analogy with VS Code's own (same Electron/
+/// VS-Code-fork convention: `~/Library/Application Support/<App>/User/
+/// globalStorage/state.vscdb`). **Unverified** — Cursor is not installed on
+/// the machine this was built against, so this exact path has never been
+/// checked against a real Cursor install. If Cursor's actual convention
+/// differs, [`Tool::Cursor`] simply degrades to "not detected" (a missing
+/// file is exactly the same code path as every other absent-tool case,
+/// per the module's failure model) rather than doing anything wrong.
+fn cursor_state_db_path(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+}
+
+/// Reads one `ItemTable` row's `value` as a UTF-8 string. `value`'s
+/// *declared* column type is `BLOB`, but SQLite's `BLOB` affinity means "no
+/// type coercion at all" — the value keeps whatever storage class it was
+/// written with. Confirmed against the real `state.vscdb` on this machine
+/// (`sqlite3 ... "SELECT typeof(value) FROM ItemTable WHERE key=...`) that
+/// VS Code actually stores these as `TEXT`, not `BLOB`. Reading via
+/// `row.get_ref` and handling *both* `Text` and `Blob` storage classes
+/// (rather than asking `rusqlite` for a `Vec<u8>` or `String` column
+/// directly, either of which errors on a type it didn't expect) means this
+/// works regardless of which storage class a given row actually has, and
+/// degrades to `None` — never panics or propagates — for a missing key,
+/// a `NULL`/numeric value, or any other query error.
+fn read_item_table_value(conn: &rusqlite::Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM ItemTable WHERE key = ?1", [key], |row| {
+        let bytes = match row.get_ref(0)? {
+            rusqlite::types::ValueRef::Text(b) => Some(b.to_vec()),
+            rusqlite::types::ValueRef::Blob(b) => Some(b.to_vec()),
+            _ => None,
+        };
+        Ok(bytes)
+    })
+    .ok()
+    .flatten()
+    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Extracts folder paths from [`RECENTLY_OPENED_KEY`]'s JSON shape:
+/// `{"entries":[{"folderUri":"file:///..."},{"workspace":{"configPath":
+/// "file:///....code-workspace"}},{"fileUri":"file:///..."}], ...}`. Only
+/// `folderUri` entries are real project-root folders — `workspace` entries
+/// point at a `.code-workspace` *file*, and `fileUri` entries are
+/// individual files someone opened, neither of which is "a project
+/// folder", so both are deliberately skipped here rather than guessed at.
+fn extract_recently_opened(json: &serde_json::Value) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
+        for entry in entries {
+            if let Some(uri) = entry.get("folderUri").and_then(|v| v.as_str()) {
+                if let Some(p) = file_uri_to_path(uri) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Extracts directories from [`TERMINAL_DIRS_KEY`]'s JSON shape:
+/// `{"entries":[{"key":"/abs/path","value":{}}, ...]}` — plain absolute
+/// paths, no URI decoding needed.
+fn extract_terminal_dirs(json: &serde_json::Value) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
+        for entry in entries {
+            if let Some(path_str) = entry.get("key").and_then(|v| v.as_str()) {
+                out.push(PathBuf::from(path_str));
+            }
+        }
+    }
+    out
+}
+
+/// Strips a `file://` scheme and percent-decodes the rest — VS Code
+/// percent-encodes spaces and other special characters in these URIs (e.g.
+/// `file:///Users/x/My%20Project`). Returns `None` for anything not
+/// actually a `file://` URI rather than guessing.
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    Some(PathBuf::from(percent_decode(rest)))
+}
+
+/// Minimal `%XX` percent-decoder — just enough for VS Code's own file URIs
+/// (always ASCII hex escapes), not a general URI/URL library. Any `%` not
+/// followed by two valid hex digits is left as a literal `%` rather than
+/// erroring, since a slightly-malformed escape shouldn't take out the
+/// whole path.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 3 <= bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Every real, existing-directory candidate from a VS-Code-family
+/// `state.vscdb` at `db_path` — shared by both [`Tool::VsCode`] and
+/// [`Tool::Cursor`] (same schema, same code path). Degrades to an empty
+/// `Vec` for a missing file, a file that isn't a valid SQLite database
+/// (corrupt, or actually something else entirely), a permission error, a
+/// missing `ItemTable`, or a JSON value that fails to parse — any one of
+/// these failing never stops the other source key from still being tried.
+fn vscode_family_candidates(db_path: &Path) -> Vec<ImportCandidate> {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return Vec::new();
+    };
+
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    let sources: [(&str, fn(&serde_json::Value) -> Vec<PathBuf>); 2] =
+        [(RECENTLY_OPENED_KEY, extract_recently_opened), (TERMINAL_DIRS_KEY, extract_terminal_dirs)];
+
+    for (key, extract) in sources {
+        let Some(raw) = read_item_table_value(&conn, key) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue; // malformed JSON for this key — skip it, try the next source
+        };
+        for path in extract(&json) {
+            if path.is_dir() && seen.insert(path.clone()) {
+                out.push(path);
+            }
+        }
+    }
+
+    out.sort();
+    out.into_iter().filter_map(to_candidate).collect()
+}
+
+// ----------------------------------------------------------- Tool dispatch
+
+fn is_present(tool: Tool, home: &Path) -> bool {
+    match tool {
+        Tool::ClaudeCode => claude_code_projects_dir(home).is_dir(),
+        Tool::VsCode => vscode_state_db_path(home).is_file(),
+        Tool::Cursor => cursor_state_db_path(home).is_file(),
+    }
+}
+
+fn candidates_for(tool: Tool, home: &Path) -> Vec<ImportCandidate> {
+    match tool {
+        Tool::ClaudeCode => claude_code_candidates(home),
+        Tool::VsCode => vscode_family_candidates(&vscode_state_db_path(home)),
+        Tool::Cursor => vscode_family_candidates(&cursor_state_db_path(home)),
+    }
+}
+
+// ------------------------------------------------------------- public API
+
+fn real_home_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+}
+
+fn detect_tools_impl(home: &Path) -> Vec<DetectedTool> {
+    Tool::ALL
+        .into_iter()
+        .map(|tool| {
+            let detected = is_present(tool, home);
+            let candidate_count = if detected { candidates_for(tool, home).len() } else { 0 };
+            DetectedTool {
+                id: tool.id().to_string(),
+                name: tool.display_name().to_string(),
+                detected,
+                candidate_count,
+            }
+        })
+        .collect()
+}
+
+fn list_candidates_impl(home: &Path, tool_id: &str) -> Result<Vec<ImportCandidate>, String> {
+    let tool = Tool::from_id(tool_id).ok_or_else(|| format!("unknown import-detect tool id: {tool_id:?}"))?;
+    if !is_present(tool, home) {
+        return Ok(Vec::new());
+    }
+    Ok(candidates_for(tool, home))
+}
+
+/// Every dev tool this module knows how to detect, with whether it was
+/// found on this machine and how many real candidate projects it has.
+/// Thin wrapper over [`detect_tools_impl`] using the real `$HOME` — same
+/// "pure impl + thin real-home wrapper" split as [`list_candidates`]/
+/// [`list_candidates_impl`], so the real logic is directly unit-testable
+/// against a synthetic `home` without touching the caller's actual machine.
+pub fn detect_tools() -> Vec<DetectedTool> {
+    detect_tools_impl(&real_home_dir())
+}
+
+/// Every real, filesystem-verified import candidate for `tool_id`
+/// (`"claude-code"` | `"vscode"` | `"cursor"`). `Err` only for an unknown
+/// id (a frontend/contract bug); an unknown-but-valid tool id that simply
+/// isn't detected on this machine returns `Ok(vec![])`, never an error —
+/// "not installed" and "installed but nothing found" are both empty
+/// results, not failures.
+pub fn list_candidates(tool_id: &str) -> Result<Vec<ImportCandidate>, String> {
+    list_candidates_impl(&real_home_dir(), tool_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +692,241 @@ mod tests {
     fn claude_code_candidates_is_empty_when_the_projects_dir_does_not_exist() {
         let home = tempdir().unwrap();
         assert!(claude_code_candidates(home.path()).is_empty());
+    }
+
+    // --------------------------------------------------------- VS Code / Cursor
+
+    /// Builds a real, temporary `state.vscdb`-shaped SQLite file: the same
+    /// `ItemTable (key TEXT, value BLOB)` schema real VS Code uses
+    /// (confirmed via `sqlite3 state.vscdb ".schema ItemTable"` against the
+    /// real file on this machine), with whatever `(key, value)` rows the
+    /// caller supplies. A real file on real disk, opened with the real
+    /// `rusqlite` — not a mock — per the task's own instruction to test
+    /// the SQLite parsing "against a real database file."
+    fn build_fake_state_db(path: &Path, rows: &[(&str, &str)]) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)", [])
+            .unwrap();
+        for (key, value) in rows {
+            conn.execute("INSERT INTO ItemTable (key, value) VALUES (?1, ?2)", rusqlite::params![key, value])
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn vscode_family_candidates_reads_both_keys_unions_and_filters_stale_entries() {
+        let dir = tempdir().unwrap();
+        let real_folder = make_real_dir(dir.path(), "Documents/RealProject");
+        let real_terminal_dir = make_real_dir(dir.path(), "Documents/TerminalProject");
+        let stale_folder = dir.path().join("Documents/DeletedProject"); // never created
+
+        let recently_opened = serde_json::json!({
+            "entries": [
+                { "folderUri": format!("file://{}", real_folder.display()) },
+                { "folderUri": format!("file://{}", stale_folder.display()) },
+                { "fileUri": format!("file://{}", dir.path().join("Documents/notes.txt").display()) },
+                { "workspace": { "configPath": "file:///tmp/whatever.code-workspace" } },
+            ]
+        })
+        .to_string();
+        let terminal_dirs = serde_json::json!({
+            "entries": [
+                { "key": real_terminal_dir.to_str().unwrap(), "value": {} },
+                { "key": "/no/such/stale/terminal/dir", "value": {} },
+            ]
+        })
+        .to_string();
+
+        let db_path = dir.path().join("state.vscdb");
+        build_fake_state_db(&db_path, &[(RECENTLY_OPENED_KEY, &recently_opened), (TERMINAL_DIRS_KEY, &terminal_dirs)]);
+
+        let candidates = vscode_family_candidates(&db_path);
+        let paths: Vec<&str> = candidates.iter().map(|c| c.path.as_str()).collect();
+
+        assert_eq!(candidates.len(), 2, "{paths:?}");
+        assert!(paths.contains(&real_folder.to_str().unwrap()), "{paths:?}");
+        assert!(paths.contains(&real_terminal_dir.to_str().unwrap()), "{paths:?}");
+        assert!(!paths.iter().any(|p| p.contains("DeletedProject")), "{paths:?}");
+        assert!(!paths.iter().any(|p| p.contains("stale")), "{paths:?}");
+        assert!(!paths.iter().any(|p| p.contains("notes.txt")), "fileUri entries must be skipped, {paths:?}");
+    }
+
+    #[test]
+    fn vscode_family_candidates_decodes_a_percent_encoded_space_in_a_folder_uri() {
+        let dir = tempdir().unwrap();
+        let real_folder = make_real_dir(dir.path(), "Documents/My Project");
+        let uri = format!("file://{}", real_folder.display()).replace(' ', "%20");
+
+        let recently_opened = serde_json::json!({ "entries": [ { "folderUri": uri } ] }).to_string();
+        let db_path = dir.path().join("state.vscdb");
+        build_fake_state_db(&db_path, &[(RECENTLY_OPENED_KEY, &recently_opened)]);
+
+        let candidates = vscode_family_candidates(&db_path);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, real_folder.to_str().unwrap());
+        assert_eq!(candidates[0].suggested_name, "My Project");
+    }
+
+    /// Task requirement: "one malformed/unparseable value to prove it's
+    /// skipped gracefully rather than erroring the whole read." Corrupts
+    /// ONE key's JSON; the other key's real, valid data must still surface.
+    #[test]
+    fn vscode_family_candidates_skips_malformed_json_for_one_key_but_still_reads_the_other() {
+        let dir = tempdir().unwrap();
+        let real_terminal_dir = make_real_dir(dir.path(), "Documents/StillWorks");
+
+        let terminal_dirs = serde_json::json!({
+            "entries": [ { "key": real_terminal_dir.to_str().unwrap(), "value": {} } ]
+        })
+        .to_string();
+
+        let db_path = dir.path().join("state.vscdb");
+        build_fake_state_db(
+            &db_path,
+            &[
+                (RECENTLY_OPENED_KEY, "{ this is not valid json at all {{{"),
+                (TERMINAL_DIRS_KEY, &terminal_dirs),
+            ],
+        );
+
+        let candidates = vscode_family_candidates(&db_path);
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(candidates[0].path, real_terminal_dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn vscode_family_candidates_is_empty_for_a_missing_db_file() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.vscdb");
+        assert!(vscode_family_candidates(&missing).is_empty());
+    }
+
+    #[test]
+    fn vscode_family_candidates_is_empty_for_a_file_that_is_not_a_valid_sqlite_database() {
+        let dir = tempdir().unwrap();
+        let corrupt = dir.path().join("corrupt.vscdb");
+        fs::write(&corrupt, b"not a sqlite database, just garbage bytes").unwrap();
+        // A malformed-but-openable file: rusqlite may open the connection
+        // lazily and only fail on the first real query — either way this
+        // must degrade to empty, never panic or propagate.
+        assert!(vscode_family_candidates(&corrupt).is_empty());
+    }
+
+    #[test]
+    fn vscode_family_candidates_is_empty_when_neither_known_key_is_present() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("state.vscdb");
+        build_fake_state_db(&db_path, &[("some.unrelated.key", "\"whatever\"")]);
+        assert!(vscode_family_candidates(&db_path).is_empty());
+    }
+
+    // ------------------------------------------------------- Tool dispatch / paths
+
+    #[test]
+    fn vscode_and_cursor_state_db_paths_follow_the_vs_code_fork_convention() {
+        let home = Path::new("/Users/x");
+        assert_eq!(
+            vscode_state_db_path(home),
+            Path::new("/Users/x/Library/Application Support/Code/User/globalStorage/state.vscdb")
+        );
+        assert_eq!(
+            cursor_state_db_path(home),
+            Path::new("/Users/x/Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+        );
+    }
+
+    /// Cursor is unverified against a real install (see the module doc),
+    /// but the shared `vscode_family_candidates` code path it dispatches
+    /// to is mechanically the same one VS Code's own tests above exercise
+    /// against a real SQLite file — this proves the WIRING (right path,
+    /// right dispatch) is correct even though no real Cursor install was
+    /// available to test end to end.
+    #[test]
+    fn cursor_dispatches_through_the_same_vscode_family_code_path_at_its_own_path() {
+        let home_dir = tempdir().unwrap();
+        let cursor_db = cursor_state_db_path(home_dir.path());
+        fs::create_dir_all(cursor_db.parent().unwrap()).unwrap();
+        let real_folder = make_real_dir(home_dir.path(), "Documents/CursorProject");
+        let recently_opened = serde_json::json!({
+            "entries": [ { "folderUri": format!("file://{}", real_folder.display()) } ]
+        })
+        .to_string();
+        build_fake_state_db(&cursor_db, &[(RECENTLY_OPENED_KEY, &recently_opened)]);
+
+        assert!(is_present(Tool::Cursor, home_dir.path()));
+        let candidates = candidates_for(Tool::Cursor, home_dir.path());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, real_folder.to_str().unwrap());
+    }
+
+    #[test]
+    fn tool_from_id_round_trips_every_known_tool_and_rejects_unknown_ids() {
+        for tool in Tool::ALL {
+            assert_eq!(Tool::from_id(tool.id()), Some(tool));
+        }
+        assert_eq!(Tool::from_id("not-a-real-tool"), None);
+    }
+
+    // --------------------------------------------------------------- public API
+
+    #[test]
+    fn detect_tools_impl_reports_detected_and_candidate_counts_per_tool() {
+        let home = tempdir().unwrap();
+        // Claude Code: present, one real project.
+        let projects_dir = claude_code_projects_dir(home.path());
+        fs::create_dir_all(&projects_dir).unwrap();
+        let project = make_real_dir(home.path(), "Documents/OnlyProject");
+        let encoded = encode_like_claude_code(&project);
+        fs::create_dir_all(projects_dir.join(encoded)).unwrap();
+
+        // VS Code: present, one real candidate.
+        let vscode_db = vscode_state_db_path(home.path());
+        fs::create_dir_all(vscode_db.parent().unwrap()).unwrap();
+        let terminal_dirs = serde_json::json!({
+            "entries": [ { "key": project.to_str().unwrap(), "value": {} } ]
+        })
+        .to_string();
+        build_fake_state_db(&vscode_db, &[(TERMINAL_DIRS_KEY, &terminal_dirs)]);
+
+        // Cursor: absent entirely.
+
+        let tools = detect_tools_impl(home.path());
+        let get = |id: &str| tools.iter().find(|t| t.id == id).unwrap().clone();
+
+        assert!(get("claude-code").detected);
+        assert_eq!(get("claude-code").candidate_count, 1);
+        assert!(get("vscode").detected);
+        assert_eq!(get("vscode").candidate_count, 1);
+        assert!(!get("cursor").detected);
+        assert_eq!(get("cursor").candidate_count, 0);
+    }
+
+    #[test]
+    fn list_candidates_impl_returns_err_for_an_unknown_tool_id() {
+        let home = tempdir().unwrap();
+        let err = list_candidates_impl(home.path(), "totally-made-up").unwrap_err();
+        assert!(err.contains("totally-made-up"), "{err}");
+    }
+
+    #[test]
+    fn list_candidates_impl_returns_an_empty_ok_for_a_known_but_undetected_tool() {
+        let home = tempdir().unwrap();
+        let result = list_candidates_impl(home.path(), "cursor").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_candidates_impl_returns_real_candidates_for_a_detected_tool() {
+        let home = tempdir().unwrap();
+        let projects_dir = claude_code_projects_dir(home.path());
+        fs::create_dir_all(&projects_dir).unwrap();
+        let project = make_real_dir(home.path(), "Documents/RealOne");
+        let encoded = encode_like_claude_code(&project);
+        fs::create_dir_all(projects_dir.join(encoded)).unwrap();
+
+        let result = list_candidates_impl(home.path(), "claude-code").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, project.to_str().unwrap());
+        assert_eq!(result[0].suggested_name, "RealOne");
     }
 }
