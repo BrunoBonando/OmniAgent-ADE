@@ -15,7 +15,7 @@
 //   (already switched into view) visibly grows behind it.
 // - "done": the same readout, now static, offering the biggest project's
 //   first terminal tab.
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useState, type CSSProperties } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { initialOnboardingState, onboardingReducer } from "./onboardingState";
 import { rootsBiggestProject, rootsStartIngest, type IngestionStatus } from "../lib/tauri";
@@ -90,12 +90,23 @@ export default function FirstRun({ ingestion, onRequestView, onOpenTerminal, onD
 
   if (state.phase === "ingesting") {
     const s = state.status;
+    // Warp-direction reskin: the same projects_done/projects_total fraction
+    // this readout already printed as plain digits, also drawn as a capsule
+    // meter (Warp's own "Week 25%"-style bar) — no new field, just the
+    // existing numbers visualized too. `projects_total` can be 0 right at
+    // the very start of a run (before the walk even counts folders), so the
+    // percent is guarded to 0 rather than dividing by zero.
+    const projectsPct =
+      s && s.projects_total > 0 ? Math.min(100, Math.round((s.projects_done / s.projects_total) * 100)) : 0;
     return (
       <div className="first-run-hud" role="status" aria-live="polite">
         <span className="first-run-hud-pulse" aria-hidden="true" />
         <span className="first-run-hud-label">Ingesting</span>
         {s?.current_project && <span className="first-run-hud-project">{s.current_project}</span>}
         <span className="first-run-hud-count">
+          <span className="meter-track">
+            <span className="meter-fill is-good" style={{ "--pct": projectsPct } as CSSProperties} />
+          </span>
           {s?.projects_done ?? 0}/{s?.projects_total ?? "…"} projects
         </span>
         <span className="first-run-hud-nodes">{(s?.total_nodes ?? 0).toLocaleString()} nodes</span>

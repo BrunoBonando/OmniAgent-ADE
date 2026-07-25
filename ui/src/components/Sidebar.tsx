@@ -31,7 +31,7 @@
 // `PaneHeader.tsx` (the terminal grid's per-pane header, née `TabBar.tsx`
 // before the BridgeSpace pane-grid rebuild) owns the other half, the badge
 // on the pane itself.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import logo from "../assets/omniagent-logo.png";
 import { PRESSURE_THRESHOLD, isUnderPressure, tabDisplayLabel, tabsByProject, type ProjectInfo, type TabInfo } from "../state/sessions";
 import {
@@ -50,6 +50,23 @@ import AddProjectModal from "./AddProjectModal";
 /** How often to refresh pause/staleness state in the background — cheap
  * settings/`list_projects` reads, not worth a live push mechanism for v1. */
 const DEGRADATION_POLL_MS = 20000;
+
+// Warp-direction reskin: each sidebar chip gets a small circular avatar —
+// the founder's reference shows "a small circular colored avatar/icon on
+// the left" of every chip row. Purely decorative/derived (no new data): a
+// fixed, muted palette cycled by a stable hash of the project id, so a
+// given project always gets the same color across renders/relaunches
+// without persisting anything new. Deliberately its own small palette
+// rather than reusing `ENGINE_COLOR` — a project isn't an engine, and
+// borrowing that palette would visually suggest a (false) engine
+// association for projects that have no open sessions at all.
+const PROJECT_AVATAR_COLORS = ["#b696f2", "#a2e7f9", "#ed81c3", "#e8a23d", "#5fd4c8", "#78a9ff"];
+
+function projectAvatarColor(id: string): string {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
+  return PROJECT_AVATAR_COLORS[Math.abs(hash) % PROJECT_AVATAR_COLORS.length];
+}
 
 interface SidebarProps {
   projects: ProjectInfo[];
@@ -110,6 +127,12 @@ export default function Sidebar({
     grouped.map((g) => [g.project, g.tabs.some((t) => t.needsAttention)]),
   );
   const underPressure = isUnderPressure(tabs);
+  // Warp-direction reskin: the session-pressure capsule meter's fill —
+  // derived from the exact same `tabs.length`/`PRESSURE_THRESHOLD` pair the
+  // plain-text badge already used, just also expressed as a 0-100 percent
+  // for the bar (capped at 100 so an over-threshold count doesn't overflow
+  // the track).
+  const sessionPressurePct = Math.min(100, Math.round((tabs.length / PRESSURE_THRESHOLD) * 100));
 
   const [pausedProjects, setPausedProjects] = useState<Set<string>>(new Set());
   const [staleness, setStaleness] = useState<Map<string, ProjectStaleness>>(new Map());
@@ -200,6 +223,17 @@ export default function Sidebar({
             className={`pressure-badge${underPressure ? " is-hot" : ""}`}
             title={`${tabs.length} live session${tabs.length === 1 ? "" : "s"} (pressure badge past ${PRESSURE_THRESHOLD})`}
           >
+            {/* Warp-direction reskin: the same session-count this badge
+                already showed as plain digits, now ALSO a capsule meter
+                (Warp's "Session 17%"-style bar) — no new metric, just the
+                existing `tabs.length`/`PRESSURE_THRESHOLD` fraction drawn
+                as a fill instead of only text. */}
+            <span className="meter-track">
+              <span
+                className={`meter-fill${underPressure ? " is-hot" : sessionPressurePct >= 60 ? " is-warm" : ""}`}
+                style={{ "--pct": sessionPressurePct } as CSSProperties}
+              />
+            </span>
             {tabs.length}/{PRESSURE_THRESHOLD}
           </span>
         </div>
@@ -254,15 +288,30 @@ export default function Sidebar({
                     onClick={() => onSelectProject(project)}
                     title={project.path ?? project.id}
                   >
-                    {hasAttention && (
+                    {/* Grouped so `.project-row-main`'s `justify-content:
+                        space-between` only ever splits "identity" from
+                        "meta badges" into two blocks — without this wrapper
+                        every child (dot, avatar, label, paused, count)
+                        would get spread evenly across the row instead,
+                        pulling the avatar away from its own label. */}
+                    <span className="project-row-identity">
+                      {hasAttention && (
+                        <span
+                          className="project-row-attention-dot"
+                          role="status"
+                          title="A session in this project needs your attention"
+                        />
+                      )}
+                      {isStale && <span className="project-row-stale-dot" title="Stale — hasn't been re-ingested in a while" />}
                       <span
-                        className="project-row-attention-dot"
-                        role="status"
-                        title="A session in this project needs your attention"
-                      />
-                    )}
-                    {isStale && <span className="project-row-stale-dot" title="Stale — hasn't been re-ingested in a while" />}
-                    <span className="project-row-label">{project.label}</span>
+                        className="project-row-avatar"
+                        aria-hidden="true"
+                        style={{ background: projectAvatarColor(project.id) }}
+                      >
+                        {project.label.charAt(0).toUpperCase()}
+                      </span>
+                      <span className="project-row-label">{project.label}</span>
+                    </span>
                     {isPaused && <span className="project-row-paused">paused</span>}
                     {count > 0 && <span className="project-row-count">{count}</span>}
                   </button>
