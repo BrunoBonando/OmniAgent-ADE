@@ -226,11 +226,70 @@ pub fn session_kill(id: String, manager: State<'_, SessionManager>) -> Result<()
     manager.kill(&id).map_err(|e| e.to_string())
 }
 
+/// The pane header's git-branch pill (BridgeSpace pane-grid rebuild — see
+/// docs/DESIGN.md and docs/reference/bridgespace-pane-grid-reference.png):
+/// `git -C <path> rev-parse --abbrev-ref HEAD`, shelled out directly rather
+/// than pulling in a git library for one read-only lookup. Returns `Ok(None)`
+/// — never `Err` — whenever `path` isn't a git repo, `git` isn't on `PATH`,
+/// or the command otherwise fails, so one pane's missing branch can never
+/// error out the whole pane (the frontend just doesn't render the pill).
+/// Takes a plain `path: String` rather than `State` — no shared state
+/// involved, unlike every other command in this file.
+#[tauri::command]
+pub fn git_branch(path: String) -> Result<Option<String>, String> {
+    let output = std::process::Command::new("git")
+        .args(["-C", &path, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output();
+
+    let Ok(output) = output else {
+        return Ok(None); // `git` not installed / failed to spawn
+    };
+    if !output.status.success() {
+        return Ok(None); // not a git repo (or no commits yet, etc.)
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(branch))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use brain_core::{now_ts, Node, NodeKind, Origin, Store};
+    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    /// Same fixture-path convention as `roots.rs`/`map_feed.rs`'s own tests:
+    /// `fixtures/sample-project` is a real git repo (seeded by Phase 2's
+    /// ingestion work) checked out on `main` with real commit history.
+    fn sample_project_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("fixtures/sample-project")
+    }
+
+    #[test]
+    fn git_branch_returns_the_checked_out_branch_for_a_real_repo() {
+        let path = sample_project_path();
+        let branch = git_branch(path.to_string_lossy().to_string()).unwrap();
+        assert_eq!(branch, Some("main".to_string()));
+    }
+
+    #[test]
+    fn git_branch_returns_none_gracefully_for_a_non_git_directory() {
+        let dir = tempdir().unwrap();
+        let branch = git_branch(dir.path().to_string_lossy().to_string()).unwrap();
+        assert_eq!(branch, None);
+    }
+
+    #[test]
+    fn git_branch_returns_none_gracefully_for_a_path_that_does_not_exist() {
+        let branch = git_branch("/no/such/path/omniagent-ade-test".to_string()).unwrap();
+        assert_eq!(branch, None);
+    }
 
     #[test]
     fn brain_state_opens_a_store_and_round_trips_settings() {
