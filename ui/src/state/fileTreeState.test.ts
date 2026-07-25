@@ -1,5 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { isExpanded, resolveRowClick, toggleExpanded } from "./fileTreeState";
+import {
+  accentForEntry,
+  clampFileTreeWidth,
+  DRAG_START_THRESHOLD_PX,
+  extensionOf,
+  FILE_TREE_MAX_WIDTH,
+  FILE_TREE_MIN_WIDTH,
+  flattenVisibleEntries,
+  hasCrossedDragThreshold,
+  iconKindForEntry,
+  isExpanded,
+  isValidDropTarget,
+  nextDefaultCreateName,
+  parentDirOf,
+  resolveCreateTargetDir,
+  resolveDragPayload,
+  resolveRowDoubleClick,
+  resolveSelectionClick,
+  toggleExpanded,
+  widthFromDrag,
+} from "./fileTreeState";
+import type { DirEntry } from "../lib/tauri";
 
 describe("fileTreeState — expand/collapse", () => {
   it("starts collapsed for a path not yet in the set", () => {
@@ -34,14 +55,318 @@ describe("fileTreeState — expand/collapse", () => {
   });
 });
 
-describe("fileTreeState — row click resolution", () => {
-  it("clicking a directory resolves to a toggle action", () => {
-    const action = resolveRowClick({ path: "/p/src", is_dir: true });
+describe("fileTreeState — double-click open resolution", () => {
+  it("double-clicking a directory resolves to a toggle action", () => {
+    const action = resolveRowDoubleClick({ path: "/p/src", is_dir: true });
     expect(action).toEqual({ type: "toggle", path: "/p/src" });
   });
 
-  it("clicking a file resolves to an open action", () => {
-    const action = resolveRowClick({ path: "/p/main.py", is_dir: false });
+  it("double-clicking a file resolves to an open action", () => {
+    const action = resolveRowDoubleClick({ path: "/p/main.py", is_dir: false });
     expect(action).toEqual({ type: "open", path: "/p/main.py" });
+  });
+});
+
+describe("fileTreeState — flattenVisibleEntries", () => {
+  const root: DirEntry[] = [
+    { name: "src", path: "/p/src", is_dir: true },
+    { name: "main.py", path: "/p/main.py", is_dir: false },
+  ];
+  const srcChildren: DirEntry[] = [
+    { name: "util.ts", path: "/p/src/util.ts", is_dir: false },
+    { name: "nested", path: "/p/src/nested", is_dir: true },
+  ];
+
+  it("lists just the root when nothing is expanded", () => {
+    const out = flattenVisibleEntries(root, new Set(), new Map());
+    expect(out.map((e) => e.path)).toEqual(["/p/src", "/p/main.py"]);
+  });
+
+  it("splices in an expanded, loaded directory's children in order", () => {
+    const expanded = new Set(["/p/src"]);
+    const children = new Map<string, unknown>([["/p/src", srcChildren]]);
+    const out = flattenVisibleEntries(root, expanded, children);
+    expect(out.map((e) => e.path)).toEqual(["/p/src", "/p/src/util.ts", "/p/src/nested", "/p/main.py"]);
+  });
+
+  it("does not descend into an expanded directory that hasn't loaded yet", () => {
+    const expanded = new Set(["/p/src"]);
+    const children = new Map<string, unknown>([["/p/src", "loading"]]);
+    const out = flattenVisibleEntries(root, expanded, children);
+    expect(out.map((e) => e.path)).toEqual(["/p/src", "/p/main.py"]);
+  });
+
+  it("does not descend into an expanded directory that errored", () => {
+    const expanded = new Set(["/p/src"]);
+    const children = new Map<string, unknown>([["/p/src", { error: "boom" }]]);
+    const out = flattenVisibleEntries(root, expanded, children);
+    expect(out.map((e) => e.path)).toEqual(["/p/src", "/p/main.py"]);
+  });
+
+  it("recurses into nested expanded directories", () => {
+    const expanded = new Set(["/p/src", "/p/src/nested"]);
+    const children = new Map<string, unknown>([
+      ["/p/src", srcChildren],
+      ["/p/src/nested", [{ name: "deep.ts", path: "/p/src/nested/deep.ts", is_dir: false }]],
+    ]);
+    const out = flattenVisibleEntries(root, expanded, children);
+    expect(out.map((e) => e.path)).toEqual([
+      "/p/src",
+      "/p/src/util.ts",
+      "/p/src/nested",
+      "/p/src/nested/deep.ts",
+      "/p/main.py",
+    ]);
+  });
+
+  it("returns an empty list for an undefined root", () => {
+    expect(flattenVisibleEntries(undefined, new Set(), new Map())).toEqual([]);
+  });
+});
+
+describe("fileTreeState — multi-select", () => {
+  const order = ["/p/a", "/p/b", "/p/c", "/p/d", "/p/e"];
+
+  it("a plain click replaces the selection with just that row and sets the anchor", () => {
+    const result = resolveSelectionClick(new Set(["/p/a"]), order, "/p/c", "/p/a", {
+      shiftKey: false,
+      metaKey: false,
+    });
+    expect(result.selection).toEqual(new Set(["/p/c"]));
+    expect(result.anchor).toBe("/p/c");
+  });
+
+  it("cmd-click adds an unselected row to the selection and moves the anchor to it", () => {
+    const result = resolveSelectionClick(new Set(["/p/a"]), order, "/p/c", "/p/a", {
+      shiftKey: false,
+      metaKey: true,
+    });
+    expect(result.selection).toEqual(new Set(["/p/a", "/p/c"]));
+    expect(result.anchor).toBe("/p/c");
+  });
+
+  it("cmd-click on an already-selected row removes it from the selection", () => {
+    const result = resolveSelectionClick(new Set(["/p/a", "/p/c"]), order, "/p/c", "/p/c", {
+      shiftKey: false,
+      metaKey: true,
+    });
+    expect(result.selection).toEqual(new Set(["/p/a"]));
+  });
+
+  it("shift-click selects the contiguous range from the anchor forward", () => {
+    const result = resolveSelectionClick(new Set(["/p/b"]), order, "/p/d", "/p/b", {
+      shiftKey: true,
+      metaKey: false,
+    });
+    expect(result.selection).toEqual(new Set(["/p/b", "/p/c", "/p/d"]));
+    expect(result.anchor).toBe("/p/b"); // anchor stays put so the range can grow/shrink further
+  });
+
+  it("shift-click selects the contiguous range from the anchor backward", () => {
+    const result = resolveSelectionClick(new Set(["/p/d"]), order, "/p/b", "/p/d", {
+      shiftKey: true,
+      metaKey: false,
+    });
+    expect(result.selection).toEqual(new Set(["/p/b", "/p/c", "/p/d"]));
+    expect(result.anchor).toBe("/p/d");
+  });
+
+  it("shift-click with no prior anchor falls back to a plain single-select", () => {
+    const result = resolveSelectionClick(new Set(), order, "/p/c", null, {
+      shiftKey: true,
+      metaKey: false,
+    });
+    expect(result.selection).toEqual(new Set(["/p/c"]));
+    expect(result.anchor).toBe("/p/c");
+  });
+
+  it("shift-click falls back gracefully when the anchor scrolled out of the visible order", () => {
+    const result = resolveSelectionClick(new Set(["/p/z"]), order, "/p/c", "/p/z", {
+      shiftKey: true,
+      metaKey: false,
+    });
+    expect(result.selection).toEqual(new Set(["/p/c"]));
+    expect(result.anchor).toBe("/p/c");
+  });
+});
+
+describe("fileTreeState — icons", () => {
+  it("extensionOf lowercases and strips the leading dot", () => {
+    expect(extensionOf("Main.TS")).toBe("ts");
+    expect(extensionOf("archive.tar.gz")).toBe("gz");
+  });
+
+  it("extensionOf treats a bare dotfile as having no extension", () => {
+    expect(extensionOf(".gitignore")).toBe("");
+  });
+
+  it("extensionOf returns empty for a name with no dot at all", () => {
+    expect(extensionOf("Makefile")).toBe("");
+  });
+
+  it("folders resolve to folder/folder-open by expanded state, ignoring name", () => {
+    expect(iconKindForEntry({ name: "src", is_dir: true }, false)).toBe("folder");
+    expect(iconKindForEntry({ name: "src", is_dir: true }, true)).toBe("folder-open");
+  });
+
+  it.each([
+    ["main.ts", "code"],
+    ["app.tsx", "code"],
+    ["index.js", "code"],
+    ["script.py", "code"],
+    ["lib.rs", "code"],
+    ["main.go", "code"],
+    ["README.md", "markup"],
+    ["package.json", "markup"],
+    ["config.yaml", "markup"],
+    ["config.yml", "markup"],
+    ["logo.png", "image"],
+    ["photo.jpeg", "image"],
+    ["diagram.svg", "image"],
+    ["data.bin", "generic"],
+    ["Makefile", "generic"],
+  ])("%s -> %s", (name, kind) => {
+    expect(iconKindForEntry({ name, is_dir: false }, false)).toBe(kind);
+  });
+
+  it("gives distinct accent colors to different code extensions", () => {
+    const ts = accentForEntry({ name: "a.ts", is_dir: false });
+    const py = accentForEntry({ name: "a.py", is_dir: false });
+    const rs = accentForEntry({ name: "a.rs", is_dir: false });
+    expect(ts).not.toBe(py);
+    expect(py).not.toBe(rs);
+    expect(ts).not.toBe(rs);
+  });
+
+  it("gives an unrecognized extension the default accent, not undefined", () => {
+    expect(accentForEntry({ name: "data.xyz123", is_dir: false })).toBe("var(--ink-dim)");
+  });
+
+  it("folders always get the neutral ink-dim accent regardless of name", () => {
+    expect(accentForEntry({ name: "src.ts", is_dir: true })).toBe("var(--ink-dim)");
+  });
+});
+
+describe("fileTreeState — drag & drop", () => {
+  it("hasCrossedDragThreshold is false for tiny jitter", () => {
+    expect(hasCrossedDragThreshold(100, 100, 101, 100)).toBe(false);
+  });
+
+  it("hasCrossedDragThreshold is true once travel reaches the threshold", () => {
+    expect(hasCrossedDragThreshold(100, 100, 100 + DRAG_START_THRESHOLD_PX, 100)).toBe(true);
+  });
+
+  it("dragging a row that's part of a multi-selection drags the whole selection", () => {
+    const selected = new Set(["/p/a", "/p/b", "/p/c"]);
+    expect(resolveDragPayload(selected, "/p/b").sort()).toEqual(["/p/a", "/p/b", "/p/c"]);
+  });
+
+  it("dragging a row NOT in the current selection drags only that row", () => {
+    const selected = new Set(["/p/a", "/p/b"]);
+    expect(resolveDragPayload(selected, "/p/z")).toEqual(["/p/z"]);
+  });
+
+  it("dragging the sole selected row drags just that row", () => {
+    const selected = new Set(["/p/a"]);
+    expect(resolveDragPayload(selected, "/p/a")).toEqual(["/p/a"]);
+  });
+
+  it("parentDirOf returns the containing directory", () => {
+    expect(parentDirOf("/repo/demo/src/util.ts")).toBe("/repo/demo/src");
+  });
+
+  it("parentDirOf of a top-level path returns the root slash", () => {
+    expect(parentDirOf("/repo")).toBe("/");
+  });
+
+  it("a folder is a valid drop target for an unrelated dragged file", () => {
+    expect(isValidDropTarget("/p/dest", ["/p/src/a.txt"])).toBe(true);
+  });
+
+  it("rejects dropping an item onto itself", () => {
+    expect(isValidDropTarget("/p/a.txt", ["/p/a.txt"])).toBe(false);
+  });
+
+  it("rejects dropping a folder into its own descendant", () => {
+    expect(isValidDropTarget("/p/parent/child", ["/p/parent"])).toBe(false);
+  });
+
+  it("rejects dropping onto the item's own current parent (no-op, not an error)", () => {
+    expect(isValidDropTarget("/p/src", ["/p/src/a.txt"])).toBe(false);
+  });
+
+  it("rejects when nothing is being dragged", () => {
+    expect(isValidDropTarget("/p/dest", [])).toBe(false);
+  });
+
+  it("rejects a multi-item drag if ANY dragged item would be invalid", () => {
+    // /p/dest is a fine target for a.txt, but IS b's own parent — one bad
+    // apple invalidates the whole drop, since move_path would be called
+    // once per item and b's call would fail/no-op.
+    expect(isValidDropTarget("/p/dest", ["/p/src/a.txt", "/p/dest/b.txt"])).toBe(false);
+  });
+});
+
+describe("fileTreeState — create (New File / New Folder)", () => {
+  it("defaults to the Finder-style placeholder name when free", () => {
+    expect(nextDefaultCreateName("folder", new Set())).toBe("untitled folder");
+    expect(nextDefaultCreateName("file", new Set())).toBe("untitled file");
+  });
+
+  it("auto-suffixes on collision, Finder-style", () => {
+    const existing = new Set(["untitled folder", "untitled folder 2"]);
+    expect(nextDefaultCreateName("folder", existing)).toBe("untitled folder 3");
+  });
+
+  it("resolves the create target to the sole selected folder", () => {
+    const selected = new Set(["/p/src"]);
+    const lookup = (p: string) => (p === "/p/src" ? { is_dir: true } : undefined);
+    expect(resolveCreateTargetDir(selected, lookup, "/p")).toBe("/p/src");
+  });
+
+  it("falls back to the project root when a file is selected", () => {
+    const selected = new Set(["/p/main.py"]);
+    const lookup = (p: string) => (p === "/p/main.py" ? { is_dir: false } : undefined);
+    expect(resolveCreateTargetDir(selected, lookup, "/p")).toBe("/p");
+  });
+
+  it("falls back to the project root when nothing is selected", () => {
+    expect(resolveCreateTargetDir(new Set(), () => undefined, "/p")).toBe("/p");
+  });
+
+  it("falls back to the project root when multiple items are selected", () => {
+    const selected = new Set(["/p/src", "/p/main.py"]);
+    const lookup = (p: string) => (p === "/p/src" ? { is_dir: true } : { is_dir: false });
+    expect(resolveCreateTargetDir(selected, lookup, "/p")).toBe("/p");
+  });
+});
+
+describe("fileTreeState — resize", () => {
+  it("clamps below the minimum", () => {
+    expect(clampFileTreeWidth(FILE_TREE_MIN_WIDTH - 50)).toBe(FILE_TREE_MIN_WIDTH);
+  });
+
+  it("clamps above the maximum", () => {
+    expect(clampFileTreeWidth(FILE_TREE_MAX_WIDTH + 200)).toBe(FILE_TREE_MAX_WIDTH);
+  });
+
+  it("passes through an in-range width unchanged", () => {
+    expect(clampFileTreeWidth(300)).toBe(300);
+  });
+
+  it("dragging the left edge leftward (pointer X decreases) widens the panel", () => {
+    expect(widthFromDrag(260, 500, 460)).toBe(300);
+  });
+
+  it("dragging the left edge rightward narrows the panel", () => {
+    expect(widthFromDrag(260, 500, 540)).toBe(220);
+  });
+
+  it("clamps the drag result to the minimum", () => {
+    expect(widthFromDrag(260, 500, 900)).toBe(FILE_TREE_MIN_WIDTH);
+  });
+
+  it("clamps the drag result to the maximum", () => {
+    expect(widthFromDrag(260, 500, -1000)).toBe(FILE_TREE_MAX_WIDTH);
   });
 });
