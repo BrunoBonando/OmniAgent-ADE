@@ -341,6 +341,26 @@ code {
   background: rgba(77, 141, 255, 0.12);
 }
 
+/* "Import projects from other tools" permanent trigger — same quiet pill
+   shape as `.sidebar-filetree-trigger` (a utility action, not the primary
+   "+" one), reachable any time, not just first-run (see Sidebar.tsx's own
+   module doc for why this isn't folded into NewWorkspaceModal). */
+.sidebar-import-trigger {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.sidebar-import-trigger:hover {
+  color: var(--ink);
+  border-color: var(--ink-dim);
+}
+
 .pressure-badge {
   display: inline-flex;
   align-items: center;
@@ -1750,6 +1770,26 @@ code {
   cursor: default;
 }
 
+/* "Import from other tools" — the pick phase's second, equally-weighted
+   path (see FirstRun.tsx's own module doc) — same filled-vs-outlined
+   pairing `.auth-gate-cta`/`.auth-gate-secondary-cta` already established
+   for exactly this "two first-class choices" shape. */
+.first-run-secondary-cta {
+  width: 100%;
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-weight: 600;
+  border-radius: 7px;
+  padding: 11px 14px;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.first-run-secondary-cta:hover {
+  border-color: var(--ink-dim);
+}
+
 .first-run-skip {
   width: 100%;
   background: transparent;
@@ -2362,6 +2402,386 @@ code {
 }
 
 .new-workspace-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* -------------------------------------------------------- import projects
+   "Import projects from other tools" (ImportProjectsFlow.tsx) — reuses the
+   shared overlay frame (background/border/radius/shadow) via the selector
+   list below, overriding width like `.command-palette`/`.new-workspace-panel`
+   already do (this needs room for a scrollable multi-tool checklist, not
+   the narrow 420px single-decision frame). Checkbox rows reuse the exact
+   `.engine-dot`-style accent-dot idiom `NewWorkspaceModal`'s AI AGENTS list
+   established, and native `<input type="checkbox">` tinted via
+   `accent-color` for the same "free, fully accessible" reasons documented
+   there. */
+
+.engine-picker,
+.command-palette,
+.about-panel,
+.first-run-panel,
+.new-workspace-panel,
+.auth-gate-panel,
+.import-flow-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.import-flow-panel {
+  width: 480px;
+  max-width: 90vw;
+  max-height: 78vh;
+  padding: 22px 24px 20px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+}
+
+.import-flow-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  flex: 0 0 auto;
+}
+
+.import-flow-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.import-flow-close {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 15px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.import-flow-close:hover {
+  color: var(--ink);
+  border-color: var(--ink-dim);
+}
+
+.import-flow-body {
+  margin: 0 0 16px;
+  color: var(--ink-dim);
+  font-size: 12.5px;
+  font-style: italic;
+  line-height: 1.6;
+  flex: 0 0 auto;
+}
+
+.import-flow-summary {
+  margin: 0 0 16px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.import-flow-loading,
+.import-flow-empty {
+  color: var(--ink-faint);
+  font-size: 12px;
+  font-style: italic;
+  padding: 12px 0;
+}
+
+.import-flow-error {
+  margin: 12px 0 0;
+  color: var(--danger);
+  font-size: 11.5px;
+  flex: 0 0 auto;
+}
+
+/* ---- tools phase ------------------------------------------------------- */
+
+.import-tool-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+.import-tool-row {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 2px 4px;
+}
+
+.import-tool-row label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  cursor: pointer;
+}
+
+.import-tool-row input[type="checkbox"] {
+  accent-color: var(--accent-select);
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+.import-tool-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.import-tool-dot.is-off {
+  background: var(--ink-faint);
+}
+
+.import-tool-label {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  flex: 1;
+}
+
+.import-tool-count {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  flex: 0 0 auto;
+}
+
+.import-tool-row.is-unavailable {
+  opacity: 0.5;
+}
+
+.import-tool-row.is-unavailable {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+}
+
+.import-tool-status {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-left: auto;
+}
+
+/* ---- candidates phase --------------------------------------------------- */
+
+.import-flow-candidates {
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.import-tool-group {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.import-tool-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--line);
+}
+
+.import-tool-group-select-all {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+}
+
+.import-tool-group-select-all input[type="checkbox"] {
+  accent-color: var(--accent-select);
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.import-tool-group-label {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.import-tool-group-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  padding: 1px 7px;
+  flex: 0 0 auto;
+}
+
+.import-candidate-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.import-candidate-row {
+  border-top: 1px solid var(--line-soft);
+}
+
+.import-candidate-row:first-child {
+  border-top: none;
+}
+
+.import-candidate-row label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.import-candidate-row input[type="checkbox"] {
+  accent-color: var(--accent-select);
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.import-candidate-row.is-already-added label {
+  cursor: default;
+}
+
+.import-candidate-name {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  flex: 0 0 auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-candidate-path {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-candidate-row.is-already-added .import-candidate-name,
+.import-candidate-row.is-already-added .import-candidate-path {
+  color: var(--ink-faint);
+}
+
+.import-candidate-tag {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  padding: 1px 7px;
+  flex: 0 0 auto;
+}
+
+.import-candidate-result {
+  font-size: 12px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.import-candidate-result.is-ok {
+  color: var(--signal);
+}
+
+.import-candidate-result.is-fail {
+  color: var(--danger);
+}
+
+/* ---- footer -------------------------------------------------------------- */
+
+.import-flow-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.import-flow-back,
+.import-flow-cancel {
+  background: transparent;
+  border: none;
+  color: var(--ink-faint);
+  font-size: 12px;
+  padding: 8px 4px;
+  margin-right: auto;
+}
+
+.import-flow-back:hover,
+.import-flow-cancel:hover {
+  color: var(--ink-dim);
+}
+
+.import-flow-cancel {
+  margin-right: 0;
+}
+
+.import-flow-primary {
+  background: var(--accent-select);
+  border: 1px solid var(--accent-select);
+  color: #2b0e20;
+  font-weight: 600;
+  border-radius: var(--radius-pill);
+  padding: 10px 20px;
+  font-size: 12.5px;
+}
+
+.import-flow-primary:hover:not(:disabled) {
+  background: #f2a0d4;
+}
+
+.import-flow-primary:disabled {
   opacity: 0.5;
   cursor: default;
 }

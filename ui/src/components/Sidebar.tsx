@@ -31,6 +31,20 @@
 // creates the sidebar row synchronously and ingests on a background
 // thread — see that command's own doc comment for why.
 //
+// "Import projects from other tools" (founder ask, 2026-07-25, verbatim:
+// "detect other dev tools already installed on the user's machine and
+// offer to import their known project lists"): a SEPARATE, permanent
+// header trigger next to "+" — not folded into `NewWorkspaceModal`. That
+// modal creates exactly one project (plus its engines/layout); import
+// bulk-creates however many candidates the user checks across up to three
+// tools, with no engine/layout step at all, so it doesn't fit that dialog's
+// shape without bolting tabs onto a recently-built, reference-matched
+// component for a fundamentally different job. It's deliberately NOT
+// first-run-only either (`FirstRun.tsx` also offers it, as an alternative
+// to its folder-pick step) — a user might install a new tool well after
+// their first launch and want to pull from it then, so this lives here,
+// reachable any time, exactly like "+" itself.
+//
 // Attention badge (founder feedback, 2026-07-24 — Bruno, verbatim: "every
 // claude session[...] can require attention, generate a badge"): a red dot
 // on `project-row-main` (`attentionByProject`, derived from `TabInfo.
@@ -65,6 +79,8 @@ import AboutPanel from "./AboutPanel";
 import ReviewPanel from "./ReviewPanel";
 import ProjectMenu from "./ProjectMenu";
 import NewWorkspaceModal from "./NewWorkspaceModal";
+import ImportProjectsFlow from "./ImportProjectsFlow";
+import type { ImportBatchResult } from "../state/importState";
 
 /** How often to refresh pause/staleness state in the background — cheap
  * settings/`list_projects` reads, not worth a live push mechanism for v1. */
@@ -101,6 +117,12 @@ interface SidebarProps {
    * preset chosen for arranging their sessions — `App.tsx` owns the actual
    * bulk `session_create` orchestration and closes the modal. */
   onWorkspaceCreated: (project: ProjectInfo, engines: Engine[], layout: LayoutPreset) => void;
+  /** The "Import projects" trigger's finished batch — `App.tsx`'s
+   * `handleImportCompleted` reloads the project list and shows an
+   * error-banner summary for any failures; this component just closes its
+   * own overlay first (see the module doc above for why import is a
+   * separate entry point from `onWorkspaceCreated`). */
+  onImportCompleted: (result: ImportBatchResult) => void;
   /** Owned centrally by `App.tsx` (already polling every ~2s for the
    * degradation badges / FirstRun / BrainMap) and simply forwarded here —
    * backs the small "ingesting…" indicator next to the wordmark, the reuse
@@ -134,6 +156,7 @@ export default function Sidebar({
   onNewTabInProject,
   onActivateTab,
   onWorkspaceCreated,
+  onImportCompleted,
   ingestion,
   view = "workspace",
   onSetView,
@@ -144,6 +167,7 @@ export default function Sidebar({
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const grouped = tabsByProject(tabs);
   const sessionCountByProject = new Map(grouped.map((g) => [g.project, g.tabs.length]));
   // Founder feedback (2026-07-24): a session's attention badge must stay
@@ -235,6 +259,14 @@ export default function Sidebar({
             title="New workspace"
           >
             +
+          </button>
+          <button
+            className="sidebar-import-trigger"
+            onClick={() => setImportOpen(true)}
+            aria-label="Import projects from other tools"
+            title="Import projects from other tools"
+          >
+            import
           </button>
           {onToggleFileTree && (
             <button
@@ -433,6 +465,16 @@ export default function Sidebar({
             onWorkspaceCreated(project, engines, layout);
           }}
           onClose={() => setNewWorkspaceOpen(false)}
+        />
+      )}
+      {importOpen && (
+        <ImportProjectsFlow
+          existingProjects={projects}
+          onImported={(result) => {
+            setImportOpen(false);
+            onImportCompleted(result);
+          }}
+          onClose={() => setImportOpen(false)}
         />
       )}
     </aside>

@@ -33,6 +33,7 @@ import {
   type TabInfo,
 } from "./state/sessions";
 import { buildLayoutTree, type LayoutPreset, type PaneTree } from "./state/paneGrid";
+import { importFailureBanner, type ImportBatchResult } from "./state/importState";
 import { ENGINE_LABEL } from "./theme";
 import {
   FILE_TREE_VISIBLE_SETTING_KEY,
@@ -441,6 +442,30 @@ function App() {
     [reloadProjects, createSessionTab],
   );
 
+  // ---- ImportProjectsFlow's bulk-import ("import from other tools") -----
+  // `ImportProjectsFlow.tsx` owns every Tauri call in the flow itself
+  // (`detect_importable_tools`, `list_import_candidates`, and one
+  // `add_project` per checked candidate — the same `addProject` wrapper
+  // `NewWorkspaceModal.tsx` already uses, never reimplemented) and hands
+  // back the finished `ImportBatchResult` here once the batch settles,
+  // exactly the ownership split `onCreate`/`handleWorkspaceCreated`
+  // established for NewWorkspaceModal: the component that shows the
+  // checklist does the work, `App.tsx` reacts to the outcome. Reachable
+  // from two places (`FirstRun`'s pick phase, Sidebar's permanent "import"
+  // trigger) — both funnel through this one handler so there's exactly one
+  // place that reloads the project list and builds the failure banner.
+  const handleImportCompleted = useCallback(
+    (result: ImportBatchResult) => {
+      if (result.created.length > 0) {
+        void reloadProjects();
+        setSelectedProjectId(result.created[0].id);
+      }
+      const banner = importFailureBanner(result);
+      if (banner) setErrorBanner(banner);
+    },
+    [reloadProjects],
+  );
+
   // Activating a tab is now also "the grid you're looking at should show
   // it" — the pane grid (Workspace.tsx) only ever displays the *selected*
   // project's sessions as panes, unlike the old single-tab-visible TabBar
@@ -546,6 +571,7 @@ function App() {
           onNewTabInProject={(p) => void requestNewTab(p)}
           onActivateTab={activateTab}
           onWorkspaceCreated={(p, engines, layout) => void handleWorkspaceCreated(p, engines, layout)}
+          onImportCompleted={handleImportCompleted}
           ingestion={ingestion}
           view={view}
           onSetView={setView}
@@ -582,8 +608,10 @@ function App() {
       {needsAuthGate === false && needsOnboarding === true && !firstRunDismissed && (
         <FirstRun
           ingestion={ingestion}
+          existingProjects={state.projects}
           onRequestView={setView}
           onOpenTerminal={(p) => void requestNewTab(p)}
+          onImportCompleted={handleImportCompleted}
           onDismiss={() => setFirstRunDismissed(true)}
         />
       )}
