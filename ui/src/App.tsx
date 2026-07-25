@@ -253,8 +253,18 @@ function App() {
   );
 
   // ---- new-tab flow: resolve the default engine, then show the picker ---
+  // Same out-of-order-response guard `useGraphData.ts`'s `fetchOnce`
+  // already established for `map_graph`: a monotonically incrementing ref,
+  // captured at the start of each call, checked before applying the
+  // result. Without it, clicking "+" for project A then quickly for
+  // project B has no protection against A's `Promise.all` settling AFTER
+  // B's — whichever settles last wins the picker state regardless of click
+  // order, so a user who confirms via Enter without reading the modal's
+  // project label could land a live terminal in the wrong project.
+  const requestNewTabIdRef = useRef(0);
   const requestNewTab = useCallback(async (project: ProjectInfo) => {
     setSelectedProjectId(project.id);
+    const requestId = ++requestNewTabIdRef.current;
     let perProject: string | null = null;
     let global: string | null = null;
     try {
@@ -265,6 +275,7 @@ function App() {
     } catch (err) {
       console.error("failed to read engine-default settings, falling back to claude", err);
     }
+    if (requestId !== requestNewTabIdRef.current) return; // superseded by a newer requestNewTab call
     const settingsMap: Record<string, string | undefined> = {};
     if (perProject) settingsMap[defaultEngineSettingKey(project.id)] = perProject;
     if (global) settingsMap[GLOBAL_DEFAULT_ENGINE_KEY] = global;
