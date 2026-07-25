@@ -95,6 +95,13 @@ impl<'a> Memory<'a> {
         fs::write(&path, &contents)?;
 
         let id = format!("{project}:memory:{filename}");
+        // Bug 4: these two Store writes can genuinely fail — e.g. SQLite
+        // returning `DatabaseBusy` when a concurrent writer holds the lock
+        // past `Store::open`'s busy_timeout (see `store.rs`) — and this
+        // function already promises an `io::Result`, so a real failure here
+        // must propagate as `Err`, not panic via `.expect(...)` (this
+        // function runs from `brain-ingest::enrich`'s unsupervised
+        // background drain-loop thread, where a panic has no supervisor).
         self.store
             .upsert_node(&Node {
                 id: id.clone(),
@@ -106,12 +113,12 @@ impl<'a> Memory<'a> {
                 origin,
                 updated: now_ts(),
             })
-            .expect("brain db write failed");
+            .map_err(io::Error::other)?;
 
         if pending {
             self.store
                 .mark_pending(&id, project)
-                .expect("brain db write failed");
+                .map_err(io::Error::other)?;
         }
 
         for target in extract_relative_links(&redacted_body) {
@@ -165,7 +172,63 @@ impl<'a> Memory<'a> {
 mod tests {
     use super::*;
     use crate::store::Origin;
+    use std::time::Duration;
     use tempfile::tempdir;
+
+    /// Bug 4: `write_note_with_status` used to `.expect("brain db write
+    /// failed")` on its `store.upsert_node`/`store.mark_pending` calls,
+    /// turning any real SQLite failure into a panic instead of the `Err`
+    /// its own `io::Result` return type promises. A real, realistic way to
+    /// force that failure without touching `Store`'s internals: hold an
+    /// exclusive write transaction open on a SECOND connection to the same
+    /// on-disk `brain.db` file, from a background thread, for longer than
+    /// `Store::open`'s 5000ms `busy_timeout` (see `store.rs`) — this is
+    /// exactly the "can't acquire SQLite's lock within its busy_timeout"
+    /// scenario the bug report describes, not a contrived injection.
+    #[test]
+    fn write_note_with_status_surfaces_a_contended_db_write_as_err_not_panic() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let memory = Memory::new(&store, dir.path());
+
+        let blocker_dir = dir.path().to_path_buf();
+        let handle = std::thread::spawn(move || {
+            let blocker = Store::open(&blocker_dir).unwrap();
+            blocker
+                .with_transaction(|s| -> rusqlite::Result<()> {
+                    // A real write is what actually takes SQLite's write
+                    // lock (a bare BEGIN in WAL mode does not). Held well
+                    // past the 5000ms busy_timeout (SQLite's busy-wait
+                    // backoff can overshoot the nominal timeout slightly on
+                    // its last retry, so a tight margin here is flaky) —
+                    // this must comfortably outlast the writer's own
+                    // busy_timeout retries below.
+                    s.set_setting("lock-holder", "1")?;
+                    std::thread::sleep(Duration::from_millis(8000));
+                    Ok(())
+                })
+                .unwrap();
+        });
+
+        // Give the background thread time to actually acquire the write
+        // lock before racing it.
+        std::thread::sleep(Duration::from_millis(300));
+
+        let result = memory.write_note_with_status(
+            "p1",
+            "Should not panic",
+            "body",
+            Origin::MachineSummary,
+            false,
+        );
+
+        handle.join().unwrap();
+
+        assert!(
+            result.is_err(),
+            "a lock-contended DB write must surface as a normal Err, not a panic"
+        );
+    }
 
     #[test]
     fn write_note_lands_on_disk_and_as_node() {
