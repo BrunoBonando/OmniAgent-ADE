@@ -733,19 +733,16 @@ fn spawn_reader_thread(
             write_redacted(&mut transcript_file, &pending);
         }
 
-        let (exit_code, signal) = {
+        // Remove the handle from the registry and let the lock drop
+        // immediately (end of this block) *before* the blocking
+        // `child.wait()` and filesystem cleanup below -- matching
+        // `SessionManager::kill`'s pattern exactly. Holding the registry
+        // lock across those would stall every other session's write/
+        // resize/kill/create for as long as this reap takes.
+        let mut handle = {
             let mut sessions = sessions.lock().unwrap();
             match sessions.remove(&id) {
-                Some(mut handle) => {
-                    // Not already handled by an explicit kill: this is a
-                    // natural exit. Reap it so it doesn't zombie.
-                    let status = handle.child.wait();
-                    cleanup_mcp_config(&handle.mcp_config_path);
-                    (
-                        status.as_ref().ok().map(|s| s.exit_code()),
-                        status.as_ref().ok().and_then(|s| s.signal().map(String::from)),
-                    )
-                }
+                Some(h) => h,
                 None => {
                     // Already removed+reaped by SessionManager::kill; that
                     // call already wrote its own "end" lifecycle event.
@@ -753,6 +750,13 @@ fn spawn_reader_thread(
                 }
             }
         };
+
+        // Not already handled by an explicit kill: this is a natural
+        // exit. Reap it so it doesn't zombie -- unlocked, same as kill().
+        let status = handle.child.wait();
+        cleanup_mcp_config(&handle.mcp_config_path);
+        let exit_code = status.as_ref().ok().map(|s| s.exit_code());
+        let signal = status.as_ref().ok().and_then(|s| s.signal().map(String::from));
 
         let _ = append_lifecycle_event(
             &lifecycle_path,
@@ -1118,6 +1122,159 @@ mod tests {
         assert_eq!(decoded, "a", "the incomplete tail must be carried, not lost or corrupted");
         let trailing = decoder.finish();
         assert_eq!(trailing, "\u{FFFD}");
+    }
+
+    fn shell_request(cwd: &Path) -> CreateSessionRequest {
+        CreateSessionRequest {
+            project: "demo".to_string(),
+            engine: "shell".to_string(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            briefing: None,
+        }
+    }
+
+    fn silent_sink() -> OutputSink {
+        Arc::new(|_id: &str, _chunk: &[u8]| {})
+    }
+
+    /// Test double for `portable_pty::Child` whose `wait()` sleeps for a
+    /// controlled, precise duration before returning — the only reliable
+    /// way to get a *deterministic*, measurable slow reap in a test: this
+    /// crate's real PTY implementation ties master-side EOF to the actual
+    /// termination of the child process on this OS (verified empirically:
+    /// closing a shell's own stdin/stdout/stderr via `exec ... </dev/null
+    /// >/dev/null 2>/dev/null` does *not* make the master see EOF any
+    /// earlier than the process's real exit), so there is no shell-level
+    /// trick that widens the gap between "EOF observed" and "wait()
+    /// returns" enough to measure. A fake `Child` sidesteps that entirely.
+    struct SlowWaitChild {
+        wait_delay: Duration,
+    }
+
+    impl std::fmt::Debug for SlowWaitChild {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SlowWaitChild").finish()
+        }
+    }
+
+    impl portable_pty::ChildKiller for SlowWaitChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(SlowWaitChild { wait_delay: self.wait_delay })
+        }
+    }
+
+    impl Child for SlowWaitChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            thread::sleep(self.wait_delay);
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    /// Bug: the natural-exit reader-thread path (the `sessions.remove(&id)`
+    /// branch at the end of `spawn_reader_thread`) used to hold the global
+    /// registry lock across the blocking `child.wait()` and
+    /// `cleanup_mcp_config` filesystem call, stalling every other open
+    /// session's write/resize/kill/create for as long as that reap took —
+    /// even though `SessionManager::kill` already got this right (release
+    /// the lock immediately after removing the handle, then
+    /// `wait()`/cleanup unlocked).
+    ///
+    /// Session A is hand-assembled with a real PTY master (so its reader
+    /// thread observes a genuine EOF, exactly like production) but a fake
+    /// `Child` ([`SlowWaitChild`]) whose `wait()` deliberately sleeps for
+    /// 1.5s — giving a precise, deterministic window during which the
+    /// natural-exit path is genuinely reaping. Session B is a real, live
+    /// shell session; its `write`/`resize` (which briefly take the very
+    /// same registry lock A's cleanup does) must return promptly the whole
+    /// time, proving the lock isn't held across A's slow `wait()`.
+    #[test]
+    fn natural_exit_cleanup_does_not_block_other_sessions_write_and_resize() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink());
+
+        let b = manager.create(shell_request(tmp.path())).unwrap();
+
+        // Assemble session A by hand: a real pty pair's master (so its
+        // reader thread behaves exactly like a real session) with nothing
+        // ever spawned into the slave side, plus the fake slow-waiting
+        // child above.
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let reader = pair.master.try_clone_reader().unwrap();
+        let writer = pair.master.take_writer().unwrap();
+
+        let a_id = "sess-test-natural-exit-lock-scope".to_string();
+        let reader_thread = spawn_reader_thread(
+            a_id.clone(),
+            reader,
+            tmp.path().join("transcripts").join(format!("{a_id}.log")),
+            tmp.path().join("transcripts").join(format!("{a_id}.lifecycle.jsonl")),
+            silent_sink(),
+            Arc::clone(&manager.sessions),
+            None,
+            None,
+            "demo".to_string(),
+            tmp.path().to_string_lossy().into_owned(),
+            "shell".to_string(),
+        );
+        let handle = SessionHandle {
+            master: pair.master,
+            writer,
+            child: Box::new(SlowWaitChild { wait_delay: Duration::from_millis(1500) }),
+            mcp_config_path: None,
+            project: "demo".to_string(),
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            engine: "shell".to_string(),
+            reader_thread,
+        };
+        // Insert A into the registry *before* triggering EOF below — the
+        // reader thread is already running (blocked in `read()`, since the
+        // slave side is still held open by `pair.slave` at this point), so
+        // there's no race with its own `sessions.remove(&a_id)`.
+        manager.sessions.lock().unwrap().insert(a_id.clone(), handle);
+
+        // Now close the *only* remaining reference to the slave side
+        // (nothing was ever spawned into it) -- this immediately unblocks
+        // A's reader thread with EOF, kicking off the natural-exit path,
+        // whose `child.wait()` will now sleep for 1.5s inside
+        // `SlowWaitChild`.
+        drop(pair.slave);
+
+        // Give A's reader thread a moment to actually observe the EOF and
+        // enter the natural-exit path (acquiring + releasing the lock to
+        // remove itself) before touching session B.
+        thread::sleep(Duration::from_millis(150));
+
+        let started = Instant::now();
+        manager.write(&b.id, "echo still-alive\n").unwrap();
+        manager.resize(&b.id, 100, 30).unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "session B's write/resize must not block on session A's in-flight \
+             natural-exit cleanup (a 1.5s fake wait()), took {elapsed:?}"
+        );
+
+        manager.kill(&b.id).unwrap();
+        // Let A's fake 1.5s wait() finish before the test ends, so its
+        // background reader thread doesn't outlive the test process.
+        thread::sleep(Duration::from_millis(1600));
     }
 
     #[test]
