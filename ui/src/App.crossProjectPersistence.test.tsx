@@ -20,15 +20,15 @@
 // Same stubbing approach as the other `App.*.test.tsx` files: heavy
 // children stubbed to minimal probes. `Sidebar`'s stub exposes one
 // "new-tab-<projectId>" button per project (`App.requestNewTab.test.tsx`'s
-// pattern); `EnginePicker`'s stub confirms with whatever default engine it
-// was given (`App.newWorkspace.test.tsx`'s pattern); `Workspace`'s stub
-// renders each tab's project/engine/id/label plus a rename trigger, since
-// renaming only exists on that side of the tree (`PaneHeader`'s `onRename`,
-// wired through `Workspace.tsx` -> `App.tsx`'s `renameTab` — the Sidebar has
-// no rename affordance at all).
+// pattern — opening a tab is a single click, instant-default-engine, no
+// `EnginePicker` confirm step); `Workspace`'s stub renders each tab's
+// project/engine/id/label plus a rename trigger, since renaming only exists
+// on that side of the tree (`PaneHeader`'s `onRename`, wired through
+// `Workspace.tsx` -> `App.tsx`'s `renameTab` — the Sidebar has no rename
+// affordance at all).
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { LAYOUT_SETTING_KEY, type Engine, type ProjectInfo, type TabInfo } from "./state/sessions";
+import { LAYOUT_SETTING_KEY, type ProjectInfo, type TabInfo } from "./state/sessions";
 
 const tauriMocks = vi.hoisted(() => ({
   getBriefingMock: vi.fn(),
@@ -66,21 +66,6 @@ vi.mock("./components/Sidebar", () => ({
             {`new-tab-${p.id}`}
           </button>
         ))}
-      </div>
-    );
-  },
-}));
-
-vi.mock("./components/EnginePicker", () => ({
-  default: function EnginePickerStub(props: {
-    project: ProjectInfo;
-    defaultEngine: Engine;
-    onConfirm: (engine: Engine) => void;
-  }) {
-    return (
-      <div data-testid="engine-picker">
-        <span data-testid="picker-project">{props.project.id}</span>
-        <button onClick={() => props.onConfirm(props.defaultEngine)}>confirm-engine</button>
       </div>
     );
   },
@@ -138,7 +123,6 @@ describe("App — session/layout persistence survives a relaunch, across every p
     const first = render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "new-tab-p1" }));
-    fireEvent.click(await screen.findByRole("button", { name: "confirm-engine" }));
     await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(1));
     fireEvent.click(screen.getByRole("button", { name: "rename-p1-claude-sess" }));
     await waitFor(() =>
@@ -146,7 +130,6 @@ describe("App — session/layout persistence survives a relaunch, across every p
     );
 
     fireEvent.click(screen.getByRole("button", { name: "new-tab-p2" }));
-    fireEvent.click(await screen.findByRole("button", { name: "confirm-engine" }));
     await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(2));
     fireEvent.click(screen.getByRole("button", { name: "rename-p2-claude-sess" }));
     await waitFor(() => {

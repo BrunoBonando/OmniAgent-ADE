@@ -335,6 +335,18 @@ export async function rootsRebuild(): Promise<void> {
   await invoke("roots_rebuild");
 }
 
+/** Renames a project's *display* label only (`id`/`project` — what every
+ * session/setting/cwd lookup actually uses — never changes). The general
+ * fix for a project's label defaulting to its folder basename forever
+ * (`src-tauri/src/roots.rs::rename_project`'s own doc has the full story) —
+ * `listProjects()` reflects the new label immediately afterward, so every
+ * pane header for sessions in that project does too. Rejects (surfaced
+ * inline by the caller) for an empty/whitespace-only name or an unknown
+ * project id. */
+export async function renameProject(id: string, newLabel: string): Promise<void> {
+  await invoke("rename_project", { id, newLabel });
+}
+
 /** The map pane's "enrichment queued (N)" degradation badge. */
 export async function enrichQueuePendingCount(): Promise<number> {
   return invoke<number>("enrich_queue_pending_count");

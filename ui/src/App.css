@@ -663,6 +663,24 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
   margin-bottom: 6px;
+  cursor: text;
+}
+
+/* Rename (founder ask): double-click `.project-menu-title` — same
+   dblclick-to-rename gesture/visual treatment as `.pane-header-rename-input`. */
+.project-menu-rename-input {
+  display: block;
+  width: 100%;
+  background: var(--void);
+  border: 1px solid var(--signal-dim);
+  border-radius: 3px;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 4px;
+  margin-bottom: 6px;
+  outline: none;
 }
 
 .project-menu-stale {
@@ -1121,6 +1139,130 @@ code {
 
 .pane-header-btn.pane-header-btn-close:hover {
   color: var(--danger);
+}
+
+.pane-header-btn.pane-header-btn-menu.is-active {
+  background: var(--panel-raised);
+  color: var(--ink);
+}
+
+/* -------------------------------------------------------- pane 3-dot menu
+   Founder ask: "3 dot configuration on the upper right corner of each
+   terminal" — change engine (restart) + terminal theme, one popover. Same
+   utility-popover pattern `.project-menu` already established (transparent
+   click-away backdrop, anchored under the trigger rather than centered). */
+
+.pane-header-menu-anchor {
+  position: relative;
+  display: flex;
+}
+
+.pane-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+}
+
+.pane-menu {
+  position: absolute;
+  right: 0;
+  top: 26px;
+  z-index: 56;
+  width: 240px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  padding: 8px;
+  font-family: var(--mono);
+}
+
+.pane-menu-section-label {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 4px 6px 2px;
+}
+
+.pane-menu-divider {
+  height: 1px;
+  background: var(--line);
+  margin: 6px 2px;
+}
+
+.pane-menu-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pane-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: left;
+}
+
+.pane-menu-row:hover:not(:disabled) {
+  background: var(--panel-raised);
+}
+
+.pane-menu-row:disabled {
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+.pane-menu-row.is-selected {
+  outline: 1px solid var(--signal-dim);
+}
+
+.pane-menu-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.pane-menu-row-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-menu-row-hint {
+  font-size: 10px;
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-menu-theme-swatch {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.pane-menu-check {
+  margin-left: auto;
+  color: var(--signal);
+  flex: 0 0 auto;
 }
 
 .pane-body {

@@ -6,7 +6,6 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "./App.css";
 import Sidebar from "./components/Sidebar";
 import Workspace from "./components/Workspace";
-import EnginePicker from "./components/EnginePicker";
 import CommandPalette from "./components/CommandPalette";
 import FileTree from "./components/FileTree";
 import BrainMap from "./map/BrainMap";
@@ -35,11 +34,13 @@ import {
 import { buildLayoutTree, type LayoutPreset, type PaneTree } from "./state/paneGrid";
 import { importFailureBanner, type ImportBatchResult } from "./state/importState";
 import { ENGINE_LABEL } from "./theme";
+import type { TerminalThemeId } from "./lib/terminalThemes";
 import {
   FILE_TREE_VISIBLE_SETTING_KEY,
   getBriefing,
   ingestionStatus,
   listProjects,
+  renameProject,
   rootsList,
   sessionCreate,
   sessionKill,
@@ -62,9 +63,12 @@ const INGESTION_POLL_MS = 2000;
 function App() {
   const [state, dispatch] = useReducer(sessionsReducer, initialSessionsState);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [pickerProject, setPickerProject] = useState<ProjectInfo | null>(null);
-  const [pickerDefault, setPickerDefault] = useState<Engine>("claude");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // ⌘N (founder ask: "Command + N opens a new workspace") — lifted out of
+  // `Sidebar.tsx` (which still owns its OTHER overlays locally, e.g.
+  // aboutOpen/reviewOpen/importOpen) so the global keydown handler below
+  // can open it, same as ⌘T/⌘K.
+  const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [view, setView] = useState<View>("workspace");
   const restoredRef = useRef(false);
@@ -214,6 +218,7 @@ function App() {
               cwd: info.cwd,
               createdAt: info.created,
               label: t.label,
+              themeId: t.themeId,
               needsAttention: false,
             });
           } catch (err) {
@@ -309,46 +314,16 @@ function App() {
     [state.projects, selectedProjectId],
   );
 
-  // ---- new-tab flow: resolve the default engine, then show the picker ---
-  // Same out-of-order-response guard `useGraphData.ts`'s `fetchOnce`
-  // already established for `map_graph`: a monotonically incrementing ref,
-  // captured at the start of each call, checked before applying the
-  // result. Without it, clicking "+" for project A then quickly for
-  // project B has no protection against A's `Promise.all` settling AFTER
-  // B's — whichever settles last wins the picker state regardless of click
-  // order, so a user who confirms via Enter without reading the modal's
-  // project label could land a live terminal in the wrong project.
-  const requestNewTabIdRef = useRef(0);
-  const requestNewTab = useCallback(async (project: ProjectInfo) => {
-    setSelectedProjectId(project.id);
-    const requestId = ++requestNewTabIdRef.current;
-    let perProject: string | null = null;
-    let global: string | null = null;
-    try {
-      [perProject, global] = await Promise.all([
-        settingsGet(defaultEngineSettingKey(project.id)),
-        settingsGet(GLOBAL_DEFAULT_ENGINE_KEY),
-      ]);
-    } catch (err) {
-      console.error("failed to read engine-default settings, falling back to claude", err);
-    }
-    if (requestId !== requestNewTabIdRef.current) return; // superseded by a newer requestNewTab call
-    const settingsMap: Record<string, string | undefined> = {};
-    if (perProject) settingsMap[defaultEngineSettingKey(project.id)] = perProject;
-    if (global) settingsMap[GLOBAL_DEFAULT_ENGINE_KEY] = global;
-    setPickerDefault(resolveDefaultEngine(project.id, settingsMap));
-    setPickerProject(project);
-  }, []);
-
   // The one place a session actually gets spawned: `engine === "claude"`
   // fetches its briefing first (the zero-config MCP/briefing wiring
   // DESIGN.md 5 requires happens automatically around the engine, never by
   // asking the user to configure anything), then calls `session_create`
-  // with the project's cwd. Shared by both the single-tab ⌘T/"+" flow
-  // (`confirmNewTab` below) and NewWorkspaceModal's bulk-create
-  // (`handleWorkspaceCreated`) so there is exactly one place that knows how
-  // to spin up a session for a project — no second, drifting copy of the
-  // per-engine spawn logic.
+  // with the project's cwd. Shared by the single-tab ⌘T/"+" flow
+  // (`requestNewTab` below), NewWorkspaceModal's bulk-create
+  // (`handleWorkspaceCreated`), and PaneHeader's 3-dot "change engine"
+  // restart (`restartTabWithEngine`) so there is exactly one place that
+  // knows how to spin up a session for a project — no second, drifting copy
+  // of the per-engine spawn logic.
   const createSessionTab = useCallback(async (project: ProjectInfo, engine: Engine): Promise<TabInfo> => {
     const briefing = engine === "claude" ? await getBriefing(project.id) : undefined;
     const cwd = project.path ?? project.id;
@@ -363,15 +338,47 @@ function App() {
     };
   }, []);
 
-  const confirmNewTab = useCallback(
-    async (engine: Engine) => {
-      const project = pickerProject;
-      setPickerProject(null);
-      if (!project) return;
+  // ---- new-tab flow: resolve the default engine, open it immediately ----
+  // Founder ask (verbatim): "When a new terminal is created, it should
+  // automatically open the default one" — no blocking picker. Resolves the
+  // exact same per-project-override-else-global-else-claude chain
+  // `EnginePicker`'s old `defaultEngine` resolution used
+  // (`resolveDefaultEngine`), then spawns the session directly. Every
+  // "new tab in project X" entry point (⌘T, the sidebar's per-project "+",
+  // the pane header's split "+", the map's "Open terminal here") already
+  // funnels through this one function via `onNewTabInProject`/
+  // `onOpenTerminal`, so none of them need their own wiring.
+  //
+  // No out-of-order-response guard needed here (unlike the old
+  // picker-based flow, which had one — see git history / `App.
+  // requestNewTab.test.tsx` for the bug it fixed): that guard protected a
+  // single shared "which project is the picker showing" UI slot from two
+  // overlapping calls resolving out of order. There's no such shared slot
+  // anymore — each call resolves its own engine and creates its own
+  // session independently, so two concurrent calls for different projects
+  // can never clobber each other regardless of which `settingsGet` settles
+  // first.
+  const requestNewTab = useCallback(
+    async (project: ProjectInfo) => {
+      setSelectedProjectId(project.id);
+      let perProject: string | null = null;
+      let global: string | null = null;
+      try {
+        [perProject, global] = await Promise.all([
+          settingsGet(defaultEngineSettingKey(project.id)),
+          settingsGet(GLOBAL_DEFAULT_ENGINE_KEY),
+        ]);
+      } catch (err) {
+        console.error("failed to read engine-default settings, falling back to claude", err);
+      }
+      const settingsMap: Record<string, string | undefined> = {};
+      if (perProject) settingsMap[defaultEngineSettingKey(project.id)] = perProject;
+      if (global) settingsMap[GLOBAL_DEFAULT_ENGINE_KEY] = global;
+      const engine = resolveDefaultEngine(project.id, settingsMap);
+
       try {
         const tab = await createSessionTab(project, engine);
         dispatch({ type: "tab/opened", tab });
-        void settingsSet(defaultEngineSettingKey(project.id), engine);
         // Cross-view integration point (Task 6.2): the map's "Open terminal
         // here" action calls `requestNewTab` too (via `onOpenTerminal`
         // below), so landing back in the workspace here covers both
@@ -382,7 +389,59 @@ function App() {
         setErrorBanner(`Couldn't start ${engine} in ${project.label}: ${err}`);
       }
     },
-    [pickerProject, createSessionTab],
+    [createSessionTab],
+  );
+
+  // ---- PaneHeader's 3-dot "Change engine" -------------------------------
+  // Kills the pane's live session and spawns a brand-new one with a
+  // different engine, same project/cwd, same pane/slot — DESIGN's own
+  // constraint (you can't hot-swap a live PTY's engine) plus the
+  // constraint from this task: "changing engine = kill+respawn using the
+  // exact same existing zero-config spawn logic, nothing new invented
+  // there" (`createSessionTab`, unchanged). Carries the pane's existing
+  // `label` (a manual rename OR a previously auto-titled first prompt) and
+  // `themeId` (its terminal-theme override) forward onto the new session —
+  // both describe the PANE, not the engine underneath it, so a restart
+  // must not reset either. `tab/engineRestarted` (sessions.ts) swaps the
+  // `TabInfo` in place at the same array index, and `paneGrid.ts`'s
+  // `syncPaneTree` 1-for-1-swap case keeps the actual grid position intact
+  // — see both of those doc comments for why this is a dedicated action
+  // rather than a close-then-open.
+  const restartTabWithEngine = useCallback(
+    async (tab: TabInfo, engine: Engine) => {
+      const project = state.projects.find((p) => p.id === tab.project);
+      if (!project) return;
+      try {
+        await sessionKill(tab.id);
+      } catch (err) {
+        console.error(`failed to kill session ${tab.id} before restarting with ${engine} (continuing anyway)`, err);
+      }
+      try {
+        const spawned = await createSessionTab(project, engine);
+        const restarted: TabInfo = { ...spawned, label: tab.label, themeId: tab.themeId };
+        dispatch({ type: "tab/engineRestarted", oldId: tab.id, tab: restarted });
+      } catch (err) {
+        console.error(`failed to restart ${tab.id} with ${engine}`, err);
+        setErrorBanner(`Couldn't restart with ${ENGINE_LABEL[engine]}: ${err}`);
+      }
+    },
+    [state.projects, createSessionTab],
+  );
+
+  // PaneHeader's 3-dot "Terminal theme" picker — applied and persisted
+  // immediately (the layout-persist effect below fires on every
+  // `state.tabs` change, which this dispatch causes).
+  const changeTabTheme = useCallback(
+    (id: string, themeId: TerminalThemeId) => dispatch({ type: "tab/themeChanged", id, themeId }),
+    [],
+  );
+
+  // Auto-title from the first prompt (`Terminal.tsx`'s `onFirstInput` ->
+  // here). The reducer's own guard (never overwrite a tab that already has
+  // a label) means this callback doesn't need to check anything itself.
+  const autoTitleTab = useCallback(
+    (id: string, line: string) => dispatch({ type: "tab/autoTitled", id, label: line }),
+    [],
   );
 
   // ---- NewWorkspaceModal's bulk-create (Sidebar's "+" -> New Workspace) -
@@ -466,6 +525,29 @@ function App() {
     [reloadProjects],
   );
 
+  // `ProjectMenu`'s rename (founder ask, verbatim across two messages: the
+  // name "OmniAgent-ADE" — this very repo's real folder name — "must not
+  // appear in the terminal title"; investigation found that's a project's
+  // real, currently-unchangeable display label, not a hardcoded string —
+  // see `src-tauri/src/roots.rs::rename_project`'s own doc for the full
+  // root-cause story). Reloads `state.projects` on success so every pane
+  // header for sessions in that project reflects the new label immediately
+  // — `list_projects` (via `reloadProjects`) is the single source every one
+  // of those reads from (`Workspace.tsx`'s `projectLabel` lookup,
+  // `selectedProject?.label`, ...), so nothing else needs to change.
+  const handleRenameProject = useCallback(
+    async (project: ProjectInfo, newLabel: string) => {
+      try {
+        await renameProject(project.id, newLabel);
+        await reloadProjects();
+      } catch (err) {
+        console.error(`rename_project(${project.id}) failed`, err);
+        setErrorBanner(`Couldn't rename "${project.label}": ${err}`);
+      }
+    },
+    [reloadProjects],
+  );
+
   // Activating a tab is now also "the grid you're looking at should show
   // it" — the pane grid (Workspace.tsx) only ever displays the *selected*
   // project's sessions as panes, unlike the old single-tab-visible TabBar
@@ -536,8 +618,14 @@ function App() {
     dispatch({ type: "tab/closed", id });
   }, []);
 
-  // ---- ⌘T new tab / ⌘K palette. ⌘W is deliberately left alone — see the
-  // module comment at the bottom of this file for why. -------------------
+  // ---- ⌘T new tab / ⌘K palette / ⌘N new workspace. ⌘W is deliberately
+  // left alone — see the module comment at the bottom of this file for
+  // why. No existing binding (native menu or app-level) claimed ⌘N before
+  // this — `lib.rs`'s `.menu(tauri::menu::Menu::default)` only supplies the
+  // standard macOS Quit/Hide/Edit/Window items, no File/New — so it's wired
+  // here exactly like ⌘T/⌘K, the established place app-level shortcuts that
+  // need live UI state (as opposed to a static native-menu event) already
+  // live. -------------------------------------------------------------
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (!e.metaKey) return;
@@ -547,6 +635,9 @@ function App() {
       } else if (e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPaletteOpen((open) => !open);
+      } else if (e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        setNewWorkspaceOpen(true);
       }
     }
     window.addEventListener("keydown", onKeyDown);
@@ -571,6 +662,10 @@ function App() {
           onNewTabInProject={(p) => void requestNewTab(p)}
           onActivateTab={activateTab}
           onWorkspaceCreated={(p, engines, layout) => void handleWorkspaceCreated(p, engines, layout)}
+          newWorkspaceOpen={newWorkspaceOpen}
+          onOpenNewWorkspace={() => setNewWorkspaceOpen(true)}
+          onCloseNewWorkspace={() => setNewWorkspaceOpen(false)}
+          onRenameProject={(p, label) => void handleRenameProject(p, label)}
           onImportCompleted={handleImportCompleted}
           ingestion={ingestion}
           view={view}
@@ -589,6 +684,9 @@ function App() {
           onCloseTab={(id) => void closeTab(id)}
           onNewTabInProject={(p) => void requestNewTab(p)}
           onRenameTab={renameTab}
+          onChangeEngine={(tab, engine) => void restartTabWithEngine(tab, engine)}
+          onChangeTheme={changeTabTheme}
+          onFirstInput={autoTitleTab}
           hidden={view !== "workspace"}
           initialLayouts={pendingLayoutsRef.current}
         />
@@ -613,15 +711,6 @@ function App() {
           onOpenTerminal={(p) => void requestNewTab(p)}
           onImportCompleted={handleImportCompleted}
           onDismiss={() => setFirstRunDismissed(true)}
-        />
-      )}
-
-      {pickerProject && (
-        <EnginePicker
-          project={pickerProject}
-          defaultEngine={pickerDefault}
-          onConfirm={(engine) => void confirmNewTab(engine)}
-          onCancel={() => setPickerProject(null)}
         />
       )}
 

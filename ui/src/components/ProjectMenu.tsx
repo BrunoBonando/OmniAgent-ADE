@@ -5,6 +5,18 @@
 // a utility, not a modal moment, so its backdrop is transparent (click-away
 // to dismiss) rather than the dimmed/blurred `.overlay-backdrop` used for
 // AboutPanel/ReviewPanel/EnginePicker.
+//
+// Rename (founder ask: closing the root cause of "OmniAgent-ADE" — a
+// project's real folder-basename-derived label — showing up in every pane
+// header, with no way to change it): double-click the title, same
+// dblclick-to-rename gesture `PaneHeader.tsx` already established for tabs,
+// rather than inventing a second interaction for the same idea. `onRename`
+// is a lifted callback (`Sidebar.tsx` -> `App.tsx`'s `handleRenameProject`,
+// which calls the real `rename_project` Tauri command and reloads the
+// project list) — this component owns only the inline edit UI/validation,
+// not the Tauri call itself, matching this file's existing
+// onTogglePause/onReingest split.
+import { useState } from "react";
 import type { ProjectInfo } from "../state/sessions";
 import type { ProjectStaleness } from "../lib/tauri";
 
@@ -25,6 +37,11 @@ interface ProjectMenuProps {
   busy: boolean;
   onTogglePause: () => void;
   onReingest: () => void;
+  /** Renames the project's *display* label — `Sidebar.tsx`/`App.tsx` own
+   * the actual `rename_project` Tauri call + reloading `state.projects`
+   * afterward (see this file's module doc). Called only with a non-empty,
+   * actually-changed, trimmed value. */
+  onRename: (newLabel: string) => void;
   onClose: () => void;
 }
 
@@ -35,13 +52,53 @@ export default function ProjectMenu({
   busy,
   onTogglePause,
   onReingest,
+  onRename,
   onClose,
 }: ProjectMenuProps) {
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  function startRename() {
+    setDraft(project.label);
+    setRenaming(true);
+  }
+
+  function commitRename() {
+    const trimmed = draft.trim();
+    setRenaming(false);
+    if (trimmed.length > 0 && trimmed !== project.label) {
+      onRename(trimmed);
+      onClose();
+    }
+  }
+
   return (
     <>
       <div className="project-menu-backdrop" onMouseDown={onClose} />
       <div className="project-menu" role="menu" aria-label={`${project.label} options`} onMouseDown={(e) => e.stopPropagation()}>
-        <div className="project-menu-title">{project.label}</div>
+        {renaming ? (
+          <input
+            className="project-menu-rename-input"
+            value={draft}
+            autoFocus
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitRename();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setRenaming(false);
+              }
+            }}
+          />
+        ) : (
+          <div className="project-menu-title" onDoubleClick={startRename} title="Double-click to rename">
+            {project.label}
+          </div>
+        )}
 
         {staleness?.stale && (
           <div className="project-menu-stale">

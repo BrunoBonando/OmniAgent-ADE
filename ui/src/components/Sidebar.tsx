@@ -117,6 +117,19 @@ interface SidebarProps {
    * preset chosen for arranging their sessions — `App.tsx` owns the actual
    * bulk `session_create` orchestration and closes the modal. */
   onWorkspaceCreated: (project: ProjectInfo, engines: Engine[], layout: LayoutPreset) => void;
+  /** Whether the New Workspace modal is open — lifted to `App.tsx` (unlike
+   * this component's other overlays, e.g. `aboutOpen`/`reviewOpen`/
+   * `importOpen` below, which stay local) so ⌘N (founder ask: "Command + N
+   * opens a new workspace") can open it from the global keydown handler in
+   * `App.tsx`, the same place ⌘T/⌘K already live. */
+  newWorkspaceOpen: boolean;
+  onOpenNewWorkspace: () => void;
+  onCloseNewWorkspace: () => void;
+  /** `ProjectMenu`'s rename (founder ask: closing the root cause of a
+   * project's label defaulting to its folder basename forever) —
+   * `App.tsx` owns the actual `rename_project` Tauri call + reloading
+   * `state.projects` afterward (see `ProjectMenu.tsx`'s own module doc). */
+  onRenameProject: (project: ProjectInfo, newLabel: string) => void;
   /** The "Import projects" trigger's finished batch — `App.tsx`'s
    * `handleImportCompleted` reloads the project list and shows an
    * error-banner summary for any failures; this component just closes its
@@ -156,6 +169,10 @@ export default function Sidebar({
   onNewTabInProject,
   onActivateTab,
   onWorkspaceCreated,
+  newWorkspaceOpen,
+  onOpenNewWorkspace,
+  onCloseNewWorkspace,
+  onRenameProject,
   onImportCompleted,
   ingestion,
   view = "workspace",
@@ -166,7 +183,6 @@ export default function Sidebar({
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
-  const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const grouped = tabsByProject(tabs);
   const sessionCountByProject = new Map(grouped.map((g) => [g.project, g.tabs.length]));
@@ -254,7 +270,7 @@ export default function Sidebar({
           )}
           <button
             className="sidebar-add-project-trigger"
-            onClick={() => setNewWorkspaceOpen(true)}
+            onClick={onOpenNewWorkspace}
             aria-label="New workspace"
             title="New workspace"
           >
@@ -329,7 +345,7 @@ export default function Sidebar({
               Add a project folder to open your first terminal — ingestion happens quietly in the
               background.
             </p>
-            <button className="sidebar-empty-cta" onClick={() => setNewWorkspaceOpen(true)}>
+            <button className="sidebar-empty-cta" onClick={onOpenNewWorkspace}>
               + New Workspace
             </button>
           </div>
@@ -399,6 +415,7 @@ export default function Sidebar({
                       busy={menuBusy}
                       onTogglePause={() => void togglePause(project)}
                       onReingest={() => void reingest(project)}
+                      onRename={(newLabel) => onRenameProject(project, newLabel)}
                       onClose={() => setMenuProjectId(null)}
                     />
                   )}
@@ -461,10 +478,10 @@ export default function Sidebar({
       {newWorkspaceOpen && (
         <NewWorkspaceModal
           onCreate={(project, engines, layout) => {
-            setNewWorkspaceOpen(false);
+            onCloseNewWorkspace();
             onWorkspaceCreated(project, engines, layout);
           }}
-          onClose={() => setNewWorkspaceOpen(false)}
+          onClose={onCloseNewWorkspace}
         />
       )}
       {importOpen && (

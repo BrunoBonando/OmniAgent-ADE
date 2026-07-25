@@ -1,20 +1,23 @@
-// Regression coverage for bug 2: `App.tsx`'s `requestNewTab` reads
-// per-project/global default-engine settings via `Promise.all`, then calls
-// `setPickerDefault`/`setPickerProject` with no protection against two
-// overlapping calls (e.g. clicking "+" for project A then quickly for
-// project B) resolving out of order — whichever `Promise.all` settles LAST
-// wins the final picker state regardless of *click* order.
-// `useGraphData.ts`'s `map_graph` fetch already guards this exact bug class
-// with a monotonic request id (`requestIdRef`, checked before applying a
-// result); `requestNewTab` needs the same guard.
+// Regression coverage for the instant-default-engine new-tab flow (founder
+// ask, verbatim: "When a new terminal is created, it should automatically
+// open the default one"). `App.tsx`'s `requestNewTab` resolves the
+// per-project/global default-engine settings via `Promise.all`, then
+// creates the session directly — no `EnginePicker` modal in between
+// anymore.
 //
-// Same stubbing approach as `App.bootRestore.test.tsx`: heavy children
-// stubbed to `null`/minimal probes, `Sidebar` reduced to one "new tab"
-// button per project and a readout of the current tabs, `EnginePicker`
-// reduced to a readout of which project/engine it's showing.
+// Before that change, this file guarded against a UI-only bug: two
+// overlapping `requestNewTab` calls (different projects) resolving their
+// `settingsGet` calls out of order could clobber a single shared "which
+// project is the picker showing" state slot. That shared slot no longer
+// exists — each call now creates its own session directly, with no
+// intermediate UI state to race over — so this file instead locks in the
+// simpler invariant the new flow actually needs: two concurrent new-tab
+// requests for different projects each land with the CORRECT,
+// independently-resolved engine for THEIR OWN project, regardless of which
+// project's `settingsGet` promises happen to resolve first.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { LAYOUT_SETTING_KEY, type ProjectInfo } from "./state/sessions";
+import { LAYOUT_SETTING_KEY, type ProjectInfo, type TabInfo } from "./state/sessions";
 import { AUTH_GATE_RESOLVED_SETTING_KEY } from "./onboarding/authGateState";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -58,18 +61,19 @@ vi.mock("./components/Sidebar", () => ({
   },
 }));
 
-vi.mock("./components/EnginePicker", () => ({
-  default: function EnginePickerStub(props: { project: ProjectInfo; defaultEngine: string }) {
+vi.mock("./components/Workspace", () => ({
+  default: function WorkspaceStub(props: { tabs: TabInfo[] }) {
     return (
-      <div data-testid="engine-picker">
-        <span data-testid="picker-project">{props.project.id}</span>
-        <span data-testid="picker-default">{props.defaultEngine}</span>
-      </div>
+      <ul>
+        {props.tabs.map((t) => (
+          <li key={t.id} data-testid="tab-info">
+            {`${t.project}:${t.engine}`}
+          </li>
+        ))}
+      </ul>
     );
   },
 }));
-
-vi.mock("./components/Workspace", () => ({ default: () => null }));
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({ default: () => null }));
@@ -78,7 +82,7 @@ vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
 
 const { default: App } = await import("./App");
 
-describe("App — requestNewTab out-of-order settingsGet resolution", () => {
+describe("App — instant-default-engine new tab", () => {
   beforeEach(() => {
     for (const mock of Object.values(tauriMocks)) mock.mockReset();
     tauriMocks.ingestionStatusMock.mockResolvedValue({
@@ -92,17 +96,59 @@ describe("App — requestNewTab out-of-order settingsGet resolution", () => {
     tauriMocks.getBriefingMock.mockResolvedValue(undefined);
   });
 
-  it("applies the most-recently-initiated request's result even when an earlier request's settingsGet resolves later", async () => {
+  it("opens the session immediately with no blocking modal in between", async () => {
+    const a: ProjectInfo = { id: "A", label: "Project A", path: "/tmp/a" };
+    tauriMocks.listProjectsMock.mockResolvedValue([a]);
+    tauriMocks.settingsGetMock.mockResolvedValue(null); // no overrides -> falls back to claude
+    tauriMocks.sessionCreateMock.mockResolvedValue({
+      id: "A-sess",
+      project: "A",
+      engine: "claude",
+      cwd: "/tmp/a",
+      created: 0,
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "new-tab-A" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("A:claude")).toBeInTheDocument();
+    });
+  });
+
+  it("resolves the per-project override over the global default, same chain EnginePicker's old default used", async () => {
+    const a: ProjectInfo = { id: "A", label: "Project A", path: "/tmp/a" };
+    tauriMocks.listProjectsMock.mockResolvedValue([a]);
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === LAYOUT_SETTING_KEY || key === "file_tree_visible" || key === AUTH_GATE_RESOLVED_SETTING_KEY) {
+        return Promise.resolve(null);
+      }
+      if (key === "default_engine:A") return Promise.resolve("codex");
+      if (key === "default_engine:__global__") return Promise.resolve("shell");
+      return Promise.resolve(null);
+    });
+    tauriMocks.sessionCreateMock.mockImplementation((project: string, engine: string, cwd: string) =>
+      Promise.resolve({ id: `${project}-sess`, project, engine, cwd, created: 0 }),
+    );
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "new-tab-A" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("A:codex")).toBeInTheDocument();
+    });
+  });
+
+  it("each concurrent request lands its OWN project's correctly-resolved engine, regardless of settingsGet resolution order", async () => {
     const a: ProjectInfo = { id: "A", label: "Project A", path: "/tmp/a" };
     const b: ProjectInfo = { id: "B", label: "Project B", path: "/tmp/b" };
     tauriMocks.listProjectsMock.mockResolvedValue([a, b]);
+    tauriMocks.sessionCreateMock.mockImplementation((project: string, engine: string, cwd: string) =>
+      Promise.resolve({ id: `${project}-sess`, project, engine, cwd, created: 0 }),
+    );
 
     const calls: Array<(v: string | null) => void> = [];
     tauriMocks.settingsGetMock.mockImplementation((key: string) => {
-      // Boot-effect settings reads (layout restore, file-tree visibility,
-      // the auth-gate check) resolve immediately — only the two
-      // per-`requestNewTab`-call reads (per-project default engine, global
-      // default engine) are deferred under the test's control below.
       if (key === LAYOUT_SETTING_KEY || key === "file_tree_visible" || key === AUTH_GATE_RESOLVED_SETTING_KEY) {
         return Promise.resolve(null);
       }
@@ -112,19 +158,16 @@ describe("App — requestNewTab out-of-order settingsGet resolution", () => {
     });
 
     render(<App />);
-
     const buttonA = await screen.findByRole("button", { name: "new-tab-A" });
     const buttonB = await screen.findByRole("button", { name: "new-tab-B" });
 
     // Click order: A initiated first, B initiated second (while A's own
-    // settingsGet calls are still pending) -- the user's most recent
-    // action is "open a tab in B".
+    // settingsGet calls are still pending).
     fireEvent.click(buttonA);
     fireEvent.click(buttonB);
 
     // Each requestNewTab call fires settingsGet twice (per-project key,
-    // then the global key) via Promise.all -- both calls happen
-    // synchronously before either yields, so by now all 4 are pending in
+    // then the global key) via Promise.all — by now all 4 are pending in
     // click order: [A-perProject, A-global, B-perProject, B-global].
     expect(calls.length).toBe(4);
 
@@ -133,17 +176,18 @@ describe("App — requestNewTab out-of-order settingsGet resolution", () => {
     calls[3](null);
 
     await waitFor(() => {
-      expect(screen.getByTestId("picker-project").textContent).toBe("B");
+      expect(screen.getByText("B:codex")).toBeInTheDocument();
     });
-    expect(screen.getByTestId("picker-default").textContent).toBe("codex");
 
-    // A (the earlier-initiated call) resolves LAST -- it must not clobber
-    // B's already-applied, more-recent result.
+    // A (the earlier-initiated call) resolves LAST — must land its own
+    // ("shell") engine and must not disturb B's already-created tab (no
+    // shared "picker" state left to clobber).
     calls[0]("shell");
     calls[1](null);
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(screen.getByTestId("picker-project").textContent).toBe("B");
-    expect(screen.getByTestId("picker-default").textContent).toBe("codex");
+    await waitFor(() => {
+      expect(screen.getByText("A:shell")).toBeInTheDocument();
+    });
+    expect(screen.getByText("B:codex")).toBeInTheDocument();
   });
 });

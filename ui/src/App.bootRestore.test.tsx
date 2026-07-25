@@ -9,11 +9,12 @@
 //
 // Heavy children (`Workspace`, `CommandPalette`, `FileTree`, `BrainMap`,
 // `FirstRun`) are stubbed to `null` — this test is about `App.tsx`'s own
-// state sequencing, not their rendering. `Sidebar` and `EnginePicker` are
-// stubbed to minimal probes that expose exactly the props/callbacks this
-// test needs to drive and observe: the tab list, the active tab id, and the
-// per-project "new tab" trigger that starts the same `requestNewTab` ->
-// `EnginePicker` -> `confirmNewTab` flow the real Sidebar kicks off.
+// state sequencing, not their rendering. `Sidebar` is stubbed to a minimal
+// probe that exposes exactly the props/callbacks this test needs to drive
+// and observe: the tab list, the active tab id, and the per-project "new
+// tab" trigger that starts the same instant-default-engine `requestNewTab`
+// flow the real Sidebar kicks off — opening a tab is now a single click,
+// no `EnginePicker` confirm step in between.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LAYOUT_SETTING_KEY, type ProjectInfo } from "./state/sessions";
@@ -67,21 +68,6 @@ vi.mock("./components/Sidebar", () => ({
             {`new-tab-${p.id}`}
           </button>
         ))}
-      </div>
-    );
-  },
-}));
-
-vi.mock("./components/EnginePicker", () => ({
-  default: function EnginePickerStub(props: {
-    project: ProjectInfo;
-    defaultEngine: string;
-    onConfirm: (engine: string) => void;
-  }) {
-    return (
-      <div data-testid="engine-picker">
-        <span data-testid="picker-project">{props.project.id}</span>
-        <button onClick={() => props.onConfirm(props.defaultEngine)}>confirm</button>
       </div>
     );
   },
@@ -153,11 +139,10 @@ describe("App — boot-time layout restore vs. a tab opened mid-restore", () => 
     // (our still-pending `restorePromise`). While it's stuck there, the
     // user opens a brand-new tab in a different project — exactly the
     // Sidebar "+ Add Project"/new-tab affordance the bug report says stays
-    // interactive during the whole restore window.
+    // interactive during the whole restore window. Opening it is now a
+    // single click (instant-default-engine, no EnginePicker confirm step).
     const liveButton = await screen.findByRole("button", { name: "new-tab-live" });
     fireEvent.click(liveButton);
-    const confirmButton = await screen.findByRole("button", { name: "confirm" });
-    fireEvent.click(confirmButton);
 
     await waitFor(() => {
       const ids = screen.getAllByTestId("tab").map((el) => el.textContent);
