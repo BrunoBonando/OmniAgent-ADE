@@ -17,6 +17,7 @@
 //! the model has no way to go read the real project files itself.
 
 use anyhow::Result;
+use brain_core::redact::redact;
 use brain_core::{now_ts, Edge, EdgeKind, Memory, Node, NodeKind, Origin, QueueJob, Store};
 use std::path::Path;
 use std::process::Command;
@@ -399,6 +400,12 @@ fn build_prompt(store: &Store, job: &QueueJob) -> Result<Option<(PromptTarget, S
 /// Builds the `session_summary` prompt body: the project's existing summary
 /// (if any, for a little context), the diff stat, and the redacted
 /// transcript tail — nothing else (Task 7.1's exact payload fields).
+///
+/// `git_diff`/`transcript_tail` are already expected to have been redacted
+/// once upstream (at session-end capture time), but both are re-redacted
+/// here via [`redact`] as defense in depth before they're folded into the
+/// prompt sent to the external `claude` CLI — this is the actual
+/// enforcement of that policy, not just a comment claiming it happens.
 fn session_summary_context(store: &Store, payload: &SessionSummaryPayload) -> String {
     let project_summary = store
         .get_node(&payload.project)
@@ -412,19 +419,21 @@ fn session_summary_context(store: &Store, payload: &SessionSummaryPayload) -> St
         out.push_str(&format!("Project summary: {}\n", project_summary.trim()));
     }
 
+    let git_diff = redact(&payload.git_diff);
     out.push_str("\nGit diff --stat (uncommitted changes at session end):\n");
-    if payload.git_diff.trim().is_empty() {
+    if git_diff.trim().is_empty() {
         out.push_str("(no uncommitted changes)\n");
     } else {
-        out.push_str(payload.git_diff.trim());
+        out.push_str(git_diff.trim());
         out.push('\n');
     }
 
+    let transcript_tail = redact(&payload.transcript_tail);
     out.push_str("\nTranscript excerpt (tail of the session, redacted):\n");
-    if payload.transcript_tail.trim().is_empty() {
+    if transcript_tail.trim().is_empty() {
         out.push_str("(empty transcript)\n");
     } else {
-        out.push_str(payload.transcript_tail.trim());
+        out.push_str(transcript_tail.trim());
         out.push('\n');
     }
 
@@ -797,6 +806,73 @@ mod tests {
     }
 
     const WELL_FORMED_ANSWER: &str = "TITLE: Fix auth token refresh\n\nUpdated src/auth.ts to refresh the token before it expires and added a regression test.";
+
+    /// Test-only `EnrichEngine` that records every prompt it's given (Bug 3
+    /// needs to inspect the actual prompt TEXT sent to the engine — the
+    /// existing `FakeEngine` only returns canned answers, it doesn't expose
+    /// what it was called with).
+    struct CapturingEngine {
+        answer: String,
+        prompts: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl CapturingEngine {
+        fn new(answer: &str) -> Self {
+            CapturingEngine {
+                answer: answer.to_string(),
+                prompts: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl EnrichEngine for CapturingEngine {
+        fn run(&self, prompt: &str) -> Result<String, EngineError> {
+            self.prompts.borrow_mut().push(prompt.to_string());
+            Ok(self.answer.clone())
+        }
+    }
+
+    /// Bug 3: the module doc comment claims session_summary prompts are
+    /// "re-redacted here as defense in depth", but `session_summary_context`
+    /// never actually called `brain_core::redact::redact` on `git_diff`/
+    /// `transcript_tail` — a secret-shaped string in either field would go
+    /// straight into the prompt sent to the real `claude` CLI. Proves the
+    /// fix by inspecting the ACTUAL prompt text via `CapturingEngine`,
+    /// not just the DB/note output (which wouldn't show what was sent).
+    #[test]
+    fn session_summary_prompt_redacts_secrets_in_git_diff_and_transcript_tail() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.upsert_node(&project_node("p1", dir.path())).unwrap();
+
+        let payload = serde_json::json!({
+            "project": "p1",
+            "session_id": "sess-secret-1",
+            "transcript_path": "/tmp/transcripts/sess-secret-1.log",
+            "transcript_tail": "$ export API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwx\nok\n",
+            "git_diff": " src/auth.ts | 4 ++--\n+  const password = \"hunter2hunter2\";\n 1 file changed",
+        })
+        .to_string();
+        store.enqueue_job("session_summary", &payload).unwrap();
+
+        let engine = CapturingEngine::new(WELL_FORMED_ANSWER);
+        let done = drain_queue(&store, dir.path(), &engine).unwrap();
+        assert_eq!(done, 1);
+
+        let prompts = engine.prompts.borrow();
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        let prompt = &prompts[0];
+
+        assert!(
+            !prompt.contains("sk-ant-api03-abcdefghijklmnopqrstuvwx"),
+            "transcript_tail secret leaked into the prompt: {prompt}"
+        );
+        assert!(
+            !prompt.contains("hunter2hunter2"),
+            "git_diff secret leaked into the prompt: {prompt}"
+        );
+        assert!(prompt.contains("[redacted]"), "{prompt}");
+    }
 
     #[test]
     fn session_summary_with_malformed_payload_is_left_pending_not_consumed() {
