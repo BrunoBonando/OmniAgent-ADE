@@ -78,14 +78,17 @@ import {
 import {
   accentForEntry,
   clampFileTreeWidth,
+  excludeSelectedDescendants,
   FILE_TREE_DEFAULT_WIDTH,
   flattenVisibleEntries,
   hasCrossedDragThreshold,
   iconKindForEntry,
   isExpanded,
   isValidDropTarget,
+  migratePathKeys,
   nextDefaultCreateName,
   parentDirOf,
+  prunePathKeys,
   resolveCreateTargetDir,
   resolveDragPayload,
   resolveRowDoubleClick,
@@ -447,17 +450,31 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
     const targets = selected.size > 1 && selected.has(target.path) ? Array.from(selected) : [target.path];
     const parents = new Set(targets.map(parentDirOf));
     let lastError: string | null = null;
+    // Bug 5: track which deletions actually succeeded (mirrors commitDrag's
+    // own `movedPaths` pattern below) — a partial failure must only clear
+    // the successfully-deleted paths from `selected`, leaving any that
+    // failed still selected so the user can see what still needs attention.
+    const deletedPaths: string[] = [];
     for (const p of targets) {
       try {
         await deleteToTrash(project.path, p);
+        deletedPaths.push(p);
       } catch (err) {
         lastError = String(err);
       }
     }
+    if (deletedPaths.length > 0) {
+      // Bug 3: prune the deleted paths' (and their descendants') expanded/
+      // children cache entries — otherwise a later create/rename landing on
+      // the exact same path would inherit the deleted folder's stale cache.
+      const pruned = prunePathKeys(deletedPaths, expanded, children);
+      setExpanded(pruned.expanded);
+      setChildren(pruned.children);
+    }
     for (const dir of parents) refreshDir(dir);
     setSelected((prev) => {
       const next = new Set(prev);
-      for (const p of targets) next.delete(p);
+      for (const p of deletedPaths) next.delete(p);
       return next;
     });
     if (lastError) setActionMessage(`Couldn't move to Trash: ${lastError}`);
@@ -488,6 +505,13 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
     if (draft.length === 0 || draft === currentName) return; // Finder: no-op, keeps the old name
     try {
       const newPath = await renamePath(project.path, path, draft);
+      // Bug 3: the `expanded`/`children` caches are keyed by absolute path —
+      // migrate this item's (and any descendant's) entries to the new key
+      // so a renamed, previously-expanded folder doesn't silently render
+      // collapsed under a path nothing looks up anymore.
+      const migrated = migratePathKeys(path, newPath, expanded, children);
+      setExpanded(migrated.expanded);
+      setChildren(migrated.children);
       refreshDir(parentDirOf(path));
       setSelected(new Set([newPath]));
       setAnchor(newPath);

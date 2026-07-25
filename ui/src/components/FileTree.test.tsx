@@ -364,6 +364,27 @@ describe("FileTree", () => {
     expect(await screen.findByText(/permission denied/i)).toBeInTheDocument();
   });
 
+  // ------------------------------- Bug 5: partial-failure selection cleanup
+  it("Move to Trash on a multi-selection only deselects the items that actually succeeded, leaving the failed one selected", async () => {
+    deleteToTrashMock.mockImplementation((_projectPath: string, path: string) =>
+      path === "/repo/demo/notes.md" ? Promise.reject(new Error("permission denied")) : Promise.resolve(undefined),
+    );
+    setup();
+    await screen.findByText("notes.md");
+    fireEvent.click(screen.getByText("main.py"));
+    fireEvent.click(screen.getByText("notes.md"), { metaKey: true });
+    fireEvent.contextMenu(screen.getByText("main.py"));
+    fireEvent.click(screen.getByRole("menuitem", { name: /move 2 items to trash/i }));
+
+    await waitFor(() => expect(deleteToTrashMock).toHaveBeenCalledTimes(2));
+    await screen.findByText(/permission denied/i);
+
+    // main.py's delete succeeded -> no longer selected.
+    expect(screen.getByText("main.py").closest(".file-tree-row")).not.toHaveClass("is-selected");
+    // notes.md's delete FAILED -> stays selected so the user can see what still needs attention.
+    expect(screen.getByText("notes.md").closest(".file-tree-row")).toHaveClass("is-selected");
+  });
+
   it("context menu Copy Path writes the path to the clipboard", async () => {
     setup();
     await screen.findByText("main.py");
@@ -436,6 +457,80 @@ describe("FileTree", () => {
     fireEvent.change(input, { target: { value: "notes.md" } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(await screen.findByText(/already exists/i)).toBeInTheDocument();
+  });
+
+  // --------------------------- Bug 3: expanded/children cache sync on rename/move/delete
+  it("renaming an expanded folder keeps it expanded and shows its cached children at the new path", async () => {
+    listDirMock.mockImplementation((path: string) => Promise.resolve(path === "/repo/demo" ? rootEntries() : childEntries()));
+    renamePathMock.mockResolvedValue("/repo/demo/lib");
+    setup();
+    await screen.findByText("src");
+    fireEvent.doubleClick(screen.getByText("src")); // expand — caches util.ts under /repo/demo/src
+    await screen.findByText("util.ts");
+
+    // The parent (root) listing gets refetched after the rename and now shows "lib".
+    listDirMock.mockResolvedValueOnce([
+      { name: "lib", path: "/repo/demo/lib", is_dir: true },
+      { name: "main.py", path: "/repo/demo/main.py", is_dir: false },
+      { name: "notes.md", path: "/repo/demo/notes.md", is_dir: false },
+    ]);
+
+    fireEvent.contextMenu(screen.getByText("src"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = screen.getByDisplayValue("src");
+    fireEvent.change(input, { target: { value: "lib" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    // Renders under its new name, STILL expanded, showing the cached child
+    // immediately — not collapsed just because `expanded` was keyed by the
+    // old path, and not re-fetched (the cache carried forward under the new key).
+    expect(await screen.findByText("lib")).toBeInTheDocument();
+    expect(screen.getByText("util.ts")).toBeInTheDocument();
+    expect(screen.queryByText("src")).not.toBeInTheDocument();
+    expect(listDirMock).not.toHaveBeenCalledWith("/repo/demo/lib");
+  });
+
+  it("deleting an expanded folder, then something new occupying the exact same path, never shows the deleted folder's stale cached children", async () => {
+    listDirMock.mockImplementation((path: string) => Promise.resolve(path === "/repo/demo" ? rootEntries() : childEntries()));
+    deleteToTrashMock.mockResolvedValue(undefined);
+    let dirChangedHandler: (() => void) | undefined;
+    listenMock.mockImplementation((eventName: string, handler: () => void) => {
+      if (eventName === "dir-changed:/repo/demo") dirChangedHandler = handler;
+      return Promise.resolve(() => {});
+    });
+    setup();
+    await screen.findByText("src");
+    await waitFor(() => expect(dirChangedHandler).toBeDefined());
+
+    fireEvent.doubleClick(screen.getByText("src")); // expand — caches util.ts under /repo/demo/src
+    await screen.findByText("util.ts");
+
+    // Delete "src".
+    listDirMock.mockResolvedValueOnce([
+      { name: "main.py", path: "/repo/demo/main.py", is_dir: false },
+      { name: "notes.md", path: "/repo/demo/notes.md", is_dir: false },
+    ]);
+    fireEvent.contextMenu(screen.getByText("src"));
+    fireEvent.click(screen.getByRole("menuitem", { name: /move src to trash/i }));
+    await waitFor(() => expect(screen.queryByText("src")).not.toBeInTheDocument());
+
+    // Something new gets created at the exact same path by an external
+    // process — simulated as an external dir-changed refresh bringing a
+    // "src" entry back.
+    listDirMock.mockResolvedValueOnce([
+      { name: "src", path: "/repo/demo/src", is_dir: true },
+      { name: "main.py", path: "/repo/demo/main.py", is_dir: false },
+      { name: "notes.md", path: "/repo/demo/notes.md", is_dir: false },
+    ]);
+    dirChangedHandler!();
+    await screen.findByText("src");
+
+    // Expanding the NEW "src" must fetch fresh content — never the deleted
+    // folder's stale cached "util.ts".
+    listDirMock.mockResolvedValueOnce([{ name: "brand-new.ts", path: "/repo/demo/src/brand-new.ts", is_dir: false }]);
+    fireEvent.doubleClick(screen.getByText("src"));
+    expect(await screen.findByText("brand-new.ts")).toBeInTheDocument();
+    expect(screen.queryByText("util.ts")).not.toBeInTheDocument();
   });
 
   // ------------------------------------------------------ New File/Folder (Task 7)
