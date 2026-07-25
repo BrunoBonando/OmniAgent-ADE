@@ -16,14 +16,32 @@
 //! move, rename) against the user's actual project files. Every one of them
 //! is scoped to a `project_root`: the frontend always knows which project's
 //! file tree it's acting on (`ProjectInfo.path`), and every source and
-//! destination path must resolve — via [`std::fs::canonicalize`], which also
-//! resolves symlinks — to somewhere inside that root before any mutation
-//! happens. This blocks both classic `../../..` traversal *and* symlink
-//! tricks (a symlink physically inside the project whose target points
-//! outside it): canonicalizing follows the symlink, so the resulting path is
-//! checked against the *real* location, not the deceptive in-project one.
-//! See [`within_root`]/[`within_root_as_child`] and the `traversal_safety`
-//! test module below.
+//! destination path must resolve to somewhere inside that root before any
+//! mutation happens. This blocks classic `../../..` traversal *and* symlink
+//! tricks that use a directory symlink to smuggle a path outside the root —
+//! but, critically, it must NOT block (or redirect) an operation on a
+//! symlink *itself*: renaming/moving/deleting/duplicating a symlink must act
+//! on the link entry, never silently follow through to whatever it points
+//! at (exactly like Finder/`mv`/`rm` — a symlink is a first-class file-tree
+//! entry, not a transparent window onto its target).
+//!
+//! Two containment checks exist for this reason, and using the wrong one
+//! for a given argument is the whole difference between correct and buggy:
+//! - [`within_root`] fully [`std::fs::canonicalize`]s the path, resolving
+//!   every symlink including the final component. Correct for a
+//!   *destination directory* argument (`new_parent_dir`/`parent_dir`) —
+//!   the operation writes *inside* that directory, so resolving what it
+//!   really is matters.
+//! - [`within_root_leaf`]/[`within_root_as_child`] canonicalize only the
+//!   target's *parent* directory (still closing both `..` traversal and a
+//!   symlinked-intermediate-directory escape), then reattach the target's
+//!   own literal file name. Correct for the item an in-place mutation
+//!   (rename/move/duplicate/delete) actually acts on — a symlink leaf
+//!   passed this way stays a symlink all the way to `fs::rename`/
+//!   `trash::delete`/`fs::copy`, which act on the leaf entry exactly as
+//!   given, never through it.
+//!
+//! See the `traversal_safety` and `symlinks` test modules below.
 //!
 //! The project root itself is never a valid *source* for rename/move/
 //! duplicate/delete ([`within_root_as_child`]) — renaming or moving it would
@@ -69,6 +87,15 @@ fn canonical_root(root: &Path) -> Result<PathBuf, String> {
 /// canonicalized (see [`canonical_root`]) — this function does not
 /// re-canonicalize it, so callers compute it once per command and reuse it
 /// across however many paths that command needs to validate.
+///
+/// This fully resolves `target`, including its final path component — for a
+/// symlink, the returned path is the symlink's RESOLVED TARGET, not the
+/// link itself. That's exactly right for a destination *directory* argument
+/// (`new_parent_dir`/`parent_dir`): the operation writes *inside* that
+/// directory, so resolving what the directory actually is (symlink or not)
+/// is the correct containment check. It is deliberately NOT used for the
+/// item being mutated in place (rename/move/duplicate/delete) — see
+/// [`within_root_leaf`] for that case.
 fn within_root(canonical_root: &Path, target: &Path) -> Result<PathBuf, String> {
     let canonical_target =
         std::fs::canonicalize(target).map_err(|e| friendly_io_error(target, &e))?;
@@ -81,18 +108,64 @@ fn within_root(canonical_root: &Path, target: &Path) -> Result<PathBuf, String> 
     Ok(canonical_target)
 }
 
-/// Like [`within_root`], but additionally rejects `target` when it resolves
-/// to `canonical_root` itself. Use this for the SOURCE of an in-place
-/// mutation (rename/move/duplicate/delete) — see the module doc's "Safety
-/// model" section for why the project root can't be one of those. Plain
-/// [`within_root`] (equality allowed) is still correct for a destination
-/// *directory* argument (`new_parent_dir`/`parent_dir`).
-fn within_root_as_child(canonical_root: &Path, target: &Path) -> Result<PathBuf, String> {
-    let canonical_target = within_root(canonical_root, target)?;
-    if canonical_target == canonical_root {
-        return Err("the project root itself cannot be modified".to_string());
+/// The containment check for the item an in-place mutation (rename/move/
+/// duplicate/delete) actually operates on. Unlike [`within_root`], this
+/// does NOT canonicalize `target` itself — doing so would resolve a
+/// symlink's final path component through to whatever it points at, which
+/// is the bug this function fixes: every caller below (`fs::rename`,
+/// `trash::delete`, `fs::copy`) must act on the literal entry the user
+/// selected (a symlink stays a symlink), never silently follow through to
+/// its target, exactly like Finder/`mv`/`rm`.
+///
+/// Containment is still fully enforced: `target`'s PARENT directory is
+/// canonicalized (closing both classic `..` traversal and a symlink trick
+/// in an intermediate *parent* directory) and checked against
+/// `canonical_root`; the returned path is that canonical parent joined with
+/// `target`'s own literal file name. `fs::rename`/`trash::delete`/etc. act
+/// on the leaf entry exactly as given, not through it, so this is safe to
+/// pass to them even when the leaf itself is a symlink whose target lives
+/// outside the root — only the link entry (which lives inside the root) is
+/// ever touched, never the outside target.
+fn within_root_leaf(canonical_root: &Path, target: &Path) -> Result<PathBuf, String> {
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| format!("{} has no file name", target.display()))?;
+    let parent = target.parent().unwrap_or_else(|| Path::new(""));
+    let canonical_parent =
+        std::fs::canonicalize(parent).map_err(|e| friendly_io_error(target, &e))?;
+    if !canonical_parent.starts_with(canonical_root) {
+        return Err(format!(
+            "{} is outside the project and cannot be modified",
+            target.display()
+        ));
     }
-    Ok(canonical_target)
+    let safe_path = canonical_parent.join(file_name);
+    // symlink_metadata (not `exists()`/`Path::is_*`) so a dangling symlink
+    // still counts as "found" — matches `occupied`'s reasoning below.
+    if std::fs::symlink_metadata(&safe_path).is_err() {
+        return Err(format!("{} does not exist", target.display()));
+    }
+    Ok(safe_path)
+}
+
+/// Like [`within_root_leaf`], but additionally rejects `target` when it IS
+/// `canonical_root` itself. Use this for the SOURCE of an in-place mutation
+/// (rename/move/duplicate/delete) — see the module doc's "Safety model"
+/// section for why the project root can't be one of those.
+///
+/// The root-equality check alone uses a full [`std::fs::canonicalize`] of
+/// `target` (resolving any symlinks in it) — safe here because the result
+/// is only ever compared for equality, never used as the operation path
+/// (that still comes from [`within_root_leaf`], which preserves the leaf).
+/// This also means a symlink *alias* of the project root is correctly
+/// caught as "the root", not treated as some other in-root entry.
+fn within_root_as_child(canonical_root: &Path, target: &Path) -> Result<PathBuf, String> {
+    if let Ok(canonical_target) = std::fs::canonicalize(target) {
+        if canonical_target == canonical_root {
+            return Err("the project root itself cannot be modified".to_string());
+        }
+    }
+    within_root_leaf(canonical_root, target)
 }
 
 fn friendly_io_error(path: &Path, e: &std::io::Error) -> String {
@@ -152,6 +225,20 @@ pub fn rename_path(project_root: &Path, path: &Path, new_name: &str) -> Result<P
         .ok_or_else(|| format!("{} has no parent directory", source.display()))?;
     let dest = parent.join(new_name);
 
+    // Residual race, documented rather than silently left: unlike
+    // `create_file`'s `create_new` (an atomic "create iff absent" syscall),
+    // `std::fs::rename` has no cross-platform/std equivalent for "rename
+    // only if the destination is absent" — on most platforms (including
+    // macOS) a plain `rename()` silently replaces an existing destination.
+    // macOS itself does have an atomic primitive for this (`renamex_np`
+    // with `RENAME_EXCL`), but reaching it means an FFI call via the `libc`
+    // crate, which isn't a dependency of this crate — adding one is out of
+    // scope for this fix. So this `occupied()` check is kept immediately
+    // adjacent to the `rename` call below (no filesystem work happens in
+    // between) to make the window as narrow as practically possible without
+    // a new dependency, not to close it completely: a second process could
+    // still create `dest` in the gap between this check and the `rename`
+    // call, in which case that rename would silently overwrite it.
     if occupied(&dest) {
         return Err(format!("a file named \"{new_name}\" already exists"));
     }
@@ -189,6 +276,12 @@ pub fn move_path(
         .ok_or_else(|| format!("{} has no file name", source.display()))?;
     let dest = dest_parent.join(file_name);
 
+    // See `rename_path`'s matching comment: this is the same narrowed-but-
+    // not-fully-closed collision race, for the same reason (no std-only
+    // atomic "rename iff absent" primitive without adding a `libc`
+    // dependency for macOS's `renamex_np`/`RENAME_EXCL`) — kept immediately
+    // adjacent to the `rename` call below rather than earlier in the
+    // function.
     if occupied(&dest) {
         return Err(format!(
             "a file named \"{}\" already exists in the destination",
@@ -243,13 +336,29 @@ fn next_copy_name(original: &Path, exists: impl Fn(&Path) -> bool) -> PathBuf {
 /// path on success. Unlike every other write op here, this one is designed
 /// to always succeed on a name collision (there is no "collision" — it just
 /// picks the next free name), matching Finder's own Duplicate behavior.
+///
+/// If `path` is itself a symlink, this recreates a new symlink pointing at
+/// the same target ([`std::os::unix::fs::symlink`]) rather than copying the
+/// target's resolved bytes — matches real Finder, which duplicates an alias
+/// as another alias, not as a copy of whatever it points to.
+/// `symlink_metadata` (not [`Path::is_dir`], which follows symlinks) is
+/// what makes this distinguishable from the plain-directory case below.
 pub fn duplicate_path(project_root: &Path, path: &Path) -> Result<PathBuf, String> {
     let root = canonical_root(project_root)?;
     let source = within_root_as_child(&root, path)?;
 
     let dest = next_copy_name(&source, occupied);
 
-    if source.is_dir() {
+    let source_type = std::fs::symlink_metadata(&source)
+        .map_err(|e| friendly_io_error(&source, &e))?
+        .file_type();
+
+    if source_type.is_symlink() {
+        let link_target =
+            std::fs::read_link(&source).map_err(|e| friendly_io_error(&source, &e))?;
+        std::os::unix::fs::symlink(&link_target, &dest)
+            .map_err(|e| friendly_io_error(&dest, &e))?;
+    } else if source_type.is_dir() {
         copy_dir_recursive(&source, &dest)?;
     } else {
         std::fs::copy(&source, &dest).map_err(|e| friendly_io_error(&source, &e))?;
@@ -339,9 +448,29 @@ fn friendly_trash_error(path: &Path, err: trash::Error) -> String {
 /// name collision (see the module doc's "Collision policy") rather than
 /// auto-incrementing an "untitled 2" style name — the frontend prompts.
 /// Returns the new full (canonical) path on success.
+///
+/// `prepare_create`'s `occupied()` check happens first (for a fast, clear
+/// error in the common non-racy case), but the actual write below uses
+/// [`std::fs::OpenOptions::create_new`] rather than `File::create` — this is
+/// what actually closes the race, not the earlier check: `create_new` is
+/// itself an atomic "create iff absent" syscall (`O_CREAT | O_EXCL`), so
+/// even if something else creates `dest` in the gap between the check above
+/// and this call, this fails with `AlreadyExists` instead of silently
+/// truncating it — the module doc's "never a silent overwrite" policy,
+/// actually enforced rather than merely checked-then-hoped-for.
 pub fn create_file(project_root: &Path, parent_dir: &Path, name: &str) -> Result<PathBuf, String> {
     let dest = prepare_create(project_root, parent_dir, name, "file")?;
-    std::fs::File::create(&dest).map_err(|e| friendly_io_error(&dest, &e))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dest)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("a file named \"{name}\" already exists")
+            } else {
+                friendly_io_error(&dest, &e)
+            }
+        })?;
     Ok(dest)
 }
 
@@ -662,6 +791,53 @@ mod tests {
         assert_eq!(fs::read_to_string(root.path().join("new.txt")).unwrap(), "existing");
     }
 
+    /// Bug 2 (TOCTOU): `prepare_create`'s `occupied()` pre-check happens
+    /// before the real write, so a sequential "file already exists" test
+    /// like `create_file_errors_clearly_on_collision` above only proves the
+    /// non-racy path. This proves the ACTUAL fix — that the write itself
+    /// (`OpenOptions::create_new`) is what closes the race — by racing many
+    /// threads at the real create_new-vs-existing-file collision: under the
+    /// old `File::create` (which truncates silently on an existing file,
+    /// no error at all), every thread would report `Ok`. Under the fix,
+    /// exactly one thread's `create_new` wins the atomic create and every
+    /// other thread gets a real `Err` — proving the collision is now caught
+    /// at the syscall itself, not just by the earlier best-effort check.
+    #[test]
+    fn create_file_atomically_rejects_a_concurrent_create_new_collision() {
+        let root = tempdir().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let root_path = std::sync::Arc::new(root.path().to_path_buf());
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let root_path = std::sync::Arc::clone(&root_path);
+                std::thread::spawn(move || {
+                    barrier.wait(); // maximize the chance every thread races the same window
+                    create_file(&root_path, &root_path, "race.txt")
+                })
+            })
+            .collect();
+
+        let results: Vec<Result<PathBuf, String>> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let ok_count = results.iter().filter(|r| r.is_ok()).count();
+        let err_count = results.iter().filter(|r| r.is_err()).count();
+        assert_eq!(ok_count, 1, "exactly one create_new should win: {results:?}");
+        assert_eq!(err_count, 7, "every loser must get a real Err, not silently succeed: {results:?}");
+        for r in &results {
+            if let Err(e) = r {
+                assert!(e.contains("already exists"), "{e}");
+            }
+        }
+
+        // The file must exist and be empty — no partial/garbled content
+        // from two writers ever raced onto the same fd.
+        let contents = fs::read_to_string(root.path().join("race.txt")).unwrap();
+        assert_eq!(contents, "");
+    }
+
     #[test]
     fn create_dir_makes_an_empty_folder() {
         let root = tempdir().unwrap();
@@ -769,25 +945,73 @@ mod tests {
         }
 
         #[test]
-        fn rejects_a_symlink_inside_the_root_pointing_outside_it() {
+        fn operating_on_a_symlink_whose_target_is_outside_root_only_touches_the_link() {
+            // A symlink physically located INSIDE the project root, whose
+            // target lives OUTSIDE it, is NOT an escape: rename/delete act
+            // on the link entry itself (see `within_root_leaf`'s doc
+            // comment and the `symlinks` test module below), which lives
+            // entirely inside the root. This replaces the old pre-fix
+            // expectation that such an operation must be rejected as
+            // "outside" — that old behavior was itself downstream of the
+            // Bug 1 symlink-resolution bug (canonicalizing the leaf, which
+            // this module no longer does for an in-place mutation's
+            // source). What must still be true, and is asserted below: the
+            // OUTSIDE target is never touched by any of it.
             let root = tempdir().unwrap();
             let outside = tempdir().unwrap();
             let secret = outside.path().join("secret.txt");
             fs::write(&secret, "top secret").unwrap();
 
-            // A symlink physically located INSIDE the project root, but
-            // whose target lives OUTSIDE it — the classic symlink-escape
-            // trick. `canonicalize` must resolve through it.
             let link = root.path().join("sneaky-link");
             std::os::unix::fs::symlink(&secret, &link).unwrap();
 
-            let rename_err = rename_path(root.path(), &link, "pwned.txt").unwrap_err();
+            let renamed = rename_path(root.path(), &link, "renamed-link").unwrap();
+            assert!(
+                std::fs::symlink_metadata(&renamed).unwrap().file_type().is_symlink(),
+                "renaming a symlink must still be a symlink afterward"
+            );
+            assert_eq!(fs::read_to_string(&secret).unwrap(), "top secret");
+
+            delete_to_trash(root.path(), &renamed).unwrap();
+            assert!(!renamed.exists(), "the link entry must be gone");
+            assert_eq!(
+                fs::read_to_string(&secret).unwrap(),
+                "top secret",
+                "the outside target must survive the link's own delete"
+            );
+        }
+
+        #[test]
+        fn rejects_a_source_reached_through_a_symlinked_intermediate_directory_pointing_outside_the_root(
+        ) {
+            // The escape attempt Bug 1's fix must still close: not a
+            // symlink LEAF (that's fine now, see the test above), but a
+            // symlink DIRECTORY inside the root used as an intermediate
+            // path component to reach a file that's actually outside the
+            // root. `within_root_leaf` canonicalizes the target's *parent*
+            // (which resolves through this symlinked directory to a
+            // location outside `canonical_root`), so this must still be
+            // rejected even though the leaf itself is never canonicalized.
+            let root = tempdir().unwrap();
+            let outside = tempdir().unwrap();
+            let real_file = outside.path().join("real.txt");
+            fs::write(&real_file, "top secret").unwrap();
+
+            let link_dir = root.path().join("sneaky-dir-link");
+            std::os::unix::fs::symlink(outside.path(), &link_dir).unwrap();
+            let path_through_link = link_dir.join("real.txt");
+
+            let rename_err =
+                rename_path(root.path(), &path_through_link, "pwned.txt").unwrap_err();
             assert!(rename_err.contains("outside"), "{rename_err}");
 
-            let delete_err = delete_to_trash(root.path(), &link).unwrap_err();
+            let delete_err = delete_to_trash(root.path(), &path_through_link).unwrap_err();
             assert!(delete_err.contains("outside"), "{delete_err}");
 
-            assert_eq!(fs::read_to_string(&secret).unwrap(), "top secret");
+            let dup_err = duplicate_path(root.path(), &path_through_link).unwrap_err();
+            assert!(dup_err.contains("outside"), "{dup_err}");
+
+            assert_eq!(fs::read_to_string(&real_file).unwrap(), "top secret");
         }
 
         #[test]
@@ -822,6 +1046,128 @@ mod tests {
                 std::fs::read_dir(outside.path()).unwrap().next().is_none(),
                 "nothing must have actually landed outside the root"
             );
+        }
+    }
+
+    // Bug 1: operations on a symlink must act on the link entry itself,
+    // never silently follow through to whatever it points at — exactly
+    // like Finder/`mv`/`rm`. Every test here uses a symlink target that
+    // lives INSIDE the same root (unlike `traversal_safety`'s outside-root
+    // cases above), so what's being proven is purely "does the operation
+    // affect the link or the target", not a containment question.
+    mod symlinks {
+        use super::*;
+
+        #[test]
+        fn rename_path_renames_the_link_entry_target_unaffected() {
+            let root = tempdir().unwrap();
+            let real = root.path().join("real.txt");
+            fs::write(&real, "real content").unwrap();
+            let link = root.path().join("link.txt");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            let new_path = rename_path(root.path(), &link, "renamed-link.txt").unwrap();
+
+            assert!(
+                std::fs::symlink_metadata(&new_path).unwrap().file_type().is_symlink(),
+                "the renamed entry must still be a symlink"
+            );
+            assert_eq!(
+                std::fs::read_link(&new_path).unwrap(),
+                real,
+                "must still point at the same target"
+            );
+            // The target itself: untouched, unmoved, unrenamed.
+            assert!(real.exists(), "real.txt must still exist under its original name");
+            assert_eq!(fs::read_to_string(&real).unwrap(), "real content");
+            assert!(!link.exists(), "the old link name is gone (it was renamed, not left behind)");
+        }
+
+        #[test]
+        fn move_path_moves_the_link_entry_target_unaffected() {
+            let root = tempdir().unwrap();
+            let real = root.path().join("real.txt");
+            fs::write(&real, "real content").unwrap();
+            let link = root.path().join("link.txt");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let dest_dir = root.path().join("subdir");
+            fs::create_dir(&dest_dir).unwrap();
+
+            let new_path = move_path(root.path(), &link, &dest_dir).unwrap();
+
+            assert!(
+                std::fs::symlink_metadata(&new_path).unwrap().file_type().is_symlink(),
+                "the moved entry must still be a symlink"
+            );
+            assert_eq!(std::fs::read_link(&new_path).unwrap(), real);
+            assert!(real.exists(), "real.txt must still exist in its original place");
+            assert_eq!(fs::read_to_string(&real).unwrap(), "real content");
+            assert!(!link.exists(), "the old link location is gone (it was moved, not left behind)");
+        }
+
+        #[test]
+        fn delete_to_trash_trashes_only_the_link_target_remains_on_disk() {
+            let root = tempdir().unwrap();
+            let real = root.path().join(format!("{TRASH_TEST_PREFIX}-real.txt"));
+            fs::write(&real, "real content").unwrap();
+            let link = root.path().join(format!("{TRASH_TEST_PREFIX}-link.txt"));
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            delete_to_trash(root.path(), &link).unwrap();
+
+            assert!(!link.exists(), "the link entry must be gone");
+            assert!(real.exists(), "the target file must remain on disk, untouched");
+            assert_eq!(fs::read_to_string(&real).unwrap(), "real content");
+        }
+
+        #[test]
+        fn duplicate_path_of_a_symlink_creates_a_new_symlink_not_a_content_copy() {
+            let root = tempdir().unwrap();
+            let real = root.path().join("real.txt");
+            fs::write(&real, "real content").unwrap();
+            let link = root.path().join("link.txt");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            let dup = duplicate_path(root.path(), &link).unwrap();
+
+            assert_eq!(dup, canon(root.path()).join("link copy.txt"));
+            assert!(
+                std::fs::symlink_metadata(&dup).unwrap().file_type().is_symlink(),
+                "the duplicate must be a symlink, not a plain-file copy of the target's bytes"
+            );
+            assert_eq!(
+                std::fs::read_link(&dup).unwrap(),
+                real,
+                "the duplicate symlink must point at the same target as the original"
+            );
+            // Original link and its target are both untouched.
+            assert!(link.exists());
+            assert_eq!(fs::read_to_string(&real).unwrap(), "real content");
+        }
+
+        #[test]
+        fn duplicate_path_of_a_symlinked_directory_preserves_it_as_a_symlink() {
+            // `duplicate_path`'s directory branch (`copy_dir_recursive`)
+            // already preserved symlinks found INSIDE a duplicated
+            // directory (see its doc comment) — this proves the symlink
+            // check now also applies when the duplicated item's TOP-LEVEL
+            // entry is itself a symlink to a directory, which used to be
+            // misclassified by `source.is_dir()` (follows symlinks) as a
+            // plain directory and recursively copied instead of relinked.
+            let root = tempdir().unwrap();
+            let real_dir = root.path().join("real-dir");
+            fs::create_dir(&real_dir).unwrap();
+            fs::write(real_dir.join("inner.txt"), "inner").unwrap();
+            let link = root.path().join("dir-link");
+            std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+            let dup = duplicate_path(root.path(), &link).unwrap();
+
+            assert!(
+                std::fs::symlink_metadata(&dup).unwrap().file_type().is_symlink(),
+                "duplicating a symlinked directory must produce another symlink"
+            );
+            assert_eq!(std::fs::read_link(&dup).unwrap(), real_dir);
         }
     }
 }
