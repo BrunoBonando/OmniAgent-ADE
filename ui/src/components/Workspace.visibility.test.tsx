@@ -37,6 +37,11 @@ vi.mock("@xterm/xterm", () => ({
       focus: xtermMocks.focusMock,
       cols: 80,
       rows: 24,
+      // Real xterm.js `Terminal` instances expose a live-mutable `.options`
+      // object (`Terminal.tsx`'s theme-swap effect assigns
+      // `term.options.theme = ...`) — matched here so this mock stays a
+      // faithful stand-in for the real constructor's shape.
+      options: {},
     });
   }),
 }));

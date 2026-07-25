@@ -70,9 +70,11 @@ import {
   PRESSURE_THRESHOLD,
   tabDisplayLabel,
   tabsByProject,
+  type Engine,
   type ProjectInfo,
   type TabInfo,
 } from "../state/sessions";
+import type { TerminalThemeId } from "../lib/terminalThemes";
 
 interface ProjectPaneGridProps {
   hidden: boolean;
@@ -93,6 +95,15 @@ interface ProjectPaneGridProps {
   onCloseTab: (id: string) => void;
   onNewTabInProject: (project: ProjectInfo) => void;
   onRenameTab: (id: string, label: string) => void;
+  /** PaneHeader's 3-dot "Change engine": kill this pane's live session and
+   * respawn a new one with a different engine, same pane/slot — the actual
+   * kill+respawn lives in `App.tsx`'s `restartTabWithEngine`. */
+  onChangeEngine: (tab: TabInfo, engine: Engine) => void;
+  /** PaneHeader's 3-dot "Terminal theme" picker. */
+  onChangeTheme: (id: string, themeId: TerminalThemeId) => void;
+  /** Auto-title from the first prompt — forwarded straight through to each
+   * pane's `<Terminal>` (see that component's own doc). */
+  onFirstInput: (id: string, line: string) => void;
   /** NewWorkspaceModal's bulk-create: when this project's very first
    * render already has its whole tab set present (see `sessions.ts`'s
    * `tabs/opened_bulk`), and this tree's leaf ids are EXACTLY that set,
@@ -118,6 +129,9 @@ function ProjectPaneGrid({
   onCloseTab,
   onNewTabInProject,
   onRenameTab,
+  onChangeEngine,
+  onChangeTheme,
+  onFirstInput,
   initialTree,
 }: ProjectPaneGridProps) {
   const [tree, setTree] = useState<PaneTree | null>(null);
@@ -196,12 +210,19 @@ function ProjectPaneGrid({
                         if (project) onNewTabInProject(project);
                       }}
                       onRename={(label) => onRenameTab(tab.id, label)}
+                      onChangeEngine={(engine) => onChangeEngine(tab, engine)}
+                      onChangeTheme={(themeId) => onChangeTheme(tab.id, themeId)}
                     />
                   </div>
                 )}
               >
                 <div className="pane-body" onMouseDownCapture={() => onActivateTab(tab.id)}>
-                  <Terminal sessionId={tab.id} visible={terminalsVisible} />
+                  <Terminal
+                    sessionId={tab.id}
+                    visible={terminalsVisible}
+                    themeId={tab.themeId}
+                    onFirstInput={onFirstInput}
+                  />
                 </div>
               </MosaicWindow>
             );
@@ -222,6 +243,16 @@ interface WorkspaceProps {
   onCloseTab: (id: string) => void;
   onNewTabInProject: (project: ProjectInfo) => void;
   onRenameTab: (id: string, label: string) => void;
+  /** PaneHeader's 3-dot "Change engine" — see `ProjectPaneGridProps`'s doc.
+   * Optional (defaults to a no-op), same reasoning as `Sidebar.tsx`'s
+   * `view`/`fileTreeVisible` props: existing tests that don't care about
+   * the 3-dot menu don't have to pass it. */
+  onChangeEngine?: (tab: TabInfo, engine: Engine) => void;
+  /** PaneHeader's 3-dot "Terminal theme" picker. Optional, same reasoning. */
+  onChangeTheme?: (id: string, themeId: TerminalThemeId) => void;
+  /** Auto-title from the first prompt, forwarded to every pane's
+   * `<Terminal>`. Optional, same reasoning. */
+  onFirstInput?: (id: string, line: string) => void;
   hidden: boolean;
   /** NewWorkspaceModal's bulk-create: `projectId -> PaneTree` hints for a
    * project's very first grid render, keyed by project id — see
@@ -241,6 +272,9 @@ export default function Workspace({
   onCloseTab,
   onNewTabInProject,
   onRenameTab,
+  onChangeEngine = () => {},
+  onChangeTheme = () => {},
+  onFirstInput = () => {},
   hidden,
   initialLayouts,
 }: WorkspaceProps) {
@@ -283,6 +317,9 @@ export default function Workspace({
             onCloseTab={onCloseTab}
             onNewTabInProject={onNewTabInProject}
             onRenameTab={onRenameTab}
+            onChangeEngine={onChangeEngine}
+            onChangeTheme={onChangeTheme}
+            onFirstInput={onFirstInput}
             initialTree={initialLayouts?.get(g.project)}
           />
         );
