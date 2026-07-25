@@ -11,9 +11,11 @@
 // set `draggable={false}` (or stop the mousedown) so grabbing them doesn't
 // also start a pane-rearrange drag.
 import { useState } from "react";
-import { tabDisplayLabel, type TabInfo } from "../state/sessions";
+import { tabDisplayLabel, type Engine, type TabInfo } from "../state/sessions";
 import { ENGINE_COLOR } from "../theme";
 import { useGitBranch } from "../lib/useGitBranch";
+import { DEFAULT_TERMINAL_THEME, type TerminalThemeId } from "../lib/terminalThemes";
+import PaneMenu from "./PaneMenu";
 
 interface PaneHeaderProps {
   tab: TabInfo;
@@ -23,6 +25,15 @@ interface PaneHeaderProps {
   onClose: () => void;
   onSplit: () => void;
   onRename: (label: string) => void;
+  /** 3-dot menu (founder ask): "Change engine" kills this pane's live
+   * session and spawns a new one with a different engine, same pane/slot —
+   * `App.tsx`'s `restartTabWithEngine` owns the actual kill+respawn.
+   * Optional so any test/caller that doesn't care about the menu (most of
+   * `PaneHeader.test.tsx`'s existing coverage) doesn't have to pass it. */
+  onChangeEngine?: (engine: Engine) => void;
+  /** 3-dot menu's "Terminal theme" picker — applied and persisted
+   * immediately on click (`App.tsx`'s `tab/themeChanged` dispatch). */
+  onChangeTheme?: (themeId: TerminalThemeId) => void;
 }
 
 /** Stops the click from also bubbling into the header's own
@@ -41,10 +52,13 @@ export default function PaneHeader({
   onClose,
   onSplit,
   onRename,
+  onChangeEngine,
+  onChangeTheme,
 }: PaneHeaderProps) {
   const branch = useGitBranch(tab.cwd);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
 
   function startRename() {
     setDraft(tabDisplayLabel(tab));
@@ -101,6 +115,31 @@ export default function PaneHeader({
       {branch && (
         <span className="pane-header-branch" title={`git branch: ${branch}`}>
           ⑂ {branch}
+        </span>
+      )}
+      {(onChangeEngine || onChangeTheme) && (
+        <span className="pane-header-menu-anchor">
+          <button
+            className={`pane-header-btn pane-header-btn-menu${menuOpen ? " is-active" : ""}`}
+            draggable={false}
+            onMouseDown={stopForDrag}
+            onClick={() => setMenuOpen((open) => !open)}
+            aria-label={`${tabDisplayLabel(tab)} options`}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            title="Terminal options"
+          >
+            &#8942;
+          </button>
+          {menuOpen && (
+            <PaneMenu
+              currentEngine={tab.engine}
+              currentThemeId={tab.themeId ?? DEFAULT_TERMINAL_THEME}
+              onChangeEngine={(engine) => onChangeEngine?.(engine)}
+              onChangeTheme={(themeId) => onChangeTheme?.(themeId)}
+              onClose={() => setMenuOpen(false)}
+            />
+          )}
         </span>
       )}
       <button

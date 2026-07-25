@@ -164,4 +164,62 @@ describe("PaneHeader", () => {
     setup({ isFocused: true });
     expect(screen.getByText("claude").closest(".pane-header")).toHaveClass("is-focused");
   });
+
+  describe("3-dot menu (change engine / terminal theme)", () => {
+    it("renders no menu trigger when neither onChangeEngine nor onChangeTheme is provided", () => {
+      setup();
+      expect(screen.queryByRole("button", { name: /options/i })).not.toBeInTheDocument();
+    });
+
+    it("renders the trigger and opens the menu on click", () => {
+      const onChangeEngine = vi.fn();
+      setup({ onChangeEngine });
+      const trigger = screen.getByRole("button", { name: /options/i });
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+      fireEvent.click(trigger);
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(trigger).toHaveAttribute("aria-expanded", "true");
+    });
+
+    it("closes the menu on a second click of the trigger", () => {
+      const onChangeEngine = vi.fn();
+      setup({ onChangeEngine });
+      const trigger = screen.getByRole("button", { name: /options/i });
+      fireEvent.click(trigger);
+      fireEvent.click(trigger);
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    });
+
+    it("forwards the tab's current engine/theme into the menu and calls onChangeEngine, closing the menu", () => {
+      const onChangeEngine = vi.fn();
+      const onChangeTheme = vi.fn();
+      setup({
+        tab: tab({ engine: "codex", themeId: "matrix" }),
+        onChangeEngine,
+        onChangeTheme,
+      });
+      fireEvent.click(screen.getByRole("button", { name: /options/i }));
+      expect(screen.getByText("Codex (current)")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Matrix/ })).toHaveAttribute("aria-pressed", "true");
+
+      fireEvent.click(screen.getByText(/Restart with Claude Code/));
+      expect(onChangeEngine).toHaveBeenCalledWith("claude");
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    });
+
+    it("defaults an unset themeId to the standard preset when opening the menu", () => {
+      setup({ tab: tab({ themeId: undefined }), onChangeTheme: vi.fn() });
+      fireEvent.click(screen.getByRole("button", { name: /options/i }));
+      expect(screen.getByRole("button", { name: /Standard/ })).toHaveAttribute("aria-pressed", "true");
+    });
+
+    it("clicking a theme calls onChangeTheme and closes the menu", () => {
+      const onChangeTheme = vi.fn();
+      setup({ onChangeTheme });
+      fireEvent.click(screen.getByRole("button", { name: /options/i }));
+      fireEvent.click(screen.getByText("Amber CRT"));
+      expect(onChangeTheme).toHaveBeenCalledWith("amber");
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    });
+  });
 });
