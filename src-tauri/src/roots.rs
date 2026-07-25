@@ -150,6 +150,19 @@ pub struct IngestionStatus {
     /// standing in for.
     pub total_nodes: usize,
     pub error: Option<String>,
+    /// How many independent ingestion operations (bulk root scans from
+    /// [`ingest_roots_in_background`], individual `add_project` ingests
+    /// from [`ingest_project_in_background`]) are currently active.
+    /// `running` is always *derived* from this being `> 0` (see
+    /// [`IngestionState::begin`]/[`IngestionState::end`]) rather than
+    /// being an independently-set bool — this is the fix for the bug
+    /// where the two paths disagreed about who "owned" clearing it: one
+    /// ingestion finishing can no longer incorrectly clear `running`
+    /// while a different one is still in flight. Not part of the public
+    /// snapshot contract the frontend polls (`ingestion_status`'s JSON
+    /// shape is unchanged).
+    #[serde(skip)]
+    active_workers: usize,
 }
 
 /// `Arc<Mutex<..>>`-backed Tauri-managed state, cloneable so a background
@@ -171,6 +184,41 @@ impl IngestionState {
     fn update(&self, f: impl FnOnce(&mut IngestionStatus)) {
         let mut guard = self.0.lock().expect("ingestion status mutex poisoned");
         f(&mut guard);
+    }
+
+    /// Marks one independent ingestion operation (a bulk root scan or a
+    /// single `add_project` ingest) as starting: bumps the active-worker
+    /// count (deriving `running = true`) and *additively* grows
+    /// `projects_total` by `additional_projects` — never a destructive
+    /// reset, so a second operation starting while the first is still
+    /// running never clobbers its in-flight counters (the bug: the old
+    /// bulk path unconditionally did `*status = IngestionStatus { .. }`
+    /// here, wiping out anything an already-running `add_project` ingest
+    /// had accumulated).
+    fn begin(&self, additional_projects: usize) {
+        self.update(|s| {
+            s.active_workers += 1;
+            s.running = true;
+            s.projects_total += additional_projects;
+        });
+    }
+
+    /// Marks one independent ingestion operation as finished: decrements
+    /// the active-worker count and derives `running` from whether any
+    /// other operation is still active — never unconditionally clears it
+    /// (the bug: both paths used to set `running = false` at their own
+    /// end regardless of whether a sibling operation was still going).
+    /// `current_project` is only cleared once nothing is active anymore,
+    /// so it doesn't flicker to `None` while a sibling ingestion is still
+    /// working through its own projects.
+    fn end(&self) {
+        self.update(|s| {
+            s.active_workers = s.active_workers.saturating_sub(1);
+            s.running = s.active_workers > 0;
+            if s.active_workers == 0 {
+                s.current_project = None;
+            }
+        });
     }
 }
 
@@ -218,8 +266,11 @@ fn ingest_roots_in_background(
         let store = match Store::open(&data_dir) {
             Ok(s) => s,
             Err(e) => {
+                // `begin()` was never called (nothing to compose with yet),
+                // so there's no active-worker count to unwind here — just
+                // record the error. `running` is left exactly as `begin()`
+                // would have found it (untouched by this failed attempt).
                 status.update(|s| {
-                    s.running = false;
                     s.error = Some(format!("failed to open brain store: {e}"));
                 });
                 return;
@@ -232,13 +283,7 @@ fn ingest_roots_in_background(
         }
         discovered.extend(extra_projects);
 
-        status.update(|s| {
-            *s = IngestionStatus {
-                running: true,
-                projects_total: discovered.len(),
-                ..Default::default()
-            };
-        });
+        status.begin(discovered.len());
 
         for (name, dir) in &discovered {
             if is_paused(&store, name) {
@@ -248,10 +293,7 @@ fn ingest_roots_in_background(
             run_one_ingest(&store, name, dir, &status);
         }
 
-        status.update(|s| {
-            s.running = false;
-            s.current_project = None;
-        });
+        status.end();
     });
 }
 
@@ -260,11 +302,11 @@ fn ingest_roots_in_background(
 /// [`ingest_roots_in_background`]) that ingests exactly one already-known
 /// project directory. Updates the *same* shared [`IngestionState`] the bulk
 /// onboarding/rebuild flows use — so the frontend's existing
-/// `ingestion_status` poll picks this up for free, no second channel — but
-/// additively rather than resetting the whole snapshot, so it composes
-/// safely if a bulk ingest happens to be running at the same moment (a
-/// destructive `*s = IngestionStatus { .. }` reset here would clobber that
-/// run's in-flight progress counters).
+/// `ingestion_status` poll picks this up for free, no second channel — via
+/// the same [`IngestionState::begin`]/[`IngestionState::end`] pair
+/// [`ingest_roots_in_background`] uses, so it composes safely (active-
+/// worker counted, counters additive) if a bulk ingest happens to be
+/// running at the same moment.
 fn ingest_project_in_background(data_dir: PathBuf, name: String, dir: PathBuf, status: IngestionState) {
     std::thread::spawn(move || {
         let store = match Store::open(&data_dir) {
@@ -275,24 +317,9 @@ fn ingest_project_in_background(data_dir: PathBuf, name: String, dir: PathBuf, s
             }
         };
 
-        status.update(|s| {
-            s.running = true;
-            s.projects_total += 1;
-        });
-
+        status.begin(1);
         run_one_ingest(&store, &name, &dir, &status);
-
-        status.update(|s| {
-            // Only clear `running` once every project this state object
-            // currently knows about (this one, plus any concurrent bulk
-            // run's own projects) has reported done — see the doc comment
-            // above on why this is additive rather than an unconditional
-            // reset.
-            if s.projects_done >= s.projects_total {
-                s.running = false;
-                s.current_project = None;
-            }
-        });
+        status.end();
     });
 }
 
@@ -807,6 +834,72 @@ mod tests {
         let snap = state.snapshot();
         assert!(snap.running);
         assert_eq!(snap.projects_total, 3);
+    }
+
+    /// Bug: `IngestionState` had incompatible update semantics between the
+    /// bulk-ingest path (`ingest_roots_in_background`, which used to
+    /// destructively reset the whole struct at start and unconditionally
+    /// clear `running` at the end) and the per-project `add_project` path
+    /// (`ingest_project_in_background`, which additively bumped counters
+    /// and only conditionally cleared `running`). Exact failure scenario
+    /// named in the bug report: a bulk ingest starts, an `add_project`
+    /// ingest starts concurrently, the bulk one finishes first -- with the
+    /// old code this incorrectly reported `running: false` (re-enabling
+    /// `roots_start_ingest`/`roots_rebuild` while the `add_project` ingest
+    /// was still actually running), and a bulk ingest starting mid-flight
+    /// would destructively reset the other operation's counters.
+    ///
+    /// Simulated directly at the state-transition level (`begin`/`end`)
+    /// rather than through real background threads/timing, since the
+    /// actual bug is entirely about the state machine's semantics, not
+    /// about scheduling -- this is deterministic and non-flaky where a
+    /// real-thread race would not be.
+    #[test]
+    fn running_stays_true_and_counters_are_not_clobbered_while_a_second_ingestion_is_still_active_after_the_first_finishes(
+    ) {
+        let status = IngestionState::new();
+        assert!(!status.snapshot().running, "idle at start");
+
+        // Bulk-style ingest starts: discovers 2 projects.
+        status.begin(2);
+        assert!(status.snapshot().running);
+        assert_eq!(status.snapshot().projects_total, 2);
+
+        // One of the bulk run's two projects finishes.
+        status.update(|s| s.projects_done += 1);
+
+        // An add_project-style ingest starts *concurrently* -- must be
+        // additive, not a destructive reset: the bulk run's
+        // already-accumulated counters must survive.
+        status.begin(1);
+        let mid = status.snapshot();
+        assert!(mid.running);
+        assert_eq!(mid.projects_total, 3, "2 from bulk + 1 from add_project, additive");
+        assert_eq!(mid.projects_done, 1, "must not have been reset by the second begin()");
+
+        // The bulk ingest's second (and last) project finishes, then the
+        // bulk operation itself ends.
+        status.update(|s| s.projects_done += 1);
+        status.end();
+
+        // The add_project ingestion is STILL active -- `running` must
+        // stay true. This is the exact bug: the old bulk path always did
+        // an unconditional `running = false` here regardless of any
+        // other still-active ingestion.
+        let after_bulk_ends = status.snapshot();
+        assert!(
+            after_bulk_ends.running,
+            "running must stay true while the add_project ingestion is still active"
+        );
+        assert_eq!(after_bulk_ends.projects_done, 2);
+
+        // The add_project ingestion's own project finishes, and it ends
+        // too -- only now should `running` correctly flip to false.
+        status.update(|s| s.projects_done += 1);
+        status.end();
+        let final_snap = status.snapshot();
+        assert!(!final_snap.running, "both ingestions are done now");
+        assert_eq!(final_snap.projects_done, 3);
     }
 
     #[test]
