@@ -83,8 +83,9 @@ beforeAll(() => {
   // jsdom has neither of these — Terminal.tsx's mount effect uses
   // ResizeObserver directly, and its become-visible effect schedules a
   // requestAnimationFrame. Same stub pattern BrainMap.test.tsx already
-  // established for this exact jsdom gap.
-  // @ts-expect-error -- test-only stub, jsdom ships none
+  // established for this exact jsdom gap (its stub omits `unobserve`,
+  // needing a `@ts-expect-error`; this one implements the full interface
+  // so TS accepts the assignment without one).
   globalThis.ResizeObserver = class {
     observe() {}
     disconnect() {}
