@@ -617,13 +617,26 @@ const DRAIN_BATCH: usize = 50;
 /// the filesystem. Returns the count of jobs completed successfully.
 ///
 /// Never propagates engine failures to the caller — only real store/DB
-/// errors bubble up via `?`. Behavior split by `EngineError` variant:
+/// errors bubble up via `?`, with ONE deliberate exception (see below).
+/// Behavior split by `EngineError` variant:
 /// - `Unavailable` (CLI missing, offline, spawn failure): every pending job
 ///   is left untouched (`status` unchanged) and the whole pass stops
 ///   immediately — trying the next job would just fail the same way.
 /// - `Failed` (bad output for this one prompt): retried once immediately;
 ///   if the retry also fails, the job is marked `failed` with the error
 ///   folded into its payload and is not retried again on a later drain.
+///
+/// The exception: [`write_session_summary`]'s write-back (which calls
+/// `Memory::write_note_with_status`) can fail with a real SQLite error —
+/// e.g. lock contention on a busy `brain.db` — that has nothing to do with
+/// this one job being bad, and is plausible enough in a headless drain loop
+/// (running from an unsupervised background thread, per Bug 4) that it
+/// shouldn't take the rest of the batch down with it. That failure is
+/// caught here and handled exactly like an `EngineError::Failed` outcome —
+/// the job is marked `failed` with the error recorded, and the loop moves
+/// on — rather than propagated via `?`. `write_summary`'s (the
+/// `project_summary`/`community_summary` write-back) own Store errors are
+/// unaffected by this and still bubble up via `?` as before.
 pub fn drain_queue(store: &Store, data_dir: &Path, engine: &dyn EnrichEngine) -> Result<usize> {
     let jobs = store.pending_jobs(DRAIN_BATCH)?;
     let mut done = 0usize;
@@ -634,16 +647,25 @@ pub fn drain_queue(store: &Store, data_dir: &Path, engine: &dyn EnrichEngine) ->
         };
 
         match run_with_one_retry(engine, &prompt) {
-            Ok(answer) => {
-                match target {
-                    PromptTarget::NodeSummary(node_id) => write_summary(store, &node_id, &answer)?,
-                    PromptTarget::SessionSummary(session_payload) => {
-                        write_session_summary(store, data_dir, &session_payload, &answer)?
+            Ok(answer) => match target {
+                PromptTarget::NodeSummary(node_id) => {
+                    write_summary(store, &node_id, &answer)?;
+                    store.set_job_status(job.id, "done", &job.payload)?;
+                    done += 1;
+                }
+                PromptTarget::SessionSummary(session_payload) => {
+                    match write_session_summary(store, data_dir, &session_payload, &answer) {
+                        Ok(()) => {
+                            store.set_job_status(job.id, "done", &job.payload)?;
+                            done += 1;
+                        }
+                        Err(e) => {
+                            let payload = record_error(&job.payload, &e.to_string());
+                            store.set_job_status(job.id, "failed", &payload)?;
+                        }
                     }
                 }
-                store.set_job_status(job.id, "done", &job.payload)?;
-                done += 1;
-            }
+            },
             Err(EngineError::Unavailable(_)) => {
                 break;
             }
@@ -1028,6 +1050,56 @@ mod tests {
         assert!(store.pending_notes(Some("p1")).unwrap().is_empty());
         let hits = store.search("token refresh", Some("p1"), 10).unwrap();
         assert!(hits.iter().any(|n| n.kind == NodeKind::Memory), "{hits:?}");
+    }
+
+    /// Bug 4 (enrich.rs call site): `write_session_summary`'s call into
+    /// `Memory::write_note_with_status` can now genuinely return `Err`
+    /// (Bug 4's brain-core fix, propagating a SQLite lock-contention
+    /// failure instead of panicking) — this proves `drain_queue` handles
+    /// that gracefully: the contended job is marked `failed` with the
+    /// error message recorded (the same pattern already used for an
+    /// `EngineError::Failed` outcome), the whole batch does NOT abort, and
+    /// — critically — nothing panics.
+    ///
+    /// Forces a real lock-contention failure the same way
+    /// `brain-core::memory`'s own Bug 4 test does: a second connection to
+    /// the same on-disk `brain.db`, holding a write transaction open from a
+    /// background thread for longer than the 5000ms `busy_timeout`.
+    #[test]
+    fn drain_session_summary_marks_job_failed_not_panic_when_the_memory_write_is_lock_contended() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.upsert_node(&project_node("p1", dir.path())).unwrap();
+        store
+            .enqueue_job("session_summary", &session_summary_payload("p1"))
+            .unwrap();
+
+        let blocker_dir = dir.path().to_path_buf();
+        let handle = std::thread::spawn(move || {
+            let blocker = Store::open(&blocker_dir).unwrap();
+            blocker
+                .with_transaction(|s| -> anyhow::Result<()> {
+                    s.set_setting("lock-holder", "1")?;
+                    std::thread::sleep(std::time::Duration::from_millis(8000));
+                    Ok(())
+                })
+                .unwrap();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let engine = FakeEngine::always_ok(WELL_FORMED_ANSWER);
+        let done = drain_queue(&store, dir.path(), &engine).unwrap();
+
+        handle.join().unwrap();
+
+        assert_eq!(done, 0, "the contended job must not count as done");
+        let failed = store.jobs_with_status("failed", 10).unwrap();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(!failed[0].payload.is_empty());
+        assert!(
+            store.pending_jobs(10).unwrap().is_empty(),
+            "the job must be resolved (failed), not stuck pending forever"
+        );
     }
 
     #[test]
