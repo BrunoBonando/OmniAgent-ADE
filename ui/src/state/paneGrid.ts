@@ -84,6 +84,26 @@ export function removePane(tree: PaneTree | null, id: string): PaneTree | null {
 }
 
 /**
+ * Swaps one leaf's id for another, preserving the tree's exact shape/
+ * nesting/position — unlike `removePane` + `addPane` (which always
+ * re-appends the new id as a sibling of the root split, relocating it),
+ * this never moves anything else. `null`/no-match are no-ops (same
+ * reference back). Used by `syncPaneTree`'s 1-for-1-swap case below, and
+ * exported on its own since it's independently useful (e.g. a future
+ * caller that already knows exactly which old id maps to which new one).
+ */
+export function replacePaneId(tree: PaneTree | null, oldId: string, newId: string): PaneTree | null {
+  if (tree === null) return null;
+  if (typeof tree === "string") return tree === oldId ? newId : tree;
+  return {
+    type: "split",
+    direction: tree.direction,
+    children: tree.children.map((child) => replacePaneId(child, oldId, newId) as PaneTree),
+    ...(tree.splitPercentages ? { splitPercentages: tree.splitPercentages } : {}),
+  };
+}
+
+/**
  * Reconciles a grid tree against the desired set of open session ids for a
  * project — adds any missing ids, removes any stale ones, and leaves
  * everything else (arrangement, split percentages Mosaic has attached)
@@ -91,18 +111,34 @@ export function removePane(tree: PaneTree | null, id: string): PaneTree | null {
  * `Workspace.tsx` can skip a `setState` (and the resulting re-render) on
  * every tick where a project's open-tab set hasn't actually moved. Order of
  * `desiredIds` doesn't matter — this only cares about set membership.
+ *
+ * **1-for-1 swap special case**: when the diff between `tree`'s current ids
+ * and `desiredIds` is *exactly* one id removed and one different id added,
+ * it's treated as an in-place replacement (`replacePaneId`) rather than
+ * remove-then-append. This is the shape `sessions.ts`'s `tab/engineRestarted`
+ * action produces (`PaneHeader`'s 3-dot "Change engine": kill the old
+ * session, spawn a new one with a fresh session id, same pane/slot — see
+ * that action's own doc) and the ONLY shape that ever produces it: every
+ * other mutation to the tabs array this app makes is add-only
+ * (`tab/opened`, `tabs/opened_bulk`) or remove-only (`tab/closed`), so this
+ * can never misfire against an unrelated coincidental close-then-open. It
+ * keeps the restarted session's pane exactly where it was instead of
+ * relocating it to the end of the grid, which a plain remove+add would do.
  */
 export function syncPaneTree(tree: PaneTree | null, desiredIds: string[]): PaneTree | null {
   const desired = new Set(desiredIds);
   const present = new Set(paneIds(tree));
 
+  const removed = [...present].filter((id) => !desired.has(id));
+  const added = desiredIds.filter((id) => !present.has(id));
+
+  if (removed.length === 1 && added.length === 1) {
+    return replacePaneId(tree, removed[0], added[0]);
+  }
+
   let next = tree;
-  for (const id of present) {
-    if (!desired.has(id)) next = removePane(next, id);
-  }
-  for (const id of desiredIds) {
-    if (!present.has(id)) next = addPane(next, id);
-  }
+  for (const id of removed) next = removePane(next, id);
+  for (const id of added) next = addPane(next, id);
   return next;
 }
 

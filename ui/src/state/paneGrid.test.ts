@@ -7,6 +7,7 @@ import {
   nominalGridShape,
   paneIds,
   removePane,
+  replacePaneId,
   syncPaneTree,
 } from "./paneGrid";
 import type { PaneTree } from "./paneGrid";
@@ -143,6 +144,48 @@ describe("syncPaneTree", () => {
 
   it("stays null when there is nothing to add", () => {
     expect(syncPaneTree(null, [])).toBeNull();
+  });
+
+  it("treats a 1-for-1 swap (engine restart) as an in-place replacement, preserving position", () => {
+    // PaneHeader's 3-dot "Change engine": kill session "b", spawn a new one
+    // ("b2") in the very same pane slot — a plain remove-then-add would
+    // relocate the new pane to the end of the grid (`addPane`'s own
+    // "always append as a sibling" rule); the swap case must not.
+    const tree = row(["a", "b", "c"]);
+    const next = syncPaneTree(tree, ["a", "b2", "c"]);
+    expect(next).toEqual(row(["a", "b2", "c"]));
+  });
+
+  it("a 1-for-1 swap in a nested split preserves the nesting, not just top-level position", () => {
+    const tree = row([column(["a", "b"]), "c"]);
+    const next = syncPaneTree(tree, ["a", "b2", "c"]);
+    expect(next).toEqual(row([column(["a", "b2"]), "c"]));
+  });
+
+  it("does not treat a 2-for-2 (or other non-1-for-1) diff as a swap", () => {
+    const tree = row(["a", "b"]);
+    const next = syncPaneTree(tree, ["c", "d"]);
+    expect(paneIds(next).sort()).toEqual(["c", "d"]);
+  });
+});
+
+describe("replacePaneId", () => {
+  it("swaps a bare leaf", () => {
+    expect(replacePaneId("a", "a", "a2")).toBe("a2");
+  });
+
+  it("is a no-op when the old id isn't present", () => {
+    const tree = row(["a", "b"]);
+    expect(replacePaneId(tree, "ghost", "x")).toEqual(row(["a", "b"]));
+  });
+
+  it("swaps a leaf deep inside a nested split, preserving every sibling's position", () => {
+    const tree = column([row(["a", "b"]), "c"]);
+    expect(replacePaneId(tree, "b", "b2")).toEqual(column([row(["a", "b2"]), "c"]));
+  });
+
+  it("returns null for a null tree", () => {
+    expect(replacePaneId(null, "a", "b")).toBeNull();
   });
 });
 

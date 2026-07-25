@@ -191,6 +191,113 @@ describe("sessionsReducer — tab/renamed", () => {
   });
 });
 
+describe("sessionsReducer — tab/autoTitled", () => {
+  // Auto-title from the first prompt (founder ask): fires once a session's
+  // first real input line resolves (Terminal.tsx -> autoTitle.ts). Unlike
+  // `tab/renamed` (always applies, an explicit user action), this must
+  // NEVER clobber a label the tab already has — manual rename, a carried-
+  // over label from an engine restart, or (defensively) a duplicate fire
+  // must all win over an auto-title.
+  it("sets the label on a tab that has none yet", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const next = sessionsReducer(state, { type: "tab/autoTitled", id: "a", label: "fix the login bug" });
+    expect(next.tabs[0].label).toBe("fix the login bug");
+  });
+
+  it("never overwrites a tab that already has a label (manual rename always wins)", () => {
+    const state: SessionsState = {
+      projects: [],
+      tabs: [{ ...tab("a", "p1"), label: "renamed by hand" }],
+      activeTabId: "a",
+    };
+    const next = sessionsReducer(state, { type: "tab/autoTitled", id: "a", label: "from first prompt" });
+    expect(next.tabs[0].label).toBe("renamed by hand");
+  });
+
+  it("is idempotent — a second auto-title fire for the same tab is a no-op", () => {
+    const state: SessionsState = {
+      projects: [],
+      tabs: [{ ...tab("a", "p1"), label: "first prompt" }],
+      activeTabId: "a",
+    };
+    const next = sessionsReducer(state, { type: "tab/autoTitled", id: "a", label: "second prompt" });
+    expect(next.tabs[0].label).toBe("first prompt");
+  });
+
+  it("auto-titling an unknown tab id is a no-op", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const next = sessionsReducer(state, { type: "tab/autoTitled", id: "ghost", label: "x" });
+    expect(next).toBe(state);
+  });
+});
+
+describe("sessionsReducer — tab/engineRestarted", () => {
+  // PaneHeader's 3-dot "Change engine": the old session was killed and a
+  // new one spawned with a different engine, same pane/slot — this swaps
+  // the TabInfo in place (same array index) rather than remove+append, so
+  // `paneGrid.ts`'s syncPaneTree 1-for-1-swap case can keep the pane where
+  // it was.
+  it("replaces the old tab with the new one at the same array position", () => {
+    const state: SessionsState = {
+      projects: [],
+      tabs: [tab("a", "p1"), tab("b", "p1", "codex"), tab("c", "p1")],
+      activeTabId: "a",
+    };
+    const restarted = tab("b2", "p1", "shell");
+    const next = sessionsReducer(state, { type: "tab/engineRestarted", oldId: "b", tab: restarted });
+    expect(next.tabs.map((t) => t.id)).toEqual(["a", "b2", "c"]);
+    expect(next.tabs[1].engine).toBe("shell");
+  });
+
+  it("moves activeTabId to the new id when the restarted tab was focused", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const restarted = tab("a2", "p1", "codex");
+    const next = sessionsReducer(state, { type: "tab/engineRestarted", oldId: "a", tab: restarted });
+    expect(next.activeTabId).toBe("a2");
+  });
+
+  it("leaves activeTabId alone when a background tab was restarted", () => {
+    const state: SessionsState = {
+      projects: [],
+      tabs: [tab("a", "p1"), tab("b", "p1")],
+      activeTabId: "a",
+    };
+    const restarted = tab("b2", "p1", "codex");
+    const next = sessionsReducer(state, { type: "tab/engineRestarted", oldId: "b", tab: restarted });
+    expect(next.activeTabId).toBe("a");
+  });
+
+  it("is a no-op when the old id isn't open", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const next = sessionsReducer(state, { type: "tab/engineRestarted", oldId: "ghost", tab: tab("x", "p1") });
+    expect(next).toBe(state);
+  });
+});
+
+describe("sessionsReducer — tab/themeChanged", () => {
+  it("sets a per-pane theme override", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const next = sessionsReducer(state, { type: "tab/themeChanged", id: "a", themeId: "matrix" });
+    expect(next.tabs[0].themeId).toBe("matrix");
+  });
+
+  it("clears the override back to the global default when themeId is undefined", () => {
+    const state: SessionsState = {
+      projects: [],
+      tabs: [{ ...tab("a", "p1"), themeId: "matrix" }],
+      activeTabId: "a",
+    };
+    const next = sessionsReducer(state, { type: "tab/themeChanged", id: "a", themeId: undefined });
+    expect(next.tabs[0].themeId).toBeUndefined();
+  });
+
+  it("changing the theme of an unknown tab id is a no-op", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
+    const next = sessionsReducer(state, { type: "tab/themeChanged", id: "ghost", themeId: "amber" });
+    expect(next).toBe(state);
+  });
+});
+
 describe("tabDisplayLabel", () => {
   it("falls back to the engine name when no custom label is set", () => {
     expect(tabDisplayLabel(tab("a", "p1", "codex"))).toBe("codex");
@@ -348,6 +455,26 @@ describe("layout serialize/deserialize round trip", () => {
     const json = serializeLayout([tab("a", "p1")]);
     expect(JSON.parse(json).tabs[0]).not.toHaveProperty("label");
     expect(deserializeLayout(json)).toEqual([{ project: "p1", engine: "claude", cwd: "/tmp/p1" }]);
+  });
+
+  it("round trips a per-pane terminal theme override so it survives a relaunch", () => {
+    const tabs = [{ ...tab("sess-1", "p1", "codex"), themeId: "matrix" as const }];
+    const json = serializeLayout(tabs);
+    expect(deserializeLayout(json)).toEqual([
+      { project: "p1", engine: "codex", cwd: "/tmp/p1", themeId: "matrix" },
+    ]);
+  });
+
+  it("omits the themeId key entirely when a tab has no per-pane override", () => {
+    const json = serializeLayout([tab("a", "p1")]);
+    expect(JSON.parse(json).tabs[0]).not.toHaveProperty("themeId");
+  });
+
+  it("drops a garbage themeId rather than restoring it", () => {
+    const raw = JSON.stringify({
+      tabs: [{ project: "p1", engine: "claude", cwd: "/tmp/p1", themeId: "not-a-real-theme" }],
+    });
+    expect(deserializeLayout(raw)).toEqual([{ project: "p1", engine: "claude", cwd: "/tmp/p1" }]);
   });
 });
 

@@ -5,6 +5,8 @@
 // when" logic (tab ordering, which tab becomes active after a close,
 // engine-default resolution, layout persistence shape) lives here, once.
 
+import { isTerminalThemeId, type TerminalThemeId } from "../lib/terminalThemes";
+
 export const ENGINES = ["claude", "codex", "shell"] as const;
 export type Engine = (typeof ENGINES)[number];
 
@@ -34,7 +36,20 @@ export interface ProjectInfo {
  * existing tab-focus path (`TabBar`, `Sidebar`'s per-project tab list,
  * `CommandPalette`) already dispatches through `onActivateTab`, so "the
  * user actually looked at this tab" needs no new UI wiring, just this
- * reducer case doing one more thing. */
+ * reducer case doing one more thing.
+ *
+ * `themeId` (founder ask, verbatim: "you can add some themes for each
+ * terminal already ... The theme is applied to the terminal only and it
+ * should be always saved automatically"): this pane's terminal-color-theme
+ * OVERRIDE, unset by default — every pane with no override renders
+ * `terminalThemes.ts`'s `DEFAULT_TERMINAL_THEME` ("global default, new
+ * sessions use it"; there's no separate "set the app-wide default" action
+ * in v1, see that module's own doc). Set via `PaneHeader`'s 3-dot "Terminal
+ * theme" picker (`tab/themeChanged`), and — same "one piece of pure UI
+ * state worth carrying across a restart" treatment `label` already gets —
+ * persisted per-pane through `PersistedTab`/`serializeLayout` below, so a
+ * pane's chosen theme survives a relaunch if its project's layout is
+ * restored. */
 export interface TabInfo {
   id: string;
   project: string;
@@ -43,6 +58,7 @@ export interface TabInfo {
   createdAt: number;
   label?: string;
   needsAttention: boolean;
+  themeId?: TerminalThemeId;
 }
 
 export interface SessionsState {
@@ -75,7 +91,20 @@ export type SessionsAction =
   | { type: "tab/activated"; id: string }
   | { type: "tab/renamed"; id: string; label: string }
   | { type: "tab/attention"; id: string }
-  | { type: "layout/restored"; tabs: TabInfo[] };
+  | { type: "layout/restored"; tabs: TabInfo[] }
+  // Auto-title from the first prompt (`autoTitle.ts`'s capture, fed from
+  // `Terminal.tsx`'s real onData stream) — unlike `tab/renamed`, only ever
+  // applies when the tab has no label yet (see the reducer case's own
+  // doc): a manual rename or an already-set auto-title always wins.
+  | { type: "tab/autoTitled"; id: string; label: string }
+  // PaneHeader's 3-dot "Change engine": the old session (`oldId`) was
+  // killed and a brand-new one spawned with a different engine, same
+  // pane/slot — swaps the whole `TabInfo` in place (see the reducer case's
+  // own doc for why this is a dedicated action rather than close-then-open).
+  | { type: "tab/engineRestarted"; oldId: string; tab: TabInfo }
+  // PaneHeader's 3-dot "Terminal theme" picker — `themeId: undefined`
+  // clears the pane's override back to the global default.
+  | { type: "tab/themeChanged"; id: string; themeId: TerminalThemeId | undefined };
 
 /**
  * When the active tab closes, focus falls to its left neighbor (matches the
@@ -170,6 +199,36 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
       };
     }
 
+    case "tab/autoTitled": {
+      const target = state.tabs.find((t) => t.id === action.id);
+      // Never overwrites an existing label — a manual rename, a label
+      // carried over from an engine restart, or a duplicate/late-arriving
+      // auto-title fire (shouldn't happen given `autoTitle.ts`'s own
+      // "capture once" guarantee, but the reducer stays defensive) all win.
+      if (!target || (target.label && target.label.length > 0)) return state;
+      return {
+        ...state,
+        tabs: state.tabs.map((t) => (t.id === action.id ? { ...t, label: action.label } : t)),
+      };
+    }
+
+    case "tab/engineRestarted": {
+      const idx = state.tabs.findIndex((t) => t.id === action.oldId);
+      if (idx === -1) return state;
+      const tabs = state.tabs.slice();
+      tabs[idx] = action.tab;
+      const activeTabId = state.activeTabId === action.oldId ? action.tab.id : state.activeTabId;
+      return { ...state, tabs, activeTabId };
+    }
+
+    case "tab/themeChanged": {
+      if (!state.tabs.some((t) => t.id === action.id)) return state;
+      return {
+        ...state,
+        tabs: state.tabs.map((t) => (t.id === action.id ? { ...t, themeId: action.themeId } : t)),
+      };
+    }
+
     case "layout/restored":
       // MERGE, never wholesale-replace: `App.tsx`'s boot effect sequentially
       // `await`s `sessionCreate` for every persisted tab before firing this
@@ -254,12 +313,15 @@ export function cycleEngine(current: Engine, direction: 1 | -1): Engine {
  * fresh on restore (DESIGN 3.1: no PTY resurrection), so only the inputs to
  * a fresh `session_create` call are kept, never the old session id. `label`
  * is the one piece of pure UI state worth carrying across a restart (a
- * rename with no other effect on the session), so it rides along here too. */
+ * rename with no other effect on the session), so it rides along here too
+ * — `themeId` (a pane's terminal-theme override, see `TabInfo.themeId`'s
+ * own doc) gets the exact same treatment. */
 export interface PersistedTab {
   project: string;
   engine: Engine;
   cwd: string;
   label?: string;
+  themeId?: TerminalThemeId;
 }
 export interface Layout {
   tabs: PersistedTab[];
@@ -267,30 +329,38 @@ export interface Layout {
 
 export function serializeLayout(tabs: TabInfo[]): string {
   const layout: Layout = {
-    tabs: tabs.map(({ project, engine, cwd, label }) => ({
+    tabs: tabs.map(({ project, engine, cwd, label, themeId }) => ({
       project,
       engine,
       cwd,
       ...(label ? { label } : {}),
+      ...(themeId ? { themeId } : {}),
     })),
   };
   return JSON.stringify(layout);
 }
 
-/** Never throws — a corrupt/missing layout restores to "no tabs" rather than crashing the app on launch. */
+/** Never throws — a corrupt/missing layout restores to "no tabs" rather
+ * than crashing the app on launch. An invalid `themeId` (e.g. a preset
+ * removed in a later version) drops just that field rather than the whole
+ * tab — a stale theme preference losing the session/project it was
+ * attached to would be a much worse failure mode than silently falling
+ * back to the global default theme for that one pane. */
 export function deserializeLayout(raw: string | null | undefined): PersistedTab[] {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw) as Partial<Layout>;
     if (!Array.isArray(parsed.tabs)) return [];
-    return parsed.tabs.filter(
-      (t): t is PersistedTab =>
-        !!t &&
-        typeof t.project === "string" &&
-        typeof t.cwd === "string" &&
-        isEngine(t.engine) &&
-        (t.label === undefined || typeof t.label === "string"),
-    );
+    return parsed.tabs
+      .filter(
+        (t): t is PersistedTab =>
+          !!t &&
+          typeof t.project === "string" &&
+          typeof t.cwd === "string" &&
+          isEngine(t.engine) &&
+          (t.label === undefined || typeof t.label === "string"),
+      )
+      .map((t) => (t.themeId !== undefined && !isTerminalThemeId(t.themeId) ? { ...t, themeId: undefined } : t));
   } catch {
     return [];
   }
