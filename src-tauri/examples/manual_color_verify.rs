@@ -177,6 +177,7 @@ fn main() {
             engine: "shell".to_string(),
             cwd: project_dir.to_string_lossy().into_owned(),
             briefing: None,
+        restore_id: None,
         })
         .expect("SessionManager::create should succeed");
 

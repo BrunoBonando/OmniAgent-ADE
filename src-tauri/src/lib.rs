@@ -3,6 +3,7 @@ pub mod feedback;
 pub mod map_feed;
 pub mod roots;
 pub mod sessions;
+pub mod tmux;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tauri::{Emitter, Manager};
@@ -145,10 +146,44 @@ pub fn run() {
                     ),
                 }
             });
+            // Founder brief (Bruno, 2026-07-26): "Green means ready for any
+            // new command, yellow means executing, red means requires
+            // attention or input." Same thin Tauri-emit adapter shape as
+            // `sink`/`attention_sink` above, same event-naming convention
+            // (`session-status:{id}`). The payload is the state string
+            // ("ready" | "executing" | "attention"); `sessions.rs` only calls
+            // this when a session's state actually *changes*, so this is a
+            // handful of events per session per minute, not a per-frame feed.
+            // The pull counterpart is `commands::session_status`, for a pane
+            // that just mounted and needs the current light immediately.
+            let status_handle = handle.clone();
+            let status_sink: sessions::StatusSink =
+                std::sync::Arc::new(move |id: &str, status: sessions::SessionStatus| {
+                    let _ = status_handle.emit(&format!("session-status:{id}"), status.as_str());
+                });
+
+            // Founder brief (same day): "Every new claude or terminal or
+            // codex session, must be stored, if not properly closed… Maybe
+            // it's nice to keep the session as tmux, regardless of agent."
+            // `default_tmux` resolves tmux once (against the user's real
+            // shell PATH — a GUI-launched .app has no Homebrew on its own
+            // PATH) and writes this app's private tmux config. `None` here
+            // means tmux simply isn't installed, which `SessionManager`
+            // handles by spawning engines directly, exactly as it did before
+            // persistence existed — never an error, never a blocked session.
+            let tmux = sessions::default_tmux(&data_dir);
+            if tmux.is_none() {
+                eprintln!(
+                    "omniagent-ade: tmux not found — sessions will run directly and will NOT \
+                     survive the app closing (install tmux to enable session restore)"
+                );
+            }
             app.manage(
                 SessionManager::new(data_dir.clone(), sink)
+                    .with_tmux(tmux)
                     .with_end_hook(end_hook)
-                    .with_attention_sink(attention_sink),
+                    .with_attention_sink(attention_sink)
+                    .with_status_sink(status_sink),
             );
 
             // Task 8.1: onboarding/rebuild ingestion progress, polled by the
@@ -217,6 +252,7 @@ pub fn run() {
             commands::session_write,
             commands::session_resize,
             commands::session_kill,
+            commands::session_status,
             commands::git_branch,
             commands::list_dir,
             commands::rename_path,

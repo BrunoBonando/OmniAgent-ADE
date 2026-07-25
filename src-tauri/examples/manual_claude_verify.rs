@@ -55,6 +55,7 @@ fn main() {
                 "You are in project OmniAgent-ADE, part of the OmniAgent ADE build itself."
                     .to_string(),
             ),
+            restore_id: None,
         })
         .expect("session_create should succeed");
 

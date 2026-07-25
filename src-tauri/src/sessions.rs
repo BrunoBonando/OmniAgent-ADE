@@ -159,6 +159,136 @@
 //! principle 5, same zero-config boundary the rest of this module's docs
 //! already describe).
 //!
+//! ## Session persistence via tmux (founder brief, 2026-07-26)
+//! Bruno, verbatim: *"Every new claude or terminal or codex session, must be
+//! stored, if not properly closed. […] if the user closes the application and
+//! comes back to that session, the terminal, claude, codex (whatever) session
+//! must be restored. […] Maybe it's nice to keep the session as tmux,
+//! regardless of agent. I think it's easier, right?"* — and *"If the user
+//! closes the terminal, tmux or claude session can be deleted."*
+//!
+//! It is easier, and it's uniform: the PTY child is no longer the engine
+//! itself but `tmux attach-session` against a detached tmux session named
+//! [`crate::tmux::session_name`]`(<session id>)` that the engine runs inside.
+//! Everything else in this module is unchanged — the reader thread still sees
+//! the same byte stream (now including tmux's redraws), the transcript is
+//! still redacted, attention detection still works, `write`/`resize`/`kill`
+//! keep their exact semantics from the frontend's point of view.
+//!
+//! What changes is what survives. Closing the app kills the attach client;
+//! the tmux server keeps the engine process and its scrollback alive. The
+//! next [`SessionManager::create`] carrying the *same* id finds that session
+//! already present and attaches instead of spawning — the user is back in the
+//! same live Claude conversation / shell, not a fresh one. `kill()` (the user
+//! closing the tab) is the only thing that destroys it.
+//!
+//! **This requires a stable session id across app restarts, which the app did
+//! not have.** [`generate_session_id`] mints a fresh
+//! `sess-<nanos>-<counter>` per call, and `ui/src/state/sessions.ts`'s
+//! `PersistedTab` deliberately never persisted the id ("engines are restarted
+//! fresh on restore… so only the inputs to a fresh `session_create` call are
+//! kept, never the old session id"). Hence
+//! [`CreateSessionRequest::restore_id`]: the frontend persists the id it got
+//! back and passes it in on relaunch. Without it, every relaunch would mint a
+//! new id, find no tmux session under that name, and start a fresh engine —
+//! i.e. exactly today's behavior, which is also the honest fallback when the
+//! id is absent.
+//!
+//! Degradation, in order of preference:
+//! 1. **tmux present, session exists** → attach. Full restoration.
+//! 2. **tmux present, no session** → create it, attach. Fresh engine, but
+//!    persistent from here on. If this was a *restore* attempt (an id came
+//!    in) the `claude` engine additionally gets `--continue` — see #3.
+//! 3. **tmux absent** → spawn the engine directly into the PTY, exactly as
+//!    before. Nothing survives an app close, but on a restore attempt
+//!    `claude` gets `-c/--continue` ("Continue the most recent conversation
+//!    in the current directory", verified against `claude --help`, 2.1.220),
+//!    so the *conversation* still carries over even though the process
+//!    doesn't. `codex`/`shell` have no equivalent and simply start fresh.
+//!
+//! A missing/broken tmux must never be a way for session creation to fail —
+//! same rule [`resolve_shell_path`] already follows for `PATH`.
+//!
+//! ### `--continue` is a booby trap, and is handled as one
+//! Measured on this machine against real `claude` 2.1.220, **not** assumed
+//! from the help text: interactive `claude --continue` **exits 1 after
+//! ~1.3 s** printing `No conversation found to continue` whenever it decides
+//! there's nothing continuable in that directory — and "nothing continuable"
+//! is *not* predictable from the on-disk conversation store: a directory with
+//! six `~/.claude/projects/<dir>/*.jsonl` files, where `claude --continue -p`
+//! succeeds, still refused the interactive form. Reproduced outside tmux
+//! entirely (bare `script`-driven PTY), so this is Claude's own behavior, not
+//! anything tmux does.
+//!
+//! Passed naively, that turns "restore my tab" into an instantly-dead
+//! terminal — strictly worse than a fresh, working Claude. So a session
+//! spawned *with* `--continue` is probed for liveness
+//! ([`child_survives_startup`], [`CONTINUE_LIVENESS_WINDOW`]) and, if the
+//! process bailed, **transparently respawned once without the flag** before
+//! `create` ever returns. The caller sees one healthy session either way; the
+//! only cost is up to [`CONTINUE_LIVENESS_WINDOW`] of extra latency on the
+//! one rare path that uses the flag at all (a *restore* whose tmux session is
+//! gone — after a reboot, say; the ordinary restore attaches and never goes
+//! near it).
+//!
+//! ## Traffic-light status (founder brief, 2026-07-26)
+//! Bruno: *"Green means ready for any new command, yellow means executing,
+//! red means requires attention or input."* → [`SessionStatus::Ready` /
+//! `Executing` / `Attention`], pushed as `session-status:{id}` on change and
+//! pullable on demand via [`SessionManager::status`] (so a tab can render the
+//! right light the instant it mounts, without waiting for a transition).
+//!
+//! Per-engine detection, and its honest limits:
+//!
+//! - **attention (red)** — the existing `ATTENTION_MARKERS` match. Latched by
+//!   the reader thread the moment the marker appears, cleared when the user
+//!   next writes to the session (answering the prompt is the only real
+//!   "handled" signal available). Note this latch reads the *raw* match, not
+//!   the [`AttentionDebouncer`]-gated event: the debouncer exists to stop a
+//!   redraw storm becoming 100 notifications, but a status latch has no such
+//!   problem, and using the debounced signal would mean a second prompt
+//!   arriving inside the 15s cooldown never turned the light red again.
+//!   Known limit, since the signal is *screen text*: while the marker is
+//!   still displayed, any full repaint re-emits it as genuinely new output
+//!   and re-latches red. For a real Claude prompt that is correct behavior
+//!   (answering it repaints *without* the dialog, so the marker stops
+//!   arriving); for text that merely happens to contain the phrase and stays
+//!   on screen, the light can stick red until that text scrolls away.
+//! - **shell sessions, with tmux (the good case)** — `tmux display-message -p
+//!   '#{pane_current_command}'`, which tmux derives from the pane tty's
+//!   foreground process group. Reads `zsh` at the prompt → **ready**; reads
+//!   `sleep`/`cargo`/`vim`/… → **executing**. Verified against real tmux
+//!   including `sleep 4`, the case that produces *no output at all* and that
+//!   therefore no activity heuristic could ever get right.
+//! - **`claude`/`codex` sessions** — `pane_current_command` is always the
+//!   engine itself (it never returns to a shell prompt), so it carries no
+//!   information; these fall back to **sustained output activity**: output
+//!   must have arrived within [`OUTPUT_QUIET_THRESHOLD`] *and* the unbroken
+//!   run it belongs to must already be [`SUSTAINED_ACTIVITY_MIN`] long.
+//!
+//!   The second condition is not decoration — it comes from measuring a real
+//!   idle `claude`, which turns out not to be quiet at all: it repaints in a
+//!   ~50 ms burst every 4–8 s, forever. Plain recency therefore strobed the
+//!   light yellow→green every few seconds on a session doing nothing
+//!   (observed live). Requiring the *run* to last ≥ 1 s separates an idle
+//!   twitch from real streaming work.
+//!
+//!   Limits, stated plainly: "executing" shows up about a second late; an
+//!   engine that genuinely works in isolated sub-second bursts spaced
+//!   seconds apart reads as ready; and an engine thinking in complete silence
+//!   also reads as ready. It is a *liveness* signal, not an idle protocol —
+//!   no stock engine exposes one (see the attention-detection investigation
+//!   above for how thoroughly that was chased), so this is deliberately the
+//!   simple, honest approximation rather than a fragile TUI-scraping guess.
+//! - **without tmux** — every engine, including `shell`, falls back to the
+//!   output-activity heuristic. For `shell` that is genuinely worse (a silent
+//!   long-running command looks idle); it is the price of not having tmux,
+//!   and one more reason the tmux path is the default.
+//!
+//! Polling is centralized in one background thread ([`spawn_status_poller`])
+//! at [`STATUS_POLL_INTERVAL`], not one thread per session, and it only emits
+//! on an actual state *change* — never a per-frame firehose.
+//!
 //! ## Making CLIs render color (founder bug, 2026-07-25 — Bruno, verbatim:
 //! ## "Can you fix the colors of the terminals? It's currently black and
 //! ## white... I like when it's colorful just like claude normally is.")
@@ -206,8 +336,8 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -216,6 +346,8 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use serde::Serialize;
 
 use brain_core::{now_ts, redact::redact};
+
+use crate::tmux::{self, Tmux};
 
 /// A callback invoked with `(session_id, raw_chunk)` for every chunk read
 /// from a session's PTY, in real time, un-redacted (this is the "live
@@ -259,7 +391,45 @@ pub type SessionEndHook = Arc<dyn Fn(&SessionEndEvent) + Send + Sync>;
 /// time this is called — callers don't need their own rate limiting.
 pub type AttentionSink = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Public shape returned by `session_create` — the Task 5.2 UI contract.
+/// The traffic light Bruno asked for (2026-07-26): *"Green means ready for
+/// any new command, yellow means executing, red means requires attention or
+/// input."* Serialized lowercase (`"ready"` / `"executing"` / `"attention"`)
+/// — that string is the `session-status:{id}` payload and the
+/// `session_status` command's return value. See the module docs for exactly
+/// how each state is detected per engine, and what that detection cannot do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionStatus {
+    /// Green — idle at a prompt, ready for a new command.
+    Ready,
+    /// Yellow — a command/turn is running.
+    Executing,
+    /// Red — blocked on the user (a Claude Code tool-permission prompt).
+    Attention,
+}
+
+impl SessionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionStatus::Ready => "ready",
+            SessionStatus::Executing => "executing",
+            SessionStatus::Attention => "attention",
+        }
+    }
+}
+
+/// Invoked with `(session_id, new_status)` whenever a session's traffic light
+/// actually *changes* — never on every poll. `lib.rs` wires this at boot to
+/// emit `session-status:{id}`, matching the existing
+/// `session-output:{id}`/`session-attention:{id}` convention; tests supply
+/// one that pushes to a channel. Registering it (via
+/// [`SessionManager::with_status_sink`]) is also what starts the single
+/// background poller — with no sink registered, nothing polls and status is
+/// only ever computed on demand.
+pub type StatusSink = Arc<dyn Fn(&str, SessionStatus) + Send + Sync>;
+
+/// Public shape returned by `session_create` — the Task 5.2 UI contract,
+/// plus the two 2026-07-26 persistence flags.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     pub id: String,
@@ -267,6 +437,15 @@ pub struct SessionInfo {
     pub engine: String,
     pub cwd: String,
     pub created: i64,
+    /// `true` when this call attached to an **already-running** engine
+    /// (a tmux session that outlived the app closing) rather than starting a
+    /// new one. The frontend can use it to skip a "starting…" placeholder, or
+    /// to tell the user their session came back.
+    pub restored: bool,
+    /// `true` when this session is tmux-backed and will therefore survive the
+    /// app closing. `false` means tmux wasn't available and this is a plain
+    /// direct spawn (see the module docs' degradation ladder).
+    pub persistent: bool,
 }
 
 /// Input to [`SessionManager::create`]. `engine` must be `"claude"`,
@@ -279,6 +458,21 @@ pub struct CreateSessionRequest {
     pub engine: String,
     pub cwd: String,
     pub briefing: Option<String>,
+    /// The id this session had before the app was closed — the whole
+    /// mechanism behind "come back to the session you left" (module docs,
+    /// "Session persistence via tmux").
+    ///
+    /// `None` (the default, and every path except layout restore) → a fresh
+    /// id is minted and a fresh engine starts, exactly as before. `Some(id)`
+    /// → that id is reused verbatim, which means the same tmux session name,
+    /// the same transcript file, and — if the tmux session is still alive —
+    /// an attach to the still-running engine instead of a new one.
+    ///
+    /// Validated by [`is_valid_session_id`] before use: it reaches the
+    /// filesystem (`<id>.log`) and a tmux target, so an arbitrary string from
+    /// the frontend is rejected rather than sanitized into something
+    /// surprising.
+    pub restore_id: Option<String>,
 }
 
 /// Everything needed to keep one live PTY session going.
@@ -306,6 +500,111 @@ struct SessionHandle {
     /// joining, a caller that exits its own process right after `kill()`
     /// could race this detached thread and lose that final flush.
     reader_thread: thread::JoinHandle<()>,
+    /// The tmux session this PTY is attached to, when tmux is in play.
+    /// `None` = direct spawn (no tmux available), i.e. nothing to kill on
+    /// tab close and nothing that survives the app closing.
+    tmux_session: Option<String>,
+    /// Live signals the status poller reads. Shared with the reader thread,
+    /// which is what actually writes to them.
+    activity: Arc<SessionActivity>,
+}
+
+/// The per-session signals the traffic light is computed from — written by
+/// the PTY reader thread, read by [`spawn_status_poller`] and
+/// [`SessionManager::status`].
+///
+/// Held behind an `Arc` and cloned into the reader thread rather than looked
+/// up through the session registry, specifically so the reader thread never
+/// has to take the registry lock on the hot per-chunk path (which would put
+/// it in contention with every `write`/`resize`/`create` on every 8 KiB of
+/// output).
+struct SessionActivity {
+    /// Copied from the request so the poller can pick the right heuristic
+    /// without a second lookup.
+    engine: String,
+    /// `None` for a direct (non-tmux) spawn — which is also exactly the
+    /// condition that forces the output-activity heuristic for every engine.
+    tmux_session: Option<String>,
+    /// When the PTY last produced any bytes.
+    last_output: Mutex<Instant>,
+    /// When the *current* run of continuous output began — reset whenever a
+    /// gap longer than [`OUTPUT_QUIET_THRESHOLD`] breaks the run. Together
+    /// with `last_output` this distinguishes "genuinely busy" from "an idle
+    /// TUI twitched": see [`SUSTAINED_ACTIVITY_MIN`].
+    busy_since: Mutex<Option<Instant>>,
+    /// Latched by the reader thread on an `ATTENTION_MARKERS` hit; cleared by
+    /// [`SessionManager::write`] (the user answering). Deliberately driven by
+    /// the raw match rather than the debounced event — see the module docs.
+    attention: AtomicBool,
+    /// Set by [`SessionManager::write`], consumed by the reader thread on its
+    /// next chunk: discard the rolling attention window before scanning.
+    ///
+    /// Without this, clearing the latch above achieves nothing. The marker
+    /// isn't a momentary event — it sits in a 4 KiB rolling window of recent
+    /// output ([`ATTENTION_WINDOW_BYTES`]) — so the very next byte of output
+    /// after the user answers re-scans that same window, re-matches the
+    /// *old* prompt text, and instantly re-latches red. Caught by
+    /// `attention_marker_turns_the_light_red_and_writing_clears_it`, which
+    /// failed exactly this way before this existed.
+    ///
+    /// Clearing the window is also the semantically right rule: text printed
+    /// *before* the user responded is no longer evidence of a pending
+    /// prompt. Only output produced *after* their input can turn the light
+    /// red again — which a genuinely still-pending prompt does immediately,
+    /// since it redraws itself (marker included) roughly twice a second.
+    clear_attention_window: AtomicBool,
+    /// Last status handed to the [`StatusSink`] (or returned by
+    /// [`SessionManager::status`]), so the poller can emit on change only.
+    last_status: Mutex<Option<SessionStatus>>,
+    /// Whether anything is actually consuming status for this session. When
+    /// false the reader thread skips the attention scan entirely (unless an
+    /// [`AttentionSink`] wants it), keeping the no-sink path exactly as cheap
+    /// as it was before this feature existed.
+    status_tracking: bool,
+}
+
+impl SessionActivity {
+    fn new(engine: String, tmux_session: Option<String>, status_tracking: bool) -> Self {
+        Self {
+            engine,
+            tmux_session,
+            last_output: Mutex::new(Instant::now()),
+            busy_since: Mutex::new(None),
+            attention: AtomicBool::new(false),
+            clear_attention_window: AtomicBool::new(false),
+            last_status: Mutex::new(None),
+            status_tracking,
+        }
+    }
+
+    /// The user just typed into this session: drop the attention latch and
+    /// tell the reader thread to forget the output that produced it.
+    fn mark_user_input(&self) {
+        self.attention.store(false, Ordering::Relaxed);
+        self.clear_attention_window.store(true, Ordering::Relaxed);
+    }
+
+    /// Called by the reader thread for every chunk off the PTY. Keeps both
+    /// halves of the activity signal current: when output last arrived, and
+    /// when the unbroken run it belongs to started.
+    fn mark_output(&self) {
+        let now = Instant::now();
+        let gap = match self.last_output.lock() {
+            Ok(mut last) => {
+                let gap = now.saturating_duration_since(*last);
+                *last = now;
+                gap
+            }
+            Err(_) => return,
+        };
+        if let Ok(mut busy) = self.busy_since.lock() {
+            // A gap longer than the quiet threshold ended the previous run,
+            // so this chunk starts a new one.
+            if busy.is_none() || gap >= OUTPUT_QUIET_THRESHOLD {
+                *busy = Some(now);
+            }
+        }
+    }
 }
 
 /// The PTY session registry. One instance lives for the app's lifetime
@@ -321,6 +620,18 @@ pub struct SessionManager {
     /// Founder-feedback attention hook, `None` by default (see
     /// [`AttentionSink`] and [`SessionManager::with_attention_sink`]).
     on_attention: Option<AttentionSink>,
+    /// Traffic-light hook, `None` by default (see [`StatusSink`] and
+    /// [`SessionManager::with_status_sink`]). Registering it also starts the
+    /// single background poller.
+    on_status: Option<StatusSink>,
+    /// The tmux server sessions are wrapped in, `None` by default (see
+    /// [`SessionManager::with_tmux`]). `None` means today's pre-2026-07-26
+    /// behavior in full: engines spawn straight into the PTY and nothing
+    /// survives the app closing.
+    tmux: Option<Tmux>,
+    /// Guards the lazy, at-most-once spawn of the status poller (see
+    /// [`SessionManager::with_status_sink`] for why it isn't spawned eagerly).
+    status_poller: OnceLock<()>,
 }
 
 impl SessionManager {
@@ -332,7 +643,41 @@ impl SessionManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             on_end: None,
             on_attention: None,
+            on_status: None,
+            tmux: None,
+            status_poller: OnceLock::new(),
         }
+    }
+
+    /// Builder-style setter for tmux-backed persistence — the same additive
+    /// shape (and the same reasoning) as [`with_end_hook`](Self::with_end_hook)
+    /// and [`with_attention_sink`](Self::with_attention_sink): tmux is
+    /// app-level infrastructure wired once at boot in `lib.rs`
+    /// ([`default_tmux`]), not a required constructor argument. Keeping it opt-in
+    /// also gives tests a clean injection seam — a per-test socket to prove
+    /// the real tmux path in isolation, or `None` to prove the fallback
+    /// without uninstalling tmux from the machine.
+    ///
+    /// Passing `None` is meaningful and safe: it is exactly the "tmux isn't
+    /// installed" degradation path.
+    pub fn with_tmux(mut self, tmux: Option<Tmux>) -> Self {
+        self.tmux = tmux;
+        self
+    }
+
+    /// Builder-style setter for the traffic-light hook (Bruno, 2026-07-26) —
+    /// same additive shape as the hooks above.
+    ///
+    /// The background poller it implies is started lazily, on the first
+    /// [`create`](Self::create), rather than here: that makes the builder
+    /// calls order-independent (a poller spawned here would capture whatever
+    /// `tmux` had been configured *so far*, silently degrading every status
+    /// reading to the activity heuristic if a caller happened to write
+    /// `.with_status_sink(…).with_tmux(…)`), and it means a manager that
+    /// never opens a session never spawns a thread at all.
+    pub fn with_status_sink(mut self, sink: StatusSink) -> Self {
+        self.on_status = Some(sink);
+        self
     }
 
     /// Builder-style setter for the Phase 7 feedback-loop hook. `lib.rs`
@@ -359,44 +704,73 @@ impl SessionManager {
         self
     }
 
-    /// Spawns a real PTY running the requested engine and registers it.
-    /// Starts a background reader thread that feeds `self.sink` and the
-    /// redacted transcript file.
+    /// Spawns (or re-attaches to) a session running the requested engine and
+    /// registers it. Starts a background reader thread that feeds
+    /// `self.sink` and the redacted transcript file.
+    ///
+    /// With tmux configured ([`with_tmux`](Self::with_tmux)) the PTY child is
+    /// `tmux attach-session` against `omniagent-<id>`, and the engine runs
+    /// inside that tmux session — so it survives the app closing, and a later
+    /// `create` carrying the same `restore_id` re-attaches to the *same live
+    /// process*. Without tmux the engine is spawned directly into the PTY,
+    /// exactly as before. See the module docs for the full degradation
+    /// ladder and for why `restore_id` exists at all.
     pub fn create(&self, req: CreateSessionRequest) -> Result<SessionInfo> {
-        let id = generate_session_id();
+        // A restore carries the id forward; everything else mints a new one.
+        let (id, is_restore) = match req.restore_id.as_deref() {
+            Some(rid) => {
+                if !is_valid_session_id(rid) {
+                    return Err(anyhow!(
+                        "invalid restore_id {rid:?}: expected 1-{MAX_SESSION_ID_LEN} characters \
+                         of [A-Za-z0-9_-] (it becomes a transcript filename and a tmux target)"
+                    ));
+                }
+                (rid.to_string(), true)
+            }
+            None => (generate_session_id(), false),
+        };
+        if self.sessions.lock().unwrap().contains_key(&id) {
+            return Err(anyhow!(
+                "session {id} is already live in this app — restore_id must name a session \
+                 from a *previous* run, not an open tab"
+            ));
+        }
         let created = now_ts();
 
         std::fs::create_dir_all(transcripts_dir(&self.data_dir))
             .context("create transcripts dir")?;
 
-        let (cmd, mcp_config_path) = build_command(&req, &self.data_dir, &id)?;
+        // Is there already a live tmux session for this id (i.e. did the app
+        // close without this tab being closed)? Answered *before* building
+        // the engine command, because it decides whether `claude` needs
+        // `--continue`: only a restore that has to start a fresh engine does.
+        // A restore that attaches doesn't need it (the conversation never
+        // ended), and a brand-new session must never get it.
+        let tmux_name = tmux::session_name(&id);
+        let tmux_session_exists = self
+            .tmux
+            .as_ref()
+            .map(|t| t.has_session(&tmux_name))
+            .unwrap_or(false);
+        let continue_conversation = is_restore && !tmux_session_exists;
+
+        let Spawned {
+            master,
+            writer,
+            child,
+            reader_thread,
+            activity,
+            mcp_config_path,
+            tmux_session,
+        } = self.spawn_session_process(&req, &id, &tmux_name, continue_conversation)?;
+
         // Armed the instant the file (if any) might exist; disarmed only
         // once the session below has been fully, successfully created --
         // see the guard's own doc comment.
         let mut mcp_cleanup_guard = McpConfigCleanupGuard::new(mcp_config_path.clone());
 
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("open pty")?;
-
-        let reader = pair.master.try_clone_reader().context("clone pty reader")?;
-        let writer = pair.master.take_writer().context("take pty writer")?;
-        let child = pair.slave.spawn_command(cmd).context("spawn engine process")?;
-        // Crucial: drop our own handle to the slave side. If we keep it
-        // open, the kernel won't deliver EOF/EIO to the master reader when
-        // the child exits (our fd would still be holding the slave open),
-        // and the reader thread would never terminate / reap naturally.
-        drop(pair.slave);
-
-        let lifecycle_path = lifecycle_path(&self.data_dir, &id);
         append_lifecycle_event(
-            &lifecycle_path,
+            &lifecycle_path(&self.data_dir, &id),
             &LifecycleEvent::Start {
                 ts: created,
                 engine: req.engine.clone(),
@@ -412,24 +786,14 @@ impl SessionManager {
             engine: req.engine.clone(),
             cwd: req.cwd.clone(),
             created,
+            // The distinction the founder brief actually cares about: did the
+            // user get their session *back*, or a new one?
+            restored: tmux_session_exists,
+            persistent: tmux_session.is_some(),
         };
 
-        let reader_thread = spawn_reader_thread(
-            id.clone(),
-            reader,
-            transcript_path(&self.data_dir, &info.id),
-            lifecycle_path,
-            self.sink.clone(),
-            Arc::clone(&self.sessions),
-            self.on_end.clone(),
-            self.on_attention.clone(),
-            req.project.clone(),
-            req.cwd.clone(),
-            req.engine.clone(),
-        );
-
         let handle = SessionHandle {
-            master: pair.master,
+            master,
             writer,
             child,
             mcp_config_path,
@@ -437,9 +801,23 @@ impl SessionManager {
             cwd: req.cwd.clone(),
             engine: req.engine.clone(),
             reader_thread,
+            tmux_session,
+            activity,
         };
 
         self.sessions.lock().unwrap().insert(id, handle);
+
+        // Lazy, at-most-once: by now every builder has run, so the poller
+        // sees the real tmux configuration (see `with_status_sink`).
+        if let Some(status_sink) = &self.on_status {
+            self.status_poller.get_or_init(|| {
+                spawn_status_poller(
+                    Arc::downgrade(&self.sessions),
+                    self.tmux.clone(),
+                    status_sink.clone(),
+                );
+            });
+        }
 
         // Fully, successfully created -- the temp mcp config file's
         // eventual cleanup is now the `SessionHandle`'s responsibility
@@ -449,12 +827,175 @@ impl SessionManager {
         Ok(info)
     }
 
+    /// Opens the PTY, starts whatever the session should actually run — a
+    /// `tmux attach-session` client, or the engine itself when tmux isn't
+    /// usable — and starts its reader thread, retrying once without `claude
+    /// --continue` if that flag turns out to have killed the process (module
+    /// docs, "`--continue` is a booby trap"). Everything about *which*
+    /// process to run lives here; `create` only deals with what to do once
+    /// it's running.
+    ///
+    /// The reader thread is started **before** the liveness probe, and that
+    /// ordering is load-bearing rather than incidental: on macOS a process
+    /// exiting with unflushed output on its tty cannot finish exiting while
+    /// nothing drains the master — it sits in the kernel's "exiting" state
+    /// (`ps` `STAT` flag `E`) indefinitely, and `try_wait` keeps answering
+    /// "still running" forever. Verified directly: a `/bin/sh -c 'echo bye;
+    /// exit 1'` spawned into an undrained PTY was still un-reaped after 2 s
+    /// of polling, `ps` showing `?NEs (bash)`. Probing before the drain
+    /// therefore always concluded "healthy", silently disabling this entire
+    /// retry. Starting the reader first is also free: on the retry path the
+    /// failed attempt's output (Claude's own `No conversation found to
+    /// continue`) legitimately belongs in that session's transcript.
+    fn spawn_session_process(
+        &self,
+        req: &CreateSessionRequest,
+        id: &str,
+        tmux_name: &str,
+        continue_conversation: bool,
+    ) -> Result<Spawned> {
+        // At most two attempts, and only ever two when `--continue` was
+        // used: with the flag, then without it.
+        let mut with_continue = continue_conversation;
+        loop {
+            let engine_cmd = build_engine_command(req, &self.data_dir, id, with_continue)?;
+            // Armed the instant the temp `--mcp-config` file might exist, and
+            // disarmed only once this attempt has fully succeeded — the same
+            // contract `create` applies to the steps *after* this function
+            // (see `McpConfigCleanupGuard`). Every `?` below, plus the retry's
+            // `continue`, drops it while armed and deletes the file; without
+            // one here, moving the config write into this function would have
+            // reopened exactly the leak the guard was introduced to close.
+            let mut mcp_cleanup_guard =
+                McpConfigCleanupGuard::new(engine_cmd.mcp_config_path.clone());
+
+            // What the PTY actually runs: either a tmux client attached to
+            // the (possibly pre-existing) session, or — when tmux is
+            // unavailable or fails — the engine itself, exactly as before
+            // tmux existed here.
+            let (cmd, tmux_session) = match &self.tmux {
+                Some(t) => match t.ensure_session(
+                    tmux_name,
+                    Path::new(&req.cwd),
+                    &engine_cmd.env,
+                    &engine_cmd.argv,
+                ) {
+                    Ok(_) => (
+                        tmux_attach_command(t, tmux_name, &req.cwd, &engine_cmd.env),
+                        Some(tmux_name.to_string()),
+                    ),
+                    Err(e) => {
+                        // Never a hard failure: a broken tmux costs
+                        // persistence, not the session (module docs).
+                        eprintln!(
+                            "omniagent-ade: tmux session setup failed for {id} ({e}); falling \
+                             back to a direct, non-persistent spawn"
+                        );
+                        (engine_cmd.to_command_builder(), None)
+                    }
+                },
+                None => (engine_cmd.to_command_builder(), None),
+            };
+
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .context("open pty")?;
+            let reader = pair.master.try_clone_reader().context("clone pty reader")?;
+            let writer = pair.master.take_writer().context("take pty writer")?;
+            let mut child = pair
+                .slave
+                .spawn_command(cmd)
+                .context("spawn engine process")?;
+            // Crucial: drop our own handle to the slave side. If we keep it
+            // open, the kernel won't deliver EOF/EIO to the master reader
+            // when the child exits (our fd would still be holding the slave
+            // open), and the reader thread would never terminate / reap
+            // naturally.
+            drop(pair.slave);
+
+            let activity = Arc::new(SessionActivity::new(
+                req.engine.clone(),
+                tmux_session.clone(),
+                self.on_status.is_some(),
+            ));
+            let reader_thread = spawn_reader_thread(
+                id.to_string(),
+                reader,
+                transcript_path(&self.data_dir, id),
+                lifecycle_path(&self.data_dir, id),
+                self.sink.clone(),
+                Arc::clone(&self.sessions),
+                self.on_end.clone(),
+                self.on_attention.clone(),
+                req.project.clone(),
+                req.cwd.clone(),
+                req.engine.clone(),
+                Arc::clone(&activity),
+            );
+
+            // Only the `--continue` attempt is ever probed, so the ordinary
+            // create path pays nothing at all for this. Under tmux the PTY
+            // child is the attach client, which exits when its session dies
+            // — so this single check covers both spawn shapes.
+            if with_continue && !child_survives_startup(&mut child, CONTINUE_LIVENESS_WINDOW) {
+                eprintln!(
+                    "omniagent-ade: `claude --continue` exited immediately for session {id} \
+                     (no continuable conversation in {}); retrying as a fresh claude session",
+                    req.cwd
+                );
+                // Tear the failed attempt down exactly the way `kill()`
+                // does, minus the parts that assume a registered session:
+                // the reader thread's own EOF path finds no entry in the
+                // registry (nothing was inserted yet) and returns quietly,
+                // so no `end` lifecycle event and no end hook fire for an
+                // attempt that never became a session.
+                let _ = child.wait();
+                drop(writer);
+                drop(pair.master);
+                let _ = reader_thread.join();
+                with_continue = false;
+                continue;
+            }
+
+            // This attempt is live: responsibility for the temp config file
+            // passes to `create`'s own guard, and from there to the
+            // `SessionHandle`.
+            mcp_cleanup_guard.disarm();
+            return Ok(Spawned {
+                master: pair.master,
+                writer,
+                child,
+                reader_thread,
+                activity,
+                mcp_config_path: engine_cmd.mcp_config_path,
+                tmux_session,
+            });
+        }
+    }
+
     /// Writes raw bytes to a session's PTY (keystrokes, pasted text, etc).
+    ///
+    /// Also clears the attention latch: the user typing into a session that
+    /// was blocked on them *is* the "handled it" signal — there is no other
+    /// one available (a stock engine announces neither that it's waiting nor
+    /// that it stopped waiting; see the module docs' attention-detection
+    /// investigation). Known limit, stated plainly: any keystroke clears it,
+    /// including one that doesn't actually dismiss the prompt (an arrow key
+    /// while choosing an option). The light goes back to red on the next
+    /// marker match, which a still-pending prompt redraws roughly twice a
+    /// second, so a premature clear self-corrects within ~a second rather
+    /// than sticking.
     pub fn write(&self, id: &str, data: &str) -> Result<()> {
         let mut sessions = self.sessions.lock().unwrap();
         let handle = sessions
             .get_mut(id)
             .ok_or_else(|| anyhow!("no such session: {id}"))?;
+        handle.activity.mark_user_input();
         handle.writer.write_all(data.as_bytes())?;
         handle.writer.flush()?;
         Ok(())
@@ -492,6 +1033,24 @@ impl SessionManager {
                 .remove(id)
                 .ok_or_else(|| anyhow!("no such session: {id}"))?
         };
+
+        // Bruno, 2026-07-26: "If the user closes the terminal, tmux or claude
+        // session can be deleted." Destroy the tmux session *first*, so the
+        // engine inside it actually dies — killing only the attach client
+        // below would leave the engine running forever with nothing attached
+        // (the exact leak persistence makes possible). This is the single
+        // place that destroys a tmux session: the natural-exit path
+        // deliberately doesn't (see `spawn_reader_thread`'s doc comment).
+        if let (Some(t), Some(name)) = (&self.tmux, &handle.tmux_session) {
+            if !t.kill_session(name) {
+                // Already gone (the engine exited on its own, taking the
+                // session with it) is the common, harmless case.
+                eprintln!(
+                    "omniagent-ade: tmux kill-session for {name} reported no such session \
+                     (it had most likely already ended on its own)"
+                );
+            }
+        }
 
         let _ = handle.child.kill();
         let status = handle.child.wait();
@@ -544,10 +1103,37 @@ impl SessionManager {
     /// Tauri-command contract — used by tests to verify reaping, and
     /// earmarked for the DESIGN 3.1 machine-pressure badge (CPU/RAM per
     /// session) later.
+    ///
+    /// Note that under tmux this is the pid of the `tmux attach-session`
+    /// *client*, not of the engine — the engine is a child of the tmux
+    /// server, which is exactly what makes it outlive this process.
     pub fn pid(&self, id: &str) -> Option<u32> {
         let sessions = self.sessions.lock().unwrap();
         sessions.get(id)?.child.process_id()
     }
+
+    /// The traffic light for one session, computed fresh right now — the
+    /// pull side of the status API (`session_status` in `commands.rs`), so a
+    /// tab can render the correct light the instant it mounts or is restored
+    /// instead of waiting for the next `session-status:{id}` change event.
+    ///
+    /// `None` only when there's no such live session. Recording the result as
+    /// the session's last-known status is deliberate: a pull that returns
+    /// `executing` has already told the caller what the next push would have,
+    /// so suppressing that redundant push is correct, not a lost update.
+    pub fn status(&self, id: &str) -> Option<SessionStatus> {
+        let activity = {
+            let sessions = self.sessions.lock().unwrap();
+            Arc::clone(&sessions.get(id)?.activity)
+        };
+        // Computed with the registry lock released: it may shell out to tmux.
+        let status = compute_status(&activity, self.tmux.as_ref(), Instant::now());
+        if let Ok(mut last) = activity.last_status.lock() {
+            *last = Some(status);
+        }
+        Some(status)
+    }
+
 }
 
 fn transcripts_dir(data_dir: &Path) -> PathBuf {
@@ -567,6 +1153,14 @@ static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// `sess-<nanos-since-epoch-hex>-<counter-hex>` — unique within a process
 /// lifetime without pulling in a UUID dependency for what is purely a local,
 /// in-memory-registry key.
+///
+/// Deliberately **not** stable across app restarts (nanos + a per-process
+/// counter), which is precisely why persistence needs
+/// [`CreateSessionRequest::restore_id`]: the id can't be re-derived, so the
+/// frontend has to carry it. Kept as-is rather than switching to something
+/// content-derived — a session's identity genuinely is "this tab, opened at
+/// this moment", and two tabs on the same project/cwd/engine must not
+/// collide onto one tmux session.
 fn generate_session_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -576,43 +1170,173 @@ fn generate_session_id() -> String {
     format!("sess-{nanos:x}-{seq:x}")
 }
 
-/// Builds the `CommandBuilder` for a session request, plus the `--mcp-config`
-/// temp-file path for `claude` sessions (so it can be cleaned up on kill).
-fn build_command(
+/// Upper bound on an accepted `restore_id`. Generated ids are ~25 characters;
+/// this leaves generous room while keeping the derived tmux session name and
+/// transcript filename bounded.
+const MAX_SESSION_ID_LEN: usize = 96;
+
+/// Whether a caller-supplied id is safe to use as one. This is a *validation*
+/// gate, not a sanitizer: the id becomes a filesystem path
+/// (`<data_dir>/transcripts/<id>.log`) and a tmux target, so `../../etc/x` or
+/// `a:b` must be rejected outright rather than quietly rewritten into some
+/// other session's name. `[A-Za-z0-9_-]` has no path separators, no `.` (so
+/// no traversal, and no tmux window/pane target syntax), and no shell
+/// metacharacters.
+fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_SESSION_ID_LEN
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Process-wide cache for the resolved tmux ([`default_tmux`]).
+static TMUX: OnceLock<Option<Tmux>> = OnceLock::new();
+
+/// The tmux OmniAgent should use in production: resolved once per process
+/// against the user's real, shell-resolved `PATH` (a GUI-launched `.app` has
+/// no Homebrew on its inherited `PATH` — the same bug
+/// [`resolve_shell_path`] exists for), pinned to this app's private socket,
+/// and pointed at this app's own config file.
+///
+/// `None` means tmux isn't installed, which every caller treats as "spawn
+/// engines directly" rather than as an error. `lib.rs` calls this once at
+/// boot; `SessionManager::new` does *not* call it implicitly, so a plain
+/// manager (every existing test) keeps its exact previous behavior.
+pub fn default_tmux(data_dir: &Path) -> Option<Tmux> {
+    cached_or_init(&TMUX, || {
+        let resolved = Tmux::resolve(tmux::DEFAULT_SOCKET, cached_shell_path())?;
+        Some(match tmux::write_config(data_dir) {
+            Some(cfg) => resolved.with_config(cfg),
+            None => resolved,
+        })
+    })
+    .clone()
+}
+
+/// The result of [`SessionManager::spawn_session_process`]: a live PTY and
+/// the process on the other end of it, plus the two things `create` needs to
+/// record about how it got there.
+struct Spawned {
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn Child + Send + Sync>,
+    reader_thread: thread::JoinHandle<()>,
+    activity: Arc<SessionActivity>,
+    mcp_config_path: Option<PathBuf>,
+    tmux_session: Option<String>,
+}
+
+/// How long a `--continue` spawn is watched before it's declared healthy.
+///
+/// Sized from a real measurement, not a guess: interactive `claude
+/// --continue` in a directory with nothing to continue prints `No
+/// conversation found to continue` and exits 1 after ~1.3 s (measured twice
+/// on claude 2.1.220), while a successful one is still running well past
+/// that. 2.5 s is ~2× the observed failure latency — comfortably past it
+/// without being an eternity on the one path that pays it.
+const CONTINUE_LIVENESS_WINDOW: Duration = Duration::from_millis(2500);
+
+/// Poll granularity for [`child_survives_startup`]. Fine enough that a
+/// failure is detected (and the retry started) within a blink of the process
+/// actually dying.
+const CONTINUE_LIVENESS_POLL: Duration = Duration::from_millis(50);
+
+/// `true` if `child` was still running at the end of `window` — i.e. it
+/// didn't immediately refuse to start. Returns as soon as the child exits,
+/// so the failure path is fast; only the healthy path waits out the window.
+fn child_survives_startup(child: &mut Box<dyn Child + Send + Sync>, window: Duration) -> bool {
+    let deadline = Instant::now() + window;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return false,
+            _ => thread::sleep(CONTINUE_LIVENESS_POLL),
+        }
+    }
+    true
+}
+
+/// An engine invocation, resolved but not yet materialized — the shape both
+/// spawn paths need. `build_command` turns it into a `CommandBuilder` for a
+/// direct PTY spawn; `Tmux::ensure_session` consumes `argv`/`env`/`cwd`
+/// directly, because tmux takes the program and its arguments as separate
+/// argv entries (never a shell string — see the tmux module docs).
+struct EngineCommand {
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    cwd: String,
+    /// Temp `--mcp-config` file for `claude` sessions, if any.
+    mcp_config_path: Option<PathBuf>,
+}
+
+impl EngineCommand {
+    fn to_command_builder(&self) -> CommandBuilder {
+        let mut cmd = CommandBuilder::new(&self.argv[0]);
+        for arg in &self.argv[1..] {
+            cmd.arg(arg);
+        }
+        cmd.cwd(&self.cwd);
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
+        cmd
+    }
+}
+
+/// Resolves a session request into the exact program, arguments and
+/// environment to run — the single source of truth for engine wiring, shared
+/// by the tmux and direct-spawn paths so tmux can never silently change how
+/// an engine is invoked (DESIGN principle 5: tmux *wraps* stock engines, it
+/// does not reconfigure them).
+///
+/// `continue_conversation` only ever applies to `claude`, and only on the
+/// no-tmux (or tmux-session-is-gone) restore path — see the module docs'
+/// degradation ladder.
+fn build_engine_command(
     req: &CreateSessionRequest,
     data_dir: &Path,
     session_id: &str,
-) -> Result<(CommandBuilder, Option<PathBuf>)> {
+    continue_conversation: bool,
+) -> Result<EngineCommand> {
+    let env = engine_env();
     match req.engine.as_str() {
         "shell" => {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-            let mut cmd = CommandBuilder::new(shell);
-            cmd.cwd(&req.cwd);
-            apply_resolved_path(&mut cmd);
-            apply_terminal_capability_env(&mut cmd);
-            Ok((cmd, None))
+            Ok(EngineCommand {
+                argv: vec![shell],
+                env,
+                cwd: req.cwd.clone(),
+                mcp_config_path: None,
+            })
         }
         "codex" => {
             // Stock spawn — no flags, nothing injected (Zero-config
             // principle: only `claude` gets ADE wiring in this task).
-            let mut cmd = CommandBuilder::new("codex");
-            cmd.cwd(&req.cwd);
-            apply_resolved_path(&mut cmd);
-            apply_terminal_capability_env(&mut cmd);
-            Ok((cmd, None))
+            Ok(EngineCommand {
+                argv: vec!["codex".to_string()],
+                env,
+                cwd: req.cwd.clone(),
+                mcp_config_path: None,
+            })
         }
         "claude" => {
-            let mut cmd = CommandBuilder::new("claude");
-            cmd.cwd(&req.cwd);
-            apply_resolved_path(&mut cmd);
-            apply_terminal_capability_env(&mut cmd);
+            let mut argv = vec!["claude".to_string()];
+
+            if continue_conversation {
+                // `-c/--continue`: "Continue the most recent conversation in
+                // the current directory" (verified against `claude --help`,
+                // 2.1.220). This is the *fallback* continuity path — it
+                // resumes the conversation, not the process, and only fires
+                // when there's no live tmux session to attach to instead.
+                argv.push("--continue".to_string());
+            }
 
             let mcp_config_path = match resolve_mcp_server_binary() {
                 Some(bin) => {
                     let cfg_path = write_mcp_config(&bin, data_dir, session_id)
                         .context("write mcp config")?;
-                    cmd.arg("--mcp-config");
-                    cmd.arg(&cfg_path);
+                    argv.push("--mcp-config".to_string());
+                    argv.push(cfg_path.to_string_lossy().into_owned());
                     Some(cfg_path)
                 }
                 None => {
@@ -626,16 +1350,67 @@ fn build_command(
             };
 
             if let Some(briefing) = &req.briefing {
-                cmd.arg("--append-system-prompt");
-                cmd.arg(briefing);
+                argv.push("--append-system-prompt".to_string());
+                argv.push(briefing.clone());
             }
 
-            Ok((cmd, mcp_config_path))
+            Ok(EngineCommand {
+                argv,
+                env,
+                cwd: req.cwd.clone(),
+                mcp_config_path,
+            })
         }
         other => Err(anyhow!(
             "unsupported engine: {other:?} (expected \"claude\", \"codex\", or \"shell\")"
         )),
     }
+}
+
+/// The environment every engine is handed, whichever way it's spawned.
+///
+/// `PATH` is the user's real, shell-resolved one ([`cached_shell_path`]) —
+/// see the module docs' "Resolving the real PATH for GUI-launched spawns"
+/// section. Omitted entirely when resolution fails, which leaves whatever
+/// `PATH` this process itself inherited (the pre-fix behavior) rather than
+/// inventing one. `TERM`/`COLORTERM` are always set ([`TERM_VALUE`],
+/// [`COLORTERM_VALUE`]).
+///
+/// Under tmux these become `tmux new-session -e KEY=VALUE` pairs, verified to
+/// reach the pane's process environment; under a direct spawn they're set on
+/// the `CommandBuilder`. Same values either way — that's the point of having
+/// one producer.
+fn engine_env() -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Some(path) = cached_shell_path() {
+        env.push(("PATH".to_string(), path.to_string()));
+    }
+    env.push(("TERM".to_string(), TERM_VALUE.to_string()));
+    env.push(("COLORTERM".to_string(), COLORTERM_VALUE.to_string()));
+    env
+}
+
+/// The PTY child that attaches to a tmux session. Gets the same
+/// `PATH`/`TERM`/`COLORTERM` as an engine would: `TERM` in particular matters
+/// here because it's the *client's* terminal type, which is what tmux matches
+/// against `terminal-features ",xterm-256color:RGB"` to decide whether it can
+/// pass 24-bit color through.
+fn tmux_attach_command(
+    t: &Tmux,
+    tmux_name: &str,
+    cwd: &str,
+    env: &[(String, String)],
+) -> CommandBuilder {
+    let argv = t.attach_argv(tmux_name);
+    let mut cmd = CommandBuilder::new(&argv[0]);
+    for arg in &argv[1..] {
+        cmd.arg(arg);
+    }
+    cmd.cwd(cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd
 }
 
 /// How long [`spawn_and_capture_path`] will wait for the login-shell
@@ -648,30 +1423,19 @@ fn build_command(
 /// path and must never be allowed to hang it.
 const SHELL_PATH_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Overrides an about-to-be-spawned command's `PATH` with the user's real,
-/// shell-resolved `PATH` ([`cached_shell_path`]) — see the module docs'
-/// "Resolving the real PATH for GUI-launched spawns" section for why this
-/// exists. A no-op (leaves whatever `PATH` this process itself inherited,
-/// today's pre-fix behavior) whenever resolution fails for any reason.
-fn apply_resolved_path(cmd: &mut CommandBuilder) {
-    if let Some(path) = cached_shell_path() {
-        cmd.env("PATH", path);
-    }
-}
-
-/// Sets the terminal-capability env vars xterm.js + its WebGL addon
-/// (`Terminal.tsx`) actually implement — see the module docs' "Making CLIs
-/// render color" section for the bug this fixes (a GUI-launched `.app` has
-/// no `TERM` at all, which makes CLIs like `claude` fall back to plain,
-/// uncolored output). Unlike [`apply_resolved_path`], always overrides —
-/// there's no "real" value to discover from this process's own environment
-/// to fall back to; `xterm-256color`/`truecolor` are simply what this app's
-/// terminal renderer supports, independent of whatever (if anything) the
-/// spawning process inherited.
-fn apply_terminal_capability_env(cmd: &mut CommandBuilder) {
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-}
+/// The exact terminal type this app's xterm.js + WebGL addon implements —
+/// see the module docs' "Making CLIs render color" section for the founder
+/// bug behind it (a GUI-launched `.app` has no `TERM` at all, which makes
+/// CLIs like `claude` fall back to plain, uncolored output). Unlike `PATH`,
+/// this is always asserted rather than resolved: there's no "real" value to
+/// discover from this process's own environment, so the right answer is
+/// simply what this app's own renderer supports. `crate::tmux::CONFIG_BODY`
+/// sets tmux's `default-terminal` to the same value, so an engine sees the
+/// identical `TERM` whether or not tmux is in the middle.
+const TERM_VALUE: &str = "xterm-256color";
+/// The de facto signal modern CLIs (including `claude`) check for 24-bit
+/// color.
+const COLORTERM_VALUE: &str = "truecolor";
 
 /// Process-global cache for [`resolve_shell_path`]'s result — the spawn it
 /// performs is real (if usually sub-second) latency, so it's paid once per
@@ -687,6 +1451,10 @@ fn cached_shell_path() -> Option<&'static str> {
     #[cfg(test)]
     if FORCE_SHELL_PATH_RESOLUTION_FAILURE.with(|f| f.get()) {
         return None;
+    }
+    #[cfg(test)]
+    if let Some(overridden) = TEST_SHELL_PATH_OVERRIDE.with(|o| o.get()) {
+        return Some(overridden);
     }
     cached_or_init(&SHELL_PATH, resolve_shell_path).as_deref()
 }
@@ -705,6 +1473,19 @@ fn cached_shell_path() -> Option<&'static str> {
 #[cfg(test)]
 thread_local! {
     static FORCE_SHELL_PATH_RESOLUTION_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only `PATH` injection: makes `engine_env` hand a spawned engine a
+    /// `PATH` of the test's choosing, so a test can put a fake `claude` in
+    /// front of the real one **without touching the process-global `PATH`**.
+    /// Thread-local for the same reason the flag above is — `cargo test` runs
+    /// tests in parallel in one process, and the one existing test that does
+    /// mutate the real `PATH`
+    /// (`create_cleans_up_leaked_mcp_config_temp_file_when_spawn_fails`,
+    /// which filters `claude` off it) would race catastrophically with a test
+    /// that prepends a directory *containing* a `claude`: whichever wrote
+    /// last would win, and that test's whole premise would silently invert.
+    /// The value is a leaked `&'static str` because `cached_shell_path`
+    /// returns one; a few bytes per test thread, in test builds only.
+    static TEST_SHELL_PATH_OVERRIDE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
 /// Generic lazy-once cache: runs `init` the first time `cache` is empty,
@@ -972,6 +1753,7 @@ fn spawn_reader_thread(
     project: String,
     cwd: String,
     engine: String,
+    activity: Arc<SessionActivity>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut transcript_file = OpenOptions::new()
@@ -990,12 +1772,16 @@ fn spawn_reader_thread(
         // `chunk` handed to `sink` below is untouched by this.
         let mut utf8_decoder = Utf8ChunkDecoder::new();
 
-        // Attention detection only runs when a sink is actually registered
-        // (see this function's doc comment for why it's not also hard-gated
-        // to `engine == "claude"`).
-        let watch_for_attention = on_attention.is_some();
+        // Attention detection runs when *either* consumer wants it: the
+        // notification sink, or the traffic light (which latches red off the
+        // raw match — see this function's doc comment and the module docs for
+        // why it deliberately doesn't reuse the debounced event).
+        let watch_for_attention = on_attention.is_some() || activity.status_tracking;
         let mut attention_window = String::new();
         let mut attention_debouncer = AttentionDebouncer::new(ATTENTION_COOLDOWN);
+        // When this thread last observed a `SessionManager::write` (i.e. the
+        // user responding) — the anchor for `ATTENTION_INPUT_GRACE`.
+        let mut last_user_input: Option<Instant> = None;
 
         loop {
             match reader.read(&mut buf) {
@@ -1004,6 +1790,12 @@ fn spawn_reader_thread(
                     let chunk = &buf[..n];
                     sink(&id, chunk);
 
+                    // The traffic light's liveness signal: any byte out of
+                    // the PTY means something is happening in there. One
+                    // uncontended mutex per read, and deliberately *not* the
+                    // registry lock (see `SessionActivity`'s doc comment).
+                    activity.mark_output();
+
                     // Decoded once per chunk and reused for both
                     // consumers below — they observe the identical raw
                     // byte stream, so a character split across two reads
@@ -1011,13 +1803,42 @@ fn spawn_reader_thread(
                     let decoded = utf8_decoder.decode(chunk);
 
                     if watch_for_attention {
+                        // The user typed since the last chunk: everything
+                        // already in the window predates their response and
+                        // must not re-trigger (see
+                        // `SessionActivity::clear_attention_window`).
+                        if activity
+                            .clear_attention_window
+                            .swap(false, Ordering::Relaxed)
+                        {
+                            attention_window.clear();
+                            last_user_input = Some(Instant::now());
+                        }
                         attention_window.push_str(&decoded);
                         trim_to_last_n_bytes(&mut attention_window, ATTENTION_WINDOW_BYTES);
-                        if contains_attention_marker(&attention_window)
-                            && attention_debouncer.should_fire(Instant::now())
-                        {
-                            if let Some(attention_sink) = &on_attention {
-                                attention_sink(&id);
+                        if contains_attention_marker(&attention_window) {
+                            let now = Instant::now();
+                            // Grace window: the first repaint after the user
+                            // responds legitimately still shows the dialog
+                            // they just answered (see
+                            // `ATTENTION_INPUT_GRACE`), so it must not turn
+                            // the light red again. A prompt that is genuinely
+                            // still pending redraws ~twice a second and
+                            // re-latches as soon as the grace lapses.
+                            let just_responded = last_user_input
+                                .is_some_and(|t| now.duration_since(t) < ATTENTION_INPUT_GRACE);
+                            if !just_responded {
+                                activity.attention.store(true, Ordering::Relaxed);
+                            }
+                            // The *notification* is deliberately not
+                            // grace-gated — it has its own, much longer
+                            // debounce, and suppressing it here would drop
+                            // the badge for a prompt that appears promptly
+                            // after the user's own input.
+                            if attention_debouncer.should_fire(now) {
+                                if let Some(attention_sink) = &on_attention {
+                                    attention_sink(&id);
+                                }
                             }
                         }
                     }
@@ -1061,6 +1882,20 @@ fn spawn_reader_thread(
         // Not already handled by an explicit kill: this is a natural
         // exit. Reap it so it doesn't zombie -- unlocked, same as kill().
         let status = handle.child.wait();
+
+        // Deliberately NOT killing the tmux session here. This path means
+        // "the PTY child ended without anyone calling kill()", which is
+        // almost always the engine itself exiting (the user typed `exit`) —
+        // in which case tmux already tore the session down. But it also
+        // covers a transient read error on the master side, where the engine
+        // is very much alive and mid-work; destroying its tmux session there
+        // would throw away exactly the state this whole feature exists to
+        // protect. Only an explicit `kill()` (the user closing the tab)
+        // deletes a session. A session left behind this way shows up in
+        // `tmux -L omniagent-ade ls` and is re-attachable by its id (no log
+        // line here: the common case is the engine having exited normally,
+        // which already destroyed the tmux session, so a "left it alive"
+        // message would be wrong far more often than right).
         cleanup_mcp_config(&handle.mcp_config_path);
         let exit_code = status.as_ref().ok().map(|s| s.exit_code());
         let signal = status.as_ref().ok().and_then(|s| s.signal().map(String::from));
@@ -1240,6 +2075,25 @@ const ATTENTION_WINDOW_BYTES: usize = 4096;
 /// attention need; it just avoids re-announcing one already flagged.
 const ATTENTION_COOLDOWN: Duration = Duration::from_secs(15);
 
+/// How long after the user writes to a session the *status latch* refuses to
+/// go red again (the notification event is unaffected — see the reader
+/// thread).
+///
+/// Clearing the rolling window on input isn't quite enough on its own: the
+/// engine's very next repaint after the user answers still contains the
+/// dialog they just answered, arrives as genuinely new output, and re-latches
+/// red — leaving the light stuck on "needs you" for a prompt that's already
+/// handled. Observed for real: through tmux this is load-dependent, and under
+/// a fully parallel `cargo test` it happened on essentially every run.
+///
+/// 750 ms is comfortably longer than a repaint takes to arrive and much
+/// shorter than a human answering a second prompt, so a genuinely
+/// still-pending prompt (which redraws roughly twice a second) re-latches
+/// within about a second of the grace lapsing. The cost of being wrong is
+/// bounded and self-correcting in both directions: at worst the light is
+/// green for ~1 s too long, never red forever.
+const ATTENTION_INPUT_GRACE: Duration = Duration::from_millis(750);
+
 fn contains_attention_marker(text: &str) -> bool {
     ATTENTION_MARKERS.iter().any(|marker| text.contains(marker))
 }
@@ -1291,9 +2145,206 @@ impl AttentionDebouncer {
     }
 }
 
+// -------------------------------------------------------------------------
+// Traffic-light status (Bruno, 2026-07-26: "Green means ready for any new
+// command, yellow means executing, red means requires attention or input").
+// See the module docs for the per-engine heuristics and their limits.
+// -------------------------------------------------------------------------
+
+/// How often the single background poller re-evaluates every live session.
+/// 300 ms is comfortably under the ~1 s at which a status light starts to
+/// feel laggy, while keeping the tmux `display-message` cost (one short-lived
+/// local IPC per tmux-backed session per tick) negligible. Nothing is emitted
+/// unless the state actually changed, so this cadence is a *detection*
+/// latency, not an event rate.
+const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(300);
+
+/// How long a session must produce no output at all before the
+/// output-activity heuristic calls it idle. Used for `claude`/`codex` always
+/// (their pane command is uninformative), and for every engine when tmux
+/// isn't available.
+///
+/// 700 ms is a deliberate compromise: long enough that the gaps *within* a
+/// working engine's output (a model streaming a response, a TUI redrawing
+/// between tool calls) don't flicker the light green, short enough that
+/// finishing a turn shows up as ready almost immediately. It cannot
+/// distinguish "thinking silently" from "waiting for input" — no stock engine
+/// exposes a signal that could (module docs).
+const OUTPUT_QUIET_THRESHOLD: Duration = Duration::from_millis(700);
+
+/// How long an unbroken run of output must last before it counts as
+/// "executing" rather than as an idle TUI twitching.
+///
+/// This exists because of a measurement, not a hunch. A real, *completely
+/// idle* `claude` session (2.1.220, watched for 30 s through this very
+/// module) is not silent: it emits a tight burst of ~3 chunks / ~2.5 KB —
+/// all within about 50 ms of each other — and then says nothing for **4 to 8
+/// seconds**, over and over. Recency alone therefore made the light flip to
+/// yellow and back roughly every 8 s on a session where nothing whatsoever
+/// was happening; observed live before this constant existed.
+///
+/// Requiring the run itself to be ≥ 1 s cleanly separates the two regimes:
+/// an idle burst is over in ~50 ms and never qualifies, while real work
+/// (streaming tokens, a tool's output) sustains output for seconds. The
+/// trade-off is honest and bounded — "executing" appears about a second
+/// late, and an engine that genuinely works in isolated sub-second bursts
+/// several seconds apart reads as ready. tmux-backed `shell` sessions don't
+/// rely on any of this: they get the exact foreground-command answer.
+const SUSTAINED_ACTIVITY_MIN: Duration = Duration::from_millis(1000);
+
+/// Foreground commands that mean "this pane is sitting at a prompt". `-zsh`
+/// / `-bash` are the login-shell argv[0] convention; `login` is what macOS
+/// puts in front of a login shell.
+const IDLE_SHELL_COMMANDS: &[&str] = &[
+    "zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh", "-zsh", "-bash", "-sh", "-fish",
+    "login",
+];
+
+fn is_idle_shell_command(pane_command: &str) -> bool {
+    IDLE_SHELL_COMMANDS.contains(&pane_command)
+}
+
+/// What a tmux pane's foreground command tells us, if anything.
+///
+/// - A shell → the pane is at a prompt: **ready**, whatever the engine is.
+/// - Anything else in a `shell` session → a real command is running:
+///   **executing**. This is the case output-activity can't see at all
+///   (`sleep 4` prints nothing).
+/// - Anything else in a `claude`/`codex` session → `None`: the engine is
+///   *always* the pane's foreground command, so this signal carries no
+///   information and the caller must fall back to output activity.
+fn status_from_pane_command(pane_command: &str, engine: &str) -> Option<SessionStatus> {
+    if is_idle_shell_command(pane_command) {
+        return Some(SessionStatus::Ready);
+    }
+    if engine == "shell" {
+        return Some(SessionStatus::Executing);
+    }
+    None
+}
+
+/// The fallback signal: is this session *sustainedly* producing output?
+///
+/// Both halves are required, and the second one is what makes this usable
+/// rather than a strobe light (see [`SUSTAINED_ACTIVITY_MIN`]): output must
+/// have arrived within [`OUTPUT_QUIET_THRESHOLD`] **and** the unbroken run it
+/// belongs to must already be [`SUSTAINED_ACTIVITY_MIN`] long.
+fn status_from_output_activity(activity: &SessionActivity, now: Instant) -> SessionStatus {
+    let last = activity
+        .last_output
+        .lock()
+        .map(|g| *g)
+        .unwrap_or_else(|e| *e.into_inner());
+    if now.saturating_duration_since(last) >= OUTPUT_QUIET_THRESHOLD {
+        return SessionStatus::Ready;
+    }
+    let busy_since = activity
+        .busy_since
+        .lock()
+        .map(|g| *g)
+        .unwrap_or_else(|e| *e.into_inner());
+    match busy_since {
+        Some(started) if now.saturating_duration_since(started) >= SUSTAINED_ACTIVITY_MIN => {
+            SessionStatus::Executing
+        }
+        _ => SessionStatus::Ready,
+    }
+}
+
+/// The full traffic-light decision for one session, in priority order:
+/// attention wins over everything (it's the state that needs the user), then
+/// tmux's foreground-command signal where it's meaningful, then output
+/// activity.
+fn compute_status(activity: &SessionActivity, tmux: Option<&Tmux>, now: Instant) -> SessionStatus {
+    if activity.attention.load(Ordering::Relaxed) {
+        return SessionStatus::Attention;
+    }
+    if let (Some(t), Some(name)) = (tmux, activity.tmux_session.as_deref()) {
+        if let Some(pane_command) = t.pane_current_command(name) {
+            if let Some(status) = status_from_pane_command(&pane_command, &activity.engine) {
+                return status;
+            }
+        }
+    }
+    status_from_output_activity(activity, now)
+}
+
+/// One background thread for the whole manager (not one per session) that
+/// re-evaluates every live session's traffic light and calls `sink` **only on
+/// a change**.
+///
+/// Holds a [`Weak`] reference to the session registry, so it shuts itself
+/// down once the `SessionManager` and every reader thread are gone rather
+/// than polling a dead app forever — which is also what makes the
+/// "simulate the app dying by dropping the manager" test terminate cleanly.
+///
+/// Each tick snapshots `(id, Arc<SessionActivity>)` under the registry lock
+/// and then **releases it** before computing anything: `compute_status` can
+/// shell out to tmux, and holding the registry lock across a subprocess call
+/// would stall every concurrent `write`/`resize`/`create` — the same mistake
+/// the natural-exit path was already fixed for.
+fn spawn_status_poller(
+    sessions: Weak<Mutex<HashMap<String, SessionHandle>>>,
+    tmux: Option<Tmux>,
+    sink: StatusSink,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || loop {
+        thread::sleep(STATUS_POLL_INTERVAL);
+
+        let Some(sessions) = sessions.upgrade() else {
+            return; // the app (or the test) is gone
+        };
+
+        let snapshot: Vec<(String, Arc<SessionActivity>)> = {
+            let Ok(guard) = sessions.lock() else {
+                return;
+            };
+            guard
+                .iter()
+                .map(|(id, handle)| (id.clone(), Arc::clone(&handle.activity)))
+                .collect()
+        };
+        // Registry lock released before any tmux call below.
+        drop(sessions);
+
+        let now = Instant::now();
+        for (id, activity) in snapshot {
+            let status = compute_status(&activity, tmux.as_ref(), now);
+            let changed = match activity.last_status.lock() {
+                Ok(mut last) => {
+                    let changed = *last != Some(status);
+                    if changed {
+                        *last = Some(status);
+                    }
+                    changed
+                }
+                Err(_) => false,
+            };
+            if changed {
+                sink(&id, status);
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Materializes a request the way the direct-spawn path in `create()`
+    /// does — `build_engine_command` + `to_command_builder`, i.e. the real
+    /// production composition, not a parallel implementation. Exists only so
+    /// the env-wiring tests below can inspect a `CommandBuilder` without
+    /// spawning anything.
+    fn build_command(
+        req: &CreateSessionRequest,
+        data_dir: &Path,
+        session_id: &str,
+    ) -> Result<(CommandBuilder, Option<PathBuf>)> {
+        let engine_cmd = build_engine_command(req, data_dir, session_id, false)?;
+        let cmd = engine_cmd.to_command_builder();
+        Ok((cmd, engine_cmd.mcp_config_path))
+    }
 
     #[test]
     fn resolves_dev_sibling_binary() {
@@ -1344,6 +2395,7 @@ mod tests {
             engine: "not-a-real-engine".into(),
             cwd: tmp.path().to_string_lossy().into_owned(),
             briefing: None,
+            restore_id: None,
         };
         let err = build_command(&req, tmp.path(), "sess-test").unwrap_err();
         assert!(err.to_string().contains("unsupported engine"));
@@ -1471,6 +2523,7 @@ mod tests {
             engine: engine.into(),
             cwd: tmp.path().to_string_lossy().into_owned(),
             briefing: None,
+            restore_id: None,
         };
         let (cmd, _mcp_path) =
             build_command(&req, tmp.path(), &format!("sess-test-path-{engine}")).unwrap();
@@ -1554,6 +2607,7 @@ mod tests {
             engine: engine.into(),
             cwd: tmp.path().to_string_lossy().into_owned(),
             briefing: None,
+            restore_id: None,
         };
         let (cmd, _mcp_path) =
             build_command(&req, tmp.path(), &format!("sess-test-color-{engine}")).unwrap();
@@ -1683,18 +2737,17 @@ mod tests {
             "test setup bug: `claude` must not resolve under the filtered PATH"
         );
 
-        let count_leaked = || {
-            std::fs::read_dir(std::env::temp_dir())
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .starts_with("omniagent-ade-mcp-")
-                })
-                .count()
-        };
-        let before = count_leaked();
+        // Pinned via `restore_id` so this test knows the exact temp filename
+        // `write_mcp_config` will use, and can therefore assert on *its own*
+        // file instead of counting every `omniagent-ade-mcp-*` in the shared
+        // system temp dir. The counting version raced any other test that
+        // opened a `claude` session concurrently (which now exists:
+        // `a_claude_restore_whose_continue_is_refused_retries_without_it`) —
+        // that session's own perfectly-legitimate config file inflated the
+        // count and failed this assertion.
+        let session_id = "sess-mcp-leak-probe";
+        let expected_config = std::env::temp_dir().join(format!("omniagent-ade-mcp-{session_id}.json"));
+        let _ = std::fs::remove_file(&expected_config);
 
         let tmp = tempfile::tempdir().unwrap();
         let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink());
@@ -1703,6 +2756,7 @@ mod tests {
             engine: "claude".into(),
             cwd: tmp.path().to_string_lossy().into_owned(),
             briefing: None,
+            restore_id: Some(session_id.to_string()),
         };
 
         let err = manager
@@ -1710,10 +2764,11 @@ mod tests {
             .expect_err("claude must fail to spawn once its directory is filtered off PATH");
         assert!(!err.to_string().is_empty());
 
-        assert_eq!(
-            count_leaked(),
-            before,
-            "the --mcp-config temp file written before the failing spawn step must not survive"
+        assert!(
+            !expected_config.exists(),
+            "the --mcp-config temp file written before the failing spawn step must not \
+             survive: {}",
+            expected_config.display()
         );
     }
 
@@ -1809,6 +2864,7 @@ mod tests {
             engine: "shell".to_string(),
             cwd: cwd.to_string_lossy().into_owned(),
             briefing: None,
+            restore_id: None,
         }
     }
 
@@ -1910,6 +2966,7 @@ mod tests {
             "demo".to_string(),
             tmp.path().to_string_lossy().into_owned(),
             "shell".to_string(),
+            Arc::new(SessionActivity::new("shell".to_string(), None, false)),
         );
         let handle = SessionHandle {
             master: pair.master,
@@ -1920,6 +2977,8 @@ mod tests {
             cwd: tmp.path().to_string_lossy().into_owned(),
             engine: "shell".to_string(),
             reader_thread,
+            tmux_session: None,
+            activity: Arc::new(SessionActivity::new("shell".to_string(), None, false)),
         };
         // Insert A into the registry *before* triggering EOF below — the
         // reader thread is already running (blocked in `read()`, since the
@@ -1994,6 +3053,473 @@ mod tests {
         let mut s = "short".to_string();
         trim_to_last_n_bytes(&mut s, 4096);
         assert_eq!(s, "short");
+    }
+
+    // -- Session persistence: ids, `claude --continue`, tmux wrapping
+    // (founder brief, 2026-07-26) --------------------------------------
+
+    #[test]
+    fn generated_session_ids_are_accepted_by_the_restore_id_validator() {
+        // The round trip that makes persistence work at all: the frontend
+        // gets an id back from `create`, persists it, and hands it to the
+        // next `create` as `restore_id` — so every id this module mints must
+        // pass its own validator, and must survive `tmux::session_name`
+        // unchanged (no character gets collapsed to `_`).
+        for _ in 0..5 {
+            let id = generate_session_id();
+            assert!(is_valid_session_id(&id), "{id:?}");
+            assert_eq!(
+                tmux::session_name(&id),
+                format!("{}{id}", tmux::SESSION_NAME_PREFIX),
+                "a generated id must need no sanitizing"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_id_validation_rejects_path_traversal_and_tmux_target_syntax() {
+        assert!(is_valid_session_id("sess-abc_123"));
+        // Reaches the filesystem as `<id>.log`:
+        assert!(!is_valid_session_id("../../etc/passwd"));
+        assert!(!is_valid_session_id("a/b"));
+        // `.` and `:` are tmux window/pane target separators:
+        assert!(!is_valid_session_id("a.b"));
+        assert!(!is_valid_session_id("a:b"));
+        // Shell metacharacters / whitespace:
+        assert!(!is_valid_session_id("a b"));
+        assert!(!is_valid_session_id("a;rm -rf /"));
+        assert!(!is_valid_session_id("a$(whoami)"));
+        // Bounds:
+        assert!(!is_valid_session_id(""));
+        assert!(is_valid_session_id(&"x".repeat(MAX_SESSION_ID_LEN)));
+        assert!(!is_valid_session_id(&"x".repeat(MAX_SESSION_ID_LEN + 1)));
+    }
+
+    /// The no-tmux continuity path: when a restore can't attach to a live
+    /// process, `claude` at least resumes the *conversation*
+    /// (`-c/--continue`, verified against `claude --help` 2.1.220). It must
+    /// never appear on a genuinely new session — that would silently graft a
+    /// brand-new tab onto whatever the user last did in that directory.
+    #[test]
+    fn claude_gets_continue_only_when_restoring_without_a_live_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let req = CreateSessionRequest {
+            project: "demo".into(),
+            engine: "claude".into(),
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            briefing: None,
+            restore_id: None,
+        };
+
+        let fresh = build_engine_command(&req, tmp.path(), "sess-fresh", false).unwrap();
+        assert!(
+            !fresh.argv.iter().any(|a| a == "--continue"),
+            "a new session must never continue an old conversation: {:?}",
+            fresh.argv
+        );
+
+        let restored = build_engine_command(&req, tmp.path(), "sess-restored", true).unwrap();
+        assert!(
+            restored.argv.iter().any(|a| a == "--continue"),
+            "a restore with no live process must continue the conversation: {:?}",
+            restored.argv
+        );
+        assert_eq!(restored.argv[0], "claude");
+        cleanup_mcp_config(&fresh.mcp_config_path);
+        cleanup_mcp_config(&restored.mcp_config_path);
+    }
+
+    /// The liveness probe behind the `--continue` retry, against real
+    /// processes: one that dies immediately (`false` — and *fast*, it must
+    /// not wait out the window) and one that keeps running (`true`).
+    ///
+    /// Both cases drain the PTY on a background thread, exactly as
+    /// production does, because **that drain is what makes the probe work at
+    /// all**: on macOS a process exiting with unflushed tty output cannot
+    /// complete its exit until something reads the master, so an undrained
+    /// child sits in the kernel's "exiting" state and `try_wait` reports
+    /// "still running" indefinitely. Found the hard way — an earlier draft of
+    /// this test (and of `spawn_session_process`) skipped the drain and the
+    /// first assertion below failed after waiting out the full window. See
+    /// `spawn_session_process`'s doc comment for the full write-up.
+    #[test]
+    fn child_survives_startup_distinguishes_an_instant_exit_from_a_healthy_process() {
+        fn spawn_probe(script: &str) -> (Box<dyn Child + Send + Sync>, thread::JoinHandle<()>) {
+            let pair = native_pty_system()
+                .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+                .unwrap();
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.arg("-c");
+            cmd.arg(script);
+            let child = pair.slave.spawn_command(cmd).unwrap();
+            drop(pair.slave);
+            let drain = thread::spawn(move || {
+                let mut buf = [0u8; 1024];
+                while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
+            });
+            // The master must stay open for the drain thread's reads; it is
+            // dropped when this pair goes out of scope at the end of the
+            // enclosing statement, which is after the probe runs.
+            std::mem::forget(pair.master);
+            (child, drain)
+        }
+
+        // Stands in for `claude --continue`'s measured real behavior: print
+        // a complaint, exit 1, right away.
+        let (mut child, drain) = spawn_probe("echo 'No conversation found to continue'; exit 1");
+        let started = Instant::now();
+        assert!(
+            !child_survives_startup(&mut child, Duration::from_secs(5)),
+            "a process that exits immediately must be reported as not surviving"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the failure path must return as soon as the child exits, not wait out the \
+             whole window (took {:?})",
+            started.elapsed()
+        );
+        let _ = child.wait();
+        let _ = drain.join();
+
+        let (mut child, _drain) = spawn_probe("sleep 30");
+        assert!(
+            child_survives_startup(&mut child, Duration::from_millis(400)),
+            "a running process must be reported as surviving"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// End-to-end proof of the retry, through the real `create()`: a fake
+    /// `claude` on this thread's `PATH` reproduces the exact real behavior
+    /// measured on claude 2.1.220 — refuse `--continue` with `No conversation
+    /// found to continue` and exit 1 — and `create` must still hand back one
+    /// healthy, running session, having silently retried without the flag.
+    ///
+    /// Uses [`TEST_SHELL_PATH_OVERRIDE`] rather than mutating the real
+    /// `PATH`; see that thread-local's doc comment for the cross-test race
+    /// that rules the obvious approach out.
+    #[test]
+    fn a_claude_restore_whose_continue_is_refused_retries_without_it() {
+        struct OverrideShellPath;
+        impl OverrideShellPath {
+            fn engage(path: String) -> Self {
+                TEST_SHELL_PATH_OVERRIDE
+                    .with(|o| o.set(Some(Box::leak(path.into_boxed_str()))));
+                Self
+            }
+        }
+        impl Drop for OverrideShellPath {
+            fn drop(&mut self) {
+                TEST_SHELL_PATH_OVERRIDE.with(|o| o.set(None));
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("fakebin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let fake_claude = bin_dir.join("claude");
+        std::fs::write(
+            &fake_claude,
+            "#!/bin/sh\n\
+             for a in \"$@\"; do\n\
+             \x20 if [ \"$a\" = \"--continue\" ]; then\n\
+             \x20   echo 'No conversation found to continue'\n\
+             \x20   exit 1\n\
+             \x20 fi\n\
+             done\n\
+             echo FAKE_CLAUDE_STARTED_FRESH\n\
+             sleep 30\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _path_override = OverrideShellPath::engage(format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ));
+
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let sink: OutputSink = Arc::new(move |_id: &str, chunk: &[u8]| {
+            let _ = tx.send(chunk.to_vec());
+        });
+        // No tmux: this is precisely the degraded path `--continue` exists
+        // for (module docs, degradation ladder step 3).
+        let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(None);
+
+        let info = manager
+            .create(CreateSessionRequest {
+                project: "demo".into(),
+                engine: "claude".into(),
+                cwd: tmp.path().to_string_lossy().into_owned(),
+                briefing: None,
+                restore_id: Some("sess-continue-refused".into()),
+            })
+            .expect("a refused --continue must never fail session creation");
+        assert_eq!(info.id, "sess-continue-refused");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = String::new();
+        while Instant::now() < deadline && !seen.contains("FAKE_CLAUDE_STARTED_FRESH") {
+            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        }
+        assert!(
+            seen.contains("FAKE_CLAUDE_STARTED_FRESH"),
+            "create must have retried without --continue and left a live engine; saw: {seen:?}"
+        );
+
+        manager.kill(&info.id).unwrap();
+    }
+
+    /// `--continue` is Claude-specific; `codex` and `shell` have no
+    /// equivalent and must stay bit-for-bit stock even on a restore.
+    #[test]
+    fn continue_never_leaks_into_codex_or_shell_invocations() {
+        let tmp = tempfile::tempdir().unwrap();
+        for engine in ["codex", "shell"] {
+            let req = CreateSessionRequest {
+                project: "demo".into(),
+                engine: engine.into(),
+                cwd: tmp.path().to_string_lossy().into_owned(),
+                briefing: None,
+                restore_id: None,
+            };
+            let cmd = build_engine_command(&req, tmp.path(), "sess-x", true).unwrap();
+            assert_eq!(
+                cmd.argv.len(),
+                1,
+                "{engine} must be spawned stock, got {:?}",
+                cmd.argv
+            );
+        }
+    }
+
+    /// The engine's argv must reach tmux as *separate* arguments — a
+    /// briefing full of spaces and newlines is passed to `tmux new-session`
+    /// verbatim, and tmux `exec`s a multi-argument command rather than
+    /// handing it to a shell (verified against real tmux; see the tmux module
+    /// docs). If this ever collapsed into one string, every briefing would
+    /// become a shell-injection surface.
+    #[test]
+    fn a_multiline_briefing_stays_a_single_argv_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let briefing = "# Briefing\n\n- decision: use $(whoami) 'quoted' \"stuff\"\n";
+        let req = CreateSessionRequest {
+            project: "demo".into(),
+            engine: "claude".into(),
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            briefing: Some(briefing.to_string()),
+            restore_id: None,
+        };
+        let cmd = build_engine_command(&req, tmp.path(), "sess-briefing", false).unwrap();
+        let idx = cmd
+            .argv
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .expect("briefing should be wired");
+        assert_eq!(cmd.argv[idx + 1], briefing);
+        cleanup_mcp_config(&cmd.mcp_config_path);
+    }
+
+    /// The env one producer hands both spawn paths — asserted as a set of
+    /// pairs here (the tmux `-e KEY=VALUE` form) rather than through a
+    /// `CommandBuilder`, which the tests above already cover.
+    #[test]
+    fn engine_env_always_carries_the_terminal_capability_vars() {
+        let env = engine_env();
+        assert!(env.contains(&("TERM".to_string(), TERM_VALUE.to_string())));
+        assert!(env.contains(&("COLORTERM".to_string(), COLORTERM_VALUE.to_string())));
+        match cached_shell_path() {
+            Some(p) => assert!(env.contains(&("PATH".to_string(), p.to_string()))),
+            None => assert!(
+                !env.iter().any(|(k, _)| k == "PATH"),
+                "no resolved PATH means don't set one at all (inherit)"
+            ),
+        }
+    }
+
+    // -- Traffic-light status heuristics --------------------------------
+
+    #[test]
+    fn a_shell_at_its_prompt_reads_as_ready_for_every_engine() {
+        for shell in ["zsh", "bash", "fish", "-zsh", "login"] {
+            for engine in ["shell", "claude", "codex"] {
+                assert_eq!(
+                    status_from_pane_command(shell, engine),
+                    Some(SessionStatus::Ready),
+                    "{shell} in a {engine} session"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_running_command_in_a_shell_session_reads_as_executing() {
+        for cmd in ["sleep", "cargo", "vim", "node", "git"] {
+            assert_eq!(
+                status_from_pane_command(cmd, "shell"),
+                Some(SessionStatus::Executing),
+                "{cmd}"
+            );
+        }
+    }
+
+    /// The honest limit, encoded: for `claude`/`codex` the pane's foreground
+    /// command is *always* the engine, so it says nothing about whether the
+    /// engine is busy — `None` forces the caller to the activity heuristic
+    /// instead of inventing an answer.
+    #[test]
+    fn the_engines_own_process_name_carries_no_information() {
+        assert_eq!(status_from_pane_command("claude", "claude"), None);
+        assert_eq!(status_from_pane_command("node", "claude"), None);
+        assert_eq!(status_from_pane_command("codex", "codex"), None);
+    }
+
+    #[test]
+    fn output_activity_reads_sustained_output_as_executing_and_silence_as_ready() {
+        let activity = SessionActivity::new("claude".into(), None, true);
+        let now = Instant::now();
+        // A run that started 2s ago and is still producing output.
+        *activity.last_output.lock().unwrap() = now;
+        *activity.busy_since.lock().unwrap() = Some(now - Duration::from_secs(2));
+
+        assert_eq!(
+            status_from_output_activity(&activity, now),
+            SessionStatus::Executing
+        );
+        assert_eq!(
+            status_from_output_activity(&activity, now + OUTPUT_QUIET_THRESHOLD / 2),
+            SessionStatus::Executing
+        );
+        assert_eq!(
+            status_from_output_activity(&activity, now + OUTPUT_QUIET_THRESHOLD),
+            SessionStatus::Ready,
+            "once output stops for the quiet threshold, it's ready"
+        );
+        assert_eq!(
+            status_from_output_activity(&activity, now + Duration::from_secs(30)),
+            SessionStatus::Ready
+        );
+    }
+
+    /// The measured idle-`claude` shape (module docs / [`SUSTAINED_ACTIVITY_MIN`]):
+    /// a ~50 ms burst of TUI repaint every few seconds. It must NOT read as
+    /// executing — that flicker is exactly what this rule exists to kill.
+    #[test]
+    fn an_isolated_idle_tui_burst_does_not_read_as_executing() {
+        let activity = SessionActivity::new("claude".into(), None, true);
+        let t0 = Instant::now();
+        *activity.busy_since.lock().unwrap() = Some(t0);
+        *activity.last_output.lock().unwrap() = t0 + Duration::from_millis(50);
+
+        for offset_ms in [60u64, 200, 400, 600, 740] {
+            assert_eq!(
+                status_from_output_activity(&activity, t0 + Duration::from_millis(offset_ms)),
+                SessionStatus::Ready,
+                "a 50ms burst must never read as executing (at +{offset_ms}ms)"
+            );
+        }
+    }
+
+    /// `mark_output` is what maintains the run boundary: consecutive chunks
+    /// extend one run, a gap longer than the quiet threshold starts a new one
+    /// (so a burst every few seconds never accumulates into "busy").
+    #[test]
+    fn mark_output_starts_a_new_run_only_after_a_real_gap() {
+        let activity = SessionActivity::new("claude".into(), None, true);
+
+        activity.mark_output();
+        let first_run = activity.busy_since.lock().unwrap().unwrap();
+
+        // A chunk right behind it belongs to the same run.
+        activity.mark_output();
+        assert_eq!(
+            activity.busy_since.lock().unwrap().unwrap(),
+            first_run,
+            "back-to-back chunks must not restart the run"
+        );
+
+        // After a gap longer than the quiet threshold, the run restarts.
+        thread::sleep(OUTPUT_QUIET_THRESHOLD + Duration::from_millis(50));
+        activity.mark_output();
+        assert!(
+            activity.busy_since.lock().unwrap().unwrap() > first_run,
+            "a gap longer than the quiet threshold must start a new run"
+        );
+    }
+
+    /// Red outranks everything: a session blocked on the user must not be
+    /// reported as merely "executing" because it happens to be redrawing its
+    /// prompt (which a real pending Claude prompt does ~twice a second).
+    #[test]
+    fn attention_outranks_both_other_signals() {
+        let activity = SessionActivity::new("claude".into(), None, true);
+        *activity.last_output.lock().unwrap() = Instant::now();
+        *activity.busy_since.lock().unwrap() = Some(Instant::now() - Duration::from_secs(5));
+        activity.attention.store(true, Ordering::Relaxed);
+        assert_eq!(
+            compute_status(&activity, None, Instant::now()),
+            SessionStatus::Attention
+        );
+        activity.attention.store(false, Ordering::Relaxed);
+        assert_eq!(
+            compute_status(&activity, None, Instant::now()),
+            SessionStatus::Executing
+        );
+    }
+
+    #[test]
+    fn a_broken_tmux_never_breaks_status_it_just_falls_back() {
+        let activity = SessionActivity::new(
+            "shell".into(),
+            Some("omniagent-does-not-exist".into()),
+            true,
+        );
+        let now = Instant::now();
+        *activity.last_output.lock().unwrap() = now;
+        *activity.busy_since.lock().unwrap() = Some(now - Duration::from_secs(3));
+
+        let broken = Tmux::with_binary("/no/such/tmux/binary", "unused");
+        // No pane command available -> activity heuristic, not a panic and
+        // not a wrong hard answer.
+        assert_eq!(
+            compute_status(&activity, Some(&broken), now),
+            SessionStatus::Executing
+        );
+        assert_eq!(
+            compute_status(&activity, Some(&broken), now + Duration::from_secs(5)),
+            SessionStatus::Ready
+        );
+    }
+
+    #[test]
+    fn a_user_write_clears_both_the_latch_and_the_stale_window() {
+        let activity = SessionActivity::new("claude".into(), None, true);
+        activity.attention.store(true, Ordering::Relaxed);
+        activity.mark_user_input();
+        assert!(!activity.attention.load(Ordering::Relaxed));
+        assert!(
+            activity.clear_attention_window.swap(false, Ordering::Relaxed),
+            "the reader thread must be told to discard the pre-response window"
+        );
+    }
+
+    #[test]
+    fn session_status_serializes_to_the_strings_the_frontend_renders() {
+        assert_eq!(SessionStatus::Ready.as_str(), "ready");
+        assert_eq!(SessionStatus::Executing.as_str(), "executing");
+        assert_eq!(SessionStatus::Attention.as_str(), "attention");
+        assert_eq!(
+            serde_json::to_string(&SessionStatus::Attention).unwrap(),
+            "\"attention\""
+        );
     }
 
     #[test]

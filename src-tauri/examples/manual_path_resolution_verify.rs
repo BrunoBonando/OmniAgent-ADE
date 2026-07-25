@@ -90,6 +90,7 @@ fn main() {
         engine: "claude".to_string(),
         cwd: project_dir.to_string_lossy().into_owned(),
         briefing: None,
+        restore_id: None,
     });
 
     let after_ok = match &result {

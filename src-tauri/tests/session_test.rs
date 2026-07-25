@@ -23,6 +23,7 @@ fn shell_request(cwd: &std::path::Path) -> CreateSessionRequest {
         engine: "shell".to_string(),
         cwd: cwd.to_string_lossy().into_owned(),
         briefing: None,
+        restore_id: None,
     }
 }
 

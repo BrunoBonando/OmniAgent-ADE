@@ -23,7 +23,7 @@ use mcp_server::tools::{self, ToolContext};
 use serde_json::{json, Value};
 use tauri::State;
 
-use crate::sessions::{CreateSessionRequest, SessionInfo, SessionManager};
+use crate::sessions::{CreateSessionRequest, SessionInfo, SessionManager, SessionStatus};
 
 /// Shared handle to the local brain DB, managed as Tauri state alongside
 /// [`SessionManager`]. `Store` wraps a plain `rusqlite::Connection` (`Send`
@@ -179,12 +179,44 @@ fn render_node_list(out: &mut String, heading: &str, items: Option<&Value>) {
 /// in `cwd`. For `engine == "claude"`, `briefing` (if provided) is forwarded
 /// verbatim to `claude --append-system-prompt`; ignored for other engines.
 /// See `sessions.rs` module docs for the full zero-config MCP wiring.
+///
+/// ## `restoreId` — the session-persistence contract (2026-07-26)
+///
+/// JS signature (Tauri camel-cases command arguments):
+///
+/// ```js
+/// invoke("session_create", {
+///   project, engine, cwd,
+///   briefing,          // string | undefined, claude only (unchanged)
+///   restoreId,         // string | undefined  <-- NEW, optional
+/// }) // -> { id, project, engine, cwd, created, restored, persistent }
+/// ```
+///
+/// Omit `restoreId` and behavior is byte-for-byte what it was: a fresh id, a
+/// fresh engine. Pass the `id` a previous run returned and the session is
+/// *reconnected* — if its tmux session is still alive (the app was closed
+/// without that tab being closed), the same live `claude`/`codex`/shell
+/// process comes back with its scrollback, and the returned `restored` is
+/// `true`.
+///
+/// **The frontend must persist the id for this to do anything.** Today
+/// `ui/src/state/sessions.ts`'s `PersistedTab` deliberately does not store it
+/// ("engines are restarted fresh on restore… never the old session id"), and
+/// `generate_session_id` mints a new one per call, so ids are *not* stable
+/// across app restarts on their own. The frontend dispatch that follows this
+/// one needs to: add `id` to `PersistedTab`/`serializeLayout`, and pass it as
+/// `restoreId` in `App.tsx`'s boot-time restore loop. Until then this
+/// parameter is simply never sent and nothing changes.
+///
+/// `restored`/`persistent` on the response are additive fields; existing
+/// callers that ignore them are unaffected.
 #[tauri::command]
 pub fn session_create(
     project: String,
     engine: String,
     cwd: String,
     briefing: Option<String>,
+    restore_id: Option<String>,
     manager: State<'_, SessionManager>,
 ) -> Result<SessionInfo, String> {
     manager
@@ -193,8 +225,27 @@ pub fn session_create(
             engine,
             cwd,
             briefing,
+            restore_id,
         })
         .map_err(|e| e.to_string())
+}
+
+/// The traffic light for one session, computed on demand — `"ready"` (green,
+/// idle and accepting a command), `"executing"` (yellow, a command/turn is
+/// running) or `"attention"` (red, blocked on the user). `Ok(None)` when
+/// there's no such live session.
+///
+/// The push counterpart is the `session-status:{id}` event, emitted only when
+/// a session's status actually changes. This pull exists so a pane can render
+/// the right light the moment it mounts (or is restored) instead of showing
+/// a wrong one until the next transition — call it once on mount, then let
+/// the event stream drive it.
+#[tauri::command]
+pub fn session_status(
+    id: String,
+    manager: State<'_, SessionManager>,
+) -> Result<Option<SessionStatus>, String> {
+    Ok(manager.status(&id))
 }
 
 /// Writes raw bytes (keystrokes, pasted text, control sequences) to a
