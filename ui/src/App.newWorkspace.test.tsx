@@ -112,6 +112,7 @@ vi.mock("./map/BrainMap", () => ({
   },
 }));
 vi.mock("./onboarding/FirstRun", () => ({ default: () => null }));
+vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
 
 const { default: App } = await import("./App");
 

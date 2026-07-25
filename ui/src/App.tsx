@@ -11,6 +11,14 @@ import CommandPalette from "./components/CommandPalette";
 import FileTree from "./components/FileTree";
 import BrainMap from "./map/BrainMap";
 import FirstRun from "./onboarding/FirstRun";
+import AuthGate from "./onboarding/AuthGate";
+import {
+  AUTH_GATE_RESOLVED_SETTING_KEY,
+  AUTH_PERSONA_SETTING_KEY,
+  AUTH_SIGNED_IN_SETTING_KEY,
+  authGateAlreadyResolved,
+  type AuthGateOutcome,
+} from "./onboarding/authGateState";
 import {
   GLOBAL_DEFAULT_ENGINE_KEY,
   LAYOUT_SETTING_KEY,
@@ -83,6 +91,17 @@ function App() {
   // bulk-created," negligible for a desktop app that restarts on relaunch.
   const pendingLayoutsRef = useRef<Map<string, PaneTree>>(new Map());
 
+  // ---- fake sign-in + personalization gate — a SEPARATE, EARLIER gate
+  // than Task 8.1's FirstRun below (Bruno, verbatim: "let's Focus on
+  // getting to know the user after a login, but they can use it without
+  // login for now while in development. Login must be fake for now, just
+  // to test the workflow."). `null` while checking, same convention as
+  // `needsOnboarding` right below — the render below only shows FirstRun
+  // once this has resolved to `false` (either the user signed in/answered,
+  // or explicitly skipped), so a first-ever launch never shows both
+  // overlays layered on top of each other.
+  const [needsAuthGate, setNeedsAuthGate] = useState<boolean | null>(null);
+
   // ---- Task 8.1: onboarding gating + the always-on ingestion status poll -
   const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null); // null = still checking
   const [firstRunDismissed, setFirstRunDismissed] = useState(false);
@@ -131,6 +150,27 @@ function App() {
       window.clearInterval(interval);
     };
   }, [reloadProjects]);
+
+  // ---- auth gate check — its own independent effect, deliberately NOT
+  // nested inside the boot effect below: a UI gate read must never block
+  // (or be blocked by) project loading/layout restore. Resolved once, on
+  // mount — a real login wouldn't re-prompt every launch, and testing
+  // "does this workflow feel right" requires the same behavior here.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const resolved = await settingsGet(AUTH_GATE_RESOLVED_SETTING_KEY);
+        if (!cancelled) setNeedsAuthGate(!authGateAlreadyResolved(resolved));
+      } catch (err) {
+        console.error("failed to read auth_gate_resolved setting, defaulting to resolved", err);
+        if (!cancelled) setNeedsAuthGate(false); // fail open — never trap the user behind a broken check
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ---- boot: load the sidebar's project list + restore the last layout --
   useEffect(() => {
@@ -438,6 +478,30 @@ function App() {
     void settingsSet(FILE_TREE_VISIBLE_SETTING_KEY, next ? "true" : "false");
   }, [fileTreeVisible]);
 
+  // `AuthGate`'s `onResolved` — fires exactly once, whichever path the user
+  // took (skip-from-login, or personalize's answer/skip). Persists all
+  // three settings the gate cares about and dismisses it immediately
+  // (optimistic, same shape as `toggleFileTree` above — the writes are
+  // fire-and-forget, the UI doesn't wait on them).
+  const handleAuthGateResolved = useCallback((outcome: AuthGateOutcome) => {
+    setNeedsAuthGate(false);
+    void settingsSet(AUTH_GATE_RESOLVED_SETTING_KEY, "true");
+    void settingsSet(AUTH_SIGNED_IN_SETTING_KEY, outcome.signedIn ? "true" : "false");
+    void settingsSet(AUTH_PERSONA_SETTING_KEY, outcome.persona ?? "");
+  }, []);
+
+  // AboutPanel's "Reset sign-in flow" (Sidebar threads it through) — clears
+  // the persisted outcome and re-shows the gate immediately, without
+  // needing an actual app relaunch or manual devtools settings surgery.
+  // Deliberately a dev-mode-only affordance: nothing here checks any real
+  // credential, so "resetting" is just re-running the same fake workflow.
+  const resetAuthGate = useCallback(() => {
+    setNeedsAuthGate(true);
+    void settingsSet(AUTH_GATE_RESOLVED_SETTING_KEY, "false");
+    void settingsSet(AUTH_SIGNED_IN_SETTING_KEY, "false");
+    void settingsSet(AUTH_PERSONA_SETTING_KEY, "");
+  }, []);
+
   const closeTab = useCallback(async (id: string) => {
     try {
       await sessionKill(id);
@@ -487,6 +551,7 @@ function App() {
           onSetView={setView}
           fileTreeVisible={fileTreeVisible}
           onToggleFileTree={toggleFileTree}
+          onResetAuthGate={resetAuthGate}
         />
         <Workspace
           projects={state.projects}
@@ -512,7 +577,9 @@ function App() {
         )}
       </div>
 
-      {needsOnboarding === true && !firstRunDismissed && (
+      {needsAuthGate === true && <AuthGate onResolved={handleAuthGateResolved} />}
+
+      {needsAuthGate === false && needsOnboarding === true && !firstRunDismissed && (
         <FirstRun
           ingestion={ingestion}
           onRequestView={setView}

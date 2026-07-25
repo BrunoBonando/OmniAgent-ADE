@@ -15,6 +15,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LAYOUT_SETTING_KEY, type ProjectInfo } from "./state/sessions";
+import { AUTH_GATE_RESOLVED_SETTING_KEY } from "./onboarding/authGateState";
 
 const tauriMocks = vi.hoisted(() => ({
   getBriefingMock: vi.fn(),
@@ -73,6 +74,7 @@ vi.mock("./components/CommandPalette", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({ default: () => null }));
 vi.mock("./onboarding/FirstRun", () => ({ default: () => null }));
+vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
 
 const { default: App } = await import("./App");
 
@@ -97,11 +99,13 @@ describe("App — requestNewTab out-of-order settingsGet resolution", () => {
 
     const calls: Array<(v: string | null) => void> = [];
     tauriMocks.settingsGetMock.mockImplementation((key: string) => {
-      // Boot-effect settings reads (layout restore, file-tree visibility)
-      // resolve immediately — only the two per-`requestNewTab`-call reads
-      // (per-project default engine, global default engine) are deferred
-      // under the test's control below.
-      if (key === LAYOUT_SETTING_KEY || key === "file_tree_visible") return Promise.resolve(null);
+      // Boot-effect settings reads (layout restore, file-tree visibility,
+      // the auth-gate check) resolve immediately — only the two
+      // per-`requestNewTab`-call reads (per-project default engine, global
+      // default engine) are deferred under the test's control below.
+      if (key === LAYOUT_SETTING_KEY || key === "file_tree_visible" || key === AUTH_GATE_RESOLVED_SETTING_KEY) {
+        return Promise.resolve(null);
+      }
       return new Promise<string | null>((resolve) => {
         calls.push(resolve);
       });

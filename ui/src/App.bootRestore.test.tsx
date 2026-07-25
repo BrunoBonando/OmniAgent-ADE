@@ -92,6 +92,7 @@ vi.mock("./components/CommandPalette", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({ default: () => null }));
 vi.mock("./onboarding/FirstRun", () => ({ default: () => null }));
+vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
 
 const { default: App } = await import("./App");
 
