@@ -665,6 +665,51 @@ describe("FileTree", () => {
     expect(listDirMock).toHaveBeenCalledTimes(2);
   });
 
+  // --------------------------- Bug 6: context menu invalidation on external change
+  it("closes the context menu when its target is removed by an external refresh while it's open", async () => {
+    let dirChangedHandler: (() => void) | undefined;
+    listenMock.mockImplementation((eventName: string, handler: () => void) => {
+      if (eventName === "dir-changed:/repo/demo") dirChangedHandler = handler;
+      return Promise.resolve(() => {});
+    });
+    setup();
+    await screen.findByText("main.py");
+    await waitFor(() => expect(dirChangedHandler).toBeDefined());
+
+    fireEvent.contextMenu(screen.getByText("main.py"));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    // An external process removes main.py while the menu targeting it is open.
+    listDirMock.mockResolvedValueOnce([
+      { name: "src", path: "/repo/demo/src", is_dir: true },
+      { name: "notes.md", path: "/repo/demo/notes.md", is_dir: false },
+    ]);
+    dirChangedHandler!();
+
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+  });
+
+  it("leaves the context menu open when a refresh still includes its target", async () => {
+    let dirChangedHandler: (() => void) | undefined;
+    listenMock.mockImplementation((eventName: string, handler: () => void) => {
+      if (eventName === "dir-changed:/repo/demo") dirChangedHandler = handler;
+      return Promise.resolve(() => {});
+    });
+    setup();
+    await screen.findByText("main.py");
+    await waitFor(() => expect(dirChangedHandler).toBeDefined());
+
+    fireEvent.contextMenu(screen.getByText("main.py"));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    // Refresh happens, but main.py is still present — the menu must stay open.
+    listDirMock.mockResolvedValueOnce(rootEntries());
+    dirChangedHandler!();
+
+    await waitFor(() => expect(listDirMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+
   // ---------------------------------------------------- drag-and-drop (Task 6)
   it("dragging a row onto a folder row calls move_path with the folder as destination", async () => {
     movePathMock.mockResolvedValue("/repo/demo/src/notes.md");

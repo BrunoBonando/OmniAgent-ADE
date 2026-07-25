@@ -179,6 +179,12 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
   projectPathRef.current = project?.path ?? null;
   const childrenRef = useRef(children);
   childrenRef.current = children;
+  // Bug 6: `refreshDir` needs the CURRENT context menu (to invalidate it if
+  // its target vanished) from inside the same long-lived `listen()`
+  // callbacks `projectPathRef`/`childrenRef` already guard against staleness
+  // for — same reasoning, same pattern.
+  const contextMenuRef = useRef(contextMenu);
+  contextMenuRef.current = contextMenu;
 
   const load = useCallback((path: string, onDone: (state: DirState) => void) => {
     onDone("loading");
@@ -186,6 +192,24 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
       .then((entries) => onDone(entries))
       .catch((err) => onDone({ error: String(err) }));
   }, []);
+
+  /** Bug 6: after a directory refresh lands, closes the currently-open
+   * context menu if ITS target lived in that directory and is no longer
+   * present in the freshly-fetched listing — the menu's actions
+   * (Open/Rename/Duplicate/Move to Trash/...) all assume the target still
+   * exists, and silently keeping it open invites acting on something an
+   * external change already removed. A menu with no target (empty-space
+   * right-click, offering only New File/New Folder) is never affected. */
+  function invalidateContextMenuIfTargetMissing(dirPath: string, state: DirState) {
+    // A transient "loading"/error state is not positive evidence the target
+    // is gone (this fires on every `load()`, including its synchronous
+    // "loading" kickoff) — only a real, settled listing can prove absence.
+    if (!Array.isArray(state)) return;
+    const target = contextMenuRef.current?.target;
+    if (!target || parentDirOf(target.path) !== dirPath) return;
+    const stillPresent = state.some((entry) => entry.path === target.path);
+    if (!stillPresent) setContextMenu(null);
+  }
 
   /** Re-fetches one directory's listing in place — the single refresh path
    * used after every mutation (rename/move/duplicate/delete) AND by the
@@ -201,9 +225,15 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
       const projectPath = projectPathRef.current;
       if (!projectPath) return;
       if (dirPath === projectPath) {
-        load(projectPath, (state) => setRoot(state));
+        load(projectPath, (state) => {
+          setRoot(state);
+          invalidateContextMenuIfTargetMissing(dirPath, state);
+        });
       } else if (childrenRef.current.has(dirPath)) {
-        load(dirPath, (state) => setChildren((prev) => new Map(prev).set(dirPath, state)));
+        load(dirPath, (state) => {
+          setChildren((prev) => new Map(prev).set(dirPath, state));
+          invalidateContextMenuIfTargetMissing(dirPath, state);
+        });
       }
     },
     [load],
