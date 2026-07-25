@@ -80,6 +80,7 @@ import ReviewPanel from "./ReviewPanel";
 import ProjectMenu from "./ProjectMenu";
 import NewWorkspaceModal from "./NewWorkspaceModal";
 import ImportProjectsFlow from "./ImportProjectsFlow";
+import AccountBadge from "./AccountBadge";
 import type { ImportBatchResult } from "../state/importState";
 
 /** How often to refresh pause/staleness state in the background — cheap
@@ -153,11 +154,19 @@ interface SidebarProps {
    * don't care about the file tree don't need to pass it. */
   fileTreeVisible?: boolean;
   onToggleFileTree?: () => void;
-  /** AboutPanel's "Reset sign-in flow" (`App.tsx` owns the persisted
-   * `auth_gate_resolved`/etc. settings — see `onboarding/authGateState.ts`).
-   * Optional, same reasoning as `view`/`fileTreeVisible` above, so tests
-   * that don't care about the auth gate don't need to pass it. */
+  /** `AccountBadge`'s "Sign in"/"Log out" menu rows (`App.tsx` owns the
+   * persisted `auth_gate_resolved`/etc. settings — see
+   * `onboarding/authGateState.ts`). Optional, same reasoning as
+   * `view`/`fileTreeVisible` above, so tests that don't care about the
+   * auth gate don't need to pass it — defaults to a no-op so the always-
+   * visible badge still renders (just inertly) without it. */
   onResetAuthGate?: () => void;
+  /** The account badge's raw settings values, read once by `App.tsx` on
+   * boot and kept live across `AuthGate`/`AccountBadge` resolving — see
+   * that file's own doc comment. Optional/defaulted to `null` (= not
+   * signed in), same convention as every other prop in this block. */
+  authSignedIn?: string | null;
+  authPersona?: string | null;
 }
 
 export default function Sidebar({
@@ -179,7 +188,9 @@ export default function Sidebar({
   onSetView,
   fileTreeVisible = false,
   onToggleFileTree,
-  onResetAuthGate,
+  onResetAuthGate = () => {},
+  authSignedIn = null,
+  authPersona = null,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -312,6 +323,7 @@ export default function Sidebar({
             </span>
             {tabs.length}/{PRESSURE_THRESHOLD}
           </span>
+          <AccountBadge signedInRaw={authSignedIn} personaRaw={authPersona} onResetAuthGate={onResetAuthGate} />
         </div>
       </div>
 
@@ -462,18 +474,7 @@ export default function Sidebar({
         </span>
       </div>
 
-      {aboutOpen && (
-        <AboutPanel
-          onClose={() => setAboutOpen(false)}
-          onResetAuthGate={
-            onResetAuthGate &&
-            (() => {
-              onResetAuthGate();
-              setAboutOpen(false);
-            })
-          }
-        />
-      )}
+      {aboutOpen && <AboutPanel onClose={() => setAboutOpen(false)} />}
       {reviewOpen && <ReviewPanel onClose={() => setReviewOpen(false)} />}
       {newWorkspaceOpen && (
         <NewWorkspaceModal

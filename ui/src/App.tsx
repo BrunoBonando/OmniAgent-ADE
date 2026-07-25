@@ -106,6 +106,19 @@ function App() {
   // or explicitly skipped), so a first-ever launch never shows both
   // overlays layered on top of each other.
   const [needsAuthGate, setNeedsAuthGate] = useState<boolean | null>(null);
+  // Lifted (not read locally by `AccountBadge.tsx` itself) for the same
+  // reason `fileTreeVisible` is lifted rather than let its own consumer
+  // poll settings independently: one read on boot, kept live by the two
+  // mutations below, and handed down as plain props the whole way to the
+  // sidebar-header badge — a persistent piece of chrome, unlike
+  // `AboutPanel.tsx`'s own one-shot `settingsGet` (that panel unmounts and
+  // remounts every time it opens, so a mount-time fetch is enough for it;
+  // the always-mounted badge has no equivalent remount to hang a refetch
+  // on). Raw setting strings, not booleans, so `AccountBadge.tsx` can feed
+  // them straight into `deriveAccountBadgeState`/`describeAuthSummary`
+  // exactly like `settingsGet`'s own return shape, no extra conversion.
+  const [authSignedIn, setAuthSignedIn] = useState<string | null>(null);
+  const [authPersona, setAuthPersona] = useState<string | null>(null);
 
   // ---- Task 8.1: onboarding gating + the always-on ingestion status poll -
   const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null); // null = still checking
@@ -165,8 +178,16 @@ function App() {
     let cancelled = false;
     (async () => {
       try {
-        const resolved = await settingsGet(AUTH_GATE_RESOLVED_SETTING_KEY);
-        if (!cancelled) setNeedsAuthGate(!authGateAlreadyResolved(resolved));
+        const [resolved, signedIn, persona] = await Promise.all([
+          settingsGet(AUTH_GATE_RESOLVED_SETTING_KEY),
+          settingsGet(AUTH_SIGNED_IN_SETTING_KEY),
+          settingsGet(AUTH_PERSONA_SETTING_KEY),
+        ]);
+        if (!cancelled) {
+          setNeedsAuthGate(!authGateAlreadyResolved(resolved));
+          setAuthSignedIn(signedIn);
+          setAuthPersona(persona);
+        }
       } catch (err) {
         console.error("failed to read auth_gate_resolved setting, defaulting to resolved", err);
         if (!cancelled) setNeedsAuthGate(false); // fail open — never trap the user behind a broken check
@@ -592,18 +613,29 @@ function App() {
   // fire-and-forget, the UI doesn't wait on them).
   const handleAuthGateResolved = useCallback((outcome: AuthGateOutcome) => {
     setNeedsAuthGate(false);
+    const signedInValue = outcome.signedIn ? "true" : "false";
+    const personaValue = outcome.persona ?? "";
+    setAuthSignedIn(signedInValue);
+    setAuthPersona(personaValue);
     void settingsSet(AUTH_GATE_RESOLVED_SETTING_KEY, "true");
-    void settingsSet(AUTH_SIGNED_IN_SETTING_KEY, outcome.signedIn ? "true" : "false");
-    void settingsSet(AUTH_PERSONA_SETTING_KEY, outcome.persona ?? "");
+    void settingsSet(AUTH_SIGNED_IN_SETTING_KEY, signedInValue);
+    void settingsSet(AUTH_PERSONA_SETTING_KEY, personaValue);
   }, []);
 
-  // AboutPanel's "Reset sign-in flow" (Sidebar threads it through) — clears
-  // the persisted outcome and re-shows the gate immediately, without
-  // needing an actual app relaunch or manual devtools settings surgery.
-  // Deliberately a dev-mode-only affordance: nothing here checks any real
-  // credential, so "resetting" is just re-running the same fake workflow.
+  // `AccountBadge.tsx`'s "Sign in"/"Log out" menu rows AND (still, see that
+  // component's own module doc for why it kept only a passive summary
+  // line) `AboutPanel`'s history — clears the persisted outcome and
+  // re-shows the gate immediately, without needing an actual app relaunch
+  // or manual devtools settings surgery. Deliberately a dev-mode-only
+  // affordance: nothing here checks any real credential, so "resetting" is
+  // just re-running the same fake workflow. Also mirrors the reset into
+  // `authSignedIn`/`authPersona` so the sidebar-header badge flips to its
+  // not-signed-in placeholder the instant either menu action fires,
+  // without waiting on the fire-and-forget `settingsSet` calls below.
   const resetAuthGate = useCallback(() => {
     setNeedsAuthGate(true);
+    setAuthSignedIn("false");
+    setAuthPersona("");
     void settingsSet(AUTH_GATE_RESOLVED_SETTING_KEY, "false");
     void settingsSet(AUTH_SIGNED_IN_SETTING_KEY, "false");
     void settingsSet(AUTH_PERSONA_SETTING_KEY, "");
@@ -673,6 +705,8 @@ function App() {
           fileTreeVisible={fileTreeVisible}
           onToggleFileTree={toggleFileTree}
           onResetAuthGate={resetAuthGate}
+          authSignedIn={authSignedIn}
+          authPersona={authPersona}
         />
         <Workspace
           projects={state.projects}

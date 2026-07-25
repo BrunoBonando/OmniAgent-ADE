@@ -384,6 +384,129 @@ code {
   border-color: var(--warning);
 }
 
+/* ------------------------------------------------------- account badge
+   Founder direction (2026-07-26, verbatim): "Somewhere should show the
+   small logged user, since the user is not logged in yet, it should at
+   least show a placeholder, with a menu for logout, or preferences,
+   billing, etc." (`AccountBadge.tsx`). Same round-icon-button footprint as
+   `.sidebar-add-project-trigger`, but neutral/muted by default (a status
+   indicator, not this header's primary action) and only picks up the
+   signal accent once actually signed in. */
+
+.account-badge-anchor {
+  position: relative;
+  display: flex;
+}
+
+.account-badge-trigger {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  color: var(--ink-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.account-badge-trigger:hover {
+  border-color: var(--ink-dim);
+  color: var(--ink);
+}
+
+.account-badge-trigger.is-signed-in {
+  border-color: var(--signal-dim);
+  color: var(--signal);
+}
+
+.account-badge-trigger.is-signed-in:hover {
+  border-color: var(--signal);
+}
+
+.account-badge-initial {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* Same utility-popover shape as `.pane-menu`/`.project-menu` (transparent
+   click-away backdrop, anchored under the trigger). */
+
+.account-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+}
+
+.account-menu {
+  position: absolute;
+  right: 0;
+  top: 26px;
+  z-index: 56;
+  width: 200px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  padding: 8px;
+  font-family: var(--mono);
+}
+
+.account-menu-summary {
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  padding: 4px 6px 8px;
+  margin: 0 0 4px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.account-menu-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.account-menu-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 6px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: left;
+}
+
+.account-menu-row:hover:not(:disabled) {
+  background: var(--panel-raised);
+}
+
+.account-menu-row:disabled {
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+.account-menu-row-hint {
+  font-size: 10px;
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.account-menu-coming-soon {
+  margin: 2px 0 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
 .sidebar-projects {
   flex: 1;
   overflow-y: auto;
@@ -1582,40 +1705,6 @@ code {
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--ink-dim);
-}
-
-/* Fake sign-in gate (onboarding/authGateState.ts) — a low-key affordance to
-   re-run the workflow without devtools settings surgery, not a destructive
-   action like rebuild below, so it gets no confirm step. */
-
-.about-reset-section {
-  width: 100%;
-  margin-bottom: 10px;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--line-soft);
-  text-align: left;
-}
-
-.about-reset-hint {
-  margin: 0 0 10px;
-  color: var(--ink-faint);
-  font-size: 10.5px;
-  font-style: italic;
-  line-height: 1.5;
-}
-
-.about-reset-trigger {
-  width: 100%;
-  background: var(--panel-raised);
-  border: 1px solid var(--line);
-  color: var(--signal);
-  border-radius: 6px;
-  padding: 7px 10px;
-  font-size: 12px;
-}
-
-.about-reset-trigger:hover {
-  border-color: var(--signal);
 }
 
 .about-close {

@@ -3,6 +3,20 @@
 // "Settings-ish spot" Task 8.1 names for "Rebuild brain" — this panel is
 // already the closest thing to a settings surface next to ReviewPanel
 // (which is specifically about session-summary review, not general config).
+//
+// 2026-07-26: this used to also own a "Reset sign-in flow" button — the
+// only way to re-run `AuthGate` short of devtools settings surgery.
+// Removed now that `AccountBadge.tsx` (the persistent sidebar-header
+// badge — see `Sidebar.tsx`'s `.sidebar-header-actions`) exposes the exact
+// same underlying action as its own "Sign in"/"Log out" menu rows, wired
+// to the very same `App.tsx` `resetAuthGate` callback this panel used to
+// call. Keeping both would just be the same action in two places under
+// different labels — the badge's copy is always visible and reads
+// unambiguously as an account action, so it fully subsumes this panel's
+// old one rather than living alongside it. The read-only `authSummary`
+// line below stays: it's a different kind of information (a passive
+// status readout that belongs in "About", not an account action) and
+// doesn't duplicate anything the badge's menu shows.
 import { useEffect, useState } from "react";
 import logo from "../assets/omniagent-logo.png";
 import { rootsRebuild, settingsGet } from "../lib/tauri";
@@ -14,14 +28,9 @@ import {
 
 interface AboutPanelProps {
   onClose: () => void;
-  /** Clears the persisted fake-sign-in outcome and re-shows the gate —
-   * `App.tsx` owns the actual settings writes (`resetAuthGate`), this
-   * panel just triggers it and closes itself. Optional so this component
-   * still renders fine if a caller doesn't wire the auth gate at all. */
-  onResetAuthGate?: () => void;
 }
 
-export default function AboutPanel({ onClose, onResetAuthGate }: AboutPanelProps) {
+export default function AboutPanel({ onClose }: AboutPanelProps) {
   const [confirming, setConfirming] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -79,18 +88,6 @@ export default function AboutPanel({ onClose, onResetAuthGate }: AboutPanelProps
         </p>
         <p className="about-version">v0.1.0 — dogfood build</p>
         {authSummary && <p className="about-auth-summary">{authSummary}</p>}
-
-        {onResetAuthGate && (
-          <div className="about-reset-section">
-            <p className="about-reset-hint">
-              Testing the sign-in workflow? This clears the fake sign-in and personalization
-              answer so the flow runs again next time.
-            </p>
-            <button className="about-reset-trigger" onClick={onResetAuthGate}>
-              Reset sign-in flow
-            </button>
-          </div>
-        )}
 
         <div className="about-rebuild-section">
           <p className="about-rebuild-hint">

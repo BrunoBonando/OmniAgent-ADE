@@ -18,7 +18,11 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LAYOUT_SETTING_KEY, type ProjectInfo, type TabInfo } from "./state/sessions";
-import { AUTH_GATE_RESOLVED_SETTING_KEY } from "./onboarding/authGateState";
+import {
+  AUTH_GATE_RESOLVED_SETTING_KEY,
+  AUTH_PERSONA_SETTING_KEY,
+  AUTH_SIGNED_IN_SETTING_KEY,
+} from "./onboarding/authGateState";
 
 const tauriMocks = vi.hoisted(() => ({
   getBriefingMock: vi.fn(),
@@ -120,7 +124,13 @@ describe("App — instant-default-engine new tab", () => {
     const a: ProjectInfo = { id: "A", label: "Project A", path: "/tmp/a" };
     tauriMocks.listProjectsMock.mockResolvedValue([a]);
     tauriMocks.settingsGetMock.mockImplementation((key: string) => {
-      if (key === LAYOUT_SETTING_KEY || key === "file_tree_visible" || key === AUTH_GATE_RESOLVED_SETTING_KEY) {
+      if (
+        key === LAYOUT_SETTING_KEY ||
+        key === "file_tree_visible" ||
+        key === AUTH_GATE_RESOLVED_SETTING_KEY ||
+        key === AUTH_SIGNED_IN_SETTING_KEY ||
+        key === AUTH_PERSONA_SETTING_KEY
+      ) {
         return Promise.resolve(null);
       }
       if (key === "default_engine:A") return Promise.resolve("codex");
@@ -149,7 +159,13 @@ describe("App — instant-default-engine new tab", () => {
 
     const calls: Array<(v: string | null) => void> = [];
     tauriMocks.settingsGetMock.mockImplementation((key: string) => {
-      if (key === LAYOUT_SETTING_KEY || key === "file_tree_visible" || key === AUTH_GATE_RESOLVED_SETTING_KEY) {
+      if (
+        key === LAYOUT_SETTING_KEY ||
+        key === "file_tree_visible" ||
+        key === AUTH_GATE_RESOLVED_SETTING_KEY ||
+        key === AUTH_SIGNED_IN_SETTING_KEY ||
+        key === AUTH_PERSONA_SETTING_KEY
+      ) {
         return Promise.resolve(null);
       }
       return new Promise<string | null>((resolve) => {
