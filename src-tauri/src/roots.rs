@@ -544,6 +544,44 @@ pub fn add_project(
     add_project_impl(brain.inner(), ingestion.inner(), &path, name.as_deref()).map_err(|e| e.to_string())
 }
 
+// -------------------------------------------------------------- rename
+
+/// The pure body behind [`rename_project`] — same `&BrainState`-not-`State`
+/// split every other command in this module uses for direct unit-testing.
+fn rename_project_impl(brain: &BrainState, id: &str, new_label: &str) -> Result<()> {
+    let trimmed = new_label.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("project name can't be empty");
+    }
+    let store = brain
+        .store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("brain store mutex poisoned"))?;
+    let node = store
+        .get_node(id)?
+        .ok_or_else(|| anyhow::anyhow!("unknown project: {id}"))?;
+    if node.kind != NodeKind::Project {
+        anyhow::bail!("{id} is not a project");
+    }
+    store.set_setting(&mcp_server::tools::project_label_key(id), trimmed)?;
+    Ok(())
+}
+
+/// Renames a project's *display* label only — closes the root cause of a
+/// project's sidebar/pane-header label defaulting to its folder basename
+/// forever (e.g. this very repo's own project entry always showing
+/// "OmniAgent-ADE"). `id`/`project` — the key every session/setting/cwd
+/// lookup elsewhere actually uses — never changes; only what
+/// `mcp_server::tools::list_projects` (and therefore `brain_query` /
+/// the sidebar / every pane header) *displays* for it does, immediately,
+/// everywhere that reads it. See [`mcp_server::tools::project_label_key`]'s
+/// doc for why this writes to the settings table rather than the node's own
+/// `label` column.
+#[tauri::command]
+pub fn rename_project(id: String, new_label: String, brain: State<'_, BrainState>) -> Result<(), String> {
+    rename_project_impl(brain.inner(), &id, &new_label).map_err(|e| e.to_string())
+}
+
 // -------------------------------------------------------- pause / staleness
 
 /// Every project id currently marked paused (skipped by future
@@ -1152,5 +1190,79 @@ mod tests {
         // upsert alone.
         let store = Store::open(data_dir.path()).unwrap();
         assert!(store.get_setting(&last_ingested_key(&project_name)).unwrap().is_some());
+    }
+
+    #[test]
+    fn rename_project_sets_the_label_override_and_list_projects_reflects_it() {
+        let data_dir = tempdir().unwrap();
+        let project_dir = tempdir().unwrap();
+        let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
+        {
+            let store = brain.store.lock().unwrap();
+            store.upsert_node(&project_node("OmniAgent-ADE", project_dir.path())).unwrap();
+        }
+
+        rename_project_impl(&brain, "OmniAgent-ADE", "OmniAgent").unwrap();
+
+        let store = brain.store.lock().unwrap();
+        // The node's own id/label columns are untouched — only the
+        // settings-table override is written (see rename_project's doc for
+        // why: ingestion unconditionally resets the node's own label).
+        let node = store.get_node("OmniAgent-ADE").unwrap().unwrap();
+        assert_eq!(node.id, "OmniAgent-ADE");
+        assert_eq!(node.label, "OmniAgent-ADE");
+        assert_eq!(
+            store.get_setting(&mcp_server::tools::project_label_key("OmniAgent-ADE")).unwrap().as_deref(),
+            Some("OmniAgent")
+        );
+    }
+
+    #[test]
+    fn rename_project_survives_a_simulated_reingest_that_resets_the_nodes_own_label() {
+        let data_dir = tempdir().unwrap();
+        let project_dir = tempdir().unwrap();
+        let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
+        {
+            let store = brain.store.lock().unwrap();
+            store.upsert_node(&project_node("OmniAgent-ADE", project_dir.path())).unwrap();
+        }
+        rename_project_impl(&brain, "OmniAgent-ADE", "OmniAgent").unwrap();
+
+        // Simulate a re-ingest pass (`ingest_project`'s own unconditional
+        // Project-node upsert) landing after the rename.
+        {
+            let store = brain.store.lock().unwrap();
+            store.upsert_node(&project_node("OmniAgent-ADE", project_dir.path())).unwrap();
+        }
+
+        let ctx = mcp_server::tools::ToolContext {
+            store: &brain.store.lock().unwrap(),
+            data_dir: data_dir.path(),
+        };
+        let projects = mcp_server::tools::list_projects(&ctx, &serde_json::json!({})).unwrap();
+        assert_eq!(projects[0]["label"], "OmniAgent", "rename must survive a re-ingest");
+    }
+
+    #[test]
+    fn rename_project_rejects_a_blank_name() {
+        let data_dir = tempdir().unwrap();
+        let project_dir = tempdir().unwrap();
+        let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
+        {
+            let store = brain.store.lock().unwrap();
+            store.upsert_node(&project_node("p1", project_dir.path())).unwrap();
+        }
+
+        let err = rename_project_impl(&brain, "p1", "   ").unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn rename_project_rejects_an_unknown_project_id() {
+        let data_dir = tempdir().unwrap();
+        let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
+
+        let err = rename_project_impl(&brain, "does-not-exist", "New Name").unwrap_err();
+        assert!(err.to_string().contains("unknown project"), "{err}");
     }
 }

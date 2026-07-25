@@ -293,10 +293,45 @@ pub fn record_note(ctx: &ToolContext, args: &Value) -> Result<Value, ToolError> 
     write_memory(ctx, "Note", args)
 }
 
-/// `list_projects {}` -> `[{id, label, path}]`
+/// Settings-table key for a project's custom display-name override, set via
+/// the app's `rename_project` Tauri command (`src-tauri/src/roots.rs`) —
+/// defined here, in the shared retrieval crate (DESIGN.md 3.4: "one shared
+/// retrieval API ... used by all three [app, daemon, MCP server]"), so
+/// every caller of [`list_projects`] sees a renamed project's real label —
+/// the app's sidebar via `brain_query`, AND any external MCP client
+/// mounting this same store.
+///
+/// Lives in the separate `settings` table rather than the node's own
+/// `label` column on purpose: `brain_ingest::ingest_project` unconditionally
+/// re-upserts a `Project` node's `label` back to its id on every
+/// re-ingest/watch-triggered pass (see that function's own doc comment) —
+/// a plain node-label edit would silently revert on the next file change,
+/// "re-check now", or "Rebuild brain". The settings table isn't touched by
+/// ingestion at all (and `roots_rebuild` already explicitly preserves it
+/// across a rebuild), so storing the override there and applying it as a
+/// read-time overlay here is the only way a rename actually sticks.
+pub fn project_label_key(project_id: &str) -> String {
+    format!("project_label:{project_id}")
+}
+
+/// `list_projects {}` -> `[{id, label, path}]`. `label` reflects a
+/// `rename_project` override (see [`project_label_key`]) when one exists,
+/// in preference to the node's own (ingestion-owned) label.
 pub fn list_projects(ctx: &ToolContext, _args: &Value) -> Result<Value, ToolError> {
     let projects = ctx.store.list_projects().map_err(internal)?;
-    let items: Vec<ProjectView> = projects.iter().map(ProjectView::from).collect();
+    let items: Vec<ProjectView> = projects
+        .iter()
+        .map(|n| {
+            let mut view = ProjectView::from(n);
+            if let Ok(Some(label)) = ctx.store.get_setting(&project_label_key(&n.id)) {
+                let trimmed = label.trim();
+                if !trimmed.is_empty() {
+                    view.label = trimmed.to_string();
+                }
+            }
+            view
+        })
+        .collect();
     Ok(serde_json::to_value(items).expect("ProjectView always serializes"))
 }
 
@@ -490,6 +525,52 @@ mod tests {
         assert_eq!(items[0]["id"], "p1");
         assert_eq!(items[0]["label"], "p1");
         assert_eq!(items[0]["path"], "/tmp/p1");
+    }
+
+    #[test]
+    fn list_projects_prefers_a_rename_override_over_the_nodes_own_label() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .upsert_node(&Node {
+                path: Some("/tmp/p1".to_string()),
+                ..node("p1", NodeKind::Project, "p1", "p1")
+            })
+            .unwrap();
+        // Simulates `rename_project` having written the override, plus a
+        // re-ingest pass afterward re-upserting the node's own label back
+        // to "p1" (exactly what `ingest_project` does on every re-ingest) —
+        // the override must still win.
+        store
+            .set_setting(&project_label_key("p1"), "OmniAgent")
+            .unwrap();
+        let ctx = ToolContext {
+            store: &store,
+            data_dir: dir.path(),
+        };
+
+        let result = list_projects(&ctx, &json!({})).unwrap();
+        let items = result.as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "p1"); // id/project key never changes
+        assert_eq!(items[0]["label"], "OmniAgent");
+    }
+
+    #[test]
+    fn list_projects_ignores_a_blank_override() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .upsert_node(&node("p1", NodeKind::Project, "p1", "p1"))
+            .unwrap();
+        store.set_setting(&project_label_key("p1"), "   ").unwrap();
+        let ctx = ToolContext {
+            store: &store,
+            data_dir: dir.path(),
+        };
+
+        let result = list_projects(&ctx, &json!({})).unwrap();
+        assert_eq!(result.as_array().unwrap()[0]["label"], "p1");
     }
 
     #[test]

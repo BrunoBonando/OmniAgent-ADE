@@ -241,6 +241,7 @@ pub fn run() {
             feedback::pending_notes_discard,
             roots::roots_start_ingest,
             roots::add_project,
+            roots::rename_project,
             roots::ingestion_status,
             roots::roots_list,
             roots::roots_biggest_project,
