@@ -290,7 +290,27 @@ fn ingest_roots_in_background(
                 status.update(|s| s.projects_done += 1);
                 continue;
             }
-            run_one_ingest(&store, name, dir, &status);
+            // Panic isolation: one project's ingest panicking (a
+            // malformed file, an unexpected parser edge case, ...) must
+            // not kill this whole background thread and leave every
+            // *other* discovered project un-ingested with `running`
+            // stuck `true` forever. `AssertUnwindSafe` is sound here —
+            // `run_one_ingest` only ever touches `store`/`status` through
+            // calls fully scoped to this one project; nothing is held
+            // across the boundary for a caught panic to leave dangling.
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_one_ingest(&store, name, dir, &status);
+            })) {
+                eprintln!(
+                    "omniagent-ade: PANIC while ingesting project {name} (caught, bulk \
+                     ingestion continues with the next project): {}",
+                    crate::panic_message(&payload)
+                );
+                status.update(|s| {
+                    s.projects_done += 1;
+                    s.error = Some(format!("{name}: panicked during ingestion"));
+                });
+            }
         }
 
         status.end();
@@ -318,7 +338,21 @@ fn ingest_project_in_background(data_dir: PathBuf, name: String, dir: PathBuf, s
         };
 
         status.begin(1);
-        run_one_ingest(&store, &name, &dir, &status);
+        // Panic isolation, same reasoning as `ingest_roots_in_background`'s
+        // loop: `status.end()` below must always run so `running` doesn't
+        // get stuck `true` forever if the ingest itself panics.
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_one_ingest(&store, &name, &dir, &status);
+        })) {
+            eprintln!(
+                "omniagent-ade: PANIC while ingesting project {name} (caught): {}",
+                crate::panic_message(&payload)
+            );
+            status.update(|s| {
+                s.projects_done += 1;
+                s.error = Some(format!("{name}: panicked during ingestion"));
+            });
+        }
         status.end();
     });
 }
