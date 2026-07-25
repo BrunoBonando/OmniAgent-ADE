@@ -12,58 +12,34 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "@xterm/xterm/css/xterm.css";
 import { sessionResize, sessionWrite } from "../lib/tauri";
+import { feedFirstInputChunk, initialFirstInputCapture } from "../lib/autoTitle";
+import { resolveTerminalTheme, type TerminalThemeId } from "../lib/terminalThemes";
 
 interface TerminalProps {
   sessionId: string;
   visible: boolean;
+  /** This pane's terminal color-theme override — `undefined` renders
+   * `terminalThemes.ts`'s global default. See `TabInfo.themeId`'s doc
+   * (sessions.ts) for the global-default-with-per-pane-override design. */
+  themeId?: TerminalThemeId;
+  /** Auto-title from the first prompt (founder ask): fires at most once per
+   * mounted session, the moment the user's own keystrokes (never anything
+   * the app itself writes, e.g. a Claude briefing — this only ever
+   * observes `onData`, which is exclusively real input) complete a first
+   * non-blank input line. `App.tsx` wires this to the `tab/autoTitled`
+   * action, which itself never overwrites a tab that already has a label —
+   * this callback doesn't need to know or care whether the tab has one. */
+  onFirstInput?: (sessionId: string, line: string) => void;
 }
 
-// Matches the --void/--ink/--signal tokens in App.css — xterm doesn't read
-// CSS custom properties, so the HUD palette is duplicated here once (keep
-// both in sync — see App.css's own :root comment).
-//
-// Warp *exact*-color pass (founder ask, 2026-07-25, verbatim: "I want the
-// theme to be exactly this colors"): background/foreground/cursor/
-// cursorAccent/selectionBackground below are kept in sync with App.css's
-// new --void/--ink/--signal/--line tokens exactly, same no-seam rule as
-// before. The ANSI red/green/yellow/blue/magenta/cyan (+ bright, + black/
-// white) are new: Warp publishes its own bundled default-dark terminal
-// theme as open-source YAML (github.com/warpdotdev/themes,
-// warp_bundled/warp_dark.yaml — the literal "Warp Dark" preset the app
-// ships with, confirmed via that repo's own README plus Warp's
-// how-we-designed-themes blog post referencing "our default dark ...
-// theme"). Unlike the old BridgeSpace reference (a parsed-output rendering
-// with no real ANSI palette to sample), this is Warp's actual terminal
-// color data — copied verbatim below rather than guessed, which the
-// founder's brief called out as the highest-value, most literal part of
-// "exactly this colors" since it's the terminal palette itself.
-const HUD_THEME = {
-  background: "#16171c",
-  foreground: "#e8e9ec",
-  cursor: "#9aa7e6",
-  cursorAccent: "#16171c",
-  selectionBackground: "#2c2d34",
-  // ANSI 0-7 / 8-15, verbatim from warp_bundled/warp_dark.yaml's
-  // terminal_colors.normal / .bright (black/white are that file's own
-  // normal.black+bright.black / normal.white+bright.white, not the theme's
-  // separate top-level background/foreground fields above).
-  black: "#616161",
-  red: "#ff8272",
-  green: "#b4fa72",
-  yellow: "#fefdc2",
-  blue: "#a5d5fe",
-  magenta: "#ff8ffd",
-  cyan: "#d0d1fe",
-  white: "#f1f1f1",
-  brightBlack: "#8e8e8e",
-  brightRed: "#ffc4bd",
-  brightGreen: "#d6fcb9",
-  brightYellow: "#fefdd5",
-  brightBlue: "#c1e3fe",
-  brightMagenta: "#ffb1fe",
-  brightCyan: "#e5e6fe",
-  brightWhite: "#feffff",
-};
+// Background/foreground/cursor palette now lives in `../lib/terminalThemes`
+// (`TERMINAL_THEMES.standard` is this file's former `HUD_THEME`, verbatim —
+// see that module's own doc for the Warp-sourced provenance and the
+// founder's "push the background almost black" follow-up ask). Kept in
+// sync with App.css's --void/--ink/--signal/--line tokens the same way the
+// original HUD_THEME was — xterm doesn't read CSS custom properties, so
+// the palette is still duplicated by hand, just one file over now that
+// there's more than one preset to hold.
 
 function base64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -72,10 +48,20 @@ function base64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
-export default function Terminal({ sessionId, visible }: TerminalProps) {
+export default function Terminal({ sessionId, visible, themeId, onFirstInput }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // Lets the mount effect (keyed only on `[sessionId]`, see below) always
+  // call the LATEST `onFirstInput` prop without needing it in that effect's
+  // deps — the same ref-for-a-callback pattern used throughout this
+  // codebase to keep a mount-once effect from re-running on every prop
+  // change (see `Workspace.tsx`'s module doc on why `<Terminal>` must stay
+  // mounted for a session's whole lifetime).
+  const onFirstInputRef = useRef(onFirstInput);
+  useEffect(() => {
+    onFirstInputRef.current = onFirstInput;
+  }, [onFirstInput]);
 
   // Mount once per session id — see module doc comment for why this must
   // not depend on `visible`.
@@ -89,7 +75,7 @@ export default function Terminal({ sessionId, visible }: TerminalProps) {
         '"JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
       fontSize: 13,
       lineHeight: 1.35,
-      theme: HUD_THEME,
+      theme: resolveTerminalTheme(themeId),
       cursorBlink: true,
       cursorStyle: "bar",
       scrollback: 10000,
@@ -123,8 +109,21 @@ export default function Terminal({ sessionId, visible }: TerminalProps) {
     };
     fitAndReportSize();
 
+    // Auto-title capture (founder ask): a fresh cycle per mounted session
+    // (this local variable lives inside the `[sessionId]`-keyed effect, so
+    // a new session id — including the one PaneHeader's "change engine"
+    // spawns — always starts watching again). Fed from the exact same
+    // `onData` stream `sessionWrite` already uses, i.e. only ever real user
+    // keystrokes, never anything the app itself writes into the PTY.
+    let firstInputCapture = initialFirstInputCapture();
+
     const dataDisposable = term.onData((data) => {
       void sessionWrite(sessionId, data);
+      if (!firstInputCapture.captured) {
+        const { next, title } = feedFirstInputChunk(firstInputCapture, data);
+        firstInputCapture = next;
+        if (title) onFirstInputRef.current?.(sessionId, title);
+      }
     });
 
     const resizeObserver = new ResizeObserver(() => fitAndReportSize());
@@ -191,6 +190,18 @@ export default function Terminal({ sessionId, visible }: TerminalProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
+
+  // Live theme swap: `xterm.js`'s `Terminal.options` is mutable at runtime
+  // (unlike the constructor-only options above), so picking a new theme in
+  // PaneHeader's 3-dot menu re-paints this pane immediately without tearing
+  // down/recreating the xterm instance — doing that would drop scrollback
+  // and momentarily interrupt the live PTY output stream, which the
+  // mount-once-per-session-id effect above exists specifically to avoid.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.theme = resolveTerminalTheme(themeId);
+  }, [themeId]);
 
   // Re-fit and refocus whenever this tab becomes the visible one (covers
   // both "just switched to it" and "window resized while it was hidden").
