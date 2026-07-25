@@ -1,14 +1,23 @@
-// Pure, framework-free state for the sidebar's "+" Add Project flow —
-// founder feedback (Bruno, 2026-07-24, verbatim): "Open one terminal, and
-// start from there... the user can add multiple sessions within one project
-// or add a new project (item on the left)". Same split as
-// `onboarding/onboardingState.ts`: a reducer with zero Tauri/React imports
-// so the pick-folder -> edit-name -> submit transitions are unit-testable
-// without mounting `AddProjectModal.tsx` or mocking the native dialog /
-// `invoke()`. `AddProjectModal.tsx` dispatches `folder_picked` right after
-// `@tauri-apps/plugin-dialog`'s `open()` resolves, then `submit_started` /
-// `submit_failed` around its `addProject()` call (success just closes the
-// modal — there's no "submitted" phase to model here).
+// Pure, framework-free state originally built for the sidebar's "+" Add
+// Project flow — founder feedback (Bruno, 2026-07-24, verbatim): "Open one
+// terminal, and start from there... the user can add multiple sessions
+// within one project or add a new project (item on the left)". Same split
+// as `onboarding/onboardingState.ts`: a reducer with zero Tauri/React
+// imports so the pick-folder -> edit-name -> submit transitions are
+// unit-testable without mounting a modal component or mocking the native
+// dialog / `invoke()`.
+//
+// 2026-07-25: the modal this originally backed (`AddProjectModal.tsx`) was
+// replaced by `NewWorkspaceModal.tsx` (a strict superset — see that
+// component's own module doc), and deleted. This file and its test were
+// deliberately kept — `basenameOf` is genuinely reusable, working, tested
+// logic, not something worth deleting just because its original caller is
+// gone — `newWorkspaceState.ts` now imports `basenameOf` from here instead
+// of re-deriving it. The rest of this module (the `AddProjectState`
+// reducer/phase machine) is unused dead code at this point, kept only
+// because `basenameOf` lives in the same file; if this file ever needs a
+// real edit, consider splitting `basenameOf` out on its own rather than
+// carrying the rest forward.
 
 export type AddProjectPhase = "pick" | "name" | "submitting";
 

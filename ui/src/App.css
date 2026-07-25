@@ -257,10 +257,12 @@ code {
 }
 
 /* Founder feedback, 2026-07-24: a persistent "+" — always available, not
-   just in the empty state — for the fast "add one project, get a terminal"
-   path (`AddProjectModal`). Same round-icon-button shape as
-   `.sidebar-about-trigger` in the footer, just accented since this is the
-   primary action in this header, not a utility one. */
+   just in the empty state — for the fast "spin up a workspace" path
+   (`NewWorkspaceModal`, which replaced the original single-purpose
+   `AddProjectModal` on 2026-07-25 — see that component's own module doc).
+   Same round-icon-button shape as `.sidebar-about-trigger` in the footer,
+   just accented since this is the primary action in this header, not a
+   utility one. */
 .sidebar-add-project-trigger {
   width: 20px;
   height: 20px;
@@ -1165,7 +1167,7 @@ code {
 .command-palette,
 .about-panel,
 .first-run-panel,
-.add-project-panel {
+.new-workspace-panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
@@ -1831,49 +1833,179 @@ code {
   border-color: var(--ink-dim);
 }
 
-/* -------------------------------------------------------- add project
-   Founder feedback, 2026-07-24 (Bruno, verbatim): "Open one terminal, and
-   start from there... the user can add multiple sessions within one
-   project or add a new project (item on the left)". Reuses the
-   engine-picker/first-run frame above rather than a fifth near-identical
-   overlay ruleset — same quiet terminal-boot-prompt tone as FirstRun's pick
-   step, just scoped to exactly one folder plus a name field. */
+/* -------------------------------------------------------- new workspace
+   Founder reference, 2026-07-25: a screenshot of BridgeSpace's "New
+   Workspace" dialog (described precisely, not checked in as an image —
+   see NewWorkspaceModal.tsx's module doc). Replaces the old `.add-project-*`
+   ruleset wholesale (this modal replaces that component) — wider than the
+   shared 420px overlay frame above (there's a LAYOUT row of 4 cards plus a
+   directory row plus a checklist to fit), same override pattern
+   `.command-palette` already uses for its own width. */
 
-.add-project-panel {
-  padding: 22px 22px 18px;
+.new-workspace-panel {
+  width: 520px;
+  padding: 22px 24px 20px;
   text-align: left;
 }
 
-.add-project-eyebrow {
+.new-workspace-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.new-workspace-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.new-workspace-close {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 15px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.new-workspace-close:hover {
+  color: var(--ink);
+  border-color: var(--ink-dim);
+}
+
+.new-workspace-section {
+  margin-bottom: 20px;
+}
+
+.new-workspace-section:last-of-type {
+  margin-bottom: 0;
+}
+
+.new-workspace-section-label {
+  display: block;
   font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.06em;
-  color: var(--signal);
-  margin: 0 0 14px;
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 10px;
 }
 
-.add-project-body {
-  margin: 0 0 18px;
+/* ---- LAYOUT --------------------------------------------------------- */
+
+.new-workspace-layout-row {
+  display: flex;
+  gap: 10px;
+}
+
+.new-workspace-layout-card {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 12px 8px 10px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius-md);
   color: var(--ink-dim);
-  font-size: 12.5px;
-  line-height: 1.6;
 }
 
-.add-project-path {
-  margin: 0 0 14px;
+.new-workspace-layout-card:hover {
+  border-color: var(--ink-faint);
+}
+
+.new-workspace-layout-card.is-selected {
+  border-color: var(--accent-select);
+  background: rgba(237, 129, 195, 0.1);
+  color: var(--ink);
+}
+
+.new-workspace-layout-glyph {
+  display: grid;
+  gap: 2px;
+  width: 30px;
+  height: 22px;
+}
+
+.new-workspace-layout-glyph-cell {
+  background: var(--ink-faint);
+  border-radius: 2px;
+}
+
+.new-workspace-layout-card.is-selected .new-workspace-layout-glyph-cell {
+  background: var(--accent-select);
+}
+
+.new-workspace-layout-number {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.new-workspace-layout-caption {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-dim);
+  font-style: italic;
+}
+
+/* ---- DIRECTORY -------------------------------------------------------- */
+
+.new-workspace-directory-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 12px;
+}
+
+.new-workspace-folder-icon {
+  flex: 0 0 auto;
+  color: var(--ink-faint);
+}
+
+.new-workspace-path {
+  flex: 1;
+  min-width: 0;
   font-family: var(--mono);
   font-size: 11px;
   color: var(--ink-dim);
   background: var(--panel-raised);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 8px 10px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.add-project-name-label {
+.new-workspace-browse {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+
+.new-workspace-browse:hover {
+  color: var(--ink);
+  border-color: var(--ink-dim);
+}
+
+.new-workspace-name-label {
   display: block;
   font-family: var(--mono);
   font-size: 10px;
@@ -1883,92 +2015,165 @@ code {
   margin-bottom: 6px;
 }
 
-.add-project-name-input {
+.new-workspace-name-input {
   width: 100%;
   background: var(--void);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--ink);
   font-family: var(--mono);
   font-size: 13px;
   padding: 9px 10px;
-  margin-bottom: 6px;
 }
 
-.add-project-name-input:focus {
+.new-workspace-name-input:focus {
   border-color: var(--signal-dim);
 }
 
-.add-project-error {
-  margin: 6px 0 0;
+.new-workspace-name-input:disabled {
+  opacity: 0.5;
+}
+
+/* ---- AI AGENTS ---------------------------------------------------------
+   Checkbox rows reuse `.engine-dot` (App.css, shared with EnginePicker)
+   directly for the identity dot rather than a second near-identical rule —
+   same color token, same job. The checkbox itself is a plain native
+   `<input type="checkbox">` tinted via `accent-color` rather than a
+   hand-rolled custom control — modern WebKit (Tauri's webview) already
+   renders that as a filled rounded square with a checkmark in the accent
+   color, which is exactly the reference's look, for near-zero code and
+   full native accessibility/keyboard behavior for free. */
+
+.new-workspace-agents-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.new-workspace-agents-header .new-workspace-section-label {
+  margin-bottom: 0;
+}
+
+.new-workspace-agents-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  padding: 1px 7px;
+}
+
+.new-workspace-agents-toggle {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  font-size: 11px;
+}
+
+.new-workspace-agents-toggle:hover {
+  color: var(--ink);
+}
+
+.new-workspace-agents-chevron {
+  display: inline-block;
+  transform: rotate(90deg);
+  transition: transform 0.15s ease;
+  font-size: 9px;
+}
+
+.new-workspace-agents-chevron.is-collapsed {
+  transform: rotate(0deg);
+}
+
+.new-workspace-agent-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.new-workspace-agent-row {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 2px 4px;
+}
+
+.new-workspace-agent-row label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px;
+  cursor: pointer;
+}
+
+.new-workspace-agent-row input[type="checkbox"] {
+  accent-color: var(--accent-select);
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+.new-workspace-agent-label {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.new-workspace-error {
+  margin: 14px 0 0;
   color: var(--danger);
   font-size: 11.5px;
 }
 
-.add-project-actions {
+/* ---- footer ------------------------------------------------------------ */
+
+.new-workspace-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-top: 16px;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
 }
 
-.add-project-back {
+.new-workspace-cancel {
   background: transparent;
   border: none;
   color: var(--ink-faint);
-  font-size: 11px;
-  padding: 4px 0;
+  font-size: 12px;
+  padding: 8px 4px;
 }
 
-.add-project-back:hover:not(:disabled) {
+.new-workspace-cancel:hover {
   color: var(--ink-dim);
 }
 
-.add-project-back:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.add-project-cta {
-  background: var(--signal);
-  border: 1px solid var(--signal);
-  color: #06101f;
+.new-workspace-submit {
+  background: var(--accent-select);
+  border: 1px solid var(--accent-select);
+  color: #2b0e20;
   font-weight: 600;
-  border-radius: 7px;
-  padding: 9px 16px;
+  border-radius: var(--radius-pill);
+  padding: 10px 20px;
   font-size: 12.5px;
 }
 
-.add-project-cta:hover:not(:disabled) {
-  background: #6ba0ff;
+.new-workspace-submit:hover:not(:disabled) {
+  background: #f2a0d4;
 }
 
-.add-project-cta:disabled {
+.new-workspace-submit:disabled {
   opacity: 0.5;
   cursor: default;
-}
-
-/* The "pick" phase's CTA is full-width (FirstRun-style, nothing else on
-   the row); the "name" phase's lives in `.add-project-actions` next to
-   "Choose a different folder" instead, so this only applies standalone. */
-.add-project-panel > .add-project-cta {
-  width: 100%;
-  padding: 11px 14px;
-  font-size: 13px;
-}
-
-.add-project-skip {
-  width: 100%;
-  background: transparent;
-  border: none;
-  color: var(--ink-faint);
-  font-size: 11px;
-  padding: 10px 0 0;
-}
-
-.add-project-skip:hover {
-  color: var(--ink-dim);
 }
 
 /* ---------------------------------------------------------------- brain map

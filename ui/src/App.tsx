@@ -24,6 +24,8 @@ import {
   type ProjectInfo,
   type TabInfo,
 } from "./state/sessions";
+import { buildLayoutTree, type LayoutPreset, type PaneTree } from "./state/paneGrid";
+import { ENGINE_LABEL } from "./theme";
 import {
   FILE_TREE_VISIBLE_SETTING_KEY,
   getBriefing,
@@ -66,6 +68,20 @@ function App() {
   // `LAYOUT_SETTING_KEY`/`REVIEW_MEMORY_SETTING_KEY` already use, restored
   // in the boot effect below alongside the tab layout.
   const [fileTreeVisible, setFileTreeVisible] = useState(true);
+
+  // NewWorkspaceModal's bulk-create: `projectId -> PaneTree` arrangement
+  // hints for a project's very first pane-grid render (see
+  // `Workspace.tsx`'s `initialLayouts`/`ProjectPaneGrid`'s `initialTree`
+  // doc). A plain mutable ref, not React state — nothing needs to
+  // re-render *because* this map changed; it only needs to hold the right
+  // value by the time the `tabs/opened_bulk` dispatch below triggers
+  // `Workspace`'s next render, and mutating-then-dispatching in the same
+  // synchronous call does exactly that. `ProjectPaneGrid` only ever reads
+  // an entry once (its tree is never `null` again after that, see that
+  // component's own doc), so entries are deliberately never cleaned up
+  // afterward — bounded by "how many workspaces this session has ever
+  // bulk-created," negligible for a desktop app that restarts on relaunch.
+  const pendingLayoutsRef = useRef<Map<string, PaneTree>>(new Map());
 
   // ---- Task 8.1: onboarding gating + the always-on ingestion status poll -
   const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null); // null = still checking
@@ -283,26 +299,37 @@ function App() {
     setPickerProject(project);
   }, []);
 
+  // The one place a session actually gets spawned: `engine === "claude"`
+  // fetches its briefing first (the zero-config MCP/briefing wiring
+  // DESIGN.md 5 requires happens automatically around the engine, never by
+  // asking the user to configure anything), then calls `session_create`
+  // with the project's cwd. Shared by both the single-tab ⌘T/"+" flow
+  // (`confirmNewTab` below) and NewWorkspaceModal's bulk-create
+  // (`handleWorkspaceCreated`) so there is exactly one place that knows how
+  // to spin up a session for a project — no second, drifting copy of the
+  // per-engine spawn logic.
+  const createSessionTab = useCallback(async (project: ProjectInfo, engine: Engine): Promise<TabInfo> => {
+    const briefing = engine === "claude" ? await getBriefing(project.id) : undefined;
+    const cwd = project.path ?? project.id;
+    const info = await sessionCreate(project.id, engine, cwd, briefing);
+    return {
+      id: info.id,
+      project: info.project,
+      engine,
+      cwd: info.cwd,
+      createdAt: info.created,
+      needsAttention: false,
+    };
+  }, []);
+
   const confirmNewTab = useCallback(
     async (engine: Engine) => {
       const project = pickerProject;
       setPickerProject(null);
       if (!project) return;
       try {
-        const briefing = engine === "claude" ? await getBriefing(project.id) : undefined;
-        const cwd = project.path ?? project.id;
-        const info = await sessionCreate(project.id, engine, cwd, briefing);
-        dispatch({
-          type: "tab/opened",
-          tab: {
-            id: info.id,
-            project: info.project,
-            engine,
-            cwd: info.cwd,
-            createdAt: info.created,
-            needsAttention: false,
-          },
-        });
+        const tab = await createSessionTab(project, engine);
+        dispatch({ type: "tab/opened", tab });
         void settingsSet(defaultEngineSettingKey(project.id), engine);
         // Cross-view integration point (Task 6.2): the map's "Open terminal
         // here" action calls `requestNewTab` too (via `onOpenTerminal`
@@ -314,7 +341,64 @@ function App() {
         setErrorBanner(`Couldn't start ${engine} in ${project.label}: ${err}`);
       }
     },
-    [pickerProject],
+    [pickerProject, createSessionTab],
+  );
+
+  // ---- NewWorkspaceModal's bulk-create (Sidebar's "+" -> New Workspace) -
+  // `add_project` + the modal's own folder-pick/name UI already ran inside
+  // `NewWorkspaceModal.tsx` by the time this fires (see that component's
+  // module doc for the ownership split) — `project` already exists. This
+  // spins up exactly one session per checked engine, in the order the
+  // caller passed (`newWorkspaceState.ts`'s `checkedEngines` — always
+  // `ENGINES` order), landing every success in ONE `tabs/opened_bulk`
+  // dispatch (never one `tab/opened` per session — see that action's own
+  // doc for why an incremental reveal would both defeat the chosen LAYOUT
+  // arrangement and risk remounting already-open panes mid-batch).
+  //
+  // Partial failure is expected, not exceptional (DESIGN.md's own "bring
+  // your own engine" reality: a checked engine's CLI might genuinely not be
+  // installed) — every engine is attempted independently; one failing
+  // never aborts the rest, and whatever succeeds still lands the user in a
+  // live, populated project rather than nothing at all.
+  //
+  // Deliberately does NOT persist `defaultEngineSettingKey` the way
+  // `confirmNewTab` does — that setting means "the last single engine
+  // chosen for this project's next ⌘T", and a multi-engine batch has no
+  // one answer to write there.
+  const handleWorkspaceCreated = useCallback(
+    async (project: ProjectInfo, engines: Engine[], layout: LayoutPreset) => {
+      void reloadProjects();
+      setSelectedProjectId(project.id);
+
+      const created: TabInfo[] = [];
+      const failed: Engine[] = [];
+      for (const engine of engines) {
+        try {
+          created.push(await createSessionTab(project, engine));
+        } catch (err) {
+          console.error(`failed to start ${engine} in ${project.label}`, err);
+          failed.push(engine);
+        }
+      }
+
+      if (created.length > 0) {
+        const tree = buildLayoutTree(created.map((t) => t.id), layout);
+        if (tree) pendingLayoutsRef.current.set(project.id, tree);
+        dispatch({ type: "tabs/opened_bulk", tabs: created });
+      }
+
+      if (failed.length > 0) {
+        const names = failed.map((e) => ENGINE_LABEL[e]).join(", ");
+        setErrorBanner(
+          created.length > 0
+            ? `Created "${project.label}", but couldn't start ${names} — the rest are running.`
+            : `Created "${project.label}", but couldn't start ${names} — no sessions are running yet.`,
+        );
+      }
+
+      setView("workspace");
+    },
+    [reloadProjects, createSessionTab],
   );
 
   // Activating a tab is now also "the grid you're looking at should show
@@ -353,23 +437,6 @@ function App() {
     setFileTreeVisible(next);
     void settingsSet(FILE_TREE_VISIBLE_SETTING_KEY, next ? "true" : "false");
   }, [fileTreeVisible]);
-
-  // ---- the sidebar's "+" Add Project flow (founder feedback, 2026-07-24):
-  // `add_project` already upserted the node and returned its `ProjectInfo`
-  // synchronously, so there's no need to await `reloadProjects` before
-  // acting on it — select it and go straight into the engine picker
-  // (`requestNewTab`, the exact same flow the per-project "+"/⌘T already
-  // use) so a terminal is one more click away immediately. `reloadProjects`
-  // still runs, non-blocking, so the sidebar row appears without waiting
-  // for the next `ingestion_status` poll's post-run refresh.
-  const handleProjectAdded = useCallback(
-    (project: ProjectInfo) => {
-      void reloadProjects();
-      setSelectedProjectId(project.id);
-      void requestNewTab(project);
-    },
-    [reloadProjects, requestNewTab],
-  );
 
   const closeTab = useCallback(async (id: string) => {
     try {
@@ -414,7 +481,7 @@ function App() {
           onSelectProject={(p) => setSelectedProjectId(p.id)}
           onNewTabInProject={(p) => void requestNewTab(p)}
           onActivateTab={activateTab}
-          onProjectAdded={handleProjectAdded}
+          onWorkspaceCreated={(p, engines, layout) => void handleWorkspaceCreated(p, engines, layout)}
           ingestion={ingestion}
           view={view}
           onSetView={setView}
@@ -432,6 +499,7 @@ function App() {
           onNewTabInProject={(p) => void requestNewTab(p)}
           onRenameTab={renameTab}
           hidden={view !== "workspace"}
+          initialLayouts={pendingLayoutsRef.current}
         />
         <BrainMap
           projects={state.projects}

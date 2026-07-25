@@ -14,12 +14,22 @@
 // FirstRun bulk-root picker) — the empty state literally told the user to
 // run a CLI command and relaunch, which is the opposite of "start from
 // there". The persistent "+" trigger below and the rewritten empty state
-// are the fix: `AddProjectModal` calls `add_project` (`src-tauri/src/
-// roots.rs`), which creates the sidebar row synchronously and ingests it on
-// a background thread — see that command's own doc comment for why. This
-// does NOT replace the FirstRun bulk "point at a parent folder full of
-// repos" flow (kept as-is, still reachable the same way it always was);
-// it's a second, faster, single-project path that coexists with it.
+// are the fix. This does NOT replace the FirstRun bulk "point at a parent
+// folder full of repos" flow (kept as-is, still reachable the same way it
+// always was); it's a second, faster, single-project path that coexists
+// with it.
+//
+// 2026-07-25: the "+" now opens `NewWorkspaceModal` (a BridgeSpace "New
+// Workspace" dialog reference — see that component's own module doc),
+// which REPLACED the original `AddProjectModal`. That modal only ever did
+// "pick a folder, optionally rename it, call `add_project`"; the new one is
+// a strict superset — the same folder-pick/rename step, PLUS choosing which
+// engines to boot for the new project's first batch of sessions and how to
+// arrange them — so there is no longer a reason to keep two overlapping
+// "add a project" entry points in the sidebar. `add_project`
+// (`src-tauri/src/roots.rs`) is still exactly what gets called; it still
+// creates the sidebar row synchronously and ingests on a background
+// thread — see that command's own doc comment for why.
 //
 // Attention badge (founder feedback, 2026-07-24 — Bruno, verbatim: "every
 // claude session[...] can require attention, generate a badge"): a red dot
@@ -33,7 +43,16 @@
 // on the pane itself.
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import logo from "../assets/omniagent-logo.png";
-import { PRESSURE_THRESHOLD, isUnderPressure, tabDisplayLabel, tabsByProject, type ProjectInfo, type TabInfo } from "../state/sessions";
+import {
+  PRESSURE_THRESHOLD,
+  isUnderPressure,
+  tabDisplayLabel,
+  tabsByProject,
+  type Engine,
+  type ProjectInfo,
+  type TabInfo,
+} from "../state/sessions";
+import type { LayoutPreset } from "../state/paneGrid";
 import {
   rootsPausedProjects,
   rootsReingestProject,
@@ -45,7 +64,7 @@ import {
 import AboutPanel from "./AboutPanel";
 import ReviewPanel from "./ReviewPanel";
 import ProjectMenu from "./ProjectMenu";
-import AddProjectModal from "./AddProjectModal";
+import NewWorkspaceModal from "./NewWorkspaceModal";
 
 /** How often to refresh pause/staleness state in the background — cheap
  * settings/`list_projects` reads, not worth a live push mechanism for v1. */
@@ -76,9 +95,12 @@ interface SidebarProps {
   onSelectProject: (project: ProjectInfo) => void;
   onNewTabInProject: (project: ProjectInfo) => void;
   onActivateTab: (id: string) => void;
-  /** The "+" Add Project flow: called with the freshly-created project the
-   * instant `add_project` returns (well before ingestion finishes). */
-  onProjectAdded: (project: ProjectInfo) => void;
+  /** The "+" New Workspace flow: called the instant `add_project` returns
+   * (well before ingestion finishes) with the freshly-created project, the
+   * engines the user checked (ENGINES order, always >= 1), and the LAYOUT
+   * preset chosen for arranging their sessions — `App.tsx` owns the actual
+   * bulk `session_create` orchestration and closes the modal. */
+  onWorkspaceCreated: (project: ProjectInfo, engines: Engine[], layout: LayoutPreset) => void;
   /** Owned centrally by `App.tsx` (already polling every ~2s for the
    * degradation badges / FirstRun / BrainMap) and simply forwarded here —
    * backs the small "ingesting…" indicator next to the wordmark, the reuse
@@ -106,7 +128,7 @@ export default function Sidebar({
   onSelectProject,
   onNewTabInProject,
   onActivateTab,
-  onProjectAdded,
+  onWorkspaceCreated,
   ingestion,
   view = "workspace",
   onSetView,
@@ -115,7 +137,7 @@ export default function Sidebar({
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
-  const [addProjectOpen, setAddProjectOpen] = useState(false);
+  const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const grouped = tabsByProject(tabs);
   const sessionCountByProject = new Map(grouped.map((g) => [g.project, g.tabs.length]));
   // Founder feedback (2026-07-24): a session's attention badge must stay
@@ -202,9 +224,9 @@ export default function Sidebar({
           )}
           <button
             className="sidebar-add-project-trigger"
-            onClick={() => setAddProjectOpen(true)}
-            aria-label="Add project"
-            title="Add project"
+            onClick={() => setNewWorkspaceOpen(true)}
+            aria-label="New workspace"
+            title="New workspace"
           >
             +
           </button>
@@ -269,8 +291,8 @@ export default function Sidebar({
               Add a project folder to open your first terminal — ingestion happens quietly in the
               background.
             </p>
-            <button className="sidebar-empty-cta" onClick={() => setAddProjectOpen(true)}>
-              + Add Project
+            <button className="sidebar-empty-cta" onClick={() => setNewWorkspaceOpen(true)}>
+              + New Workspace
             </button>
           </div>
         ) : (
@@ -387,13 +409,13 @@ export default function Sidebar({
 
       {aboutOpen && <AboutPanel onClose={() => setAboutOpen(false)} />}
       {reviewOpen && <ReviewPanel onClose={() => setReviewOpen(false)} />}
-      {addProjectOpen && (
-        <AddProjectModal
-          onAdded={(project) => {
-            setAddProjectOpen(false);
-            onProjectAdded(project);
+      {newWorkspaceOpen && (
+        <NewWorkspaceModal
+          onCreate={(project, engines, layout) => {
+            setNewWorkspaceOpen(false);
+            onWorkspaceCreated(project, engines, layout);
           }}
-          onClose={() => setAddProjectOpen(false)}
+          onClose={() => setNewWorkspaceOpen(false)}
         />
       )}
     </aside>
