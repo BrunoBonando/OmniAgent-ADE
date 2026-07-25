@@ -271,6 +271,10 @@ impl SessionManager {
             .context("create transcripts dir")?;
 
         let (cmd, mcp_config_path) = build_command(&req, &self.data_dir, &id)?;
+        // Armed the instant the file (if any) might exist; disarmed only
+        // once the session below has been fully, successfully created --
+        // see the guard's own doc comment.
+        let mut mcp_cleanup_guard = McpConfigCleanupGuard::new(mcp_config_path.clone());
 
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -337,6 +341,11 @@ impl SessionManager {
         };
 
         self.sessions.lock().unwrap().insert(id, handle);
+
+        // Fully, successfully created -- the temp mcp config file's
+        // eventual cleanup is now the `SessionHandle`'s responsibility
+        // (kill()/the natural-exit path), not this guard's.
+        mcp_cleanup_guard.disarm();
 
         Ok(info)
     }
@@ -589,6 +598,47 @@ fn write_mcp_config(mcp_binary: &Path, data_dir: &Path, session_id: &str) -> Res
 fn cleanup_mcp_config(path: &Option<PathBuf>) {
     if let Some(p) = path {
         let _ = std::fs::remove_file(p);
+    }
+}
+
+/// RAII guard for the temp `--mcp-config` file `build_command` writes for
+/// `claude` sessions (see [`write_mcp_config`]). `SessionManager::create`
+/// arms one right after the file is written and disarms it only once the
+/// session has been fully, successfully created and inserted into the
+/// registry — ownership of the file's eventual cleanup passes to the
+/// `SessionHandle` (and from there to `kill()`/the natural-exit path,
+/// which already clean it up) at that point.
+///
+/// Any of `create()`'s several fallible steps between those two points
+/// (`openpty`, `try_clone_reader`/`take_writer`, `spawn_command`,
+/// `append_lifecycle_event`) returning early via `?` instead drops this
+/// guard while still armed, deleting the file — without this, every one
+/// of those failure paths leaked the file permanently into the system
+/// temp dir. Realistic trigger: `claude` isn't on `PATH`, so every
+/// "claude" session attempt fails at `spawn_command` and leaks one more
+/// file, forever.
+struct McpConfigCleanupGuard {
+    path: Option<PathBuf>,
+    armed: bool,
+}
+
+impl McpConfigCleanupGuard {
+    fn new(path: Option<PathBuf>) -> Self {
+        Self { path, armed: true }
+    }
+
+    /// Call once the session is fully, successfully created — the file
+    /// (if any) is no longer this guard's responsibility from here on.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for McpConfigCleanupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            cleanup_mcp_config(&self.path);
+        }
     }
 }
 
@@ -1040,6 +1090,111 @@ mod tests {
         };
         let err = build_command(&req, tmp.path(), "sess-test").unwrap_err();
         assert!(err.to_string().contains("unsupported engine"));
+    }
+
+    /// Bug: every one of `create()`'s fallible steps *after*
+    /// `write_mcp_config` writes the temp `--mcp-config` JSON file
+    /// (`openpty`, `try_clone_reader`/`take_writer`, `spawn_command`,
+    /// `append_lifecycle_event`) propagated its error via `?` without ever
+    /// cleaning that file up -- only `kill()` and the natural-exit path
+    /// (both post-success) did. Realistic trigger named in the bug report:
+    /// `claude` isn't on `PATH`, so every "claude" session attempt fails at
+    /// spawn and leaks one more file into the system temp dir forever.
+    ///
+    /// Reproduced end-to-end through the real `create()`, exactly that
+    /// trigger: a fake sibling `omniagent-mcp` binary is dropped next to
+    /// *this test binary itself* so `resolve_mcp_server_binary()` (which
+    /// looks up `std::env::current_exe()`, exactly as `create()` calls it
+    /// for real) genuinely finds it and writes the config file, then
+    /// `PATH` is filtered (for the duration of the `create()` call only,
+    /// restored via RAII even if an assertion below panics) to drop only
+    /// the specific directory that actually contains a `claude`
+    /// executable -- every *other* directory on `PATH` is left untouched,
+    /// so anything else on this machine's `PATH` (notably `git`, which
+    /// `feedback::tests::git_diff_stat_reports_uncommitted_changes`
+    /// shells out to and which flaked when an earlier version of this
+    /// test wiped `PATH` entirely and ran concurrently with it) keeps
+    /// resolving normally for any test running in parallel with this one.
+    /// (Two other failure triggers were tried first and rejected: a
+    /// nonexistent `cwd` and an oversized `--append-system-prompt` value
+    /// both let `spawn_command` return `Ok` -- the failure happens
+    /// invisibly inside the forked child before `exec`, not in the
+    /// parent's `spawn_command` call, on this PTY backend/OS -- so neither
+    /// actually surfaces as an `Err` here, and worse, both leave a real
+    /// child process spawned and running.)
+    #[test]
+    fn create_cleans_up_leaked_mcp_config_temp_file_when_spawn_fails() {
+        let exe = std::env::current_exe().unwrap();
+        let sibling = exe.parent().unwrap().join("omniagent-mcp");
+        std::fs::write(&sibling, b"fake").unwrap();
+        struct RemoveOnDrop(PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _sibling_guard = RemoveOnDrop(sibling);
+
+        struct RestorePath(Option<std::ffi::OsString>);
+        impl Drop for RestorePath {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(p) => std::env::set_var("PATH", p),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        }
+        let original_path = std::env::var_os("PATH");
+        let _path_guard = RestorePath(original_path.clone());
+        let filtered: Vec<PathBuf> = original_path
+            .as_deref()
+            .map(std::env::split_paths)
+            .into_iter()
+            .flatten()
+            .filter(|dir| !dir.join("claude").is_file())
+            .collect();
+        std::env::set_var("PATH", std::env::join_paths(&filtered).unwrap());
+        assert!(
+            which_claude(&filtered).is_none(),
+            "test setup bug: `claude` must not resolve under the filtered PATH"
+        );
+
+        let count_leaked = || {
+            std::fs::read_dir(std::env::temp_dir())
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("omniagent-ade-mcp-")
+                })
+                .count()
+        };
+        let before = count_leaked();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink());
+        let req = CreateSessionRequest {
+            project: "demo".into(),
+            engine: "claude".into(),
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            briefing: None,
+        };
+
+        let err = manager
+            .create(req)
+            .expect_err("claude must fail to spawn once its directory is filtered off PATH");
+        assert!(!err.to_string().is_empty());
+
+        assert_eq!(
+            count_leaked(),
+            before,
+            "the --mcp-config temp file written before the failing spawn step must not survive"
+        );
+    }
+
+    fn which_claude(dirs: &[PathBuf]) -> Option<PathBuf> {
+        dirs.iter().map(|d| d.join("claude")).find(|p| p.is_file())
     }
 
     #[test]
