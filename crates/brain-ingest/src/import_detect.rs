@@ -933,4 +933,33 @@ mod tests {
         assert_eq!(result[0].path, project.to_str().unwrap());
         assert_eq!(result[0].suggested_name, "RealOne");
     }
+
+    // ------------------------------------------------------- manual verification
+    //
+    // Not part of the automated suite (never runs in `cargo test --workspace`)
+    // — a human-run check against THIS machine's real `~/.claude/projects`
+    // and real VS Code `state.vscdb`, the genuine end-to-end proof the
+    // synthetic-fixture tests above can't give (they'll differ on every
+    // machine, same reasoning `CLAUDE.md`'s own "Projects landscape" section
+    // gives for not testing against a live vault). Same precedent as
+    // `brain-core/examples/concurrency_repro.rs` — a kept, runnable manual
+    // verification tool, not a throwaway script.
+    //
+    //   cargo test -p brain-ingest import_detect::tests::manual_report_against_real_machine_data -- --ignored --nocapture
+
+    #[test]
+    #[ignore]
+    fn manual_report_against_real_machine_data() {
+        println!("\n=== detect_tools() against the real $HOME ===");
+        for t in detect_tools() {
+            println!("{t:?}");
+        }
+        for tool in Tool::ALL {
+            let candidates = list_candidates(tool.id()).unwrap();
+            println!("\n--- {} ({} candidate(s)) ---", tool.display_name(), candidates.len());
+            for c in &candidates {
+                println!("  {:<30} {}", c.suggested_name, c.path);
+            }
+        }
+    }
 }
