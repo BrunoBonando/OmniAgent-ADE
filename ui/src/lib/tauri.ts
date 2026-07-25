@@ -339,3 +339,38 @@ export async function rootsRebuild(): Promise<void> {
 export async function enrichQueuePendingCount(): Promise<number> {
   return invoke<number>("enrich_queue_pending_count");
 }
+
+// --------------------------------------------------------------- Task: import
+// "Import projects from other tools" (Part A backend, `src-tauri/src/
+// commands.rs`'s own doc comment, verbatim founder ask: "detect other dev
+// tools already installed on the user's machine and offer to import their
+// known project lists"). Read-only wrappers over a frozen, independently
+// unit-tested (314 Rust tests) backend contract — same thin-wrapper house
+// style as every other function in this file. Turning a selected
+// `ImportCandidate` into a real project is `addProject` above; this file
+// never combines the two, same read/write split the Rust side keeps.
+
+export interface DetectedTool {
+  id: string;
+  name: string;
+  detected: boolean;
+  candidate_count: number;
+}
+
+export interface ImportCandidate {
+  path: string;
+  suggested_name: string;
+}
+
+/** Every dev tool this build knows how to detect, always `Ok` — a tool
+ * that isn't installed simply reports `detected: false`, never an error. */
+export async function detectImportableTools(): Promise<DetectedTool[]> {
+  return invoke<DetectedTool[]>("detect_importable_tools");
+}
+
+/** `tool` must be one of the ids `detectImportableTools()` returned
+ * (`"claude-code" | "vscode" | "cursor"`) — rejects only for an unrecognized
+ * id; a known tool with nothing installed resolves to `[]`. */
+export async function listImportCandidates(tool: string): Promise<ImportCandidate[]> {
+  return invoke<ImportCandidate[]>("list_import_candidates", { tool });
+}
