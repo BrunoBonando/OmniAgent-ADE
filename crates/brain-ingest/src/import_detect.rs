@@ -423,6 +423,10 @@ fn percent_decode(s: &str) -> String {
 /// (corrupt, or actually something else entirely), a permission error, a
 /// missing `ItemTable`, or a JSON value that fails to parse — any one of
 /// these failing never stops the other source key from still being tried.
+/// One `ItemTable` key's JSON-extraction function — see
+/// [`vscode_family_candidates`]'s `sources` array.
+type JsonPathExtractor = fn(&serde_json::Value) -> Vec<PathBuf>;
+
 fn vscode_family_candidates(db_path: &Path) -> Vec<ImportCandidate> {
     let Ok(conn) = rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
         return Vec::new();
@@ -431,7 +435,7 @@ fn vscode_family_candidates(db_path: &Path) -> Vec<ImportCandidate> {
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut out: Vec<PathBuf> = Vec::new();
 
-    let sources: [(&str, fn(&serde_json::Value) -> Vec<PathBuf>); 2] =
+    let sources: [(&str, JsonPathExtractor); 2] =
         [(RECENTLY_OPENED_KEY, extract_recently_opened), (TERMINAL_DIRS_KEY, extract_terminal_dirs)];
 
     for (key, extract) in sources {
@@ -544,7 +548,7 @@ mod tests {
     /// original path — proving the round trip against real disk, not a
     /// mocked filesystem.
     fn encode_like_claude_code(path: &Path) -> String {
-        path.to_str().unwrap().replace('.', "-").replace('/', "-")
+        path.to_str().unwrap().replace(['.', '/'], "-")
     }
 
     #[test]

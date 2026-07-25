@@ -372,6 +372,39 @@ pub fn unwatch_dir(path: String, watcher: State<'_, brain_ingest::dirwatch::DirW
     watcher.unwatch(std::path::Path::new(&path))
 }
 
+// ------------------------------------------------------------------------
+// Import detection (Part A — backend only). Founder ask, 2026-07-25,
+// verbatim: "detect other dev tools already installed on the user's
+// machine and offer to import their known project lists, so a new
+// OmniAgent user doesn't have to manually '+ Add Project' one folder at a
+// time." Read-only: neither command below writes anything or calls
+// `add_project` — that's the next (frontend) task, built on top of
+// `list_import_candidates`. Thin wrappers, same house style as `list_dir`
+// above — the real logic (per-tool detection, path decoding, SQLite
+// parsing, every degrade-gracefully edge case) lives in
+// `brain_ingest::import_detect`, independently unit-tested there. Take no
+// `State` — no shared app state involved, same as `list_dir`/`git_branch`.
+// ------------------------------------------------------------------------
+
+/// Every dev tool this build knows how to detect (Claude Code / VS Code /
+/// Cursor), with whether it was found on this machine and how many real,
+/// filesystem-verified candidate projects it has. Always `Ok` — detection
+/// itself never fails; a given tool simply reports `detected: false`.
+#[tauri::command]
+pub fn detect_importable_tools() -> Result<Vec<brain_ingest::import_detect::DetectedTool>, String> {
+    Ok(brain_ingest::import_detect::detect_tools())
+}
+
+/// Every real, filesystem-verified import candidate for one tool
+/// (`tool` = `"claude-code"` | `"vscode"` | `"cursor"`, matching
+/// [`brain_ingest::import_detect::DetectedTool::id`]). `Err` only for an
+/// unrecognized `tool` id; a known tool that simply isn't installed/found
+/// returns `Ok(vec![])`.
+#[tauri::command]
+pub fn list_import_candidates(tool: String) -> Result<Vec<brain_ingest::import_detect::ImportCandidate>, String> {
+    brain_ingest::import_detect::list_candidates(&tool)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,6 +586,39 @@ mod tests {
         assert_eq!(registry.watched_count(), 1);
         registry.unwatch(dir.path()).unwrap();
         assert_eq!(registry.watched_count(), 0);
+    }
+
+    // -------------------------------------------------- import-detect commands
+    //
+    // The real per-tool detection logic (path decoding, worktree dedup,
+    // SQLite parsing, every degrade-gracefully edge case) is already
+    // exhaustively covered by `brain_ingest::import_detect`'s own test
+    // suite against constructed fixtures. These are smoke tests proving
+    // the thin `#[tauri::command]` wrappers plumb through correctly — same
+    // split as `list_dir`'s own command tests above. Deliberately don't
+    // assert on this dev machine's actual detected tool/candidate data
+    // (that would be flaky across machines/CI); see this task's manual
+    // verification notes for the real numbers on this machine.
+
+    #[test]
+    fn detect_importable_tools_command_returns_one_entry_per_known_tool() {
+        let tools = detect_importable_tools().unwrap();
+        let ids: Vec<&str> = tools.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["claude-code", "vscode", "cursor"], "{ids:?}");
+    }
+
+    #[test]
+    fn list_import_candidates_command_accepts_every_known_tool_id_without_erroring() {
+        for id in ["claude-code", "vscode", "cursor"] {
+            let result = list_import_candidates(id.to_string());
+            assert!(result.is_ok(), "{id}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn list_import_candidates_command_rejects_an_unknown_tool_id() {
+        let err = list_import_candidates("not-a-real-tool".to_string()).unwrap_err();
+        assert!(err.contains("not-a-real-tool"), "{err}");
     }
 
     #[test]

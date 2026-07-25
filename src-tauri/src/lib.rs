@@ -227,6 +227,8 @@ pub fn run() {
             commands::create_dir,
             commands::watch_dir,
             commands::unwatch_dir,
+            commands::detect_importable_tools,
+            commands::list_import_candidates,
             commands::brain_query,
             commands::brain_get_context,
             commands::brain_briefing,
