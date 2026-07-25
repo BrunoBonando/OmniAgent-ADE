@@ -487,11 +487,44 @@ describe("FileTree", () => {
     setup();
     await screen.findByText("main.py");
     const handle = screen.getByRole("separator", { name: /resize file browser panel/i });
-    fireEvent.mouseDown(handle, { clientX: 500 });
-    fireEvent.mouseMove(window, { clientX: 460 }); // dragging left widens
-    fireEvent.mouseUp(window);
+    fireEvent.pointerDown(handle, { clientX: 500, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 460, pointerId: 1 }); // dragging left widens
+    fireEvent.pointerUp(handle, { clientX: 460, pointerId: 1 });
     await waitFor(() => expect(screen.getByLabelText("Project files")).toHaveStyle({ width: "300px" }));
     expect(settingsSetMock).toHaveBeenCalledWith("file_tree_width", "300");
+  });
+
+  // ------------------------------- Bug 1&2: Pointer Capture (resize side)
+  it("a resize interrupted by pointercancel (e.g. released outside the window) does not persist the in-progress width", async () => {
+    setup();
+    await screen.findByText("main.py");
+    const handle = screen.getByRole("separator", { name: /resize file browser panel/i });
+    fireEvent.pointerDown(handle, { clientX: 500, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 460, pointerId: 1 });
+    await waitFor(() => expect(screen.getByLabelText("Project files")).toHaveStyle({ width: "300px" }));
+
+    fireEvent.pointerCancel(handle, { pointerId: 1 });
+    expect(settingsSetMock).not.toHaveBeenCalled();
+
+    // A later, unrelated pointerup elsewhere must not resurrect the cancelled resize.
+    fireEvent.pointerUp(document.body, { pointerId: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settingsSetMock).not.toHaveBeenCalled();
+  });
+
+  it("never attaches resize listeners to window — only to the handle that started the drag", async () => {
+    const addSpy = vi.spyOn(window, "addEventListener");
+    setup();
+    await screen.findByText("main.py");
+    const handle = screen.getByRole("separator", { name: /resize file browser panel/i });
+    fireEvent.pointerDown(handle, { clientX: 500, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 460, pointerId: 1 });
+    fireEvent.pointerUp(handle, { clientX: 460, pointerId: 1 });
+    const leaked = addSpy.mock.calls.filter(([type]) =>
+      ["mousemove", "mouseup", "pointermove", "pointerup", "pointercancel"].includes(type as string),
+    );
+    expect(leaked).toEqual([]);
+    addSpy.mockRestore();
   });
 
   // --------------------------------------------------- live updates (Task 8)
@@ -546,9 +579,9 @@ describe("FileTree", () => {
 
     document.elementFromPoint = vi.fn().mockReturnValue(srcRow);
 
-    fireEvent.mouseDown(notes, { clientX: 10, clientY: 100, button: 0 });
-    fireEvent.mouseMove(window, { clientX: 10, clientY: 40 }); // past the drag threshold, over "src"
-    fireEvent.mouseUp(window, { clientX: 10, clientY: 40 });
+    fireEvent.pointerDown(notes, { clientX: 10, clientY: 100, button: 0, pointerId: 1 });
+    fireEvent.pointerMove(notes, { clientX: 10, clientY: 40, pointerId: 1 }); // past the drag threshold, over "src"
+    fireEvent.pointerUp(notes, { clientX: 10, clientY: 40, pointerId: 1 });
 
     await waitFor(() => expect(movePathMock).toHaveBeenCalledWith("/repo/demo", "/repo/demo/notes.md", "/repo/demo/src"));
   });
@@ -564,9 +597,9 @@ describe("FileTree", () => {
 
     document.elementFromPoint = vi.fn().mockReturnValue(body);
 
-    fireEvent.mouseDown(util, { clientX: 10, clientY: 100, button: 0 });
-    fireEvent.mouseMove(window, { clientX: 10, clientY: 400 });
-    fireEvent.mouseUp(window, { clientX: 10, clientY: 400 });
+    fireEvent.pointerDown(util, { clientX: 10, clientY: 100, button: 0, pointerId: 1 });
+    fireEvent.pointerMove(util, { clientX: 10, clientY: 400, pointerId: 1 });
+    fireEvent.pointerUp(util, { clientX: 10, clientY: 400, pointerId: 1 });
 
     await waitFor(() => expect(movePathMock).toHaveBeenCalledWith("/repo/demo", "/repo/demo/src/util.ts", "/repo/demo"));
   });
@@ -574,9 +607,9 @@ describe("FileTree", () => {
   it("a drag that doesn't cross the threshold is treated as a click, not a move", async () => {
     setup();
     const notes = await screen.findByText("notes.md");
-    fireEvent.mouseDown(notes, { clientX: 10, clientY: 10, button: 0 });
-    fireEvent.mouseMove(window, { clientX: 11, clientY: 10 }); // 1px — below threshold
-    fireEvent.mouseUp(window, { clientX: 11, clientY: 10 });
+    fireEvent.pointerDown(notes, { clientX: 10, clientY: 10, button: 0, pointerId: 1 });
+    fireEvent.pointerMove(notes, { clientX: 11, clientY: 10, pointerId: 1 }); // 1px — below threshold
+    fireEvent.pointerUp(notes, { clientX: 11, clientY: 10, pointerId: 1 });
     expect(movePathMock).not.toHaveBeenCalled();
   });
 
@@ -587,10 +620,67 @@ describe("FileTree", () => {
     const srcRow = screen.getByText("src").closest("[data-file-tree-path]") as HTMLElement;
     document.elementFromPoint = vi.fn().mockReturnValue(srcRow);
 
-    fireEvent.mouseDown(notes, { clientX: 10, clientY: 100, button: 0 });
-    fireEvent.mouseMove(window, { clientX: 10, clientY: 40 });
-    fireEvent.mouseUp(window, { clientX: 10, clientY: 40 });
+    fireEvent.pointerDown(notes, { clientX: 10, clientY: 100, button: 0, pointerId: 1 });
+    fireEvent.pointerMove(notes, { clientX: 10, clientY: 40, pointerId: 1 });
+    fireEvent.pointerUp(notes, { clientX: 10, clientY: 40, pointerId: 1 });
 
     expect(await screen.findByText(/cannot move a folder/i)).toBeInTheDocument();
+  });
+
+  // ------------------------------- Bug 1&2: Pointer Capture (drag side)
+  // Raw `window`-level mousemove/mouseup listeners only ever got removed
+  // inside their own `onUp()` — if the button was released outside the app
+  // window, the browser never delivers that `mouseup` at all, so the
+  // listeners leaked permanently and the NEXT unrelated mouseup anywhere in
+  // the app replayed the stale drag. Pointer Capture fixes this: listeners
+  // live on the row that started the drag (never `window`), and the
+  // capturing element is guaranteed to receive either `pointerup` or
+  // `pointercancel` — there is no third "silently disappeared" case.
+  it("a drag that ends with pointerup commits the move and cleans up (no window listeners left behind)", async () => {
+    const addSpy = vi.spyOn(window, "addEventListener");
+    movePathMock.mockResolvedValue("/repo/demo/src/notes.md");
+    setup();
+    const notes = await screen.findByText("notes.md");
+    const srcRow = screen.getByText("src").closest("[data-file-tree-path]") as HTMLElement;
+    document.elementFromPoint = vi.fn().mockReturnValue(srcRow);
+
+    fireEvent.pointerDown(notes, { clientX: 10, clientY: 100, button: 0, pointerId: 1 });
+    fireEvent.pointerMove(notes, { clientX: 10, clientY: 40, pointerId: 1 });
+    expect(screen.getByText("notes.md").closest(".file-tree-row")).toHaveClass("is-drag-source");
+    fireEvent.pointerUp(notes, { clientX: 10, clientY: 40, pointerId: 1 });
+
+    await waitFor(() => expect(movePathMock).toHaveBeenCalledWith("/repo/demo", "/repo/demo/notes.md", "/repo/demo/src"));
+    expect(screen.getByText("notes.md").closest(".file-tree-row")).not.toHaveClass("is-drag-source");
+
+    const leaked = addSpy.mock.calls.filter(([type]) =>
+      ["mousemove", "mouseup", "pointermove", "pointerup", "pointercancel"].includes(type as string),
+    );
+    expect(leaked).toEqual([]); // every listener the drag used was attached to the row, not window
+    addSpy.mockRestore();
+  });
+
+  it("pointercancel (simulating the button being released outside the window) aborts the drag, cleans up, and a later unrelated pointerup never replays it", async () => {
+    movePathMock.mockResolvedValue("/repo/demo/src/notes.md");
+    setup();
+    const notes = await screen.findByText("notes.md");
+    const srcRow = screen.getByText("src").closest("[data-file-tree-path]") as HTMLElement;
+    document.elementFromPoint = vi.fn().mockReturnValue(srcRow);
+
+    fireEvent.pointerDown(notes, { clientX: 10, clientY: 100, button: 0, pointerId: 1 });
+    fireEvent.pointerMove(notes, { clientX: 10, clientY: 40, pointerId: 1 });
+    // The drag is genuinely under way — proves pointer events, not clicks, drive it.
+    expect(screen.getByText("notes.md").closest(".file-tree-row")).toHaveClass("is-drag-source");
+
+    fireEvent.pointerCancel(notes, { pointerId: 1 });
+    expect(screen.getByText("notes.md").closest(".file-tree-row")).not.toHaveClass("is-drag-source");
+    expect(movePathMock).not.toHaveBeenCalled();
+
+    // Old bug: a stale `window`-level mouseup listener would replay this
+    // drag (calling movePath with the originally-dragged file + whatever
+    // hover target happened to be under this later, unrelated event) the
+    // next time ANY mouseup fired anywhere in the app.
+    fireEvent.pointerUp(document.body, { pointerId: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(movePathMock).not.toHaveBeenCalled();
   });
 });

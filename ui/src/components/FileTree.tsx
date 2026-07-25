@@ -548,15 +548,45 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
     if (lastError) setActionMessage(`Couldn't move: ${lastError}`);
   }
 
-  function beginPossibleDrag(e: React.MouseEvent, entry: DirEntry) {
+  // Pointer Capture, not raw `window` listeners (Bug 1/2 fix): a raw
+  // `window.addEventListener("mousemove"/"mouseup", ...)` pair only ever got
+  // torn down inside its own `onUp()` — if the button was released outside
+  // the app window (entirely normal near a screen/window edge), the browser
+  // never delivers that `mouseup` DOM event at all, so the listeners leaked
+  // permanently and the NEXT unrelated mouseup anywhere in the app replayed
+  // the stale drag using the originally-dragged paths + whatever hover
+  // target that later, unrelated event happened to land on.
+  //
+  // `element.setPointerCapture(pointerId)` on `pointerdown`, with
+  // `pointermove`/`pointerup`/`pointercancel` listeners on that SAME element
+  // (never `window`), is the purpose-built fix: once captured, the element
+  // keeps receiving that pointer's events even when the cursor leaves the
+  // window bounds, and — critically — the capturing element is guaranteed to
+  // receive either `pointerup` OR `pointercancel` (fired when the OS/browser
+  // interrupts the gesture, e.g. dragging outside the window). There is no
+  // third "silently vanished" case, so cleanup always runs exactly once.
+  function beginPossibleDrag(e: React.PointerEvent<HTMLButtonElement>, entry: DirEntry) {
     if (e.button !== 0) return; // left button only
     const startX = e.clientX;
     const startY = e.clientY;
     const paths = resolveDragPayload(selected, entry.path);
+    const el = e.currentTarget;
+    const pointerId = e.pointerId;
     let active = false;
     let hover: DragHover = null;
 
-    function onMove(ev: MouseEvent) {
+    function cleanup() {
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("pointercancel", onCancel);
+      try {
+        el.releasePointerCapture?.(pointerId);
+      } catch {
+        // Already released (e.g. the pointer went away on its own) — fine.
+      }
+    }
+
+    function onMove(ev: PointerEvent) {
       if (!active) {
         if (!hasCrossedDragThreshold(startX, startY, ev.clientX, ev.clientY)) return;
         active = true;
@@ -568,15 +598,24 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
     }
 
     function onUp() {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      cleanup();
       if (active) void commitDrag(paths, hover);
       setDraggedPaths(null);
       setDragHover(null);
     }
 
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    // A cancelled drag is an abort, not a commit — the gesture was
+    // interrupted, not intentionally completed by the user.
+    function onCancel() {
+      cleanup();
+      setDraggedPaths(null);
+      setDragHover(null);
+    }
+
+    el.setPointerCapture?.(pointerId);
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+    el.addEventListener("pointercancel", onCancel);
   }
 
   const hoverTargetDir =
@@ -585,23 +624,47 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
   const isRootDropTarget = dropIsValid && dragHover?.kind === "root";
 
   // ---- Task 9: resizable panel -------------------------------------------
-  function beginResize(e: React.MouseEvent) {
+  // Same Pointer Capture fix as `beginPossibleDrag` above (Bug 1/2) — see
+  // that function's comment for the full "why" (raw window listeners leak
+  // when the button is released outside the window; Pointer Capture
+  // guarantees pointerup/pointercancel on the SAME element instead).
+  function beginResize(e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault();
     const startX = e.clientX;
     const startWidth = width;
+    const el = e.currentTarget;
+    const pointerId = e.pointerId;
     let latest = startWidth;
 
-    function onMove(ev: MouseEvent) {
+    function cleanup() {
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("pointercancel", onCancel);
+      try {
+        el.releasePointerCapture?.(pointerId);
+      } catch {
+        // Already released — fine.
+      }
+    }
+
+    function onMove(ev: PointerEvent) {
       latest = widthFromDrag(startWidth, startX, ev.clientX);
       setWidth(latest);
     }
     function onUp() {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      cleanup();
       void settingsSet(FILE_TREE_WIDTH_SETTING_KEY, String(latest));
     }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    // A cancelled resize (e.g. released outside the window) must not
+    // persist a width the user never intentionally committed to.
+    function onCancel() {
+      cleanup();
+    }
+
+    el.setPointerCapture?.(pointerId);
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+    el.addEventListener("pointercancel", onCancel);
   }
 
   function renderDirState(state: DirState | undefined, depth: number) {
@@ -688,7 +751,7 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
                 ) : (
                   <button
                     className="file-tree-row-main"
-                    onMouseDown={(e) => beginPossibleDrag(e, entry)}
+                    onPointerDown={(e) => beginPossibleDrag(e, entry)}
                     onClick={(e) => handleRowClick(e, entry)}
                     onDoubleClick={() => handleRowDoubleClick(entry)}
                     title={entry.path}
@@ -742,7 +805,7 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
 
   return (
     <aside className="file-tree" aria-label="Project files" style={{ width }}>
-      <div className="file-tree-resize-handle" onMouseDown={beginResize} role="separator" aria-orientation="vertical" aria-label="Resize file browser panel" />
+      <div className="file-tree-resize-handle" onPointerDown={beginResize} role="separator" aria-orientation="vertical" aria-label="Resize file browser panel" />
 
       <div className="file-tree-header">
         <span className="file-tree-title">FILES</span>

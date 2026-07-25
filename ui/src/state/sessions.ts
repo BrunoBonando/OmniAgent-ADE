@@ -150,10 +150,24 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
     }
 
     case "layout/restored":
+      // MERGE, never wholesale-replace: `App.tsx`'s boot effect sequentially
+      // `await`s `sessionCreate` for every persisted tab before firing this
+      // action once, and nothing disables the Sidebar's new-tab affordances
+      // while that loop is in flight. If the user opens a tab mid-restore,
+      // `tab/opened` already appended it to `state.tabs` — a wholesale
+      // replace here would silently drop it from the UI while its
+      // already-spawned backend PTY session keeps running orphaned forever
+      // (nothing left in state to ever call `sessionKill` on it). Restored
+      // tabs always get fresh ids from a fresh `sessionCreate` call, so they
+      // can never collide with an id already in `state.tabs` — a plain
+      // concat is a safe merge, no dedup needed. Focus: only default to the
+      // first restored tab if nothing opened during the race has already
+      // claimed it — never steal focus away from a tab the user is already
+      // looking at.
       return {
         ...state,
-        tabs: action.tabs,
-        activeTabId: action.tabs[0]?.id ?? null,
+        tabs: [...action.tabs, ...state.tabs],
+        activeTabId: state.activeTabId ?? action.tabs[0]?.id ?? null,
       };
 
     default:

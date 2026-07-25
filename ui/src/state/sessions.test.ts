@@ -213,6 +213,41 @@ describe("sessionsReducer — layout/restored", () => {
     const next = sessionsReducer(initialSessionsState, { type: "layout/restored", tabs: [] });
     expect(next.activeTabId).toBeNull();
   });
+
+  // Bug: App.tsx's boot effect sequentially awaits sessionCreate for every
+  // persisted tab, then fires a single `layout/restored` only once the whole
+  // loop finishes — nothing disables the sidebar's new-tab affordances while
+  // that's in flight. If the user opens a tab mid-restore, `tab/opened` adds
+  // it to `state.tabs`, but a wholesale-replace `layout/restored` would then
+  // silently drop it from the UI while its real backend PTY session (already
+  // spawned via `sessionCreate`) keeps running orphaned forever. These three
+  // cases lock in the merge fix instead.
+  it("merges restored tabs with a tab opened during the restore window, instead of discarding it", () => {
+    const liveTab = tab("live-1", "live");
+    const afterOpen = sessionsReducer(initialSessionsState, { type: "tab/opened", tab: liveTab });
+    const restored = [tab("restored-1", "p1")];
+
+    const next = sessionsReducer(afterOpen, { type: "layout/restored", tabs: restored });
+
+    expect(next.tabs.map((t) => t.id).sort()).toEqual(["live-1", "restored-1"]);
+  });
+
+  it("does not steal focus away from a tab opened during restore back to the first restored tab", () => {
+    const liveTab = tab("live-1", "live");
+    const afterOpen = sessionsReducer(initialSessionsState, { type: "tab/opened", tab: liveTab });
+    expect(afterOpen.activeTabId).toBe("live-1");
+    const restored = [tab("restored-1", "p1")];
+
+    const next = sessionsReducer(afterOpen, { type: "layout/restored", tabs: restored });
+
+    expect(next.activeTabId).toBe("live-1");
+  });
+
+  it("still defaults focus to the first restored tab when nothing else has claimed focus yet", () => {
+    const restored = [tab("restored-1", "p1"), tab("restored-2", "p2")];
+    const next = sessionsReducer(initialSessionsState, { type: "layout/restored", tabs: restored });
+    expect(next.activeTabId).toBe("restored-1");
+  });
 });
 
 describe("tabsByProject", () => {
