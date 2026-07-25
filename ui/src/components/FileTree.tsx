@@ -556,10 +556,18 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
     const targetDir = hover?.kind === "root" ? projectPath : hover?.kind === "row" && hover.is_dir ? hover.path : null;
     if (targetDir === null || !isValidDropTarget(targetDir, paths)) return;
 
-    const affectedDirs = new Set<string>([targetDir, ...paths.map(parentDirOf)]);
+    // Bug 4: a shift-click range-select always orders parent before child in
+    // visible tree order, so `paths` can legally contain both a folder AND
+    // one of its own already-visible descendants. Moving the parent first
+    // would invalidate the descendant's captured original path before its
+    // own move_path call runs — filter down to top-level selected ancestors
+    // only; their selected descendants come along automatically, nested
+    // inside.
+    const topLevelPaths = excludeSelectedDescendants(paths);
+    const affectedDirs = new Set<string>([targetDir, ...topLevelPaths.map(parentDirOf)]);
     let lastError: string | null = null;
     const movedPaths: string[] = [];
-    for (const p of paths) {
+    for (const p of topLevelPaths) {
       try {
         movedPaths.push(await movePath(projectPath, p, targetDir));
       } catch (err) {

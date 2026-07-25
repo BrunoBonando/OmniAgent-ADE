@@ -722,6 +722,45 @@ describe("FileTree", () => {
     expect(await screen.findByText(/cannot move a folder/i)).toBeInTheDocument();
   });
 
+  // -------------------- Bug 4: multi-select drag excludes selected descendants
+  it("dragging a multi-selection containing a folder and its own descendant only moves the top-level folder", async () => {
+    const customRoot: DirEntry[] = [
+      { name: "src", path: "/repo/demo/src", is_dir: true },
+      { name: "dest", path: "/repo/demo/dest", is_dir: true },
+      { name: "main.py", path: "/repo/demo/main.py", is_dir: false },
+    ];
+    listDirMock.mockImplementation((path: string) =>
+      Promise.resolve(path === "/repo/demo" ? customRoot : path === "/repo/demo/src" ? childEntries() : []),
+    );
+    movePathMock.mockResolvedValue("/repo/demo/dest/src");
+    setup();
+    await screen.findByText("src");
+    fireEvent.doubleClick(screen.getByText("src")); // expand
+    await screen.findByText("util.ts");
+
+    // Shift-click range-select from "src" to "util.ts" — parent before child
+    // in visible tree order, exactly the scenario the bug describes.
+    fireEvent.click(screen.getByText("src"));
+    fireEvent.click(screen.getByText("util.ts"), { shiftKey: true });
+    expect(screen.getByText("src").closest(".file-tree-row")).toHaveClass("is-selected");
+    expect(screen.getByText("util.ts").closest(".file-tree-row")).toHaveClass("is-selected");
+
+    const destRow = screen.getByText("dest").closest("[data-file-tree-path]") as HTMLElement;
+    document.elementFromPoint = vi.fn().mockReturnValue(destRow);
+
+    // Start the drag on the folder itself, which is part of the selection —
+    // drags the whole current selection (both src and util.ts).
+    fireEvent.pointerDown(screen.getByText("src"), { clientX: 10, clientY: 100, button: 0, pointerId: 1 });
+    fireEvent.pointerMove(screen.getByText("src"), { clientX: 10, clientY: 40, pointerId: 1 });
+    fireEvent.pointerUp(screen.getByText("src"), { clientX: 10, clientY: 40, pointerId: 1 });
+
+    await waitFor(() => expect(movePathMock).toHaveBeenCalledWith("/repo/demo", "/repo/demo/src", "/repo/demo/dest"));
+    // The already-nested descendant must not be sent as its own, separately
+    // doomed-to-fail move call — it moves for free, nested inside its parent.
+    expect(movePathMock).not.toHaveBeenCalledWith("/repo/demo", "/repo/demo/src/util.ts", "/repo/demo/dest");
+    expect(movePathMock).toHaveBeenCalledTimes(1);
+  });
+
   // ------------------------------- Bug 1&2: Pointer Capture (drag side)
   // Raw `window`-level mousemove/mouseup listeners only ever got removed
   // inside their own `onUp()` — if the button was released outside the app
