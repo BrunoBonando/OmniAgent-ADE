@@ -15,35 +15,57 @@
    own parsed-output rendering, which is explicitly out of scope here, see
    docs/DESIGN.md and the task's own note about that being a separate,
    deliberately-deferred feature), so inventing values for them would be a
-   guess rather than a sampled value. */
+   guess rather than a sampled value.
+
+   Warp *exact*-color pass (founder ask, 2026-07-25, verbatim: "I want the
+   theme to be exactly this colors" — showing a real screenshot of his own
+   Warp window, not just a stylistic nod). This supersedes the previous
+   paragraph's void/panel/panel-raised/line/line-soft/ink/signal/warning
+   values (danger/accent-select/claude/codex/shell mostly held, see below):
+   background/panel/text/accent below are a careful, disclosed estimate from
+   that screenshot (Warp's own app-chrome — the conversation sidebar, its
+   text hierarchy, its inline-code accent — has no publicly published hex
+   spec; Warp's *terminal* color data does, and is used verbatim in
+   Terminal.tsx's HUD_THEME instead of estimated, see that file's comment).
+   Screenshot-observed characteristics this pass targets: a very dark,
+   cool-toned (not warm/brown) desaturated charcoal shared by sidebar and
+   main content with only subtle tonal separation; a distinctly lighter
+   "raised" mid-dark-gray for the selected sidebar chip; off-white primary
+   text short of pure white; a visibly dimmer secondary/meta gray; a muted
+   blue-lavender/periwinkle (not saturated blue) for inline-code/link
+   accents; warm amber/tan + green for the status meters. */
 
 :root {
-  --void: #2a2c37; /* pane body / outer gutter bg — sampled (900,600) */
-  --panel: #31323d; /* sidebar / titlebar bg — sampled (200,440) */
-  --panel-raised: #3a3744; /* raised surface — close to the focused-pane-header/branch-pill family */
-  --line: #3c3845; /* hairline borders — sampled branch-pill border */
-  --line-soft: #322f3b;
-  --ink: #eef0f2; /* primary text — sampled pane-header/branch-pill text */
-  --ink-dim: #9a9ba6; /* secondary labels e.g. "WORKSPACES" */
-  --ink-faint: #6b6d78;
-  --signal: #4d8dff;
-  --signal-dim: #2c4f8f;
+  --void: #16171c; /* app background, shared by sidebar/content per screenshot */
+  --panel: #1a1b20; /* sidebar/titlebar bg — deliberately near-identical to void */
+  --panel-raised: #3e4049; /* selected-chip / "raised" surface — distinctly lighter, per screenshot */
+  --line: #2c2d34; /* hairline borders */
+  --line-soft: #202126;
+  --ink: #e8e9ec; /* primary text — off-white, short of pure #fff per screenshot */
+  --ink-dim: #8b8d97; /* secondary/meta text — visibly dimmer, desaturated */
+  --ink-faint: #5c5e66;
+  --signal: #9aa7e6; /* muted blue-lavender/periwinkle accent (inline code, links, focus) */
+  --signal-dim: #353f74;
   /* Engine dot colors — see theme.ts's own comment for the exact sample
-     coordinates; kept in sync with ENGINE_COLOR there. */
-  --claude: #b696f2;
+     coordinates; kept in sync with ENGINE_COLOR there. codex/shell held as
+     sampled; claude nudged slightly toward magenta-violet (261deg -> 275deg
+     hue, same sat/light) so it stays clearly distinct from the new
+     periwinkle --signal above (was 31deg apart at the old hue, back up to
+     ~45deg, matching the separation the old signal/claude pairing had). */
+  --claude: #cc96f2;
   --codex: #a2e7f9;
   --shell: #9a9ca6;
   --danger: #e5484d;
-  --warning: #e8a23d;
+  --warning: #d6a54a; /* warm amber/tan meter tone, per screenshot */
   /* New for the pane grid: the sidebar's selection accent (the reference's
      magenta left-edge stripe on the selected workspace row, sampled
      (61,255)) and the two pane-header tones (a neutral header for
      background panes, a subtly accent-tinted one for the focused pane —
-     sampled (900,165) vs the codex/antigravity/zsh panes' (1085,165)-family
-     #30323d). */
+     mirrors --panel/--panel-raised exactly, same relationship the original
+     BridgeSpace sample had). */
   --accent-select: #ed81c3;
-  --pane-header: #30323d;
-  --pane-header-focus: #3c3744;
+  --pane-header: #1a1b20;
+  --pane-header-focus: #3e4049;
 
   --mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -161,7 +183,7 @@ code {
 }
 
 .meter-fill.is-good {
-  background: #43c98f; /* same green family xterm's ANSI "green" already uses */
+  background: #b4fa72; /* Warp's own ANSI "green" (warp_bundled/warp_dark.yaml) — same exact value Terminal.tsx's HUD_THEME now uses */
 }
 
 /* ---------------------------------------------------------------- shell */

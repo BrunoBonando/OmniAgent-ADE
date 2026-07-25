@@ -22,40 +22,47 @@ interface TerminalProps {
 // CSS custom properties, so the HUD palette is duplicated here once (keep
 // both in sync — see App.css's own :root comment).
 //
-// Founder pane-grid rebuild (2026-07): background/foreground/black/
-// brightBlack/selectionBackground/cursorAccent below were re-sampled from
-// docs/reference/bridgespace-pane-grid-reference.png to match App.css's new
-// --void/--ink/--ink-faint/--line tokens exactly, so a pane's terminal body
-// has no visible seam against its own chrome. The ANSI red/green/yellow/
-// blue/magenta/cyan (+ bright variants) are deliberately left as they were:
-// the reference shows BridgeMind's own parsed-output rendering, not a raw
-// terminal, so there's no real ANSI palette to sample there (and this task
-// is explicitly not building that structured-output view — see
-// docs/DESIGN.md's v1 cut list) — changing colors real CLI tools rely on
-// (git status, ls, test runners) for no sampled reason would be a guess,
-// which the brief was explicit about not doing.
+// Warp *exact*-color pass (founder ask, 2026-07-25, verbatim: "I want the
+// theme to be exactly this colors"): background/foreground/cursor/
+// cursorAccent/selectionBackground below are kept in sync with App.css's
+// new --void/--ink/--signal/--line tokens exactly, same no-seam rule as
+// before. The ANSI red/green/yellow/blue/magenta/cyan (+ bright, + black/
+// white) are new: Warp publishes its own bundled default-dark terminal
+// theme as open-source YAML (github.com/warpdotdev/themes,
+// warp_bundled/warp_dark.yaml — the literal "Warp Dark" preset the app
+// ships with, confirmed via that repo's own README plus Warp's
+// how-we-designed-themes blog post referencing "our default dark ...
+// theme"). Unlike the old BridgeSpace reference (a parsed-output rendering
+// with no real ANSI palette to sample), this is Warp's actual terminal
+// color data — copied verbatim below rather than guessed, which the
+// founder's brief called out as the highest-value, most literal part of
+// "exactly this colors" since it's the terminal palette itself.
 const HUD_THEME = {
-  background: "#2a2c37",
-  foreground: "#d7d8e0",
-  cursor: "#4d8dff",
-  cursorAccent: "#2a2c37",
-  selectionBackground: "#3c3845",
-  black: "#2a2c37",
-  red: "#e5484d",
-  green: "#43c98f",
-  yellow: "#e8a23d",
-  blue: "#4d8dff",
-  magenta: "#8b7cf6",
-  cyan: "#5fd4c8",
-  white: "#d7d8e0",
-  brightBlack: "#6b6d78",
-  brightRed: "#ff6b70",
-  brightGreen: "#5eeaa8",
-  brightYellow: "#ffbb5c",
-  brightBlue: "#78a9ff",
-  brightMagenta: "#a996ff",
-  brightCyan: "#7fe8dc",
-  brightWhite: "#f4f5f7",
+  background: "#16171c",
+  foreground: "#e8e9ec",
+  cursor: "#9aa7e6",
+  cursorAccent: "#16171c",
+  selectionBackground: "#2c2d34",
+  // ANSI 0-7 / 8-15, verbatim from warp_bundled/warp_dark.yaml's
+  // terminal_colors.normal / .bright (black/white are that file's own
+  // normal.black+bright.black / normal.white+bright.white, not the theme's
+  // separate top-level background/foreground fields above).
+  black: "#616161",
+  red: "#ff8272",
+  green: "#b4fa72",
+  yellow: "#fefdc2",
+  blue: "#a5d5fe",
+  magenta: "#ff8ffd",
+  cyan: "#d0d1fe",
+  white: "#f1f1f1",
+  brightBlack: "#8e8e8e",
+  brightRed: "#ffc4bd",
+  brightGreen: "#d6fcb9",
+  brightYellow: "#fefdd5",
+  brightBlue: "#c1e3fe",
+  brightMagenta: "#ffb1fe",
+  brightCyan: "#e5e6fe",
+  brightWhite: "#feffff",
 };
 
 function base64ToBytes(b64: string): Uint8Array {
