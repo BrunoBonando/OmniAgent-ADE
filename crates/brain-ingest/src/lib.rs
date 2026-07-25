@@ -6,8 +6,10 @@
 
 pub mod code;
 pub mod community;
+pub mod dirwatch;
 pub mod docs;
 pub mod enrich;
+pub mod fileops;
 pub mod gitmine;
 mod paths;
 pub mod walk;
