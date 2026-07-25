@@ -118,6 +118,11 @@ interface SidebarProps {
    * don't care about the file tree don't need to pass it. */
   fileTreeVisible?: boolean;
   onToggleFileTree?: () => void;
+  /** AboutPanel's "Reset sign-in flow" (`App.tsx` owns the persisted
+   * `auth_gate_resolved`/etc. settings — see `onboarding/authGateState.ts`).
+   * Optional, same reasoning as `view`/`fileTreeVisible` above, so tests
+   * that don't care about the auth gate don't need to pass it. */
+  onResetAuthGate?: () => void;
 }
 
 export default function Sidebar({
@@ -134,6 +139,7 @@ export default function Sidebar({
   onSetView,
   fileTreeVisible = false,
   onToggleFileTree,
+  onResetAuthGate,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -407,7 +413,18 @@ export default function Sidebar({
         </span>
       </div>
 
-      {aboutOpen && <AboutPanel onClose={() => setAboutOpen(false)} />}
+      {aboutOpen && (
+        <AboutPanel
+          onClose={() => setAboutOpen(false)}
+          onResetAuthGate={
+            onResetAuthGate &&
+            (() => {
+              onResetAuthGate();
+              setAboutOpen(false);
+            })
+          }
+        />
+      )}
       {reviewOpen && <ReviewPanel onClose={() => setReviewOpen(false)} />}
       {newWorkspaceOpen && (
         <NewWorkspaceModal
