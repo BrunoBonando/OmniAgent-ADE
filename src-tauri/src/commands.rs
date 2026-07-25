@@ -254,6 +254,21 @@ pub fn git_branch(path: String) -> Result<Option<String>, String> {
     Ok(Some(branch))
 }
 
+/// The file tree panel's directory listing (founder feedback, 2026-07-25,
+/// verbatim: "nice to have a folder/file navigation on the right panel") —
+/// one lazy, gitignore-aware directory level per call, expand-on-click
+/// rather than a full recursive walk. All the actual logic (the `ignore`
+/// crate walker, `SKIP_DIRS`, sort order, error handling for a bad path)
+/// lives in `brain_ingest::walk::list_dir`, independently unit-tested there
+/// against both synthetic tempdirs and the golden fixture — this is a thin
+/// wrapper, same house style as every other command in this file. Takes a
+/// plain `path: String` rather than `State`, like `git_branch` — no shared
+/// state involved.
+#[tauri::command]
+pub fn list_dir(path: String) -> Result<Vec<brain_ingest::walk::DirEntry>, String> {
+    brain_ingest::walk::list_dir(std::path::Path::new(&path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +304,21 @@ mod tests {
     fn git_branch_returns_none_gracefully_for_a_path_that_does_not_exist() {
         let branch = git_branch("/no/such/path/omniagent-ade-test".to_string()).unwrap();
         assert_eq!(branch, None);
+    }
+
+    #[test]
+    fn list_dir_returns_the_fixture_s_top_level_dirs_first_then_files() {
+        let path = sample_project_path();
+        let entries = list_dir(path.to_string_lossy().to_string()).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["docs", "src", "helpers.py", "main.py", "README.md"], "{names:?}");
+        assert!(!names.contains(&".git"), "{names:?}");
+    }
+
+    #[test]
+    fn list_dir_returns_an_error_for_a_path_that_does_not_exist() {
+        let err = list_dir("/no/such/path/omniagent-ade-list-dir-command-test".to_string());
+        assert!(err.is_err());
     }
 
     #[test]

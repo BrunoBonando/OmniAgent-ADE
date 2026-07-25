@@ -154,6 +154,7 @@ pub fn run() {
             commands::session_resize,
             commands::session_kill,
             commands::git_branch,
+            commands::list_dir,
             commands::brain_query,
             commands::brain_get_context,
             commands::brain_briefing,
