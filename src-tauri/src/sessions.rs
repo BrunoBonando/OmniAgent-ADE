@@ -102,13 +102,69 @@
 //! storm (dozens of re-renders a second while nothing has actually changed)
 //! fires one
 //! event, not hundreds.
+//!
+//! ## Resolving the real `PATH` for GUI-launched spawns (founder bug,
+//! ## 2026-07-25)
+//! Bruno hit this live in the packaged `.app`: opening a `"claude"` session
+//! failed with `Couldn't start claude in <project>: spawn engine process`.
+//! Root cause: `build_command` spawns `"claude"`/`"codex"` as bare command
+//! names, which `portable_pty` resolves via whatever `PATH` this process
+//! itself inherited at spawn time. A `.app` launched via Finder/`open`
+//! inherits macOS's minimal default `PATH`
+//! (`/usr/bin:/bin:/usr/sbin:/sbin`) — **not** the user's real shell `PATH`,
+//! which lives in their shell startup files and is normally only assembled
+//! when a real login shell starts (this is why `cargo tauri dev`, run from
+//! inside an already-full-PATH terminal, never reproduced the bug: it
+//! inherits the terminal's PATH, not a GUI launch's). On this machine, the
+//! real `claude` binary is a symlink at `~/.local/bin/claude`, and
+//! `~/.local/bin` is only added to `PATH` by `~/.zshrc`.
+//!
+//! [`resolve_shell_path`] fixes this the standard way GUI apps on macOS do
+//! (VS Code and most Electron apps included): spawn the user's own
+//! `$SHELL` once, non-interactively from *this* process's point of view,
+//! and capture the `PATH` it ends up with. The exact invocation matters and
+//! was verified empirically on this machine (see the commit message /
+//! [`resolve_shell_path_for`]'s tests for the comparison) rather than
+//! assumed: `<shell> -lc 'echo -n $PATH'` (login, non-interactive — the
+//! "standard" advice) sources `.zshenv`/`.zprofile`/`.zlogin` but **not**
+//! `.zshrc`, and this machine's `~/.local/bin` entry lives in `.zshrc` —
+//! zsh only sources it for *interactive* shells, login or not. `<shell>
+//! -ilc '...'` (login **and** interactive) does source `.zshrc` and
+//! reliably produces the real, correct `PATH` (including `~/.local/bin`)
+//! with clean single-line output — no banner/prompt noise leaked into
+//! `stdout`, verified against this exact `$SHELL`/`~/.zshrc` combination.
+//! That's the invocation used here.
+//!
+//! Resolution spawns a real subprocess, so it's cached process-wide after
+//! the first call ([`cached_shell_path`], backed by a `std::sync::OnceLock`
+//! — this module's first use of that pattern; nothing comparable existed
+//! here before) rather than repeated per session. It also runs on a
+//! background thread with a hard [`SHELL_PATH_RESOLUTION_TIMEOUT`] via a
+//! channel `recv_timeout` (not a bare blocking call) — `stdin` is closed so
+//! a profile script trying to interactively prompt gets immediate EOF
+//! rather than hanging, but nothing rules out a truly pathological profile
+//! (an infinite loop, a network call that never returns), and this sits on
+//! session creation's critical path. Any failure — `$SHELL` unset, spawn
+//! error, timeout, empty output — resolves to `None`, and callers
+//! ([`apply_resolved_path`]) simply skip overriding `PATH`, falling back to
+//! exactly today's behavior (bare-name resolution against whatever `PATH`
+//! this process already inherited). PATH resolution failing must never
+//! become a *new* way for session creation to fail.
+//!
+//! Applied to `"claude"` and `"codex"` (the bug's actual targets) and,
+//! since it's free once computed and strictly more correct from the very
+//! first prompt, to `"shell"` too — the engines themselves stay completely
+//! stock; this only changes which `PATH` OmniAgent's own spawn call hands
+//! them, never anything about how `claude`/`codex` are configured (DESIGN
+//! principle 5, same zero-config boundary the rest of this module's docs
+//! already describe).
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -489,6 +545,7 @@ fn build_command(
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
             let mut cmd = CommandBuilder::new(shell);
             cmd.cwd(&req.cwd);
+            apply_resolved_path(&mut cmd);
             Ok((cmd, None))
         }
         "codex" => {
@@ -496,11 +553,13 @@ fn build_command(
             // principle: only `claude` gets ADE wiring in this task).
             let mut cmd = CommandBuilder::new("codex");
             cmd.cwd(&req.cwd);
+            apply_resolved_path(&mut cmd);
             Ok((cmd, None))
         }
         "claude" => {
             let mut cmd = CommandBuilder::new("claude");
             cmd.cwd(&req.cwd);
+            apply_resolved_path(&mut cmd);
 
             let mcp_config_path = match resolve_mcp_server_binary() {
                 Some(bin) => {
@@ -530,6 +589,144 @@ fn build_command(
         other => Err(anyhow!(
             "unsupported engine: {other:?} (expected \"claude\", \"codex\", or \"shell\")"
         )),
+    }
+}
+
+/// How long [`spawn_and_capture_path`] will wait for the login-shell
+/// `PATH`-resolution subprocess before giving up and treating it as a
+/// failure (see [`resolve_shell_path_for`]'s doc comment for the rest of
+/// the guard: `stdin` is already closed, this timeout is the backstop for
+/// whatever that doesn't cover). Generous relative to the real,
+/// empirically-measured cost of this machine's own profile chain (well
+/// under a second), but bounded — this sits on session creation's critical
+/// path and must never be allowed to hang it.
+const SHELL_PATH_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Overrides an about-to-be-spawned command's `PATH` with the user's real,
+/// shell-resolved `PATH` ([`cached_shell_path`]) — see the module docs'
+/// "Resolving the real PATH for GUI-launched spawns" section for why this
+/// exists. A no-op (leaves whatever `PATH` this process itself inherited,
+/// today's pre-fix behavior) whenever resolution fails for any reason.
+fn apply_resolved_path(cmd: &mut CommandBuilder) {
+    if let Some(path) = cached_shell_path() {
+        cmd.env("PATH", path);
+    }
+}
+
+/// Process-global cache for [`resolve_shell_path`]'s result — the spawn it
+/// performs is real (if usually sub-second) latency, so it's paid once per
+/// app run, not once per session. See [`cached_or_init`]'s doc comment for
+/// why the caching *mechanism* is unit-tested against a fresh, local
+/// `OnceLock` rather than this one.
+static SHELL_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+/// Cached accessor for the app's actual use: resolves at most once per
+/// process lifetime, reusing the cached `Option<String>` (itself `None`
+/// when resolution failed) on every subsequent call.
+fn cached_shell_path() -> Option<&'static str> {
+    #[cfg(test)]
+    if FORCE_SHELL_PATH_RESOLUTION_FAILURE.with(|f| f.get()) {
+        return None;
+    }
+    cached_or_init(&SHELL_PATH, resolve_shell_path).as_deref()
+}
+
+// Test-only escape hatch, thread-local so it's naturally isolated from
+// every other test running concurrently on its own worker thread (`cargo
+// test`'s default execution model) — no cross-test races, no extra
+// synchronization. Exists purely for
+// `create_cleans_up_leaked_mcp_config_temp_file_when_spawn_fails`, whose
+// whole premise (claude becomes unresolvable once its directory is
+// filtered off `PATH`) this PATH-resolution fix otherwise permanently
+// defeats on any machine where the real shell `PATH` *does* contain
+// `claude` — which, after this fix, `apply_resolved_path` now consults
+// unconditionally, regardless of what a test does to the ambient env.
+// Compiled only under `#[cfg(test)]`; doesn't exist in a release binary.
+#[cfg(test)]
+thread_local! {
+    static FORCE_SHELL_PATH_RESOLUTION_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Generic lazy-once cache: runs `init` the first time `cache` is empty,
+/// reuses the stored result forever after — precisely `OnceLock::get_or_init`
+/// with a name that reads at the call site. Pulled out as its own function
+/// (rather than inlining `SHELL_PATH.get_or_init(resolve_shell_path)`
+/// directly into [`cached_shell_path`]) purely so the caching mechanism
+/// itself can be exercised in tests against a fresh, test-local `OnceLock`
+/// and a call-counting closure — asserting a call count against the *real*
+/// process-global `SHELL_PATH` would be racy under `cargo test`'s parallel,
+/// shared-binary execution (some other test could resolve it first).
+fn cached_or_init<T>(cache: &OnceLock<T>, init: impl FnOnce() -> T) -> &T {
+    cache.get_or_init(init)
+}
+
+/// Resolves the user's real `PATH` by spawning their login shell — the
+/// entry point [`cached_shell_path`] caches. Thin wrapper around
+/// [`resolve_shell_path_for`] that supplies the real `$SHELL`; kept
+/// separate so tests can drive the interesting logic directly with an
+/// explicit `Option<&str>` instead of mutating the real process
+/// environment (see [`resolve_shell_path_for`]'s tests for why that
+/// matters here specifically).
+fn resolve_shell_path() -> Option<String> {
+    resolve_shell_path_for(std::env::var("SHELL").ok().as_deref())
+}
+
+/// Core PATH-resolution logic, parameterized over the shell to use instead
+/// of reading `$SHELL` itself. `None` in, or any failure along the way
+/// (spawn error, timeout, non-zero exit, empty output), all resolve to
+/// `None` out — every one of those is "resolution failed", and every
+/// caller already treats `None` as "fall back to today's behavior", so
+/// there is no need to distinguish the reasons at this layer.
+fn resolve_shell_path_for(shell: Option<&str>) -> Option<String> {
+    let shell = shell?;
+    spawn_and_capture_path(shell)
+}
+
+/// Spawns `<shell> -ilc 'echo -n $PATH'` and returns its trimmed stdout, or
+/// `None` if the spawn fails, it doesn't finish within
+/// [`SHELL_PATH_RESOLUTION_TIMEOUT`] (in which case the child is left to
+/// exit on its own — the timeout only stops *this function* from waiting,
+/// it doesn't try to kill a stuck child), it exits non-zero, or its output
+/// is empty after trimming.
+///
+/// `-ilc` (login **and** interactive), not just `-lc` (login only) — see
+/// the module docs' "Resolving the real PATH for GUI-launched spawns"
+/// section for the empirical reasoning: on this machine (and commonly
+/// elsewhere), `PATH` entries added in `.zshrc`/`.bashrc` only take effect
+/// for *interactive* shells, login or not, while `-lc` alone only sources
+/// the login-only files (`.zprofile`/`.zshenv`/`.zlogin` for zsh) — proven
+/// empirically to miss `~/.local/bin` entirely on this machine, where it's
+/// added in `.zshrc`.
+///
+/// Runs on a background thread and waits via a channel `recv_timeout`
+/// rather than a bare blocking `Command::output()` call, specifically so a
+/// pathological shell profile (infinite loop, a network call that never
+/// returns) can't hang session creation forever — `stdin` is already closed
+/// (`Stdio::null()`) so a profile script trying to interactively prompt
+/// gets immediate EOF instead of blocking, which covers the common case,
+/// but doesn't cover every conceivable hang.
+fn spawn_and_capture_path(shell: &str) -> Option<String> {
+    let shell = shell.to_string();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = std::process::Command::new(&shell)
+            .arg("-ilc")
+            .arg("echo -n $PATH")
+            .stdin(std::process::Stdio::null())
+            .output();
+        let _ = tx.send(result);
+    });
+
+    let output = rx.recv_timeout(SHELL_PATH_RESOLUTION_TIMEOUT).ok()?.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
     }
 }
 
@@ -1092,6 +1289,163 @@ mod tests {
         assert!(err.to_string().contains("unsupported engine"));
     }
 
+    // -- Shell-PATH resolution (founder bug, 2026-07-25 -- see module docs
+    // for the full "Resolving the real PATH for GUI-launched spawns"
+    // writeup) --------------------------------------------------------
+
+    /// Proves the caching *mechanism* itself: the `init` closure passed to
+    /// `cached_or_init` must run at most once, no matter how many times the
+    /// accessor is called, with every call after the first reusing the
+    /// cached value. Deliberately uses a fresh, test-local `OnceLock` (not
+    /// the real process-global `SHELL_PATH` `cached_shell_path` uses) so
+    /// this is fully deterministic and independent of `cargo test`'s
+    /// parallel, shared-binary execution -- a test asserting call counts
+    /// against the *real* global cache would be racy, since some other test
+    /// in this binary might resolve it first.
+    #[test]
+    fn cached_or_init_only_calls_the_resolver_once_across_multiple_calls() {
+        let cache: OnceLock<Option<String>> = OnceLock::new();
+        let calls = AtomicU64::new(0);
+
+        let a = cached_or_init(&cache, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Some("fake-resolved-path".to_string())
+        });
+        let b = cached_or_init(&cache, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Some("fake-resolved-path".to_string())
+        });
+        let c = cached_or_init(&cache, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Some("fake-resolved-path".to_string())
+        });
+
+        assert_eq!(a.as_deref(), Some("fake-resolved-path"));
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the resolver must run exactly once; later calls must reuse the cached value"
+        );
+    }
+
+    /// Graceful fallback, case 1: no shell configured at all. Exercises
+    /// `resolve_shell_path_for` directly with `None` rather than mutating
+    /// the real `$SHELL` env var -- `resolve_shell_path` (the thin wrapper
+    /// that actually reads `$SHELL`) is a one-line composition of this, and
+    /// mutating process env vars here would risk racing the real,
+    /// process-global `cached_shell_path` if some concurrently-running test
+    /// happened to trigger its first-ever resolution at the same moment.
+    #[test]
+    fn resolve_shell_path_for_returns_none_when_no_shell_is_configured() {
+        assert_eq!(resolve_shell_path_for(None), None);
+    }
+
+    /// Graceful fallback, case 2: `$SHELL` is set but doesn't point at a
+    /// real, spawnable binary -- the spawn itself must fail cleanly, not
+    /// panic or hang.
+    #[test]
+    fn resolve_shell_path_for_returns_none_when_the_shell_binary_does_not_exist() {
+        assert_eq!(
+            resolve_shell_path_for(Some("/no/such/shell/binary/on/this/machine")),
+            None
+        );
+    }
+
+    /// The real proof this task called out specifically: run the actual
+    /// resolution logic against this machine's real `$SHELL`. Soft-guarded
+    /// rather than hard-failed on the exact `~/.local/bin` marker, since a
+    /// stock CI box won't have this developer's home directory -- but if
+    /// that exact directory *is* present (i.e. this is genuinely Bruno's
+    /// machine, where the bug was reported and `claude` really does live at
+    /// `~/.local/bin/claude`), assert the resolution actually found it.
+    #[test]
+    fn resolve_shell_path_finds_the_real_login_shell_path_on_this_machine() {
+        let Some(resolved) = resolve_shell_path() else {
+            eprintln!(
+                "resolve_shell_path() returned None on this machine (no $SHELL, or \
+                 resolution failed) -- nothing further to assert"
+            );
+            return;
+        };
+
+        assert!(
+            !resolved.trim().is_empty(),
+            "a successful resolution must never yield an empty PATH"
+        );
+
+        let home = std::env::var("HOME").unwrap_or_default();
+        let marker = format!("{home}/.local/bin");
+        if std::path::Path::new(&marker).is_dir() {
+            assert!(
+                resolved.contains(&marker),
+                "resolved PATH should contain {marker} on this machine, got: {resolved}"
+            );
+        } else {
+            eprintln!(
+                "note: {marker} doesn't exist on this machine, skipping the exact-marker \
+                 assertion -- resolved PATH was: {resolved}"
+            );
+            let default_path = std::env::var("PATH").unwrap_or_default();
+            assert_ne!(
+                resolved.trim(),
+                default_path.trim(),
+                "when the exact marker isn't available, at least prove resolution produced \
+                 something distinct from this test process's own bare PATH"
+            );
+        }
+    }
+
+    /// Wiring proof: `build_command` actually applies whatever
+    /// `cached_shell_path()` resolves (or doesn't) to the spawned command's
+    /// `PATH` env var, for every engine that should get it. Self-consistent
+    /// regardless of which machine runs it -- compares against
+    /// `cached_shell_path()`'s own live return value rather than a
+    /// hardcoded expectation, so it holds whether resolution succeeds here
+    /// or not.
+    fn assert_build_command_applies_resolved_path(engine: &str) {
+        let tmp = tempfile::tempdir().unwrap();
+        let req = CreateSessionRequest {
+            project: "demo".into(),
+            engine: engine.into(),
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            briefing: None,
+        };
+        let (cmd, _mcp_path) =
+            build_command(&req, tmp.path(), &format!("sess-test-path-{engine}")).unwrap();
+        let got = cmd.get_env("PATH").map(|s| s.to_string_lossy().into_owned());
+
+        match cached_shell_path() {
+            Some(expected) => assert_eq!(
+                got.as_deref(),
+                Some(expected),
+                "{engine} session's PATH should be the resolved shell PATH"
+            ),
+            None => assert_eq!(
+                got,
+                std::env::var("PATH").ok(),
+                "{engine} session's PATH should fall back to this process's own PATH \
+                 when resolution fails"
+            ),
+        }
+    }
+
+    #[test]
+    fn build_command_applies_resolved_path_to_claude() {
+        assert_build_command_applies_resolved_path("claude");
+    }
+
+    #[test]
+    fn build_command_applies_resolved_path_to_codex() {
+        assert_build_command_applies_resolved_path("codex");
+    }
+
+    #[test]
+    fn build_command_applies_resolved_path_to_shell() {
+        assert_build_command_applies_resolved_path("shell");
+    }
+
     /// Bug: every one of `create()`'s fallible steps *after*
     /// `write_mcp_config` writes the temp `--mcp-config` JSON file
     /// (`openpty`, `try_clone_reader`/`take_writer`, `spawn_command`,
@@ -1122,8 +1476,38 @@ mod tests {
     /// parent's `spawn_command` call, on this PTY backend/OS -- so neither
     /// actually surfaces as an `Err` here, and worse, both leave a real
     /// child process spawned and running.)
+    ///
+    /// Updated 2026-07-25 for the shell-`PATH`-resolution fix
+    /// (`apply_resolved_path`/`cached_shell_path`): filtering the ambient
+    /// `PATH` alone no longer makes `claude` unresolvable, since
+    /// `build_command` now overrides the spawned command's `PATH` with the
+    /// user's real, shell-resolved one regardless of what this test does to
+    /// the current process's env -- which is the fix working as intended,
+    /// but it defeats this test's original trigger on any machine where
+    /// `claude` really is reachable via the user's shell (this one
+    /// included). `_force_resolution_failure` engages a thread-local,
+    /// `#[cfg(test)]`-only escape hatch (see
+    /// `FORCE_SHELL_PATH_RESOLUTION_FAILURE`'s doc comment) so
+    /// `apply_resolved_path` skips its override for the duration of this
+    /// test's own thread only, restoring the original filtered-`PATH`
+    /// trigger without disturbing any other test's view of the real,
+    /// process-global resolution cache.
     #[test]
     fn create_cleans_up_leaked_mcp_config_temp_file_when_spawn_fails() {
+        struct ForceShellPathResolutionFailure;
+        impl ForceShellPathResolutionFailure {
+            fn engage() -> Self {
+                FORCE_SHELL_PATH_RESOLUTION_FAILURE.with(|f| f.set(true));
+                Self
+            }
+        }
+        impl Drop for ForceShellPathResolutionFailure {
+            fn drop(&mut self) {
+                FORCE_SHELL_PATH_RESOLUTION_FAILURE.with(|f| f.set(false));
+            }
+        }
+        let _force_resolution_failure = ForceShellPathResolutionFailure::engage();
+
         let exe = std::env::current_exe().unwrap();
         let sibling = exe.parent().unwrap().join("omniagent-mcp");
         std::fs::write(&sibling, b"fake").unwrap();
