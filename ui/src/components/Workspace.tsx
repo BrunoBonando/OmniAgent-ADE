@@ -76,6 +76,14 @@ import {
 
 interface ProjectPaneGridProps {
   hidden: boolean;
+  /** Real, combined visibility for every `<Terminal>` this grid renders:
+   * true only when this grid is both the selected project's AND the
+   * overall Workspace view (not the Map view) is the active one. Threaded
+   * through as its own prop (rather than derived from `hidden` alone)
+   * because `hidden` here only ever reflects "not the selected project" —
+   * see the `visible`-prop bug this fixes in the module doc's cross-
+   * reference from `Terminal.tsx`. */
+  terminalsVisible: boolean;
   projectId: string;
   projectLabel: string;
   tabs: TabInfo[];
@@ -92,6 +100,7 @@ interface ProjectPaneGridProps {
  * when it isn't the sidebar's current selection. */
 function ProjectPaneGrid({
   hidden,
+  terminalsVisible,
   projectId,
   projectLabel,
   tabs,
@@ -163,7 +172,7 @@ function ProjectPaneGrid({
                 )}
               >
                 <div className="pane-body" onMouseDownCapture={() => onActivateTab(tab.id)}>
-                  <Terminal sessionId={tab.id} visible />
+                  <Terminal sessionId={tab.id} visible={terminalsVisible} />
                 </div>
               </MosaicWindow>
             );
@@ -219,21 +228,28 @@ export default function Workspace({
         </div>
       )}
 
-      {grouped.map((g) => (
-        <ProjectPaneGrid
-          key={g.project}
-          hidden={g.project !== selectedProjectId}
-          projectId={g.project}
-          projectLabel={projectLabel(g.project)}
-          tabs={g.tabs}
-          activeTabId={activeTabId}
-          projects={projects}
-          onActivateTab={onActivateTab}
-          onCloseTab={onCloseTab}
-          onNewTabInProject={onNewTabInProject}
-          onRenameTab={onRenameTab}
-        />
-      ))}
+      {grouped.map((g) => {
+        const gridHidden = g.project !== selectedProjectId;
+        return (
+          <ProjectPaneGrid
+            key={g.project}
+            hidden={gridHidden}
+            // Only the selected project's grid, in the active (non-Map)
+            // workspace view, is real visibility for its terminals — see
+            // `ProjectPaneGridProps.terminalsVisible`'s doc.
+            terminalsVisible={!gridHidden && !hidden}
+            projectId={g.project}
+            projectLabel={projectLabel(g.project)}
+            tabs={g.tabs}
+            activeTabId={activeTabId}
+            projects={projects}
+            onActivateTab={onActivateTab}
+            onCloseTab={onCloseTab}
+            onNewTabInProject={onNewTabInProject}
+            onRenameTab={onRenameTab}
+          />
+        );
+      })}
 
       {!selectedHasTabs && (
         <div className="empty-workspace">
