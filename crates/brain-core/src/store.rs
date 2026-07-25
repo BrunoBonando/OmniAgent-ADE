@@ -215,6 +215,51 @@ fn sanitize_fts_query(query: &str) -> String {
         .join(" ")
 }
 
+/// Bug fix: `enqueue_job`'s original SELECT-then-INSERT dedup check was a
+/// check-then-act race across separate connections to the same on-disk
+/// `brain.db` — two connections (e.g. a bulk re-ingest and a per-project
+/// re-ingest for the same project, both realistic given `open`'s
+/// multi-connection-per-`brain.db` architecture) could each see "no
+/// pending job" before either commits its INSERT, producing duplicate
+/// enrichment jobs (`dedup_race_tests::
+/// concurrent_enqueue_job_across_connections_never_duplicates` reproduces
+/// this against the pre-fix code).
+///
+/// A partial `UNIQUE` index — unique on `(kind, payload)` only among rows
+/// still `status = 'pending'` — turns the second connection's INSERT into
+/// an atomic no-op enforced by SQLite itself (via `INSERT ... ON CONFLICT
+/// ... DO NOTHING` in `enqueue_job`), which no read-then-write race in
+/// application code can defeat: unlike wrapping the existing
+/// SELECT-then-INSERT in `Store::with_transaction` (a plain deferred
+/// `BEGIN`), a real UNIQUE constraint doesn't depend on both connections'
+/// reads happening to serialize with their writes — the constraint is
+/// checked by the same atomic INSERT statement that would create the
+/// duplicate, not by a separate, racing SELECT.
+///
+/// This lives here (in `store.rs`, executed at `open` time) rather than in
+/// `schema.sql` only because `enqueue_job`'s dedup is `Store`'s own
+/// invariant to own and test end-to-end in one file; the index itself is
+/// ordinary schema and behaves identically either way.
+///
+/// Deletes any pre-existing duplicate pending rows first (keeping the
+/// lowest/oldest id per `kind`+`payload`), so opening an existing
+/// `brain.db` that already accumulated duplicates from this very bug
+/// doesn't fail with a `UNIQUE` constraint violation while building the
+/// index.
+fn ensure_enrich_queue_pending_dedup_index(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "DELETE FROM enrich_queue
+           WHERE status = 'pending'
+             AND id NOT IN (
+               SELECT MIN(id) FROM enrich_queue
+               WHERE status = 'pending'
+               GROUP BY kind, payload
+             );
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_enrich_queue_pending_dedup
+           ON enrich_queue(kind, payload) WHERE status = 'pending';",
+    )
+}
+
 impl Store {
     /// Resolves the local-first data directory: honors the `OMNIAGENT_ADE_DATA_DIR`
     /// env var override (used by tests and by `OMNIAGENT_ADE_DATA_DIR=... brain ingest`
@@ -278,6 +323,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
         )?;
         conn.execute_batch(include_str!("schema.sql"))?;
+        ensure_enrich_queue_pending_dedup_index(&conn)?;
         Ok(Store { conn })
     }
 
@@ -292,6 +338,7 @@ impl Store {
     pub fn open_in_memory() -> rusqlite::Result<Store> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(include_str!("schema.sql"))?;
+        ensure_enrich_queue_pending_dedup_index(&conn)?;
         Ok(Store { conn })
     }
 
@@ -499,23 +546,36 @@ impl Store {
     /// instead of inserting a duplicate — re-ingesting a project you just
     /// ingested a moment ago, or the fs watcher firing twice, shouldn't pile
     /// up repeat LLM calls for jobs no drain has touched yet.
+    ///
+    /// This dedup is enforced atomically by the partial `UNIQUE` index built
+    /// in `ensure_enrich_queue_pending_dedup_index` (on `(kind, payload)`
+    /// among `status = 'pending'` rows), not by a separate check-then-act
+    /// SELECT: `INSERT ... ON CONFLICT ... DO NOTHING` either inserts the
+    /// new row or — atomically, as part of the same statement, so no other
+    /// connection can observe or race a gap between "check" and "act" — a
+    /// no-op when a pending row for this `kind`+`payload` already exists.
+    /// That's what makes this safe across the several separate connections
+    /// this app opens against the same on-disk `brain.db` (see `open`'s doc
+    /// comment), unlike the SELECT-then-INSERT this replaced, which two
+    /// connections could both pass before either committed its INSERT.
     pub fn enqueue_job(&self, kind: &str, payload: &str) -> rusqlite::Result<i64> {
-        let existing: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT id FROM enrich_queue WHERE kind = ?1 AND payload = ?2 AND status = 'pending'",
-                params![kind, payload],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(id) = existing {
-            return Ok(id);
-        }
-        self.conn.execute(
-            "INSERT INTO enrich_queue (kind, payload, status, created) VALUES (?1, ?2, 'pending', ?3)",
+        let inserted = self.conn.execute(
+            "INSERT INTO enrich_queue (kind, payload, status, created)
+             VALUES (?1, ?2, 'pending', ?3)
+             ON CONFLICT (kind, payload) WHERE status = 'pending' DO NOTHING",
             params![kind, payload, now_ts()],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        if inserted > 0 {
+            return Ok(self.conn.last_insert_rowid());
+        }
+        // The INSERT above was a no-op: a pending job for this kind+payload
+        // already exists (ours or a concurrent connection's that won the
+        // race). Look its id up instead of returning a phantom rowid.
+        self.conn.query_row(
+            "SELECT id FROM enrich_queue WHERE kind = ?1 AND payload = ?2 AND status = 'pending'",
+            params![kind, payload],
+            |r| r.get(0),
+        )
     }
 
     /// Pending enrichment jobs, oldest first (FIFO drain order).
@@ -799,5 +859,73 @@ mod pragma_tests {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mode.to_lowercase(), "memory");
+    }
+}
+
+#[cfg(test)]
+mod dedup_race_tests {
+    // Bug 2: `enqueue_job`'s SELECT-then-INSERT dedup was a check-then-act
+    // race across separate connections to the same on-disk `brain.db`
+    // (this app runs several concurrently — see `open`'s doc comment: the
+    // UI connection, the ingestion background thread's connection, the
+    // enrichment drain loop's connection — and a bulk re-ingest racing a
+    // per-project re-ingest for the same project is realistic). This test
+    // drives that race for real: two genuine `Store::open` connections
+    // (not `:memory:` — an in-memory database is private and unshared per
+    // connection, so it can never reproduce a *cross-connection* race) to
+    // the same tempdir, synchronized with a `Barrier` so both threads reach
+    // `enqueue_job` at (as close to) the same instant as possible, racing
+    // to enqueue the identical (kind, payload) job. Repeated over many
+    // rounds (each with a fresh payload, so a bad round can't be masked by
+    // a later round's cleanup) to make a scheduling fluke that happens to
+    // avoid the race exceedingly unlikely to hide a real bug.
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use tempfile::tempdir;
+
+    #[test]
+    fn concurrent_enqueue_job_across_connections_never_duplicates() {
+        let dir = tempdir().unwrap();
+
+        for round in 0..25 {
+            let kind = "summarize";
+            let payload = format!("node-{round}");
+
+            // Two genuine, separately-opened connections to the same
+            // on-disk brain.db — opened up front (schema creation is not
+            // the thing under test and racing two connections' `CREATE
+            // TABLE IF NOT EXISTS`/FTS5 DDL against each other is its own,
+            // unrelated source of transient `SQLITE_BUSY` contention). The
+            // barrier below synchronizes only the `enqueue_job` call
+            // itself, which is the actual check-then-act race this test
+            // targets.
+            let store_a = Store::open(dir.path()).unwrap();
+            let store_b = Store::open(dir.path()).unwrap();
+            let barrier = Arc::new(Barrier::new(2));
+
+            let handles = [store_a, store_b].into_iter().map(|store| {
+                let payload = payload.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    store.enqueue_job(kind, &payload).unwrap()
+                })
+            });
+            for h in handles.collect::<Vec<_>>() {
+                h.join().unwrap();
+            }
+
+            let verify = Store::open(dir.path()).unwrap();
+            let pending = verify.pending_jobs(1000).unwrap();
+            let matching = pending
+                .iter()
+                .filter(|j| j.kind == kind && j.payload == payload)
+                .count();
+            assert_eq!(
+                matching, 1,
+                "round {round}: expected exactly 1 pending job for {kind}/{payload}, found {matching}"
+            );
+        }
     }
 }
