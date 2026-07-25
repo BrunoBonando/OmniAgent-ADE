@@ -8,6 +8,7 @@ import Sidebar from "./components/Sidebar";
 import Workspace from "./components/Workspace";
 import EnginePicker from "./components/EnginePicker";
 import CommandPalette from "./components/CommandPalette";
+import FileTree from "./components/FileTree";
 import BrainMap from "./map/BrainMap";
 import FirstRun from "./onboarding/FirstRun";
 import {
@@ -24,6 +25,7 @@ import {
   type TabInfo,
 } from "./state/sessions";
 import {
+  FILE_TREE_VISIBLE_SETTING_KEY,
   getBriefing,
   ingestionStatus,
   listProjects,
@@ -55,6 +57,15 @@ function App() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [view, setView] = useState<View>("workspace");
   const restoredRef = useRef(false);
+  // Founder feedback (Bruno, 2026-07-25, verbatim): "nice to have a
+  // folder/file navigation on the right panel" — but the same founder has
+  // twice now been explicit that UI chrome must not compete with the
+  // terminal workspace for attention, so it's collapsible rather than a
+  // fixed extra column. Defaults to visible (it's the feature being asked
+  // for) and is persisted via the same settings-table pattern
+  // `LAYOUT_SETTING_KEY`/`REVIEW_MEMORY_SETTING_KEY` already use, restored
+  // in the boot effect below alongside the tab layout.
+  const [fileTreeVisible, setFileTreeVisible] = useState(true);
 
   // ---- Task 8.1: onboarding gating + the always-on ingestion status poll -
   const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null); // null = still checking
@@ -118,6 +129,17 @@ function App() {
       } catch (err) {
         console.error("failed to load project roots", err);
         if (!cancelled) setNeedsOnboarding(false); // fail open — never trap the user behind a broken check
+      }
+
+      try {
+        const storedFileTreeVisible = await settingsGet(FILE_TREE_VISIBLE_SETTING_KEY);
+        // Unset (first run) keeps the `useState(true)` default — only an
+        // explicit "false" ever hides it on boot.
+        if (!cancelled && storedFileTreeVisible !== null) {
+          setFileTreeVisible(storedFileTreeVisible === "true");
+        }
+      } catch (err) {
+        console.error("failed to read file_tree_visible setting, defaulting to visible", err);
       }
 
       try {
@@ -310,6 +332,17 @@ function App() {
     [],
   );
 
+  // Same optimistic-flip-then-persist shape as `ReviewPanel.tsx`'s
+  // `toggleReviewMode` (its own settings-table boolean toggle) — flip local
+  // state immediately so the panel opens/closes with no round-trip latency,
+  // fire-and-forget the persist. Doubles as both the sidebar trigger's
+  // handler and the panel's own in-place close button.
+  const toggleFileTree = useCallback(() => {
+    const next = !fileTreeVisible;
+    setFileTreeVisible(next);
+    void settingsSet(FILE_TREE_VISIBLE_SETTING_KEY, next ? "true" : "false");
+  }, [fileTreeVisible]);
+
   // ---- the sidebar's "+" Add Project flow (founder feedback, 2026-07-24):
   // `add_project` already upserted the node and returned its `ProjectInfo`
   // synchronously, so there's no need to await `reloadProjects` before
@@ -374,6 +407,8 @@ function App() {
           ingestion={ingestion}
           view={view}
           onSetView={setView}
+          fileTreeVisible={fileTreeVisible}
+          onToggleFileTree={toggleFileTree}
         />
         <Workspace
           projects={state.projects}
@@ -393,6 +428,9 @@ function App() {
           hidden={view !== "map"}
           livePollMs={ingestion?.running ? INGESTION_POLL_MS : undefined}
         />
+        {fileTreeVisible && (
+          <FileTree project={selectedProject} activeTabId={state.activeTabId} onClose={toggleFileTree} />
+        )}
       </div>
 
       {needsOnboarding === true && !firstRunDismissed && (

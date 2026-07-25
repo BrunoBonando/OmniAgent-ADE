@@ -73,6 +73,12 @@ interface SidebarProps {
    * still type-checks for any test that doesn't care about it. */
   view?: "workspace" | "map";
   onSetView?: (view: "workspace" | "map") => void;
+  /** Founder feedback, 2026-07-25: the file tree panel's show/hide toggle
+   * (`App.tsx` owns the persisted state — see `FILE_TREE_VISIBLE_SETTING_KEY`).
+   * Optional, same reasoning as `view`/`onSetView` above, so tests that
+   * don't care about the file tree don't need to pass it. */
+  fileTreeVisible?: boolean;
+  onToggleFileTree?: () => void;
 }
 
 export default function Sidebar({
@@ -87,6 +93,8 @@ export default function Sidebar({
   ingestion,
   view = "workspace",
   onSetView,
+  fileTreeVisible = false,
+  onToggleFileTree,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -177,6 +185,17 @@ export default function Sidebar({
           >
             +
           </button>
+          {onToggleFileTree && (
+            <button
+              className={`sidebar-filetree-trigger${fileTreeVisible ? " is-active" : ""}`}
+              onClick={onToggleFileTree}
+              aria-label="Toggle file browser panel"
+              aria-pressed={fileTreeVisible}
+              title="Toggle file browser panel"
+            >
+              files
+            </button>
+          )}
           <span
             className={`pressure-badge${underPressure ? " is-hot" : ""}`}
             title={`${tabs.length} live session${tabs.length === 1 ? "" : "s"} (pressure badge past ${PRESSURE_THRESHOLD})`}
