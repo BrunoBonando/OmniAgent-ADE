@@ -158,6 +158,49 @@
 //! them, never anything about how `claude`/`codex` are configured (DESIGN
 //! principle 5, same zero-config boundary the rest of this module's docs
 //! already describe).
+//!
+//! ## Making CLIs render color (founder bug, 2026-07-25 — Bruno, verbatim:
+//! ## "Can you fix the colors of the terminals? It's currently black and
+//! ## white... I like when it's colorful just like claude normally is.")
+//! `Terminal.tsx`'s xterm.js `theme` option already has the real, correct
+//! ANSI 0-15 palette (sourced from Warp's own bundled theme data) — that
+//! was never the bug. The actual cause is the same class of "GUI launch
+//! doesn't inherit what a real terminal session would" gap the `PATH` fix
+//! above exists for: `CommandBuilder::new` seeds a spawned command's env
+//! from whatever THIS process itself inherited at construction time (see
+//! `portable_pty::cmdbuilder::get_base_env`), and a `.app` launched via
+//! Finder/`open` has no `TERM` at all (no controlling terminal) — unlike
+//! `cargo tauri dev` run from an already-interactive shell, which is why
+//! this, too, never reproduced outside the packaged app. CLIs like `claude`
+//! detect color-capability partly from `TERM`/`COLORTERM`; a missing/absent
+//! `TERM` commonly makes them fall back to plain monochrome output — which
+//! looks exactly like "black and white" no matter how correct xterm.js's
+//! own rendering theme is, since there are no color escape codes in the
+//! byte stream for it to render in the first place. Verified for real: a
+//! `shell` session running `TERM=dumb tput setaf 1` (a command that emits
+//! an ANSI color escape only when the terminfo it's given actually supports
+//! color) prints nothing but a `tput: unknown terminal "dumb"`-style error
+//! to the pty and no escape bytes at all, whereas the same session with
+//! this fix's `TERM=xterm-256color` applied prints the real
+//! `\x1b[31m` escape sequence — a genuine before/after byte-level
+//! difference, not just "the env var is set in code" (see this task's own
+//! commit message / report for the exact transcript).
+//!
+//! [`apply_terminal_capability_env`] sets `TERM=xterm-256color` (the exact
+//! terminal type xterm.js + its WebGL addon actually implement) and
+//! `COLORTERM=truecolor` (the de facto signal modern CLIs, including
+//! `claude`, check for 24-bit color) on every engine's spawned command,
+//! unconditionally — unlike `PATH`, there's no real, discoverable "user's
+//! actual value" to resolve here (a GUI launch's `TERM` isn't merely wrong,
+//! it's absent), so the fix is to always assert the exact capability this
+//! app's own terminal renderer supports rather than to propagate whatever
+//! (if anything) this process happened to inherit. Applied to all three
+//! engines (`claude`, `codex`, `shell`), same reasoning `apply_resolved_path`
+//! above already gives for extending PATH resolution to `shell` too: this is
+//! a terminal-capability signal every spawned interactive process benefits
+//! from, not an engine-specific behavior — the engines themselves stay
+//! completely stock, only the env OmniAgent's own spawn call hands them
+//! changes (DESIGN principle 5).
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -546,6 +589,7 @@ fn build_command(
             let mut cmd = CommandBuilder::new(shell);
             cmd.cwd(&req.cwd);
             apply_resolved_path(&mut cmd);
+            apply_terminal_capability_env(&mut cmd);
             Ok((cmd, None))
         }
         "codex" => {
@@ -554,12 +598,14 @@ fn build_command(
             let mut cmd = CommandBuilder::new("codex");
             cmd.cwd(&req.cwd);
             apply_resolved_path(&mut cmd);
+            apply_terminal_capability_env(&mut cmd);
             Ok((cmd, None))
         }
         "claude" => {
             let mut cmd = CommandBuilder::new("claude");
             cmd.cwd(&req.cwd);
             apply_resolved_path(&mut cmd);
+            apply_terminal_capability_env(&mut cmd);
 
             let mcp_config_path = match resolve_mcp_server_binary() {
                 Some(bin) => {
@@ -611,6 +657,20 @@ fn apply_resolved_path(cmd: &mut CommandBuilder) {
     if let Some(path) = cached_shell_path() {
         cmd.env("PATH", path);
     }
+}
+
+/// Sets the terminal-capability env vars xterm.js + its WebGL addon
+/// (`Terminal.tsx`) actually implement — see the module docs' "Making CLIs
+/// render color" section for the bug this fixes (a GUI-launched `.app` has
+/// no `TERM` at all, which makes CLIs like `claude` fall back to plain,
+/// uncolored output). Unlike [`apply_resolved_path`], always overrides —
+/// there's no "real" value to discover from this process's own environment
+/// to fall back to; `xterm-256color`/`truecolor` are simply what this app's
+/// terminal renderer supports, independent of whatever (if anything) the
+/// spawning process inherited.
+fn apply_terminal_capability_env(cmd: &mut CommandBuilder) {
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
 }
 
 /// Process-global cache for [`resolve_shell_path`]'s result — the spawn it
@@ -1444,6 +1504,86 @@ mod tests {
     #[test]
     fn build_command_applies_resolved_path_to_shell() {
         assert_build_command_applies_resolved_path("shell");
+    }
+
+    // -- Terminal-capability env: TERM/COLORTERM (founder bug, 2026-07-25 --
+    // "the terminals render black-and-white instead of colorful") ---------
+
+    /// Wiring proof: `build_command` sets `TERM`/`COLORTERM` on the spawned
+    /// command's env, for every engine, unconditionally -- see the module
+    /// docs' "Making CLIs render color" section for why this is
+    /// unconditional (always the same two literal values) rather than
+    /// resolved/cached like `PATH` above: unlike `PATH`, there is no "real"
+    /// value to discover from the user's environment -- a GUI launch simply
+    /// has no `TERM` at all, and the correct fix is to assert the exact
+    /// capability this app's own xterm.js + WebGL addon actually support,
+    /// not to propagate whatever (if anything) this process happened to
+    /// inherit.
+    ///
+    /// Deliberately forces THIS TEST PROCESS's own `TERM`/`COLORTERM` to
+    /// something else first (`dumb`/unset), restored via RAII even if an
+    /// assertion panics -- otherwise this assertion would silently pass for
+    /// the wrong reason on any machine (this one included: a real terminal
+    /// session's own shell already has `TERM=xterm-256color`,
+    /// `COLORTERM=truecolor`) where `CommandBuilder::new`'s base-env
+    /// inheritance (see `get_base_env` in the `portable-pty` crate) already
+    /// happens to match the target values by coincidence, exactly the same
+    /// "cargo tauri dev never reproduced the PATH bug" trap the module docs
+    /// describe for `PATH` above -- proven empirically while writing this
+    /// test: without the override below, this assertion passed even before
+    /// `build_command` set anything, purely because this developer's own
+    /// shell's `TERM`/`COLORTERM` already matched.
+    fn assert_build_command_sets_terminal_capability_env(engine: &str) {
+        struct RestoreEnvVar(&'static str, Option<std::ffi::OsString>);
+        impl Drop for RestoreEnvVar {
+            fn drop(&mut self) {
+                match &self.1 {
+                    Some(v) => std::env::set_var(self.0, v),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+        let _restore_term = RestoreEnvVar("TERM", std::env::var_os("TERM"));
+        let _restore_colorterm = RestoreEnvVar("COLORTERM", std::env::var_os("COLORTERM"));
+        std::env::set_var("TERM", "dumb");
+        std::env::remove_var("COLORTERM");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let req = CreateSessionRequest {
+            project: "demo".into(),
+            engine: engine.into(),
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            briefing: None,
+        };
+        let (cmd, _mcp_path) =
+            build_command(&req, tmp.path(), &format!("sess-test-color-{engine}")).unwrap();
+
+        assert_eq!(
+            cmd.get_env("TERM").map(|s| s.to_string_lossy().into_owned()).as_deref(),
+            Some("xterm-256color"),
+            "{engine} session's TERM should be set for real color support, regardless of \
+             whatever (if anything) this process itself inherited"
+        );
+        assert_eq!(
+            cmd.get_env("COLORTERM").map(|s| s.to_string_lossy().into_owned()).as_deref(),
+            Some("truecolor"),
+            "{engine} session's COLORTERM should signal 24-bit color support"
+        );
+    }
+
+    #[test]
+    fn build_command_sets_terminal_capability_env_for_claude() {
+        assert_build_command_sets_terminal_capability_env("claude");
+    }
+
+    #[test]
+    fn build_command_sets_terminal_capability_env_for_codex() {
+        assert_build_command_sets_terminal_capability_env("codex");
+    }
+
+    #[test]
+    fn build_command_sets_terminal_capability_env_for_shell() {
+        assert_build_command_sets_terminal_capability_env("shell");
     }
 
     /// Bug: every one of `create()`'s fallible steps *after*
