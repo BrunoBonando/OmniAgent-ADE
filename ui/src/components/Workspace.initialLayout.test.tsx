@@ -1,7 +1,7 @@
 // Regression coverage for the founder's approved layout ladder actually
 // reaching the DOM: a session's panes are laid out in the shape
-// `paneGrid.ts`'s `GRID_LADDER` prescribes for their *count* — 2x1, 2x2, 3x2,
-// 3x3, 4x3, 4x4 — no matter how they got there (a bulk create, ⌘T one at a
+// `paneGrid.ts`'s `GRID_LADDER` prescribes for their *count* — 1x2, 2x2, 2x3,
+// 2x4, capped at 8 — no matter how they got there (a bulk create, ⌘T one at a
 // time, a close that drops the grid back down a rung). There is deliberately
 // no layout hint plumbed from the create dialogs any more: the count IS the
 // instruction, which is what makes every path agree.
@@ -19,7 +19,7 @@
 // `Terminal`/`PaneHeader` are stubbed to trivial probes — this test is
 // about grid geometry, not terminal rendering (already covered by
 // `Workspace.visibility.test.tsx` and `Workspace.mountStability.test.tsx`).
-import { fireEvent, render } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
 import { initialAgentsState } from "../state/agents";
@@ -68,7 +68,7 @@ function renderedShape(container: HTMLElement): { rows: number; cols: number; pa
   };
 }
 
-function workspaceWith(tabs: TabInfo[]) {
+function workspaceWith(tabs: TabInfo[], onNewTabInProject: (p: ProjectInfo) => void = noop) {
   return (
     <Workspace
       projects={[project("p1")]}
@@ -77,7 +77,7 @@ function workspaceWith(tabs: TabInfo[]) {
       selectedProjectId="p1"
       onActivateTab={noop}
       onCloseTab={noop}
-      onNewTabInProject={noop}
+      onNewTabInProject={onNewTabInProject}
       onRenameTab={noop}
       agentState={initialAgentsState}
       hidden={false}
@@ -91,6 +91,11 @@ function panes(n: number): TabInfo[] {
 }
 
 describe("Workspace — a session's panes render in their approved shape", () => {
+  // `panes` here is the total CELL count (`rows * cols`), not the pane count
+  // passed in: a count that doesn't exactly fill the rung (3, 5, 7) still
+  // renders the full rectangle, the leftover cell(s) a hole (see the
+  // dedicated hole tests below) — so `.mosaic-tile` count is always the
+  // rung's full capacity.
   it.each([
     [1, { rows: 1, cols: 1 }],
     [2, { rows: 1, cols: 2 }],
@@ -98,12 +103,11 @@ describe("Workspace — a session's panes render in their approved shape", () =>
     [4, { rows: 2, cols: 2 }],
     [5, { rows: 2, cols: 3 }],
     [6, { rows: 2, cols: 3 }],
-    [9, { rows: 3, cols: 3 }],
-    [12, { rows: 3, cols: 4 }],
-    [16, { rows: 4, cols: 4 }],
+    [7, { rows: 2, cols: 4 }],
+    [8, { rows: 2, cols: 4 }],
   ])("%i panes render as a real %o grid", (count, shape) => {
     const { container } = render(workspaceWith(panes(count)));
-    expect(renderedShape(container)).toEqual({ ...shape, panes: count });
+    expect(renderedShape(container)).toEqual({ ...shape, panes: shape.rows * shape.cols });
   });
 
   it("opening one more terminal reflows the grid up a rung, live", () => {
@@ -111,15 +115,69 @@ describe("Workspace — a session's panes render in their approved shape", () =>
     expect(renderedShape(container)).toEqual({ rows: 1, cols: 2, panes: 2 });
 
     rerender(workspaceWith(panes(3)));
-    expect(renderedShape(container)).toEqual({ rows: 2, cols: 2, panes: 3 });
+    expect(renderedShape(container)).toEqual({ rows: 2, cols: 2, panes: 4 }); // 3 real + 1 hole
   });
 
   it("closing one drops it back down a rung", () => {
     const { container, rerender } = render(workspaceWith(panes(5)));
-    expect(renderedShape(container)).toEqual({ rows: 2, cols: 3, panes: 5 });
+    expect(renderedShape(container)).toEqual({ rows: 2, cols: 3, panes: 6 }); // 5 real + 1 hole
 
     rerender(workspaceWith(panes(4)));
     expect(renderedShape(container)).toEqual({ rows: 2, cols: 2, panes: 4 });
+  });
+
+  it("a count that doesn't fill the rung renders the leftover cell as a hole, not a real pane", () => {
+    // 3 panes -> the 2x2 rung: a real gradient-filled placeholder in the 4th
+    // cell (founder, 2026-07-26: "if a number of terminals is not even, it's
+    // okay to have a hole in the matrix... represented by gradient dark
+    // blue, just like the one from when it's without terminals"), never a
+    // 4th terminal and never a shrunk 2-then-1 shape.
+    const { container } = render(workspaceWith(panes(3)));
+    const holes = container.querySelectorAll(".pane-hole");
+    expect(holes).toHaveLength(1);
+    expect(holes[0].querySelector("[data-testid^='terminal-']")).toBeNull();
+    expect(container.querySelectorAll("[data-testid^='terminal-']")).toHaveLength(3);
+  });
+
+  it("the hole is an Add Terminal button — clicking it opens one more terminal here", () => {
+    // Founder, 2026-07-26: "on the blank space... a small square button with
+    // an image of a terminal and a text under saying: add Terminal". Wired to
+    // the same handler as the pane header's split, and the new terminal fills
+    // exactly this cell (`buildGrid`'s bottom-of-column fill).
+    const onNewTab = vi.fn();
+    render(workspaceWith(panes(3), onNewTab));
+    fireEvent.click(screen.getByRole("button", { name: /add terminal/i }));
+    expect(onNewTab).toHaveBeenCalledWith(project("p1"));
+  });
+
+  it("the new pane lands top of the new column; nobody already open changes cell (4 -> 5)", () => {
+    // Founder, 2026-07-26: "the new terminal would simply always start on top
+    // right if full or bottom if not full". At 4 (full 2x2), pane 5 appears
+    // top-right with the hole under it. Column widths re-divide (50% -> 33%),
+    // so the invariant is each pane's CELL — its row, and its column's rank.
+    const cellOf = (container: HTMLElement, id: string) => {
+      const t = tileOf(container, id);
+      const lefts = [...new Set(tilePositions(container).map((p) => p.left))].sort((a, b) => a - b);
+      return {
+        row: Math.round(parseFloat(t.style.top)) === 0 ? 0 : 1,
+        col: lefts.indexOf(Math.round(parseFloat(t.style.left))),
+      };
+    };
+    const { container, rerender } = render(workspaceWith(panes(4)));
+    expect(cellOf(container, "1")).toEqual({ row: 0, col: 0 });
+    expect(cellOf(container, "2")).toEqual({ row: 1, col: 0 });
+    expect(cellOf(container, "3")).toEqual({ row: 0, col: 1 });
+    expect(cellOf(container, "4")).toEqual({ row: 1, col: 1 });
+
+    rerender(workspaceWith(panes(5)));
+    // Panes 1-4 keep their cells; 5 tops the new third column, the hole under it.
+    expect(cellOf(container, "1")).toEqual({ row: 0, col: 0 });
+    expect(cellOf(container, "2")).toEqual({ row: 1, col: 0 });
+    expect(cellOf(container, "3")).toEqual({ row: 0, col: 1 });
+    expect(cellOf(container, "4")).toEqual({ row: 1, col: 1 });
+    expect(cellOf(container, "5")).toEqual({ row: 0, col: 2 });
+    const hole = container.querySelector<HTMLElement>(".pane-hole")!.closest<HTMLElement>(".mosaic-tile")!;
+    expect(Math.round(parseFloat(hole.style.top))).toBe(50);
   });
 
   it("each session is shaped by its OWN pane count, not the workspace's", () => {

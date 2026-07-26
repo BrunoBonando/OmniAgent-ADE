@@ -3,6 +3,7 @@
 // "engine" looks like — see App.css for the rest of the HUD token system
 // (color/type/spacing custom properties).
 import type { Engine } from "./state/sessions";
+import type { IconName } from "./components/Icon";
 
 export const ENGINE_LABEL: Record<Engine, string> = {
   claude: "Claude Code",
@@ -38,6 +39,17 @@ export const ENGINE_COLOR: Record<Engine, string> = {
   shell: "#9a9ca6",
   copilot: "#2ea043",
   antigravity: "#ff7f50",
+};
+
+/** Which mark stands for each agent — kept here with LABEL/COLOR/HINT so
+ * adding an agent means editing a single file. Every agent has a mark
+ * whether or not it is installed. */
+export const AGENT_ICON: Record<Engine, IconName> = {
+  claude: "agent-claude",
+  codex: "agent-codex",
+  copilot: "agent-copilot",
+  antigravity: "agent-antigravity",
+  shell: "agent-shell",
 };
 
 export const ENGINE_HINT: Record<Engine, string> = {

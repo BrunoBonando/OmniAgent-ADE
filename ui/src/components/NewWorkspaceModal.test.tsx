@@ -63,9 +63,9 @@ describe("NewWorkspaceModal — rendering", () => {
     expect(screen.getByText("AI AGENTS")).toBeInTheDocument();
   });
 
-  it("shows all four layout presets, 4 selected by default with its caption", () => {
+  it("shows all five layout presets, 4 selected by default with its caption", () => {
     setup();
-    for (const preset of [2, 4, 6, 9]) {
+    for (const preset of [1, 2, 4, 6, 8]) {
       expect(screen.getByRole("button", { name: new RegExp(`^${preset}\\b`) })).toBeInTheDocument();
     }
     expect(screen.getByText("2×2 grid layout")).toBeInTheDocument();
@@ -151,7 +151,11 @@ describe("NewWorkspaceModal — AI Agents checklist", () => {
   it("shows a checked/total count badge", () => {
     setup();
     expect(screen.getByText("1/5")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("checkbox", { name: /codex/i }));
+    // Claude rather than Codex: only installed agents have an enabled tile,
+    // and the default fixture installs claude + shell. (The old checkbox
+    // list let jsdom click straight through a disabled <input>; the tile is
+    // a real disabled <button>, which correctly swallows the click.)
+    fireEvent.click(screen.getByRole("checkbox", { name: /claude code/i }));
     expect(screen.getByText("2/5")).toBeInTheDocument();
   });
 });
@@ -198,7 +202,7 @@ describe("NewWorkspaceModal — submit", () => {
     // Shell starts checked (the default), so this ticks claude as well —
     // clicked second, but it must still come back FIRST, in ENGINES order.
     fireEvent.click(screen.getByRole("checkbox", { name: /claude code/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^9\b/ })); // pick the "9" layout
+    fireEvent.click(screen.getByRole("button", { name: /^8\b/ })); // pick the "8" layout
 
     fireEvent.click(screen.getByRole("button", { name: /create workspace/i }));
 
@@ -207,7 +211,7 @@ describe("NewWorkspaceModal — submit", () => {
     const [project, engines, layout] = onCreate.mock.calls[0] as [ProjectInfo, Engine[], LayoutPreset];
     expect(project).toEqual(PROJECT);
     expect(engines).toEqual(["claude", "shell"]); // ENGINES order, not click order
-    expect(layout).toBe(9);
+    expect(layout).toBe(8);
   });
 
   it("does not call onClose itself on success — the caller closes the modal (same split as AddProjectModal/Sidebar)", async () => {

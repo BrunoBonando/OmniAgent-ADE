@@ -37,6 +37,7 @@ function tab(overrides: Partial<TabInfo> = {}): TabInfo {
 
 function setup(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
   const onCloseWorkspace = vi.fn();
+  const onCloseSession = vi.fn();
   const onActivateTab = vi.fn();
   const utils = render(
     <Sidebar
@@ -54,6 +55,7 @@ function setup(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
       onRenameProject={() => {}}
       onImportCompleted={() => {}}
       onCloseWorkspace={onCloseWorkspace}
+      onCloseSession={onCloseSession}
       authSignedIn={null}
       authPersona={null}
       onResetAuthGate={() => {}}
@@ -62,7 +64,7 @@ function setup(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
       {...overrides}
     />,
   );
-  return { ...utils, onCloseWorkspace, onActivateTab };
+  return { ...utils, onCloseWorkspace, onCloseSession, onActivateTab };
 }
 
 describe("Sidebar — session and branch, nothing else", () => {
@@ -102,7 +104,9 @@ describe("Sidebar — session and branch, nothing else", () => {
 
   it("activates the session's first terminal when its row is clicked", () => {
     const { onActivateTab } = setup();
-    fireEvent.click(screen.getByRole("button", { name: /Session 1/ }));
+    // Anchored: "Close session Session 1" (the row's hover close) also
+    // contains the session name.
+    fireEvent.click(screen.getByRole("button", { name: /^Session 1/ }));
     expect(onActivateTab).toHaveBeenCalledWith("s1");
   });
 });
@@ -203,5 +207,46 @@ describe("Sidebar — closing a workspace", () => {
   it("shows no close control at all when the app does not pass a handler", () => {
     setup({ onCloseWorkspace: undefined });
     expect(screen.queryByRole("button", { name: /^Close workspace/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("Sidebar — closing a session (founder ask: 'I must be able to close a session')", () => {
+  beforeEach(() => {
+    useGitBranchMock.mockReset();
+    useGitBranchMock.mockReturnValue("main");
+  });
+
+  it("offers a close control on the session row", () => {
+    setup();
+    expect(screen.getByRole("button", { name: "Close session Session 1" })).toBeInTheDocument();
+  });
+
+  it("asks before killing anything, and says how many terminals stop", () => {
+    const { onCloseSession } = setup();
+    fireEvent.click(screen.getByRole("button", { name: "Close session Session 1" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Close session" });
+    expect(dialog.textContent).toContain("2 terminals");
+    expect(onCloseSession).not.toHaveBeenCalled();
+  });
+
+  it("closes the session only once the user confirms", () => {
+    const { onCloseSession } = setup();
+    fireEvent.click(screen.getByRole("button", { name: "Close session Session 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close session" }));
+    expect(onCloseSession).toHaveBeenCalledWith(p1, "g1");
+  });
+
+  it("cancels without touching a thing", () => {
+    const { onCloseSession } = setup();
+    fireEvent.click(screen.getByRole("button", { name: "Close session Session 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onCloseSession).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("shows no session close control when the app does not pass a handler", () => {
+    setup({ onCloseSession: undefined });
+    expect(screen.queryByRole("button", { name: /^Close session/ })).not.toBeInTheDocument();
   });
 });

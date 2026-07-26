@@ -209,6 +209,37 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
     expect(xtermMocks.ctorMock).toHaveBeenCalledTimes(1);
   });
 
+  it("stamps each pane window with its status/motion classes — the border IS the status display", async () => {
+    // Founder, 2026-07-26: "The current terminal status is on the title
+    // bar, we could remove it from there and leave only in the border."
+    // These classes are all App.css's pane-status-border block has to key
+    // off, so a wrong pair here means a pane border lying about its state.
+    const p1 = project("p1");
+    const tabs = [{ ...tab("a", "p1"), status: "tool_execution" as const }, tab("b", "p1")];
+
+    const { container } = render(
+      <Workspace
+        projects={[p1]}
+        tabs={tabs}
+        activeTabId="a"
+        selectedProjectId="p1"
+        onActivateTab={noop}
+        onCloseTab={noop}
+        onNewTabInProject={noop}
+        onRenameTab={noop}
+        agentState={initialAgentsState}
+        hidden={false}
+      />,
+    );
+
+    await waitFor(() => expect(container.querySelectorAll(".pane-window")).toHaveLength(2));
+    const focused = container.querySelector(".pane-window.is-focused")!;
+    expect(focused).toHaveClass("pane-status-tool_execution", "pane-motion-chase");
+    // No status reported yet → the neutral pair, never a guess.
+    const other = container.querySelector(".pane-window:not(.is-focused)")!;
+    expect(other).toHaveClass("pane-status-unknown", "pane-motion-steady");
+  });
+
   it("marks exactly the active pane and cycles from an xterm descendant with Ctrl+Tab", async () => {
     const p1 = project("p1");
     const tabs = [tab("a", "p1"), tab("b", "p1")];

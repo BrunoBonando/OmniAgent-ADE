@@ -41,9 +41,9 @@ describe("NewSessionModal — rendering", () => {
     expect(screen.getByText(/Runs in the project folder/)).toBeInTheDocument();
   });
 
-  it("offers all four layout presets, side-by-side selected by default", () => {
+  it("offers all five layout presets, side-by-side selected by default", () => {
     setup();
-    for (const preset of [2, 4, 6, 9]) {
+    for (const preset of [1, 2, 4, 6, 8]) {
       expect(screen.getByRole("button", { name: new RegExp(`^${preset}$`) })).toBeInTheDocument();
     }
     expect(screen.getByText("Side-by-side split")).toBeInTheDocument();

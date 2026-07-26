@@ -45,7 +45,8 @@ import { LAYOUT_PRESETS, layoutCaption, type LayoutPreset } from "../state/paneG
 import { LayoutGlyph } from "./NewSessionModal";
 import { ENGINES, type Engine, type ProjectInfo } from "../state/sessions";
 import { type AgentsState, type Agent, AVAILABLE_AGENTS } from "../state/agents";
-import { ENGINE_COLOR, ENGINE_LABEL } from "../theme";
+import { AGENT_ICON, ENGINE_COLOR, ENGINE_LABEL } from "../theme";
+import Icon from "./Icon";
 import { addProject } from "../lib/tauri";
 
 interface NewWorkspaceModalProps {
@@ -213,24 +214,36 @@ export default function NewWorkspaceModal({ onCreate, onClose, agentState, onIns
             </button>
           </div>
           {!state.agentsCollapsed && (
-            <ul className="new-workspace-agent-list">
+            // Logo tiles in a 3-column grid (Bruno, 2026-07-26: "instead of
+            // a list of options, make it a grid — 3 on top and 2 under"),
+            // wearing the brand marks the agent-picker work introduced. Each
+            // tile keeps `role="checkbox"` so the toggle semantics (and the
+            // existing tests) carry over from the checkbox rows unchanged.
+            <div className="new-workspace-agent-grid">
               {AVAILABLE_AGENTS.map((agent) => {
                 const isInstalled = agentState.installed.has(agent);
                 const isInstalling = agentState.installing.has(agent);
                 const installStatus = agentState.installing.get(agent);
 
                 return (
-                  <li key={agent} className="new-workspace-agent-row">
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={state.engines[agent as Engine]}
-                        onChange={() => dispatch({ type: "engine_toggled", engine: agent as Engine })}
-                        disabled={!isInstalled}
-                      />
-                      <span className="engine-dot" style={{ background: ENGINE_COLOR[agent as Engine] }} aria-hidden />
+                  <div key={agent} className="new-workspace-agent-cell">
+                    <button
+                      type="button"
+                      role="checkbox"
+                      aria-checked={state.engines[agent as Engine]}
+                      className={`new-workspace-agent-tile${state.engines[agent as Engine] ? " is-selected" : ""}`}
+                      onClick={() => dispatch({ type: "engine_toggled", engine: agent as Engine })}
+                      disabled={!isInstalled}
+                    >
+                      <span
+                        className="new-workspace-agent-logo"
+                        style={{ color: ENGINE_COLOR[agent as Engine] }}
+                        aria-hidden
+                      >
+                        <Icon name={AGENT_ICON[agent as Engine]} size={28} strokeWidth={1.75} />
+                      </span>
                       <span className="new-workspace-agent-label">{ENGINE_LABEL[agent as Engine]}</span>
-                    </label>
+                    </button>
                     {!isInstalled && !isInstalling && (
                       <button
                         type="button"
@@ -258,10 +271,10 @@ export default function NewWorkspaceModal({ onCreate, onClose, agentState, onIns
                         )}
                       </span>
                     )}
-                  </li>
+                  </div>
                 );
               })}
-            </ul>
+            </div>
           )}
         </div>
 

@@ -55,6 +55,13 @@
   --claude: #cc96f2;
   --codex: #a2e7f9;
   --shell: #9a9ca6;
+  /* The other two spawnable engines, kept in sync with theme.ts's
+     ENGINE_COLOR (GitHub's own green, AntiGravity's coral). They had no
+     token here while the engine colour only ever tinted a branch tag that
+     three engines had rules for; the pane header's tag now names the agent
+     for all five, so all five need a colour. */
+  --copilot: #2ea043;
+  --antigravity: #ff7f50;
   --danger: #e5484d;
   --warning: #d6a54a; /* warm amber/tan meter tone, per screenshot */
 
@@ -678,19 +685,32 @@ code {
   position: relative;
 }
 
-/* Founder pane-grid rebuild: the selected-workspace row is a tinted
-   background plus a thin left-edge accent bar. `box-shadow` for the bar
-   rather than `border-left` so it doesn't shift the row's inner padding.
-   Restrained on purpose (founder brief: "the selected chip has a subtly
-   lighter background fill plus a thin colored accent bar... restrained, not
-   a loud highlight") — a modest lift off the chip's own resting fill, so the
-   bar carries the actual color signal instead of a loud full-row tint.
-   The colour is OmniAgent's blue (--brand-blue), not the reference
-   screenshot's magenta; the tint is the same lightness the magenta-era fill
-   had (#413a49) rotated onto the blue side, so only the hue changed. */
+/* The selected-workspace chip: a blue-tinted fill plus the left-edge accent
+   bar (`box-shadow` for the bar rather than `border-left` so it doesn't
+   shift the row's inner padding).
+
+   It used to be a flat `#3a4149` — a desaturated warm-grey lift off the
+   chip's resting fill, with the blue only in the 3px bar. Founder,
+   2026-07-26: *"I don't like the 'selected' color, it's a bit grayish and it
+   looks disabled."* He is right about the cause: at that saturation the fill
+   is the same neutral grey the app uses for disabled controls, so the one
+   row that is active read as the one row that is off. It is now actually
+   blue — a left-to-right fade of --brand-blue so the tint is strongest at
+   the accent bar and releases across the row, which keeps it from becoming
+   the loud full-row highlight the original brief ruled out. */
 .project-row.is-selected {
-  background: #3a4149;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--brand-blue) 30%, transparent) 0%,
+      color-mix(in srgb, var(--brand-blue) 12%, transparent) 100%
+    ),
+    rgba(255, 255, 255, 0.025);
   box-shadow: inset 3px 0 0 0 var(--brand-blue);
+}
+
+.project-row.is-selected .project-row-label {
+  color: #fff;
 }
 
 .project-row-main {
@@ -714,6 +734,14 @@ code {
 
 .project-row-main:hover {
   background: var(--panel-raised);
+}
+
+/* The button is a child, so its own hover fill paints OVER the chip's
+   selected tint — a plain --panel-raised here would hand the grey straight
+   back on hover, which is the exact look the founder rejected. A translucent
+   white lift instead: it brightens whatever is underneath. */
+.project-row.is-selected .project-row-main:hover {
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .project-row-identity {
@@ -1119,9 +1147,217 @@ code {
    while already in this rule block). */
 .pane-grid .pane-window.mosaic-window {
   background: var(--void);
-  border: 1px solid var(--line-soft);
+  /* Transparent, not removed: the status ring below (drawn at inset: 0,
+     inside this border, because .mosaic-window is overflow: hidden) is the
+     pane's visible frame now — a static line under an animated ring read as
+     a double edge. Kept 1px so geometry is identical to the old border. */
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  /* This pane's status colour — overridden per state below, inherited by
+     the ring pseudos here AND by .pane-body's focus wash inside. `-hi` is
+     the comet's head: default is "the status colour, brightened"; thinking
+     overrides it with its own sampled highlight token. */
+  --pane-status: var(--status-unknown);
+  --pane-status-hi: color-mix(in srgb, var(--pane-status) 35%, #fff);
+}
+
+/* Pane status border (founder, 2026-07-26, two asks in one session: first
+   "an ai animation circling around the border" for the focused pane, then,
+   on seeing it: "instead of making the border behave like this when the
+   terminal is focused, we make it according to the terminal status? The
+   current terminal status is on the title bar, we could remove it from
+   there and leave only in the border.")
+
+   So the border IS the status display now. `Workspace.tsx` stamps each pane
+   window with `pane-status-*` / `pane-motion-*` — the same
+   `statusPresentation` pair the sidebar light carries — and the five rhythms
+   keep the identities the light established:
+
+     steady   ready              still ring, muted status colour
+     sweep    thinking           blue comet orbiting, 3.6s — smooth, calm
+     chase    tool_execution     the same comet, same 3.6s, in teal
+     breathe  awaiting_approval  amber ring on the light's own 3.4s glow dip
+     flash    error              hard 0.44s square wave
+
+   chase originally ran the comet at 1.4s ("the fast traveller"); founder,
+   on seeing it: "remember the previous circling effect when we had the
+   terminal focused? I need the same effect for when it's executing." The
+   previous effect was exactly the 3.6s comet + breathing glow, so executing
+   now runs it verbatim and colour alone separates it from thinking — a
+   deliberate trade of rhythm-distinctness for the motion he liked.
+
+   breathe/flash reuse the mark's own keyframes (omni-breathe-glow /
+   omni-flash) so a pane border and its sidebar light can never drift out of
+   rhythm; both orbiting motions share one rotation keyframe. Focus is
+   layered ON TOP of status rather than being a colour of its own: the
+   focused pane runs the ring at full strength plus a blurred aura and a
+   status-tinted outer glow — breathing, on the orbiting motions, the
+   original focus effect's pulse — while unfocused rings are dimmed via
+   filter (NOT opacity, which flash/breathe animate and would override).
+
+   Registered @property so the comet's angle interpolates; without support
+   it degrades to a static gradient ring.
+
+   Geometry constraints, all inherited from the library CSS:
+   - `.mosaic-window` is `overflow: hidden`, so the ring pseudos sit at
+     `inset: 0` (inside the window's now-transparent 1px border) — anything
+     poking outward would be clipped. The outer glow therefore rides the
+     window's own box-shadow, which overflow does NOT clip.
+   - `.mosaic-window-toolbar` is z-index 4, so the ring paints at 5 to
+     cross the header's top corners uninterrupted. pointer-events: none —
+     it is chrome, never a hit target.
+   - Ring thickness = the pseudo's padding; the padding-box/content-box
+     mask-composite pair cuts everything but that rim away. */
+@property --pane-orbit {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* Same three-class specificity as the base rule above (which sets the
+   `unknown` default) — these only win by coming later. */
+.pane-grid .pane-window.pane-status-ready {
+  --pane-status: var(--status-ready);
+}
+.pane-grid .pane-window.pane-status-thinking {
+  --pane-status: var(--status-thinking);
+  --pane-status-hi: var(--status-thinking-hi);
+}
+.pane-grid .pane-window.pane-status-tool_execution {
+  --pane-status: var(--status-tool);
+}
+.pane-grid .pane-window.pane-status-awaiting_approval {
+  --pane-status: var(--status-approval);
+}
+.pane-grid .pane-window.pane-status-error {
+  --pane-status: var(--status-error);
+}
+
+/* The ring, on every pane — and the focused pane's aura, a thicker blurred
+   copy that shares all of this geometry and every per-motion rule below.
+   The muted background here is steady/unknown's whole rendering; the
+   animated motions override it. */
+.pane-grid .pane-window.mosaic-window::before,
+.pane-grid .pane-window.mosaic-window.is-focused::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  padding: 1.5px;
+  border-radius: calc(var(--radius-md) - 1px);
+  background: color-mix(in srgb, var(--pane-status) 55%, var(--void));
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+/* Background panes state their status quietly. */
+.pane-grid .pane-window.mosaic-window:not(.is-focused)::before {
+  filter: brightness(0.62) saturate(0.85);
+}
+
+.pane-grid .pane-window.mosaic-window.is-focused::after {
+  padding: 3px;
+  filter: blur(5px);
+  opacity: 0.55;
+}
+
+.pane-grid .pane-window.mosaic-window.is-focused {
+  box-shadow:
+    0 6px 20px rgba(0, 0, 0, 0.35),
+    0 0 18px color-mix(in srgb, var(--pane-status) 25%, transparent);
+}
+
+/* On the orbiting motions the focused pane's glow breathes — the pulsing
+   half of the original focus effect, now in the status colour. Kept off the
+   other motions: breathe already pulses its own ring, flash is busy enough,
+   and a steady/ready pane should sit still. */
+.pane-grid .pane-window.mosaic-window.is-focused.pane-motion-sweep,
+.pane-grid .pane-window.mosaic-window.is-focused.pane-motion-chase {
+  animation: pane-status-glow 3.6s ease-in-out infinite;
+}
+
+@keyframes pane-status-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 6px 20px rgba(0, 0, 0, 0.35),
+      0 0 14px color-mix(in srgb, var(--pane-status) 16%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 6px 20px rgba(0, 0, 0, 0.35),
+      0 0 26px color-mix(in srgb, var(--pane-status) 34%, transparent);
+  }
+}
+
+/* sweep + chase — the comet: a dark arc brightening through the status
+   colour into a near-white head. One gradient, two periods. */
+.pane-window.pane-motion-sweep::before,
+.pane-window.pane-motion-sweep.is-focused::after,
+.pane-window.pane-motion-chase::before,
+.pane-window.pane-motion-chase.is-focused::after {
+  background: conic-gradient(
+    from var(--pane-orbit),
+    color-mix(in srgb, var(--pane-status) 30%, var(--void)) 0deg,
+    color-mix(in srgb, var(--pane-status) 46%, var(--void)) 165deg,
+    var(--pane-status) 285deg,
+    var(--pane-status-hi) 349deg,
+    color-mix(in srgb, var(--pane-status) 30%, var(--void)) 360deg
+  );
+}
+.pane-window.pane-motion-sweep::before,
+.pane-window.pane-motion-sweep.is-focused::after,
+.pane-window.pane-motion-chase::before,
+.pane-window.pane-motion-chase.is-focused::after {
+  animation: pane-orbit 3.6s linear infinite;
+}
+
+/* breathe / flash — full-strength colour on the mark's own opacity
+   keyframes. (On the focused aura the animated opacity outruns its resting
+   0.55 — deliberate: both states are asking for the person's eyes.) */
+.pane-window.pane-motion-breathe::before,
+.pane-window.pane-motion-breathe.is-focused::after,
+.pane-window.pane-motion-flash::before,
+.pane-window.pane-motion-flash.is-focused::after {
+  background: var(--pane-status);
+}
+.pane-window.pane-motion-breathe::before,
+.pane-window.pane-motion-breathe.is-focused::after {
+  animation: omni-breathe-glow 3.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+.pane-window.pane-motion-flash::before,
+.pane-window.pane-motion-flash.is-focused::after {
+  animation: omni-flash 0.44s linear infinite;
+}
+
+@keyframes pane-orbit {
+  to {
+    --pane-orbit: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Still five distinguishable frames, zero motion: every state collapses
+     to its flat ring colour. Specificity here is (0,3,x) against the
+     per-motion rules' (0,2,x), so this wins outright — no [data-motion]
+     matching trick needed, unlike the session-light block's collapse. */
+  .pane-grid .pane-window.mosaic-window::before,
+  .pane-grid .pane-window.mosaic-window.is-focused::after {
+    animation: none;
+    background: color-mix(in srgb, var(--pane-status) 60%, var(--void));
+  }
+  /* The breathing focus glow settles to its resting box-shadow. */
+  .pane-grid .pane-window.mosaic-window.is-focused {
+    animation: none;
+  }
 }
 
 .pane-grid .pane-window .mosaic-window-toolbar {
@@ -1172,19 +1408,35 @@ code {
   width: 100%;
   height: 34px;
   padding: 0 8px 0 12px;
-  background: var(--pane-header);
+  background: color-mix(in srgb, var(--pane-status, var(--status-unknown)) 9%, var(--pane-header));
   border-bottom: 1px solid var(--line-soft);
   border-top-left-radius: var(--radius-md);
   border-top-right-radius: var(--radius-md);
   font-family: var(--mono);
   font-size: 12px;
-  color: var(--ink-dim);
+  /* Focus contrast redesign (founder, 2026-07-26: "the real focused
+     terminal should have a very strong title bar… while the other ones are
+     kind of grayish dimmed") — background panes' headers recede to faint
+     gray; the focused one below goes full white on the raised bar. Both
+     bars are tinted with the pane's own live status colour (--pane-status
+     inherits from the `.pane-window` status classes) — founder, next
+     round: "the title bar must also reflect its color based on the status,
+     but darker. It'll only be stronger and more visible when it's
+     selected" — so the tint rides the dark base here and the raised base
+     when focused. */
+  color: var(--ink-faint);
+  position: relative;
 }
 
 .pane-header.is-focused {
-  background: var(--pane-header-focus);
-  color: var(--ink);
+  background: color-mix(in srgb, var(--pane-status, var(--status-unknown)) 22%, var(--pane-header-focus));
+  color: #fff;
 }
+
+.pane-header.is-focused .pane-header-label-text {
+  font-weight: 650;
+}
+
 
 /* ---------------------------------------------------------------------
    The five-state session light — the OmniAgent mark, tinted and animated
@@ -1242,33 +1494,28 @@ code {
   background: var(--light);
 }
 
-/* One definition of each state's colour, shared by the mark and by the pane
-   header strip that runs the same state along the whole title bar (see
-   `.pane-header::after` below) — two renderings of one fact, so they can
-   never drift apart. `unknown` is deliberately NOT in this list: it dims
-   each surface differently (see each one's own rule). */
-.session-light[data-status="ready"],
-.pane-header[data-status="ready"] {
+/* One definition of each state's colour. The pane-header strip that used to
+   share these selectors is gone (2026-07-26: the pane BORDER carries status
+   now, see the pane-status-border block above) — the sidebar's mark is the
+   light's remaining home. `unknown` is deliberately NOT in this list: it
+   dims instead of lighting (see its own rule). */
+.session-light[data-status="ready"] {
   --light: var(--status-ready);
   --light-glow: rgba(53, 208, 127, 0.5);
 }
-.session-light[data-status="thinking"],
-.pane-header[data-status="thinking"] {
+.session-light[data-status="thinking"] {
   --light: var(--status-thinking);
   --light-glow: rgba(75, 134, 255, 0.55);
 }
-.session-light[data-status="tool_execution"],
-.pane-header[data-status="tool_execution"] {
+.session-light[data-status="tool_execution"] {
   --light: var(--status-tool);
   --light-glow: rgba(47, 227, 205, 0.55);
 }
-.session-light[data-status="awaiting_approval"],
-.pane-header[data-status="awaiting_approval"] {
+.session-light[data-status="awaiting_approval"] {
   --light: var(--status-approval);
   --light-glow: rgba(245, 185, 58, 0.55);
 }
-.session-light[data-status="error"],
-.pane-header[data-status="error"] {
+.session-light[data-status="error"] {
   --light: var(--status-error);
   --light-glow: rgba(255, 61, 113, 0.6);
 }
@@ -1376,95 +1623,12 @@ code {
   }
 }
 
-/* ---------------------------------------------------------------------
-   The same five states, run along the whole pane title bar (founder ask,
-   2026-07-26: "Make the title bar of each terminal an animation similar to
-   the logo status of the terminal. This will be easier to identify the
-   current situation of each terminal").
-
-   It is the SAME vocabulary, not a second one: `PaneHeader.tsx` puts the
-   same `data-status` / `data-motion` pair on the header that the light
-   already carries, the colours come from the shared block above, and three
-   of the four motions reuse the mark's own keyframes verbatim. Only the
-   geometry differs — what rotates around a 15px ring has to travel along a
-   300px bar, so `chase` gets a linear-gradient head instead of a conic one.
-
-   ponytail: one pseudo-element on an element that already exists. No new
-   component, no wrapper, no JS frames — a workspace can hold a dozen of
-   these and reduced-motion still switches every one off in one place.
-   --------------------------------------------------------------------- */
-.pane-header {
-  position: relative;
-  --light: var(--status-unknown);
-  --light-glow: rgba(85, 87, 95, 0.55);
-}
-
-.pane-header::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  /* Over the header's own 1px bottom border rather than above it, so the
-     strip reads as the pane's edge lighting up, not as extra chrome. */
-  bottom: -1px;
-  height: 2px;
-  background: var(--light);
-  box-shadow: 0 0 6px var(--light-glow);
-  pointer-events: none;
-}
-
-/* Nothing has reported in yet — present, but not lighting up the room, same
-   restraint as the mark's own `unknown` rule. */
-.pane-header[data-status="unknown"]::after {
-  opacity: 0.4;
-  box-shadow: none;
-}
-
-.pane-header[data-motion="sweep"]::after {
-  background-image: linear-gradient(
-    115deg,
-    var(--status-thinking-lo) 0%,
-    var(--status-thinking-hi) 45%,
-    var(--status-thinking-lo) 90%
-  );
-  background-size: 260% 100%;
-  animation: omni-sweep 1.9s ease-in-out infinite;
-}
-
-/* Only the glow half of `breathe` — the mark's companion `-scale` keyframe
-   would shrink the bar off its own edges. Same duration and easing, so a
-   pane and its light still breathe together. */
-.pane-header[data-motion="breathe"]::after {
-  animation: omni-breathe-glow 3.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-}
-
-.pane-header[data-motion="flash"]::after {
-  animation: omni-flash 0.44s linear infinite;
-}
-
-/* The one motion that had to be re-cut for the geometry: a bright head
-   travelling left-to-right over the solid colour, at the mark's own 0.85s
-   linear period, so it still reads as the same "travelling" rhythm. */
-.pane-header[data-motion="chase"]::after {
-  background-image: linear-gradient(
-    90deg,
-    rgba(255, 255, 255, 0) 0%,
-    rgba(255, 255, 255, 0.95) 50%,
-    rgba(255, 255, 255, 0) 100%
-  );
-  background-size: 30% 100%;
-  background-repeat: no-repeat;
-  animation: omni-chase-bar 0.85s linear infinite;
-}
-
-@keyframes omni-chase-bar {
-  from {
-    background-position: -30% 0;
-  }
-  to {
-    background-position: 130% 0;
-  }
-}
+/* The pane-title-bar status strip (`.pane-header::after`, "Make the title
+   bar of each terminal an animation similar to the logo status") lived here
+   2026-07-26 → 2026-07-26: the pane border took over as the one place a
+   terminal's status renders (founder: "remove it from there and leave only
+   in the border") — see the pane-status-border block above, which reuses
+   the same keyframes the strip did. */
 
 /* `.pane-header-attention-dot` / `.pane-header.has-attention` lived here
    until 2026-07-26. The latched red attention badge folded into the
@@ -1494,15 +1658,6 @@ code {
     transform: none;
   }
 
-  /* Same collapse for the title bar strip, and the same specificity trick:
-     `[data-motion]` has to be matched here or the rules above win. */
-     No `opacity: 1` reset: `animation: none` already drops the animated
-     opacity, and forcing it would out-order the `unknown` dimming above. */
-  .pane-header[data-motion]::after {
-    animation: none;
-    background-image: none;
-    background-color: var(--light);
-  }
 }
 
 .pane-header-label {
@@ -1510,10 +1665,6 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: text;
-}
-
-.pane-header-project {
-  color: var(--ink-faint);
 }
 
 .pane-header-rename-input {
@@ -1532,29 +1683,30 @@ code {
   min-width: 4px;
 }
 
-/* The session's branch TAG (founder ask, 2026-07-26: "terminal title has a
-   dropdown with main, remove it. This must be connected to the session as a
-   tag, that must be tied to the current git branch"). Same live data as the
-   `.pane-header-branch` capsule it replaces; every one of the differences
-   below is about killing the control affordance that made it read as a
-   dropdown:
+/* The pane's AGENT TAG. Shape and treatment are inherited verbatim from the
+   git-branch tag this replaced (founder, 2026-07-26: "exactly the same way
+   it shows the branch, but actually the name of the agent"), which in turn
+   was shaped to kill the dropdown affordance of the pill before it:
 
      capsule (999px)  ->  squared 3px, with a flat left edge
-     free-floating    ->  2px left rule in the session's ENGINE colour, so
-                          it hangs off the session's identity instead of
-                          sitting on its own like a button
+     free-floating    ->  2px left rule in the ENGINE colour, so it hangs off
+                          the pane's identity instead of sitting on its own
+                          like a button
      bordered box     ->  no outline, just a slightly recessed ground
-     neutral grey     ->  engine-tinted text (see .pane-header-tag[data-
-                          engine]), the signal the status light took over
+     neutral grey     ->  engine-tinted text (see [data-engine] below)
 
    `cursor: default` and no `title` matter as much as the shape: a tooltip
-   promising something on click is exactly the affordance being removed. */
+   promising something on click is exactly the affordance being removed.
+   `font-weight` is the one addition — "with their respective colors and
+   strong" — and it is also what lets this carry the pane's identity now that
+   the header label's `· Claude Code` suffix is gone. */
 .pane-header-tag {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   font-size: 10.5px;
+  font-weight: 700;
   letter-spacing: 0.01em;
   color: var(--ink-dim);
   background: rgba(255, 255, 255, 0.035);
@@ -1569,13 +1721,11 @@ code {
   user-select: none;
 }
 
-.pane-header-tag-glyph {
-  color: var(--ink-faint);
-}
-
 /* Engine identity, relocated. It used to be the leading dot in this header;
-   the status light took that slot, so it lives here — same three colours,
-   same meaning, kept in sync with theme.ts's ENGINE_COLOR. */
+   the status light took that slot, so it lives here — same colours, same
+   meaning, kept in sync with theme.ts's ENGINE_COLOR. All five engines have
+   a rule now that the tag names the agent outright: an engine missing from
+   this list would print its own name in the neutral fallback grey. */
 .pane-header-tag[data-engine="claude"] {
   --tag-accent: var(--claude);
   color: var(--claude);
@@ -1587,6 +1737,14 @@ code {
 .pane-header-tag[data-engine="shell"] {
   --tag-accent: var(--shell);
   color: var(--shell);
+}
+.pane-header-tag[data-engine="copilot"] {
+  --tag-accent: var(--copilot);
+  color: var(--copilot);
+}
+.pane-header-tag[data-engine="antigravity"] {
+  --tag-accent: var(--antigravity);
+  color: var(--antigravity);
 }
 
 .pane-header-btn {
@@ -1934,9 +2092,9 @@ code {
   width: 100%;
 }
 
-.pane-body.is-focused {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--signal) 58%, transparent);
-}
+/* The focus ring itself lives on `.pane-window.is-focused` (the animated
+   orbit border, see the pane-window block above) — `.pane-body.is-focused`
+   keeps only the wash below. */
 
 /* The 1px ring alone was too easy to lose in a grid (founder, 2026-07-26:
    "it's currently very difficult to know where I am... a gradient subtle
@@ -1946,15 +2104,33 @@ code {
    opaque canvas (`TERMINAL_THEMES[*].background`) over anything behind it,
    so a background here would never be seen. Low alpha and
    `pointer-events: none`, so it neither eats clicks nor meaningfully moves
-   the text contrast underneath. */
-.pane-body.is-focused::after {
+   the text contrast underneath.
+
+   Since the status-border round (founder, 2026-07-26: the focus overlay
+   should "also slightly represent the color of the actual status"), the
+   wash is tinted with --pane-status — inherited from the `.pane-window`
+   status classes wrapping this body — instead of the fixed focus blue. And
+   since the round after that ("I want the status to and the overlay
+   gradient selection to be also on every terminal… It'll only be stronger
+   and more visible when it's selected, but otherwise it's darker"), EVERY
+   pane wears it: darker on background panes, full strength on the focused
+   one. */
+.pane-body::after {
   content: "";
   position: absolute;
   inset: 0;
   pointer-events: none;
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--signal) 13%, transparent),
+    color-mix(in srgb, var(--pane-status, var(--signal)) 7%, transparent),
+    transparent 45%
+  );
+}
+
+.pane-body.is-focused::after {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--pane-status, var(--signal)) 14%, transparent),
     transparent 45%
   );
 }
@@ -1995,6 +2171,55 @@ code {
 .empty-workspace p {
   margin: 0;
   font-size: 12.5px;
+}
+
+/* A grid cell no open session claims (`buildGrid`'s hole padding, paneGrid.ts
+   — founder, 2026-07-26: "if a number of terminals is not even, it's okay to
+   have a hole in the matrix... represented by gradient dark blue, just like
+   the one from when it's without terminals"). Same gradient as
+   `.empty-workspace` above, just sized to one cell instead of the whole
+   grid — and carrying the "Add Terminal" button, since the hole is exactly
+   where the next terminal will land. */
+.pane-hole {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-soft);
+  background:
+    radial-gradient(60% 55% at 50% 42%, rgba(58, 96, 190, 0.22), transparent 70%),
+    linear-gradient(168deg, #05060a 0%, #070b16 45%, #0b1730 78%, #12233f 100%);
+  background-color: #0b1730;
+}
+
+/* The small square button in the hole: a terminal glyph (same `>_` mark as
+   `.empty-workspace-prompt`) with "Add Terminal" under it. */
+.pane-hole-add {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 20px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-md);
+  color: var(--ink-faint);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.pane-hole-add:hover {
+  border-color: var(--ink-faint);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink-dim);
+}
+
+.pane-hole-add-glyph {
+  font-family: var(--mono);
+  font-size: 18px;
+  color: var(--ink-dim);
 }
 
 /* The window. `.new-workspace-panel` (above) already carries the surface,
@@ -3154,38 +3379,53 @@ code {
   transform: rotate(0deg);
 }
 
-.new-workspace-agent-list {
-  list-style: none;
-  margin: 10px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+/* 3-column tile grid — five agents land as 3 on top, 2 under. */
+.new-workspace-agent-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
 }
 
-.new-workspace-agent-row {
+.new-workspace-agent-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.new-workspace-agent-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 8px 12px;
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  padding: 2px 4px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.new-workspace-agent-row label {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 8px;
+  color: var(--ink);
   cursor: pointer;
 }
 
-.new-workspace-agent-row input[type="checkbox"] {
-  accent-color: var(--accent-select);
-  width: 15px;
-  height: 15px;
-  flex: 0 0 auto;
+.new-workspace-agent-tile:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.new-workspace-agent-tile.is-selected {
+  border-color: var(--accent-select);
+  background: color-mix(in srgb, var(--accent-select) 10%, transparent);
+}
+
+.new-workspace-agent-tile:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.new-workspace-agent-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
 }
 
 .new-workspace-agent-label {
@@ -5688,33 +5928,92 @@ code {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  /* 4px, up from 2: the rows are two-line cards now, and one wearing a full
+     gradient needs a little air around it or it bleeds into its neighbour. */
+  gap: 4px;
 }
 
 /* Founder ask, 2026-07-26: "make the session on the left a bit taller, and
    each session has its own color". The colour is `--session-tint`, set
    inline per row from a stable hash of the session id (see
    `SidebarSessionRow`), and it rides the rail the row already had —
-   dimmed at rest so the *on-screen* session still wins the eye. */
+   dimmed at rest so the *on-screen* session still wins the eye.
+
+   Taller again, same day and the same word ("This session must be a bit
+   taller"): the row is two lines now, its name over a mini map of its panes,
+   so the height is what the content needs rather than a padding number. */
 .session-row {
   position: relative;
   border-left: 2px solid color-mix(in srgb, var(--session-tint, var(--line)) 45%, transparent);
-  border-radius: 0 4px 4px 0;
+  border-radius: 0 6px 6px 0;
+  overflow: hidden;
 }
 
+/* The session on screen, in full (founder, 2026-07-26: "the session that is
+   inside must be selected with a full gradient blue"). Unlike the workspace
+   chip above — which is deliberately a *tint*, because a whole column of
+   chips shouldn't shout — exactly one session row is ever current inside the
+   selected workspace, so this one is the saturated thing on the panel and
+   nothing has to compete with it: a diagonal --brand-blue ramp, a soft drop
+   glow, and a hairline top highlight so it reads as a lit surface rather
+   than a flat swatch. The per-session tint rail steps aside here (it would
+   cut the gradient's own left edge with an unrelated hue); it is still what
+   distinguishes every OTHER row. */
 .session-row.is-current {
-  border-left-color: var(--session-tint, var(--accent-select));
-  background: color-mix(in srgb, var(--session-tint, var(--accent-select)) 12%, transparent);
+  border-left-color: transparent;
+  background: linear-gradient(135deg, #1e4f81 0%, var(--brand-blue) 52%, #5cabe4 100%);
+  box-shadow:
+    0 2px 12px rgba(61, 141, 203, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
 .session-row:hover {
   background: var(--panel-raised);
 }
 
+/* Same reason as the workspace chip's hover: a grey fill on the row itself
+   would erase the gradient. Brighten it instead. */
+.session-row.is-current:hover {
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.08)),
+    linear-gradient(135deg, #1e4f81 0%, var(--brand-blue) 52%, #5cabe4 100%);
+}
+
+/* The session's own hover close — the same treatment as the workspace row's
+   `.project-row-close`, floated over the row's top-right corner so the name
+   keeps its full width at rest. */
+.session-row-close {
+  position: absolute;
+  right: 3px;
+  top: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: var(--panel-raised);
+  color: var(--ink-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  opacity: 0;
+}
+
+.session-row:hover .session-row-close,
+.session-row-close:focus-visible {
+  opacity: 1;
+}
+
+.session-row-close:hover {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
+}
+
 .session-row-main {
   width: 100%;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 6px;
   background: transparent;
   border: none;
@@ -5722,7 +6021,15 @@ code {
   font-family: var(--mono);
   font-size: 11px;
   text-align: left;
-  padding: 7px 6px 7px 8px;
+  padding: 8px 8px 9px 9px;
+}
+
+/* Line one: the name, and the branch pushed to the far edge. */
+.session-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .session-row-name {
@@ -5731,19 +6038,32 @@ code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* 13px — the row's own 11px, +2 (founder, 2026-07-26). Its own declaration
+     rather than a bump on `.session-row-main`, so the branch chip and the
+     pane map keep the sizes they were tuned at. */
+  font-size: 13px;
   color: var(--ink-dim);
 }
 
-.session-row.is-current .session-row-name,
 .session-row:hover .session-row-name {
   color: var(--ink);
 }
 
-/* The branch reads as a fact about the session, not as a control: no
-   capsule, no hover state of its own, just the fork glyph and the name at
-   the quietest weight the panel has. Same idiom as the pane header's tag,
-   one step smaller and untinted — an engine colour here would claim the
-   branch belongs to one of the session's terminals. */
+.session-row.is-current .session-row-name {
+  color: #fff;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+/* The branch, as an actual chip (founder, 2026-07-26: "The current tag with
+   branch name should also be more visible"). It used to be bare --ink-faint
+   text next to the fork glyph — the quietest weight the panel has, which at
+   10px against a tinted row was effectively gone. Now it has its own
+   recessed ground and a readable ink, and on the current row it inverts to
+   translucent white so it stays legible on top of the gradient instead of
+   dissolving into it. Still untinted by engine: a colour here would claim
+   the branch belongs to one of the session's terminals rather than to the
+   session's root. */
 .session-row-branch {
   flex: 0 1 auto;
   min-width: 0;
@@ -5751,14 +6071,60 @@ code {
   align-items: center;
   gap: 4px;
   font-size: 10px;
-  color: var(--ink-faint);
+  font-weight: 600;
+  color: var(--ink-dim);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 4px;
+  padding: 1px 6px 1px 5px;
   white-space: nowrap;
-  max-width: 46%;
+  max-width: 52%;
+}
+
+.session-row:hover .session-row-branch {
+  color: var(--ink);
+}
+
+.session-row.is-current .session-row-branch {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.3);
 }
 
 .session-row-branch-glyph {
   flex: 0 0 auto;
-  opacity: 0.7;
+  opacity: 0.8;
+}
+
+/* Line two: the session's panes, as the layout (SidebarSessionRow's `shape`
+   — `gridShape`, the same function the real grid uses). One OmniAgent mark
+   per terminal in layout order, each one carrying its OWN live status colour
+   and animation, so the sidebar shows not just "this session is busy" but
+   which pane in which cell is. `--pane-cols` is set inline per row; the
+   leftover cells of a partly-filled rung are drawn as holes, exactly as
+   `buildGrid` pads them. */
+.session-row-panes {
+  display: grid;
+  grid-template-columns: repeat(var(--pane-cols, 1), 13px);
+  gap: 4px;
+  justify-content: start;
+}
+
+.session-row-pane-hole {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+}
+
+.session-row.is-current .session-row-pane-hole {
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* On the gradient, an unlit mark (`unknown` dims rather than lighting) has
+   nothing dark left to sit against — lift it back to legible. */
+.session-row.is-current .session-light[data-status="unknown"] {
+  opacity: 0.95;
 }
 
 /* The ellipsis has to live on this element, not on the flex row above it:
@@ -5778,7 +6144,9 @@ code {
   border-radius: 3px;
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 11px;
+  /* Matches `.session-row-name` — the text must not resize the moment you
+     double-click it. */
+  font-size: 13px;
   padding: 2px 4px;
 }
 

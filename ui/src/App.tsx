@@ -302,16 +302,9 @@ function App() {
     let cancelled = false;
 
     (async () => {
-      await reloadProjects();
-
-      try {
-        const roots = await rootsList();
-        if (!cancelled) setNeedsOnboarding(roots.length === 0);
-      } catch (err) {
-        console.error("failed to load project roots", err);
-        if (!cancelled) setNeedsOnboarding(false); // fail open — never trap the user behind a broken check
-      }
-
+      // The closed set is read BEFORE the project list loads: the sidebar
+      // must never paint every workspace and then collapse to the open ones
+      // a beat later — that flash read as "two different lists" on launch.
       try {
         const rawClosed = await settingsGet(CLOSED_WORKSPACES_SETTING_KEY);
         const closed = deserializeClosedWorkspaces(rawClosed);
@@ -320,6 +313,16 @@ function App() {
         // Fail open: showing a workspace the user closed is a small
         // annoyance, hiding one they didn't is lost work.
         console.error("failed to read closed_workspaces setting, showing every workspace", err);
+      }
+
+      await reloadProjects();
+
+      try {
+        const roots = await rootsList();
+        if (!cancelled) setNeedsOnboarding(roots.length === 0);
+      } catch (err) {
+        console.error("failed to load project roots", err);
+        if (!cancelled) setNeedsOnboarding(false); // fail open — never trap the user behind a broken check
       }
 
       try {
@@ -671,11 +674,11 @@ function App() {
       // session". A project with no panes at all starts one, named.
       const existingGroup = sessionGroupForNewPane(state.tabs, project.id, state.activeTabId);
 
-      // The approved-shape ladder tops out at 4x4 (`paneGrid.ts`'s
+      // The approved-shape ladder tops out at 2x4 (`paneGrid.ts`'s
       // `GRID_LADDER` — founder: "and then no more terminals are
-      // available"), so refuse the 17th pane instead of spawning a live
+      // available"), so refuse the 9th pane instead of spawning a live
       // session the grid has no approved shape for. Per SESSION, not per
-      // project or per app: a workspace can hold as many 16-pane sessions as
+      // project or per app: a workspace can hold as many 8-pane sessions as
       // the machine will take (`isUnderPressure` is the softer, advisory
       // warning about that).
       const inSession = state.tabs.filter(
@@ -847,6 +850,10 @@ function App() {
     async (project: ProjectInfo, engines: Engine[]) => {
       void reloadProjects();
       setSelectedProjectId(project.id);
+      // `add_project` upserts by folder basename, so re-adding a closed
+      // folder returns the id still sitting in the closed set — un-hide it,
+      // the same contract every other "opens the workspace" path honours.
+      reopenWorkspace(project.id);
 
       // Save selected agents
       await settingsSet("last_selected_agents", JSON.stringify(engines));
@@ -882,7 +889,7 @@ function App() {
 
       setView("workspace");
     },
-    [reloadProjects, createSessionTab, state.tabs],
+    [reloadProjects, createSessionTab, state.tabs, reopenWorkspace],
   );
 
   // ---- NewSessionModal's create (⌘N -> "Session") -----------------------
@@ -997,11 +1004,14 @@ function App() {
       if (result.created.length > 0) {
         void reloadProjects();
         setSelectedProjectId(result.created[0].id);
+        // Importing a previously closed folder reopens it, same as re-adding
+        // it via "+" — see `state/closedWorkspaces.ts`.
+        for (const project of result.created) reopenWorkspace(project.id);
       }
       const banner = importFailureBanner(result);
       if (banner) setErrorBanner(banner);
     },
-    [reloadProjects],
+    [reloadProjects, reopenWorkspace],
   );
 
   // `ProjectMenu`'s rename (founder ask, verbatim across two messages: the
@@ -1184,6 +1194,28 @@ function App() {
     [state.tabs, state.projects],
   );
 
+  // ---- closing one session (founder ask: "I must be able to close a
+  // session") — `closeWorkspace`'s cascade scoped to one pane group: kill
+  // every terminal in it, drop them from state. No closed-set bookkeeping —
+  // the workspace row stays, only this session's panes go.
+  const closeSession = useCallback(
+    async (project: ProjectInfo, sessionId: string) => {
+      const doomed = state.tabs.filter(
+        (t) => t.project === project.id && (t.group ?? UNGROUPED_SESSION_ID) === sessionId,
+      );
+      await Promise.all(
+        doomed.map((tab) =>
+          sessionKill(tab.id).catch((err) =>
+            console.error(`failed to kill session ${tab.id} while closing a session in ${project.label}`, err),
+          ),
+        ),
+      );
+      for (const tab of doomed) dispatch({ type: "tab/closed", id: tab.id });
+      setReviewTarget((target) => (doomed.some((t) => t.id === target?.id) ? null : target));
+    },
+    [state.tabs],
+  );
+
   const closeTab = useCallback(async (id: string) => {
     try {
       await sessionKill(id);
@@ -1334,6 +1366,7 @@ function App() {
           }}
           onRenameSession={renameSession}
           onCloseWorkspace={(p) => void closeWorkspace(p)}
+          onCloseSession={(p, sessionId) => void closeSession(p, sessionId)}
           authSignedIn={authSignedIn}
           authPersona={authPersona}
           onResetAuthGate={resetAuthGate}

@@ -7,11 +7,15 @@
 // > names. Just the session, so it's cleaner. Session and current github
 // > branch. On hover, it shows full details."
 //
-// So the row is exactly three things: the session's live light, its **name**,
-// and the **branch** its root folder is on. The "2 panes · Claude Code,
-// Shell" meta line and the nested list of every terminal in the session are
-// gone from here — both moved into the hover card, which is the surface that
-// asked for detail.
+// So the row is the session's **name**, the **branch** its root folder is on,
+// and — under both, since 2026-07-26 — a **mini map of its panes**: one
+// OmniAgent mark per terminal, in the same approved grid shape the real pane
+// grid uses, each tinted and animated by that terminal's own live status.
+// The "2 panes · Claude Code, Shell" meta line and the nested list of every
+// terminal in the session are still gone from here — both moved into the
+// hover card, which is the surface that asked for detail. The mini map is
+// not that list coming back: it is a picture of the layout with no names in
+// it, which is the one thing the hover card can't answer at a glance.
 //
 // Its own component (rather than more JSX inside `Sidebar.tsx`) for one
 // concrete reason: the branch comes from `useGitBranch`, a hook, and a
@@ -27,8 +31,8 @@
 // focused.
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { deriveSessionCard } from "../state/sessionHoverCard";
-import { mostSignificantStatus } from "../state/sessionStatus";
 import type { SessionGroup } from "../state/sessionGroups";
+import { gridShape } from "../state/paneGrid";
 import { useGitBranch } from "../lib/useGitBranch";
 import SessionHoverCard from "./SessionHoverCard";
 import SessionStatusLight from "./SessionStatusLight";
@@ -85,6 +89,10 @@ interface SidebarSessionRowProps {
   /** Commit a new name for the session. Called with the raw draft; the
    * reducer trims it and treats empty as "back to the default name". */
   onRename: (name: string) => void;
+  /** The hover-revealed session close (founder ask: "I must be able to
+   * close a session") — `Sidebar` confirms before anything is killed.
+   * Absent = no close control, same convention as `onCloseWorkspace`. */
+  onClose?: () => void;
 }
 
 export default function SidebarSessionRow({
@@ -94,6 +102,7 @@ export default function SidebarSessionRow({
   tint,
   onActivate,
   onRename,
+  onClose,
 }: SidebarSessionRowProps) {
   const branch = useGitBranch(session.cwd);
   const [renaming, setRenaming] = useState(false);
@@ -136,7 +145,17 @@ export default function SidebarSessionRow({
     if (draft.trim() !== session.label) onRename(draft);
   }
 
-  const status = mostSignificantStatus(session.tabs.map((t) => t.status));
+  // The row's mini pane-map (founder ask, 2026-07-26): one OmniAgent mark
+  // per terminal, "in their order in the layout and their current status,
+  // with the same effect, meaning it also stays in 1, 1x2, 2x2, 2x3, 2x4
+  // layout". So the shape comes from `gridShape` — the SAME function the
+  // real grid derives its arrangement from — and the leftover cells are
+  // drawn as holes exactly like `buildGrid` pads them, which is what keeps
+  // this a map of the layout rather than a row of dots that happens to have
+  // the right count. It also replaces the row's single aggregate light:
+  // eight marks that each say their own state say strictly more than one
+  // that says the most significant of them.
+  const shape = gridShape(session.tabs.length);
 
   return (
     <li
@@ -167,24 +186,51 @@ export default function SidebarSessionRow({
         />
       ) : (
         <button className="session-row-main" onClick={onActivate}>
-          {/* The session's aggregate light — its most significant terminal's
-              state. Keeps its own "on hover, it explains" tooltip (Bruno's
-              words), which is why the light carries the sentence rather than
-              the row. */}
-          <SessionStatusLight status={status} size={11} />
-          <span className="session-row-name" onDoubleClick={startRename} title="Double-click to rename">
-            {session.label}
-          </span>
-          {branch && (
-            <span className="session-row-branch" aria-label={`Branch ${branch}`}>
-              <Icon name="branch" size={13} className="session-row-branch-glyph" />
-              {/* Its own element so a long branch ellipsizes: an anonymous
-                  text node inside a flex container can't take
-                  `text-overflow`, and `feature/sidebar-sessions` was being
-                  cut mid-word against the panel edge. */}
-              <span className="session-row-branch-name">{branch}</span>
+          <span className="session-row-top">
+            <span className="session-row-name" onDoubleClick={startRename} title="Double-click to rename">
+              {session.label}
             </span>
-          )}
+            {branch && (
+              <span className="session-row-branch" aria-label={`Branch ${branch}`}>
+                <Icon name="branch" size={11} className="session-row-branch-glyph" />
+                {/* Its own element so a long branch ellipsizes: an anonymous
+                    text node inside a flex container can't take
+                    `text-overflow`, and `feature/sidebar-sessions` was being
+                    cut mid-word against the panel edge. */}
+                <span className="session-row-branch-name">{branch}</span>
+              </span>
+            )}
+          </span>
+          <span
+            className="session-row-panes"
+            style={{ "--pane-cols": shape.cols } as CSSProperties}
+          >
+            {Array.from({ length: shape.cols * shape.rows }, (_, i) => {
+              const pane = session.tabs[i];
+              return pane ? (
+                <SessionStatusLight key={pane.id} status={pane.status} size={13} />
+              ) : (
+                <span key={`hole-${i}`} className="session-row-pane-hole" aria-hidden="true" />
+              );
+            })}
+          </span>
+        </button>
+      )}
+      {/* A sibling of `.session-row-main`, not a child — a button can't nest
+          inside a button — revealed on the row's hover like the workspace
+          row's own close. */}
+      {onClose && !renaming && (
+        <button
+          className="session-row-close"
+          onClick={(e) => {
+            e.stopPropagation();
+            closeCard();
+            onClose();
+          }}
+          aria-label={`Close session ${session.label}`}
+          title="Close session"
+        >
+          <Icon name="x" size={12} />
         </button>
       )}
       {cardAnchor !== null && !renaming && (

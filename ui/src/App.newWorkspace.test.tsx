@@ -22,6 +22,7 @@
 // enough (`hidden`, `tabs`, `sessionLayouts`) to assert on.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CLOSED_WORKSPACES_SETTING_KEY } from "./state/closedWorkspaces";
 import type { Engine, ProjectInfo, TabInfo } from "./state/sessions";
 import type { LayoutPreset } from "./state/paneGrid";
 
@@ -157,6 +158,32 @@ describe("App — NewWorkspaceModal bulk-create orchestration", () => {
     // View flips back from map to workspace once the workspace is created.
     expect(screen.getByTestId("workspace-stub").dataset.hidden).toBe("false");
     expect(screen.getByTestId("brainmap-stub").dataset.hidden).toBe("true");
+  });
+
+  it("re-creating a previously closed workspace takes it back out of the closed set", async () => {
+    // `add_project` upserts by folder basename, so re-adding a closed folder
+    // comes back with the same project id — the row must un-hide, exactly
+    // like opening a terminal in it does (`state/closedWorkspaces.ts`).
+    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
+      Promise.resolve(key === CLOSED_WORKSPACES_SETTING_KEY ? JSON.stringify(["fresh"]) : null),
+    );
+    tauriMocks.sessionCreateMock.mockImplementation((_project: string, engine: string) =>
+      Promise.resolve(sessionInfoFor(engine)),
+    );
+
+    render(<App />);
+    await waitFor(() =>
+      expect(tauriMocks.settingsGetMock).toHaveBeenCalledWith(CLOSED_WORKSPACES_SETTING_KEY),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "create-workspace-claude-codex" }));
+
+    await waitFor(() => {
+      const writes = tauriMocks.settingsSetMock.mock.calls.filter(
+        ([key]) => key === CLOSED_WORKSPACES_SETTING_KEY,
+      );
+      expect(writes[writes.length - 1]?.[1]).toBe(JSON.stringify([]));
+    });
   });
 
   it("partial failure: one engine's session_create rejects — the rest still land, and an error banner names the failure", async () => {

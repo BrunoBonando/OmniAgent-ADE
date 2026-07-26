@@ -92,10 +92,22 @@ describe("SidebarSessionRow — the session and its branch, nothing else", () =>
     expect(onActivate).toHaveBeenCalled();
   });
 
-  it("carries the session's aggregate status light, explained on hover", () => {
+});
+
+describe("SidebarSessionRow — the pane map under the name", () => {
+  // Founder ask, 2026-07-26, verbatim: "under it, it must be all the
+  // omniagent logos that each represent their order in the layout and their
+  // current status, with the same effect, meaning it also stays in 1, 1x2,
+  // 2x2, 2x3, 2x4 layout."
+  beforeEach(() => {
+    useGitBranchMock.mockReset();
+    useGitBranchMock.mockReturnValue("main");
+  });
+
+  function rowFor(tabs: TabInfo[]) {
     const { container } = render(
       <SidebarSessionRow
-        session={session([tab({ id: "s1", status: "ready" }), tab({ id: "s2", status: "awaiting_approval" })])}
+        session={session(tabs)}
         projectLabel="api"
         isCurrent={false}
         tint="#78a9ff"
@@ -103,9 +115,58 @@ describe("SidebarSessionRow — the session and its branch, nothing else", () =>
         onRename={() => {}}
       />,
     );
-    const light = container.querySelector(".session-light")!;
-    expect(light).toHaveAttribute("data-status", "awaiting_approval");
-    expect(light.getAttribute("title")).toContain("approve");
+    return container;
+  }
+
+  function panes(count: number) {
+    return Array.from({ length: count }, (_, i) => tab({ id: `s${i}` }));
+  }
+
+  it("draws one mark per terminal, each carrying that terminal's own status", () => {
+    const container = rowFor([
+      tab({ id: "s1", status: "ready" }),
+      tab({ id: "s2", status: "awaiting_approval" }),
+    ]);
+    const marks = [...container.querySelectorAll(".session-light")];
+    expect(marks.map((m) => m.getAttribute("data-status"))).toEqual(["ready", "awaiting_approval"]);
+    // "with the same effect" — the light still explains itself on hover.
+    expect(marks[1].getAttribute("title")).toContain("approve");
+  });
+
+  it("keeps the marks in the panes' layout order", () => {
+    const container = rowFor([
+      tab({ id: "s1", status: "error" }),
+      tab({ id: "s2", status: "thinking" }),
+      tab({ id: "s3", status: "ready" }),
+    ]);
+    expect(
+      [...container.querySelectorAll(".session-light")].map((m) => m.getAttribute("data-status")),
+    ).toEqual(["error", "thinking", "ready"]);
+  });
+
+  it.each([
+    [1, 1],
+    [2, 2],
+    [3, 2],
+    [4, 2],
+    [5, 3],
+    [6, 3],
+    [7, 4],
+    [8, 4],
+  ])("lays %i terminals out in the same approved grid the pane grid uses (%i columns)", (count, cols) => {
+    const grid = rowFor(panes(count)).querySelector<HTMLElement>(".session-row-panes")!;
+    expect(grid.style.getPropertyValue("--pane-cols")).toBe(String(cols));
+  });
+
+  it("pads a partly-filled rung with holes, exactly like the real grid does", () => {
+    // 3 panes is a 2x2 with one cell empty — never a lopsided 2 + 1.
+    const container = rowFor(panes(3));
+    expect(container.querySelectorAll(".session-light")).toHaveLength(3);
+    expect(container.querySelectorAll(".session-row-pane-hole")).toHaveLength(1);
+  });
+
+  it("leaves no holes when the rung is full", () => {
+    expect(rowFor(panes(4)).querySelectorAll(".session-row-pane-hole")).toHaveLength(0);
   });
 });
 

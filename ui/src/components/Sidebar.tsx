@@ -129,6 +129,8 @@ import NewWorkspaceModal from "./NewWorkspaceModal";
 import ImportProjectsFlow from "./ImportProjectsFlow";
 import SidebarSessionRow from "./SidebarSessionRow";
 import CloseWorkspaceConfirm from "./CloseWorkspaceConfirm";
+import CloseSessionConfirm from "./CloseSessionConfirm";
+import type { SessionGroup } from "../state/sessionGroups";
 import AccountBadge from "./AccountBadge";
 import type { ImportBatchResult } from "../state/importState";
 import type { AgentsState, Agent } from "../state/agents";
@@ -217,6 +219,11 @@ interface SidebarProps {
    * `CloseWorkspaceConfirm` is accepted — `App.tsx` kills the terminals and
    * drops the row (see `state/closedWorkspaces.ts`). */
   onCloseWorkspace?: (project: ProjectInfo) => void;
+  /** The session row's hover-revealed close (founder ask: "I must be able
+   * to close a session"). Called only after `CloseSessionConfirm` is
+   * accepted — `App.tsx` kills that session's terminals; the workspace row
+   * stays. */
+  onCloseSession?: (project: ProjectInfo, sessionId: string) => void;
   authSignedIn: string | null;
   authPersona: string | null;
   onResetAuthGate: () => void;
@@ -246,6 +253,7 @@ export default function Sidebar({
   onNewSessionInProject,
   onRenameSession,
   onCloseWorkspace,
+  onCloseSession,
   authSignedIn,
   authPersona,
   onResetAuthGate,
@@ -257,6 +265,11 @@ export default function Sidebar({
   const [importOpen, setImportOpen] = useState(false);
   /** The workspace whose close is waiting on a confirmation, if any. */
   const [closingProject, setClosingProject] = useState<ProjectInfo | null>(null);
+  /** The session whose close is waiting on a confirmation, if any. */
+  const [closingSession, setClosingSession] = useState<{
+    project: ProjectInfo;
+    session: SessionGroup;
+  } | null>(null);
   const grouped = tabsByProject(tabs);
   const sessionsByProject = groupTabsBySession(tabs, activeTabId);
   // Which session the pane grid is showing for the selected workspace — the
@@ -545,6 +558,9 @@ export default function Sidebar({
                           isCurrent={isSelected && session.id === onScreenSession}
                           onActivate={() => onActivateTab(session.tabs[0].id)}
                           onRename={(name) => onRenameSession?.(project, session.id, name)}
+                          onClose={
+                            onCloseSession ? () => setClosingSession({ project, session }) : undefined
+                          }
                         />
                       ))}
                       {isSelected && onNewSessionInProject && (
@@ -598,6 +614,18 @@ export default function Sidebar({
             onImportCompleted(result);
           }}
           onClose={() => setImportOpen(false)}
+        />
+      )}
+      {closingSession && (
+        <CloseSessionConfirm
+          label={closingSession.session.label}
+          terminals={closingSession.session.tabs.length}
+          onConfirm={() => {
+            const { project, session } = closingSession;
+            setClosingSession(null);
+            onCloseSession?.(project, session.id);
+          }}
+          onCancel={() => setClosingSession(null)}
         />
       )}
       {closingProject && (

@@ -26,6 +26,16 @@
 // 3. *"on hover, it explains, of course"* — the status light explains
 //    itself on hover, and that is the only popover this header has.
 //
+// ## The status light left, then came straight back — bigger (2026-07-26)
+//
+// Bruno first asked to drop it for the animated pane border, then: "where's
+// the omniagent logo from the terminal title that changes its color
+// according to the status? it should be bigger and now it's gone!" So the
+// OmniAgent mark is back at the head of the bar, up from its old 15px to
+// 20px. Only the title-bar STRIP animation stayed gone — the border
+// (`Workspace.tsx`'s `pane-status-*` classes) still carries the full-pane
+// rendering of the same fact.
+//
 // ## The hover card left this header (2026-07-26, later the same day)
 //
 // It briefly lived here too: resting on the header opened a `SessionHoverCard`
@@ -48,15 +58,25 @@
 // repo has no tag, so its engine shows only in the card (and, until it is
 // renamed or auto-titled, in the header label, which still falls back to the
 // engine name).
+//
+// ## The tag is the AGENT now, not the branch (2026-07-26, latest round)
+//
+// Bruno: *"the current tag with the branch name should be replaced by the
+// name of the agent, with their respective colors and strong. exactly the
+// same way it shows the branch, but actually the name of the agent. And
+// where it currently holds the agent name should be removed."* So the tag
+// keeps its exact shape and its engine tint — what changed is the words in
+// it — and the `· Claude Code` suffix that used to trail the header label is
+// gone, because it was the same fact printed twice. Two things follow: this
+// header no longer reads git at all (`useGitBranch` left with the branch),
+// and the tag is now unconditional — every pane has an engine, where only a
+// pane inside a repo had a branch.
 import { useState } from "react";
 import { tabDisplayLabel, type Engine, type TabInfo } from "../state/sessions";
-import { statusPresentation } from "../state/sessionStatus";
-import { useGitBranch } from "../lib/useGitBranch";
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeId } from "../lib/terminalThemes";
 import { ENGINE_LABEL } from "../theme";
 import PaneMenu from "./PaneMenu";
 import SessionStatusLight from "./SessionStatusLight";
-import Icon from "./Icon";
 
 interface PaneHeaderProps {
   tab: TabInfo;
@@ -101,8 +121,6 @@ export default function PaneHeader({
   onChangeTheme,
   onOpenCodeReview,
 }: PaneHeaderProps) {
-  const branch = useGitBranch(tab.cwd);
-  const presentation = statusPresentation(tab.status);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -124,23 +142,12 @@ export default function PaneHeader({
       // red in the light below, which is the same fact in the language the
       // rest of the app now uses. See `state/sessions.ts`'s `TabInfo` doc.
       className={`pane-header${isFocused ? " is-focused" : ""}`}
-      // Founder ask, 2026-07-26: "Make the title bar of each terminal an
-      // animation similar to the logo status of the terminal." Same two
-      // attributes the light next to it already carries — the whole header
-      // strip then runs the same colour and the same rhythm in App.css, so a
-      // pane's state is readable from the bar itself, not just from a 15px
-      // mark. Decorative: `SessionStatusLight` below is the accessible
-      // rendering of this exact fact, and announcing it twice per pane is
-      // noise.
-      data-status={presentation.key}
-      data-motion={presentation.motion}
       onMouseDown={onFocus}
     >
       {/* The five-state light: the OmniAgent mark, tinted and animated by
-          this session's live status. Replaced the engine-coloured dot that
-          used to sit here — engine identity moved to the session tag's tint
-          and to the hover card's footer, see this file's module doc. */}
-      <SessionStatusLight status={tab.status} />
+          this session's live status. Bigger than the sidebar's 15px — the
+          header is where Bruno actually reads it. */}
+      <SessionStatusLight status={tab.status} size={20} />
       {renaming ? (
         <input
           className="pane-header-rename-input"
@@ -164,29 +171,16 @@ export default function PaneHeader({
         />
       ) : (
         <span className="pane-header-label" onDoubleClick={startRename} title="Double-click to rename">
-          <span className="pane-header-label-text">{tabDisplayLabel(tab)}</span>{" "}
-          {/* ponytail: the project name was here and repeated in every pane —
-              the sidebar already says which project this is. The agent is the
-              one fact that actually differs pane to pane. */}
-          <span className="pane-header-project">· {ENGINE_LABEL[tab.engine]}</span>
+          <span className="pane-header-label-text">{tabDisplayLabel(tab)}</span>
         </span>
       )}
       <span className="pane-header-spacer" />
-      {/* The session's branch tag (founder ask, 2026-07-26, verbatim:
-          "terminal title has a dropdown with main, remove it. This must be
-          connected to the session as a tag, that must be tied to the current
-          git branch"). Same live `git_branch` data as the pill it replaces —
-          what changed is that it no longer *looks* like a control: squared
-          off instead of a capsule, no hover/pointer affordance, no tooltip
-          promising a menu, and tinted with this session's engine colour so
-          the tag reads as belonging to the session rather than as something
-          to click. */}
-      {branch && (
-        <span className="pane-header-tag" data-engine={tab.engine} aria-label={`Branch ${branch}`}>
-          <Icon name="branch" size={13} className="pane-header-tag-glyph" />
-          {branch}
-        </span>
-      )}
+      {/* The pane's AGENT tag — the branch tag's exact shape and engine tint,
+          now saying which agent is running here (see the module doc). Still
+          not a control: no hover affordance, no tooltip promising a menu. */}
+      <span className="pane-header-tag" data-engine={tab.engine} aria-label={`Agent ${ENGINE_LABEL[tab.engine]}`}>
+        {ENGINE_LABEL[tab.engine]}
+      </span>
       {(onChangeEngine || onChangeTheme || onOpenCodeReview) && (
         <span className="pane-header-menu-anchor">
           <button

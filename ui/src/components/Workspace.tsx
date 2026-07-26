@@ -90,7 +90,7 @@ import "react-mosaic-component/react-mosaic-component.css";
 import EmptyWorkspace from "./EmptyWorkspace";
 import PaneHeader from "./PaneHeader";
 import Terminal from "./Terminal";
-import { paneIds, swapPaneIds, syncPaneTree, type LayoutPreset, type PaneTree } from "../state/paneGrid";
+import { isPaneHole, paneIds, swapPaneIds, syncPaneTree, type LayoutPreset, type PaneTree } from "../state/paneGrid";
 import {
   isUnderPressure,
   PRESSURE_THRESHOLD,
@@ -100,6 +100,7 @@ import {
   type TabInfo,
 } from "../state/sessions";
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
+import { statusPresentation } from "../state/sessionStatus";
 import type { TerminalThemeId } from "../lib/terminalThemes";
 import { ownsCtrlOnlyShortcut } from "../lib/keyboard";
 import type { AgentsState } from "../state/agents";
@@ -245,13 +246,48 @@ function ProjectPaneGrid({
           value={tree}
           onChange={(next: MosaicNode<string> | null) => setTree(next as PaneTree | null)}
           renderTile={(id, path) => {
+            // A cell no open session claims (`buildGrid`'s padding, paneGrid.ts) —
+            // the empty-workspace gradient sized to this one cell, carrying an
+            // "Add Terminal" button (founder, 2026-07-26: "on the blank space...
+            // a small square button with an image of a terminal and a text
+            // under saying: add Terminal"). Clicking it is exactly the pane
+            // header's split: one more terminal in this session, which lands
+            // in this very cell (`buildGrid` fills the hole first).
+            if (isPaneHole(id)) {
+              const project = projects.find((p) => p.id === projectId);
+              return (
+                <div className="pane-hole">
+                  {project && (
+                    <button
+                      type="button"
+                      className="pane-hole-add"
+                      onClick={() => onNewTabInProject(project)}
+                    >
+                      <span className="pane-hole-add-glyph" aria-hidden>
+                        &gt;_
+                      </span>
+                      Add Terminal
+                    </button>
+                  )}
+                </div>
+              );
+            }
             const tab = tabsById.get(id);
             if (!tab) return <div />; // transient desync (closed mid-reconcile) — next sync clears it
+            // The pane border is the session's status display (founder,
+            // 2026-07-26: "remove it from there [the title bar] and leave
+            // only in the border") — the same statusPresentation pair the
+            // sidebar light carries, as classes because className is the one
+            // channel MosaicWindow forwards. App.css's pane-status-border
+            // block turns them into the five colours and rhythms.
+            const status = statusPresentation(tab.status);
             return (
               <MosaicWindow<string>
                 path={path}
                 title={tabDisplayLabel(tab)}
-                className="pane-window"
+                className={`pane-window pane-status-${status.key} pane-motion-${status.motion}${
+                  tab.id === activeTabId ? " is-focused" : ""
+                }`}
                 // react-mosaic's own header drag is off: it only ever offered
                 // edge drops, which build a brand-new nested split — a shape
                 // `GRID_LADDER` would never produce, and the one interaction

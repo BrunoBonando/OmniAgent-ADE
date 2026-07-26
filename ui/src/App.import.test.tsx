@@ -16,6 +16,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProjectInfo } from "./state/sessions";
 import type { ImportBatchResult } from "./state/importState";
+import { CLOSED_WORKSPACES_SETTING_KEY } from "./state/closedWorkspaces";
 
 const tauriMocks = vi.hoisted(() => ({
   getBriefingMock: vi.fn(),
@@ -130,6 +131,32 @@ describe("App — import-projects orchestration (handleImportCompleted)", () => 
     await waitFor(() => expect(tauriMocks.listProjectsMock).toHaveBeenCalledTimes(2));
     // No failure banner for an all-success batch.
     expect(screen.queryByText(/couldn.t import/i)).not.toBeInTheDocument();
+  });
+
+  it("importing previously closed folders takes them back out of the closed set", async () => {
+    // Same contract as re-adding via "+" (`state/closedWorkspaces.ts`):
+    // import is one of the ways a closed workspace comes back.
+    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
+      Promise.resolve(
+        key === CLOSED_WORKSPACES_SETTING_KEY
+          ? JSON.stringify(["imported-a", "imported-b"])
+          : null,
+      ),
+    );
+
+    render(<App />);
+    await waitFor(() =>
+      expect(tauriMocks.settingsGetMock).toHaveBeenCalledWith(CLOSED_WORKSPACES_SETTING_KEY),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "sidebar-import-all-succeeded" }));
+
+    await waitFor(() => {
+      const writes = tauriMocks.settingsSetMock.mock.calls.filter(
+        ([key]) => key === CLOSED_WORKSPACES_SETTING_KEY,
+      );
+      expect(writes[writes.length - 1]?.[1]).toBe(JSON.stringify([]));
+    });
   });
 
   it("a partial failure reloads the project list AND shows a banner naming the failure, without blocking", async () => {

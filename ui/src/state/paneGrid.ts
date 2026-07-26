@@ -18,32 +18,54 @@ export type PaneTree =
   | string
   | { type: "split"; direction: "row" | "column"; children: PaneTree[]; splitPercentages?: number[] };
 
-/** Every leaf (session) id in the tree, left to right. */
+/** Prefix for a `buildGrid`-inserted filler leaf — a cell no open session
+ * claims, rendered by `Workspace.tsx` as an empty placeholder rather than a
+ * real pane. */
+const HOLE_PREFIX = "__pane-hole-";
+
+function holeId(i: number): string {
+  return `${HOLE_PREFIX}${i}`;
+}
+
+/** True for a hole leaf (`buildGrid`'s filler), never a real session id —
+ * `Workspace.tsx`'s `renderTile` uses this to render the empty-gradient
+ * placeholder instead of a `<Terminal>`. */
+export function isPaneHole(id: string): boolean {
+  return id.startsWith(HOLE_PREFIX);
+}
+
+/** Every real (non-hole) leaf id in the tree, in FILL order — top to bottom
+ * within a column, columns left to right (the tree is a row split of column
+ * splits, so depth-first IS that order). Exactly the order `buildGrid`
+ * consumes, so `buildGrid(paneIds(tree))` reproduces the same arrangement —
+ * the round-trip `syncPaneTree` relies on to keep surviving panes where they
+ * were. */
 export function paneIds(tree: PaneTree | null): string[] {
   if (tree === null) return [];
-  if (typeof tree === "string") return [tree];
+  if (typeof tree === "string") return isPaneHole(tree) ? [] : [tree];
   return tree.children.flatMap(paneIds);
 }
 
 // ----------------------------------------------------------------------
-// The approved grid shapes (founder brief, 2026-07-26, verbatim: "I want the
-// layout of the terminals to be consistent when adding a new tab... it should
-// automatically go to 2x1 and then 2x2 and the 3x2, 3x3, 4x3, 4x4. And then
-// no more terminals are available.")
+// The approved grid shapes (founder brief, 2026-07-26: "the only layouts
+// possible are: 1, 1x2, 2x2, 2x3, 2x4. And no more terminals are allowed" —
+// max 8 terminals a session can hold).
 //
 // `[cols, rows]`, ascending capacity. A session's grid is ALWAYS the first
 // rung that fits its pane count, so the arrangement is a pure function of
 // *how many* panes are open — never of the order they were opened in, which
 // path opened them (⌘T, a bulk create, a restore), or what the previous shape
-// happened to be. Two sessions with 5 panes each look identical.
+// happened to be. A count that doesn't exactly fill a rung does NOT shrink
+// the shape down to what's there — `buildGrid` below pads the leftover cells
+// with holes ("if a number of terminals is not even, it's okay to have a
+// hole in the matrix"), so e.g. 3 panes always render as a real 2x2, one
+// cell empty, never a lopsided row of 2 plus a lone 1.
 const GRID_LADDER = [
   [1, 1],
   [2, 1],
   [2, 2],
   [3, 2],
-  [3, 3],
-  [4, 3],
-  [4, 4],
+  [4, 2],
 ] as const;
 
 /** Panes one session can hold — the last rung's capacity. The open-a-terminal
@@ -51,7 +73,7 @@ const GRID_LADDER = [
  * still lays out any excess (in more 4-wide rows) rather than dropping a live
  * session on the floor if one ever arrives another way (a restore of an older,
  * uncapped workspace). */
-export const MAX_PANES = 16;
+export const MAX_PANES = 8;
 
 /** The approved shape for `count` panes. */
 export function gridShape(count: number): { cols: number; rows: number } {
@@ -60,36 +82,45 @@ export function gridShape(count: number): { cols: number; rows: number } {
 }
 
 /**
- * Arranges `ids` into their approved grid: rows of `gridShape().cols`, left
- * to right, top to bottom, stacked in a column split. A single row needs no
- * column wrapper, and a row holding exactly one id renders as a bare leaf
- * rather than a pointless 1-child split.
+ * Arranges `ids` into their approved grid, COLUMN-major: `gridShape`'s
+ * columns side by side (a row split), each column filled top to bottom (a
+ * column split), any leftover cells padded with holes — always the complete
+ * rung's rectangle, never a short row.
+ *
+ * The column-major fill is the founder's placement rule (2026-07-26): a new
+ * terminal lands at the TOP of a brand-new right-hand column when the grid
+ * was full, or drops into the bottom hole when it wasn't — and every
+ * already-open terminal stays exactly where it was. The hole itself doubles
+ * as the "Add Terminal" affordance (`Workspace.tsx`'s hole tile).
  *
  * This is the ONLY function in this file that decides a shape — `syncPaneTree`
  * below routes every add and every close through it, so no caller can produce
  * an unapproved arrangement.
  *
- * ponytail: a shape change moves panes between rows, and
- * react-mosaic-component keys its split nodes by tree path (see
- * `Workspace.tsx`'s module doc), so the panes that change row are remounted —
- * their xterm loses its scrollback, while tmux keeps the session and repaints
- * the visible screen on the resize that every reflow causes. Within one rung
- * every full row keeps its path, so an add costs at most the one pane that was
- * alone on the last row. Upgrade path if the scrollback loss ever bites: a
- * `session_snapshot` command over `tmux capture-pane -p -e`, written into
- * xterm on mount.
+ * ponytail: react-mosaic-component keys split nodes by tree path (see
+ * `Workspace.tsx`'s module doc), so a reflow that restacks a pane into a
+ * different column remounts it — its xterm loses scrollback, while tmux keeps
+ * the session and repaints on the resize every reflow causes. Column-major
+ * growth makes that rare: adding or dropping a whole column (4->5, 5->4,
+ * 6->7…) keeps every surviving leaf's path, so only the 2->3 restack (the
+ * side-by-side pair becomes the first stacked column) still pays. Upgrade
+ * path if the scrollback loss ever bites: a `session_snapshot` command over
+ * `tmux capture-pane -p -e`, written into xterm on mount.
  */
 export function buildGrid(ids: string[]): PaneTree | null {
   if (ids.length === 0) return null;
   if (ids.length === 1) return ids[0];
 
-  const { cols } = gridShape(ids.length);
-  const rows: PaneTree[] = [];
-  for (let i = 0; i < ids.length; i += cols) {
-    const rowIds = ids.slice(i, i + cols);
-    rows.push(rowIds.length === 1 ? rowIds[0] : { type: "split", direction: "row", children: rowIds });
+  const { cols, rows } = gridShape(ids.length);
+  const cells = ids.slice();
+  for (let i = 0; cells.length < cols * rows; i++) cells.push(holeId(i));
+
+  const colNodes: PaneTree[] = [];
+  for (let i = 0; i < cells.length; i += rows) {
+    const colCells = cells.slice(i, i + rows);
+    colNodes.push(colCells.length === 1 ? colCells[0] : { type: "split", direction: "column", children: colCells });
   }
-  return rows.length === 1 ? rows[0] : { type: "split", direction: "column", children: rows };
+  return { type: "split", direction: "row", children: colNodes };
 }
 
 /** Rewrites every leaf id through `fn`, keeping the tree's exact shape,
@@ -173,14 +204,14 @@ export function syncPaneTree(tree: PaneTree | null, desiredIds: string[]): PaneT
 // a grid completely, so a card can never promise a shape the grid won't
 // produce: pick "6" and you get the 3x2 `gridShape(6)` describes, because the
 // grid derives its own shape from the pane count either way.
-export const LAYOUT_PRESETS = [1, 2, 4, 6, 9] as const;
+export const LAYOUT_PRESETS = [1, 2, 4, 6, 8] as const;
 export type LayoutPreset = (typeof LAYOUT_PRESETS)[number];
 
 /** The plain-language caption the modals show under whichever LAYOUT card is
  * currently selected (the reference screenshot's own example: "2×2 grid
  * layout" under the selected "4" card). */
 export function layoutCaption(preset: LayoutPreset): string {
-  const { rows, cols } = gridShape(preset);
   if (preset === 1) return "Single terminal";
+  const { rows, cols } = gridShape(preset);
   return rows === 1 ? "Side-by-side split" : `${rows}×${cols} grid layout`;
 }

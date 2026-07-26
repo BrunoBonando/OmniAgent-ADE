@@ -67,48 +67,54 @@ describe("PaneHeader", () => {
     expect(screen.queryByText("claude")).not.toBeInTheDocument();
   });
 
-  it("shows the git branch as a session tag when useGitBranch resolves one", () => {
-    useGitBranchMock.mockReturnValue("main");
+  it("names the agent in the tag the branch used to occupy", () => {
     setup();
-    const tag = screen.getByLabelText("Branch main");
+    const tag = screen.getByLabelText("Agent Claude Code");
     expect(tag).toHaveClass("pane-header-tag");
-    expect(tag.textContent).toContain("main");
+    expect(tag.textContent).toBe("Claude Code");
   });
 
-  it("renders no branch tag when there is none", () => {
-    useGitBranchMock.mockReturnValue(null);
+  it("never shows the git branch — the tag is the agent now", () => {
+    useGitBranchMock.mockReturnValue("main");
     setup();
+    expect(screen.queryByText("main")).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/^Branch /)).not.toBeInTheDocument();
   });
 
-  describe("the branch is a tag on the session, not a dropdown", () => {
-    // Founder ask, verbatim: "terminal title has a dropdown with main,
-    // remove it. This must be connected to the session as a tag, that must
-    // be tied to the current git branch."
-    beforeEach(() => useGitBranchMock.mockReturnValue("main"));
+  it("tags every pane, including one whose cwd is not a repo", () => {
+    // The branch tag was conditional (no repo, no tag). Every pane has an
+    // engine, so this one never goes missing.
+    useGitBranchMock.mockReturnValue(null);
+    setup({ tab: tab({ engine: "shell" }) });
+    expect(screen.getByLabelText("Agent Shell")).toBeInTheDocument();
+  });
 
+  describe("the agent tag is a tag, not a dropdown", () => {
+    // Founder ask, verbatim: "the current tag with the branch name should be
+    // replaced by the name of the agent, with their respective colors and
+    // strong. exactly the same way it shows the branch" — including the
+    // branch tag's own no-control-affordance rules.
     it("is not a control: no button, no menu semantics, no click affordance", () => {
       setup();
-      const tag = screen.getByLabelText("Branch main");
+      const tag = screen.getByLabelText("Agent Claude Code");
       expect(tag.tagName).toBe("SPAN");
       expect(tag).not.toHaveAttribute("aria-haspopup");
       expect(tag).not.toHaveAttribute("role");
-      // The old pill's `title="git branch: main"` promised something on
-      // click; the hover card explains instead.
       expect(tag).not.toHaveAttribute("title");
     });
 
-    it("carries the session's engine so the tag is tinted with the engine colour the status light gave up", () => {
+    it("carries the engine so the tag wears that agent's own colour", () => {
       setup({ tab: tab({ engine: "codex" }) });
-      expect(screen.getByLabelText("Branch main")).toHaveAttribute("data-engine", "codex");
+      expect(screen.getByLabelText("Agent Codex")).toHaveAttribute("data-engine", "codex");
     });
   });
 
   it("says a session needs attention through its light, not a second red dot", () => {
     // 2026-07-26: the latched `needsAttention` badge folded into the
-    // five-state status (see state/sessions.ts's TabInfo doc). The header
-    // must carry that meaning exactly once — the light — with no separate
-    // attention marker beside it.
+    // five-state status. The light briefly left for the pane border, then
+    // came straight back ("it should be bigger and now it's gone!") — the
+    // header carries that meaning exactly once, in the light, with no
+    // separate attention marker beside it.
     const { rerender } = render(
       <PaneHeader
         tab={tab({ status: "thinking" })}
@@ -197,20 +203,20 @@ describe("PaneHeader", () => {
     expect(screen.getByText("claude").closest(".pane-header")).toHaveClass("is-focused");
   });
 
-  describe("the five-state status light (the OmniAgent mark)", () => {
+  describe("the five-state status light (the OmniAgent mark), back and bigger (2026-07-26)", () => {
+    // The light left for the pane border, then Bruno: "where's the omniagent
+    // logo from the terminal title that changes its color according to the
+    // status? it should be bigger and now it's gone!" Only the title-bar
+    // STRIP animation (data-status/data-motion on the header itself) stayed
+    // gone — the border still renders the full-pane version of this fact.
     function light() {
-      return document.querySelector(".session-light")!;
+      return document.querySelector<HTMLElement>(".session-light")!;
     }
 
-    it("replaces the old engine-coloured dot", () => {
+    it("renders the mark, bigger than the 15px default", () => {
       setup();
-      expect(document.querySelector(".pane-header-dot")).toBeNull();
       expect(light()).toBeInTheDocument();
-    });
-
-    it("renders the mark and the animated fill the mask needs", () => {
-      setup();
-      expect(light().querySelector(".session-light-mark .session-light-fill")).not.toBeNull();
+      expect(light().style.getPropertyValue("--light-size")).toBe("20px");
     });
 
     it.each([
@@ -231,34 +237,19 @@ describe("PaneHeader", () => {
       expect(light()).toHaveAttribute("data-motion", "steady");
     });
 
-    // "Make the title bar of each terminal an animation similar to the logo
-    // status" (founder, 2026-07-26) — the header carries the same pair, so
-    // App.css can run the same colour and rhythm along the whole bar. If
-    // these ever disagree, a pane's strip is lying about its own state.
-    it.each([
-      ["tool_execution", "chase"],
-      ["error", "flash"],
-      [undefined, "steady"],
-    ] as const)("runs the title bar on the same state as the mark (%s)", (status, motion) => {
-      setup({ tab: tab({ status }) });
+    it("keeps the title-bar strip animation off the header itself", () => {
+      setup({ tab: tab({ status: "tool_execution" }) });
       const header = document.querySelector(".pane-header")!;
-      expect(header).toHaveAttribute("data-status", status ?? "unknown");
-      expect(header).toHaveAttribute("data-motion", motion);
-      expect(header.getAttribute("data-status")).toBe(light().getAttribute("data-status"));
-    });
-
-    it("explains itself to a screen reader as well as on hover", () => {
-      setup({ tab: tab({ status: "awaiting_approval" }) });
-      const img = screen.getByRole("img", { name: /needs approval/i });
-      expect(img.getAttribute("aria-label")).toContain("approve");
+      expect(header).not.toHaveAttribute("data-status");
+      expect(header).not.toHaveAttribute("data-motion");
     });
   });
 
   describe("no hover card here any more — it belongs to the sidebar's session row", () => {
     // Founder, 2026-07-26: "The hover part is currently wrong: it's not on
-    // the terminal itself, but on session menu on the left." What survived
-    // on this header is the status light's own explanation, which is a
-    // different affordance ("on hover, it explains, of course").
+    // the terminal itself, but on session menu on the left." (The status
+    // light's own tooltip briefly survived here too, until the light itself
+    // left for the pane border later the same day.)
     beforeEach(() => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       useGitBranchMock.mockReturnValue("main");
@@ -271,12 +262,6 @@ describe("PaneHeader", () => {
       fireEvent.mouseEnter(header);
       act(() => void vi.advanceTimersByTime(2000));
       expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
-    });
-
-    it("still explains the session's state on the light itself", () => {
-      setup({ tab: tab({ status: "tool_execution" }) });
-      const light = document.querySelector(".session-light")!;
-      expect(light.getAttribute("title")).toContain("Running a command or writing files right now.");
     });
   });
 

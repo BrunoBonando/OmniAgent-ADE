@@ -126,8 +126,8 @@ describe("App — instant-default-engine new tab", () => {
     });
   });
 
-  it(`refuses the ${MAX_PANES + 1}th terminal in one session — the approved shapes stop at 4x4`, async () => {
-    // Founder, 2026-07-26: "...4x3, 4x4. And then no more terminals are
+  it(`refuses the ${MAX_PANES + 1}th terminal in one session — the approved shapes stop at 2x4`, async () => {
+    // Founder, 2026-07-26: "...2x3, 2x4. And no more terminals are
     // available." The ceiling is per SESSION (the unit a grid renders), and it
     // refuses BEFORE spawning — a live PTY the grid has no approved shape for
     // would be worse than the refusal.

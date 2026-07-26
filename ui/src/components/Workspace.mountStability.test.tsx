@@ -39,7 +39,7 @@ import { render } from "@testing-library/react";
 import { useEffect } from "react";
 import { Mosaic, MosaicWindow, type MosaicNode } from "react-mosaic-component";
 import { describe, expect, it, vi } from "vitest";
-import { buildGrid, syncPaneTree, type PaneTree } from "../state/paneGrid";
+import { buildGrid, isPaneHole, syncPaneTree, type PaneTree } from "../state/paneGrid";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
 import { initialAgentsState } from "../state/agents";
 
@@ -79,16 +79,22 @@ function Probe({ id }: { id: string }) {
   return <div>{id}</div>;
 }
 
+/** Mirrors `Workspace.tsx`'s own `renderTile`: a hole (`buildGrid`'s padding
+ * for a rung a pane count doesn't fill exactly) never mounts a pane. */
 function Harness({ tree }: { tree: PaneTree | null }) {
   return (
     <Mosaic<string>
       value={tree as MosaicNode<string> | null}
       onChange={() => {}}
-      renderTile={(id, path) => (
-        <MosaicWindow<string> path={path} title={id}>
-          <Probe id={id} />
-        </MosaicWindow>
-      )}
+      renderTile={(id, path) =>
+        isPaneHole(id) ? (
+          <div />
+        ) : (
+          <MosaicWindow<string> path={path} title={id}>
+            <Probe id={id} />
+          </MosaicWindow>
+        )
+      }
     />
   );
 }
@@ -97,14 +103,11 @@ describe("mount stability against the real react-mosaic-component library", () =
   /** ids "1".."n", the pane set a session holds at that count. */
   const ids = (n: number) => Array.from({ length: n }, (_, i) => String(i + 1));
 
-  it("adding a pane WITHIN a rung costs at most the one pane sharing its row", () => {
-    // 7 -> 8 -> 9 panes, all three the 3x3 rung. Every full row (1-2-3,
-    // 4-5-6) keeps its exact tree path and its live terminal. The only pane
-    // that pays is the one that was ALONE on the last row: a solitary pane
-    // renders as a bare leaf (the codebase's "no pointless single-child
-    // split" rule), so gaining a neighbour turns it into a real row split and
-    // React discards it. "8" joining "7" costs "7"; "9" joining an existing
-    // 2-wide row costs nobody.
+  it("adding a pane WITHIN a rung costs only the pane that fills the hole", () => {
+    // 7 -> 8 panes, both the 4x2 rung: 7 renders with a hole in the last
+    // cell (`buildGrid`'s padding), and 8 just replaces that hole with a
+    // real pane. Every real pane keeps its own leaf key regardless of what
+    // its row's last sibling is, so nothing already open moves.
     mounts = [];
     let tree: PaneTree | null = buildGrid(ids(7));
     const { rerender } = render(<Harness tree={tree} />);
@@ -112,17 +115,14 @@ describe("mount stability against the real react-mosaic-component library", () =
 
     tree = syncPaneTree(tree, ids(8));
     rerender(<Harness tree={tree} />);
-    expect(mounts.slice(7)).toEqual(["7", "8"]);
-
-    tree = syncPaneTree(tree, ids(9));
-    rerender(<Harness tree={tree} />);
-    expect(mounts.slice(9)).toEqual(["9"]); // nothing already open moved
+    expect(mounts.slice(7)).toEqual(["8"]);
   });
 
-  it("crossing a rung remounts only the panes whose ROW changes", () => {
-    // 4 panes (2x2: rows [1,2] [3,4]) -> 5 panes (3x2: rows [1,2,3] [4,5]).
-    // "3" moves up into the first row and "5" is new; "1", "2" and "4" keep
-    // their row and their live terminal.
+  it("crossing a rung UP (4 -> 5) adds a column and remounts nothing", () => {
+    // 4 panes (columns [1,2] [3,4]) -> 5 panes (+ column [5,hole]). Column-
+    // major growth means the existing columns keep their exact tree paths —
+    // only the new pane mounts. This is the payoff of the founder's
+    // "new terminal always starts top right" placement rule.
     mounts = [];
     let tree: PaneTree | null = buildGrid(ids(4));
     const { rerender } = render(<Harness tree={tree} />);
@@ -130,7 +130,7 @@ describe("mount stability against the real react-mosaic-component library", () =
 
     tree = syncPaneTree(tree, ids(5));
     rerender(<Harness tree={tree} />);
-    expect(mounts.slice(4).sort()).toEqual(["3", "5"]);
+    expect(mounts.slice(4)).toEqual(["5"]);
   });
 
   it("the first split (1 pane -> 2) remounts nothing", () => {
@@ -144,10 +144,10 @@ describe("mount stability against the real react-mosaic-component library", () =
     expect(mounts).toEqual(["a", "b"]);
   });
 
-  it("closing the last pane of a row leaves the rows above it mounted", () => {
-    // 5 panes (rows [1,2,3] [4,5]) -> close "5" -> 4 panes (rows [1,2] [3,4]).
-    // The panes that stay in the same row keep their terminals; "3" moves down
-    // a row and pays for it.
+  it("crossing a rung DOWN (5 -> 4) drops the extra column and remounts nothing", () => {
+    // 5 panes (columns [1,2] [3,4] [5,hole]) -> close "5" -> the third column
+    // simply disappears; columns [1,2] and [3,4] keep their paths and their
+    // live terminals.
     mounts = [];
     let tree: PaneTree | null = buildGrid(ids(5));
     const { rerender } = render(<Harness tree={tree} />);
@@ -155,7 +155,7 @@ describe("mount stability against the real react-mosaic-component library", () =
 
     tree = syncPaneTree(tree, ["1", "2", "3", "4"]);
     rerender(<Harness tree={tree} />);
-    expect(mounts.slice(5)).toEqual(["3"]);
+    expect(mounts.slice(5)).toEqual([]);
   });
 
   it("resizing (splitPercentages only) never remounts any pane", () => {

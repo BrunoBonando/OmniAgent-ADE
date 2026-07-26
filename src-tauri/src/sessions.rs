@@ -827,6 +827,18 @@ struct SessionActivity {
     tmux_session: Option<String>,
     /// When the PTY last produced any bytes.
     last_output: Mutex<Instant>,
+    /// When the user last typed into this session ([`SessionManager::write`]).
+    /// `None` until they first do.
+    ///
+    /// Exists because the engines echo: every keystroke makes a `claude`/
+    /// `codex` TUI repaint its input box, so a person typing a prompt IS
+    /// "sustained output" to the activity heuristic, and the light (and since
+    /// 2026-07-26, the whole pane border) lit up as busy while they typed.
+    /// Founder, verbatim: "I also don't want the executing effect to be
+    /// triggered when I'm typing." [`status_from_output_activity`] therefore
+    /// refuses to call the session busy within [`TYPING_ECHO_GRACE`] of the
+    /// last keystroke — see that constant for the trade-off.
+    last_user_input: Mutex<Option<Instant>>,
     /// When the *current* run of continuous output began — reset whenever a
     /// gap longer than [`OUTPUT_QUIET_THRESHOLD`] breaks the run. Together
     /// with `last_output` this distinguishes "genuinely busy" from "an idle
@@ -903,6 +915,7 @@ impl SessionActivity {
             engine,
             tmux_session,
             last_output: Mutex::new(Instant::now()),
+            last_user_input: Mutex::new(None),
             busy_since: Mutex::new(None),
             attention: AtomicBool::new(false),
             error: AtomicBool::new(false),
@@ -934,6 +947,9 @@ impl SessionActivity {
     /// there is no screen to ask, so the write is all we have and the latch is
     /// cleared the old way.
     fn mark_user_input(&self) {
+        if let Ok(mut last) = self.last_user_input.lock() {
+            *last = Some(Instant::now());
+        }
         self.attention.store(false, Ordering::Relaxed);
         self.clear_marker_window.store(true, Ordering::Relaxed);
         if self.tmux_session.is_some() {
@@ -3283,6 +3299,29 @@ const OUTPUT_QUIET_THRESHOLD: Duration = Duration::from_millis(700);
 /// rely on any of this: they get the exact foreground-command answer.
 const SUSTAINED_ACTIVITY_MIN: Duration = Duration::from_millis(1000);
 
+/// How long after a keystroke the activity heuristic refuses to call the
+/// session busy (founder, 2026-07-26: "I also don't want the executing
+/// effect to be triggered when I'm typing").
+///
+/// The problem it solves: the engines echo. Each keystroke makes a
+/// `claude`/`codex` TUI repaint its input box, so someone typing at a normal
+/// rhythm (a keystroke every few hundred ms) produces exactly the sustained
+/// output run that [`status_from_output_activity`] reads as busy — the pane
+/// lit up as "thinking" for the duration of every prompt the user typed.
+/// While they keep typing, every keystroke re-arms this grace, so the light
+/// stays quiet no matter how long the prompt; once they stop, the echo stops
+/// with them and the quiet threshold wins anyway.
+///
+/// One second, same order as [`SUSTAINED_ACTIVITY_MIN`] and a judgment call
+/// rather than a measurement: long enough to cover an engine's trailing
+/// echo repaints, short enough that real work the user kicks off with Enter
+/// shows busy at most a second later than it otherwise would (the run
+/// clock keeps counting through the grace — suppression hides the label,
+/// it does not reset the run). Known, accepted edge: typing a follow-up
+/// while the engine is genuinely streaming dips the light to ready for
+/// about a second; it self-corrects the moment the typing pauses.
+const TYPING_ECHO_GRACE: Duration = Duration::from_millis(1000);
+
 /// Foreground commands that mean "this pane is sitting at a prompt". `-zsh`
 /// / `-bash` are the login-shell argv[0] convention; `login` is what macOS
 /// puts in front of a login shell.
@@ -3345,6 +3384,21 @@ fn status_from_output_activity(activity: &SessionActivity, now: Instant) -> Sess
         .unwrap_or_else(|e| *e.into_inner());
     if now.saturating_duration_since(last) >= OUTPUT_QUIET_THRESHOLD {
         return SessionStatus::Ready;
+    }
+    // Output right behind the user's own keystrokes is (or at least may be)
+    // the engine echoing them, not the engine working — see
+    // [`TYPING_ECHO_GRACE`]. The run clock is left alone on purpose: the
+    // moment the grace expires, a genuinely busy session is already past
+    // SUSTAINED_ACTIVITY_MIN and flips busy immediately.
+    let typed = activity
+        .last_user_input
+        .lock()
+        .map(|g| *g)
+        .unwrap_or_else(|e| *e.into_inner());
+    if let Some(typed) = typed {
+        if now.saturating_duration_since(typed) < TYPING_ECHO_GRACE {
+            return SessionStatus::Ready;
+        }
     }
     let busy_since = activity
         .busy_since
@@ -5206,6 +5260,53 @@ mod tests {
         );
     }
 
+    /// Founder, 2026-07-26: "I also don't want the executing effect to be
+    /// triggered when I'm typing." Typing makes the engine echo, echo is
+    /// output, and output used to read as busy — [`TYPING_ECHO_GRACE`] is
+    /// the rule that stops it, without resetting the run clock.
+    #[test]
+    fn typing_echo_does_not_read_as_busy_but_real_work_resumes_after_the_grace() {
+        let activity = SessionActivity::new("claude".into(), None, true);
+        let now = Instant::now();
+        // A sustained output run is in progress...
+        *activity.last_output.lock().unwrap() = now;
+        *activity.busy_since.lock().unwrap() = Some(now - Duration::from_secs(3));
+        assert_eq!(
+            status_from_output_activity(&activity, now),
+            SessionStatus::Thinking
+        );
+
+        // ...but the user just typed, so that output is (may be) echo.
+        *activity.last_user_input.lock().unwrap() = Some(now);
+        assert_eq!(
+            status_from_output_activity(&activity, now),
+            SessionStatus::Ready,
+            "output on the heels of a keystroke must not light the pane up"
+        );
+        assert_eq!(
+            status_from_output_activity(&activity, now + TYPING_ECHO_GRACE / 2),
+            SessionStatus::Ready,
+            "still inside the grace"
+        );
+
+        // Once the grace passes and output continues, busy resumes at once —
+        // the run clock kept counting through the suppression.
+        let after = now + TYPING_ECHO_GRACE;
+        *activity.last_output.lock().unwrap() = after;
+        assert_eq!(
+            status_from_output_activity(&activity, after),
+            SessionStatus::Thinking,
+            "a genuinely working engine flips busy the moment the grace ends"
+        );
+
+        // And mark_user_input (the real write path) arms the same grace.
+        activity.mark_user_input();
+        assert_eq!(
+            status_from_output_activity(&activity, Instant::now()),
+            SessionStatus::Ready
+        );
+    }
+
     /// The measured idle-`claude` shape (module docs / [`SUSTAINED_ACTIVITY_MIN`]):
     /// a ~50 ms burst of TUI repaint every few seconds. It must NOT read as
     /// executing — that flicker is exactly what this rule exists to kill.
@@ -5311,9 +5412,18 @@ mod tests {
             SessionStatus::AwaitingApproval
         );
 
-        // 5. the user types: both latches drop, back to the live signal
+        // 5. the user types: both latches drop, and for the length of the
+        //    typing grace the ongoing output is treated as their own echo
+        //    ([`TYPING_ECHO_GRACE`]) — green, not busy.
         activity.mark_user_input();
-        assert_eq!(compute_status(&activity, None, now), SessionStatus::Thinking);
+        let typed = activity.last_user_input.lock().unwrap().unwrap();
+        assert_eq!(compute_status(&activity, None, typed), SessionStatus::Ready);
+
+        // 6. the grace expires with output still flowing: back to the live
+        //    signal, immediately — the run clock counted right through.
+        let after = typed + TYPING_ECHO_GRACE;
+        *activity.last_output.lock().unwrap() = after;
+        assert_eq!(compute_status(&activity, None, after), SessionStatus::Thinking);
     }
 
     /// A shell session, same chain, without tmux: the states it can reach are

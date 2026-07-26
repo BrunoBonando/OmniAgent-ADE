@@ -41,9 +41,11 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() =
 vi.mock("./components/Sidebar", () => ({
   default: function SidebarStub(props: {
     projects: ProjectInfo[];
+    tabs: TabInfo[];
     selectedProjectId: string | null;
     onNewTabInProject: (p: ProjectInfo) => void;
     onCloseWorkspace?: (p: ProjectInfo) => void;
+    onCloseSession?: (p: ProjectInfo, sessionId: string) => void;
   }) {
     return (
       <div>
@@ -53,6 +55,14 @@ vi.mock("./components/Sidebar", () => ({
             {p.id}
             <button onClick={() => props.onNewTabInProject(p)}>{`new-tab-${p.id}`}</button>
             <button onClick={() => props.onCloseWorkspace?.(p)}>{`close-workspace-${p.id}`}</button>
+            {props.tabs
+              .filter((t) => t.project === p.id)
+              .map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => props.onCloseSession?.(p, t.group ?? "")}
+                >{`close-session-of-${t.id}`}</button>
+              ))}
           </div>
         ))}
       </div>
@@ -212,6 +222,24 @@ describe("App — closing a workspace", () => {
   });
 });
 
+describe("App — closing a session (founder ask: 'I must be able to close a session')", () => {
+  beforeEach(resetMocks);
+
+  it("kills every terminal in that session, leaves other workspaces running, and keeps the workspace row", async () => {
+    render(<App />);
+    await openTerminal("p1");
+    await openTerminal("p1"); // ⌘T joins the same session
+    await openTerminal("p2");
+
+    fireEvent.click(screen.getByRole("button", { name: "close-session-of-sess-1" }));
+
+    await waitFor(() => expect(liveTabs()).toEqual(["sess-3@p2"]));
+    expect(tauriMocks.sessionKillMock.mock.calls.map(([id]) => id).sort()).toEqual(["sess-1", "sess-2"]);
+    // Closing a session is not closing the workspace: the row stays.
+    expect(workspaceIds()).toEqual(["p1", "p2"]);
+  });
+});
+
 describe("App — a closed workspace stays closed, and comes back when reopened", () => {
   beforeEach(resetMocks);
 
@@ -221,6 +249,29 @@ describe("App — a closed workspace stays closed, and comes back when reopened"
     );
 
     render(<App />);
+    await waitFor(() => expect(workspaceIds()).toEqual(["p2"]));
+  });
+
+  it("never renders the project list before the closed set is known — no flash of closed rows", async () => {
+    // Boot used to load projects first and apply `closed_workspaces` a beat
+    // later, so the sidebar painted every workspace and then collapsed to
+    // the open ones — Bruno saw it as "two different lists" on launch.
+    let resolveClosed!: (value: string | null) => void;
+    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
+      key === CLOSED_WORKSPACES_SETTING_KEY
+        ? new Promise<string | null>((resolve) => {
+            resolveClosed = resolve;
+          })
+        : Promise.resolve(null),
+    );
+
+    render(<App />);
+    await waitFor(() =>
+      expect(tauriMocks.settingsGetMock).toHaveBeenCalledWith(CLOSED_WORKSPACES_SETTING_KEY),
+    );
+    expect(workspaceIds()).toEqual([]);
+
+    resolveClosed(JSON.stringify(["p1"]));
     await waitFor(() => expect(workspaceIds()).toEqual(["p2"]));
   });
 

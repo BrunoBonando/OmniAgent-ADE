@@ -4,6 +4,7 @@ import {
   MAX_PANES,
   buildGrid,
   gridShape,
+  isPaneHole,
   layoutCaption,
   paneIds,
   replacePaneId,
@@ -25,11 +26,19 @@ function ids(n: number): string[] {
   return Array.from({ length: n }, (_, i) => String(i + 1));
 }
 
+/** Every leaf id, holes included — unlike the exported `paneIds`, which
+ * exists precisely to hide holes from every other caller. */
+function allLeaves(tree: PaneTree | null): string[] {
+  if (tree === null) return [];
+  if (typeof tree === "string") return [tree];
+  return tree.children.flatMap(allLeaves);
+}
+
 describe("gridShape — the founder's approved ladder", () => {
-  it("walks 1x1 -> 2x1 -> 2x2 -> 3x2 -> 3x3 -> 4x3 -> 4x4 and stops", () => {
-    // Founder, 2026-07-26: "it should go automatically go to 2x1 and then 2x2
-    // and the 3x2, 3x3, 4x3, 4x4. And then no more terminals are available."
-    // `[cols, rows]` per pane count, 1..16:
+  it("walks 1x1 -> 2x1 -> 2x2 -> 3x2 -> 4x2 and stops", () => {
+    // Founder, 2026-07-26: "the only layouts possible are: 1, 1x2, 2x2, 2x3,
+    // 2x4. And no more terminals are allowed." `[cols, rows]` per pane count,
+    // 1..8:
     const expected: Array<[number, number]> = [
       [1, 1], // 1
       [2, 1], // 2
@@ -37,16 +46,8 @@ describe("gridShape — the founder's approved ladder", () => {
       [2, 2], // 4
       [3, 2], // 5
       [3, 2], // 6
-      [3, 3], // 7
-      [3, 3], // 8
-      [3, 3], // 9
-      [4, 3], // 10
-      [4, 3], // 11
-      [4, 3], // 12
-      [4, 4], // 13
-      [4, 4], // 14
-      [4, 4], // 15
-      [4, 4], // 16
+      [4, 2], // 7
+      [4, 2], // 8
     ];
     expected.forEach(([cols, rows], i) => {
       expect(gridShape(i + 1), `${i + 1} panes`).toEqual({ cols, rows });
@@ -54,7 +55,7 @@ describe("gridShape — the founder's approved ladder", () => {
   });
 
   it("MAX_PANES is the last rung's capacity", () => {
-    expect(MAX_PANES).toBe(16);
+    expect(MAX_PANES).toBe(8);
     const { cols, rows } = gridShape(MAX_PANES);
     expect(cols * rows).toBe(MAX_PANES);
   });
@@ -62,8 +63,8 @@ describe("gridShape — the founder's approved ladder", () => {
   it("past the cap it keeps the widest shape and grows rows rather than losing panes", () => {
     // The open-a-terminal path refuses past MAX_PANES, but a restored
     // workspace from before the cap must still render every live session.
-    expect(gridShape(17)).toEqual({ cols: 4, rows: 5 });
-    expect(paneIds(buildGrid(ids(17)))).toEqual(ids(17));
+    expect(gridShape(9)).toEqual({ cols: 4, rows: 3 });
+    expect(paneIds(buildGrid(ids(9)))).toEqual(ids(9));
   });
 });
 
@@ -77,39 +78,49 @@ describe("buildGrid", () => {
     expect(buildGrid(["a", "b"])).toEqual(row(["a", "b"]));
   });
 
-  it("3 panes: the 2x2 rung, with the odd one as a bare leaf row", () => {
-    expect(buildGrid(["a", "b", "c"])).toEqual(column([row(["a", "b"]), "c"]));
+  it("3 panes: the 2x2 rung filled column-major, the bottom-right cell a hole", () => {
+    // Column-major: "a" top-left, "b" below it, "c" tops the new right-hand
+    // column, the hole under "c" — the founder's "new terminal always starts
+    // on top right" rule.
+    const tree = buildGrid(["a", "b", "c"]);
+    expect(paneIds(tree)).toEqual(["a", "b", "c"]);
+    const leaves = allLeaves(tree);
+    expect(leaves.slice(0, 3)).toEqual(["a", "b", "c"]);
+    expect(leaves).toHaveLength(4);
+    expect(isPaneHole(leaves[3])).toBe(true);
+    expect(tree).toEqual(row([column(["a", "b"]), column(["c", leaves[3]])]));
   });
 
-  it("4 panes: a literal 2x2", () => {
-    expect(buildGrid(["a", "b", "c", "d"])).toEqual(column([row(["a", "b"]), row(["c", "d"])]));
+  it("4 panes: a literal 2x2 (two stacked columns), no holes", () => {
+    expect(buildGrid(["a", "b", "c", "d"])).toEqual(row([column(["a", "b"]), column(["c", "d"])]));
   });
 
-  it("5 panes: the 3x2 rung — 3 wide first, remainder on the second row", () => {
-    expect(buildGrid(ids(5))).toEqual(column([row(["1", "2", "3"]), row(["4", "5"])]));
+  it("5 panes: the 3x2 rung — two full columns, then the new pane atop a hole", () => {
+    const tree = buildGrid(ids(5));
+    const leaves = allLeaves(tree);
+    expect(paneIds(tree)).toEqual(ids(5));
+    expect(leaves).toHaveLength(6);
+    expect(isPaneHole(leaves[5])).toBe(true);
+    expect(tree).toEqual(row([column(["1", "2"]), column(["3", "4"]), column(["5", leaves[5]])]));
   });
 
-  it("9 panes: a literal 3x3", () => {
-    expect(buildGrid(ids(9))).toEqual(
-      column([row(["1", "2", "3"]), row(["4", "5", "6"]), row(["7", "8", "9"])]),
-    );
-  });
-
-  it("16 panes: a literal 4x4", () => {
-    const tree = buildGrid(ids(16));
+  it("8 panes: a literal 2x4 (four stacked columns), no holes", () => {
+    const tree = buildGrid(ids(8));
     expect(tree).toEqual(
-      column([
-        row(["1", "2", "3", "4"]),
-        row(["5", "6", "7", "8"]),
-        row(["9", "10", "11", "12"]),
-        row(["13", "14", "15", "16"]),
-      ]),
+      row([column(["1", "2"]), column(["3", "4"]), column(["5", "6"]), column(["7", "8"])]),
     );
   });
 
-  it("keeps every id exactly once, in order, at every count up to the cap", () => {
+  it("keeps every real id exactly once, in order, at every count up to the cap", () => {
     for (let n = 1; n <= MAX_PANES; n++) {
       expect(paneIds(buildGrid(ids(n))), `${n} panes`).toEqual(ids(n));
+    }
+  });
+
+  it("pads every rung to its full rectangle with holes, never a short row", () => {
+    for (let n = 1; n <= MAX_PANES; n++) {
+      const { cols, rows } = gridShape(n);
+      expect(allLeaves(buildGrid(ids(n))), `${n} panes`).toHaveLength(cols * rows);
     }
   });
 });
@@ -133,14 +144,29 @@ describe("syncPaneTree", () => {
     expect(syncPaneTree(null, ["a", "b"])).toEqual(row(["a", "b"]));
   });
 
-  it("a new terminal moves the whole grid up a rung (2x1 -> 2x2)", () => {
-    expect(syncPaneTree(row(["a", "b"]), ["a", "b", "c"])).toEqual(column([row(["a", "b"]), "c"]));
+  it("a new terminal moves the grid up a rung, landing TOP-RIGHT (2x1 -> 2x2)", () => {
+    // The pair restacks into the first column; "c" tops the new right column,
+    // the hole (the next Add Terminal spot) below it.
+    const tree = syncPaneTree(row(["a", "b"]), ["a", "b", "c"]);
+    const hole = allLeaves(tree)[3];
+    expect(isPaneHole(hole)).toBe(true);
+    expect(tree).toEqual(row([column(["a", "b"]), column(["c", hole])]));
   });
 
-  it("a new terminal within the current rung keeps the shape (7 -> 8 stays 3x3)", () => {
+  it("growing a full 2x2 to 5 panes adds a column on the right — nobody already open moves", () => {
+    // Founder, 2026-07-26: "the new terminal would simply always start on top
+    // right if full". Columns [1,2] and [3,4] are untouched, byte for byte.
+    const at4 = buildGrid(ids(4));
+    const tree = syncPaneTree(at4, ids(5));
+    const hole = allLeaves(tree)[5];
+    expect(isPaneHole(hole)).toBe(true);
+    expect(tree).toEqual(row([column(["1", "2"]), column(["3", "4"]), column(["5", hole])]));
+  });
+
+  it("a new terminal within the current rung fills the hole — 'bottom if not full' (7 -> 8)", () => {
     const at7 = buildGrid(ids(7));
     expect(syncPaneTree(at7, ids(8))).toEqual(
-      column([row(["1", "2", "3"]), row(["4", "5", "6"]), row(["7", "8"])]),
+      row([column(["1", "2"]), column(["3", "4"]), column(["5", "6"]), column(["7", "8"])]),
     );
   });
 
@@ -149,11 +175,13 @@ describe("syncPaneTree", () => {
     expect(syncPaneTree(at3, ["a", "b"])).toEqual(row(["a", "b"]));
   });
 
-  it("survivors keep their left-to-right order, including one the user dragged", () => {
+  it("survivors keep their fill order, including one the user dragged", () => {
     // A drag-rearranged tree is the input here (c before a) — reflowing must
     // respect the arrangement the user made, not reset to creation order.
-    const dragged = column([row(["c", "b"]), "a"]);
-    expect(syncPaneTree(dragged, ["a", "b", "c", "d"])).toEqual(column([row(["c", "b"]), row(["a", "d"])]));
+    const dragged = row([column(["c", "b"]), "a"]);
+    expect(syncPaneTree(dragged, ["a", "b", "c", "d"])).toEqual(
+      row([column(["c", "b"]), column(["a", "d"])]),
+    );
   });
 
   it("returns the exact same tree reference when already in sync (no re-render, no lost resize)", () => {
@@ -171,8 +199,10 @@ describe("syncPaneTree", () => {
     // PaneHeader's 3-dot "Change engine": kill session "b", spawn a new one
     // ("b2") in the very same slot. Rebuilding the grid would put the new id
     // at the end; this must not.
-    expect(syncPaneTree(buildGrid(["a", "b", "c"]), ["a", "b2", "c"])).toEqual(
-      column([row(["a", "b2"]), "c"]),
+    const before = buildGrid(["a", "b", "c"]);
+    const hole = allLeaves(before)[3];
+    expect(syncPaneTree(before, ["a", "b2", "c"])).toEqual(
+      row([column(["a", "b2"]), column(["c", hole])]),
     );
   });
 
@@ -201,9 +231,9 @@ describe("replacePaneId", () => {
 });
 
 describe("swapPaneIds — dragging one terminal onto another to trade places", () => {
-  it("trades two panes across rows, leaving every other pane where it was", () => {
-    const tree = buildGrid(ids(4)); // rows [1,2] [3,4]
-    expect(swapPaneIds(tree, "1", "4")).toEqual(column([row(["4", "2"]), row(["3", "1"])]));
+  it("trades two panes across columns, leaving every other pane where it was", () => {
+    const tree = buildGrid(ids(4)); // columns [1,2] [3,4]
+    expect(swapPaneIds(tree, "1", "4")).toEqual(row([column(["4", "2"]), column(["3", "1"])]));
   });
 
   it("keeps the shape and any manual resize (split percentages)", () => {
@@ -226,7 +256,7 @@ describe("swapPaneIds — dragging one terminal onto another to trade places", (
 
 describe("LAYOUT presets", () => {
   it("are exactly the ladder rungs that fill a grid completely", () => {
-    expect(LAYOUT_PRESETS).toEqual([1, 2, 4, 6, 9]);
+    expect(LAYOUT_PRESETS).toEqual([1, 2, 4, 6, 8]);
     for (const preset of LAYOUT_PRESETS) {
       const { cols, rows } = gridShape(preset);
       expect(cols * rows, `preset ${preset}`).toBe(preset);
@@ -238,6 +268,6 @@ describe("LAYOUT presets", () => {
     expect(layoutCaption(2)).toBe("Side-by-side split");
     expect(layoutCaption(4)).toBe("2×2 grid layout");
     expect(layoutCaption(6)).toBe("2×3 grid layout");
-    expect(layoutCaption(9)).toBe("3×3 grid layout");
+    expect(layoutCaption(8)).toBe("2×4 grid layout");
   });
 });
