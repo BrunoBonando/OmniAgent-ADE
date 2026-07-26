@@ -44,12 +44,15 @@ import {
 import { LAYOUT_PRESETS, layoutCaption, type LayoutPreset } from "../state/paneGrid";
 import { LayoutGlyph } from "./NewSessionModal";
 import { ENGINES, type Engine, type ProjectInfo } from "../state/sessions";
+import { type AgentsState, type Agent, AVAILABLE_AGENTS } from "../state/agents";
 import { ENGINE_COLOR, ENGINE_LABEL } from "../theme";
 import { addProject } from "../lib/tauri";
 
 interface NewWorkspaceModalProps {
   onCreate: (project: ProjectInfo, engines: Engine[], layout: LayoutPreset) => void;
   onClose: () => void;
+  agentState: AgentsState;
+  onInstallAgent: (agent: Agent) => void;
 }
 
 /** Simple inline folder icon — the reference's DIRECTORY section leads with
@@ -74,7 +77,7 @@ function FolderIcon() {
   );
 }
 
-export default function NewWorkspaceModal({ onCreate, onClose }: NewWorkspaceModalProps) {
+export default function NewWorkspaceModal({ onCreate, onClose, agentState, onInstallAgent }: NewWorkspaceModalProps) {
   const [state, dispatch] = useReducer(newWorkspaceReducer, initialNewWorkspaceState);
   const panelRef = useRef<HTMLDivElement | null>(null);
 
@@ -202,19 +205,53 @@ export default function NewWorkspaceModal({ onCreate, onClose }: NewWorkspaceMod
           </div>
           {!state.agentsCollapsed && (
             <ul className="new-workspace-agent-list">
-              {ENGINES.map((engine) => (
-                <li key={engine} className="new-workspace-agent-row">
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={state.engines[engine]}
-                      onChange={() => dispatch({ type: "engine_toggled", engine })}
-                    />
-                    <span className="engine-dot" style={{ background: ENGINE_COLOR[engine] }} aria-hidden />
-                    <span className="new-workspace-agent-label">{ENGINE_LABEL[engine]}</span>
-                  </label>
-                </li>
-              ))}
+              {AVAILABLE_AGENTS.map((agent) => {
+                const isInstalled = agentState.installed.has(agent);
+                const isInstalling = agentState.installing.has(agent);
+                const installStatus = agentState.installing.get(agent);
+
+                return (
+                  <li key={agent} className="new-workspace-agent-row">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={state.engines[agent as Engine]}
+                        onChange={() => dispatch({ type: "engine_toggled", engine: agent as Engine })}
+                        disabled={!isInstalled}
+                      />
+                      <span className="engine-dot" style={{ background: ENGINE_COLOR[agent as Engine] }} aria-hidden />
+                      <span className="new-workspace-agent-label">{ENGINE_LABEL[agent as Engine]}</span>
+                    </label>
+                    {!isInstalled && !isInstalling && (
+                      <button
+                        type="button"
+                        className="new-workspace-install-btn"
+                        onClick={() => onInstallAgent(agent)}
+                      >
+                        Install
+                      </button>
+                    )}
+                    {isInstalling && (
+                      <span className="new-workspace-agent-status">
+                        {installStatus === 'failed' ? (
+                          <>
+                            <span className="status-failed">Failed</span>
+                            <button
+                              type="button"
+                              className="new-workspace-retry-btn"
+                              onClick={() => onInstallAgent(agent)}
+                            >
+                              Retry
+                            </button>
+                          </>
+                        ) : (
+                          <span className="status-installing">Installing…</span>
+                        )}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

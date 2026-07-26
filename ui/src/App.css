@@ -461,39 +461,49 @@ code {
    small logged user, since the user is not logged in yet, it should at
    least show a placeholder, with a menu for logout, or preferences,
    billing, etc." (`AccountBadge.tsx`). Same round-icon-button footprint as
-   `.sidebar-add-project-trigger`, but neutral/muted by default (a status
-   indicator, not this header's primary action) and only picks up the
-   signal accent once actually signed in. */
+   Full-width identity row at the bottom of the left sidebar. */
 
 .account-badge-anchor {
   position: relative;
   display: flex;
+  width: 100%;
 }
 
 .account-badge-trigger {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: 1px solid var(--line);
-  background: var(--panel-raised);
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  gap: 9px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
   color: var(--ink-dim);
   display: flex;
   align-items: center;
-  justify-content: center;
+  text-align: left;
 }
 
 .account-badge-trigger:hover {
-  border-color: var(--ink-dim);
+  background: var(--panel-raised);
   color: var(--ink);
 }
 
 .account-badge-trigger.is-signed-in {
-  border-color: var(--signal-dim);
-  color: var(--signal);
+  color: var(--ink);
 }
 
-.account-badge-trigger.is-signed-in:hover {
-  border-color: var(--signal);
+.account-badge-avatar {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 50%;
+  border: 1px solid var(--signal-dim);
+  background: var(--panel-raised);
+  color: var(--signal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .account-badge-initial {
@@ -501,6 +511,23 @@ code {
   font-size: 10.5px;
   font-weight: 600;
   line-height: 1;
+}
+
+.account-badge-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.account-badge-disclosure {
+  flex: 0 0 auto;
+  color: var(--ink-faint);
+  font-size: 10px;
 }
 
 /* Same utility-popover shape as `.pane-menu`/`.project-menu` (transparent
@@ -514,8 +541,8 @@ code {
 
 .account-menu {
   position: absolute;
-  right: 0;
-  top: 26px;
+  left: 0;
+  bottom: calc(100% + 6px);
   z-index: 56;
   width: 200px;
   background: var(--panel);
@@ -955,47 +982,8 @@ code {
 }
 
 .sidebar-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px;
+  padding: 7px 8px;
   border-top: 1px solid var(--line-soft);
-}
-
-/* Typography pass (Warp-direction reskin): this is a plain-language hint
-   ("⌘K search · ⌘T new tab"), not code or a file path — the keyboard glyphs
-   read fine in either face, but the surrounding words are prose, so it
-   moves to the sans/italic/muted treatment this pass gives every purely
-   descriptive meta line, keeping mono reserved for genuinely code-like
-   content (paths, branch names, file names, terminal text). */
-.sidebar-hint {
-  font-family: var(--sans);
-  font-style: italic;
-  font-size: 10.5px;
-  color: var(--ink-faint);
-}
-
-.sidebar-footer-triggers {
-  display: flex;
-  gap: 6px;
-}
-
-.sidebar-about-trigger {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--ink-dim);
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.sidebar-about-trigger:hover {
-  color: var(--ink);
-  border-color: var(--ink-dim);
 }
 
 /* ------------------------------------------------------------- workspace
@@ -3052,6 +3040,9 @@ code {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: 2px 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .new-workspace-agent-row label {
@@ -3074,6 +3065,57 @@ code {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--ink);
+}
+
+.new-workspace-install-btn {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.875rem;
+  background: var(--color-primary);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.new-workspace-install-btn:hover {
+  opacity: 0.9;
+}
+
+.new-workspace-agent-status {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.875rem;
+}
+
+.status-installing {
+  color: var(--text-secondary);
+  animation: pulse 2s infinite;
+}
+
+.status-failed {
+  color: var(--danger);
+}
+
+.new-workspace-retry-btn {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.75rem;
+  background: var(--danger);
+  color: white;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.new-workspace-retry-btn:hover {
+  opacity: 0.9;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 .new-workspace-error {

@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Engine } from "../state/sessions";
 import type { LayoutPreset } from "../state/paneGrid";
 import type { ProjectInfo } from "../state/sessions";
+import type { AgentsState } from "../state/agents";
 
 const { openMock, addProjectMock } = vi.hoisted(() => ({
   openMock: vi.fn(),
@@ -26,11 +27,26 @@ const { default: NewWorkspaceModal } = await import("./NewWorkspaceModal");
 
 const PROJECT: ProjectInfo = { id: "demo-workspace", label: "demo-workspace", path: "/tmp/demo-workspace" };
 
+const DEFAULT_AGENT_STATE: AgentsState = {
+  installed: new Set(["claude", "shell"]),
+  lastSelected: [],
+  installing: new Map(),
+};
+
 function setup() {
   const onCreate = vi.fn();
   const onClose = vi.fn();
-  render(<NewWorkspaceModal onCreate={onCreate} onClose={onClose} />);
-  return { onCreate, onClose };
+  const onInstallAgent = vi.fn();
+  const agentState = DEFAULT_AGENT_STATE;
+  render(
+    <NewWorkspaceModal
+      onCreate={onCreate}
+      onClose={onClose}
+      agentState={agentState}
+      onInstallAgent={onInstallAgent}
+    />
+  );
+  return { onCreate, onClose, onInstallAgent };
 }
 
 beforeEach(() => {
