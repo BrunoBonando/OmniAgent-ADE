@@ -1348,6 +1348,13 @@ function App() {
           selectedProjectId={selectedProjectId}
           onSelectProject={(p) => setSelectedProjectId(p.id)}
           onNewTabInProject={(p) => void requestNewTab(p)}
+          onOpenNewTerminal={() => {
+            // "New terminal" in the workspace the sidebar is showing — the
+            // same thing ⌘T does, off the same `selectedProject` derivation
+            // that handler reads, so the keystroke and the sidebar can never
+            // disagree about which workspace they mean.
+            if (selectedProject) void requestNewTab(selectedProject);
+          }}
           onActivateTab={activateTab}
           onWorkspaceCreated={(p, engines) => void handleWorkspaceCreated(p, engines)}
           newWorkspaceOpen={newWorkspaceOpen}

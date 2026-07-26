@@ -1,5 +1,8 @@
-// The sidebar after the 2026-07-26 founder round: what a workspace row and
-// a session row are allowed to show, and the hover-revealed workspace close.
+// The sidebar after the 2026-07-27 left-pane redesign: ONE workspace at a
+// time (the switcher + its dropdown), that workspace's sessions under a
+// SESSIONS header, and what a session row is allowed to show. The workspace
+// close still exists and still confirms — it moved from the project row's
+// hover "×" into `ProjectMenu`, reached through the dropdown's per-row "⋯".
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
@@ -35,18 +38,34 @@ function tab(overrides: Partial<TabInfo> = {}): TabInfo {
   return { id: "s1", project: "p1", engine: "claude", cwd: "/tmp/p1", createdAt: 0, group: "g1", ...overrides };
 }
 
+/** Open the workspace dropdown, then that workspace's "⋯" (`ProjectMenu`) —
+ * the path every per-workspace action takes now that there are no project
+ * rows. Anchored by the row's name, since the menu row is what carries it. */
+function openWorkspaceMenu(container: HTMLElement, label: string) {
+  fireEvent.click(container.querySelector(".workspace-switcher")!);
+  // By row, not by text: the selected workspace's name is also on the
+  // switcher itself, so a bare `getByText` matches two nodes.
+  const row = Array.from(container.querySelectorAll(".workspace-menu-row")).find(
+    (candidate) => candidate.querySelector(".workspace-menu-name")?.textContent === label,
+  )!;
+  fireEvent.click(row.querySelector(".workspace-menu-manage")!);
+}
+
 function setup(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
   const onCloseWorkspace = vi.fn();
   const onCloseSession = vi.fn();
   const onActivateTab = vi.fn();
+  const onSelectProject = vi.fn();
+  const onOpenNewTerminal = vi.fn();
   const utils = render(
     <Sidebar
       projects={[p1, p2]}
       tabs={[tab(), tab({ id: "s2", engine: "shell", label: "shell scratch" })]}
       activeTabId="s1"
       selectedProjectId="p1"
-      onSelectProject={() => {}}
+      onSelectProject={onSelectProject}
       onNewTabInProject={() => {}}
+      onOpenNewTerminal={onOpenNewTerminal}
       onActivateTab={onActivateTab}
       onWorkspaceCreated={() => {}}
       newWorkspaceOpen={false}
@@ -64,8 +83,74 @@ function setup(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
       {...overrides}
     />,
   );
-  return { ...utils, onCloseWorkspace, onCloseSession, onActivateTab };
+  return { ...utils, onCloseWorkspace, onCloseSession, onActivateTab, onSelectProject, onOpenNewTerminal };
 }
+
+describe("Sidebar — one workspace at a time", () => {
+  beforeEach(() => {
+    useGitBranchMock.mockReset();
+    useGitBranchMock.mockReturnValue("main");
+  });
+
+  it("shows the active workspace in the switcher, not a project list", () => {
+    const { container } = setup();
+    expect(container.querySelector(".workspace-switcher")).toBeInTheDocument();
+    expect(container.querySelector(".project-list")).toBeNull();
+    expect(container.querySelector(".project-row")).toBeNull();
+    expect(screen.getByText("api")).toBeInTheDocument();
+    expect(screen.getByText("/tmp/p1")).toBeInTheDocument();
+  });
+
+  it("opens the workspace menu and switches project", () => {
+    const { container, onSelectProject } = setup();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    fireEvent.click(container.querySelector(".workspace-switcher")!);
+    fireEvent.click(screen.getByText("web"));
+    expect(onSelectProject).toHaveBeenCalledWith(p2);
+  });
+
+  it("counts every workspace's sessions in the menu, not just the open one", () => {
+    const { container } = setup();
+    fireEvent.click(container.querySelector(".workspace-switcher")!);
+    expect(screen.getByText("1 session")).toBeInTheDocument();
+    expect(screen.getByText("no sessions")).toBeInTheDocument();
+  });
+
+  it("keeps New workspace and Import reachable, now from the menu", () => {
+    const onOpenNewWorkspace = vi.fn();
+    const { container } = setup({ onOpenNewWorkspace });
+    expect(container.querySelector(".sidebar-add-project-trigger")).toBeNull();
+    fireEvent.click(container.querySelector(".workspace-switcher")!);
+    expect(screen.getByText("Import projects…")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("New workspace"));
+    expect(onOpenNewWorkspace).toHaveBeenCalled();
+  });
+
+  it("heads the list with SESSIONS and shows only the selected workspace's sessions", () => {
+    const { container } = setup({
+      tabs: [tab(), tab({ id: "s3", project: "p2", cwd: "/tmp/p2", group: "g2", groupLabel: "web work" })],
+    });
+    expect(screen.getByText("SESSIONS")).toBeInTheDocument();
+    expect(container.querySelectorAll(".sidebar-session-list .session-row")).toHaveLength(1);
+    expect(screen.getByText("Session 1")).toBeInTheDocument();
+    expect(screen.queryByText("web work")).not.toBeInTheDocument();
+  });
+
+  it("says 'No workspace' when there is nothing open, and still offers a way in", () => {
+    const { container } = setup({ projects: [], tabs: [], selectedProjectId: null });
+    expect(screen.getByText("No workspace")).toBeInTheDocument();
+    expect(screen.getByText("choose or add one")).toBeInTheDocument();
+    fireEvent.click(container.querySelector(".workspace-switcher")!);
+    expect(screen.getByText("New workspace")).toBeInTheDocument();
+  });
+
+  it("opens a new session in the selected workspace from the SESSIONS header", () => {
+    const onNewSessionInProject = vi.fn();
+    setup({ onNewSessionInProject });
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    expect(onNewSessionInProject).toHaveBeenCalledWith(p1);
+  });
+});
 
 describe("Sidebar — session and branch, nothing else", () => {
   beforeEach(() => {
@@ -81,19 +166,22 @@ describe("Sidebar — session and branch, nothing else", () => {
 
   it("no longer badges a workspace with how many terminals it has", () => {
     const { container } = setup();
-    expect(container.querySelector(".project-row-count")).toBeNull();
+    // Nor with the session-pressure meter the old header carried: the
+    // switcher is identity only, and session counts live in the dropdown.
+    expect(container.querySelector(".workspace-switcher")!.textContent).not.toMatch(
+      /\d\s*(terminal|tab|pane|session)/i,
+    );
+    expect(container.querySelector(".pressure-badge")).toBeNull();
   });
 
   it("no longer lists the terminals inside a session", () => {
-    const { container } = setup();
-    expect(container.querySelector(".project-row-tabs")).toBeNull();
+    setup();
     expect(screen.queryByText("shell scratch")).not.toBeInTheDocument();
   });
 
   it("no longer prints the '2 panes · Claude Code, Shell' meta line", () => {
     const { container } = setup();
     expect(container.textContent).not.toContain("panes");
-    expect(container.querySelector(".project-row-session-meta")).toBeNull();
   });
 
   it("marks the session on screen with the accent rail rather than a text tag", () => {
@@ -147,14 +235,18 @@ describe("Sidebar — closing a workspace", () => {
     useGitBranchMock.mockReturnValue("main");
   });
 
-  it("offers a close control on every workspace row", () => {
-    setup();
+  it("offers a close control for any workspace, through its dropdown menu", () => {
+    const { container } = setup();
+    openWorkspaceMenu(container, "api");
     expect(screen.getByRole("button", { name: "Close workspace api" })).toBeInTheDocument();
+
+    openWorkspaceMenu(container, "web");
     expect(screen.getByRole("button", { name: "Close workspace web" })).toBeInTheDocument();
   });
 
   it("asks before killing anything, and says exactly what stops", () => {
-    const { onCloseWorkspace } = setup();
+    const { container, onCloseWorkspace } = setup();
+    openWorkspaceMenu(container, "api");
     fireEvent.click(screen.getByRole("button", { name: "Close workspace api" }));
 
     const dialog = screen.getByRole("dialog", { name: "Close workspace" });
@@ -163,7 +255,8 @@ describe("Sidebar — closing a workspace", () => {
   });
 
   it("is unambiguous that nothing is deleted", () => {
-    setup();
+    const { container } = setup();
+    openWorkspaceMenu(container, "api");
     fireEvent.click(screen.getByRole("button", { name: "Close workspace api" }));
     const dialog = screen.getByRole("dialog", { name: "Close workspace" });
     expect(dialog.textContent).toContain("Nothing is deleted");
@@ -171,7 +264,8 @@ describe("Sidebar — closing a workspace", () => {
   });
 
   it("says nothing is running when the workspace has no terminals", () => {
-    setup();
+    const { container } = setup();
+    openWorkspaceMenu(container, "web");
     fireEvent.click(screen.getByRole("button", { name: "Close workspace web" }));
     expect(screen.getByRole("dialog", { name: "Close workspace" }).textContent).toContain(
       "Nothing is running in it",
@@ -179,14 +273,16 @@ describe("Sidebar — closing a workspace", () => {
   });
 
   it("closes the workspace only once the user confirms", () => {
-    const { onCloseWorkspace } = setup();
+    const { container, onCloseWorkspace } = setup();
+    openWorkspaceMenu(container, "api");
     fireEvent.click(screen.getByRole("button", { name: "Close workspace api" }));
     fireEvent.click(screen.getByRole("button", { name: "Close workspace" }));
     expect(onCloseWorkspace).toHaveBeenCalledWith(p1);
   });
 
   it("cancels without touching a thing", () => {
-    const { onCloseWorkspace } = setup();
+    const { container, onCloseWorkspace } = setup();
+    openWorkspaceMenu(container, "api");
     fireEvent.click(screen.getByRole("button", { name: "Close workspace api" }));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onCloseWorkspace).not.toHaveBeenCalled();
@@ -194,18 +290,23 @@ describe("Sidebar — closing a workspace", () => {
   });
 
   it("takes Escape as cancel and Enter as confirm, like every other dialog here", () => {
-    const { onCloseWorkspace } = setup();
+    const { container, onCloseWorkspace } = setup();
+    openWorkspaceMenu(container, "api");
     fireEvent.click(screen.getByRole("button", { name: "Close workspace api" }));
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Close workspace" }), { key: "Escape" });
     expect(onCloseWorkspace).not.toHaveBeenCalled();
 
+    openWorkspaceMenu(container, "api");
     fireEvent.click(screen.getByRole("button", { name: "Close workspace api" }));
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Close workspace" }), { key: "Enter" });
     expect(onCloseWorkspace).toHaveBeenCalledWith(p1);
   });
 
   it("shows no close control at all when the app does not pass a handler", () => {
-    setup({ onCloseWorkspace: undefined });
+    const { container } = setup({ onCloseWorkspace: undefined });
+    openWorkspaceMenu(container, "api");
+    // The rest of the workspace menu is still there — only the close is gone.
+    expect(screen.getByRole("button", { name: /Re-check now/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Close workspace/ })).not.toBeInTheDocument();
   });
 });

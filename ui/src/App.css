@@ -6420,3 +6420,106 @@ code {
   display: flex; align-items: center; justify-content: center;
   color: var(--accent-hi); font: 400 13px/1 var(--sans);
 }
+
+/* redesign: workspace switcher (Task 3) — the single control that replaced
+   the sidebar's project list. Its own row at the top of the panel, with the
+   dropdown (`.workspace-menu`) hanging off the same relatively-positioned
+   anchor. */
+.workspace-switcher {
+  appearance: none;
+  width: calc(100% - 18px);
+  margin: 9px 9px 7px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  border: 0.5px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.045);
+  cursor: pointer;
+  text-align: left;
+}
+.workspace-switcher:hover, .workspace-switcher.is-open { background: rgba(255, 255, 255, 0.08); }
+.workspace-switcher-avatar {
+  width: 20px; height: 20px; flex: none;
+  border-radius: 5px;
+  display: flex; align-items: center; justify-content: center;
+  font: 600 9.5px/1 var(--sans); color: #fff;
+}
+.workspace-switcher-identity { flex: 1; min-width: 0; }
+.workspace-switcher-name {
+  display: block;
+  font: 600 11.5px/1.25 var(--sans); color: #e6e6ec;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.workspace-switcher-path {
+  display: block;
+  font: 400 9.5px/1.3 var(--mono); color: #65656f;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.workspace-switcher-microlabel { flex: none; font: 500 9px/1 var(--sans); color: #5c5c66; padding-right: 2px; }
+.workspace-switcher-chevrons { flex: none; font: 400 8px/0.5 var(--sans); color: #8a8a94; letter-spacing: -1px; }
+
+/* redesign: sidebar skeleton (Task 3). */
+.sidebar-switcher-anchor { position: relative; flex: none; }
+
+/* `ProjectMenu` (pause / re-check / rename / close) used to be anchored to
+   the project row that opened it. There is no row any more: it is opened
+   from the "⋯" on a `.workspace-menu` row, so it hangs off the same anchor
+   the dropdown does — and at the same offset, since it takes the dropdown's
+   place (the menu closes as this opens; two stacked popovers over one button
+   is noise, and `.project-menu`'s z-index sits under `.workspace-menu`'s). */
+.sidebar-switcher-anchor .project-menu { top: 46px; right: 9px; }
+
+.sidebar-sessions-header { flex: none; display: flex; align-items: center; gap: 6px; padding: 4px 14px 5px; }
+.sidebar-microlabel { font: 600 9.5px/1 var(--sans); letter-spacing: 0.1em; color: #65656f; }
+.sidebar-microcount { font: 600 9.5px/1 var(--mono); color: #4a4a53; }
+.sidebar-spacer { flex: 1; }
+.sidebar-sessions-add {
+  appearance: none; border: 0; background: transparent;
+  color: #7c7c86; width: 18px; height: 18px; border-radius: 5px;
+  cursor: pointer; font: 400 13px/1 var(--sans);
+  display: flex; align-items: center; justify-content: center;
+}
+.sidebar-sessions-add:hover { background: rgba(255, 255, 255, 0.1); color: var(--ink); }
+/* `flex: 0 1 auto` + its own scroll rather than the `flex: none` the rest of
+   this skeleton uses: the list is the only part of the panel that grows with
+   what the user opens, and until Task 6's FILES section lands there is
+   nothing below it to absorb a workspace with a dozen sessions — it would
+   push the account footer off the bottom of the window instead. */
+.sidebar-session-list {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0 6px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* The old `.sidebar-projects` (flex: 1) is what used to push the footer to
+   the bottom of the panel. Nothing in the new skeleton grows to fill — the
+   FILES section that will (Task 6) isn't built yet — so the footer pins
+   itself. */
+.sidebar-footer { margin-top: auto; }
+
+/* The workspace close, re-homed from the project row's hover "×" into
+   `ProjectMenu` (left-pane redesign, Task 3). Same shape as
+   `.project-menu-recheck` above it, and the same reason it is the only
+   control in this menu that turns a colour on hover: it is the only one that
+   ends something. */
+.project-menu-close-workspace {
+  width: 100%;
+  margin-top: 6px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11.5px;
+}
+.project-menu-close-workspace:hover {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
+}

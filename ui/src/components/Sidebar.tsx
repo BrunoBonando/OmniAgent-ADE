@@ -1,7 +1,34 @@
+// The left pane. **Since the 2026-07-27 redesign (Task 3) it shows exactly
+// one workspace**: the `WorkspaceSwitcher` at the top names it, `WorkspaceMenu`
+// (the dropdown that switcher opens) is how you reach every other one, and
+// everything below the switcher belongs to that single selected workspace.
+//
+// What that replaced, and where each piece went, because the history below
+// was all written against the old shape — a `.project-list` of one row per
+// open project, each with its own nested session list:
+//
+// - the per-project rows -> `WorkspaceMenu`'s rows (name, path, session
+//   count, a checkmark on the active one);
+// - the header's "+" (new workspace) and "import" triggers -> that same
+//   menu's two footer items;
+// - a row's "⋯" -> the same menu row's "⋯", which still opens `ProjectMenu`
+//   (pause / re-check / rename) — now anchored under the switcher rather
+//   than under a row, since there is no row left to hang it on;
+// - a row's hover "×" -> `ProjectMenu`'s "Close workspace" item, still
+//   confirming through `CloseWorkspaceConfirm` before anything is killed;
+// - a row's hover "+" (new terminal) -> Task 5's "New terminal" row inside
+//   the session, via the new `onOpenNewTerminal` prop;
+// - the session-pressure badge and the per-project attention dot were cut:
+//   the first is not in the design, and the second answered a question ("a
+//   session in *another* project needs you") that a single-workspace sidebar
+//   can no longer ask — the per-session lights inside `SidebarSessionRow`
+//   and the notification centre in `AppChrome` still answer it.
+//
+// Everything below is the original file history, kept because it is why the
+// surviving pieces are shaped the way they are.
+//
 // Project list (Task 5.2): `brain_query{kind:"list_projects"}` -> brain-core
-// Store::list_projects() directly, no daemon round trip. Renders a real,
-// non-broken empty state when the brain has nothing ingested yet — the
-// common case on a fresh dev run.
+// Store::list_projects() directly, no daemon round trip.
 //
 // Task 8.1 degradation surfaces added here: a "stale" dot on any project
 // whose last (re)ingest is past the threshold, and the "⋯" context menu
@@ -100,20 +127,10 @@
 // `state/closedWorkspaces.ts` for the full "this is a window close, not a
 // delete" reasoning, and `CloseWorkspaceConfirm` for what the user is told
 // before anything is killed.
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
-import logo from "../assets/omniagent-logo.png";
-import {
-  PRESSURE_THRESHOLD,
-  isUnderPressure,
-  tabsByProject,
-  type Engine,
-  type ProjectInfo,
-  type TabInfo,
-} from "../state/sessions";
+import { useCallback, useEffect, useState } from "react";
+import { tabsByProject, type Engine, type ProjectInfo, type TabInfo } from "../state/sessions";
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
-import { statusNeedsAttention } from "../state/sessionStatus";
 import { idColor } from "../state/projectColors";
-import Icon from "./Icon";
 import type { LayoutPreset } from "../state/paneGrid";
 import {
   rootsPausedProjects,
@@ -126,6 +143,8 @@ import {
 import AboutPanel from "./AboutPanel";
 import ReviewPanel from "./ReviewPanel";
 import ProjectMenu from "./ProjectMenu";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
+import { WorkspaceMenu } from "./WorkspaceMenu";
 import NewWorkspaceModal from "./NewWorkspaceModal";
 import ImportProjectsFlow from "./ImportProjectsFlow";
 import SidebarSessionRow from "./SidebarSessionRow";
@@ -146,7 +165,17 @@ interface SidebarProps {
   activeTabId: string | null;
   selectedProjectId: string | null;
   onSelectProject: (project: ProjectInfo) => void;
+  /** Open a terminal in an arbitrary project. Its trigger — the project
+   * row's hover "+" — went away with the row list (Task 3); the sidebar now
+   * only ever opens terminals in the *selected* workspace, which is
+   * `onOpenNewTerminal` below. Kept because `App.tsx` still passes it and
+   * the two are different questions (any project vs. this one). */
   onNewTabInProject: (project: ProjectInfo) => void;
+  /** "New terminal" in the selected workspace — `App.tsx` wires it to the
+   * same `requestNewTab(selectedProject)` ⌘T runs. Nothing renders it yet:
+   * Task 5's "New terminal" row inside the current session is its first call
+   * site, and Task 9 swaps App's handler for the modal. */
+  onOpenNewTerminal: () => void;
   onActivateTab: (id: string) => void;
   /** The "+" New Workspace flow: called the instant `add_project` returns
    * (well before ingestion finishes) with the freshly-created project, the
@@ -174,11 +203,12 @@ interface SidebarProps {
    * separate entry point from `onWorkspaceCreated`). */
   onImportCompleted: (result: ImportBatchResult) => void;
   /** Owned centrally by `App.tsx` (already polling every ~2s for the
-   * degradation badges / FirstRun / BrainMap) and simply forwarded here —
-   * backs the small "ingesting…" indicator next to the wordmark, the reuse
-   * of that existing poll loop this task asked for rather than a second
-   * one. Optional so this component still type-checks for tests that don't
-   * care about it. */
+   * degradation badges / FirstRun / BrainMap) and simply forwarded here — it
+   * backed the small "ingesting…" indicator next to the wordmark, which went
+   * away with the header (Task 3). Still passed and still wanted: Task 8
+   * re-homes it as the account row's "Brain indexed · 8m ago" sub-line.
+   * Optional so this component still type-checks for tests that don't care
+   * about it. */
   ingestion?: IngestionStatus | null;
   /** Task 6.2: the workspace/map view toggle. Optional so this component
    * still type-checks for any test that doesn't care about it. */
@@ -186,22 +216,25 @@ interface SidebarProps {
   onSetView?: (view: "workspace" | "map") => void;
   /** Founder feedback, 2026-07-25: the file tree panel's show/hide toggle
    * (`App.tsx` owns the persisted state — see `FILE_TREE_VISIBLE_SETTING_KEY`).
-   * Optional, same reasoning as `view`/`onSetView` above, so tests that
-   * don't care about the file tree don't need to pass it. */
+   * Its "files" button lived in the sidebar header, which Task 3 removed;
+   * Task 6 pulls the tree itself into this panel as the FILES section and
+   * deletes both of these props with the right-hand dock. Kept until then so
+   * `App.tsx` keeps type-checking unchanged. */
   fileTreeVisible?: boolean;
   onToggleFileTree?: () => void;
-  /** "+ New session" under a project's session list — opens
-   * `NewSessionModal` for that project (⌘N -> Session reaches the same
-   * dialog). Optional, same convention as the props above. */
+  /** The SESSIONS header's "+" — opens `NewSessionModal` for the selected
+   * workspace (⌘N -> Session reaches the same dialog). Optional, same
+   * convention as the props above. */
   onNewSessionInProject?: (project: ProjectInfo) => void;
   /** A session's double-click rename. `App.tsx` owns the dispatch
    * (`session/renamed`), which writes the name onto every pane in the group
    * and persists it with the layout — this component owns only the inline
    * edit UI, the same split `onRenameProject`/`ProjectMenu` uses. */
   onRenameSession?: (project: ProjectInfo, group: string, name: string) => void;
-  /** The hover-revealed workspace close. Called only after
+  /** The workspace close, now `ProjectMenu`'s last item (it was the project
+   * row's hover "×" before Task 3). Called only after
    * `CloseWorkspaceConfirm` is accepted — `App.tsx` kills the terminals and
-   * drops the row (see `state/closedWorkspaces.ts`). */
+   * drops the workspace (see `state/closedWorkspaces.ts`). */
   onCloseWorkspace?: (project: ProjectInfo) => void;
   /** The session row's hover-revealed close (founder ask: "I must be able
    * to close a session"). Called only after `CloseSessionConfirm` is
@@ -215,13 +248,18 @@ interface SidebarProps {
   onInstallAgent: (agent: Agent) => void;
 }
 
+// `onNewTabInProject`, `onOpenNewTerminal`, `ingestion`, `fileTreeVisible`
+// and `onToggleFileTree` are deliberately NOT destructured: they are live
+// props `App.tsx` passes, whose render sites either moved out of this file
+// (Task 3) or haven't been built yet (Tasks 5/6/8) — see each one's doc on
+// `SidebarProps`. Leaving them out of the signature is what keeps
+// `noUnusedLocals` honest without dropping the prop itself.
 export default function Sidebar({
   projects,
   tabs,
   activeTabId,
   selectedProjectId,
   onSelectProject,
-  onNewTabInProject,
   onActivateTab,
   onWorkspaceCreated,
   newWorkspaceOpen,
@@ -229,11 +267,8 @@ export default function Sidebar({
   onCloseNewWorkspace,
   onRenameProject,
   onImportCompleted,
-  ingestion,
   view = "workspace",
   onSetView,
-  fileTreeVisible = false,
-  onToggleFileTree,
   onNewSessionInProject,
   onRenameSession,
   onCloseWorkspace,
@@ -262,27 +297,27 @@ export default function Sidebar({
   // `isCurrent` prop).
   const onScreenSession =
     selectedProjectId === null ? null : visibleSessionGroupId(tabs, selectedProjectId, activeTabId);
-  // Founder feedback (2026-07-24): a session's attention badge must stay
-  // visible from the sidebar even while looking at a different project's
-  // tabs, or the Map view — this is the whole reason the badge lives at two
-  // levels (this per-project one, and the per-pane row below), not just on
-  // the pane itself. Derived from the live status since 2026-07-26 (see the
-  // module doc), so it can never disagree with the pane's own light.
-  const attentionByProject = new Map(
-    grouped.map((g) => [g.project, g.tabs.some((t) => statusNeedsAttention(t.status))]),
-  );
-  const underPressure = isUnderPressure(tabs);
-  // Warp-direction reskin: the session-pressure capsule meter's fill —
-  // derived from the exact same `tabs.length`/`PRESSURE_THRESHOLD` pair the
-  // plain-text badge already used, just also expressed as a 0-100 percent
-  // for the bar (capped at 100 so an over-threshold count doesn't overflow
-  // the track).
-  const sessionPressurePct = Math.min(100, Math.round((tabs.length / PRESSURE_THRESHOLD) * 100));
+  // The one workspace this panel is about (Task 3). `null` is a real state —
+  // no projects at all, or a selection pointing at a workspace that was just
+  // closed — and the switcher renders its own "No workspace" copy for it.
+  const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
+  // Only the selected workspace's sessions are listed now; the others are a
+  // click away in the dropdown, which is where their session *counts* go.
+  const selectedSessions =
+    sessionsByProject.find((p) => p.project === selectedProjectId)?.sessions ?? [];
+  const sessionCounts = new Map(sessionsByProject.map((p) => [p.project, p.sessions.length]));
 
   const [pausedProjects, setPausedProjects] = useState<Set<string>>(new Set());
   const [staleness, setStaleness] = useState<Map<string, ProjectStaleness>>(new Map());
+  /** Whether the workspace dropdown is open under the switcher. */
+  const [menuOpen, setMenuOpen] = useState(false);
   const [menuProjectId, setMenuProjectId] = useState<string | null>(null);
   const [menuBusy, setMenuBusy] = useState(false);
+  // `ProjectMenu` is opened from a dropdown row's "⋯", so it is about
+  // whichever workspace that row named — not necessarily the selected one.
+  // Resolved from the live list so a workspace closing underneath the open
+  // menu takes the menu with it rather than leaving a stale panel.
+  const menuProject = projects.find((p) => p.id === menuProjectId) ?? null;
 
   const reloadDegradationState = useCallback(() => {
     rootsPausedProjects()
@@ -332,64 +367,55 @@ export default function Sidebar({
 
   return (
     <aside className="sidebar">
-      <div className="sidebar-header">
-        <span className="sidebar-wordmark">OMNIAGENT</span>
-        <div className="sidebar-header-actions">
-          {ingestion?.running && (
-            <span
-              className="sidebar-ingesting"
-              role="status"
-              title={`Ingesting${ingestion.current_project ? ` ${ingestion.current_project}` : ""}… runs in the background, terminals stay usable.`}
-            >
-              <span className="sidebar-ingesting-dot" aria-hidden="true" />
-              ingesting
-            </span>
-          )}
-          <button
-            className="sidebar-add-project-trigger"
-            onClick={onOpenNewWorkspace}
-            aria-label="New workspace"
-            title="New workspace"
-          >
-            +
-          </button>
-          <button
-            className="sidebar-import-trigger"
-            onClick={() => setImportOpen(true)}
-            aria-label="Import projects from other tools"
-            title="Import projects from other tools"
-          >
-            import
-          </button>
-          {onToggleFileTree && (
-            <button
-              className={`sidebar-filetree-trigger${fileTreeVisible ? " is-active" : ""}`}
-              onClick={onToggleFileTree}
-              aria-label="Toggle file browser panel"
-              aria-pressed={fileTreeVisible}
-              title="Toggle file browser panel"
-            >
-              files
-            </button>
-          )}
-          <span
-            className={`pressure-badge${underPressure ? " is-hot" : ""}`}
-            title={`${tabs.length} live session${tabs.length === 1 ? "" : "s"} (pressure badge past ${PRESSURE_THRESHOLD})`}
-          >
-            {/* Warp-direction reskin: the same session-count this badge
-                already showed as plain digits, now ALSO a capsule meter
-                (Warp's "Session 17%"-style bar) — no new metric, just the
-                existing `tabs.length`/`PRESSURE_THRESHOLD` fraction drawn
-                as a fill instead of only text. */}
-            <span className="meter-track">
-              <span
-                className={`meter-fill${underPressure ? " is-hot" : sessionPressurePct >= 60 ? " is-warm" : ""}`}
-                style={{ "--pct": sessionPressurePct } as CSSProperties}
-              />
-            </span>
-            {tabs.length}/{PRESSURE_THRESHOLD}
-          </span>
-        </div>
+      {/* The switcher and both popovers it can raise share one relatively
+          positioned anchor: `.workspace-menu` and `.project-menu` are both
+          absolutely placed, and the project menu no longer has a project row
+          to hang off (see the module doc). */}
+      <div className="sidebar-switcher-anchor">
+        <WorkspaceSwitcher
+          project={selectedProject}
+          open={menuOpen}
+          onToggle={() => setMenuOpen((open) => !open)}
+        />
+        {menuOpen && (
+          <WorkspaceMenu
+            projects={projects}
+            activeProjectId={selectedProjectId}
+            sessionCounts={sessionCounts}
+            onSelect={onSelectProject}
+            onNewWorkspace={onOpenNewWorkspace}
+            onImport={() => setImportOpen(true)}
+            // The dropdown closes as the project menu opens: they are
+            // stacked over the same button, and `.project-menu`'s z-index
+            // sits below `.workspace-menu`'s — two popovers deep is noise
+            // even if the layering were solvable.
+            onManage={(project) => {
+              setMenuOpen(false);
+              setMenuProjectId(project.id);
+            }}
+            onClose={() => setMenuOpen(false)}
+          />
+        )}
+        {menuProject && (
+          <ProjectMenu
+            project={menuProject}
+            paused={pausedProjects.has(menuProject.id)}
+            staleness={staleness.get(menuProject.id)}
+            busy={menuBusy}
+            onTogglePause={() => void togglePause(menuProject)}
+            onReingest={() => void reingest(menuProject)}
+            onRename={(newLabel) => onRenameProject(menuProject, newLabel)}
+            onCloseWorkspace={
+              onCloseWorkspace
+                ? () => {
+                    setMenuProjectId(null);
+                    setClosingProject(menuProject);
+                  }
+                : undefined
+            }
+            onClose={() => setMenuProjectId(null)}
+          />
+        )}
       </div>
 
       <div className="sidebar-view-toggle" role="tablist" aria-label="View">
@@ -413,159 +439,53 @@ export default function Sidebar({
         </button>
       </div>
 
-      <div className="sidebar-projects">
-        {projects.length === 0 ? (
-          <div className="sidebar-empty">
-            <img src={logo} alt="" className="sidebar-empty-logo" />
-            <p className="sidebar-empty-title">No projects yet</p>
-            <p className="sidebar-empty-hint">
-              Add a project folder to open your first terminal — ingestion happens quietly in the
-              background.
-            </p>
-            <button className="sidebar-empty-cta" onClick={onOpenNewWorkspace}>
-              + New Workspace
-            </button>
-          </div>
-        ) : (
-          <ul className="project-list">
-            {projects.map((project) => {
-              const sessions = sessionsByProject.find((p) => p.project === project.id)?.sessions ?? [];
-              const isSelected = project.id === selectedProjectId;
-              const isPaused = pausedProjects.has(project.id);
-              const isStale = staleness.get(project.id)?.stale ?? false;
-              const hasAttention = attentionByProject.get(project.id) ?? false;
-              return (
-                <li key={project.id} className={`project-row${isSelected ? " is-selected" : ""}`}>
-                  <button
-                    className="project-row-main"
-                    onClick={() => onSelectProject(project)}
-                    title={project.path ?? project.id}
-                  >
-                    {/* Grouped so `.project-row-main`'s `justify-content:
-                        space-between` only ever splits "identity" from
-                        "meta badges" into two blocks — without this wrapper
-                        every child (dot, avatar, label, paused, count)
-                        would get spread evenly across the row instead,
-                        pulling the avatar away from its own label. */}
-                    <span className="project-row-identity">
-                      {hasAttention && (
-                        <span
-                          className="project-row-attention-dot"
-                          role="status"
-                          title="A session in this project needs your attention"
-                        />
-                      )}
-                      {isStale && <span className="project-row-stale-dot" title="Stale — hasn't been re-ingested in a while" />}
-                      <span
-                        className="project-row-avatar"
-                        aria-hidden="true"
-                        style={{ background: idColor(project.id) }}
-                      >
-                        {project.label.charAt(0).toUpperCase()}
-                      </span>
-                      <span className="project-row-label">{project.label}</span>
-                    </span>
-                    {isPaused && <span className="project-row-paused">paused</span>}
-                  </button>
-                  {/* The row's hover controls, as one cluster that fades in
-                      OVER the end of the label rather than a strip the label
-                      is permanently shortened to make room for — a workspace
-                      called "OmniAgent-ADE" should read as its own name at
-                      rest, which reserving space for three buttons made
-                      impossible. */}
-                  <span className="project-row-actions">
-                    <button
-                      className="project-row-add"
-                      onClick={() => onNewTabInProject(project)}
-                      aria-label={`New terminal in ${project.label}`}
-                      title="New terminal (⌘T)"
-                    >
-                      <Icon name="plus" size={14} />
-                    </button>
-                    <button
-                      className="project-row-menu-trigger"
-                      onClick={() => setMenuProjectId(project.id)}
-                      aria-label={`${project.label} options`}
-                      title="Pause / re-check"
-                    >
-                      <Icon name="more" size={14} />
-                    </button>
-                    {/* Founder ask: "add the possibility to close a
-                        workspace, on hover" — last in the cluster, because
-                        that is where a close lives in every window and tab
-                        this app sits beside. Confirms first: it ends live
-                        engines. */}
-                    {onCloseWorkspace && (
-                      <button
-                        className="project-row-close"
-                        onClick={() => setClosingProject(project)}
-                        aria-label={`Close workspace ${project.label}`}
-                        title="Close workspace"
-                      >
-                        <Icon name="x" size={13} />
-                      </button>
-                    )}
-                  </span>
-                  {menuProjectId === project.id && (
-                    <ProjectMenu
-                      project={project}
-                      paused={isPaused}
-                      staleness={staleness.get(project.id)}
-                      busy={menuBusy}
-                      onTogglePause={() => void togglePause(project)}
-                      onReingest={() => void reingest(project)}
-                      onRename={(newLabel) => onRenameProject(project, newLabel)}
-                      onClose={() => setMenuProjectId(null)}
-                    />
-                  )}
-                  {/* Workspace -> session. One row per session: its light,
-                      its name and its branch, and nothing else (see this
-                      file's module doc for what was cut and where it went).
-                      The session holding the focused pane wears the accent
-                      rail — the founder's "it must show the session it's
-                      currently on the screen", now carried by the row's own
-                      styling rather than by a text tag beside it. */}
-                  {sessions.length > 0 && (
-                    <ul className="project-row-sessions">
-                      {sessions.map((session) => (
-                        <SidebarSessionRow
-                          key={session.id}
-                          session={session}
-                          projectLabel={project.label}
-                          tint={idColor(session.id)}
-                          // The rail marks what the grid is actually
-                          // painting, answered by the same function the grid
-                          // asks (`visibleSessionGroupId`) — so "the session
-                          // it's currently on the screen" means the same
-                          // thing in both columns. Only the selected
-                          // workspace has a session on screen at all.
-                          isCurrent={isSelected && session.id === onScreenSession}
-                          onActivate={() => onActivateTab(session.tabs[0].id)}
-                          onRename={(name) => onRenameSession?.(project, session.id, name)}
-                          onClose={
-                            onCloseSession ? () => setClosingSession({ project, session }) : undefined
-                          }
-                        />
-                      ))}
-                      {isSelected && onNewSessionInProject && (
-                        <li>
-                          <button
-                            className="project-row-new-session"
-                            onClick={() => onNewSessionInProject(project)}
-                            title="New session in this project (⌘N)"
-                          >
-                            + New session
-                          </button>
-                        </li>
-                      )}
-                    </ul>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
+      {/* One workspace, so one flat list of ITS sessions — the nesting
+          (project -> sessions) went away with the project rows. The count
+          beside the label is what the dropdown shows per workspace, said
+          once more for the one on screen. */}
+      <div className="sidebar-sessions-header">
+        <span className="sidebar-microlabel">SESSIONS</span>
+        <span className="sidebar-microcount">{selectedSessions.length}</span>
+        <span className="sidebar-spacer" />
+        <button
+          className="sidebar-sessions-add"
+          aria-label="New session"
+          title="New session (⌘N)"
+          onClick={() => selectedProject && onNewSessionInProject?.(selectedProject)}
+        >
+          +
+        </button>
       </div>
+
+      <ul className="sidebar-session-list">
+        {selectedProject &&
+          selectedSessions.map((session) => (
+            <SidebarSessionRow
+              key={session.id}
+              session={session}
+              projectLabel={selectedProject.label}
+              tint={idColor(session.id)}
+              // The rail marks what the grid is actually painting, answered
+              // by the same function the grid asks
+              // (`visibleSessionGroupId`) — so "the session it's currently
+              // on the screen" means the same thing in both columns. Every
+              // row here belongs to the selected workspace now, so the
+              // "is this workspace selected" half of the old test is
+              // implied.
+              isCurrent={session.id === onScreenSession}
+              onActivate={() => onActivateTab(session.tabs[0].id)}
+              onRename={(name) => onRenameSession?.(selectedProject, session.id, name)}
+              onClose={
+                onCloseSession
+                  ? () => setClosingSession({ project: selectedProject, session })
+                  : undefined
+              }
+            />
+          ))}
+      </ul>
+
+      {/* FILES section arrives in Task 6, between the sessions and the
+          account footer. */}
 
       <div className="sidebar-footer">
         <AccountBadge
