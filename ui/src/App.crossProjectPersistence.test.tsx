@@ -37,6 +37,7 @@ const tauriMocks = vi.hoisted(() => ({
   rootsListMock: vi.fn(),
   sessionCreateMock: vi.fn(),
   sessionKillMock: vi.fn(),
+  sessionStatusMock: vi.fn(),
   settingsGetMock: vi.fn(),
   settingsSetMock: vi.fn(),
 }));
@@ -49,6 +50,7 @@ vi.mock("./lib/tauri", () => ({
   rootsList: tauriMocks.rootsListMock,
   sessionCreate: tauriMocks.sessionCreateMock,
   sessionKill: tauriMocks.sessionKillMock,
+  sessionStatus: tauriMocks.sessionStatusMock,
   settingsGet: tauriMocks.settingsGetMock,
   settingsSet: tauriMocks.settingsSetMock,
 }));
@@ -100,6 +102,7 @@ describe("App — session/layout persistence survives a relaunch, across every p
 
   beforeEach(() => {
     for (const mock of Object.values(tauriMocks)) mock.mockReset();
+    tauriMocks.sessionStatusMock.mockResolvedValue(null);
     tauriMocks.ingestionStatusMock.mockResolvedValue({
       running: false,
       projects_total: 0,
@@ -159,6 +162,7 @@ describe("App — session/layout persistence survives a relaunch, across every p
     // LAYOUT_SETTING_KEY returns EXACTLY what session 1 actually persisted
     // -- not a hand-authored fixture standing in for it. ---------------
     for (const mock of Object.values(tauriMocks)) mock.mockReset();
+    tauriMocks.sessionStatusMock.mockResolvedValue(null);
     tauriMocks.ingestionStatusMock.mockResolvedValue({
       running: false,
       projects_total: 0,

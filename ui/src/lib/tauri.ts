@@ -5,6 +5,7 @@
 // contract easy to audit).
 import { invoke } from "@tauri-apps/api/core";
 import type { Engine, ProjectInfo } from "../state/sessions";
+import type { SessionStatusEvent } from "../state/sessionStatus";
 
 export interface SessionInfo {
   id: string;
@@ -12,6 +13,19 @@ export interface SessionInfo {
   engine: string;
   cwd: string;
   created: number;
+  /** `true` when this call attached to an engine that outlived the app
+   * closing (a surviving tmux session) instead of starting a new one.
+   *
+   * Optional in the type on purpose: it is additive on the Rust side
+   * (`sessions::SessionInfo`, 2026-07-26) and — more importantly — a
+   * `restoreId` whose tmux session is gone comes back `false` with a
+   * perfectly good fresh session. Nothing may branch on this being `true`;
+   * it is display-only. */
+  restored?: boolean;
+  /** `true` when the session is tmux-backed and will therefore survive the
+   * app closing. `false` = tmux wasn't available and this is a plain direct
+   * spawn (see `sessions.rs`'s degradation ladder). */
+  persistent?: boolean;
 }
 
 export interface BrainSearchHit {
@@ -48,13 +62,45 @@ export async function settingsSet(key: string, value: string): Promise<void> {
   await invoke("settings_set", { key, value });
 }
 
+/** Spawns a session — or, with `restoreId`, *reattaches* to one.
+ *
+ * `restoreId` is the id a previous run of the app got back for this same
+ * pane (persisted in `PersistedTab.id`). When the engine's tmux session
+ * survived the app closing, the backend attaches to the still-running
+ * `claude`/`codex`/shell instead of spawning a new one and the response
+ * comes back with `restored: true`. When it didn't survive — first launch,
+ * a reboot, tmux unavailable — the backend starts fresh under the same id
+ * and returns `restored: false`; that is a normal outcome, not an error, so
+ * no caller may assume a restore happened.
+ *
+ * Omitting it is byte-for-byte the old behaviour, which is what every path
+ * except `App.tsx`'s boot restore does. */
 export async function sessionCreate(
   project: string,
   engine: Engine,
   cwd: string,
   briefing?: string,
+  restoreId?: string,
 ): Promise<SessionInfo> {
-  return invoke<SessionInfo>("session_create", { project, engine, cwd, briefing: briefing ?? null });
+  return invoke<SessionInfo>("session_create", {
+    project,
+    engine,
+    cwd,
+    briefing: briefing ?? null,
+    restoreId: restoreId ?? null,
+  });
+}
+
+/** The five-state light for one session, pulled on demand — `null` when
+ * there's no such live session.
+ *
+ * The push counterpart (`session-status:{id}`) only fires on a genuine
+ * transition, so a pane that just mounted would otherwise show the neutral
+ * "Starting" mark until the session's *next* change. `App.tsx` calls this
+ * once per new session id and then lets the event stream drive it.
+ * Same payload shape either way, `notify` included. */
+export async function sessionStatus(id: string): Promise<SessionStatusEvent | null> {
+  return invoke<SessionStatusEvent | null>("session_status", { id });
 }
 
 export async function sessionWrite(id: string, data: string): Promise<void> {

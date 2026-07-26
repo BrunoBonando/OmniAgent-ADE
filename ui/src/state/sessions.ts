@@ -6,6 +6,7 @@
 // engine-default resolution, layout persistence shape) lives here, once.
 
 import { isTerminalThemeId, type TerminalThemeId } from "../lib/terminalThemes";
+import type { SessionStatus } from "./sessionStatus";
 
 export const ENGINES = ["claude", "codex", "shell"] as const;
 export type Engine = (typeof ENGINES)[number];
@@ -59,6 +60,25 @@ export interface TabInfo {
   label?: string;
   needsAttention: boolean;
   themeId?: TerminalThemeId;
+  /** This pane's five-state light (`sessionStatus.ts`), set by the
+   * `tab/status` action from the `session-status:{id}` event stream and the
+   * one-shot `session_status` pull `App.tsx` does per new session.
+   * `undefined` = nothing has reported in yet, which renders as the neutral
+   * "Starting" mark rather than a guess (see `statusPresentation`).
+   *
+   * Lives on the tab (rather than in a `PaneHeader`-local hook) for exactly
+   * the reason `needsAttention` does: the status of a session the user isn't
+   * looking at is the interesting case, and the notifications panel a later
+   * dispatch builds needs one central place holding every session's current
+   * light. Deliberately NOT persisted — see `PersistedTab`. */
+  status?: SessionStatus;
+  /** `SessionInfo.restored`: this tab reattached to an engine that survived
+   * the app closing (tmux), rather than starting a fresh one. A fact about
+   * *this run* only, so — like `status` — it is never persisted. Surfaced as
+   * one line in the hover card; nothing branches on it, because a restore
+   * that silently fell back to a fresh session must look and behave
+   * identically to any other session. */
+  restored?: boolean;
 }
 
 export interface SessionsState {
@@ -91,6 +111,9 @@ export type SessionsAction =
   | { type: "tab/activated"; id: string }
   | { type: "tab/renamed"; id: string; label: string }
   | { type: "tab/attention"; id: string }
+  // The five-state light — one `session-status:{id}` transition, or the
+  // one-shot `session_status` pull for a pane that just appeared.
+  | { type: "tab/status"; id: string; status: SessionStatus }
   | { type: "layout/restored"; tabs: TabInfo[] }
   // Auto-title from the first prompt (`autoTitle.ts`'s capture, fed from
   // `Terminal.tsx`'s real onData stream) — unlike `tab/renamed`, only ever
@@ -185,6 +208,20 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
       return {
         ...state,
         tabs: state.tabs.map((t) => (t.id === action.id ? { ...t, needsAttention: true } : t)),
+      };
+    }
+
+    case "tab/status": {
+      const target = state.tabs.find((t) => t.id === action.id);
+      // Skips the tabs-array rebuild when the light didn't actually change.
+      // The backend already only emits on a genuine transition, but the
+      // one-shot `session_status` pull on mount usually reports the state a
+      // just-arrived event already set — without this guard that pull would
+      // churn a new `tabs` array (and re-render every pane) for nothing.
+      if (!target || target.status === action.status) return state;
+      return {
+        ...state,
+        tabs: state.tabs.map((t) => (t.id === action.id ? { ...t, status: action.status } : t)),
       };
     }
 
@@ -309,17 +346,55 @@ export function cycleEngine(current: Engine, direction: 1 | -1): Engine {
   return ENGINES[next];
 }
 
-/** The shape persisted under `LAYOUT_SETTING_KEY` — engines are restarted
- * fresh on restore (DESIGN 3.1: no PTY resurrection), so only the inputs to
- * a fresh `session_create` call are kept, never the old session id. `label`
- * is the one piece of pure UI state worth carrying across a restart (a
- * rename with no other effect on the session), so it rides along here too
- * — `themeId` (a pane's terminal-theme override, see `TabInfo.themeId`'s
- * own doc) gets the exact same treatment. */
+/** Upper bound on a session id the backend will accept as a `restore_id`,
+ * mirroring `sessions.rs`'s `MAX_SESSION_ID_LEN`. */
+export const MAX_SESSION_ID_LEN = 96;
+
+/** The backend's `is_valid_session_id`, mirrored (`[A-Za-z0-9_-]`, 1..=96).
+ * That id becomes both a filename (`<id>.log`) and a tmux target, so the
+ * Rust side *validates* rather than sanitizes and rejects anything else —
+ * checking here as well means a hand-edited or corrupted settings row costs
+ * one tab its live-session restore, not the whole `session_create` call.
+ * Generated ids are `sess-<nanos>-<counter>`, comfortably inside this. */
+export function isValidSessionId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_SESSION_ID_LEN &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
+/** The shape persisted under `LAYOUT_SETTING_KEY`.
+ *
+ * **`id` (2026-07-26) is what makes session restore real.** This used to
+ * deliberately drop it — DESIGN 3.1's "engines are restarted fresh on
+ * restore, no PTY resurrection", so only the inputs to a fresh
+ * `session_create` were worth keeping. Two backend dispatches then made
+ * sessions genuinely survive the app closing (tmux-backed, see
+ * `src-tauri/src/sessions.rs`'s "Session persistence via tmux"), and that
+ * machinery keys entirely off the session keeping the *same id* across a
+ * relaunch: `session_create({ …, restoreId })` reattaches to the still-live
+ * `claude`/`codex`/shell process instead of spawning a new one. With no
+ * persisted id there is no `restoreId` to send, every relaunch mints a fresh
+ * id, and the whole feature is inert. So the id rides along now — and
+ * `App.tsx`'s boot restore passes it as `restoreId`.
+ *
+ * It stays *optional* in the type on purpose: layouts written before this
+ * change have no `id`, and they must keep restoring exactly as they did
+ * (fresh session, no `restoreId` sent). `label` and `themeId` are the two
+ * pieces of pure UI state worth carrying across a restart (a rename, a
+ * pane's terminal-theme override) and are unchanged.
+ *
+ * `status` and `restored` (see `TabInfo`) are deliberately absent: both
+ * describe a live process in *this* run, and persisting either would mean
+ * restoring a pane with a stale light claiming a state nothing has
+ * verified. */
 export interface PersistedTab {
   project: string;
   engine: Engine;
   cwd: string;
+  id?: string;
   label?: string;
   themeId?: TerminalThemeId;
 }
@@ -329,10 +404,13 @@ export interface Layout {
 
 export function serializeLayout(tabs: TabInfo[]): string {
   const layout: Layout = {
-    tabs: tabs.map(({ project, engine, cwd, label, themeId }) => ({
+    tabs: tabs.map(({ id, project, engine, cwd, label, themeId }) => ({
       project,
       engine,
       cwd,
+      // An id the backend would reject as a `restoreId` is not worth
+      // storing — it can only produce a failed restore next launch.
+      ...(isValidSessionId(id) ? { id } : {}),
       ...(label ? { label } : {}),
       ...(themeId ? { themeId } : {}),
     })),
@@ -341,16 +419,25 @@ export function serializeLayout(tabs: TabInfo[]): string {
 }
 
 /** Never throws — a corrupt/missing layout restores to "no tabs" rather
- * than crashing the app on launch. An invalid `themeId` (e.g. a preset
- * removed in a later version) drops just that field rather than the whole
- * tab — a stale theme preference losing the session/project it was
- * attached to would be a much worse failure mode than silently falling
- * back to the global default theme for that one pane. */
+ * than crashing the app on launch. Two fields are individually repaired
+ * rather than costing the whole entry:
+ *
+ * - an invalid `themeId` (e.g. a preset removed in a later version) drops
+ *   just that field — a stale theme preference losing the session/project it
+ *   was attached to would be a much worse failure mode than silently falling
+ *   back to the global default theme for that one pane;
+ * - an invalid *or duplicated* `id` drops just that field, so the tab
+ *   restores as a fresh session instead of disappearing. Duplicates matter
+ *   because the backend rejects a `restoreId` naming a session already live
+ *   in this app ("restore_id must name a session from a previous run"), and
+ *   one corrupt row must not be able to cost the user a whole pane.
+ */
 export function deserializeLayout(raw: string | null | undefined): PersistedTab[] {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw) as Partial<Layout>;
     if (!Array.isArray(parsed.tabs)) return [];
+    const seenIds = new Set<string>();
     return parsed.tabs
       .filter(
         (t): t is PersistedTab =>
@@ -360,7 +447,16 @@ export function deserializeLayout(raw: string | null | undefined): PersistedTab[
           isEngine(t.engine) &&
           (t.label === undefined || typeof t.label === "string"),
       )
-      .map((t) => (t.themeId !== undefined && !isTerminalThemeId(t.themeId) ? { ...t, themeId: undefined } : t));
+      .map((t) => (t.themeId !== undefined && !isTerminalThemeId(t.themeId) ? { ...t, themeId: undefined } : t))
+      .map((t) => {
+        if (t.id === undefined) return t;
+        if (!isValidSessionId(t.id) || seenIds.has(t.id)) {
+          const { id: _dropped, ...rest } = t;
+          return rest;
+        }
+        seenIds.add(t.id);
+        return t;
+      });
   } catch {
     return [];
   }

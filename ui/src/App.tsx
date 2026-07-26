@@ -2,7 +2,6 @@
 // the Phase 6 brain map (see the module-level comment at the bottom of this
 // file, written by the Phase 5 agent, for the integration plan this follows).
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "./App.css";
 import Sidebar from "./components/Sidebar";
 import Workspace from "./components/Workspace";
@@ -33,8 +32,10 @@ import {
 } from "./state/sessions";
 import { buildLayoutTree, type LayoutPreset, type PaneTree } from "./state/paneGrid";
 import { importFailureBanner, type ImportBatchResult } from "./state/importState";
+import { isSessionStatus, type SessionStatusEvent } from "./state/sessionStatus";
 import { ENGINE_LABEL } from "./theme";
 import type { TerminalThemeId } from "./lib/terminalThemes";
+import { usePerSessionEvent } from "./lib/usePerSessionEvent";
 import {
   FILE_TREE_VISIBLE_SETTING_KEY,
   getBriefing,
@@ -44,6 +45,7 @@ import {
   rootsList,
   sessionCreate,
   sessionKill,
+  sessionStatus,
   settingsGet,
   settingsSet,
   type IngestionStatus,
@@ -231,7 +233,34 @@ function App() {
         for (const t of persisted) {
           try {
             const briefing = t.engine === "claude" ? await getBriefing(t.project) : undefined;
-            const info = await sessionCreate(t.project, t.engine, t.cwd, briefing);
+            // THE session-restore wiring (2026-07-26). `t.id` is the id this
+            // pane's session had before the app closed; handing it back as
+            // `restoreId` is what lets the backend reattach to the engine
+            // still running inside its tmux session — the same live Claude
+            // conversation / shell, scrollback and all — instead of spawning
+            // a new one. Absent (a layout written before ids were persisted,
+            // or an id `deserializeLayout` rejected) it is simply not sent,
+            // which is exactly the old fresh-spawn behaviour.
+            //
+            // `info.restored` is what actually happened, and it is NOT
+            // assumed: a `restoreId` whose tmux session is gone (first
+            // launch after a reboot, tmux uninstalled) comes back
+            // `restored: false` with a perfectly good fresh session, and the
+            // pane must look and behave identically either way.
+            let info;
+            try {
+              info = await sessionCreate(t.project, t.engine, t.cwd, briefing, t.id);
+            } catch (restoreErr) {
+              // A rejected restore must never cost the user the pane. The
+              // only ways `session_create` fails *because of* the id are an
+              // id this build considers valid but the backend doesn't, or
+              // one naming a session already live in this app — both mean
+              // "you can't reattach", never "you can't have a terminal". Try
+              // once more as a plain fresh spawn before giving up.
+              if (t.id === undefined) throw restoreErr;
+              console.error(`failed to reattach session ${t.id}, starting it fresh instead`, restoreErr);
+              info = await sessionCreate(t.project, t.engine, t.cwd, briefing);
+            }
             restored.push({
               id: info.id,
               project: info.project,
@@ -241,11 +270,12 @@ function App() {
               label: t.label,
               themeId: t.themeId,
               needsAttention: false,
+              restored: info.restored === true,
             });
           } catch (err) {
-            // DESIGN 3.1: engines "restart fresh" on relaunch — if one
-            // fails to spawn (e.g. that CLI got uninstalled), skip it
-            // rather than blocking the rest of the layout from restoring.
+            // If a session can't be started at all (e.g. that CLI got
+            // uninstalled), skip it rather than blocking the rest of the
+            // layout from restoring.
             console.error("failed to restore tab", t, err);
           }
         }
@@ -269,59 +299,59 @@ function App() {
     void settingsSet(LAYOUT_SETTING_KEY, serializeLayout(state.tabs));
   }, [state.tabs]);
 
-  // ---- session-attention:{id} events (founder feedback, 2026-07-24) -----
-  // Same subscription style `Terminal.tsx` already uses for
-  // `session-output:{id}` (`void listen(event, cb).then((unlisten) => ...)`)
-  // — the difference is *where* it's done: `Terminal.tsx` subscribes once
-  // per mounted session because it only ever cares about its own id, but
-  // the attention badge has to update the Sidebar/TabBar for a session that
-  // isn't the active tab's Terminal, so it lives here instead, subscribing
-  // per tab id and diffing against `state.tabs` as tabs open/close (rather
-  // than tearing everything down and resubscribing on every tab change,
-  // which would risk a real event landing in the gap). `attentionListeners`
-  // holds either a resolved `UnlistenFn` or a temporary cancel-flag closure
-  // for a subscription still in flight — see the resolution branch below
-  // for why that matters when a tab closes before its `listen()` call
-  // returns.
-  const attentionListeners = useRef<Map<string, UnlistenFn>>(new Map());
-  useEffect(() => {
-    const listeners = attentionListeners.current;
-    const liveIds = new Set(state.tabs.map((t) => t.id));
+  // ---- per-session event streams ----------------------------------------
+  // Two of them now, both subscribed here rather than inside the component
+  // that renders the session: a badge/light is interesting precisely for the
+  // session the user is NOT looking at. `usePerSessionEvent` owns the
+  // subscribe/diff/unsubscribe dance (see its module doc — it is this file's
+  // original attention effect, lifted out when the second stream arrived).
+  const tabIds = useMemo(() => state.tabs.map((t) => t.id), [state.tabs]);
 
-    for (const [id, unlisten] of listeners) {
-      if (!liveIds.has(id)) {
-        unlisten();
-        listeners.delete(id);
-      }
+  // `session-attention:{id}` (founder feedback, 2026-07-24): Claude Code
+  // asking for a tool permission, pattern-matched out of the raw PTY stream.
+  usePerSessionEvent<unknown>(tabIds, "session-attention:", (id) => {
+    dispatch({ type: "tab/attention", id });
+  });
+
+  // `session-status:{id}` (founder brief, 2026-07-26): the five-state light.
+  // Fires only on a genuine transition. `notify` rides along on the payload
+  // and is deliberately ignored here — the notifications panel a later
+  // dispatch builds is what consumes it; this wiring only renders status.
+  usePerSessionEvent<SessionStatusEvent>(tabIds, "session-status:", (id, payload) => {
+    if (payload && isSessionStatus(payload.status)) {
+      dispatch({ type: "tab/status", id, status: payload.status });
     }
+  });
 
-    for (const id of liveIds) {
-      if (listeners.has(id)) continue;
-      let cancelled = false;
-      listeners.set(id, () => {
-        cancelled = true;
-      });
-      void listen(`session-attention:${id}`, () => {
-        dispatch({ type: "tab/attention", id });
-      }).then((unlisten) => {
-        if (cancelled) {
-          unlisten();
-          return;
-        }
-        listeners.set(id, unlisten);
-      });
-    }
-  }, [state.tabs]);
-
-  // Unsubscribe everything on unmount (App.tsx only ever unmounts with the
-  // whole window closing, but this keeps the pattern honest/symmetric).
+  // …and one pull per newly-seen session, because the push side only fires
+  // on *change*: without this a pane that just mounted (or was just
+  // restored, already mid-thought) would show the neutral "Starting" mark
+  // until its session next happened to change state. The backend returns the
+  // identical payload shape for both. Ids are remembered so this runs once
+  // per session, not on every tab-array change; ids that go away are
+  // forgotten so a re-created one pulls again.
+  const pulledStatusIds = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const listeners = attentionListeners.current;
-    return () => {
-      for (const unlisten of listeners.values()) unlisten();
-      listeners.clear();
-    };
-  }, []);
+    const live = new Set(tabIds);
+    for (const id of pulledStatusIds.current) {
+      if (!live.has(id)) pulledStatusIds.current.delete(id);
+    }
+    for (const id of tabIds) {
+      if (pulledStatusIds.current.has(id)) continue;
+      pulledStatusIds.current.add(id);
+      void sessionStatus(id)
+        .then((event) => {
+          if (event && isSessionStatus(event.status)) {
+            dispatch({ type: "tab/status", id, status: event.status });
+          }
+        })
+        .catch((err) => {
+          // A missing status is a rendering detail, never a reason to break
+          // the pane — the event stream will correct it on the next change.
+          console.error(`session_status(${id}) failed`, err);
+        });
+    }
+  }, [tabIds]);
 
   // ---- default the sidebar's "current project" once projects arrive -----
   useEffect(() => {

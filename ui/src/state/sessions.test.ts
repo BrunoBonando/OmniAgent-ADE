@@ -416,14 +416,63 @@ describe("cycleEngine", () => {
 });
 
 describe("layout serialize/deserialize round trip", () => {
-  it("round trips tabs through JSON, dropping ids (fresh session_create per restore)", () => {
+  // Changed 2026-07-26: this used to assert ids were DROPPED ("fresh
+  // session_create per restore", DESIGN 3.1). tmux-backed session restore
+  // (src-tauri/src/sessions.rs) made the id the thing the whole feature
+  // hangs on — `session_create({ …, restoreId })` reattaches to the live
+  // engine only if the frontend can hand back the id it got last run.
+  it("round trips tabs through JSON, KEEPING ids so they can be replayed as restoreId", () => {
     const tabs = [tab("sess-1", "p1", "codex"), tab("sess-2", "p2", "shell")];
     const json = serializeLayout(tabs);
     const restored = deserializeLayout(json);
     expect(restored).toEqual([
-      { project: "p1", engine: "codex", cwd: "/tmp/p1" },
-      { project: "p2", engine: "shell", cwd: "/tmp/p2" },
+      { id: "sess-1", project: "p1", engine: "codex", cwd: "/tmp/p1" },
+      { id: "sess-2", project: "p2", engine: "shell", cwd: "/tmp/p2" },
     ]);
+  });
+
+  it("restores a layout written before ids were persisted, with no id and no restoreId to send", () => {
+    const legacy = JSON.stringify({
+      tabs: [{ project: "p1", engine: "claude", cwd: "/tmp/p1", label: "old" }],
+    });
+    expect(deserializeLayout(legacy)).toEqual([
+      { project: "p1", engine: "claude", cwd: "/tmp/p1", label: "old" },
+    ]);
+  });
+
+  it("drops an id the backend would reject rather than the whole tab", () => {
+    const raw = JSON.stringify({
+      tabs: [
+        { id: "has spaces", project: "p1", engine: "claude", cwd: "/tmp/p1" },
+        { id: "slash/es", project: "p2", engine: "claude", cwd: "/tmp/p2" },
+        { id: "x".repeat(97), project: "p3", engine: "claude", cwd: "/tmp/p3" },
+        { id: "", project: "p4", engine: "claude", cwd: "/tmp/p4" },
+        { id: 7, project: "p5", engine: "claude", cwd: "/tmp/p5" },
+      ],
+    });
+    const restored = deserializeLayout(raw);
+    expect(restored).toHaveLength(5);
+    for (const t of restored) expect(t).not.toHaveProperty("id");
+  });
+
+  it("keeps only the first of two tabs persisted with the same id (the backend rejects a re-used restoreId)", () => {
+    const raw = JSON.stringify({
+      tabs: [
+        { id: "sess-dup", project: "p1", engine: "claude", cwd: "/tmp/p1" },
+        { id: "sess-dup", project: "p2", engine: "claude", cwd: "/tmp/p2" },
+      ],
+    });
+    const restored = deserializeLayout(raw);
+    expect(restored).toHaveLength(2);
+    expect(restored[0].id).toBe("sess-dup");
+    expect(restored[1]).not.toHaveProperty("id");
+  });
+
+  it("never persists the live-process fields — a restored pane must not claim a stale light", () => {
+    const json = serializeLayout([{ ...tab("sess-1", "p1"), status: "error", restored: true }]);
+    const raw = JSON.parse(json).tabs[0];
+    expect(raw).not.toHaveProperty("status");
+    expect(raw).not.toHaveProperty("restored");
   });
 
   it("deserializing null/undefined/garbage never throws and returns []", () => {
@@ -448,20 +497,22 @@ describe("layout serialize/deserialize round trip", () => {
     const tabs = [{ ...tab("sess-1", "p1", "codex"), label: "backend fix" }];
     const json = serializeLayout(tabs);
     const restored = deserializeLayout(json);
-    expect(restored).toEqual([{ project: "p1", engine: "codex", cwd: "/tmp/p1", label: "backend fix" }]);
+    expect(restored).toEqual([
+      { id: "sess-1", project: "p1", engine: "codex", cwd: "/tmp/p1", label: "backend fix" },
+    ]);
   });
 
   it("omits the label key entirely for un-renamed tabs (existing layouts stay unaffected)", () => {
     const json = serializeLayout([tab("a", "p1")]);
     expect(JSON.parse(json).tabs[0]).not.toHaveProperty("label");
-    expect(deserializeLayout(json)).toEqual([{ project: "p1", engine: "claude", cwd: "/tmp/p1" }]);
+    expect(deserializeLayout(json)).toEqual([{ id: "a", project: "p1", engine: "claude", cwd: "/tmp/p1" }]);
   });
 
   it("round trips a per-pane terminal theme override so it survives a relaunch", () => {
     const tabs = [{ ...tab("sess-1", "p1", "codex"), themeId: "matrix" as const }];
     const json = serializeLayout(tabs);
     expect(deserializeLayout(json)).toEqual([
-      { project: "p1", engine: "codex", cwd: "/tmp/p1", themeId: "matrix" },
+      { id: "sess-1", project: "p1", engine: "codex", cwd: "/tmp/p1", themeId: "matrix" },
     ]);
   });
 
@@ -475,6 +526,42 @@ describe("layout serialize/deserialize round trip", () => {
       tabs: [{ project: "p1", engine: "claude", cwd: "/tmp/p1", themeId: "not-a-real-theme" }],
     });
     expect(deserializeLayout(raw)).toEqual([{ project: "p1", engine: "claude", cwd: "/tmp/p1" }]);
+  });
+});
+
+describe("sessionsReducer — tab/status (the five-state light)", () => {
+  const two: SessionsState = { projects: [], tabs: [tab("a", "p1"), tab("b", "p1")], activeTabId: "a" };
+
+  it("sets the light on exactly the tab the event names", () => {
+    const next = sessionsReducer(two, { type: "tab/status", id: "b", status: "awaiting_approval" });
+    expect(next.tabs.map((t) => t.status)).toEqual([undefined, "awaiting_approval"]);
+  });
+
+  it("replaces the previous light on a later transition", () => {
+    const s1 = sessionsReducer(two, { type: "tab/status", id: "a", status: "thinking" });
+    const s2 = sessionsReducer(s1, { type: "tab/status", id: "a", status: "ready" });
+    expect(s2.tabs[0].status).toBe("ready");
+  });
+
+  it("is a no-op — same array identity — when the light didn't change, so the on-mount pull never re-renders every pane", () => {
+    const s1 = sessionsReducer(two, { type: "tab/status", id: "a", status: "ready" });
+    const s2 = sessionsReducer(s1, { type: "tab/status", id: "a", status: "ready" });
+    expect(s2).toBe(s1);
+    expect(s2.tabs).toBe(s1.tabs);
+  });
+
+  it("ignores a status for a tab that has already closed", () => {
+    const next = sessionsReducer(two, { type: "tab/status", id: "gone", status: "error" });
+    expect(next).toBe(two);
+  });
+
+  it("leaves the attention badge alone — the light and the badge are separate signals", () => {
+    const withBadge: SessionsState = {
+      ...two,
+      tabs: [{ ...tab("a", "p1"), needsAttention: true }, tab("b", "p1")],
+    };
+    const next = sessionsReducer(withBadge, { type: "tab/status", id: "a", status: "ready" });
+    expect(next.tabs[0].needsAttention).toBe(true);
   });
 });
 
