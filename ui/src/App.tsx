@@ -1,13 +1,16 @@
 // The app shell: a `view` switch between the Phase 5 terminal workspace and
 // the Phase 6 brain map (see the module-level comment at the bottom of this
 // file, written by the Phase 5 agent, for the integration plan this follows).
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import "./App.css";
 import Sidebar from "./components/Sidebar";
 import Workspace from "./components/Workspace";
 import CommandPalette from "./components/CommandPalette";
 import FileTree from "./components/FileTree";
 import CodeReviewPanel from "./components/CodeReviewPanel";
+import AppChrome from "./components/AppChrome";
+import NewChooserModal from "./components/NewChooserModal";
+import NewSessionModal from "./components/NewSessionModal";
 import BrainMap from "./map/BrainMap";
 import FirstRun from "./onboarding/FirstRun";
 import AuthGate from "./onboarding/AuthGate";
@@ -35,6 +38,22 @@ import {
 import { buildLayoutTree, type LayoutPreset, type PaneTree } from "./state/paneGrid";
 import { importFailureBanner, type ImportBatchResult } from "./state/importState";
 import { isSessionStatus, type SessionStatusEvent } from "./state/sessionStatus";
+import {
+  currentSessionGroupId,
+  groupTabsBySession,
+  newSessionGroupId,
+  sessionGroupForNewPane,
+} from "./state/sessionGroups";
+import {
+  NOTIFICATIONS_SETTING_KEY,
+  deriveNotification,
+  deserializeNotifications,
+  initialNotificationsState,
+  notificationsReducer,
+  serializeNotifications,
+  type NotificationEntry,
+} from "./state/notifications";
+import type { CreateChoice } from "./state/newChooserState";
 import { ENGINE_LABEL } from "./theme";
 import type { TerminalThemeId } from "./lib/terminalThemes";
 import { usePerSessionEvent } from "./lib/usePerSessionEvent";
@@ -68,11 +87,16 @@ function App() {
   const [state, dispatch] = useReducer(sessionsReducer, initialSessionsState);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  // ⌘N (founder ask: "Command + N opens a new workspace") — lifted out of
-  // `Sidebar.tsx` (which still owns its OTHER overlays locally, e.g.
-  // aboutOpen/reviewOpen/importOpen) so the global keydown handler below
-  // can open it, same as ⌘T/⌘K.
+  // ⌘N — since 2026-07-26 it no longer opens the workspace dialog directly
+  // (Bruno: "cmd + N now has a new meaning. Either a new session or a new
+  // workspace"). It opens `NewChooserModal` first; that hands back
+  // "session" or "workspace" and exactly one of the two dialogs below
+  // opens. `newWorkspaceOpen` stays lifted out of `Sidebar.tsx` (which
+  // still owns its OTHER overlays locally, e.g. aboutOpen/reviewOpen/
+  // importOpen) because the sidebar's "+" opens it too.
+  const [newChooserOpen, setNewChooserOpen] = useState(false);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [view, setView] = useState<View>("workspace");
   const restoredRef = useRef(false);
@@ -105,18 +129,24 @@ function App() {
   // suppressed from rendering.
   const [reviewTarget, setReviewTarget] = useState<{ id: string; cwd: string; label: string } | null>(null);
 
-  // NewWorkspaceModal's bulk-create: `projectId -> PaneTree` arrangement
-  // hints for a project's very first pane-grid render (see
-  // `Workspace.tsx`'s `initialLayouts`/`ProjectPaneGrid`'s `initialTree`
-  // doc). A plain mutable ref, not React state — nothing needs to
+  // Arrangement hints for a freshly-created batch of panes (see
+  // `Workspace.tsx`'s `sessionLayouts` doc). A plain mutable ref, not React
+  // state — nothing needs to
   // re-render *because* this map changed; it only needs to hold the right
   // value by the time the `tabs/opened_bulk` dispatch below triggers
   // `Workspace`'s next render, and mutating-then-dispatching in the same
-  // synchronous call does exactly that. `ProjectPaneGrid` only ever reads
-  // an entry once (its tree is never `null` again after that, see that
-  // component's own doc), so entries are deliberately never cleaned up
-  // afterward — bounded by "how many workspaces this session has ever
-  // bulk-created," negligible for a desktop app that restarts on relaunch.
+  // synchronous call does exactly that. `ProjectPaneGrid` applies each
+  // entry exactly once (it remembers which groups it has folded in), so
+  // entries are deliberately never cleaned up afterward — bounded by "how
+  // many sessions this run has created," negligible for a desktop app that
+  // restarts on relaunch.
+  // Keyed by SESSION-GROUP id (2026-07-26), not project id as it was when
+  // only `NewWorkspaceModal` could bulk-create: a project can now hold
+  // several sessions, each created with its own layout preset, so the
+  // arrangement hint belongs to the batch that chose it. `Workspace.tsx`
+  // merges each entry into that project's grid the first time all of its
+  // panes are present (see `addPaneSubtree` — appended beside what's
+  // already there, never re-wrapping it, so live terminals never remount).
   const pendingLayoutsRef = useRef<Map<string, PaneTree>>(new Map());
 
   // ---- fake sign-in + personalization gate — a SEPARATE, EARLIER gate
@@ -142,6 +172,20 @@ function App() {
   // exactly like `settingsGet`'s own return shape, no extra conversion.
   const [authSignedIn, setAuthSignedIn] = useState<string | null>(null);
   const [authPersona, setAuthPersona] = useState<string | null>(null);
+
+  // ---- notifications (founder ask, 2026-07-26) -------------------------
+  // Its own reducer beside `sessionsReducer` rather than a slice of it:
+  // notifications outlive the sessions they describe (they're restored from
+  // the settings table on boot, sessions are not), so folding them into
+  // `SessionsState` would tie a list that persists to a list that doesn't.
+  // The rule for what becomes a notification lives in
+  // `state/notifications.ts`; the rule for *which statuses* notify at all
+  // lives in Rust and rides on the event as `notify`.
+  const [notifications, notificationsDispatch] = useReducer(
+    notificationsReducer,
+    initialNotificationsState,
+  );
+  const notificationsRestoredRef = useRef(false);
 
   // ---- Task 8.1: onboarding gating + the always-on ingestion status poll -
   const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null); // null = still checking
@@ -247,6 +291,22 @@ function App() {
         console.error("failed to read file_tree_visible setting, defaulting to visible", err);
       }
 
+      // Recent notifications survive a relaunch (see
+      // `state/notifications.ts`'s persistence note — "somewhere else"
+      // includes "quit for the night", and the reference panel's own rows
+      // read "3 days ago"). Best effort: a failed read just starts empty.
+      try {
+        const rawNotifications = await settingsGet(NOTIFICATIONS_SETTING_KEY);
+        const entries = deserializeNotifications(rawNotifications);
+        if (!cancelled && entries.length > 0) {
+          notificationsDispatch({ type: "notifications/restored", entries });
+        }
+      } catch (err) {
+        console.error("failed to restore notifications", err);
+      } finally {
+        notificationsRestoredRef.current = true;
+      }
+
       try {
         const raw = await settingsGet(LAYOUT_SETTING_KEY);
         const persisted = deserializeLayout(raw);
@@ -290,7 +350,13 @@ function App() {
               createdAt: info.created,
               label: t.label,
               themeId: t.themeId,
-              needsAttention: false,
+              // The pane's session (pane group) — restored alongside its
+              // label/theme so the sidebar's project -> session -> pane tree
+              // comes back exactly as the user left it. Absent for layouts
+              // written before groups existed, which is handled by
+              // `sessionGroups.ts`'s implicit group rather than by inventing
+              // one here.
+              group: t.group,
               restored: info.restored === true,
             });
           } catch (err) {
@@ -320,28 +386,83 @@ function App() {
     void settingsSet(LAYOUT_SETTING_KEY, serializeLayout(state.tabs));
   }, [state.tabs]);
 
-  // ---- per-session event streams ----------------------------------------
-  // Two of them now, both subscribed here rather than inside the component
-  // that renders the session: a badge/light is interesting precisely for the
+  // ---- …and the notification list, same shape, same guard ---------------
+  useEffect(() => {
+    if (!notificationsRestoredRef.current) return;
+    void settingsSet(NOTIFICATIONS_SETTING_KEY, serializeNotifications(notifications.entries));
+  }, [notifications.entries]);
+
+  // ---- the per-session event stream -------------------------------------
+  // Subscribed here rather than inside the component that renders the
+  // session: a light (and a notification) is interesting precisely for the
   // session the user is NOT looking at. `usePerSessionEvent` owns the
-  // subscribe/diff/unsubscribe dance (see its module doc — it is this file's
-  // original attention effect, lifted out when the second stream arrived).
+  // subscribe/diff/unsubscribe dance.
+  //
+  // `session-attention:{id}` used to be a SECOND stream here, driving the
+  // latched red `needsAttention` badge. It's gone (2026-07-26): the same
+  // underlying detection in `sessions.rs` also produces
+  // `awaiting_approval`/`error` on this stream, so the badge was a second
+  // visual language for a fact the five-state light already carried, with
+  // a different lifetime. See `TabInfo`'s doc in `state/sessions.ts` for
+  // the full reconciliation.
   const tabIds = useMemo(() => state.tabs.map((t) => t.id), [state.tabs]);
 
-  // `session-attention:{id}` (founder feedback, 2026-07-24): Claude Code
-  // asking for a tool permission, pattern-matched out of the raw PTY stream.
-  usePerSessionEvent<unknown>(tabIds, "session-attention:", (id) => {
-    dispatch({ type: "tab/attention", id });
+  // The focus context the notification rule reads, mirrored into a ref in a
+  // LAYOUT effect — i.e. synchronously at commit, before anything can be
+  // painted or any passive effect runs.
+  //
+  // This is not ceremony: `usePerSessionEvent` re-points its handler in a
+  // *passive* effect, so an event arriving in the window between a commit
+  // and that flush would otherwise be judged against the previous render's
+  // idea of "which pane is focused and which project is on screen". That
+  // window is real in the app (a status event can land in the same tick the
+  // user switches project) and it is exactly the wrong thing to be stale
+  // about: getting it wrong means either a notification for the pane the
+  // user is staring at, or — worse — silence for one they can't see. Read
+  // through the ref, the rule always sees the state that is actually
+  // committed.
+  const notifyContextRef = useRef({
+    tabs: state.tabs,
+    projects: state.projects,
+    activeTabId: state.activeTabId,
+    selectedProjectId,
+    view,
+  });
+  useLayoutEffect(() => {
+    notifyContextRef.current = {
+      tabs: state.tabs,
+      projects: state.projects,
+      activeTabId: state.activeTabId,
+      selectedProjectId,
+      view,
+    };
   });
 
-  // `session-status:{id}` (founder brief, 2026-07-26): the five-state light.
-  // Fires only on a genuine transition. `notify` rides along on the payload
-  // and is deliberately ignored here — the notifications panel a later
-  // dispatch builds is what consumes it; this wiring only renders status.
+  // `session-status:{id}` (founder brief, 2026-07-26): the five-state light
+  // AND — since this dispatch — the notification feed. Fires only on a
+  // genuine transition. `payload.notify` is the backend's precomputed
+  // "green/yellow/red only" rule and is consumed as-is, never re-derived
+  // (see `state/notifications.ts`). This closure is re-read from a ref on
+  // every render (`usePerSessionEvent`), so the focus/visibility state it
+  // checks is always current at the moment the event lands.
   usePerSessionEvent<SessionStatusEvent>(tabIds, "session-status:", (id, payload) => {
-    if (payload && isSessionStatus(payload.status)) {
-      dispatch({ type: "tab/status", id, status: payload.status });
-    }
+    if (!payload || !isSessionStatus(payload.status)) return;
+    dispatch({ type: "tab/status", id, status: payload.status });
+
+    const { tabs, projects, activeTabId, selectedProjectId: onScreenProject, view: currentView } =
+      notifyContextRef.current;
+    const tab = tabs.find((t) => t.id === id);
+    const entry = deriveNotification({
+      event: payload,
+      tab,
+      projectLabel: projects.find((p) => p.id === tab?.project)?.label ?? tab?.project ?? "",
+      focusedTabId: activeTabId,
+      selectedProjectId: onScreenProject,
+      view: currentView,
+      windowVisible: typeof document === "undefined" || document.visibilityState !== "hidden",
+      now: Date.now(),
+    });
+    if (entry) notificationsDispatch({ type: "notification/added", entry });
   });
 
   // …and one pull per newly-seen session, because the push side only fires
@@ -396,19 +517,26 @@ function App() {
   // restart (`restartTabWithEngine`) so there is exactly one place that
   // knows how to spin up a session for a project — no second, drifting copy
   // of the per-engine spawn logic.
-  const createSessionTab = useCallback(async (project: ProjectInfo, engine: Engine): Promise<TabInfo> => {
-    const briefing = engine === "claude" ? await getBriefing(project.id) : undefined;
-    const cwd = project.path ?? project.id;
-    const info = await sessionCreate(project.id, engine, cwd, briefing);
-    return {
-      id: info.id,
-      project: info.project,
-      engine,
-      cwd: info.cwd,
-      createdAt: info.created,
-      needsAttention: false,
-    };
-  }, []);
+  //
+  // `cwd` overrides the project's own folder — the "or subfolder" half of
+  // Bruno's session brief (`NewSessionModal` validates that the override is
+  // genuinely inside the project before it ever gets here). `group` is the
+  // session (pane group) the new pane belongs to.
+  const createSessionTab = useCallback(
+    async (project: ProjectInfo, engine: Engine, group: string, cwd?: string): Promise<TabInfo> => {
+      const briefing = engine === "claude" ? await getBriefing(project.id) : undefined;
+      const info = await sessionCreate(project.id, engine, cwd ?? project.path ?? project.id, briefing);
+      return {
+        id: info.id,
+        project: info.project,
+        engine,
+        cwd: info.cwd,
+        createdAt: info.created,
+        group,
+      };
+    },
+    [],
+  );
 
   // ---- new-tab flow: resolve the default engine, open it immediately ----
   // Founder ask (verbatim): "When a new terminal is created, it should
@@ -449,7 +577,12 @@ function App() {
       const engine = resolveDefaultEngine(project.id, settingsMap);
 
       try {
-        const tab = await createSessionTab(project, engine);
+        // A single new pane joins the session you're already in for that
+        // project (`sessionGroupForNewPane`) — ⌘T, the sidebar "+" and the
+        // pane header's split all mean "one more terminal here", not "a new
+        // session". A project with no panes at all starts one.
+        const group = sessionGroupForNewPane(state.tabs, project.id, state.activeTabId) ?? newSessionGroupId();
+        const tab = await createSessionTab(project, engine, group);
         dispatch({ type: "tab/opened", tab });
         // Cross-view integration point (Task 6.2): the map's "Open terminal
         // here" action calls `requestNewTab` too (via `onOpenTerminal`
@@ -461,7 +594,7 @@ function App() {
         setErrorBanner(`Couldn't start ${engine} in ${project.label}: ${err}`);
       }
     },
-    [createSessionTab],
+    [createSessionTab, state.tabs, state.activeTabId],
   );
 
   // ---- PaneHeader's 3-dot "Change engine" -------------------------------
@@ -489,7 +622,10 @@ function App() {
         console.error(`failed to kill session ${tab.id} before restarting with ${engine} (continuing anyway)`, err);
       }
       try {
-        const spawned = await createSessionTab(project, engine);
+        // `tab.group` rides along for the same reason `label`/`themeId` do:
+        // restarting the engine must not move the pane out of the session
+        // it belongs to.
+        const spawned = await createSessionTab(project, engine, tab.group ?? newSessionGroupId(), tab.cwd);
         const restarted: TabInfo = { ...spawned, label: tab.label, themeId: tab.themeId };
         dispatch({ type: "tab/engineRestarted", oldId: tab.id, tab: restarted });
       } catch (err) {
@@ -542,11 +678,13 @@ function App() {
       void reloadProjects();
       setSelectedProjectId(project.id);
 
+      // A new workspace's first batch of panes is its first session.
+      const group = newSessionGroupId();
       const created: TabInfo[] = [];
       const failed: Engine[] = [];
       for (const engine of engines) {
         try {
-          created.push(await createSessionTab(project, engine));
+          created.push(await createSessionTab(project, engine, group));
         } catch (err) {
           console.error(`failed to start ${engine} in ${project.label}`, err);
           failed.push(engine);
@@ -555,7 +693,7 @@ function App() {
 
       if (created.length > 0) {
         const tree = buildLayoutTree(created.map((t) => t.id), layout);
-        if (tree) pendingLayoutsRef.current.set(project.id, tree);
+        if (tree) pendingLayoutsRef.current.set(group, tree);
         dispatch({ type: "tabs/opened_bulk", tabs: created });
       }
 
@@ -571,6 +709,67 @@ function App() {
       setView("workspace");
     },
     [reloadProjects, createSessionTab],
+  );
+
+  // ---- NewSessionModal's create (⌘N -> "Session") -----------------------
+  // The sibling of `handleWorkspaceCreated` above, and deliberately almost
+  // the same function: same per-engine spawn, same one-bulk-dispatch,
+  // same partial-failure handling, same layout hint. Two differences, and
+  // they are the whole definition of a session (founder brief, 2026-07-26:
+  // "Each session can be created with a new layout, agents, etc... but in
+  // the same folder or subfolder"):
+  //
+  // 1. no `add_project` — the project already exists, this runs inside it;
+  // 2. `cwd` is the project folder or a validated subfolder of it, not a
+  //    brand-new folder chosen from anywhere on disk.
+  const handleSessionCreated = useCallback(
+    async (project: ProjectInfo, cwd: string, engines: Engine[], layout: LayoutPreset) => {
+      setNewSessionOpen(false);
+      setSelectedProjectId(project.id);
+
+      const group = newSessionGroupId();
+      const created: TabInfo[] = [];
+      const failed: Engine[] = [];
+      for (const engine of engines) {
+        try {
+          created.push(await createSessionTab(project, engine, group, cwd));
+        } catch (err) {
+          console.error(`failed to start ${engine} in ${cwd}`, err);
+          failed.push(engine);
+        }
+      }
+
+      if (created.length > 0) {
+        const tree = buildLayoutTree(created.map((t) => t.id), layout);
+        if (tree) pendingLayoutsRef.current.set(group, tree);
+        dispatch({ type: "tabs/opened_bulk", tabs: created });
+      }
+
+      if (failed.length > 0) {
+        const names = failed.map((e) => ENGINE_LABEL[e]).join(", ");
+        setErrorBanner(
+          created.length > 0
+            ? `Started the session, but couldn't run ${names} — the rest are up.`
+            : `Couldn't start ${names} in ${project.label} — no panes were opened.`,
+        );
+      }
+
+      setView("workspace");
+    },
+    [createSessionTab],
+  );
+
+  // ⌘N's chooser resolved. "Session" needs a project to run in — with none
+  // selected (a brand-new install with no projects at all) the only
+  // meaningful thing to create is a workspace, so it falls through to that
+  // rather than opening a dialog with nowhere to put its panes.
+  const handleCreateChoice = useCallback(
+    (choice: CreateChoice) => {
+      setNewChooserOpen(false);
+      if (choice === "workspace" || !selectedProject) setNewWorkspaceOpen(true);
+      else setNewSessionOpen(true);
+    },
+    [selectedProject],
   );
 
   // ---- ImportProjectsFlow's bulk-import ("import from other tools") -----
@@ -692,6 +891,37 @@ function App() {
     void settingsSet(AUTH_PERSONA_SETTING_KEY, "");
   }, []);
 
+  // ---- clicking a notification (the feature's whole point) --------------
+  // Bruno's own rationale for notifications is that he's somewhere else, so
+  // the row has to take him back. Three cases, in order of how much is
+  // still there:
+  //
+  // 1. the session is live -> select its project and focus its pane
+  //    (`activateTab` already does both);
+  // 2. the session is gone but its project isn't -> select the project, so
+  //    he lands where the work happened;
+  // 3. neither exists any more (project removed) -> say so in the banner
+  //    rather than silently doing nothing.
+  const handleNotificationSelect = useCallback(
+    (entry: NotificationEntry) => {
+      const tab = state.tabs.find((t) => t.id === entry.sessionId);
+      if (tab) {
+        setView("workspace");
+        setSelectedProjectId(tab.project);
+        dispatch({ type: "tab/activated", id: tab.id });
+        return;
+      }
+      if (state.projects.some((p) => p.id === entry.project)) {
+        setView("workspace");
+        setSelectedProjectId(entry.project);
+        setErrorBanner(`"${entry.title}" isn't running any more — opened ${entry.projectLabel} instead.`);
+        return;
+      }
+      setErrorBanner(`"${entry.title}" is gone: ${entry.projectLabel} isn't in your projects any more.`);
+    },
+    [state.tabs, state.projects],
+  );
+
   const closeTab = useCallback(async (id: string) => {
     try {
       await sessionKill(id);
@@ -725,15 +955,42 @@ function App() {
         setPaletteOpen((open) => !open);
       } else if (e.key.toLowerCase() === "n") {
         e.preventDefault();
-        setNewWorkspaceOpen(true);
+        // Since 2026-07-26 this asks first (session or workspace) instead
+        // of opening the workspace dialog outright — see `newChooserOpen`.
+        setNewChooserOpen(true);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectedProject, requestNewTab]);
 
+  // The chrome's breadcrumb — "which workspace, which session am I in" —
+  // built from the same `groupTabsBySession` derivation the sidebar renders
+  // its tree from, so the two can never disagree.
+  const currentGroupId = currentSessionGroupId(state.tabs, state.activeTabId);
+  const currentSessionLabel =
+    groupTabsBySession(state.tabs, state.activeTabId)
+      .find((g) => g.project === selectedProjectId)
+      ?.sessions.find((s) => s.id === currentGroupId)?.label ?? null;
+
   return (
     <div className="app-shell">
+      <AppChrome
+        projectLabel={selectedProject?.label ?? null}
+        sessionLabel={currentSessionLabel}
+        notifications={notifications.entries}
+        liveSessionIds={tabIds}
+        knownProjectIds={state.projects.map((p) => p.id)}
+        selectedProjectId={selectedProjectId}
+        selectedProjectLabel={selectedProject?.label ?? null}
+        onNotificationsOpened={() => notificationsDispatch({ type: "notifications/read" })}
+        onSelectNotification={handleNotificationSelect}
+        onDismissNotification={(id) => notificationsDispatch({ type: "notification/dismissed", id })}
+        onClearNotifications={() => notificationsDispatch({ type: "notifications/cleared" })}
+        authSignedIn={authSignedIn}
+        authPersona={authPersona}
+        onResetAuthGate={resetAuthGate}
+      />
       {errorBanner && (
         <div className="error-banner">
           <span>{errorBanner}</span>
@@ -760,9 +1017,10 @@ function App() {
           onSetView={setView}
           fileTreeVisible={fileTreeVisible}
           onToggleFileTree={toggleFileTree}
-          onResetAuthGate={resetAuthGate}
-          authSignedIn={authSignedIn}
-          authPersona={authPersona}
+          onNewSessionInProject={(p) => {
+            setSelectedProjectId(p.id);
+            setNewSessionOpen(true);
+          }}
         />
         <Workspace
           projects={state.projects}
@@ -781,7 +1039,7 @@ function App() {
           }
           onFirstInput={autoTitleTab}
           hidden={view !== "workspace"}
-          initialLayouts={pendingLayoutsRef.current}
+          sessionLayouts={pendingLayoutsRef.current}
         />
         <BrainMap
           projects={state.projects}
@@ -817,6 +1075,23 @@ function App() {
           onOpenTerminal={(p) => void requestNewTab(p)}
           onImportCompleted={handleImportCompleted}
           onDismiss={() => setFirstRunDismissed(true)}
+        />
+      )}
+
+      {/* ⌘N's two steps: the chooser, then whichever dialog it picked.
+          `NewWorkspaceModal` itself still lives inside `Sidebar` (its "+"
+          opens it too) — see `newWorkspaceOpen`'s declaration. */}
+      {newChooserOpen && (
+        <NewChooserModal onChoose={handleCreateChoice} onClose={() => setNewChooserOpen(false)} />
+      )}
+
+      {newSessionOpen && selectedProject && (
+        <NewSessionModal
+          project={selectedProject}
+          onCreate={(project, cwd, engines, layout) =>
+            void handleSessionCreated(project, cwd, engines, layout)
+          }
+          onClose={() => setNewSessionOpen(false)}
         />
       )}
 

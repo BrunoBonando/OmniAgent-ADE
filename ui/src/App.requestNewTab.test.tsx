@@ -17,6 +17,7 @@
 // project's `settingsGet` promises happen to resolve first.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { NOTIFICATIONS_SETTING_KEY } from "./state/notifications";
 import { LAYOUT_SETTING_KEY, type ProjectInfo, type TabInfo } from "./state/sessions";
 import {
   AUTH_GATE_RESOLVED_SETTING_KEY,
@@ -132,7 +133,8 @@ describe("App — instant-default-engine new tab", () => {
         key === "file_tree_visible" ||
         key === AUTH_GATE_RESOLVED_SETTING_KEY ||
         key === AUTH_SIGNED_IN_SETTING_KEY ||
-        key === AUTH_PERSONA_SETTING_KEY
+        key === AUTH_PERSONA_SETTING_KEY ||
+        key === NOTIFICATIONS_SETTING_KEY
       ) {
         return Promise.resolve(null);
       }
@@ -167,7 +169,8 @@ describe("App — instant-default-engine new tab", () => {
         key === "file_tree_visible" ||
         key === AUTH_GATE_RESOLVED_SETTING_KEY ||
         key === AUTH_SIGNED_IN_SETTING_KEY ||
-        key === AUTH_PERSONA_SETTING_KEY
+        key === AUTH_PERSONA_SETTING_KEY ||
+        key === NOTIFICATIONS_SETTING_KEY
       ) {
         return Promise.resolve(null);
       }

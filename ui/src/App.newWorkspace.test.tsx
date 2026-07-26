@@ -8,7 +8,8 @@
 // a brand-new project's grid must mount with its final tab set already
 // present so the chosen LAYOUT preset's arrangement actually lands, and
 // panes already opened never remount mid-batch), computes an
-// `initialLayouts` entry for the chosen preset, selects the project, and
+// `sessionLayouts` entry (keyed by the new session's group id) for the
+// chosen preset, selects the project, and
 // switches to the workspace view — surfacing any per-engine failure via
 // the existing `errorBanner` without aborting the rest of the batch.
 //
@@ -18,7 +19,7 @@
 // with fixture args (the modal's own UI is covered by
 // `NewWorkspaceModal.test.tsx`) plus a "go to map" button to exercise the
 // view-switch-back assertion. `Workspace`/`BrainMap` stubs expose just
-// enough (`hidden`, `tabs`, `initialLayouts`) to assert on.
+// enough (`hidden`, `tabs`, `sessionLayouts`) to assert on.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildLayoutTree } from "./state/paneGrid";
@@ -86,7 +87,7 @@ vi.mock("./components/Workspace", () => ({
   default: function WorkspaceStub(props: {
     hidden: boolean;
     tabs: TabInfo[];
-    initialLayouts?: Map<string, PaneTree>;
+    sessionLayouts?: Map<string, PaneTree>;
   }) {
     return (
       <div data-testid="workspace-stub" data-hidden={String(props.hidden)}>
@@ -98,7 +99,7 @@ vi.mock("./components/Workspace", () => ({
           ))}
         </ul>
         <span data-testid="initial-layout-fresh">
-          {JSON.stringify(props.initialLayouts?.get("fresh") ?? null)}
+          {JSON.stringify([...(props.sessionLayouts?.values() ?? [])][0] ?? null)}
         </span>
       </div>
     );
@@ -166,7 +167,7 @@ describe("App — NewWorkspaceModal bulk-create orchestration", () => {
     expect(screen.getByTestId("brainmap-stub").dataset.hidden).toBe("true");
   });
 
-  it("seeds initialLayouts with buildLayoutTree(createdIds, layout) for the new project", async () => {
+  it("seeds the new session's layout hint with buildLayoutTree(createdIds, layout)", async () => {
     tauriMocks.sessionCreateMock.mockImplementation((_project: string, engine: string) =>
       Promise.resolve(sessionInfoFor(engine)),
     );
