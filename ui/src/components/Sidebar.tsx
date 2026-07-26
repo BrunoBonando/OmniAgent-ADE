@@ -112,6 +112,7 @@ import {
 } from "../state/sessions";
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
 import { statusNeedsAttention } from "../state/sessionStatus";
+import { idColor } from "../state/projectColors";
 import Icon from "./Icon";
 import type { LayoutPreset } from "../state/paneGrid";
 import {
@@ -138,23 +139,6 @@ import type { AgentsState, Agent } from "../state/agents";
 /** How often to refresh pause/staleness state in the background — cheap
  * settings/`list_projects` reads, not worth a live push mechanism for v1. */
 const DEGRADATION_POLL_MS = 20000;
-
-// Warp-direction reskin: each sidebar chip gets a small circular avatar —
-// the founder's reference shows "a small circular colored avatar/icon on
-// the left" of every chip row. Purely decorative/derived (no new data): a
-// fixed, muted palette cycled by a stable hash of a project **or session**
-// id, so a given row always gets the same color across renders/relaunches
-// without persisting anything new. Deliberately its own small palette
-// rather than reusing `ENGINE_COLOR` — a project isn't an engine, and
-// borrowing that palette would visually suggest a (false) engine
-// association for projects that have no open sessions at all.
-const PROJECT_AVATAR_COLORS = ["#b696f2", "#a2e7f9", "#ed81c3", "#e8a23d", "#5fd4c8", "#78a9ff"];
-
-function idColor(id: string): string {
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
-  return PROJECT_AVATAR_COLORS[Math.abs(hash) % PROJECT_AVATAR_COLORS.length];
-}
 
 interface SidebarProps {
   projects: ProjectInfo[];
