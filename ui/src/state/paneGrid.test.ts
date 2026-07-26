@@ -7,6 +7,7 @@ import {
   layoutCaption,
   paneIds,
   replacePaneId,
+  swapPaneIds,
   syncPaneTree,
 } from "./paneGrid";
 import type { PaneTree } from "./paneGrid";
@@ -199,16 +200,41 @@ describe("replacePaneId", () => {
   });
 });
 
+describe("swapPaneIds — dragging one terminal onto another to trade places", () => {
+  it("trades two panes across rows, leaving every other pane where it was", () => {
+    const tree = buildGrid(ids(4)); // rows [1,2] [3,4]
+    expect(swapPaneIds(tree, "1", "4")).toEqual(column([row(["4", "2"]), row(["3", "1"])]));
+  });
+
+  it("keeps the shape and any manual resize (split percentages)", () => {
+    const tree: PaneTree = { type: "split", direction: "row", children: ["a", "b"], splitPercentages: [30, 70] };
+    expect(swapPaneIds(tree, "a", "b")).toEqual({
+      type: "split",
+      direction: "row",
+      children: ["b", "a"],
+      splitPercentages: [30, 70],
+    });
+  });
+
+  it("is a no-op for a pane dropped on itself, an unknown id, or a null tree", () => {
+    const tree = row(["a", "b"]);
+    expect(swapPaneIds(tree, "a", "a")).toBe(tree);
+    expect(swapPaneIds(tree, "a", "ghost")).toBe(tree);
+    expect(swapPaneIds(null, "a", "b")).toBeNull();
+  });
+});
+
 describe("LAYOUT presets", () => {
   it("are exactly the ladder rungs that fill a grid completely", () => {
-    expect(LAYOUT_PRESETS).toEqual([2, 4, 6, 9]);
+    expect(LAYOUT_PRESETS).toEqual([1, 2, 4, 6, 9]);
     for (const preset of LAYOUT_PRESETS) {
       const { cols, rows } = gridShape(preset);
       expect(cols * rows, `preset ${preset}`).toBe(preset);
     }
   });
 
-  it("captions the 2 preset as a side-by-side split, the rest as an RxC grid", () => {
+  it("captions 1 as a single terminal, 2 as a side-by-side split, the rest as an RxC grid", () => {
+    expect(layoutCaption(1)).toBe("Single terminal");
     expect(layoutCaption(2)).toBe("Side-by-side split");
     expect(layoutCaption(4)).toBe("2×2 grid layout");
     expect(layoutCaption(6)).toBe("2×3 grid layout");

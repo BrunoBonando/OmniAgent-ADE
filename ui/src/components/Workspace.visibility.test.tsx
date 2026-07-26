@@ -79,7 +79,9 @@ vi.mock("@tauri-apps/api/webview", () => ({
 }));
 
 const tauriMocks = vi.hoisted(() => ({
-  sessionResizeMock: vi.fn(),
+  // Resolved, not bare: `Terminal.tsx` chains its follow-up resize off this
+  // promise (the redraw nudge a remounted pane needs — see its comment).
+  sessionResizeMock: vi.fn().mockResolvedValue(undefined),
   sessionWriteMock: vi.fn(),
 }));
 

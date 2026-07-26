@@ -92,6 +92,14 @@ export function buildGrid(ids: string[]): PaneTree | null {
   return rows.length === 1 ? rows[0] : { type: "split", direction: "column", children: rows };
 }
 
+/** Rewrites every leaf id through `fn`, keeping the tree's exact shape,
+ * nesting and split percentages. The two functions below are both this. */
+function mapPaneIds(tree: PaneTree | null, fn: (id: string) => string): PaneTree | null {
+  if (tree === null) return null;
+  if (typeof tree === "string") return fn(tree);
+  return { ...tree, children: tree.children.map((child) => mapPaneIds(child, fn) as PaneTree) };
+}
+
 /**
  * Swaps one leaf's id for another, preserving the tree's exact shape,
  * nesting, position and split percentages — unlike a rebuild through
@@ -101,14 +109,21 @@ export function buildGrid(ids: string[]): PaneTree | null {
  * caller that already knows exactly which old id maps to which new one).
  */
 export function replacePaneId(tree: PaneTree | null, oldId: string, newId: string): PaneTree | null {
-  if (tree === null) return null;
-  if (typeof tree === "string") return tree === oldId ? newId : tree;
-  return {
-    type: "split",
-    direction: tree.direction,
-    children: tree.children.map((child) => replacePaneId(child, oldId, newId) as PaneTree),
-    ...(tree.splitPercentages ? { splitPercentages: tree.splitPercentages } : {}),
-  };
+  return mapPaneIds(tree, (id) => (id === oldId ? newId : id));
+}
+
+/**
+ * Trades two panes' positions (founder ask, 2026-07-26: *"Make dragged
+ * terminal able to exchange places with another terminal"*) — everything
+ * else about the tree, including the approved shape and any manual resize,
+ * is untouched, because a swap is exactly the one rearrangement that can't
+ * produce a grid `buildGrid` wouldn't. Dropping a pane on itself, or on an
+ * id that isn't in the tree, is a no-op.
+ */
+export function swapPaneIds(tree: PaneTree | null, a: string, b: string): PaneTree | null {
+  const present = paneIds(tree);
+  if (a === b || !present.includes(a) || !present.includes(b)) return tree;
+  return mapPaneIds(tree, (id) => (id === a ? b : id === b ? a : id));
 }
 
 /**
@@ -158,7 +173,7 @@ export function syncPaneTree(tree: PaneTree | null, desiredIds: string[]): PaneT
 // a grid completely, so a card can never promise a shape the grid won't
 // produce: pick "6" and you get the 3x2 `gridShape(6)` describes, because the
 // grid derives its own shape from the pane count either way.
-export const LAYOUT_PRESETS = [2, 4, 6, 9] as const;
+export const LAYOUT_PRESETS = [1, 2, 4, 6, 9] as const;
 export type LayoutPreset = (typeof LAYOUT_PRESETS)[number];
 
 /** The plain-language caption the modals show under whichever LAYOUT card is
@@ -166,5 +181,6 @@ export type LayoutPreset = (typeof LAYOUT_PRESETS)[number];
  * layout" under the selected "4" card). */
 export function layoutCaption(preset: LayoutPreset): string {
   const { rows, cols } = gridShape(preset);
+  if (preset === 1) return "Single terminal";
   return rows === 1 ? "Side-by-side split" : `${rows}×${cols} grid layout`;
 }

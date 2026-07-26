@@ -114,6 +114,17 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
       void sessionResize(sessionId, term.cols, term.rows);
     };
     fitAndReportSize();
+    // ponytail: a pane that REMOUNTS — a cross-row drag-to-swap, or a ladder
+    // reflow (see `Workspace.mountStability.test.tsx`) — starts with an empty
+    // xterm, and tmux only repaints on a real size change, so two equally
+    // sized panes trading places would sit blank until the agent next
+    // printed. Reporting one row short and then the true size guarantees the
+    // SIGWINCH that makes tmux redraw; the chained call means the pane ends
+    // at its true size whichever order the two IPCs land in. Rows only — a
+    // width change would make tmux reflow its scrollback. Upgrade path if the
+    // one-row flicker ever shows: a `session_snapshot` command over `tmux
+    // capture-pane -p -e`, written into xterm on mount.
+    void sessionResize(sessionId, term.cols, Math.max(1, term.rows - 1)).then(fitAndReportSize);
 
     // Auto-title capture (founder ask): a fresh cycle per mounted session
     // (this local variable lives inside the `[sessionId]`-keyed effect, so

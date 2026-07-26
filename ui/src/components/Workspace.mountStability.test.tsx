@@ -169,7 +169,12 @@ describe("mount stability against the real react-mosaic-component library", () =
     expect(mounts).toEqual(["a", "b"]);
   });
 
-  it("documents the known gap: a topology-changing drag-rearrange DOES remount the panes whose nesting depth changes", () => {
+  it("documents the cost of a topology change: panes whose nesting depth changes DO remount", () => {
+    // No longer reachable by dragging — react-mosaic's edge drops are off and
+    // a header drag can only swap two panes now (`swapPaneIds`, which never
+    // changes the tree's shape). Kept as the pinned-down statement of what
+    // the library costs whenever a pane's enclosing split changes, which the
+    // ladder's own reflows still do.
     // This is a real, verified limitation of rendering directly in
     // `renderTile` (portals don't fix it either — see the module doc
     // above), not something this task's scope covers a full fix for.

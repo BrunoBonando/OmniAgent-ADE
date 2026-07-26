@@ -19,7 +19,7 @@
 // `Terminal`/`PaneHeader` are stubbed to trivial probes — this test is
 // about grid geometry, not terminal rendering (already covered by
 // `Workspace.visibility.test.tsx` and `Workspace.mountStability.test.tsx`).
-import { render } from "@testing-library/react";
+import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
 import { initialAgentsState } from "../state/agents";
@@ -144,5 +144,81 @@ describe("Workspace — a session's panes render in their approved shape", () =>
     const g1 = gridFor("g1");
     expect(g1.style.display).toBe("none");
     expect(tilePositions(g1)).toEqual([{ top: 0, left: 0 }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Drag one terminal onto another to trade places (founder ask, 2026-07-26:
+// "Make dragged terminal able to exchange places with another terminal...
+// while dragging I see the square being highlighted, indicating it will
+// change places"). The header is a plain HTML5 drag handle and the pane body
+// is the drop zone — react-mosaic's own header drag (edge drops, which build
+// a split the ladder above would never produce) is off. A swap is the one
+// rearrangement that can't leave the approved shape, so these assert both
+// halves: the panes traded positions, and the geometry didn't move.
+// ---------------------------------------------------------------------------
+
+/** The `.mosaic-tile` currently holding pane `id` — found through the probe
+ * `<Terminal>` stub, so it follows the pane wherever the swap puts it. */
+function tileOf(container: HTMLElement, id: string): HTMLElement {
+  return Array.from(container.querySelectorAll<HTMLElement>(".mosaic-tile")).find((el) =>
+    el.querySelector(`[data-testid="terminal-${id}"]`),
+  )!;
+}
+
+/** Which pane sits at a given tile offset — "left column" is `left: 0`. */
+function paneAt(container: HTMLElement, left: number): string | undefined {
+  const tile = Array.from(container.querySelectorAll<HTMLElement>(".mosaic-tile")).find(
+    (el) => Math.round(parseFloat(el.style.left)) === left,
+  );
+  return tile?.querySelector<HTMLElement>("[data-testid^='terminal-']")?.textContent ?? undefined;
+}
+
+describe("Workspace — dragging a terminal onto another exchanges their places", () => {
+  const dataTransfer = { setData: () => {}, effectAllowed: "" };
+
+  it("swaps the two panes and leaves the grid's shape alone", () => {
+    const { container } = render(workspaceWith(panes(2)));
+    expect(paneAt(container, 0)).toBe("1");
+    expect(paneAt(container, 50)).toBe("2");
+
+    // Drag the right-hand terminal onto the left one, the founder's example.
+    fireEvent.dragStart(tileOf(container, "2").querySelector(".pane-toolbar-wrap")!, { dataTransfer });
+    const target = tileOf(container, "1").querySelector<HTMLElement>(".pane-body")!;
+    fireEvent.dragOver(target);
+
+    // The affordance: the pane about to be traded with lights up.
+    expect(target.className).toContain("is-swap-target");
+
+    fireEvent.drop(target);
+    expect(paneAt(container, 0)).toBe("2");
+    expect(paneAt(container, 50)).toBe("1");
+    expect(renderedShape(container)).toEqual({ rows: 1, cols: 2, panes: 2 });
+  });
+
+  it("swaps across rows too, and highlights nothing once the drag ends", () => {
+    const { container } = render(workspaceWith(panes(4))); // 2x2: [1,2] / [3,4]
+    fireEvent.dragStart(tileOf(container, "4").querySelector(".pane-toolbar-wrap")!, { dataTransfer });
+    const target = tileOf(container, "1").querySelector<HTMLElement>(".pane-body")!;
+    fireEvent.dragOver(target);
+    fireEvent.drop(target);
+
+    expect(tileOf(container, "4").style.top).toBe("0%");
+    expect(tileOf(container, "1").style.top).toBe("50%");
+    expect(renderedShape(container)).toEqual({ rows: 2, cols: 2, panes: 4 });
+    expect(container.querySelector(".is-swap-target")).toBeNull();
+  });
+
+  it("dropping a pane on itself changes nothing", () => {
+    const { container } = render(workspaceWith(panes(2)));
+    const own = tileOf(container, "1");
+    fireEvent.dragStart(own.querySelector(".pane-toolbar-wrap")!, { dataTransfer });
+    const body = own.querySelector<HTMLElement>(".pane-body")!;
+    fireEvent.dragOver(body);
+    expect(body.className).not.toContain("is-swap-target");
+
+    fireEvent.drop(body);
+    expect(paneAt(container, 0)).toBe("1");
+    expect(paneAt(container, 50)).toBe("2");
   });
 });

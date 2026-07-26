@@ -52,14 +52,13 @@
 // what is pinned down against the real library in
 // `Workspace.mountStability.test.tsx`.
 //
-// **The one known, deliberately-not-fixed gap**: a user physically
-// dragging one pane's header onto a *different* pane's edge (forcing a
-// brand-new split, rather than reordering within the existing one) does
-// still remount the panes whose nesting depth changes — a real limitation
-// of react-mosaic-component's own tree-diffing, not something fixable from
-// application code short of patching the library. Documented, with a
-// suggested mitigation, in the task report and in
-// `Workspace.mountStability.test.tsx`'s last test.
+// **Dragging a pane** can no longer create a new split at all: react-mosaic's
+// edge drops are off (`draggable={false}` below) because they build shapes
+// the ladder would never produce, and dragging a header now only *swaps* two
+// panes (`swapPaneIds`). A swap within a row remounts nothing; a swap across
+// rows still remounts both panes, for the same path-keying reason — which is
+// why `Terminal.tsx` nudges its PTY size on mount, so tmux repaints a pane
+// that traded places with an equally sized one.
 //
 // ## The grid shows ONE session (founder brief, 2026-07-26)
 //
@@ -91,7 +90,7 @@ import "react-mosaic-component/react-mosaic-component.css";
 import EmptyWorkspace from "./EmptyWorkspace";
 import PaneHeader from "./PaneHeader";
 import Terminal from "./Terminal";
-import { paneIds, syncPaneTree, type LayoutPreset, type PaneTree } from "../state/paneGrid";
+import { paneIds, swapPaneIds, syncPaneTree, type LayoutPreset, type PaneTree } from "../state/paneGrid";
 import {
   isUnderPressure,
   PRESSURE_THRESHOLD,
@@ -104,6 +103,31 @@ import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroup
 import type { TerminalThemeId } from "../lib/terminalThemes";
 import { ownsCtrlOnlyShortcut } from "../lib/keyboard";
 import type { AgentsState } from "../state/agents";
+
+/**
+ * Keeps a pane drag away from react-dnd's window-level HTML5 backend, which
+ * `<Mosaic>` installs (its own `DndProvider`) and which is hostile to any
+ * drag it didn't start — verified against react-dnd 16's
+ * `HTML5BackendImpl`, all three of these on `window`'s BUBBLE phase, so a
+ * `stopPropagation` from React's root container is enough to never reach
+ * them:
+ *
+ * - `dragstart` ends with *"if by this time no drag source reacted, tell
+ *   browser not to drag"* → `preventDefault()`, i.e. the drag never starts.
+ * - `dragover` sets `dropEffect = "none"` whenever its own monitor isn't
+ *   dragging, i.e. the browser refuses the drop and never fires `drop`.
+ * - `drop` calls `actions.hover()` unconditionally, which throws
+ *   `Invariant Violation: Cannot call hover while not dragging`.
+ *
+ * The backend's *capture*-phase handlers still run (nothing can stop those
+ * from application code) and are all harmless for a foreign drag: they clear
+ * their own bookkeeping, and the `application/x-ade-pane` MIME the drag
+ * carries matches none of react-dnd's "native item" types, so it never
+ * adopts the drag as a file/text/URL one.
+ */
+function stopBeforeReactDnd(e: React.DragEvent) {
+  e.stopPropagation();
+}
 
 interface ProjectPaneGridProps {
   hidden: boolean;
@@ -170,6 +194,12 @@ function ProjectPaneGrid({
 }: ProjectPaneGridProps) {
   const [tree, setTree] = useState<PaneTree | null>(null);
   const idsKey = tabs.map((t) => t.id).join(" ");
+  // Pane drag-to-swap (founder ask, 2026-07-26: "Make dragged terminal able
+  // to exchange places with another terminal... while dragging I see the
+  // square being highlighted"). `from` is the pane being dragged, `over` the
+  // pane currently under the cursor — the one that lights up and that the
+  // drop trades places with. Null between drags.
+  const [drag, setDrag] = useState<{ from: string; over: string | null } | null>(null);
 
   // The whole reconciliation: this session's open panes in, their approved
   // grid out (`syncPaneTree` -> `buildGrid`, paneGrid.ts). No layout hint from
@@ -222,20 +252,41 @@ function ProjectPaneGrid({
                 path={path}
                 title={tabDisplayLabel(tab)}
                 className="pane-window"
+                // react-mosaic's own header drag is off: it only ever offered
+                // edge drops, which build a brand-new nested split — a shape
+                // `GRID_LADDER` would never produce, and the one interaction
+                // this file's module doc lists as a known remount gap. The
+                // header below is a plain HTML5 drag handle instead, and the
+                // only rearrangement it can make is a swap (`swapPaneIds`),
+                // which by construction keeps the approved shape.
+                draggable={false}
                 renderToolbar={() => (
-                  // react-mosaic-component's `renderToolbar` return value
-                  // gets wrapped by react-dnd's `connectDragSource` (that's
-                  // how the whole header becomes the drag handle for
-                  // rearranging panes) — react-dnd 16's connector requires
-                  // a *native* DOM element to attach its ref to ("Only
-                  // native element nodes can now be passed to React DnD
-                  // connectors"), rejecting a custom component even with
-                  // forwardRef. This `<div>` is that required native
-                  // wrapper; `PaneHeader` owns all the actual layout.
+                  // This `<div>` is the pane's drag handle: grabbing the
+                  // header anywhere `PaneHeader` hasn't marked
+                  // `draggable={false}` (its buttons and rename input) picks
+                  // the whole pane up, and dropping it on another pane's body
+                  // trades their places. Plain HTML5 DnD — react-mosaic's own
+                  // drag source used to be connected here instead, see the
+                  // `draggable={false}` above for why it isn't any more.
                   // `pane-toolbar-wrap` (App.css) stretches it to fill the
                   // toolbar row — see App.css's own comment on that class
                   // for the white-band bug this is half the fix for.
-                  <div className="pane-toolbar-wrap">
+                  <div
+                    className="pane-toolbar-wrap"
+                    draggable
+                    onDragStart={(e) => {
+                      // A custom MIME rather than text/plain: nothing else in
+                      // the app (or in xterm) can mistake a pane drag for
+                      // droppable text, react-dnd won't adopt it as one of its
+                      // "native item" types, and the drag store has to be
+                      // non-empty or WebKit refuses to start the drag at all.
+                      e.dataTransfer.setData("application/x-ade-pane", tab.id);
+                      e.dataTransfer.effectAllowed = "move";
+                      stopBeforeReactDnd(e);
+                      setDrag({ from: tab.id, over: null });
+                    }}
+                    onDragEnd={() => setDrag(null)}
+                  >
                     <PaneHeader
                       tab={tab}
                       projectLabel={projectLabel}
@@ -255,8 +306,30 @@ function ProjectPaneGrid({
                 )}
               >
                 <div
-                  className={`pane-body${tab.id === activeTabId ? " is-focused" : ""}`}
+                  className={`pane-body${tab.id === activeTabId ? " is-focused" : ""}${
+                    drag !== null && drag.over === tab.id && drag.from !== tab.id ? " is-swap-target" : ""
+                  }`}
                   onMouseDownCapture={() => onActivateTab(tab.id)}
+                  // Only a pane drag from THIS grid opens a drop zone —
+                  // without the guard, `preventDefault` here would also claim
+                  // OS file drags, which `Terminal.tsx` handles itself (it
+                  // pastes the dropped path) through Tauri's own webview
+                  // drag-drop event, not through HTML5 DnD.
+                  onDragOver={(e) => {
+                    if (drag === null) return;
+                    stopBeforeReactDnd(e);
+                    if (drag.from === tab.id) return; // a pane can't trade with itself
+                    e.preventDefault(); // = "this is a drop zone"
+                    if (drag.over !== tab.id) setDrag({ ...drag, over: tab.id });
+                  }}
+                  onDrop={(e) => {
+                    if (drag === null) return;
+                    stopBeforeReactDnd(e);
+                    if (drag.from === tab.id) return;
+                    e.preventDefault();
+                    setTree((prev) => swapPaneIds(prev, drag.from, tab.id));
+                    setDrag(null);
+                  }}
                 >
                   <Terminal
                     sessionId={tab.id}

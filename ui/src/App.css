@@ -1065,7 +1065,21 @@ code {
   background: var(--signal-dim);
 }
 
-.pane-grid .drop-target-container .drop-target {
+/* The pane a dragged terminal will trade places with (founder ask,
+   2026-07-26: "while dragging I see the square being highlighted,
+   indicating it will change places"). Same accent this grid's drop
+   affordance always used — it replaces react-mosaic's own edge drop
+   targets, which `Workspace.tsx` now turns off (`draggable={false}`)
+   because an edge drop builds a split the approved shape ladder would
+   never produce. An overlay rather than a background: xterm paints its own
+   opaque canvas over the pane body, same reason `.pane-body.is-focused`
+   uses one. */
+.pane-body.is-swap-target::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
   background: rgba(237, 129, 195, 0.14);
   border: 2px solid var(--accent-select);
   border-radius: 8px;
@@ -1145,6 +1159,10 @@ code {
   display: flex;
   width: 100%;
   min-width: 0;
+  /* It is the drag handle for swapping two panes (`Workspace.tsx`), now that
+     react-mosaic's own header drag is off — the library used to supply this
+     cursor with its `.draggable` class. */
+  cursor: grab;
 }
 
 .pane-header {
