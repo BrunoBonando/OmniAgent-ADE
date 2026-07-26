@@ -14,6 +14,9 @@ import "@xterm/xterm/css/xterm.css";
 import { sessionResize, sessionWrite } from "../lib/tauri";
 import { feedFirstInputChunk, initialFirstInputCapture } from "../lib/autoTitle";
 import { resolveTerminalTheme, type TerminalThemeId } from "../lib/terminalThemes";
+import PaneInstallOverlay from "./PaneInstallOverlay";
+import type { AgentsState } from "../state/agents";
+import type { Engine } from "../state/sessions";
 
 interface TerminalProps {
   sessionId: string;
@@ -31,6 +34,8 @@ interface TerminalProps {
    * action, which itself never overwrites a tab that already has a label —
    * this callback doesn't need to know or care whether the tab has one. */
   onFirstInput?: (sessionId: string, line: string) => void;
+  agentState: AgentsState;
+  tabEngine: Engine;
 }
 
 // Background/foreground/cursor palette now lives in `../lib/terminalThemes`
@@ -49,7 +54,7 @@ function base64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
-export default function Terminal({ sessionId, visible, focused, themeId, onFirstInput }: TerminalProps) {
+export default function Terminal({ sessionId, visible, focused, themeId, onFirstInput, agentState, tabEngine }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -229,9 +234,16 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
   return (
     <div
       ref={containerRef}
-      className="terminal-surface"
+      className="terminal-container"
       style={{ display: visible ? "block" : "none" }}
       data-session-id={sessionId}
-    />
+    >
+      {agentState.installing.has(tabEngine) && (
+        <PaneInstallOverlay
+          agent={tabEngine}
+          status={agentState.installing.get(tabEngine)!}
+        />
+      )}
+    </div>
   );
 }

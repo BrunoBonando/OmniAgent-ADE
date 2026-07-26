@@ -143,6 +143,7 @@ interface ProjectPaneGridProps {
   /** Auto-title from the first prompt — forwarded straight through to each
    * pane's `<Terminal>` (see that component's own doc). */
   onFirstInput: (id: string, line: string) => void;
+  agentState: AgentsState;
 }
 
 /** One **session's** grid — always mounted for as long as that session has
@@ -165,6 +166,7 @@ function ProjectPaneGrid({
   onChangeTheme,
   onOpenCodeReview,
   onFirstInput,
+  agentState,
 }: ProjectPaneGridProps) {
   const [tree, setTree] = useState<PaneTree | null>(null);
   const idsKey = tabs.map((t) => t.id).join(" ");
@@ -262,6 +264,8 @@ function ProjectPaneGrid({
                     focused={terminalsVisible && tab.id === activeTabId}
                     themeId={tab.themeId}
                     onFirstInput={onFirstInput}
+                    agentState={agentState}
+                    tabEngine={tab.engine}
                   />
                 </div>
               </MosaicWindow>
@@ -317,7 +321,7 @@ export default function Workspace({
   onOpenCodeReview = () => {},
   onFirstInput = () => {},
   onStartSession = () => {},
-  agentState: _agentState,
+  agentState,
   hidden,
 }: WorkspaceProps) {
   const projectLabel = useCallback(
@@ -380,6 +384,7 @@ export default function Workspace({
               onChangeTheme={onChangeTheme}
               onOpenCodeReview={onOpenCodeReview}
               onFirstInput={onFirstInput}
+              agentState={agentState}
             />
           );
         }),
