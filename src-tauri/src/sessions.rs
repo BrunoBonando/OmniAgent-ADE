@@ -281,10 +281,22 @@
 //!   repainting the full screen ~1.9×/s (17 repaints while one sat unanswered
 //!   for 9 s), which is exactly why [`ATTENTION_INPUT_GRACE`] exists.
 //! - **error (red)** — [`contains_error_marker`]: a non-zero `Exit code N`
-//!   line, the literal Claude Code renders for a failed Bash tool. Latched and
-//!   cleared like approval, sharing [`ATTENTION_INPUT_GRACE`]. See
-//!   [`ERROR_MARKER`] for the measurement, and that constant for the live-run
-//!   correction that made the two graces the same length.
+//!   report, the line Claude Code renders for a failed Bash tool. The stream
+//!   scan latches it; with tmux the **live pane is then the authority**
+//!   ([`resolve_error`]), which is what keeps red from becoming permanent —
+//!   the engine repaints constantly and every repaint re-delivers the same
+//!   failure line, so a stream-only latch went red again within seconds of
+//!   every acknowledgement, for the rest of the session. Instead the latch is
+//!   held while the line is visible, suppressed once the user has typed, and
+//!   released outright when the line scrolls off the pane. Note that
+//!   Claude renders this **differently at different terminal widths** —
+//!   inline with the digit adjacent at 120 columns, as a colon-label with the
+//!   value bolded (an SGR escape between label and digit) at the 80 columns an
+//!   ADE pane actually opens at — which is why the match is a label plus an
+//!   escape-skipping value check rather than a plain `contains`. See
+//!   [`ERROR_MARKER`] for both captures and for the live-run round that found
+//!   it, and [`ATTENTION_INPUT_GRACE`] for the second live-run correction
+//!   that made the two graces the same length.
 //! - **tool_execution (cyan), `shell` sessions with tmux (the good case)** —
 //!   `tmux display-message -p '#{pane_current_command}'`, which tmux derives
 //!   from the pane tty's foreground process group. Reads `zsh` at the prompt →
@@ -347,7 +359,15 @@
 //!   `thinking`. Less specific, never wrong.
 //! - **`error` for `claude`/`codex`** covers a failed *tool* only. API errors,
 //!   rate limits and refusals were not reproducible on demand and are not
-//!   claimed.
+//!   claimed. One further known hole, stated rather than papered over: once a
+//!   failure has been acknowledged, a *second* failure occurring while the
+//!   first is still visible on the pane is missed, because the suppression is
+//!   "this pane still shows a failure the user answered for", not "this exact
+//!   failure". Closing it would mean counting occurrences across repaints for
+//!   a case that resolves itself as soon as the first line scrolls away.
+//! - **`error` without tmux** falls back to a plain latch cleared by the next
+//!   user write — no pane to reconcile against. Weaker, and the reason the
+//!   tmux path is the default.
 //!
 //! Polling is centralized in one background thread ([`spawn_status_poller`])
 //! at [`STATUS_POLL_INTERVAL`], not one thread per session, and it only emits
@@ -707,6 +727,27 @@ struct SessionActivity {
     /// staring at the tab — which is exactly the person the notification is
     /// for.
     error: AtomicBool,
+    /// The user has typed since `error` latched — they've seen the failure and
+    /// moved on — but the failure line is still sitting on the pane.
+    ///
+    /// This exists because clearing the latch on write is *not enough*, and
+    /// that was measured rather than predicted: driving a real `claude`
+    /// through a failed tool and then continuing the conversation, the light
+    /// went red again 3 s later, and again after that, because the engine
+    /// repaints the whole pane constantly and every repaint re-delivers the
+    /// same `Exit code: 1` line as genuinely new output. Red ended up latched
+    /// permanently, drowning out every other state for the rest of the
+    /// session (observed live: `ready → error → error → error`, final status
+    /// `Error`).
+    ///
+    /// So for tmux-backed sessions the *screen* is the authority, not the
+    /// stream: the latch stays set while the failure is visible, this flag
+    /// suppresses it once the user has moved on, and
+    /// [`compute_status`] drops both the moment the line scrolls off the pane
+    /// — at which point a genuinely new failure can latch again. Without tmux
+    /// there is no screen to consult, so [`SessionActivity::mark_user_input`]
+    /// falls back to clearing the latch outright.
+    error_dismissed: AtomicBool,
     /// Set by [`SessionManager::write`], consumed by the reader thread on its
     /// next chunk: discard the rolling marker window before scanning.
     ///
@@ -743,25 +784,48 @@ impl SessionActivity {
             busy_since: Mutex::new(None),
             attention: AtomicBool::new(false),
             error: AtomicBool::new(false),
+            error_dismissed: AtomicBool::new(false),
             clear_marker_window: AtomicBool::new(false),
             last_status: Mutex::new(None),
             status_tracking,
         }
     }
 
-    /// The user just typed into this session: drop **both** marker latches
-    /// (approval and error) and tell the reader thread to forget the output
-    /// that produced them.
+    /// The user just typed into this session: stop holding either marker state
+    /// (approval and error) on their behalf, and tell the reader thread to
+    /// forget the output that produced them.
     ///
-    /// Both clear together because they share one clearing signal — there is
-    /// no way to tell "the user answered the prompt" apart from "the user
-    /// acknowledged the failure"; a stock engine reports neither. Typing is
-    /// the only evidence either way, so it clears everything the light was
-    /// holding on the user's behalf.
+    /// Both respond to the same signal because there is no way to tell "the
+    /// user answered the prompt" apart from "the user acknowledged the
+    /// failure" — a stock engine reports neither. Typing is the only evidence
+    /// either way.
+    ///
+    /// The two are *released* differently, though, and that asymmetry is the
+    /// whole point of [`SessionActivity::error_dismissed`]. Approval clears
+    /// outright: answering a prompt makes it leave the screen, so if the
+    /// marker shows up again it really is a new prompt. A failure line does
+    /// **not** leave the screen when acknowledged — it stays in the
+    /// conversation — so clearing outright just means the next repaint
+    /// re-latches it (measured: red became permanent). With tmux, the latch is
+    /// therefore kept and merely marked dismissed, and [`compute_status`]
+    /// releases it when the line actually scrolls off the pane. Without tmux
+    /// there is no screen to ask, so the write is all we have and the latch is
+    /// cleared the old way.
     fn mark_user_input(&self) {
         self.attention.store(false, Ordering::Relaxed);
-        self.error.store(false, Ordering::Relaxed);
         self.clear_marker_window.store(true, Ordering::Relaxed);
+        if self.tmux_session.is_some() {
+            // Only meaningful when there is a red light to acknowledge. A
+            // write with nothing latched must not pre-dismiss a failure that
+            // hasn't happened yet — which is exactly what it did in the first
+            // draft, swallowing the failure of the very command the user had
+            // just typed.
+            if self.error.load(Ordering::Relaxed) {
+                self.error_dismissed.store(true, Ordering::Relaxed);
+            }
+        } else {
+            self.error.store(false, Ordering::Relaxed);
+        }
     }
 
     /// Called by the reader thread for every chunk off the PTY. Keeps both
@@ -2316,42 +2380,101 @@ fn contains_attention_marker(text: &str) -> bool {
 // that stops this from covering plain `shell` sessions at all.
 // -------------------------------------------------------------------------
 
-/// The literal Claude Code prints in a tool-result line when a Bash tool
-/// exits non-zero — measured, not guessed, against real `claude` 2.1.220
-/// running `ls /nonexistent-path-xyz-123` through this app's own tmux config:
+/// The label Claude Code prints in a tool-result line when a Bash tool exits
+/// non-zero — measured, not guessed, against real `claude` 2.1.220 running
+/// `ls /nonexistent-path-xyz-123` through this app's own tmux config.
+///
+/// **It renders in (at least) two forms, and which one you get depends on the
+/// terminal width.** This cost a whole verification round to find, and is the
+/// reason [`contains_error_marker`] is not a plain `contains`:
 ///
 /// ```text
+/// # 120 columns — inline, em-dash, digit immediately after the label:
 /// ⎿  Exit code 1 — ls: /nonexistent-path-xyz-123: No such file or directory
+///
+/// # 80 columns (what a freshly-created ADE pane actually is) — a label with
+/// # a colon, and the value bolded, i.e. an SGR escape *between* the two:
+/// ⎿  Exit code: \x1b[1m1\x1b(B\x1b[m
 /// ```
 ///
-/// The bytes arrive as one contiguous run (`\x1b[39m Exit code 1 —`), which
-/// is what makes a plain `contains` viable at all — Claude's *own* PTY output
-/// is word-addressed (`Running\x1b[11G1\x1b[13Gshell…`) and would defeat it,
-/// but the ADE reads tmux's re-rendered stream, which re-composes runs of text
-/// (see the module docs).
+/// The first probe of this feature was done at 120 columns and produced a
+/// marker (`"Exit code "`, trailing space, digit next) that matched nothing at
+/// all in a real ADE session: the pane is opened at 24×80, so every live
+/// session hit the second form. Only the label itself is common to both, so
+/// only the label is matched, and the digit is looked for past any escapes.
 ///
-/// A successful command prints **no** exit-code line at all (verified in the
-/// same session: a zero-exit Bash tool renders `Ran 1 shell command` and
-/// nothing else), so this literal is already failure-specific. The digit check
-/// in [`contains_error_marker`] is belt-and-braces for a future version that
-/// starts printing `Exit code 0`.
-const ERROR_MARKER: &str = "Exit code ";
+/// Matching works at all because the ADE reads tmux's re-rendered stream:
+/// Claude's *own* PTY output is word-addressed (`Running\x1b[11G1\x1b[13Gshell…`)
+/// and would defeat any substring match (see the module docs).
+///
+/// A successful command prints **no** exit-code line in either form (verified
+/// in the same real session: 197 occurrences of this label, every one of them
+/// `Exit code: 1` from the failing command, none from the `sleep && echo` that
+/// succeeded in the same run), so the label is already failure-specific. The
+/// digit check is what keeps prose — "check the Exit code manually" — from
+/// lighting a session red, and future-proofs an `Exit code: 0` that today
+/// doesn't exist.
+const ERROR_MARKER: &str = "Exit code";
 
 /// True when `text` contains a non-zero `Exit code N` report.
 ///
-/// Deliberately more than `contains(ERROR_MARKER)`: the marker must be
-/// followed by a digit (so prose like "check the exit code manually" doesn't
-/// match) and that digit must not be `0` (so a hypothetical future `Exit code
-/// 0` success line can never light the session red). Kept as a small explicit
-/// scan rather than a regex — this runs on every PTY chunk of every tracked
-/// session, and the crate has no regex dependency.
+/// The label must be followed by an actual numeric value — that is what
+/// separates a rendered result field from prose — and that value must not be
+/// `0`. "Followed by" is evaluated with [`first_value_char_after`], because
+/// the value is commonly separated from the label by a colon and an SGR
+/// escape (see [`ERROR_MARKER`]).
+///
+/// A small explicit scan rather than a regex: this runs on every PTY chunk of
+/// every tracked session, and the crate has no regex dependency.
 fn contains_error_marker(text: &str) -> bool {
     text.match_indices(ERROR_MARKER).any(|(idx, _)| {
-        matches!(
-            text[idx + ERROR_MARKER.len()..].chars().next(),
-            Some(c) if c.is_ascii_digit() && c != '0'
-        )
+        first_value_char_after(&text[idx + ERROR_MARKER.len()..])
+            .is_some_and(|c| c.is_ascii_digit() && c != '0')
     })
+}
+
+/// The first character a *user* would see after a label — skipping ANSI escape
+/// sequences and the `:`/whitespace a label uses to separate itself from its
+/// value, and stopping at a line break (a value never lives on the next line).
+///
+/// Escapes have to be skipped structurally rather than by hunting for the
+/// first digit: `\x1b[1m` (bold on, which is exactly what Claude wraps the
+/// exit code in) *contains* the digit `1`, so a naive digit scan would report
+/// "failure" for every bolded value on screen, including `Exit code: 0`.
+///
+/// Handles the two escape shapes that actually occur in this stream — CSI
+/// (`ESC [` … final byte in `@`–`~`) and the character-set designators
+/// (`ESC (B`, `ESC )0`) tmux emits — and treats anything else introduced by
+/// `ESC` as a two-byte sequence. It is not a general terminal parser and does
+/// not need to be: it only has to walk a handful of bytes between a label and
+/// its value.
+fn first_value_char_after(text: &str) -> Option<char> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            0x1b => {
+                i += 1;
+                match bytes.get(i) {
+                    Some(b'[') => {
+                        i += 1;
+                        while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                            i += 1;
+                        }
+                        i += 1; // the final byte
+                    }
+                    // `ESC (B`, `ESC )0` — designator plus its argument.
+                    Some(b'(') | Some(b')') | Some(b'#') => i += 2,
+                    Some(_) => i += 1,
+                    None => return None,
+                }
+            }
+            b':' | b' ' | b'\t' => i += 1,
+            b'\r' | b'\n' => return None,
+            _ => return text[i..].chars().next(),
+        }
+    }
+    None
 }
 
 // -------------------------------------------------------------------------
@@ -2605,46 +2728,94 @@ fn status_from_screen(screen: &str) -> Option<SessionStatus> {
 ///    the only state where nothing at all will happen until they act.
 /// 2. **error** — something failed and they should look. Below approval
 ///    because if the engine is *also* asking for permission, that's the
-///    actionable one.
+///    actionable one. With tmux this is reconciled against the live screen —
+///    see [`resolve_error`].
 /// 3. **tmux's foreground-command signal**, where it means anything (shell
 ///    sessions).
 /// 4. **output activity** → `ready` / `thinking` / `tool_execution`, refined
-///    for a busy `claude`/`codex` by one `capture-pane` look at the screen.
+///    for a busy `claude`/`codex` by a look at the screen
+///    ([`status_from_screen`]).
 ///
-/// Step 4's `capture-pane` call is deliberately reached *only* when the
-/// session is already busy and the engine is one whose busy-state is
-/// ambiguous: an idle session, and every `shell` session, costs exactly what
-/// it cost before this existed.
+/// The pane screen is captured **at most once per call and only when
+/// something actually needs it** — a latched error to reconcile, or a busy
+/// `claude`/`codex` whose busy-state is ambiguous. An idle session with no
+/// error, and every `shell` session, costs exactly what it cost before any of
+/// this existed: one `display-message`.
 fn compute_status(activity: &SessionActivity, tmux: Option<&Tmux>, now: Instant) -> SessionStatus {
     if activity.attention.load(Ordering::Relaxed) {
         return SessionStatus::AwaitingApproval;
     }
-    if activity.error.load(Ordering::Relaxed) {
-        return SessionStatus::Error;
-    }
+
     let tmux_session = match (tmux, activity.tmux_session.as_deref()) {
-        (Some(t), Some(name)) => {
-            if let Some(pane_command) = t.pane_current_command(name) {
-                if let Some(status) = status_from_pane_command(&pane_command, &activity.engine) {
-                    return status;
-                }
-            }
-            Some((t, name))
-        }
+        (Some(t), Some(name)) => Some((t, name)),
         _ => None,
     };
+    // Captured lazily, then reused: `resolve_error` and `status_from_screen`
+    // both want the same screen, and it must not be fetched twice (nor at all
+    // when neither asks). `fetched` is separate from `screen.is_some()` so a
+    // capture that legitimately failed isn't retried within one call.
+    let mut screen: Option<String> = None;
+    let mut fetched = false;
+
+    if activity.error.load(Ordering::Relaxed) {
+        if let Some((t, name)) = tmux_session {
+            screen = t.capture_pane(name);
+            fetched = true;
+        }
+        if resolve_error(activity, screen.as_deref()) {
+            return SessionStatus::Error;
+        }
+    }
+
+    if let Some((t, name)) = tmux_session {
+        if let Some(pane_command) = t.pane_current_command(name) {
+            if let Some(status) = status_from_pane_command(&pane_command, &activity.engine) {
+                return status;
+            }
+        }
+    }
 
     let status = status_from_output_activity(activity, now);
     if status == SessionStatus::Thinking {
         if let Some((t, name)) = tmux_session {
-            if let Some(screen) = t.capture_pane(name) {
-                if let Some(refined) = status_from_screen(&screen) {
-                    return refined;
-                }
+            if !fetched {
+                screen = t.capture_pane(name);
+            }
+            if let Some(refined) = screen.as_deref().and_then(status_from_screen) {
+                return refined;
             }
         }
     }
     status
+}
+
+/// Decides whether a latched failure should still be shown, given what the
+/// pane currently displays (`None` = no screen available: no tmux, or the
+/// capture failed).
+///
+/// Three outcomes, and the middle one is the reason this function exists:
+///
+/// - **The failure is gone from the screen** → release everything. The line
+///   has scrolled out of the conversation; there is nothing left to point at,
+///   and a genuinely new failure must be able to latch again.
+/// - **Still on screen, but the user has moved on** ([`SessionActivity::
+///   error_dismissed`]) → don't report it. This is what stops the light
+///   becoming permanently red: the engine repaints the pane constantly and
+///   every repaint re-delivers the same failure line to the stream scanner.
+/// - **Still on screen and not yet acknowledged** → red.
+///
+/// With no screen to consult the latch is taken at face value, except that a
+/// dismissal is still honoured — a failure the user has already answered for
+/// must not come back merely because tmux hiccupped.
+fn resolve_error(activity: &SessionActivity, screen: Option<&str>) -> bool {
+    if let Some(screen) = screen {
+        if !contains_error_marker(screen) {
+            activity.error.store(false, Ordering::Relaxed);
+            activity.error_dismissed.store(false, Ordering::Relaxed);
+            return false;
+        }
+    }
+    !activity.error_dismissed.load(Ordering::Relaxed)
 }
 
 /// One background thread for the whole manager (not one per session) that
@@ -3942,29 +4113,54 @@ mod tests {
 
     // -- error detection (Bruno's red) -----------------------------------
 
-    /// The exact line real `claude` 2.1.220 renders for a failed Bash tool,
-    /// captured from a live session through this app's own tmux config.
+    /// Both real renderings of a failed Bash tool, captured verbatim from live
+    /// `claude` 2.1.220 sessions through this app's own tmux config — the wide
+    /// (120-column) inline form and the narrow (80-column, i.e. what an ADE
+    /// pane actually is) label-and-bolded-value form.
+    ///
+    /// The narrow case is the one that matters most: an earlier marker built
+    /// only from the 120-column probe matched *nothing* in a real session, and
+    /// this test is what would have caught it.
     #[test]
-    fn a_non_zero_exit_code_line_is_an_error() {
-        assert!(contains_error_marker(
-            "  \u{23bf}  Exit code 1 \u{2014} ls: /nonexistent-path-xyz-123: No such file or directory"
-        ));
+    fn a_non_zero_exit_code_line_is_an_error_in_both_real_renderings() {
+        assert!(
+            contains_error_marker(
+                "  \u{23bf}  Exit code 1 \u{2014} ls: /nonexistent-path-xyz-123: No such file or directory"
+            ),
+            "120-column inline form"
+        );
+        assert!(
+            contains_error_marker("  \u{23bf}  Exit code: \u{1b}[1m1\u{1b}(B\u{1b}[m"),
+            "80-column label form, with the value bolded — the one a real ADE pane produces"
+        );
         for code in ["1", "2", "127", "130"] {
             assert!(
                 contains_error_marker(&format!("Exit code {code} \u{2014} boom")),
                 "exit {code} must read as a failure"
             );
+            assert!(
+                contains_error_marker(&format!("Exit code: \u{1b}[1m{code}\u{1b}(B\u{1b}[m")),
+                "exit {code} must read as a failure in the label form too"
+            );
         }
     }
 
-    /// The two ways this must NOT fire: a success line (should a future
-    /// Claude Code start printing one), and prose that merely mentions the
-    /// words.
+    /// The ways this must NOT fire: a success line (should a future Claude
+    /// Code start printing one — in either rendering), and prose that merely
+    /// mentions the words.
+    ///
+    /// The bolded-zero case is the reason escapes are skipped structurally
+    /// instead of by hunting for the first digit: `\u{1b}[1m` contains a `1`,
+    /// so a naive scan would call a *successful* command a failure.
     #[test]
     fn a_zero_exit_code_and_bare_prose_are_not_errors() {
         assert!(
             !contains_error_marker("Exit code 0"),
             "a zero exit is a success, whatever the engine chooses to print"
+        );
+        assert!(
+            !contains_error_marker("Exit code: \u{1b}[1m0\u{1b}(B\u{1b}[m"),
+            "a bolded zero must not be read as the `1` inside the SGR escape"
         );
         assert!(!contains_error_marker(
             "check the Exit code manually before continuing"
@@ -3973,17 +4169,124 @@ mod tests {
         assert!(!contains_error_marker(""));
     }
 
-    /// A user write must drop the error latch as well as the approval one —
-    /// they share the single "the user has seen it" signal a stock engine
-    /// affords us.
+    /// The escape-skipping helper on its own, including the shapes tmux
+    /// actually emits.
     #[test]
-    fn a_user_write_clears_the_error_latch_too() {
+    fn first_value_char_after_walks_past_escapes_and_label_punctuation() {
+        assert_eq!(first_value_char_after("1"), Some('1'));
+        assert_eq!(first_value_char_after(": 7"), Some('7'));
+        assert_eq!(first_value_char_after("\u{1b}[1m4"), Some('4'));
+        assert_eq!(first_value_char_after(": \u{1b}[1m\u{1b}(B9"), Some('9'));
+        // A value never lives on the next line — don't wander onto it.
+        assert_eq!(first_value_char_after(":\n1"), None);
+        assert_eq!(first_value_char_after(""), None);
+        assert_eq!(first_value_char_after("\u{1b}"), None);
+        // Non-numeric values are found and simply aren't digits, which is
+        // what makes the prose case above fall through.
+        assert_eq!(first_value_char_after(" manually"), Some('m'));
+    }
+
+    /// Without tmux there is no screen to consult, so a user write is the only
+    /// release available and clears the error latch outright — today's
+    /// behaviour, preserved for the fallback path.
+    #[test]
+    fn without_tmux_a_user_write_clears_the_error_latch_outright() {
         let activity = SessionActivity::new("claude".into(), None, true);
         activity.error.store(true, Ordering::Relaxed);
         activity.attention.store(true, Ordering::Relaxed);
         activity.mark_user_input();
         assert!(!activity.error.load(Ordering::Relaxed));
         assert!(!activity.attention.load(Ordering::Relaxed));
+    }
+
+    /// With tmux, a user write marks the failure *dismissed* instead of
+    /// clearing it, because the line is still on the pane and the engine will
+    /// keep repainting it. This is the fix for a measured defect: clearing
+    /// outright made red come back on the next repaint, over and over, until
+    /// it was effectively permanent.
+    #[test]
+    fn with_tmux_a_user_write_dismisses_the_error_rather_than_clearing_it() {
+        let activity =
+            SessionActivity::new("claude".into(), Some("omniagent-x".into()), true);
+        activity.error.store(true, Ordering::Relaxed);
+        activity.mark_user_input();
+        assert!(
+            activity.error.load(Ordering::Relaxed),
+            "the failure is still on the pane, so the latch stays"
+        );
+        assert!(activity.error_dismissed.load(Ordering::Relaxed));
+    }
+
+    /// A write with nothing latched must not *pre*-dismiss: otherwise typing a
+    /// command and having that very command fail a second later would be
+    /// silently swallowed — which is what the first draft did, caught by the
+    /// tmux integration test.
+    #[test]
+    fn a_write_with_no_error_latched_does_not_pre_dismiss_a_future_failure() {
+        let activity = SessionActivity::new("shell".into(), Some("omniagent-x".into()), true);
+        activity.mark_user_input();
+        assert!(
+            !activity.error_dismissed.load(Ordering::Relaxed),
+            "there was nothing to acknowledge"
+        );
+
+        // ...and the failure that follows still turns the light red.
+        activity.error.store(true, Ordering::Relaxed);
+        assert!(resolve_error(&activity, Some("  \u{23bf}  Exit code: 1\n")));
+    }
+
+    /// [`resolve_error`]'s three outcomes, driven directly.
+    #[test]
+    fn resolve_error_reports_only_an_unacknowledged_failure_that_is_still_on_screen() {
+        let failing_screen = "  \u{23bf}  Exit code: 1\n";
+        let clean_screen = "\u{273b} Cooked for 3s\n\u{276f} \n";
+
+        // 1. On screen, not yet acknowledged -> red.
+        let a = SessionActivity::new("claude".into(), Some("x".into()), true);
+        a.error.store(true, Ordering::Relaxed);
+        assert!(resolve_error(&a, Some(failing_screen)));
+
+        // 2. Still on screen, but the user moved on -> not red, and the latch
+        //    is deliberately kept (the line hasn't gone anywhere).
+        a.mark_user_input();
+        assert!(!resolve_error(&a, Some(failing_screen)));
+        assert!(a.error.load(Ordering::Relaxed));
+
+        // 3. Scrolled off the pane -> everything released, so the next real
+        //    failure can latch again.
+        assert!(!resolve_error(&a, Some(clean_screen)));
+        assert!(!a.error.load(Ordering::Relaxed));
+        assert!(!a.error_dismissed.load(Ordering::Relaxed));
+    }
+
+    /// The repaint storm that caused the live defect, replayed: once
+    /// acknowledged, no number of screens still showing the same failure may
+    /// turn the light red again.
+    #[test]
+    fn an_acknowledged_failure_does_not_come_back_on_repaint() {
+        let screen = "  \u{23bf}  Exit code: 1\n\u{273b} Cascading\u{2026}\n";
+        let activity = SessionActivity::new("claude".into(), Some("x".into()), true);
+        activity.error.store(true, Ordering::Relaxed);
+        activity.mark_user_input();
+
+        for repaint in 0..25 {
+            assert!(
+                !resolve_error(&activity, Some(screen)),
+                "repaint #{repaint} re-reported a failure the user already acknowledged"
+            );
+        }
+    }
+
+    /// No screen available (no tmux, or the capture failed): the latch is
+    /// taken at face value, but a dismissal is still honoured — a failure the
+    /// user answered for must not return because tmux hiccupped.
+    #[test]
+    fn resolve_error_without_a_screen_trusts_the_latch_but_still_honours_a_dismissal() {
+        let activity = SessionActivity::new("claude".into(), Some("x".into()), true);
+        activity.error.store(true, Ordering::Relaxed);
+        assert!(resolve_error(&activity, None));
+        activity.mark_user_input();
+        assert!(!resolve_error(&activity, None));
     }
 
     // -- tool execution inside claude/codex (Bruno's cyan) ----------------

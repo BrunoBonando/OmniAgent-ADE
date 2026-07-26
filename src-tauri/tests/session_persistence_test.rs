@@ -587,10 +587,16 @@ fn a_failed_tool_exit_turns_the_light_red_and_writing_clears_it() {
     // keystroke, and an earlier 5 s error-only grace suppressed exactly that
     // (see `ATTENTION_INPUT_GRACE`), so this test now runs at the timing that
     // actually caught it.
+    //
+    // The text is the **80-column** rendering — a label, then the value
+    // bolded, i.e. an SGR escape between the two — because that is what a real
+    // ADE pane (opened at 24x80) actually produces. A marker built only from a
+    // 120-column probe matched nothing in a live session; this test now emits
+    // the exact bytes that caught it.
     manager
         .write(
             &info.id,
-            "sleep 2 && echo 'Exit code 1 \u{2014} ls: nope: No such file or directory'\n",
+            "sleep 2 && printf 'Exit code: \\033[1m1\\033[m\\n'\n",
         )
         .unwrap();
 
@@ -602,20 +608,14 @@ fn a_failed_tool_exit_turns_the_light_red_and_writing_clears_it() {
     assert_eq!(pulled.status, SessionStatus::Error);
     assert!(pulled.notify, "red must be notification-worthy");
 
-    // The user acknowledges by typing, and the failure text leaves the screen
-    // (`clear` stands in for the engine repainting past it), then the terminal
-    // is allowed to settle before the contract is judged — exactly the shape
-    // (and for exactly the reason) the approval test above uses. The signal is
-    // *screen text*: the repaint of the pre-`clear` screen still carries the
-    // failure line, arrives well after the keystroke under parallel load, and
-    // legitimately re-latches red. That is the documented limitation, not a
-    // fudge; asserting through it would make this a load-sensitive coin flip.
+    // The user acknowledges by typing, and the failure leaves the screen
+    // (`clear` stands in for the engine repainting past it). No settling dance
+    // is needed here, and that is the point of reconciling red against the
+    // live pane rather than against the stream: the moment `capture-pane` stops
+    // showing the failure, the latch is released. An earlier stream-only
+    // version needed a sleep plus a second write to survive the repaint that
+    // arrives after the keystroke, and even then red came back later.
     manager.write(&info.id, "clear\n").unwrap();
-    std::thread::sleep(Duration::from_secs(3));
-
-    // With the screen quiet and no failure on it, the contract under test —
-    // a user write clears the error latch — must hold.
-    manager.write(&info.id, "").unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline && status_of(&manager, &info.id) != Some(SessionStatus::Ready) {
         std::thread::sleep(Duration::from_millis(200));
