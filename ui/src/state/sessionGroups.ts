@@ -209,6 +209,45 @@ export function currentSessionGroupId(tabs: TabInfo[], activeTabId: string | nul
 }
 
 /**
+ * Which session's panes the grid actually puts **on screen** for `project`
+ * — the founder's *"Inside each workspace (first column) it must show the
+ * session it's currently on the screen"*, in its second half.
+ *
+ * The sidebar half of that brief shipped first; the grid stayed unfiltered
+ * ("sessions are an organizing layer; all of a project's panes stay
+ * visible"). This is the answer that closes it: `Workspace.tsx` renders one
+ * grid per *session*, and shows the one this names.
+ *
+ * The rule, and why it isn't just `currentSessionGroupId`:
+ *
+ * - **The focused pane's session**, when the focused pane is in this
+ *   project. This is the case that matters, and it agrees with
+ *   `groupTabsBySession`'s `isCurrent` by construction — the sidebar's
+ *   accent rail and the grid can never point at different sessions.
+ * - **Otherwise the project's first session** (first-seen order = the
+ *   topmost row in the sidebar). Selecting a workspace in the sidebar
+ *   deliberately does *not* move focus, so `activeTabId` routinely belongs
+ *   to a different project than the one being rendered; `currentSessionGroupId`
+ *   answers `null` there, and a grid showing nothing at all would be a
+ *   worse answer than showing the session the eye lands on anyway.
+ * - **`null`** only when the project genuinely has no panes — the caller
+ *   then renders its empty state.
+ *
+ * A stale `activeTabId` (its pane closed underneath) falls through to the
+ * same first-session fallback rather than blanking the grid.
+ */
+export function visibleSessionGroupId(
+  tabs: TabInfo[],
+  project: string,
+  activeTabId: string | null,
+): string | null {
+  const focused = activeTabId === null ? undefined : tabs.find((t) => t.id === activeTabId);
+  if (focused && focused.project === project) return focused.group ?? UNGROUPED_SESSION_ID;
+  const first = tabs.find((t) => t.project === project);
+  return first === undefined ? null : (first.group ?? UNGROUPED_SESSION_ID);
+}
+
+/**
  * Which session a *newly opened single pane* in `project` should join —
  * the ⌘T / "+" / pane-split path, which says nothing about sessions.
  *

@@ -8,8 +8,12 @@
 // `sessionLayouts` map App.tsx passes down (keyed by session-group id
 // since 2026-07-26, when a project gained the ability to hold several
 // sessions) is what lets a freshly-created batch of panes land in the
-// chosen preset's real shape — as the whole grid for a brand-new project,
-// or merged in beside what's already there for a new session inside one.
+// chosen preset's real shape.
+//
+// Later the same day the grid became session-filtered (`Workspace.tsx`
+// renders one always-mounted grid per session and displays one of them), so
+// a preset is now simply the shape of its own session's grid — the last
+// test here is what that changed.
 //
 // react-mosaic-component (real library, not mocked) renders every leaf as
 // a `.mosaic-tile` positioned via inline `top`/`left`/`width`/`height`
@@ -149,11 +153,14 @@ describe("Workspace — a session's layout preset seeds the shape its panes land
     expect(new Set(positions.map((p) => p.left)).size).toBe(2);
   });
 
-  it("a second session's preset merges in beside the panes already open, without disturbing them", () => {
-    // The ⌘N -> Session case: project p1 already has one pane from session
-    // g1; session g2 arrives as a 2x2 batch of four. Result: five tiles,
-    // and the four new ones really are arranged as a grid (2 distinct row
-    // offsets) rather than flattened into one long row.
+  it("a second session's preset shapes that session's own grid, leaving the first session's panes alone", () => {
+    // The ⌘N -> Session case, as it works since the grid became
+    // session-filtered (2026-07-26): project p1 already has one pane from
+    // session g1; session g2 arrives as a 2x2 batch of four. They do NOT
+    // share a tree any more — g2's preset is the whole shape of g2's own
+    // grid, and g1's single pane sits untouched in its own (now hidden)
+    // one. This used to assert a merge into one tree; the merge is gone
+    // because sessions no longer share a grid at all.
     const p1 = project("p1");
     const tabs = [
       tab("a", "p1", "g1"),
@@ -180,8 +187,23 @@ describe("Workspace — a session's layout preset seeds the shape its panes land
       />,
     );
 
-    const positions = tilePositions(container);
-    expect(positions).toHaveLength(5);
-    expect(new Set(positions.map((p) => p.top)).size).toBe(2);
+    const gridFor = (group: string) =>
+      container.querySelector<HTMLElement>(`.pane-grid-project[data-session="${group}"]`)!;
+
+    // g2 is the focused session, so it is the one on screen, and its four
+    // panes really are a 2x2 (2 distinct row offsets, 2 distinct columns) —
+    // not one flat row of four.
+    const g2 = gridFor("g2");
+    expect(g2.style.display).not.toBe("none");
+    const g2Tiles = tilePositions(g2);
+    expect(g2Tiles).toHaveLength(4);
+    expect(new Set(g2Tiles.map((p) => p.top)).size).toBe(2);
+    expect(new Set(g2Tiles.map((p) => p.left)).size).toBe(2);
+
+    // g1 keeps its single pane, mounted and full-bleed in its own grid —
+    // the new batch never reached into it.
+    const g1 = gridFor("g1");
+    expect(g1.style.display).toBe("none");
+    expect(tilePositions(g1)).toEqual([{ top: 0, left: 0 }]);
   });
 });

@@ -48,11 +48,11 @@ import {
 } from "./state/closedWorkspaces";
 import { isSessionStatus, type SessionStatusEvent } from "./state/sessionStatus";
 import {
-  currentSessionGroupId,
   groupTabsBySession,
   newSessionGroupId,
   nextSessionName,
   sessionGroupForNewPane,
+  visibleSessionGroupId,
 } from "./state/sessionGroups";
 import {
   NOTIFICATIONS_SETTING_KEY,
@@ -1129,7 +1129,15 @@ function App() {
   // its tree from, so the two can never disagree.
   const closingTab = closingTabId ? (state.tabs.find((t) => t.id === closingTabId) ?? null) : null;
 
-  const currentGroupId = currentSessionGroupId(state.tabs, state.activeTabId);
+  // The same question the sidebar's accent rail and the pane grid answer,
+  // asked once more for the chrome: which session is on screen. All three
+  // go through `visibleSessionGroupId` so they can never name different
+  // sessions — see that function's doc for why it isn't just
+  // `currentSessionGroupId` (selecting a workspace doesn't move focus).
+  const currentGroupId =
+    selectedProjectId === null
+      ? null
+      : visibleSessionGroupId(state.tabs, selectedProjectId, state.activeTabId);
   const currentSessionLabel =
     groupTabsBySession(state.tabs, state.activeTabId)
       .find((g) => g.project === selectedProjectId)

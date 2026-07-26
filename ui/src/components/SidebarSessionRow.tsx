@@ -62,6 +62,17 @@ function measureCardAnchor(row: HTMLElement | null): DOMRect | null {
 interface SidebarSessionRowProps {
   session: SessionGroup;
   projectLabel: string;
+  /** Whether this is the session **on screen** in the pane grid — the accent
+   * rail.
+   *
+   * Passed in rather than read off `session.isCurrent` (which only knows
+   * about the focused pane) because since 2026-07-26 the grid shows exactly
+   * one session, and which one is a slightly richer question: selecting a
+   * workspace in the sidebar does not move focus, so a project whose panes
+   * nobody is focused on still has a session on screen. `Sidebar` answers
+   * with `visibleSessionGroupId` — the same function `Workspace.tsx` uses to
+   * decide what to paint — so the rail and the grid cannot disagree. */
+  isCurrent: boolean;
   /** Bring this session on screen — `App.tsx` activates one of its
    * terminals, which also selects its workspace. */
   onActivate: () => void;
@@ -73,6 +84,7 @@ interface SidebarSessionRowProps {
 export default function SidebarSessionRow({
   session,
   projectLabel,
+  isCurrent,
   onActivate,
   onRename,
 }: SidebarSessionRowProps) {
@@ -122,7 +134,7 @@ export default function SidebarSessionRow({
   return (
     <li
       ref={rowRef}
-      className={`session-row${session.isCurrent ? " is-current" : ""}`}
+      className={`session-row${isCurrent ? " is-current" : ""}`}
       onMouseEnter={scheduleCard}
       onMouseLeave={closeCard}
     >

@@ -67,8 +67,16 @@
 // Bruno: *"Inside each workspace (first column) it must show the session
 // it's currently on the screen."* A project's panes are no longer a flat
 // list under the project row: they're grouped by session
-// (`state/sessionGroups.ts`), and the one holding the focused pane wears the
-// accent rail.
+// (`state/sessionGroups.ts`), and the one on screen wears the accent rail.
+//
+// "On screen" became literal later the same day, when `Workspace.tsx`
+// started painting exactly one session's panes: the rail now reads
+// `visibleSessionGroupId` — the *same* function the grid paints from — so
+// the marked row and the visible panes are guaranteed to be the same
+// session. It used to read `SessionGroup.isCurrent`, which only knows about
+// the focused pane; selecting a workspace in the sidebar deliberately
+// doesn't move focus, so that left a selected workspace showing a session
+// with no row marked at all.
 //
 // **Later the same day, he cut the rest of it away:** *"The menu on the left
 // should not show the amount of tabs and their names. Just the session, so
@@ -102,7 +110,7 @@ import {
   type ProjectInfo,
   type TabInfo,
 } from "../state/sessions";
-import { groupTabsBySession } from "../state/sessionGroups";
+import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
 import { statusNeedsAttention } from "../state/sessionStatus";
 import type { LayoutPreset } from "../state/paneGrid";
 import {
@@ -238,6 +246,12 @@ export default function Sidebar({
   const [closingProject, setClosingProject] = useState<ProjectInfo | null>(null);
   const grouped = tabsByProject(tabs);
   const sessionsByProject = groupTabsBySession(tabs, activeTabId);
+  // Which session the pane grid is showing for the selected workspace — the
+  // accent rail's answer, taken from the same derivation `Workspace.tsx`
+  // paints from so the two columns always agree (see `SidebarSessionRow`'s
+  // `isCurrent` prop).
+  const onScreenSession =
+    selectedProjectId === null ? null : visibleSessionGroupId(tabs, selectedProjectId, activeTabId);
   // Founder feedback (2026-07-24): a session's attention badge must stay
   // visible from the sidebar even while looking at a different project's
   // tabs, or the Map view — this is the whole reason the badge lives at two
@@ -508,6 +522,13 @@ export default function Sidebar({
                           key={session.id}
                           session={session}
                           projectLabel={project.label}
+                          // The rail marks what the grid is actually
+                          // painting, answered by the same function the grid
+                          // asks (`visibleSessionGroupId`) — so "the session
+                          // it's currently on the screen" means the same
+                          // thing in both columns. Only the selected
+                          // workspace has a session on screen at all.
+                          isCurrent={isSelected && session.id === onScreenSession}
                           onActivate={() => onActivateTab(session.tabs[0].id)}
                           onRename={(name) => onRenameSession?.(project, session.id, name)}
                         />

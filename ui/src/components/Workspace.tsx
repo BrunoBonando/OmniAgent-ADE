@@ -59,6 +59,34 @@
 // application code short of patching the library. Documented, with a
 // suggested mitigation, in the task report and in
 // `Workspace.mountStability.test.tsx`'s last test.
+//
+// ## The grid shows ONE session (founder brief, 2026-07-26)
+//
+// Bruno, verbatim: *"Inside each workspace (first column) it must show the
+// session it's currently on the screen."* The sidebar half of that shipped
+// first and this file was explicitly left behind — every pane in a project
+// stayed on screen at once, sessions being only an organizing layer in the
+// tree. This is the other half.
+//
+// **The unit of the grid is now a SESSION, not a project.** One
+// `<ProjectPaneGrid>` per (project, session) that has any open pane; all of
+// them stay mounted for as long as their session has panes; `display`
+// toggles off every one that isn't the selected project's current session
+// (`visibleSessionGroupId`, state/sessionGroups.ts).
+//
+// That is deliberately the *same* mechanism the cross-project case above
+// already used, applied one level down, and for the identical reason: the
+// obvious implementation — render only the current session's panes — is
+// exactly the unmount that drops `session-output:{id}` on the floor. A
+// session the user isn't looking at is still a live agent doing work, and
+// switching away from it must cost nothing but a repaint.
+//
+// A pleasant consequence: each session's panes now get their own mosaic
+// tree, so a session's layout preset lands as that grid's whole shape
+// instead of being merged in beside a neighbouring session's panes, and one
+// session's drag-rearrange can't move another's. `addPaneSubtree` is kept in
+// the reconciliation below anyway — it costs nothing and still does the
+// right thing if a batch ever lands in a grid that already has panes.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Mosaic, MosaicWindow, type MosaicNode } from "react-mosaic-component";
 import "react-mosaic-component/react-mosaic-component.css";
@@ -69,12 +97,15 @@ import {
   isUnderPressure,
   PRESSURE_THRESHOLD,
   tabDisplayLabel,
-  tabsByProject,
   type Engine,
   type ProjectInfo,
   type TabInfo,
 } from "../state/sessions";
-import { UNGROUPED_SESSION_ID } from "../state/sessionGroups";
+import {
+  UNGROUPED_SESSION_ID,
+  groupTabsBySession,
+  visibleSessionGroupId,
+} from "../state/sessionGroups";
 import type { TerminalThemeId } from "../lib/terminalThemes";
 
 interface ProjectPaneGridProps {
@@ -88,6 +119,11 @@ interface ProjectPaneGridProps {
    * reference from `Terminal.tsx`. */
   terminalsVisible: boolean;
   projectId: string;
+  /** The session (pane group) whose panes this grid holds — `TabInfo.group`,
+   * or `UNGROUPED_SESSION_ID`. Surfaced on the DOM node as `data-session` so
+   * the mount-stability tests (and a browser harness) can point at one
+   * specific session's grid and read whether it is displayed. */
+  sessionId: string;
   projectLabel: string;
   tabs: TabInfo[];
   activeTabId: string | null;
@@ -125,13 +161,14 @@ interface ProjectPaneGridProps {
   sessionLayouts?: Map<string, PaneTree>;
 }
 
-/** One project's grid — always mounted for as long as that project has any
- * open tab (see this file's module doc for why), CSS-hidden via `hidden`
- * when it isn't the sidebar's current selection. */
+/** One **session's** grid — always mounted for as long as that session has
+ * any open pane (see this file's module doc for why), CSS-hidden via
+ * `hidden` when it isn't the selected project's current session. */
 function ProjectPaneGrid({
   hidden,
   terminalsVisible,
   projectId,
+  sessionId,
   projectLabel,
   tabs,
   activeTabId,
@@ -196,7 +233,12 @@ function ProjectPaneGrid({
   const tabsById = useMemo(() => new Map(tabs.map((t) => [t.id, t])), [tabs]);
 
   return (
-    <div className="pane-grid-project" style={{ display: hidden ? "none" : "flex" }}>
+    <div
+      className="pane-grid-project"
+      data-project={projectId}
+      data-session={sessionId}
+      style={{ display: hidden ? "none" : "flex" }}
+    >
       {tree === null ? (
         <div className="empty-workspace">
           <div className="empty-workspace-prompt">&gt;_</div>
@@ -317,11 +359,18 @@ export default function Workspace({
     [projects],
   );
 
-  // First-seen order, one entry per project that currently has >= 1 open
-  // tab — every one of these renders its own always-mounted grid below.
-  const grouped = tabsByProject(tabs);
+  // First-seen order, one entry per (project, session) that currently has
+  // >= 1 open pane — every one of these renders its own always-mounted grid
+  // below, and exactly one of them is displayed.
+  const grouped = groupTabsBySession(tabs, activeTabId);
   const selectedHasTabs = grouped.some((g) => g.project === selectedProjectId);
   const underPressure = isUnderPressure(tabs);
+  // Which session is on screen for the project the sidebar has selected.
+  // Derived, never stored: it follows the focused pane, and falls back to
+  // the project's first session when focus is elsewhere (selecting a
+  // workspace doesn't move focus) — see `visibleSessionGroupId`'s own doc.
+  const visibleSession =
+    selectedProjectId === null ? null : visibleSessionGroupId(tabs, selectedProjectId, activeTabId);
 
   return (
     <div className="workspace" style={{ display: hidden ? "none" : "flex" }}>
@@ -332,33 +381,44 @@ export default function Workspace({
         </div>
       )}
 
-      {grouped.map((g) => {
-        const gridHidden = g.project !== selectedProjectId;
-        return (
-          <ProjectPaneGrid
-            key={g.project}
-            hidden={gridHidden}
-            // Only the selected project's grid, in the active (non-Map)
-            // workspace view, is real visibility for its terminals — see
-            // `ProjectPaneGridProps.terminalsVisible`'s doc.
-            terminalsVisible={!gridHidden && !hidden}
-            projectId={g.project}
-            projectLabel={projectLabel(g.project)}
-            tabs={g.tabs}
-            activeTabId={activeTabId}
-            projects={projects}
-            onActivateTab={onActivateTab}
-            onCloseTab={onCloseTab}
-            onNewTabInProject={onNewTabInProject}
-            onRenameTab={onRenameTab}
-            onChangeEngine={onChangeEngine}
-            onChangeTheme={onChangeTheme}
-            onOpenCodeReview={onOpenCodeReview}
-            onFirstInput={onFirstInput}
-            sessionLayouts={sessionLayouts}
-          />
-        );
-      })}
+      {grouped.flatMap((p) =>
+        p.sessions.map((session) => {
+          // Two conditions, both required: this is the selected workspace,
+          // AND this is the session that workspace is currently showing.
+          // Everything else stays mounted and simply isn't painted.
+          const gridHidden = p.project !== selectedProjectId || session.id !== visibleSession;
+          return (
+            <ProjectPaneGrid
+              // Keyed by session, so a session keeps its React identity —
+              // and therefore its `<Terminal>`s — for its whole life. Group
+              // ids are stable (`sess-grp-…` or the implicit
+              // `UNGROUPED_SESSION_ID`); renaming a session changes its
+              // label, never this.
+              key={`${p.project}:${session.id}`}
+              hidden={gridHidden}
+              // Only the displayed session's grid, in the active (non-Map)
+              // workspace view, is real visibility for its terminals — see
+              // `ProjectPaneGridProps.terminalsVisible`'s doc.
+              terminalsVisible={!gridHidden && !hidden}
+              projectId={p.project}
+              sessionId={session.id}
+              projectLabel={projectLabel(p.project)}
+              tabs={session.tabs}
+              activeTabId={activeTabId}
+              projects={projects}
+              onActivateTab={onActivateTab}
+              onCloseTab={onCloseTab}
+              onNewTabInProject={onNewTabInProject}
+              onRenameTab={onRenameTab}
+              onChangeEngine={onChangeEngine}
+              onChangeTheme={onChangeTheme}
+              onOpenCodeReview={onOpenCodeReview}
+              onFirstInput={onFirstInput}
+              sessionLayouts={sessionLayouts}
+            />
+          );
+        }),
+      )}
 
       {!selectedHasTabs && (
         <div className="empty-workspace">

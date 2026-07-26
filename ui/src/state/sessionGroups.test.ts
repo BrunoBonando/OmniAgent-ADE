@@ -8,6 +8,7 @@ import {
   sessionEngineBreakdown,
   sessionGroupForNewPane,
   tabsInSession,
+  visibleSessionGroupId,
 } from "./sessionGroups";
 import { isValidSessionId, type Engine, type TabInfo } from "./sessions";
 
@@ -216,5 +217,53 @@ describe("sessionEngineBreakdown — how many terminals of which engine", () => 
       { engine: "claude", count: 2 },
       { engine: "shell", count: 1 },
     ]);
+  });
+});
+
+describe("visibleSessionGroupId — which session the pane grid puts on screen", () => {
+  it("is the focused pane's session when the focused pane is in this workspace", () => {
+    const tabs = [tab("a", "p1", "g1"), tab("b", "p1", "g2")];
+    expect(visibleSessionGroupId(tabs, "p1", "b")).toBe("g2");
+  });
+
+  it("falls back to the workspace's first session when focus is in a DIFFERENT workspace", () => {
+    // Selecting a workspace in the sidebar doesn't move focus, so the grid
+    // still has to answer "which session am I showing" for a project whose
+    // panes nobody is focused on. The topmost session in the sidebar is the
+    // one the eye lands on, so that's the one that shows.
+    const tabs = [tab("a", "p1", "g1"), tab("b", "p1", "g2"), tab("c", "p2", "g3")];
+    expect(visibleSessionGroupId(tabs, "p1", "c")).toBe("g1");
+  });
+
+  it("falls back to the first session when nothing is focused at all", () => {
+    const tabs = [tab("a", "p1", "g1"), tab("b", "p1", "g2")];
+    expect(visibleSessionGroupId(tabs, "p1", null)).toBe("g1");
+  });
+
+  it("is null for a workspace with no panes — there is no session to show", () => {
+    expect(visibleSessionGroupId([tab("a", "p1", "g1")], "p2", "a")).toBeNull();
+  });
+
+  it("answers with the implicit session for pre-grouping panes", () => {
+    const tabs = [tab("a", "p1"), tab("b", "p1")];
+    expect(visibleSessionGroupId(tabs, "p1", "b")).toBe(UNGROUPED_SESSION_ID);
+    expect(visibleSessionGroupId(tabs, "p1", null)).toBe(UNGROUPED_SESSION_ID);
+  });
+
+  it("survives a stale activeTabId (a pane closed out from under it)", () => {
+    const tabs = [tab("a", "p1", "g1"), tab("b", "p1", "g2")];
+    expect(visibleSessionGroupId(tabs, "p1", "gone")).toBe("g1");
+  });
+
+  it("agrees with the sidebar: the session it shows is the one marked current", () => {
+    // `groupTabsBySession`'s `isCurrent` and this function must never
+    // disagree about the focused case, or the grid would show one session
+    // while the sidebar's accent rail pointed at another.
+    const tabs = [tab("a", "p1", "g1"), tab("b", "p1", "g2")];
+    const visible = visibleSessionGroupId(tabs, "p1", "b");
+    const marked = groupTabsBySession(tabs, "b")
+      .find((p) => p.project === "p1")!
+      .sessions.find((s) => s.isCurrent)!.id;
+    expect(visible).toBe(marked);
   });
 });
