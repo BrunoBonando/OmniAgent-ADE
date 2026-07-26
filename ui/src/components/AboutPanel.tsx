@@ -17,7 +17,17 @@
 // line below stays: it's a different kind of information (a passive
 // status readout that belongs in "About", not an account action) and
 // doesn't duplicate anything the badge's menu shows.
+//
+// 2026-07-26, later the same day: the version line stopped being the
+// literal `v0.1.0 — dogfood build`. There is exactly one version in this
+// repo — `tauri.conf.json`'s `version` field — and it already had two
+// honest readers: the window title (via `PackageInfo::version` in
+// `src-tauri/src/lib.rs`'s `window_title`) and the bundler, which stamps it
+// into the `.app`. This panel was the third reader and the only one holding
+// a *copy* of it, which meant the next release would ship an About panel
+// quietly claiming the previous version. See `aboutVersionLine` below.
 import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import logo from "../assets/omniagent-logo.png";
 import { rootsRebuild, settingsGet } from "../lib/tauri";
 import {
@@ -30,15 +40,55 @@ interface AboutPanelProps {
   onClose: () => void;
 }
 
+/** The version line, shaped in one place.
+ *
+ * `null` (rather than a placeholder) while the version is still being read,
+ * and also when reading it failed: this panel is a branding surface, and a
+ * line that says "v— dogfood build" or "vunknown" is worse than no line at
+ * all. Same best-effort posture as the `authSummary` line below. */
+export function aboutVersionLine(version: string | null): string | null {
+  return version === null ? null : `v${version} — dogfood build`;
+}
+
 export default function AboutPanel({ onClose }: AboutPanelProps) {
   const [confirming, setConfirming] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The shipped version, read from the running app rather than typed in
+  // here. `getVersion()` (@tauri-apps/api/app) resolves `PackageInfo::
+  // version`, which `tauri::generate_context!` compiles from
+  // `tauri.conf.json`'s own `version` field — the exact same value
+  // `src-tauri/src/lib.rs`'s `window_title` puts in the title bar and the
+  // bundler stamps into the `.app`. So the panel and the title bar can no
+  // longer disagree, and a release bump moves all three at once.
+  //
+  // Tauri's built-in API rather than a new command of our own: `core:app:
+  // default` (already granted by `core:default` in
+  // `src-tauri/capabilities/default.json`) includes `allow-version`, so
+  // this needs no backend code and no permission change.
+  const [version, setVersion] = useState<string | null>(null);
   // Light-touch surfacing of the fake-sign-in gate's captured answer
   // (Task: onboarding — "nice to have, not required"). Read-only, best
   // effort: a failed read just leaves the line blank rather than showing
   // an error in a panel that's mostly about branding.
   const [authSummary, setAuthSummary] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getVersion()
+      .then((v) => {
+        if (!cancelled) setVersion(v);
+      })
+      .catch((err) => {
+        // Best effort, exactly like the auth summary below: a panel that
+        // can't name its own version is a missing line, never an error
+        // screen.
+        console.error("failed to read the app version", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +126,8 @@ export default function AboutPanel({ onClose }: AboutPanelProps) {
     }
   }
 
+  const versionLine = aboutVersionLine(version);
+
   return (
     <div className="overlay-backdrop" onMouseDown={onClose}>
       <div className="about-panel" role="dialog" aria-label="About OmniAgent ADE" onMouseDown={(e) => e.stopPropagation()}>
@@ -86,7 +138,7 @@ export default function AboutPanel({ onClose }: AboutPanelProps) {
           A local-first agentic development environment: parallel agent-CLI terminal sessions
           grouped per project, all feeding and fed by one fully local second brain.
         </p>
-        <p className="about-version">v0.1.0 — dogfood build</p>
+        {versionLine && <p className="about-version">{versionLine}</p>}
         {authSummary && <p className="about-auth-summary">{authSummary}</p>}
 
         <div className="about-rebuild-section">
