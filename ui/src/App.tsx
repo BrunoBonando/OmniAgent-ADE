@@ -71,9 +71,12 @@ import { ownsCtrlOnlyShortcut } from "./lib/keyboard";
 import { usePerSessionEvent } from "./lib/usePerSessionEvent";
 import {
   FILE_TREE_VISIBLE_SETTING_KEY,
+  agentCheckInstalled,
+  agentInstall,
   getBriefing,
   ingestionStatus,
   listProjects,
+  onAgentInstallProgress,
   renameProject,
   rootsList,
   sessionCreate,
@@ -83,6 +86,7 @@ import {
   settingsSet,
   type IngestionStatus,
 } from "./lib/tauri";
+import { agentsReducer, initialAgentsState, type Agent } from "./state/agents";
 
 type View = "workspace" | "map";
 
@@ -97,6 +101,7 @@ const INGESTION_POLL_MS = 2000;
 
 function App() {
   const [state, dispatch] = useReducer(sessionsReducer, initialSessionsState);
+  const [agentState, agentDispatch] = useReducer(agentsReducer, initialAgentsState);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   // ⌘N — since 2026-07-26 it no longer opens the workspace dialog directly
@@ -265,6 +270,31 @@ function App() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // ---- Load installed agents on startup ----
+  useEffect(() => {
+    (async () => {
+      try {
+        const installed = await agentCheckInstalled();
+        agentDispatch({ type: "agents/loaded", installed: installed as Agent[] });
+
+        // Load last-selected from settings
+        const lastSelected = await settingsGet("last_selected_agents");
+        if (lastSelected) {
+          try {
+            const parsed = JSON.parse(lastSelected);
+            if (Array.isArray(parsed)) {
+              agentDispatch({ type: "agents/selected", agents: parsed });
+            }
+          } catch {
+            // Ignore parse errors
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load agent state", err);
+      }
+    })();
   }, []);
 
   // ---- boot: load the sidebar's project list + restore the last layout --
@@ -748,6 +778,28 @@ function App() {
     [],
   );
 
+  // ---- Agent installation handler ----
+  async function handleInstallAgent(agent: Agent) {
+    agentDispatch({ type: "agents/install_started", agent });
+
+    try {
+      // Listen for install progress
+      await onAgentInstallProgress(agent, (status) => {
+        if (status === "completed") {
+          agentDispatch({ type: "agents/install_completed", agent });
+        } else if (status === "failed") {
+          agentDispatch({ type: "agents/install_failed", agent });
+        }
+      });
+
+      // Trigger install in backend
+      await agentInstall(agent);
+    } catch (err) {
+      console.error(`Failed to install ${agent}:`, err);
+      agentDispatch({ type: "agents/install_failed", agent });
+    }
+  }
+
   // ---- NewWorkspaceModal's bulk-create (Sidebar's "+" -> New Workspace) -
   // `add_project` + the modal's own folder-pick/name UI already ran inside
   // `NewWorkspaceModal.tsx` by the time this fires (see that component's
@@ -776,6 +828,10 @@ function App() {
     async (project: ProjectInfo, engines: Engine[]) => {
       void reloadProjects();
       setSelectedProjectId(project.id);
+
+      // Save selected agents
+      await settingsSet("last_selected_agents", JSON.stringify(engines));
+      agentDispatch({ type: "agents/selected", agents: engines as Agent[] });
 
       // A new workspace's first batch of panes is its first session —
       // "Session 1", the founder's own starting point.
@@ -1226,9 +1282,6 @@ function App() {
         onSelectNotification={handleNotificationSelect}
         onDismissNotification={(id) => notificationsDispatch({ type: "notification/dismissed", id })}
         onClearNotifications={() => notificationsDispatch({ type: "notifications/cleared" })}
-        authSignedIn={authSignedIn}
-        authPersona={authPersona}
-        onResetAuthGate={resetAuthGate}
       />
       {errorBanner && (
         <div className="error-banner">
@@ -1262,6 +1315,11 @@ function App() {
           }}
           onRenameSession={renameSession}
           onCloseWorkspace={(p) => void closeWorkspace(p)}
+          authSignedIn={authSignedIn}
+          authPersona={authPersona}
+          onResetAuthGate={resetAuthGate}
+          agentState={agentState}
+          onInstallAgent={handleInstallAgent}
         />
         <Workspace
           projects={state.projects}
@@ -1279,6 +1337,7 @@ function App() {
           }
           onFirstInput={autoTitleTab}
           onStartSession={(p, layout, goal) => void handleQuickStart(p, layout, goal)}
+          agentState={agentState}
           hidden={view !== "workspace"}
         />
         <BrainMap

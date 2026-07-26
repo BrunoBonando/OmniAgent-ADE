@@ -16,6 +16,7 @@
 import { fireEvent, render, waitFor } from "@testing-library/react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
+import { initialAgentsState } from "../state/agents";
 
 const xtermMocks = vi.hoisted(() => ({
   ctorMock: vi.fn(),
@@ -142,6 +143,7 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
       onCloseTab: noop,
       onNewTabInProject: noop,
       onRenameTab: noop,
+      agentState: initialAgentsState,
       hidden: false,
     };
 
@@ -185,6 +187,7 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
       onCloseTab: noop,
       onNewTabInProject: noop,
       onRenameTab: noop,
+      agentState: initialAgentsState,
     };
 
     const { rerender } = render(<Workspace {...props} hidden={false} />);
@@ -216,6 +219,7 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
       onCloseTab: noop,
       onNewTabInProject: noop,
       onRenameTab: noop,
+      agentState: initialAgentsState,
     };
 
     const { container, rerender } = render(<Workspace {...props} activeTabId="a" hidden={false} />);
@@ -267,6 +271,7 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
         onCloseTab={noop}
         onNewTabInProject={noop}
         onRenameTab={noop}
+        agentState={initialAgentsState}
         hidden={false}
       />,
     );
@@ -302,6 +307,7 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
       onCloseTab: noop,
       onNewTabInProject: noop,
       onRenameTab: noop,
+      agentState: initialAgentsState,
       hidden: false,
     };
     const { rerender } = render(<Workspace {...props} tabs={tabs} activeTabId="a" />);

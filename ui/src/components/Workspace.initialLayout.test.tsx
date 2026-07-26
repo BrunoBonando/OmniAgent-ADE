@@ -22,6 +22,7 @@
 import { render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
+import { initialAgentsState } from "../state/agents";
 
 vi.mock("./Terminal", () => ({
   default: ({ sessionId }: { sessionId: string }) => <div data-testid={`terminal-${sessionId}`}>{sessionId}</div>,
@@ -78,6 +79,7 @@ function workspaceWith(tabs: TabInfo[]) {
       onCloseTab={noop}
       onNewTabInProject={noop}
       onRenameTab={noop}
+      agentState={initialAgentsState}
       hidden={false}
     />
   );

@@ -52,6 +52,7 @@ import { useState } from "react";
 import { tabDisplayLabel, type Engine, type TabInfo } from "../state/sessions";
 import { useGitBranch } from "../lib/useGitBranch";
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeId } from "../lib/terminalThemes";
+import { ENGINE_LABEL } from "../theme";
 import PaneMenu from "./PaneMenu";
 import SessionStatusLight from "./SessionStatusLight";
 import Icon from "./Icon";
@@ -152,7 +153,10 @@ export default function PaneHeader({
       ) : (
         <span className="pane-header-label" onDoubleClick={startRename} title="Double-click to rename">
           <span className="pane-header-label-text">{tabDisplayLabel(tab)}</span>{" "}
-          <span className="pane-header-project">· {projectLabel}</span>
+          {/* ponytail: the project name was here and repeated in every pane —
+              the sidebar already says which project this is. The agent is the
+              one fact that actually differs pane to pane. */}
+          <span className="pane-header-project">· {ENGINE_LABEL[tab.engine]}</span>
         </span>
       )}
       <span className="pane-header-spacer" />

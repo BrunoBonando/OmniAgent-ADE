@@ -43,10 +43,11 @@ describe("PaneHeader", () => {
     useGitBranchMock.mockReturnValue(null);
   });
 
-  it("renders the engine + project label, BridgeSpace-style", () => {
+  it("renders the title + agent label, not the project (same in every pane)", () => {
     setup();
     expect(screen.getByText("claude")).toBeInTheDocument();
-    expect(screen.getByText("bridgemind-api", { exact: false })).toBeInTheDocument();
+    expect(screen.getByText("Claude Code", { exact: false })).toBeInTheDocument();
+    expect(screen.queryByText("bridgemind-api", { exact: false })).not.toBeInTheDocument();
   });
 
   it("prefers a custom rename label over the engine name", () => {

@@ -1,12 +1,8 @@
-// **The window's title bar.** Where you are on the left, notifications and
-// the account badge hard against the right edge.
+// **The window's title bar.** Where you are on the left and notifications
+// hard against the right edge. The account row lives in the sidebar.
 //
-// Founder, 2026-07-26, verbatim: *"The user and notification menu must be
-// on the title of the application, just like warp does."* Both of his
-// reference screenshots (docs/reference/warp-notifications-panel.png,
-// warp-user-menu.png) show the same far-right cluster living in Warp's own
-// title bar, level with the traffic lights, with both popovers hanging from
-// it.
+// Notifications remain in the overlay title bar, level with the traffic
+// lights, with their popover hanging from it.
 //
 // ## This is a window-decoration change, not CSS
 //
@@ -57,7 +53,6 @@
 // session. It answers "which session am I on" from anywhere on screen,
 // including the map view.
 import NotificationsPanel from "./NotificationsPanel";
-import AccountBadge from "./AccountBadge";
 import type { NotificationEntry } from "../state/notifications";
 
 interface AppChromeProps {
@@ -72,9 +67,6 @@ interface AppChromeProps {
   onSelectNotification: (entry: NotificationEntry) => void;
   onDismissNotification: (id: string) => void;
   onClearNotifications: () => void;
-  authSignedIn: string | null;
-  authPersona: string | null;
-  onResetAuthGate: () => void;
 }
 
 export default function AppChrome({
@@ -89,9 +81,6 @@ export default function AppChrome({
   onSelectNotification,
   onDismissNotification,
   onClearNotifications,
-  authSignedIn,
-  authPersona,
-  onResetAuthGate,
 }: AppChromeProps) {
   return (
     // `deep`: drag from anywhere in here that isn't a control — see this
@@ -125,7 +114,6 @@ export default function AppChrome({
           onDismiss={onDismissNotification}
           onClearAll={onClearNotifications}
         />
-        <AccountBadge signedInRaw={authSignedIn} personaRaw={authPersona} onResetAuthGate={onResetAuthGate} />
       </div>
     </header>
   );

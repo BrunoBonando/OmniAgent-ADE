@@ -78,6 +78,8 @@ export type AccountMenuItemId =
   | "preferences"
   | "keyboard-shortcuts"
   | "view-logs"
+  | "review"
+  | "about"
   | "billing"
   | "sign-in"
   | "log-out";
@@ -121,6 +123,8 @@ export function accountMenuItems(signedIn: boolean): AccountMenuItem[] {
     },
     { id: "keyboard-shortcuts", label: "Keyboard shortcuts", kind: "action", enabled: true },
     { id: "view-logs", label: "View session logs", kind: "action", enabled: true },
+    { id: "review", label: "Review session summaries", kind: "action", enabled: true },
+    { id: "about", label: "About OmniAgent ADE", kind: "action", enabled: true },
     {
       id: "billing",
       label: "Billing",

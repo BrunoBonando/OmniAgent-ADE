@@ -45,9 +45,6 @@ function setup(overrides: Partial<Parameters<typeof AppChrome>[0]> = {}) {
     onSelectNotification: vi.fn(),
     onDismissNotification: vi.fn(),
     onClearNotifications: vi.fn(),
-    authSignedIn: null,
-    authPersona: null,
-    onResetAuthGate: vi.fn(),
     ...overrides,
   };
   const { container } = render(<AppChrome {...props} />);
@@ -77,15 +74,11 @@ describe("the title bar stays a title bar", () => {
     expect(breadcrumb.className).not.toContain("app-chrome-lights");
   });
 
-  it("keeps the notifications bell and the account badge together at the far right", () => {
+  it("keeps notifications at the far right and leaves the account in the sidebar", () => {
     const { container } = setup();
     const actions = container.querySelector(".app-chrome-actions")!;
     expect(actions.querySelector(".notifications-anchor")).not.toBeNull();
-    expect(actions.querySelector(".account-badge-anchor")).not.toBeNull();
-    // Order matters — both reference screenshots put the inbox left of the
-    // avatar, and the avatar hard against the window edge.
-    const kids = Array.from(actions.children).map((el) => el.className);
-    expect(kids.indexOf("notifications-anchor")).toBeLessThan(kids.indexOf("account-badge-anchor"));
+    expect(actions.querySelector(".account-badge-anchor")).toBeNull();
   });
 
   it("still says which workspace and session you are in", () => {
@@ -100,16 +93,9 @@ describe("the controls survive living inside a drag region", () => {
   // moment it meets a clickable element with no drag attribute of its own
   // (`CLICKABLE_TAGS` / `INTERACTIVE_ROLES` in drag.js). Real <button>s are
   // therefore what keeps these clickable rather than window-dragging.
-  it("renders both triggers as real buttons, which is what makes them click and not drag", () => {
+  it("renders the notifications trigger as a real button, which is what makes it click and not drag", () => {
     const { container } = setup();
     expect(container.querySelector(".notifications-trigger")!.tagName).toBe("BUTTON");
-    expect(container.querySelector(".account-badge-trigger")!.tagName).toBe("BUTTON");
-  });
-
-  it("opens the user menu from the title bar", () => {
-    setup();
-    fireEvent.click(screen.getByRole("button", { name: "Bruno Bonando — account menu" }));
-    expect(screen.getByRole("menu", { name: "Account" })).toBeInTheDocument();
   });
 
   it("opens the notifications panel from the title bar, and marks them read", () => {

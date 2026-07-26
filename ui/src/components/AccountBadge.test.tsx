@@ -26,8 +26,19 @@ const { default: AccountBadge } = await import("./AccountBadge");
  * identity (nothing written to the settings table yet). */
 function setup(overrides: Partial<Parameters<typeof AccountBadge>[0]> = {}) {
   const onResetAuthGate = vi.fn();
-  render(<AccountBadge signedInRaw={null} personaRaw={null} onResetAuthGate={onResetAuthGate} {...overrides} />);
-  return { onResetAuthGate };
+  const onOpenReview = vi.fn();
+  const onOpenAbout = vi.fn();
+  render(
+    <AccountBadge
+      signedInRaw={null}
+      personaRaw={null}
+      onResetAuthGate={onResetAuthGate}
+      onOpenReview={onOpenReview}
+      onOpenAbout={onOpenAbout}
+      {...overrides}
+    />,
+  );
+  return { onResetAuthGate, onOpenReview, onOpenAbout };
 }
 
 function openMenu(name = "Bruno Bonando — account menu") {
@@ -45,13 +56,14 @@ describe("AccountBadge — the fake signed-in default", () => {
     setup();
     expect(screen.getByRole("button", { name: "Bruno Bonando — account menu" })).toBeInTheDocument();
     expect(screen.getByText("B")).toBeInTheDocument();
+    expect(screen.getByText("Bruno Bonando")).toBeInTheDocument();
   });
 
   it("names the user in the menu header, over an honest dev-mode subtitle", () => {
     setup();
     openMenu();
-    expect(screen.getByText("Bruno Bonando")).toBeInTheDocument();
-    expect(screen.getByText(/dev mode/)).toBeInTheDocument();
+    expect(screen.getByRole("menu")).toHaveTextContent("Bruno Bonando");
+    expect(screen.getByRole("menu")).toHaveTextContent(/dev mode/);
   });
 
   it("shows the captured persona as the subtitle once there is one", () => {
@@ -75,6 +87,24 @@ describe("AccountBadge — the fake signed-in default", () => {
     fireEvent.mouseDown(document.querySelector(".account-menu-backdrop")!);
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(onResetAuthGate).not.toHaveBeenCalled();
+  });
+});
+
+describe("AccountBadge — sidebar destinations", () => {
+  it("opens session review from the submenu and closes it", () => {
+    const { onOpenReview } = setup();
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Review session summaries" }));
+    expect(onOpenReview).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("opens About from the submenu and closes it", () => {
+    const { onOpenAbout } = setup();
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "About OmniAgent ADE" }));
+    expect(onOpenAbout).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 });
 

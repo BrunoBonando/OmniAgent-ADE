@@ -103,6 +103,7 @@ import {
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
 import type { TerminalThemeId } from "../lib/terminalThemes";
 import { ownsCtrlOnlyShortcut } from "../lib/keyboard";
+import type { AgentsState } from "../state/agents";
 
 interface ProjectPaneGridProps {
   hidden: boolean;
@@ -298,6 +299,7 @@ interface WorkspaceProps {
    * Optional/no-op, same reasoning as the props above: the layout and
    * visibility tests never press it. */
   onStartSession?: (project: ProjectInfo, layout: LayoutPreset, goal: string) => void;
+  agentState: AgentsState;
   hidden: boolean;
 }
 
@@ -315,6 +317,7 @@ export default function Workspace({
   onOpenCodeReview = () => {},
   onFirstInput = () => {},
   onStartSession = () => {},
+  agentState: _agentState,
   hidden,
 }: WorkspaceProps) {
   const projectLabel = useCallback(

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import "./PaneInstallOverlay.css";
 import type { Agent } from "../state/agents";
 
@@ -38,7 +39,7 @@ function OmniAgentLogo() {
 export default function PaneInstallOverlay({
   agent,
   status,
-}: PaneInstallOverlayProps): JSX.Element {
+}: PaneInstallOverlayProps): ReactNode {
   return (
     <div className="pane-install-overlay">
       {/* Dimmed backdrop over terminal */}
@@ -48,7 +49,7 @@ export default function PaneInstallOverlay({
       <div className="pane-install-content">
         <OmniAgentLogo />
         <p className="pane-install-text">
-          {status === 'in_progress' ? 'Installing…' : 'Installation failed'}
+          {status === 'in_progress' ? `Installing ${agent}…` : `Installation of ${agent} failed`}
         </p>
         {status === 'failed' && (
           <p className="pane-install-hint">Check your network and try again</p>

@@ -4,6 +4,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
+import { initialAgentsState } from "../state/agents";
 
 const { useGitBranchMock } = vi.hoisted(() => ({ useGitBranchMock: vi.fn() }));
 vi.mock("../lib/useGitBranch", () => ({ useGitBranch: useGitBranchMock }));
@@ -53,6 +54,11 @@ function setup(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
       onRenameProject={() => {}}
       onImportCompleted={() => {}}
       onCloseWorkspace={onCloseWorkspace}
+      authSignedIn={null}
+      authPersona={null}
+      onResetAuthGate={() => {}}
+      agentState={initialAgentsState}
+      onInstallAgent={() => {}}
       {...overrides}
     />,
   );
@@ -98,6 +104,36 @@ describe("Sidebar — session and branch, nothing else", () => {
     const { onActivateTab } = setup();
     fireEvent.click(screen.getByRole("button", { name: /Session 1/ }));
     expect(onActivateTab).toHaveBeenCalledWith("s1");
+  });
+});
+
+describe("Sidebar — account menu", () => {
+  beforeEach(() => {
+    useGitBranchMock.mockReset();
+    useGitBranchMock.mockReturnValue("main");
+  });
+
+  it("shows the mocked user at the bottom without the old footer controls", () => {
+    const { container } = setup();
+    expect(screen.getByRole("button", { name: "Bruno Bonando — account menu" })).toHaveTextContent(
+      "Bruno Bonando",
+    );
+    expect(screen.queryByText(/⌘K search/)).not.toBeInTheDocument();
+    expect(container.querySelector(".sidebar-about-trigger")).toBeNull();
+  });
+
+  it("opens session review from the account submenu", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "Bruno Bonando — account menu" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Review session summaries" }));
+    expect(screen.getByRole("dialog", { name: "Session summary review" })).toBeInTheDocument();
+  });
+
+  it("opens About from the account submenu", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "Bruno Bonando — account menu" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "About OmniAgent ADE" }));
+    expect(screen.getByRole("dialog", { name: "About OmniAgent ADE" })).toBeInTheDocument();
   });
 });
 

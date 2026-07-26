@@ -6,13 +6,9 @@
 // know that we didn't implement the login part yet, so just make a fake one
 // as if I was logged in as BrunoBonando."
 //
-// Lives in the app's top-right chrome (`AppChrome.tsx`) beside the
-// notifications badge — the position both reference screenshots show, and
-// the one piece of chrome on screen in every state of the app, unlike
-// `AuthGate.tsx` (shown once) or `AboutPanel.tsx` (opened on demand). It
-// moved there from the sidebar header when the notifications badge arrived:
-// the two belong together, and a 240px sidebar header already carried five
-// controls.
+// Lives at the bottom of the left sidebar as a full identity row. The
+// account menu also owns the Review/About destinations that previously
+// occupied separate footer controls.
 //
 // A SECOND surface reading the SAME `onboarding/authGateState.ts` settings
 // `AuthGate.tsx` drives — never a competing source of truth, never a second
@@ -54,6 +50,8 @@ interface AccountBadgeProps {
   /** Reuses `App.tsx`'s existing reset-and-redo action — the fake sign-in's
    * only real mutation, shared by the "Sign in" and "Log out" rows. */
   onResetAuthGate: () => void;
+  onOpenReview?: () => void;
+  onOpenAbout?: () => void;
 }
 
 /** `Store::default_data_dir`'s macOS location, mirrored — see the module
@@ -79,7 +77,13 @@ function PersonGlyph({ filled }: { filled: boolean }) {
   );
 }
 
-export default function AccountBadge({ signedInRaw, personaRaw, onResetAuthGate }: AccountBadgeProps) {
+export default function AccountBadge({
+  signedInRaw,
+  personaRaw,
+  onResetAuthGate,
+  onOpenReview,
+  onOpenAbout,
+}: AccountBadgeProps) {
   const [open, setOpen] = useState(false);
   // Preferences/Billing have no real surface behind them yet — an honest
   // "Coming soon" note beats a silently dead button or a fake settings
@@ -128,6 +132,16 @@ export default function AccountBadge({ signedInRaw, personaRaw, onResetAuthGate 
       void revealTranscripts();
       return;
     }
+    if (id === "review") {
+      onOpenReview?.();
+      close();
+      return;
+    }
+    if (id === "about") {
+      onOpenAbout?.();
+      close();
+      return;
+    }
     setComingSoon(id);
   }
 
@@ -142,13 +156,11 @@ export default function AccountBadge({ signedInRaw, personaRaw, onResetAuthGate 
         aria-label={`${name} — account menu`}
         title={name}
       >
-        {initial ? (
-          <span className="account-badge-initial" aria-hidden="true">
-            {initial}
-          </span>
-        ) : (
-          <PersonGlyph filled={state.signedIn} />
-        )}
+        <span className="account-badge-avatar" aria-hidden="true">
+          {initial ? <span className="account-badge-initial">{initial}</span> : <PersonGlyph filled={state.signedIn} />}
+        </span>
+        <span className="account-badge-name">{name}</span>
+        <span className="account-badge-disclosure" aria-hidden="true">{open ? "▾" : "▴"}</span>
       </button>
 
       {open && (

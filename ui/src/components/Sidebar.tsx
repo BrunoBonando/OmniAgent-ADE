@@ -129,7 +129,9 @@ import NewWorkspaceModal from "./NewWorkspaceModal";
 import ImportProjectsFlow from "./ImportProjectsFlow";
 import SidebarSessionRow from "./SidebarSessionRow";
 import CloseWorkspaceConfirm from "./CloseWorkspaceConfirm";
+import AccountBadge from "./AccountBadge";
 import type { ImportBatchResult } from "../state/importState";
+import type { AgentsState, Agent } from "../state/agents";
 
 /** How often to refresh pause/staleness state in the background — cheap
  * settings/`list_projects` reads, not worth a live push mechanism for v1. */
@@ -215,6 +217,11 @@ interface SidebarProps {
    * `CloseWorkspaceConfirm` is accepted — `App.tsx` kills the terminals and
    * drops the row (see `state/closedWorkspaces.ts`). */
   onCloseWorkspace?: (project: ProjectInfo) => void;
+  authSignedIn: string | null;
+  authPersona: string | null;
+  onResetAuthGate: () => void;
+  agentState: AgentsState;
+  onInstallAgent: (agent: Agent) => void;
 }
 
 export default function Sidebar({
@@ -239,6 +246,11 @@ export default function Sidebar({
   onNewSessionInProject,
   onRenameSession,
   onCloseWorkspace,
+  authSignedIn,
+  authPersona,
+  onResetAuthGate,
+  agentState,
+  onInstallAgent,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -556,20 +568,13 @@ export default function Sidebar({
       </div>
 
       <div className="sidebar-footer">
-        <span className="sidebar-hint">⌘K search &nbsp;·&nbsp; ⌘T new tab</span>
-        <span className="sidebar-footer-triggers">
-          <button
-            className="sidebar-about-trigger"
-            onClick={() => setReviewOpen(true)}
-            aria-label="Review session summaries"
-            title="Review session summaries"
-          >
-            <Icon name="checklist" size={13} />
-          </button>
-          <button className="sidebar-about-trigger" onClick={() => setAboutOpen(true)} aria-label="About OmniAgent ADE">
-            <Icon name="info" size={13} />
-          </button>
-        </span>
+        <AccountBadge
+          signedInRaw={authSignedIn}
+          personaRaw={authPersona}
+          onResetAuthGate={onResetAuthGate}
+          onOpenReview={() => setReviewOpen(true)}
+          onOpenAbout={() => setAboutOpen(true)}
+        />
       </div>
 
       {aboutOpen && <AboutPanel onClose={() => setAboutOpen(false)} />}
@@ -581,6 +586,8 @@ export default function Sidebar({
             onWorkspaceCreated(project, engines, layout);
           }}
           onClose={onCloseNewWorkspace}
+          agentState={agentState}
+          onInstallAgent={onInstallAgent}
         />
       )}
       {importOpen && (

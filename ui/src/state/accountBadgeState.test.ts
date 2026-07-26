@@ -84,6 +84,8 @@ describe("accountMenuItems", () => {
       "preferences",
       "keyboard-shortcuts",
       "view-logs",
+      "review",
+      "about",
       "billing",
       "log-out",
     ]);
@@ -97,6 +99,8 @@ describe("accountMenuItems", () => {
       "preferences",
       "keyboard-shortcuts",
       "view-logs",
+      "review",
+      "about",
       "billing",
       "sign-in",
     ]);
@@ -121,6 +125,6 @@ describe("accountMenuItems", () => {
       expect(["action", "placeholder", "auth"]).toContain(item.kind);
     }
     const wired = accountMenuItems(true).filter((i) => i.kind === "action").map((i) => i.id);
-    expect(wired).toEqual(["keyboard-shortcuts", "view-logs"]);
+    expect(wired).toEqual(["keyboard-shortcuts", "view-logs", "review", "about"]);
   });
 });

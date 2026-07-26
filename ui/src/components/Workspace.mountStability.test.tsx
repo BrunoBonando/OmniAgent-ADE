@@ -41,6 +41,7 @@ import { Mosaic, MosaicWindow, type MosaicNode } from "react-mosaic-component";
 import { describe, expect, it, vi } from "vitest";
 import { buildGrid, syncPaneTree, type PaneTree } from "../state/paneGrid";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
+import { initialAgentsState } from "../state/agents";
 
 const probes = vi.hoisted(() => ({
   /** Every `<Terminal>` mount, in order — the whole point of this file. A
@@ -248,6 +249,7 @@ describe("session filtering shows one session without unmounting the others", ()
     onCloseTab: noop,
     onNewTabInProject: noop,
     onRenameTab: noop,
+    agentState: initialAgentsState,
     hidden: false,
   };
 
