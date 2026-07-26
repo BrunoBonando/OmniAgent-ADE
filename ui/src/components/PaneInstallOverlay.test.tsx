@@ -8,12 +8,12 @@ const TEST_AGENT: Agent = "claude";
 describe("PaneInstallOverlay", () => {
   it("renders 'Installing…' text when status is 'in_progress'", () => {
     render(<PaneInstallOverlay agent={TEST_AGENT} status="in_progress" />);
-    expect(screen.getByText("Installing…")).toBeInTheDocument();
+    expect(screen.getByText("Installing claude…")).toBeInTheDocument();
   });
 
   it("renders 'Installation failed' text when status is 'failed'", () => {
     render(<PaneInstallOverlay agent={TEST_AGENT} status="failed" />);
-    expect(screen.getByText("Installation failed")).toBeInTheDocument();
+    expect(screen.getByText("Installation of claude failed")).toBeInTheDocument();
   });
 
   it("renders hint text only when status is 'failed'", () => {
