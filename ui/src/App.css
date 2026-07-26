@@ -1325,11 +1325,20 @@ code {
 }
 
 /* sweep + chase — the comet: a dark arc brightening through the status
-   colour into a near-white head. One gradient, two periods. */
-.pane-window.pane-motion-sweep::before,
-.pane-window.pane-motion-sweep.is-focused::after,
-.pane-window.pane-motion-chase::before,
-.pane-window.pane-motion-chase.is-focused::after {
+   colour into a near-white head. One gradient, two colours: thinking blue,
+   executing teal — same 3.6s orbit, colour is the only difference.
+
+   `.pane-grid`-prefixed for the same reason as the `--pane-status` setters
+   above ("same three-class specificity as the base rule — these only win by
+   coming later"): the base ring rule carries three classes, and at two these
+   backgrounds silently lost the cascade — the orbit animation ran, but the
+   flat base ring was what painted, so thinking/executing never visibly
+   circled (verified in WebKit; breathe/flash escaped because they animate
+   opacity, which nothing overrides). */
+.pane-grid .pane-window.pane-motion-sweep::before,
+.pane-grid .pane-window.pane-motion-sweep.is-focused::after,
+.pane-grid .pane-window.pane-motion-chase::before,
+.pane-grid .pane-window.pane-motion-chase.is-focused::after {
   background: conic-gradient(
     from var(--pane-orbit),
     color-mix(in srgb, var(--pane-status) 30%, var(--void)) 0deg,
@@ -1338,29 +1347,24 @@ code {
     var(--pane-status-hi) 349deg,
     color-mix(in srgb, var(--pane-status) 30%, var(--void)) 360deg
   );
-}
-.pane-window.pane-motion-sweep::before,
-.pane-window.pane-motion-sweep.is-focused::after,
-.pane-window.pane-motion-chase::before,
-.pane-window.pane-motion-chase.is-focused::after {
   animation: pane-orbit 3.6s linear infinite;
 }
 
 /* breathe / flash — full-strength colour on the mark's own opacity
    keyframes. (On the focused aura the animated opacity outruns its resting
    0.55 — deliberate: both states are asking for the person's eyes.) */
-.pane-window.pane-motion-breathe::before,
-.pane-window.pane-motion-breathe.is-focused::after,
-.pane-window.pane-motion-flash::before,
-.pane-window.pane-motion-flash.is-focused::after {
+.pane-grid .pane-window.pane-motion-breathe::before,
+.pane-grid .pane-window.pane-motion-breathe.is-focused::after,
+.pane-grid .pane-window.pane-motion-flash::before,
+.pane-grid .pane-window.pane-motion-flash.is-focused::after {
   background: var(--pane-status);
 }
-.pane-window.pane-motion-breathe::before,
-.pane-window.pane-motion-breathe.is-focused::after {
+.pane-grid .pane-window.pane-motion-breathe::before,
+.pane-grid .pane-window.pane-motion-breathe.is-focused::after {
   animation: omni-breathe-glow 3.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
 }
-.pane-window.pane-motion-flash::before,
-.pane-window.pane-motion-flash.is-focused::after {
+.pane-grid .pane-window.pane-motion-flash::before,
+.pane-grid .pane-window.pane-motion-flash.is-focused::after {
   animation: omni-flash 0.44s linear infinite;
 }
 
@@ -1372,9 +1376,9 @@ code {
 
 @media (prefers-reduced-motion: reduce) {
   /* Still five distinguishable frames, zero motion: every state collapses
-     to its flat ring colour. Specificity here is (0,3,x) against the
-     per-motion rules' (0,2,x), so this wins outright — no [data-motion]
-     matching trick needed, unlike the session-light block's collapse. */
+     to its flat ring colour. Same three-class specificity as the per-motion
+     rules above — this block wins by coming later, the file's standing
+     convention for the pane ring rules. */
   .pane-grid .pane-window.mosaic-window::before,
   .pane-grid .pane-window.mosaic-window.is-focused::after {
     animation: none;
