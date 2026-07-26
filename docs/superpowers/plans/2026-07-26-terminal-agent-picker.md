@@ -12,13 +12,30 @@
 
 ## Global Constraints
 
-- **Only `claude`, `codex`, `shell` may ever be offered.** `build_engine_argv` (`src-tauri/src/sessions.rs:2117`) errors on anything else. Filter against `ENGINES` (`ui/src/state/sessions.ts:11`), never `AVAILABLE_AGENTS` (`ui/src/state/agents.ts:1`).
+- **Only `claude`, `codex`, `shell` may ever be offered.** `build_engine_argv`
+  (`src-tauri/src/sessions.rs:2117`) has arms for exactly those three and returns
+  `unsupported engine` for anything else (`:2195`).
+
+  ⚠️ **`ENGINES` is no longer a safe filter.** Commit `f9bf83c` (a parallel session, 2026-07-26
+  15:52) redefined `ui/src/state/sessions.ts` as `export const ENGINES = AVAILABLE_AGENTS` and
+  `export type Engine = Agent` — so `ENGINES` now contains all five names, including the two the
+  backend rejects. `theme.ts` likewise gained `copilot`/`antigravity` entries in `ENGINE_LABEL`,
+  `ENGINE_COLOR` and `ENGINE_HINT` (commit `8867d57`).
+
+  This plan therefore filters against its **own explicit list** of spawnable engines, declared
+  once in `lib/useInstalledAgents.ts` as `SPAWNABLE` and derived from the Rust match arms — not
+  from `ENGINES`, which no longer means "what can spawn". Task 2 defines it; nothing else may
+  re-derive it.
 - **`shell` is always installed.** `agents_check_installed` runs `which::which("shell")`, which never resolves; shell spawns `$SHELL` and cannot fail to be available.
 - **Do not touch `ui/src/state/agents.ts`.** Its reducer belongs to the separate agent-installation design and stays unwired.
 - **Do not change behaviour of the sidebar `+` or the map's "Open terminal here."** Both keep spawning the default silently.
 - No new npm dependencies. Icon geometry is inlined, not fetched.
 - Run tests from `ui/`: `npm test`.
 - Conventional commits: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`.
+- ⚠️ **A parallel session is committing to `main` right now**, building the agent-installation
+  feature (`NewWorkspaceModal` install rows, `agents_check_installed` wiring). It has uncommitted
+  edits in `PaneHeader.tsx`, `Workspace.tsx`, `App.tsx`, `Sidebar.tsx` and their tests. Check
+  `git log` and `git status` before each task, and rebase rather than reverting its work.
 
 ---
 
@@ -55,9 +72,15 @@
 - Consumes: nothing.
 - Produces: `IconName` gains `"agent-claude" | "agent-codex" | "agent-shell"`. `theme.ts` exports `AGENT_ICON: Record<Engine, IconName>`.
 
-**Background the implementer needs:** `Icon.tsx` renders one shared `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor">`. The two brand marks are *solid* shapes, not strokes, so each sets `fill="currentColor" stroke="none"` on its own `<path>` — exactly how the existing `more` icon overrides the shared attributes for its dots (`Icon.tsx:76-80`). No prop or signature change to `Icon`.
+**Background the implementer needs:** `Icon.tsx` renders one shared `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor">`. Brand marks are *solid* shapes, not strokes, so each sets `fill="currentColor" stroke="none"` on its own `<path>` — exactly how the existing `more` icon overrides the shared attributes for its dots (`Icon.tsx:76-80`). No prop or signature change to `Icon`.
 
-The claude and codex geometry below is copied from [simple-icons](https://github.com/simple-icons/simple-icons) (`claude.svg`, `openai.svg`), which is CC0 — that licence is why we use their traced paths rather than copying marks off a vendor site. `agent-shell` is Lucide's `terminal` glyph (ISC, same source as every other icon in this file), deliberately chosen over simple-icons' `gnubash` hexagon: it is 2 stroke paths instead of a 2KB filled logo, and "shell" here means `$SHELL`, not GNU Bash specifically.
+**`AGENT_ICON` must cover all five agents, not three.** `Engine` now aliases `Agent` (commit `f9bf83c`), so `Record<Engine, IconName>` will not type-check without `copilot` and `antigravity` keys — and `theme.ts` already carries all five in `ENGINE_LABEL`/`ENGINE_COLOR`/`ENGINE_HINT` (commit `8867d57`). Giving all five an icon also means the parallel session's `NewWorkspaceModal` install rows can use them. Only three ever reach the picker — that filtering is Task 2's job, not this one's.
+
+Claude, codex and copilot geometry is copied from [simple-icons](https://github.com/simple-icons/simple-icons) (`claude.svg`, `openai.svg`, `githubcopilot.svg`), which is CC0 — that licence is why we use their traced paths rather than copying marks off a vendor site.
+
+Two icons are not brand marks, for stated reasons:
+- `agent-shell` is Lucide's `terminal` glyph (ISC, the source of every other icon in this file), chosen over simple-icons' `gnubash` hexagon: 2 stroke paths instead of a 2KB filled logo, and "shell" here means `$SHELL`, not GNU Bash specifically.
+- `agent-antigravity` is a hand-drawn rising-arrow glyph. simple-icons has **no** `antigravity` slug (verified: 404), so there is no CC0 mark to copy and none gets invented from memory.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -86,10 +109,17 @@ describe("agent logos", () => {
   });
 
   it("draws the brand marks as fills, not strokes", () => {
-    for (const engine of ["claude", "codex"] as const) {
+    for (const engine of ["claude", "codex", "copilot"] as const) {
       const { container } = render(<Icon name={AGENT_ICON[engine]} />);
       expect(container.querySelector("path")?.getAttribute("fill")).toBe("currentColor");
     }
+  });
+
+  // `Engine` aliases `Agent` since commit f9bf83c, so this map has to cover
+  // all five installable agents or `Record<Engine, IconName>` won't compile.
+  it("covers every installable agent, not just the spawnable ones", () => {
+    for (const engine of ENGINES) expect(AGENT_ICON[engine]).toBeTruthy();
+    expect(ENGINES.length).toBe(5);
   });
 });
 ```
@@ -107,6 +137,8 @@ In `ui/src/components/Icon.tsx`, extend the union (after `| "plus"`):
   | "plus"
   | "agent-claude"
   | "agent-codex"
+  | "agent-copilot"
+  | "agent-antigravity"
   | "agent-shell"
   | "x";
 ```
@@ -132,6 +164,22 @@ Add to `PATHS`, immediately after the `plus` entry:
       d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"
     />
   ),
+  "agent-copilot": (
+    <path
+      fill="currentColor"
+      stroke="none"
+      d="M23.922 16.997C23.061 18.492 18.063 22.02 12 22.02 5.937 22.02.939 18.492.078 16.997A.641.641 0 0 1 0 16.741v-2.869a.883.883 0 0 1 .053-.22c.372-.935 1.347-2.292 2.605-2.656.167-.429.414-1.055.644-1.517a10.098 10.098 0 0 1-.052-1.086c0-1.331.282-2.499 1.132-3.368.397-.406.89-.717 1.474-.952C7.255 2.937 9.248 1.98 11.978 1.98c2.731 0 4.767.957 6.166 2.093.584.235 1.077.546 1.474.952.85.869 1.132 2.037 1.132 3.368 0 .368-.014.733-.052 1.086.23.462.477 1.088.644 1.517 1.258.364 2.233 1.721 2.605 2.656a.841.841 0 0 1 .053.22v2.869a.641.641 0 0 1-.078.256Zm-11.75-5.992h-.344a4.359 4.359 0 0 1-.355.508c-.77.947-1.918 1.492-3.508 1.492-1.725 0-2.989-.359-3.782-1.259a2.137 2.137 0 0 1-.085-.104L4 11.746v6.585c1.435.779 4.514 2.179 8 2.179 3.486 0 6.565-1.4 8-2.179v-6.585l-.098-.104s-.033.045-.085.104c-.793.9-2.057 1.259-3.782 1.259-1.59 0-2.738-.545-3.508-1.492a4.359 4.359 0 0 1-.355-.508Zm2.328 3.25c.549 0 1 .451 1 1v2c0 .549-.451 1-1 1-.549 0-1-.451-1-1v-2c0-.549.451-1 1-1Zm-5 0c.549 0 1 .451 1 1v2c0 .549-.451 1-1 1-.549 0-1-.451-1-1v-2c0-.549.451-1 1-1Zm3.313-6.185c.136 1.057.403 1.913.878 2.497.442.544 1.134.938 2.344.938 1.573 0 2.292-.337 2.657-.751.384-.435.558-1.15.558-2.361 0-1.14-.243-1.847-.705-2.319-.477-.488-1.319-.862-2.824-1.025-1.487-.161-2.192.138-2.533.529-.269.307-.437.808-.438 1.578v.021c0 .265.021.562.063.893Zm-1.626 0c.042-.331.063-.628.063-.894v-.02c-.001-.77-.169-1.271-.438-1.578-.341-.391-1.046-.69-2.533-.529-1.505.163-2.347.537-2.824 1.025-.462.472-.705 1.179-.705 2.319 0 1.211.175 1.926.558 2.361.365.414 1.084.751 2.657.751 1.21 0 1.902-.394 2.344-.938.475-.584.742-1.44.878-2.497Z"
+    />
+  ),
+  // No simple-icons slug exists for Antigravity, so this is a plain
+  // rising-arrow glyph in the house stroke style rather than a guessed
+  // brand mark. Swap it for the real one if a CC0 trace ever lands.
+  "agent-antigravity": (
+    <>
+      <path d="M12 20V5" />
+      <path d="m6 11 6-6 6 6" />
+    </>
+  ),
   "agent-shell": (
     <>
       <path d="m4 17 6-6-6-6" />
@@ -147,11 +195,16 @@ import type { IconName } from "./components/Icon";
 ```
 
 ```ts
-/** Which mark stands for each engine — the fourth per-engine lookup, kept
- * here with LABEL/COLOR/HINT so adding an engine means editing one file. */
+/** Which mark stands for each agent — the fourth per-engine lookup, kept
+ * here with LABEL/COLOR/HINT so adding one means editing a single file.
+ * Covers all five *installable* agents, matching the other three maps;
+ * only the three spawnable ones reach the ⌘T picker, which is
+ * `lib/useInstalledAgents.ts`'s filtering job, not this map's. */
 export const AGENT_ICON: Record<Engine, IconName> = {
   claude: "agent-claude",
   codex: "agent-codex",
+  copilot: "agent-copilot",
+  antigravity: "agent-antigravity",
   shell: "agent-shell",
 };
 ```
@@ -177,12 +230,15 @@ git commit -m "feat(ui): add per-agent logo icons"
 - Test: `ui/src/lib/useInstalledAgents.test.ts`
 
 **Interfaces:**
-- Consumes: `agentCheckInstalled(): Promise<string[]>` from `ui/src/lib/tauri.ts:563`; `ENGINES`, `Engine` from `ui/src/state/sessions.ts:11`.
+- Consumes: `agentCheckInstalled(): Promise<string[]>` from `ui/src/lib/tauri.ts:563`; `Engine` type from `ui/src/state/sessions.ts`.
 - Produces:
+  - `SPAWNABLE: readonly Engine[]` — `["claude", "codex", "shell"]`, this module's own list.
   - `installedEngines(names: string[]): Engine[]` — pure filter.
-  - `useInstalledAgents(): Engine[]` — hook, returns all of `ENGINES` until detection resolves.
+  - `useInstalledAgents(): Engine[]` — hook, returns all of `SPAWNABLE` until detection resolves.
 
 **Background the implementer needs:** the backend reports installed agents by running `which` over five names, two of which (`copilot`, `antigravity`) cannot be spawned and one of which (`shell`) can never be detected. Both distortions are corrected here, in one pure function, so no component has to know about them.
+
+Do **not** import `ENGINES` for the filter. Since commit `f9bf83c` it aliases `AVAILABLE_AGENTS` — all five names — so filtering by it would let `copilot`/`antigravity` through to a spawn the Rust side rejects. `SPAWNABLE` is declared here, literally, and mirrors the match arms in `build_engine_argv`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -195,7 +251,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { agentCheckInstalledMock } = vi.hoisted(() => ({ agentCheckInstalledMock: vi.fn() }));
 vi.mock("./tauri", () => ({ agentCheckInstalled: agentCheckInstalledMock }));
 
-const { installedEngines, useInstalledAgents } = await import("./useInstalledAgents");
+const { SPAWNABLE, installedEngines, useInstalledAgents } = await import("./useInstalledAgents");
 
 describe("installedEngines", () => {
   it("keeps shell even though `which shell` can never find it", () => {
@@ -206,15 +262,22 @@ describe("installedEngines", () => {
     expect(installedEngines(["claude", "copilot", "antigravity"])).toEqual(["claude", "shell"]);
   });
 
-  it("keeps detected engines in ENGINES order, not report order", () => {
+  it("keeps detected engines in SPAWNABLE order, not report order", () => {
     expect(installedEngines(["codex", "claude"])).toEqual(["claude", "codex", "shell"]);
+  });
+
+  // Guards the reason SPAWNABLE is a literal rather than `ENGINES`: since
+  // commit f9bf83c, ENGINES aliases AVAILABLE_AGENTS (all five). If someone
+  // "simplifies" SPAWNABLE back to ENGINES, this fails.
+  it("lists exactly the three engines build_engine_argv has arms for", () => {
+    expect([...SPAWNABLE]).toEqual(["claude", "codex", "shell"]);
   });
 });
 
 describe("useInstalledAgents", () => {
   beforeEach(() => agentCheckInstalledMock.mockReset());
 
-  it("offers every engine until detection resolves", () => {
+  it("offers every spawnable engine until detection resolves", () => {
     agentCheckInstalledMock.mockReturnValue(new Promise(() => {}));
     const { result } = renderHook(() => useInstalledAgents());
     expect(result.current).toEqual(["claude", "codex", "shell"]);
@@ -226,7 +289,7 @@ describe("useInstalledAgents", () => {
     await waitFor(() => expect(result.current).toEqual(["codex", "shell"]));
   });
 
-  it("falls back to every engine when detection fails", async () => {
+  it("falls back to every spawnable engine when detection fails", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     agentCheckInstalledMock.mockRejectedValue(new Error("no ipc"));
     const { result } = renderHook(() => useInstalledAgents());
@@ -257,19 +320,32 @@ Create `ui/src/lib/useInstalledAgents.ts`:
 //    (`copilot`, `antigravity`) `build_engine_argv` rejects outright
 //    (`src-tauri/src/sessions.rs`: "unsupported engine"). Offering one
 //    would be a button that errors, so the result is intersected with
-//    `ENGINES` — the three the backend can genuinely spawn.
+//    `SPAWNABLE` below.
 // 2. It detects by `which::which(agent)`, and nothing on PATH is named
 //    `shell`. Shell is therefore always reported missing while being the
 //    one engine that cannot fail (it spawns `$SHELL`, defaulting to
 //    `/bin/zsh`), so it is added back unconditionally.
 import { useEffect, useState } from "react";
 import { agentCheckInstalled } from "./tauri";
-import { ENGINES, type Engine } from "../state/sessions";
+import type { Engine } from "../state/sessions";
+
+/**
+ * The engines `build_engine_argv` (`src-tauri/src/sessions.rs`) actually has
+ * match arms for. Its fallback arm errors with "unsupported engine", so
+ * anything outside this list is a picker button that cannot spawn.
+ *
+ * Deliberately a literal and NOT `ENGINES`: since commit f9bf83c that
+ * constant aliases `AVAILABLE_AGENTS` — all five *installable* names,
+ * including `copilot` and `antigravity`, which the Rust side has no arms
+ * for. "Installable" and "spawnable" are two different sets, and this is
+ * the spawnable one. Widen it only alongside a matching arm in Rust.
+ */
+export const SPAWNABLE = ["claude", "codex", "shell"] as const satisfies readonly Engine[];
 
 /** The spawnable subset of a raw `agents_check_installed` report, in
- * `ENGINES` order so the picker's layout never depends on probe order. */
+ * `SPAWNABLE` order so the picker's layout never depends on probe order. */
 export function installedEngines(names: string[]): Engine[] {
-  return ENGINES.filter((engine) => engine === "shell" || names.includes(engine));
+  return SPAWNABLE.filter((engine) => engine === "shell" || names.includes(engine));
 }
 
 export function useInstalledAgents(): Engine[] {
@@ -277,7 +353,7 @@ export function useInstalledAgents(): Engine[] {
   // for a frame — or forever, if the call fails — leaves the user with no
   // way to open a terminal at all. Over-offering degrades to the old
   // behaviour (a spawn that may fail loudly); under-offering is a dead end.
-  const [installed, setInstalled] = useState<Engine[]>(() => [...ENGINES]);
+  const [installed, setInstalled] = useState<Engine[]>(() => [...SPAWNABLE]);
 
   useEffect(() => {
     let alive = true;
@@ -490,7 +566,9 @@ git commit -m "feat(ui): add agent hover menu popover"
 
 **Background the implementer needs:** `PaneHeader.tsx:178` already wraps the 3-dot button in `<span className="pane-header-menu-anchor">`, which is the `position: relative` that `.pane-menu`'s `position: absolute` needs (`App.css:1690`). Reuse that same class for the `+`. `onMouseDown={stopForDrag}` on the button is load-bearing — the whole header is a react-mosaic drag handle, and without it grabbing `+` starts a pane rearrange.
 
-`agents` is a **required** prop rather than one defaulting to `ENGINES`: a default would silently offer uninstalled engines anywhere the wiring was forgotten. There are exactly 4 `<PaneHeader>` renders in `PaneHeader.test.tsx` to update.
+`agents` is a **required** prop rather than one defaulting to `ENGINES`: a default would silently offer engines that are uninstalled — and, since `ENGINES` widened in commit `f9bf83c`, ones that cannot spawn at all. There are exactly 4 `<PaneHeader>` renders in `PaneHeader.test.tsx` to update.
+
+⚠️ **`PaneHeader.tsx` and `Workspace.tsx` have uncommitted edits from a parallel session** (the pane header label now shows `ENGINE_LABEL[tab.engine]` in place of the project name). Rebase or coordinate before starting this task — do not `git checkout` over that work.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -686,7 +764,7 @@ git commit -m "feat(ui): pane + opens an agent menu instead of spawning the defa
 
 **Background the implementer needs:** `EnginePicker.tsx` is the same modal minus logos — read it before deleting it; its keyboard model is being kept, not reinvented. That model (focus on mount, Escape cancels, Enter confirms, digits `1..n` select **and** confirm in one keystroke, hover-selects / click-confirms) is shared with `NewChooserModal.tsx` and `state/keyboardShortcuts.ts`'s `chooserKeyAction`.
 
-Two things change. Rows become a horizontal grid of buttons, so `ArrowLeft`/`ArrowRight` join `ArrowUp`/`ArrowDown`. And selection wraps over the **`agents` array**, not `ENGINES` — do **not** use `cycleEngine` (`state/sessions.ts:411`), which is hardcoded to wrap over all three and would land on an engine this machine cannot spawn.
+Two things change. Rows become a horizontal grid of buttons, so `ArrowLeft`/`ArrowRight` join `ArrowUp`/`ArrowDown`. And selection wraps over the **`agents` array** — do **not** use `cycleEngine` (`state/sessions.ts:411`), which wraps over `ENGINES`. That was already wrong (it ignores what is installed) and is now worse: since commit `f9bf83c`, `ENGINES` includes `copilot` and `antigravity`, so `cycleEngine` would step the selection onto an engine the backend cannot spawn at all.
 
 `defaultEngine` may not be in `agents` (a project configured for codex on a machine without it), so the initial selection falls back to `agents[0]`.
 
@@ -1249,7 +1327,7 @@ If steps 1-7 all pass, there is nothing to commit — say so rather than inventi
 
 | Spec section | Task |
 |---|---|
-| 1. `useInstalledAgents` — shell always, ENGINES intersection, error fallback | Task 2 |
+| 1. `useInstalledAgents` — shell always, spawnable-set intersection, error fallback | Task 2 |
 | 2. Logos in `Icon.tsx` + `AGENT_ICON` in `theme.ts` | Task 1 |
 | 3. `AgentMenu` popover, `.pane-menu` reuse, native focus order, `onSplit(engine)` | Tasks 3, 4 |
 | 4. `AgentPicker` modal, grid, wrap over installed, `defaultEngineFor` preselect | Task 5 |
