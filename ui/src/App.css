@@ -57,6 +57,31 @@
   --shell: #9a9ca6;
   --danger: #e5484d;
   --warning: #d6a54a; /* warm amber/tan meter tone, per screenshot */
+
+  /* Five-state session light (founder brief, 2026-07-26 — his colours,
+     verbatim: "White / Blue … Green … Amber / Yellow … Red / Magenta …
+     Cyan / Teal"). Deliberately their own tokens rather than reuses of
+     --warning/--danger: those are muted *chrome* tones sampled from Warp's
+     window (a meter fill, an error border), and a 15px light that has to
+     read as a signal across a room of panes needs more saturation than a
+     border does. Two of them are also pulled away from neighbours on
+     purpose:
+       - error leans magenta (Bruno wrote "Red / Magenta") which also keeps
+         it from reading as the same thing as --danger's attention border;
+       - tool leans teal rather than sky-cyan, because --codex (#a2e7f9) is
+         a pale cyan and both can appear in the same header. ~30deg of hue
+         and a big saturation gap between them.
+     `-hi`/`-lo` are the two ends of the thinking state's gradient sweep;
+     `--status-thinking` itself is the single colour that state collapses to
+     under prefers-reduced-motion. */
+  --status-ready: #35d07f;
+  --status-thinking: #9ec2ff;
+  --status-thinking-hi: #eef3ff;
+  --status-thinking-lo: #4b86ff;
+  --status-tool: #2fe3cd;
+  --status-approval: #f5b93a;
+  --status-error: #ff3d71;
+  --status-unknown: #55575f;
   /* New for the pane grid: the sidebar's selection accent (the reference's
      magenta left-edge stripe on the selected workspace row, sampled
      (61,255)) and the two pane-header tones (a neutral header for
@@ -1174,12 +1199,184 @@ code {
   box-shadow: inset 0 0 0 1px var(--danger);
 }
 
-.pane-header-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+/* ---------------------------------------------------------------------
+   The five-state session light — the OmniAgent mark, tinted and animated
+   per status (SessionStatusLight.tsx; read that file's header first, it
+   explains why this is a mask and why there are three nested spans).
+
+   Colour and motion are both keyed off data attributes so the component
+   stays a pure mapping from `sessionStatus.ts` — no inline styles, no JS
+   frames, and one place (this file) where "amber" is decided.
+
+   The motions are built to be told apart at 15px WITHOUT reading the
+   colour, which means they differ on axis, timing function and period, not
+   just duration:
+
+     steady   nothing at all           —      the only motionless state
+     sweep    gradient traverses       1.9s   ease-in-out, soft, continuous
+     breathe  opacity + scale dip      3.4s   slowest by 2x, deep, organic
+     flash    hard square wave         0.44s  the only one that JUMPS
+     chase    conic highlight rotates  0.85s  the only one that TRAVELS
+   --------------------------------------------------------------------- */
+.session-light {
+  --light-size: 15px;
+  --light: var(--status-unknown);
+  --light-glow: rgba(85, 87, 95, 0.55);
+  width: var(--light-size);
+  height: var(--light-size);
   flex: 0 0 auto;
-  animation: pulse 2.4s ease-in-out infinite;
+  display: block;
+  /* Outside the mask on purpose: `filter` is applied before masking, so a
+     drop-shadow on the masked element itself would be clipped away by that
+     very mask. Here it traces the mark's silhouette instead. */
+  filter: drop-shadow(0 0 3px var(--light-glow));
+}
+
+.session-light-mark {
+  display: block;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  -webkit-mask-image: url("./assets/omniagent-mark-mask.png");
+  mask-image: url("./assets/omniagent-mark-mask.png");
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+/* Oversized so `chase`'s rotation never sweeps a corner into view — the
+   mask clips it back to the mark either way. */
+.session-light-fill {
+  position: absolute;
+  inset: -40%;
+  background: var(--light);
+}
+
+.session-light[data-status="ready"] {
+  --light: var(--status-ready);
+  --light-glow: rgba(53, 208, 127, 0.5);
+}
+.session-light[data-status="thinking"] {
+  --light: var(--status-thinking);
+  --light-glow: rgba(75, 134, 255, 0.55);
+}
+.session-light[data-status="tool_execution"] {
+  --light: var(--status-tool);
+  --light-glow: rgba(47, 227, 205, 0.55);
+}
+.session-light[data-status="awaiting_approval"] {
+  --light: var(--status-approval);
+  --light-glow: rgba(245, 185, 58, 0.55);
+}
+.session-light[data-status="error"] {
+  --light: var(--status-error);
+  --light-glow: rgba(255, 61, 113, 0.6);
+}
+.session-light[data-status="unknown"] {
+  filter: none; /* nothing has reported in — don't light up the room for it */
+  opacity: 0.75;
+}
+
+/* thinking — white/blue gradient travelling across the mark, with a
+   brightness swell at the crossing point. Alternating rather than looping
+   so it reads as a pulse rather than a conveyor. */
+.session-light[data-motion="sweep"] .session-light-fill {
+  background-image: linear-gradient(
+    115deg,
+    var(--status-thinking-lo) 0%,
+    var(--status-thinking-hi) 45%,
+    var(--status-thinking-lo) 90%
+  );
+  background-size: 260% 100%;
+  animation: omni-sweep 1.9s ease-in-out infinite;
+}
+
+@keyframes omni-sweep {
+  0% {
+    background-position: 100% 50%;
+    opacity: 0.72;
+  }
+  50% {
+    background-position: 0% 50%;
+    opacity: 1;
+  }
+  100% {
+    background-position: 100% 50%;
+    opacity: 0.72;
+  }
+}
+
+/* awaiting_approval — the slow one. Scale rides on the outer element (which
+   is post-mask, so the whole mark grows and shrinks); opacity rides on the
+   fill. Same duration and easing, so they breathe as one. */
+.session-light[data-motion="breathe"] {
+  animation: omni-breathe-scale 3.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+.session-light[data-motion="breathe"] .session-light-fill {
+  animation: omni-breathe-glow 3.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes omni-breathe-scale {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(0.84);
+  }
+}
+
+@keyframes omni-breathe-glow {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.24;
+  }
+}
+
+/* error — a square wave, not a fade. The 0.01% steps are what make it snap:
+   nothing here is ever mid-transition, which is exactly what separates
+   "flashing" from "pulsing" at a glance. */
+.session-light[data-motion="flash"] .session-light-fill {
+  animation: omni-flash 0.44s linear infinite;
+}
+
+@keyframes omni-flash {
+  0%,
+  49.99% {
+    opacity: 1;
+  }
+  50%,
+  99.99% {
+    opacity: 0.1;
+  }
+}
+
+/* tool_execution — a bright head chasing around the ring. The conic
+   gradient sits over a solid base so the mark never disappears where the
+   highlight isn't; rotating the fill (never the mask) keeps the mark
+   upright while the highlight travels. */
+.session-light[data-motion="chase"] .session-light-fill {
+  background-image: conic-gradient(
+    from 0deg,
+    rgba(255, 255, 255, 0) 0deg,
+    rgba(255, 255, 255, 0.95) 55deg,
+    rgba(255, 255, 255, 0) 130deg,
+    rgba(255, 255, 255, 0) 360deg
+  );
+  background-color: var(--light);
+  animation: omni-chase 0.85s linear infinite;
+}
+
+@keyframes omni-chase {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .pane-header-attention-dot {
@@ -1193,9 +1390,28 @@ code {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pane-header-dot,
   .pane-header-attention-dot {
     animation: none;
+  }
+
+  /* Every state collapses to its flat colour: still five distinguishable
+     lights, zero motion. `background-image: none` is what strips the
+     thinking gradient and the chase highlight back to `--light`.
+     `[data-motion]` is load-bearing, not decoration: a media query adds no
+     specificity, so a bare `.session-light-fill` (0,1,0) here loses to
+     `.session-light[data-motion="sweep"] .session-light-fill` (0,3,0) above
+     and reduced motion silently does nothing — which is exactly what a live
+     browser check caught. Matching the attribute selector ties the
+     specificity and lets source order decide. */
+  .session-light[data-motion] {
+    animation: none;
+  }
+  .session-light[data-motion] .session-light-fill {
+    animation: none;
+    background-image: none;
+    background-color: var(--light);
+    opacity: 1;
+    transform: none;
   }
 }
 
@@ -1226,18 +1442,61 @@ code {
   min-width: 4px;
 }
 
-.pane-header-branch {
+/* The session's branch TAG (founder ask, 2026-07-26: "terminal title has a
+   dropdown with main, remove it. This must be connected to the session as a
+   tag, that must be tied to the current git branch"). Same live data as the
+   `.pane-header-branch` capsule it replaces; every one of the differences
+   below is about killing the control affordance that made it read as a
+   dropdown:
+
+     capsule (999px)  ->  squared 3px, with a flat left edge
+     free-floating    ->  2px left rule in the session's ENGINE colour, so
+                          it hangs off the session's identity instead of
+                          sitting on its own like a button
+     bordered box     ->  no outline, just a slightly recessed ground
+     neutral grey     ->  engine-tinted text (see .pane-header-tag[data-
+                          engine]), the signal the status light took over
+
+   `cursor: default` and no `title` matter as much as the shape: a tooltip
+   promising something on click is exactly the affordance being removed. */
+.pane-header-tag {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 10.5px;
+  letter-spacing: 0.01em;
   color: var(--ink-dim);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 2px 9px;
+  background: rgba(255, 255, 255, 0.035);
+  border-left: 2px solid var(--tag-accent, var(--line));
+  border-radius: 0 3px 3px 0;
+  padding: 2px 8px 2px 6px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 140px;
+  max-width: 150px;
+  cursor: default;
+  user-select: none;
+}
+
+.pane-header-tag-glyph {
+  color: var(--ink-faint);
+}
+
+/* Engine identity, relocated. It used to be the leading dot in this header;
+   the status light took that slot, so it lives here — same three colours,
+   same meaning, kept in sync with theme.ts's ENGINE_COLOR. */
+.pane-header-tag[data-engine="claude"] {
+  --tag-accent: var(--claude);
+  color: var(--claude);
+}
+.pane-header-tag[data-engine="codex"] {
+  --tag-accent: var(--codex);
+  color: var(--codex);
+}
+.pane-header-tag[data-engine="shell"] {
+  --tag-accent: var(--shell);
+  color: var(--shell);
 }
 
 .pane-header-btn {
@@ -1267,6 +1526,169 @@ code {
 .pane-header-btn.pane-header-btn-menu.is-active {
   background: var(--panel-raised);
   color: var(--ink);
+}
+
+/* ----------------------------------------------------- session hover card
+   Founder ask: "for each session, have a hover with more info, like warp
+   does" (+ "on hover, it explains" for the status light — one surface, see
+   SessionHoverCard.tsx). Modelled on his reference screenshot,
+   docs/reference/warp-session-hover-card.png: a small dark slab under the
+   session, status badge first, then the facts, then the agent.
+
+   `position: fixed` and a high z-index because every pane is its own
+   stacking context inside react-mosaic and the toolbar clips — placed from
+   a rect the header measured when the card opened.
+
+   Typography is split down the middle on purpose: the facts (path, branch,
+   title, agent) are set in the mono face, the one human sentence in the
+   sans face. Same distinction the terminal itself makes. */
+
+.session-card {
+  position: fixed;
+  z-index: 70;
+  width: 300px;
+  padding: 10px 12px 11px;
+  background: #0f1014;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.55),
+    0 0 0 0.5px rgba(255, 255, 255, 0.04);
+  font-family: var(--mono);
+  pointer-events: none; /* purely informational — never steals the pointer */
+  animation: session-card-in 110ms ease-out;
+}
+
+@keyframes session-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
+.session-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-card-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 3px 9px 3px 7px;
+  border-radius: var(--radius-pill, 999px);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink);
+}
+
+/* The badge borrows the state's own colour for its text + ground — the same
+   token the light is using two spans away, so the pill and the mark inside
+   it are visibly one object. */
+.session-card-badge[data-status="ready"] {
+  color: var(--status-ready);
+  background: rgba(53, 208, 127, 0.12);
+}
+.session-card-badge[data-status="thinking"] {
+  color: var(--status-thinking);
+  background: rgba(75, 134, 255, 0.14);
+}
+.session-card-badge[data-status="tool_execution"] {
+  color: var(--status-tool);
+  background: rgba(47, 227, 205, 0.12);
+}
+.session-card-badge[data-status="awaiting_approval"] {
+  color: var(--status-approval);
+  background: rgba(245, 185, 58, 0.13);
+}
+.session-card-badge[data-status="error"] {
+  color: var(--status-error);
+  background: rgba(255, 61, 113, 0.14);
+}
+.session-card-badge[data-status="unknown"] {
+  color: var(--ink-dim);
+}
+
+/* Quiet by design: it's a footnote about how this pane came back, not a
+   status of its own — the badge next to it owns that slot. */
+.session-card-chip {
+  margin-left: auto;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-faint);
+}
+
+.session-card-explain {
+  margin: 8px 0 10px;
+  font-family: var(--sans);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ink-dim);
+}
+
+.session-card-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+/* Long paths wrap rather than truncate — which end of a path matters
+   depends on what you're looking for, so dropping either end is a guess. */
+.session-card-path {
+  overflow-wrap: anywhere;
+}
+
+.session-card-branch {
+  color: var(--ink-dim);
+}
+
+.session-card-title {
+  overflow-wrap: anywhere;
+}
+
+.session-card-project {
+  color: var(--ink-faint);
+}
+
+.session-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11px;
+  color: var(--ink-dim);
+  /* The right-hand slot is where Warp's `+12891` diff stat lives. Left
+     empty until real git-review data exists — see HoverCardModel.diff. */
+}
+
+.session-card-engine {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.session-card-engine-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-card {
+    animation: none;
+  }
 }
 
 /* -------------------------------------------------------- pane 3-dot menu

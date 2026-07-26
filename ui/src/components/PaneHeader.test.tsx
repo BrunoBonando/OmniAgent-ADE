@@ -1,6 +1,6 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import PaneHeader from "./PaneHeader";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import PaneHeader, { HOVER_CARD_DELAY_MS } from "./PaneHeader";
 import type { TabInfo } from "../state/sessions";
 
 const { useGitBranchMock } = vi.hoisted(() => ({ useGitBranchMock: vi.fn() }));
@@ -67,16 +67,41 @@ describe("PaneHeader", () => {
     expect(screen.queryByText("claude")).not.toBeInTheDocument();
   });
 
-  it("shows the git branch pill when useGitBranch resolves one", () => {
+  it("shows the git branch as a session tag when useGitBranch resolves one", () => {
     useGitBranchMock.mockReturnValue("main");
     setup();
-    expect(screen.getByText(/main/)).toBeInTheDocument();
+    const tag = screen.getByLabelText("Branch main");
+    expect(tag).toHaveClass("pane-header-tag");
+    expect(tag.textContent).toContain("main");
   });
 
-  it("renders no branch pill when there is none", () => {
+  it("renders no branch tag when there is none", () => {
     useGitBranchMock.mockReturnValue(null);
     setup();
-    expect(screen.queryByTitle(/git branch/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Branch /)).not.toBeInTheDocument();
+  });
+
+  describe("the branch is a tag on the session, not a dropdown", () => {
+    // Founder ask, verbatim: "terminal title has a dropdown with main,
+    // remove it. This must be connected to the session as a tag, that must
+    // be tied to the current git branch."
+    beforeEach(() => useGitBranchMock.mockReturnValue("main"));
+
+    it("is not a control: no button, no menu semantics, no click affordance", () => {
+      setup();
+      const tag = screen.getByLabelText("Branch main");
+      expect(tag.tagName).toBe("SPAN");
+      expect(tag).not.toHaveAttribute("aria-haspopup");
+      expect(tag).not.toHaveAttribute("role");
+      // The old pill's `title="git branch: main"` promised something on
+      // click; the hover card explains instead.
+      expect(tag).not.toHaveAttribute("title");
+    });
+
+    it("carries the session's engine so the tag is tinted with the engine colour the status light gave up", () => {
+      setup({ tab: tab({ engine: "codex" }) });
+      expect(screen.getByLabelText("Branch main")).toHaveAttribute("data-engine", "codex");
+    });
   });
 
   it("shows the attention dot only when the tab needs attention", () => {
@@ -163,6 +188,142 @@ describe("PaneHeader", () => {
   it("applies the focused-pane styling when isFocused is true", () => {
     setup({ isFocused: true });
     expect(screen.getByText("claude").closest(".pane-header")).toHaveClass("is-focused");
+  });
+
+  describe("the five-state status light (the OmniAgent mark)", () => {
+    function light() {
+      return document.querySelector(".session-light")!;
+    }
+
+    it("replaces the old engine-coloured dot", () => {
+      setup();
+      expect(document.querySelector(".pane-header-dot")).toBeNull();
+      expect(light()).toBeInTheDocument();
+    });
+
+    it("renders the mark and the animated fill the mask needs", () => {
+      setup();
+      expect(light().querySelector(".session-light-mark .session-light-fill")).not.toBeNull();
+    });
+
+    it.each([
+      ["ready", "steady"],
+      ["thinking", "sweep"],
+      ["tool_execution", "chase"],
+      ["awaiting_approval", "breathe"],
+      ["error", "flash"],
+    ] as const)("renders %s with its own colour state and its own motion (%s)", (status, motion) => {
+      setup({ tab: tab({ status }) });
+      expect(light()).toHaveAttribute("data-status", status);
+      expect(light()).toHaveAttribute("data-motion", motion);
+    });
+
+    it("shows the neutral pre-signal mark — never green — before any status arrives", () => {
+      setup({ tab: tab({ status: undefined }) });
+      expect(light()).toHaveAttribute("data-status", "unknown");
+      expect(light()).toHaveAttribute("data-motion", "steady");
+    });
+
+    it("explains itself to a screen reader as well as on hover", () => {
+      setup({ tab: tab({ status: "awaiting_approval" }) });
+      const img = screen.getByRole("img", { name: /needs approval/i });
+      expect(img.getAttribute("aria-label")).toContain("approve");
+    });
+  });
+
+  describe("session hover card", () => {
+    // Founder ask: "for each session, have a hover with more info, like warp
+    // does" + "on hover, it explains, of course" — one surface for both.
+    beforeEach(() => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      useGitBranchMock.mockReturnValue("main");
+    });
+    afterEach(() => vi.useRealTimers());
+
+    function hoverHeader() {
+      const header = document.querySelector(".pane-header")!;
+      fireEvent.mouseEnter(header);
+      act(() => void vi.advanceTimersByTime(HOVER_CARD_DELAY_MS));
+      return header;
+    }
+
+    it("stays closed until the pointer has actually rested on the header", () => {
+      setup();
+      fireEvent.mouseEnter(document.querySelector(".pane-header")!);
+      act(() => void vi.advanceTimersByTime(HOVER_CARD_DELAY_MS - 50));
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+      act(() => void vi.advanceTimersByTime(60));
+      expect(screen.getByRole("tooltip")).toBeInTheDocument();
+    });
+
+    it("explains the current status in plain language", () => {
+      setup({ tab: tab({ status: "tool_execution" }) });
+      hoverHeader();
+      const card = screen.getByRole("tooltip");
+      expect(card.textContent).toContain("Running tools");
+      expect(card.textContent).toContain("Running a command or writing files right now.");
+    });
+
+    it("shows the session's folder, branch, title and engine", () => {
+      setup({
+        tab: tab({ label: "backend fix", cwd: "/Users/bonando/Documents/Bruno.Digital/My-Brain" }),
+        projectLabel: "My-Brain",
+      });
+      hoverHeader();
+      const card = screen.getByRole("tooltip");
+      expect(card.textContent).toContain("~/Documents/Bruno.Digital/My-Brain");
+      expect(card.textContent).toContain("main");
+      expect(card.textContent).toContain("backend fix");
+      expect(card.textContent).toContain("Claude Code");
+    });
+
+    it("says so when the session was reattached to a still-running engine", () => {
+      setup({ tab: tab({ restored: true }) });
+      hoverHeader();
+      expect(screen.getByRole("tooltip").textContent).toContain("Restored");
+    });
+
+    it("does not say 'Restored' for an ordinary fresh session", () => {
+      setup();
+      hoverHeader();
+      expect(screen.getByRole("tooltip").textContent).not.toContain("Restored");
+    });
+
+    it("invents no diff stat — Warp's `+12891` has no data behind it here yet", () => {
+      setup();
+      hoverHeader();
+      expect(screen.getByRole("tooltip").textContent).not.toMatch(/[+-]\d/);
+    });
+
+    it("closes as soon as the pointer leaves", () => {
+      setup();
+      const header = hoverHeader();
+      fireEvent.mouseLeave(header);
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    });
+
+    it("gets out of the way the moment the header is pressed (that press may start a pane drag)", () => {
+      setup();
+      const header = hoverHeader();
+      fireEvent.mouseDown(header);
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    });
+
+    it("does not hover over its own rename input", () => {
+      setup();
+      hoverHeader();
+      // The card is open and echoes the session title, so target the
+      // header's own label element rather than the text.
+      fireEvent.doubleClick(document.querySelector(".pane-header-label")!);
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    });
+
+    it("does not fight the 3-dot menu for the same space", () => {
+      setup({ onChangeEngine: vi.fn() });
+      hoverHeader();
+      fireEvent.click(screen.getByRole("button", { name: /options/i }));
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    });
   });
 
   describe("3-dot menu (change engine / terminal theme)", () => {
