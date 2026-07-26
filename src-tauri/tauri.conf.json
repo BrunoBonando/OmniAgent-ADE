@@ -35,6 +35,14 @@
     ],
     "resources": {
       "../target/release/omniagent-mcp": "omniagent-mcp"
+    },
+    "macOS": {
+      "dmg": {
+        "background": "dmg/dmg-background.png",
+        "windowSize": { "width": 700, "height": 400 },
+        "appPosition": { "x": 172, "y": 205 },
+        "applicationFolderPosition": { "x": 528, "y": 205 }
+      }
     }
   }
 }
