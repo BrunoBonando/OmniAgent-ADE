@@ -443,37 +443,45 @@ export default function Sidebar({
                     </span>
                     {isPaused && <span className="project-row-paused">paused</span>}
                   </button>
-                  <button
-                    className="project-row-add"
-                    onClick={() => onNewTabInProject(project)}
-                    aria-label={`New terminal in ${project.label}`}
-                    title="New terminal (⌘T)"
-                  >
-                    +
-                  </button>
-                  <button
-                    className="project-row-menu-trigger"
-                    onClick={() => setMenuProjectId(project.id)}
-                    aria-label={`${project.label} options`}
-                    title="Pause / re-check"
-                  >
-                    ⋯
-                  </button>
-                  {/* Founder ask: "add the possibility to close a workspace,
-                      on hover" — revealed with the row's other two controls,
-                      last in the cluster because that is where a close lives
-                      in every window and tab this app sits beside. Confirms
-                      first: it ends live engines. */}
-                  {onCloseWorkspace && (
+                  {/* The row's hover controls, as one cluster that fades in
+                      OVER the end of the label rather than a strip the label
+                      is permanently shortened to make room for — a workspace
+                      called "OmniAgent-ADE" should read as its own name at
+                      rest, which reserving space for three buttons made
+                      impossible. */}
+                  <span className="project-row-actions">
                     <button
-                      className="project-row-close"
-                      onClick={() => setClosingProject(project)}
-                      aria-label={`Close workspace ${project.label}`}
-                      title="Close workspace"
+                      className="project-row-add"
+                      onClick={() => onNewTabInProject(project)}
+                      aria-label={`New terminal in ${project.label}`}
+                      title="New terminal (⌘T)"
                     >
-                      ×
+                      +
                     </button>
-                  )}
+                    <button
+                      className="project-row-menu-trigger"
+                      onClick={() => setMenuProjectId(project.id)}
+                      aria-label={`${project.label} options`}
+                      title="Pause / re-check"
+                    >
+                      ⋯
+                    </button>
+                    {/* Founder ask: "add the possibility to close a
+                        workspace, on hover" — last in the cluster, because
+                        that is where a close lives in every window and tab
+                        this app sits beside. Confirms first: it ends live
+                        engines. */}
+                    {onCloseWorkspace && (
+                      <button
+                        className="project-row-close"
+                        onClick={() => setClosingProject(project)}
+                        aria-label={`Close workspace ${project.label}`}
+                        title="Close workspace"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </span>
                   {menuProjectId === project.id && (
                     <ProjectMenu
                       project={project}

@@ -40,6 +40,25 @@ import SessionStatusLight from "./SessionStatusLight";
  * (Inherited unchanged from the pane header this card used to open from.) */
 export const SESSION_CARD_DELAY_MS = 320;
 
+/**
+ * The rect the card is placed from: this row's vertical position, but the
+ * **sidebar's** right edge.
+ *
+ * A session row is inset from the panel it lives in (the workspace chip's
+ * padding, the session list's own indent), so a card placed a gap to the
+ * right of the *row* lands a few pixels on top of the sidebar — verified in
+ * a real browser: 237px against a 240px panel. Anchoring to the panel edge
+ * means the card always clears the sidebar, whatever a row's indent is.
+ * Falls back to the row itself if the panel can't be found.
+ */
+function measureCardAnchor(row: HTMLElement | null): DOMRect | null {
+  if (!row) return null;
+  const rowRect = row.getBoundingClientRect();
+  const panel = row.closest(".sidebar")?.getBoundingClientRect();
+  if (!panel) return rowRect;
+  return new DOMRect(rowRect.x, rowRect.y, Math.max(0, panel.right - rowRect.x), rowRect.height);
+}
+
 interface SidebarSessionRowProps {
   session: SessionGroup;
   projectLabel: string;
@@ -83,7 +102,7 @@ export default function SidebarSessionRow({
     if (openTimer.current !== null) return;
     openTimer.current = window.setTimeout(() => {
       openTimer.current = null;
-      setCardAnchor(rowRef.current?.getBoundingClientRect() ?? null);
+      setCardAnchor(measureCardAnchor(rowRef.current));
     }, SESSION_CARD_DELAY_MS);
   }
 
@@ -141,7 +160,11 @@ export default function SidebarSessionRow({
               <span className="session-row-branch-glyph" aria-hidden="true">
                 ⑂
               </span>
-              {branch}
+              {/* Its own element so a long branch ellipsizes: an anonymous
+                  text node inside a flex container can't take
+                  `text-overflow`, and `feature/sidebar-sessions` was being
+                  cut mid-word against the panel edge. */}
+              <span className="session-row-branch-name">{branch}</span>
             </span>
           )}
         </button>

@@ -646,9 +646,10 @@ code {
 }
 
 .project-row-main {
-  /* Room for the three hover-revealed controls at the right end of the row:
-     "+" (new terminal), "⋯" (pause/re-check) and "×" (close workspace). */
-  width: calc(100% - 70px);
+  /* Full width: the three hover controls (`.project-row-actions`) fade in
+     over the end of the row rather than taking a permanent bite out of it,
+     so a workspace's name is readable at rest. */
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -741,10 +742,31 @@ code {
   flex: 0 0 auto;
 }
 
-.project-row-add {
+/* The hover cluster: "+" (new terminal), "⋯" (pause/re-check) and "×"
+   (close workspace). Absolutely positioned over the row's right end, on the
+   row's own hover colour with a short gradient lead-in so a long workspace
+   name fades under it instead of being chopped. */
+.project-row-actions {
   position: absolute;
-  right: 48px;
+  right: 3px;
   top: 3px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 14px;
+  border-radius: 5px;
+  background: linear-gradient(to right, transparent 0, var(--panel-raised) 14px);
+  opacity: 0;
+}
+
+.project-row:hover .project-row-actions,
+.project-row-actions:focus-within {
+  opacity: 1;
+}
+
+.project-row-add,
+.project-row-menu-trigger,
+.project-row-close {
   width: 20px;
   height: 20px;
   border-radius: 4px;
@@ -753,77 +775,29 @@ code {
   color: var(--ink-dim);
   font-size: 13px;
   line-height: 1;
-  opacity: 0;
-}
-
-.project-row:hover .project-row-add {
-  opacity: 1;
-}
-
-.project-row-add:hover {
-  border-color: var(--line);
-  color: var(--ink);
+  flex: 0 0 auto;
 }
 
 .project-row-menu-trigger {
-  position: absolute;
-  right: 26px;
-  top: 3px;
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--ink-dim);
-  font-size: 13px;
-  line-height: 1;
   letter-spacing: -1px;
-  opacity: 0;
 }
 
-.project-row:hover .project-row-menu-trigger {
-  opacity: 1;
-}
-
+.project-row-add:hover,
 .project-row-menu-trigger:hover {
   border-color: var(--line);
   color: var(--ink);
 }
 
-/* Founder ask, 2026-07-26: "add the possibility to close a workspace, on
-   hover". Last in the cluster, hard against the right edge — where a close
-   sits on every window and tab this app is used beside — and the only one
-   of the three that turns a colour on hover, because it is the only one
-   that ends something. It still asks first (`CloseWorkspaceConfirm`). */
+/* The only one of the three that turns a colour on hover, because it is the
+   only one that ends something. It still asks first
+   (`CloseWorkspaceConfirm`), and it deletes nothing. */
 .project-row-close {
-  position: absolute;
-  right: 4px;
-  top: 3px;
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--ink-dim);
   font-size: 14px;
-  line-height: 1;
-  opacity: 0;
-}
-
-.project-row:hover .project-row-close {
-  opacity: 1;
 }
 
 .project-row-close:hover {
   border-color: color-mix(in srgb, var(--danger) 45%, transparent);
   color: var(--danger);
-}
-
-/* Keyboard users get the same controls the pointer does. */
-.project-row-add:focus-visible,
-.project-row-menu-trigger:focus-visible,
-.project-row-close:focus-visible {
-  opacity: 1;
 }
 
 /* -------------------------------------------------------- project menu
@@ -5493,14 +5467,22 @@ code {
   gap: 4px;
   font-size: 10px;
   color: var(--ink-faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 46%;
 }
 
 .session-row-branch-glyph {
+  flex: 0 0 auto;
   opacity: 0.7;
+}
+
+/* The ellipsis has to live on this element, not on the flex row above it:
+   a bare text node inside a flex container is an anonymous item and
+   `text-overflow` never reaches it. */
+.session-row-branch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-row-rename-input {
