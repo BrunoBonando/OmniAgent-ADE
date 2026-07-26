@@ -112,6 +112,7 @@ import {
 } from "../state/sessions";
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
 import { statusNeedsAttention } from "../state/sessionStatus";
+import Icon from "./Icon";
 import type { LayoutPreset } from "../state/paneGrid";
 import {
   rootsPausedProjects,
@@ -470,7 +471,7 @@ export default function Sidebar({
                       aria-label={`New terminal in ${project.label}`}
                       title="New terminal (⌘T)"
                     >
-                      +
+                      <Icon name="plus" size={14} />
                     </button>
                     <button
                       className="project-row-menu-trigger"
@@ -478,7 +479,7 @@ export default function Sidebar({
                       aria-label={`${project.label} options`}
                       title="Pause / re-check"
                     >
-                      ⋯
+                      <Icon name="more" size={14} />
                     </button>
                     {/* Founder ask: "add the possibility to close a
                         workspace, on hover" — last in the cluster, because
@@ -492,7 +493,7 @@ export default function Sidebar({
                         aria-label={`Close workspace ${project.label}`}
                         title="Close workspace"
                       >
-                        ×
+                        <Icon name="x" size={13} />
                       </button>
                     )}
                   </span>
@@ -563,10 +564,10 @@ export default function Sidebar({
             aria-label="Review session summaries"
             title="Review session summaries"
           >
-            ✓
+            <Icon name="checklist" size={13} />
           </button>
           <button className="sidebar-about-trigger" onClick={() => setAboutOpen(true)} aria-label="About OmniAgent ADE">
-            i
+            <Icon name="info" size={13} />
           </button>
         </span>
       </div>

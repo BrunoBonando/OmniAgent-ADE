@@ -32,6 +32,7 @@ import type { SessionGroup } from "../state/sessionGroups";
 import { useGitBranch } from "../lib/useGitBranch";
 import SessionHoverCard from "./SessionHoverCard";
 import SessionStatusLight from "./SessionStatusLight";
+import Icon from "./Icon";
 
 /** How long the pointer must rest on a session row before its card appears.
  * Long enough that running the pointer down the sidebar never summons a
@@ -176,9 +177,7 @@ export default function SidebarSessionRow({
           </span>
           {branch && (
             <span className="session-row-branch" aria-label={`Branch ${branch}`}>
-              <span className="session-row-branch-glyph" aria-hidden="true">
-                ⑂
-              </span>
+              <Icon name="branch" size={13} className="session-row-branch-glyph" />
               {/* Its own element so a long branch ellipsizes: an anonymous
                   text node inside a flex container can't take
                   `text-overflow`, and `feature/sidebar-sessions` was being

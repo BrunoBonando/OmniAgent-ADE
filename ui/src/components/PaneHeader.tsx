@@ -54,6 +54,7 @@ import { useGitBranch } from "../lib/useGitBranch";
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeId } from "../lib/terminalThemes";
 import PaneMenu from "./PaneMenu";
 import SessionStatusLight from "./SessionStatusLight";
+import Icon from "./Icon";
 
 interface PaneHeaderProps {
   tab: TabInfo;
@@ -166,9 +167,7 @@ export default function PaneHeader({
           to click. */}
       {branch && (
         <span className="pane-header-tag" data-engine={tab.engine} aria-label={`Branch ${branch}`}>
-          <span className="pane-header-tag-glyph" aria-hidden="true">
-            ⑂
-          </span>
+          <Icon name="branch" size={13} className="pane-header-tag-glyph" />
           {branch}
         </span>
       )}

@@ -29,6 +29,7 @@ import { useEffect, useState } from "react";
 import { ENGINES, type Engine } from "../state/sessions";
 import { ENGINE_COLOR, ENGINE_LABEL } from "../theme";
 import { reviewStatus } from "../lib/tauri";
+import Icon from "./Icon";
 import { TERMINAL_THEME_HINT, TERMINAL_THEME_IDS, TERMINAL_THEME_LABELS, TERMINAL_THEMES, type TerminalThemeId } from "../lib/terminalThemes";
 
 interface PaneMenuProps {
@@ -93,9 +94,7 @@ export default function PaneMenu({
                     onClose();
                   }}
                 >
-                  <span className="pane-menu-review-glyph" aria-hidden>
-                    ⇄
-                  </span>
+                  <Icon name="compare" size={14} className="pane-menu-review-glyph" />
                   <span className="pane-menu-row-text">
                     <span className="pane-menu-row-label">Code review</span>
                     <span className="pane-menu-row-hint">

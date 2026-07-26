@@ -68,6 +68,7 @@ import {
   statusGlyph,
   toggleExpandedFile,
 } from "../state/codeReviewState";
+import Icon from "./Icon";
 
 /** How often the panel re-reads `git status` while it's open and visible. */
 export const REVIEW_POLL_MS = 4000;
@@ -267,21 +268,21 @@ export default function CodeReviewPanel({ repoPath, sessionLabel, onClose }: Cod
             {header?.pathLabel ?? repoPath}
           </span>
           <span className="code-review-branch">
-            <span aria-hidden="true">⑂</span> {header?.branchLabel ?? "…"}
+            <Icon name="branch" size={13} /> {header?.branchLabel ?? "…"}
           </span>
         </div>
         <div className="code-review-header-right">
           {header && (
             <span className="code-review-totals">
               <span className="code-review-filecount" title={`${header.fileCount} changed files`}>
-                <span aria-hidden="true">▤</span> {header.fileCount}
+                <Icon name="files" size={13} /> {header.fileCount}
               </span>
               <span className="code-review-stat-add">+{header.added}</span>
               <span className="code-review-stat-del">-{header.removed}</span>
             </span>
           )}
           <button className="code-review-close" onClick={onClose} aria-label="Close code review" title="Close">
-            &times;
+            <Icon name="x" size={15} />
           </button>
         </div>
       </div>
@@ -295,7 +296,7 @@ export default function CodeReviewPanel({ repoPath, sessionLabel, onClose }: Cod
       {/* ---- toolbar + commit ------------------------------------------ */}
       <div className="code-review-toolbar">
         <span className="code-review-toolbar-label">
-          <span aria-hidden="true">⇄</span> Uncommitted changes
+          <Icon name="compare" size={13} /> Uncommitted changes
         </span>
       </div>
 
@@ -326,7 +327,7 @@ export default function CodeReviewPanel({ repoPath, sessionLabel, onClose }: Cod
         <div className="code-review-notice" role="status">
           <span>{notice}</span>
           <button onClick={() => setNotice(null)} aria-label="Dismiss">
-            &times;
+            <Icon name="x" size={14} />
           </button>
         </div>
       )}
@@ -357,7 +358,7 @@ export default function CodeReviewPanel({ repoPath, sessionLabel, onClose }: Cod
                   aria-expanded={isOpen}
                   aria-label={`${isOpen ? "Collapse" : "Expand"} ${file.path}`}
                 >
-                  <span aria-hidden="true">{isOpen ? "⌄" : "›"}</span>
+                  <Icon name={isOpen ? "chevron-down" : "chevron-right"} size={14} />
                 </button>
 
                 <span
@@ -389,7 +390,7 @@ export default function CodeReviewPanel({ repoPath, sessionLabel, onClose }: Cod
                     aria-label={`Copy path of ${file.path}`}
                     title="Copy path"
                   >
-                    ⧉
+                    <Icon name="copy" size={14} />
                   </button>
 
                   {stat.kind === "counts" && (
@@ -413,7 +414,7 @@ export default function CodeReviewPanel({ repoPath, sessionLabel, onClose }: Cod
                     aria-expanded={prompt !== null}
                     title="Revert…"
                   >
-                    ↺
+                    <Icon name="undo" size={14} />
                   </button>
                   <button
                     className="code-review-icon"
@@ -425,7 +426,7 @@ export default function CodeReviewPanel({ repoPath, sessionLabel, onClose }: Cod
                     aria-label={`Open ${file.path}`}
                     title="Open in the default app"
                   >
-                    ↗
+                    <Icon name="external" size={14} />
                   </button>
                 </span>
               </div>

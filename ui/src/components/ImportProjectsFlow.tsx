@@ -56,6 +56,7 @@ import type { ImportBatchResult } from "../state/importState";
 import type { DetectedTool, ImportCandidate } from "../lib/tauri";
 import { addProject, detectImportableTools, listImportCandidates } from "../lib/tauri";
 import type { ProjectInfo } from "../state/sessions";
+import Icon from "./Icon";
 
 interface ImportProjectsFlowProps {
   /** For duplicate detection (`mergeCandidates`) — the caller's current
@@ -339,7 +340,7 @@ function ImportToolGroup({
                 {row.alreadyAdded && <span className="import-candidate-tag">Already added</span>}
                 {result && (
                   <span className={`import-candidate-result ${result.success ? "is-ok" : "is-fail"}`} title={result.error}>
-                    {result.success ? "✓" : "✗"}
+                    <Icon name={result.success ? "check" : "x"} size={13} strokeWidth={2.4} />
                   </span>
                 )}
               </label>

@@ -33,6 +33,7 @@
 import { ENGINE_COLOR } from "../theme";
 import type { SessionCardModel } from "../state/sessionHoverCard";
 import SessionStatusLight from "./SessionStatusLight";
+import Icon from "./Icon";
 
 /** Kept in sync with `.session-card { width }` in App.css — only used to
  * keep the card from hanging off the right edge of the window. */
@@ -90,7 +91,7 @@ export default function SessionHoverCard({ model, anchor }: SessionHoverCardProp
         <div className="session-card-path">{model.path}</div>
         {model.branch !== null && (
           <div className="session-card-branch">
-            <span aria-hidden="true">⑂</span> {model.branch}
+            <Icon name="branch" size={13} /> {model.branch}
           </div>
         )}
         <div className="session-card-title">

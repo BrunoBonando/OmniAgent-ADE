@@ -36,6 +36,7 @@ import {
 } from "../state/notifications";
 import { useGitBranch } from "../lib/useGitBranch";
 import SessionStatusLight from "./SessionStatusLight";
+import Icon from "./Icon";
 
 /** Relative timestamps go stale while the panel sits open; re-render them
  * on a coarse tick rather than per second — the strings themselves are
@@ -121,7 +122,7 @@ function NotificationRow({
             <span className="notification-row-branch">
               {branch ? (
                 <>
-                  <span aria-hidden="true">⑂</span> {branch}
+                  <Icon name="branch" size={13} /> {branch}
                 </>
               ) : (
                 entry.projectLabel
