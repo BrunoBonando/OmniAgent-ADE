@@ -31,3 +31,7 @@ fixtures/**/.git/
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code local state
+.claude/settings.local.json
+.claude/worktrees/

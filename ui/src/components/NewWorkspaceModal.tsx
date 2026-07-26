@@ -1,11 +1,14 @@
 // The sidebar's "+" flow, rebuilt from a founder reference (Bruno,
 // 2026-07-25): a screenshot of BridgeSpace's "New Workspace" dialog,
 // described precisely rather than checked in as an image. Structure: a
-// title + close button; a LAYOUT section (four preset cards — 2/4/6/9 —
-// each a small grid glyph with a caption for whichever is selected); a
-// DIRECTORY section (folder path + Browse, plus an editable project name);
-// a collapsible AI AGENTS section (checkbox rows, one per agent); a
-// footer (Cancel / Create Workspace).
+// title + close button; a DIRECTORY section (an editable project name,
+// then folder path + Browse — name first since it no longer depends on a
+// folder being picked, Bruno 2026-07-26); a LAYOUT section (four preset
+// cards — 2/4/6/9 — each a small grid glyph with a caption for whichever
+// is selected); a collapsible AI AGENTS section (checkbox tiles, one per
+// agent, plus a separate "Normal Terminal" tile for plain `shell` since
+// it isn't an agent — same founder brief); a footer (Cancel / Create
+// Workspace).
 //
 // The checklist is built directly from the real `ENGINES` array (which is
 // `AVAILABLE_AGENTS` from `state/agents.ts`), with `ENGINE_COLOR`/
@@ -129,6 +132,56 @@ export default function NewWorkspaceModal({ onCreate, onClose, agentState, onIns
     }
   }
 
+  /** One AI-AGENTS tile — shared by the 4-agent grid and the standalone
+   * "Normal Terminal" (`shell`) tile below it, so both get the same
+   * install/installing/failed affordances for free. */
+  function renderAgentTile(agent: Agent, label: string) {
+    const isInstalled = agentState.installed.has(agent);
+    const isInstalling = agentState.installing.has(agent);
+    const installStatus = agentState.installing.get(agent);
+
+    return (
+      <div key={agent} className="new-workspace-agent-cell">
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={state.engines[agent as Engine]}
+          className={`new-workspace-agent-tile${state.engines[agent as Engine] ? " is-selected" : ""}`}
+          onClick={() => dispatch({ type: "engine_toggled", engine: agent as Engine })}
+          disabled={!isInstalled}
+        >
+          <span
+            className="new-workspace-agent-logo"
+            style={{ color: ENGINE_COLOR[agent as Engine] }}
+            aria-hidden
+          >
+            <Icon name={AGENT_ICON[agent as Engine]} size={28} strokeWidth={1.75} />
+          </span>
+          <span className="new-workspace-agent-label">{label}</span>
+        </button>
+        {!isInstalled && !isInstalling && (
+          <button type="button" className="new-workspace-install-btn" onClick={() => onInstallAgent(agent)}>
+            Install
+          </button>
+        )}
+        {isInstalling && (
+          <span className="new-workspace-agent-status">
+            {installStatus === "failed" ? (
+              <>
+                <span className="status-failed">Failed</span>
+                <button type="button" className="new-workspace-retry-btn" onClick={() => onInstallAgent(agent)}>
+                  Retry
+                </button>
+              </>
+            ) : (
+              <span className="status-installing">Installing…</span>
+            )}
+          </span>
+        )}
+      </div>
+    );
+  }
+
   const checked = checkedEngines(state);
 
   return (
@@ -150,6 +203,30 @@ export default function NewWorkspaceModal({ onCreate, onClose, agentState, onIns
         </div>
 
         <div className="new-workspace-section">
+          <span className="new-workspace-section-label">DIRECTORY</span>
+          <label className="new-workspace-name-label" htmlFor="new-workspace-name">
+            Project name
+          </label>
+          <input
+            id="new-workspace-name"
+            className="new-workspace-name-input"
+            value={state.name}
+            placeholder="My workspace"
+            disabled={state.submitting}
+            onChange={(e) => dispatch({ type: "name_changed", name: e.target.value })}
+          />
+          <div className="new-workspace-directory-row">
+            <FolderIcon />
+            <span className="new-workspace-path" title={state.path ?? undefined}>
+              {state.path ?? "No folder chosen yet"}
+            </span>
+            <button type="button" className="new-workspace-browse" onClick={() => void pickFolder()}>
+              Browse
+            </button>
+          </div>
+        </div>
+
+        <div className="new-workspace-section">
           <span className="new-workspace-section-label">LAYOUT</span>
           <div className="new-workspace-layout-row">
             {LAYOUT_PRESETS.map((preset) => (
@@ -166,30 +243,6 @@ export default function NewWorkspaceModal({ onCreate, onClose, agentState, onIns
             ))}
           </div>
           <p className="new-workspace-layout-caption">{layoutCaption(state.layout)}</p>
-        </div>
-
-        <div className="new-workspace-section">
-          <span className="new-workspace-section-label">DIRECTORY</span>
-          <div className="new-workspace-directory-row">
-            <FolderIcon />
-            <span className="new-workspace-path" title={state.path ?? undefined}>
-              {state.path ?? "No folder chosen yet"}
-            </span>
-            <button type="button" className="new-workspace-browse" onClick={() => void pickFolder()}>
-              Browse
-            </button>
-          </div>
-          <label className="new-workspace-name-label" htmlFor="new-workspace-name">
-            Project name
-          </label>
-          <input
-            id="new-workspace-name"
-            className="new-workspace-name-input"
-            value={state.name}
-            placeholder={state.path ? undefined : "Choose a folder first"}
-            disabled={state.path === null || state.submitting}
-            onChange={(e) => dispatch({ type: "name_changed", name: e.target.value })}
-          />
         </div>
 
         <div className="new-workspace-section">
@@ -214,67 +267,22 @@ export default function NewWorkspaceModal({ onCreate, onClose, agentState, onIns
             </button>
           </div>
           {!state.agentsCollapsed && (
-            // Logo tiles in a 3-column grid (Bruno, 2026-07-26: "instead of
-            // a list of options, make it a grid — 3 on top and 2 under"),
-            // wearing the brand marks the agent-picker work introduced. Each
-            // tile keeps `role="checkbox"` so the toggle semantics (and the
-            // existing tests) carry over from the checkbox rows unchanged.
-            <div className="new-workspace-agent-grid">
-              {AVAILABLE_AGENTS.map((agent) => {
-                const isInstalled = agentState.installed.has(agent);
-                const isInstalling = agentState.installing.has(agent);
-                const installStatus = agentState.installing.get(agent);
-
-                return (
-                  <div key={agent} className="new-workspace-agent-cell">
-                    <button
-                      type="button"
-                      role="checkbox"
-                      aria-checked={state.engines[agent as Engine]}
-                      className={`new-workspace-agent-tile${state.engines[agent as Engine] ? " is-selected" : ""}`}
-                      onClick={() => dispatch({ type: "engine_toggled", engine: agent as Engine })}
-                      disabled={!isInstalled}
-                    >
-                      <span
-                        className="new-workspace-agent-logo"
-                        style={{ color: ENGINE_COLOR[agent as Engine] }}
-                        aria-hidden
-                      >
-                        <Icon name={AGENT_ICON[agent as Engine]} size={28} strokeWidth={1.75} />
-                      </span>
-                      <span className="new-workspace-agent-label">{ENGINE_LABEL[agent as Engine]}</span>
-                    </button>
-                    {!isInstalled && !isInstalling && (
-                      <button
-                        type="button"
-                        className="new-workspace-install-btn"
-                        onClick={() => onInstallAgent(agent)}
-                      >
-                        Install
-                      </button>
-                    )}
-                    {isInstalling && (
-                      <span className="new-workspace-agent-status">
-                        {installStatus === 'failed' ? (
-                          <>
-                            <span className="status-failed">Failed</span>
-                            <button
-                              type="button"
-                              className="new-workspace-retry-btn"
-                              onClick={() => onInstallAgent(agent)}
-                            >
-                              Retry
-                            </button>
-                          </>
-                        ) : (
-                          <span className="status-installing">Installing…</span>
-                        )}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+            <>
+              {/* Logo tiles in a 3-column grid (Bruno, 2026-07-26: "instead
+                  of a list of options, make it a grid"), wearing the brand
+                  marks the agent-picker work introduced. Each tile keeps
+                  `role="checkbox"` so the toggle semantics (and the
+                  existing tests) carry over from the checkbox rows
+                  unchanged. `shell` isn't an AI agent (theme.ts's own
+                  `ENGINE_COLOR` doc says so), so it renders separately below
+                  as its own "Normal Terminal" tile rather than a 5th agent. */}
+              <div className="new-workspace-agent-grid">
+                {AVAILABLE_AGENTS.filter((agent) => agent !== "shell").map((agent) =>
+                  renderAgentTile(agent, ENGINE_LABEL[agent as Engine]),
+                )}
+              </div>
+              <div className="new-workspace-agent-grid">{renderAgentTile("shell", "Normal Terminal")}</div>
+            </>
           )}
         </div>
 

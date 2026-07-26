@@ -25,9 +25,11 @@ import { LAYOUT_PRESETS, type LayoutPreset } from "./paneGrid";
 
 export interface NewWorkspaceState {
   path: string | null;
-  /** Editable project display name — defaults to the folder's basename the
-   * instant a folder is picked, same precedent `addProjectState.ts`
-   * established, but never re-derived after that (a user edit sticks). */
+  /** Editable project display name — the dialog now asks for this BEFORE a
+   * folder, so it only defaults from the folder's basename (same precedent
+   * `addProjectState.ts` established) when still blank at the moment a
+   * folder is picked; a name the user already typed, before or after that,
+   * is never overwritten. */
   name: string;
   layout: LayoutPreset;
   /** Per-engine checked state for the AI AGENTS checklist — a plain record
@@ -106,7 +108,15 @@ export type NewWorkspaceAction =
 export function newWorkspaceReducer(state: NewWorkspaceState, action: NewWorkspaceAction): NewWorkspaceState {
   switch (action.type) {
     case "folder_picked":
-      return { ...state, path: action.path, name: basenameOf(action.path), error: null };
+      // The dialog now asks for a name BEFORE a folder — don't clobber
+      // something the user already typed; only default from the folder's
+      // basename when the name field is still blank.
+      return {
+        ...state,
+        path: action.path,
+        name: state.name.trim().length > 0 ? state.name : basenameOf(action.path),
+        error: null,
+      };
 
     case "name_changed":
       return { ...state, name: action.name };

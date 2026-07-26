@@ -82,9 +82,10 @@ describe("NewWorkspaceModal — rendering", () => {
     // Founder rule, verbatim: "if it's a brand new installation, it should be
     // shell selected". Two agents installed and nothing used before, so
     // neither the last-selected nor the only-one-installed branch applies.
-    expect(screen.getByRole("checkbox", { name: /shell/i })).toBeChecked();
+    // "shell" renders as its own "Normal Terminal" tile, not a 5th AI agent.
+    expect(screen.getByRole("checkbox", { name: /normal terminal/i })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /claude code/i })).not.toBeChecked();
-    // Exactly 5 agent checkboxes — claude, codex, shell, copilot, antigravity
+    // Exactly 5 checkboxes — claude, codex, copilot, antigravity + Normal Terminal
     expect(screen.getAllByRole("checkbox")).toHaveLength(5);
   });
 
@@ -92,7 +93,7 @@ describe("NewWorkspaceModal — rendering", () => {
     // "the last one that they created, should be pre-selected."
     setup({ installed: new Set(["claude", "shell"]), lastSelected: ["claude"] });
     expect(screen.getByRole("checkbox", { name: /claude code/i })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: /shell/i })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /normal terminal/i })).not.toBeChecked();
   });
 
   it("never pre-checks an agent that is no longer installed", () => {
@@ -101,7 +102,7 @@ describe("NewWorkspaceModal — rendering", () => {
     setup({ installed: new Set(["shell"]), lastSelected: ["codex"] });
     expect(screen.getByRole("checkbox", { name: /codex/i })).not.toBeChecked();
     expect(screen.getByRole("checkbox", { name: /codex/i })).toBeDisabled();
-    expect(screen.getByRole("checkbox", { name: /shell/i })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /normal terminal/i })).toBeChecked();
   });
 
   it("Create Workspace starts disabled — no folder chosen yet", () => {
@@ -128,9 +129,9 @@ describe("NewWorkspaceModal — AI Agents checklist", () => {
     await waitFor(() => expect(screen.getByDisplayValue("demo-workspace")).toBeInTheDocument());
 
     const submit = screen.getByRole("button", { name: /create workspace/i });
-    expect(submit).toBeEnabled(); // shell checked by default
+    expect(submit).toBeEnabled(); // shell (Normal Terminal) checked by default
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /shell/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /normal terminal/i }));
     expect(submit).toBeDisabled(); // nothing checked now
 
     // Claude rather than Codex: only installed agents have an enabled
@@ -177,6 +178,17 @@ describe("NewWorkspaceModal — directory picking", () => {
     const nameInput = await screen.findByDisplayValue("demo-workspace");
     fireEvent.change(nameInput, { target: { value: "renamed-workspace" } });
     expect(screen.getByDisplayValue("renamed-workspace")).toBeInTheDocument();
+  });
+
+  it("typing a name before picking a folder survives the folder pick", async () => {
+    // The dialog now asks for the name first — picking a folder afterward
+    // must not clobber it with the folder's basename.
+    setup();
+    fireEvent.change(screen.getByLabelText(/project name/i), { target: { value: "my custom name" } });
+    openMock.mockResolvedValue("/tmp/demo-workspace");
+    fireEvent.click(screen.getByRole("button", { name: /browse/i }));
+    await waitFor(() => expect(screen.getByText("/tmp/demo-workspace")).toBeInTheDocument());
+    expect(screen.getByDisplayValue("my custom name")).toBeInTheDocument();
   });
 
   it("cancelling the native picker (null result) leaves the form untouched", async () => {
