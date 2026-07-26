@@ -25,14 +25,31 @@
 // array — there is no second collection to keep in sync, which is what
 // keeps session restore honest: restore the tabs and the grouping comes
 // back with them, for free.
-import type { TabInfo } from "./sessions";
+//
+// ## Names (same brief: "Each session has a name and can be renamed. It
+// ## starts with session #1")
+//
+// A session's name is **stored**, on its panes (`TabInfo.groupLabel`), for
+// exactly the reason the grouping is stored there: one array, one restore.
+// It was positional at first — "the 2nd session in this project is Session
+// 2" — which quietly renamed every session below one that closed, i.e. the
+// opposite of a name.
+//
+// - A session is created with `nextSessionName`: **the lowest free number**
+//   in that workspace, so closing #2 and opening another gives Session 2
+//   back rather than climbing forever, and no two rows ever read the same.
+// - `groupTabsBySession` shows the stored name when there is one, and hands
+//   the rest a derived default that is checked against the stored names, so
+//   a legacy session can never collide with a typed one.
+// - Renaming is `session/renamed` (sessions.ts), which writes the name onto
+//   every pane in the group.
+import { UNGROUPED_SESSION_ID, type Engine, type TabInfo } from "./sessions";
 
-/** The implicit session every pane with no `group` belongs to, per project.
- * Two kinds of pane land here: layouts persisted before groups existed
- * (which must keep restoring exactly as they did), and any future code path
- * that opens a pane without saying which session it's for. Never generated
- * as a real group id — `newSessionGroupId` only ever mints `sess-grp-…`. */
-export const UNGROUPED_SESSION_ID = "__ungrouped__";
+/** Re-exported from `sessions.ts`, where it now lives so the reducer can
+ * address a session by `project + group` without importing this module (see
+ * that constant's own doc). Every existing `from "./sessionGroups"` import
+ * keeps working. */
+export { UNGROUPED_SESSION_ID };
 
 let groupCounter = 0;
 
@@ -51,11 +68,23 @@ export interface SessionGroup {
   /** `TabInfo.group`, or `UNGROUPED_SESSION_ID`. */
   id: string;
   project: string;
-  /** Display name: "Session 1", "Session 2", … by first-seen order within
-   * the project. Positional rather than stored, so nothing has to be
-   * migrated, renamed or persisted — and the numbering always reads in the
-   * order the sessions appear in the sidebar. */
+  /** The name actually stored on the panes (`TabInfo.groupLabel`), or
+   * `undefined` for a session nobody has named — a pre-naming layout, or the
+   * implicit ungrouped session. */
+  name?: string;
+  /** What to print: the stored `name`, else a derived `Session N`. */
   label: string;
+  /** The session's own root: the cwd its **first** pane was created in.
+   *
+   * A session is created with one cwd (`NewSessionModal` validates the
+   * project folder or a subfolder of it, and every pane in the batch gets
+   * it), so in practice all its panes agree. They can drift afterwards — a
+   * "change engine" restart keeps the pane's own cwd, and nothing stops a
+   * future feature from moving one — so this picks the first pane rather
+   * than pretending the session has no single answer. It is what the
+   * sidebar's branch tag and the hover card's path are read from: the
+   * session's root, not whichever pane happens to be focused. */
+  cwd: string;
   tabs: TabInfo[];
   /** Contains the pane that currently has focus (`activeTabId`) — the
    * "session it's currently on the screen" the sidebar marks. */
@@ -98,20 +127,74 @@ export function groupTabsBySession(tabs: TabInfo[], activeTabId: string | null):
 
   return projectOrder.map((project) => {
     const entry = byProject.get(project)!;
+    // Two passes, because a derived default must never collide with a name
+    // that is actually stored somewhere in this workspace: collect the real
+    // names first, then hand the leftovers the lowest free number.
+    const names = entry.order.map((id) => storedSessionName(entry.groups.get(id)!));
+    const taken = new Set(names.filter((n): n is string => n !== undefined));
     return {
       project,
       sessions: entry.order.map((id, i) => {
         const groupTabs = entry.groups.get(id)!;
+        const name = names[i];
+        let label = name;
+        if (label === undefined) {
+          label = defaultSessionName(lowestFreeSessionNumber(taken));
+          taken.add(label);
+        }
         return {
           id,
           project,
-          label: `Session ${i + 1}`,
+          name,
+          label,
+          cwd: groupTabs[0].cwd,
           tabs: groupTabs,
           isCurrent: activeTabId !== null && groupTabs.some((t) => t.id === activeTabId),
         };
       }),
     };
   });
+}
+
+/** The name stored on a session's panes: the first one that carries a
+ * non-empty `groupLabel`. Renaming writes it onto every pane, so they
+ * normally agree; taking the first keeps a half-written group (an engine
+ * restart racing a rename) readable instead of blank. */
+function storedSessionName(tabs: TabInfo[]): string | undefined {
+  for (const tab of tabs) {
+    const name = tab.groupLabel?.trim();
+    if (name) return name;
+  }
+  return undefined;
+}
+
+/** `Session 1`, `Session 2`, … — the default a session is born with
+ * (founder brief: "It starts with session #1"). */
+export function defaultSessionName(n: number): string {
+  return `Session ${n}`;
+}
+
+/** **The numbering rule, stated once:** the lowest positive integer whose
+ * default name is not already taken by a live session in that workspace.
+ *
+ * So sessions created and closed out of order never collide and never grow
+ * unbounded: with `Session 1` and `Session 3` open, the next one is
+ * `Session 2`; with 1 and 2 open it is `Session 3`. "Taken" means the name
+ * a session *shows* — a stored name (including one the user typed as
+ * "Session 2") or a derived default — because the collision that matters to
+ * the person reading the sidebar is two rows with the same words on them. */
+function lowestFreeSessionNumber(taken: ReadonlySet<string>): number {
+  let n = 1;
+  while (taken.has(defaultSessionName(n))) n += 1;
+  return n;
+}
+
+/** What to call the session about to be created in `project` — see
+ * `lowestFreeSessionNumber` for the rule. Reads the live tabs, so it sees
+ * exactly what the sidebar shows. */
+export function nextSessionName(tabs: TabInfo[], project: string): string {
+  const sessions = groupTabsBySession(tabs, null).find((p) => p.project === project)?.sessions ?? [];
+  return defaultSessionName(lowestFreeSessionNumber(new Set(sessions.map((s) => s.label))));
 }
 
 /** The session the user is currently on — the group holding the focused
@@ -154,16 +237,26 @@ export function tabsInSession(tabs: TabInfo[], project: string, groupId: string)
   return tabs.filter((t) => t.project === project && (t.group ?? UNGROUPED_SESSION_ID) === groupId);
 }
 
-/** One line under a session row: how many panes and which engines, e.g.
- * "2 panes · Claude Code, Shell". Deliberately built from the live tabs
- * rather than remembering what the create dialog chose — a pane closed
- * afterwards must not leave the row claiming it's still there. */
-export function describeSession(session: SessionGroup, engineLabel: (engine: string) => string): string {
-  const count = session.tabs.length;
-  const engines: string[] = [];
+/** Which engines are running in this session and how many terminals of
+ * each, first-seen order — the hover card's "how many terminals and which
+ * engines" row.
+ *
+ * Replaced `describeSession`, which rendered the same facts as one string
+ * ("2 panes · Claude Code, Shell") for a sidebar line that no longer exists:
+ * the sidebar now shows a session's name and branch and nothing else
+ * (founder: "The menu on the left should not show the amount of tabs and
+ * their names… Just the session, so it's cleaner"), and the card that
+ * inherited the detail draws an engine-coloured dot per engine, which needs
+ * the engines as data rather than as prose.
+ *
+ * Built from the live tabs, never from what the create dialog chose — a
+ * terminal closed afterwards must not leave the card claiming it's there. */
+export function sessionEngineBreakdown(session: SessionGroup): Array<{ engine: Engine; count: number }> {
+  const counts: Array<{ engine: Engine; count: number }> = [];
   for (const tab of session.tabs) {
-    const label = engineLabel(tab.engine);
-    if (!engines.includes(label)) engines.push(label);
+    const seen = counts.find((c) => c.engine === tab.engine);
+    if (seen) seen.count += 1;
+    else counts.push({ engine: tab.engine, count: 1 });
   }
-  return `${count} pane${count === 1 ? "" : "s"} · ${engines.join(", ")}`;
+  return counts;
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { collapseHome, deriveHoverCard } from "./sessionHoverCard";
+import { collapseHome, deriveSessionCard } from "./sessionHoverCard";
+import { groupTabsBySession } from "./sessionGroups";
 import type { TabInfo } from "./sessions";
 
 function tab(overrides: Partial<TabInfo> = {}): TabInfo {
@@ -41,44 +42,95 @@ describe("collapseHome — Warp's `~/Documents/…` path rendering", () => {
   });
 });
 
-describe("deriveHoverCard — what the card actually shows", () => {
+describe("deriveSessionCard — what the card shows about a whole session", () => {
+  // The card moved from the pane header to the sidebar's session row
+  // (founder, 2026-07-26: "The hover part is currently wrong: it's not on
+  // the terminal itself, but on session menu on the left"), so every field
+  // is now scoped to the session rather than to one terminal.
+  function session(tabs: TabInfo[], activeTabId: string | null = null) {
+    return groupTabsBySession(tabs, activeTabId)[0].sessions[0];
+  }
+
   it("derives every field the card renders from data the frontend genuinely has", () => {
-    const model = deriveHoverCard({
-      tab: tab({ label: "backend fix", status: "awaiting_approval" }),
+    const model = deriveSessionCard({
+      session: session([
+        tab({ id: "s1", group: "g1", groupLabel: "auth refactor", status: "thinking" }),
+        tab({ id: "s2", group: "g1", engine: "shell", status: "awaiting_approval" }),
+      ]),
       projectLabel: "My-Brain",
       branch: "main",
     });
 
-    expect(model.title).toBe("backend fix");
+    expect(model.name).toBe("auth refactor");
     expect(model.projectLabel).toBe("My-Brain");
     expect(model.path).toBe("~/Documents/Bruno.Digital/My-Brain");
     expect(model.branch).toBe("main");
-    expect(model.engine).toBe("claude");
-    expect(model.engineLabel).toBe("Claude Code");
+    expect(model.terminals).toBe(2);
+    expect(model.engines).toEqual([
+      { engine: "claude", label: "Claude Code", count: 1 },
+      { engine: "shell", label: "Shell", count: 1 },
+    ]);
+    // The session speaks with its most significant terminal's voice.
     expect(model.status.label).toBe("Needs approval");
     expect(model.status.explanation).toContain("approve");
     expect(model.restored).toBe(false);
   });
 
-  it("falls back to the engine name as the title for a tab that was never renamed", () => {
-    expect(deriveHoverCard({ tab: tab({ engine: "codex" }), projectLabel: "P" }).title).toBe("codex");
+  it("names an unnamed session by its derived default", () => {
+    const model = deriveSessionCard({ session: session([tab({ group: "g1" })]), projectLabel: "P" });
+    expect(model.name).toBe("Session 1");
   });
 
-  it("shows the neutral pre-signal state when no status has arrived yet", () => {
-    const model = deriveHoverCard({ tab: tab({ status: undefined }), projectLabel: "P" });
+  it("reads the path from the session's own root, not from whichever terminal moved", () => {
+    const model = deriveSessionCard({
+      session: session([
+        tab({ id: "s1", group: "g1", cwd: "/Users/bonando/code/api" }),
+        tab({ id: "s2", group: "g1", cwd: "/Users/bonando/code/api/vendor" }),
+      ]),
+      projectLabel: "P",
+    });
+    expect(model.path).toBe("~/code/api");
+  });
+
+  it("shows the neutral pre-signal state when nothing in the session has reported yet", () => {
+    const model = deriveSessionCard({ session: session([tab({ group: "g1" })]), projectLabel: "P" });
     expect(model.status.key).toBe("unknown");
   });
 
-  it("carries the branch through as null when the session's cwd isn't a git repo", () => {
-    expect(deriveHoverCard({ tab: tab(), projectLabel: "P", branch: null }).branch).toBeNull();
-    expect(deriveHoverCard({ tab: tab(), projectLabel: "P" }).branch).toBeNull();
+  it("carries the branch through as null when the session's root isn't a git repo", () => {
+    const s = session([tab({ group: "g1" })]);
+    expect(deriveSessionCard({ session: s, projectLabel: "P", branch: null }).branch).toBeNull();
+    expect(deriveSessionCard({ session: s, projectLabel: "P" }).branch).toBeNull();
   });
 
-  it("reports a restored session so the card can say the tab came back alive", () => {
-    expect(deriveHoverCard({ tab: tab({ restored: true }), projectLabel: "P" }).restored).toBe(true);
+  it("says a session was restored when ANY of its terminals came back alive", () => {
+    const model = deriveSessionCard({
+      session: session([
+        tab({ id: "s1", group: "g1" }),
+        tab({ id: "s2", group: "g1", restored: true }),
+      ]),
+      projectLabel: "P",
+    });
+    expect(model.restored).toBe(true);
+  });
+
+  it("counts terminals per engine so two Claudes read as two, not one", () => {
+    const model = deriveSessionCard({
+      session: session([
+        tab({ id: "s1", group: "g1" }),
+        tab({ id: "s2", group: "g1" }),
+        tab({ id: "s3", group: "g1", engine: "codex" }),
+      ]),
+      projectLabel: "P",
+    });
+    expect(model.terminals).toBe(3);
+    expect(model.engines).toEqual([
+      { engine: "claude", label: "Claude Code", count: 2 },
+      { engine: "codex", label: "Codex", count: 1 },
+    ]);
   });
 
   it("leaves the diff stat null — the git-review data does not exist yet, and a number here would be invented", () => {
-    expect(deriveHoverCard({ tab: tab(), projectLabel: "P" }).diff).toBeNull();
+    expect(deriveSessionCard({ session: session([tab({ group: "g1" })]), projectLabel: "P" }).diff).toBeNull();
   });
 });

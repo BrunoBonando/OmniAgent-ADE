@@ -11,6 +11,19 @@ import type { SessionStatus } from "./sessionStatus";
 export const ENGINES = ["claude", "codex", "shell"] as const;
 export type Engine = (typeof ENGINES)[number];
 
+/** The implicit session every pane with no `group` belongs to, per project.
+ * Two kinds of pane land here: layouts persisted before groups existed
+ * (which must keep restoring exactly as they did), and any future code path
+ * that opens a pane without saying which session it's for. Never generated
+ * as a real group id — `newSessionGroupId` only ever mints `sess-grp-…`.
+ *
+ * Lives here rather than in `sessionGroups.ts` (which re-exports it, so
+ * every existing import still resolves) because the reducer below needs it
+ * to address a session by `project + group`, and `sessionGroups.ts` already
+ * imports from this module — pointing a value import back the other way
+ * would close the cycle. */
+export const UNGROUPED_SESSION_ID = "__ungrouped__";
+
 export function isEngine(value: unknown): value is Engine {
   return value === "claude" || value === "codex" || value === "shell";
 }
@@ -89,6 +102,28 @@ export interface TabInfo {
    * same reason `label`/`themeId` are: it describes the PANE, not the
    * process underneath it. */
   group?: string;
+  /** The **name of the session this pane belongs to** — founder brief,
+   * 2026-07-26, verbatim: *"Each session has a name and can be renamed. It
+   * starts with session #1"*.
+   *
+   * Stored, not derived. The sidebar used to label sessions positionally
+   * ("the 2nd session in this project is Session 2"), which silently
+   * renames every session below one that closes — the opposite of a name.
+   * So a session's name is materialized when it is created (`Session 1`,
+   * `Session 2`, … — see `sessionGroups.ts`'s `nextSessionName` for the
+   * numbering rule) and thereafter only changes when the user renames it.
+   *
+   * Carried by *every* pane of the session rather than by a second
+   * collection keyed by group id, for the reason `sessionGroups.ts`'s doc
+   * gives: the tabs array is the only thing that survives a relaunch, so a
+   * side table of names would need its own persistence, its own restore and
+   * its own garbage collection, and could disagree with the panes it
+   * describes. Renaming writes the name onto every pane in the group
+   * (`session/renamed`), and reading takes the first pane that has one.
+   *
+   * Undefined for pre-naming layouts and for the implicit ungrouped
+   * session, which fall back to a derived default. */
+  groupLabel?: string;
   themeId?: TerminalThemeId;
   /** This pane's five-state light (`sessionStatus.ts`), set by the
    * `tab/status` action from the `session-status:{id}` event stream and the
@@ -140,6 +175,13 @@ export type SessionsAction =
   | { type: "tab/closed"; id: string }
   | { type: "tab/activated"; id: string }
   | { type: "tab/renamed"; id: string; label: string }
+  // Renaming a whole SESSION (the sidebar's double-click-to-rename, same
+  // gesture `PaneHeader`/`ProjectMenu` use for a pane and a project). A
+  // session is addressed by `project + group` because a group id is only
+  // unique within its project, and the implicit `UNGROUPED_SESSION_ID`
+  // exists once per project. An empty/whitespace name clears the stored
+  // name, exactly like `tab/renamed` does for a pane.
+  | { type: "session/renamed"; project: string; group: string; name: string }
   // The five-state light — one `session-status:{id}` transition, or the
   // one-shot `session_status` pull for a pane that just appeared.
   | { type: "tab/status"; id: string; status: SessionStatus }
@@ -246,6 +288,19 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
         ...state,
         tabs: state.tabs.map((t) =>
           t.id === action.id ? { ...t, label: trimmed.length > 0 ? trimmed : undefined } : t,
+        ),
+      };
+    }
+
+    case "session/renamed": {
+      const inSession = (t: TabInfo) =>
+        t.project === action.project && (t.group ?? UNGROUPED_SESSION_ID) === action.group;
+      if (!state.tabs.some(inSession)) return state;
+      const trimmed = action.name.trim();
+      return {
+        ...state,
+        tabs: state.tabs.map((t) =>
+          inSession(t) ? { ...t, groupLabel: trimmed.length > 0 ? trimmed : undefined } : t,
         ),
       };
     }
@@ -419,6 +474,13 @@ export interface PersistedTab {
    * the way back in — a corrupt group id costs that pane its grouping, not
    * its terminal. */
   group?: string;
+  /** The session's **name** (see `TabInfo.groupLabel`). Persisted for the
+   * same reason the group id is: a relaunch that came back with sessions
+   * called something else — or renumbered — would make the name a lie. Kept
+   * even when `group` itself was rejected above: the pane then joins its
+   * project's implicit session, and that session is still the one the user
+   * named. */
+  groupLabel?: string;
 }
 export interface Layout {
   tabs: PersistedTab[];
@@ -426,7 +488,7 @@ export interface Layout {
 
 export function serializeLayout(tabs: TabInfo[]): string {
   const layout: Layout = {
-    tabs: tabs.map(({ id, project, engine, cwd, label, themeId, group }) => ({
+    tabs: tabs.map(({ id, project, engine, cwd, label, themeId, group, groupLabel }) => ({
       project,
       engine,
       cwd,
@@ -436,6 +498,7 @@ export function serializeLayout(tabs: TabInfo[]): string {
       ...(label ? { label } : {}),
       ...(themeId ? { themeId } : {}),
       ...(isValidSessionId(group) ? { group } : {}),
+      ...(groupLabel && groupLabel.trim().length > 0 ? { groupLabel: groupLabel.trim() } : {}),
     })),
   };
   return JSON.stringify(layout);
@@ -479,6 +542,16 @@ export function deserializeLayout(raw: string | null | undefined): PersistedTab[
         if (t.group === undefined) return t;
         if (isValidSessionId(t.group)) return t;
         const { group: _dropped, ...rest } = t;
+        return rest;
+      })
+      // A session name is free text the user typed, so it is only checked
+      // for being a non-empty string — a corrupt one costs the session its
+      // name (it falls back to a derived default) rather than the pane.
+      .map((t) => {
+        if (t.groupLabel === undefined) return t;
+        const trimmed = typeof t.groupLabel === "string" ? t.groupLabel.trim() : "";
+        if (trimmed.length > 0) return { ...t, groupLabel: trimmed };
+        const { groupLabel: _dropped, ...rest } = t;
         return rest;
       })
       .map((t) => {

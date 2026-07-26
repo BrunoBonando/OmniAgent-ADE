@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   UNGROUPED_SESSION_ID,
   currentSessionGroupId,
-  describeSession,
   groupTabsBySession,
   newSessionGroupId,
+  nextSessionName,
+  sessionEngineBreakdown,
   sessionGroupForNewPane,
   tabsInSession,
 } from "./sessionGroups";
@@ -43,10 +44,23 @@ describe("groupTabsBySession", () => {
     expect(grouped[1].sessions[0].tabs.map((t) => t.id)).toEqual(["b"]);
   });
 
-  it("labels sessions positionally within their own project", () => {
+  it("falls back to Session N, per project, for sessions nobody has named", () => {
     const grouped = groupTabsBySession([tab("a", "p1", "g1"), tab("b", "p1", "g2"), tab("c", "p2", "g9")], null);
     expect(grouped[0].sessions.map((s) => s.label)).toEqual(["Session 1", "Session 2"]);
     expect(grouped[1].sessions.map((s) => s.label)).toEqual(["Session 1"]);
+    // …and nothing was *stored*: these are derived defaults for panes that
+    // predate stored names.
+    expect(grouped[0].sessions.map((s) => s.name)).toEqual([undefined, undefined]);
+  });
+
+  it("carries each session's own root — the cwd its first pane was created in", () => {
+    const tabs = [
+      { ...tab("a", "p1", "g1"), cwd: "/repo" },
+      { ...tab("b", "p1", "g1"), cwd: "/repo/packages/api" },
+      { ...tab("c", "p1", "g2"), cwd: "/repo/packages/web" },
+    ];
+    const sessions = groupTabsBySession(tabs, null)[0].sessions;
+    expect(sessions.map((s) => s.cwd)).toEqual(["/repo", "/repo/packages/web"]);
   });
 
   it("collects pre-grouping panes under one implicit session per project", () => {
@@ -119,19 +133,88 @@ describe("tabsInSession", () => {
   });
 });
 
-describe("describeSession", () => {
-  const label = (e: string) => ({ claude: "Claude Code", codex: "Codex", shell: "Shell" })[e] ?? e;
+// ---------------------------------------------------------------------------
+// A session's NAME (founder brief, 2026-07-26: "Each session has a name and
+// can be renamed. It starts with session #1"). Stored on the panes
+// (`TabInfo.groupLabel`); only unnamed sessions fall back to a derived
+// "Session N".
+// ---------------------------------------------------------------------------
 
-  it("counts panes and lists each distinct engine once", () => {
+function named(id: string, project: string, group: string, groupLabel?: string): TabInfo {
+  return { ...tab(id, project, group), groupLabel };
+}
+
+describe("groupTabsBySession — stored session names", () => {
+  it("shows the name the session actually carries", () => {
+    const sessions = groupTabsBySession([named("a", "p1", "g1", "auth refactor")], null)[0].sessions;
+    expect(sessions[0].name).toBe("auth refactor");
+    expect(sessions[0].label).toBe("auth refactor");
+  });
+
+  it("takes the name from the first pane in the session that carries one", () => {
+    const sessions = groupTabsBySession(
+      [named("a", "p1", "g1"), named("b", "p1", "g1", "auth refactor")],
+      null,
+    )[0].sessions;
+    expect(sessions[0].label).toBe("auth refactor");
+  });
+
+  it("keeps a stored name stable when an earlier session closes", () => {
+    const all = [named("a", "p1", "g1", "Session 1"), named("b", "p1", "g2", "Session 2")];
+    const afterClosingTheFirst = groupTabsBySession(all.slice(1), null)[0].sessions;
+    // Positional labelling would have renamed this to "Session 1" — the bug
+    // stored names exist to kill.
+    expect(afterClosingTheFirst[0].label).toBe("Session 2");
+  });
+
+  it("never derives a default that collides with a name already in the workspace", () => {
+    const sessions = groupTabsBySession(
+      [named("a", "p1", "g1"), named("b", "p1", "g2", "Session 1"), named("c", "p1", "g3")],
+      null,
+    )[0].sessions;
+    expect(sessions.map((s) => s.label)).toEqual(["Session 2", "Session 1", "Session 3"]);
+  });
+});
+
+describe("nextSessionName — what a session about to be created is called", () => {
+  it("starts at Session 1 in a workspace with nothing open", () => {
+    expect(nextSessionName([], "p1")).toBe("Session 1");
+    expect(nextSessionName([named("z", "p2", "g9", "Session 1")], "p1")).toBe("Session 1");
+  });
+
+  it("takes the lowest free number, so re-creating after closing #2 gives Session 2 again", () => {
+    const live = [named("a", "p1", "g1", "Session 1"), named("c", "p1", "g3", "Session 3")];
+    expect(nextSessionName(live, "p1")).toBe("Session 2");
+  });
+
+  it("never collides with a live session, including one the user typed 'Session 2' onto", () => {
+    const live = [named("a", "p1", "g1", "Session 1"), named("b", "p1", "g2", "Session 2")];
+    expect(nextSessionName(live, "p1")).toBe("Session 3");
+  });
+
+  it("skips over derived names too — an unnamed legacy session still holds its number", () => {
+    expect(nextSessionName([named("a", "p1", "g1")], "p1")).toBe("Session 2");
+  });
+
+  it("numbers per workspace, never globally", () => {
+    const live = [named("a", "p1", "g1", "Session 1"), named("b", "p1", "g2", "Session 2")];
+    expect(nextSessionName(live, "p2")).toBe("Session 1");
+  });
+
+  it("ignores a user-chosen name that isn't a number at all", () => {
+    expect(nextSessionName([named("a", "p1", "g1", "auth refactor")], "p1")).toBe("Session 1");
+  });
+});
+
+describe("sessionEngineBreakdown — how many terminals of which engine", () => {
+  it("counts each engine once, in first-seen order, with its own tally", () => {
     const session = groupTabsBySession(
       [tab("a", "p1", "g1"), tab("b", "p1", "g1", "shell"), tab("c", "p1", "g1")],
       null,
     )[0].sessions[0];
-    expect(describeSession(session, label)).toBe("3 panes · Claude Code, Shell");
-  });
-
-  it("singularises a one-pane session", () => {
-    const session = groupTabsBySession([tab("a", "p1", "g1", "codex")], null)[0].sessions[0];
-    expect(describeSession(session, label)).toBe("1 pane · Codex");
+    expect(sessionEngineBreakdown(session)).toEqual([
+      { engine: "claude", count: 2 },
+      { engine: "shell", count: 1 },
+    ]);
   });
 });

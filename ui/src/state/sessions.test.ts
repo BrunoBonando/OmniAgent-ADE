@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   GLOBAL_DEFAULT_ENGINE_KEY,
   PRESSURE_THRESHOLD,
+  UNGROUPED_SESSION_ID,
   cycleEngine,
   defaultEngineSettingKey,
   deserializeLayout,
@@ -560,5 +561,111 @@ describe("sessionsReducer — tabs/opened_bulk", () => {
     });
     expect(next.tabs.map((t) => t.id)).toEqual(["a"]);
     expect(next.activeTabId).toBe("a");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sessions are first-class, named things (founder brief, 2026-07-26, verbatim:
+// "Each session has a name and can be renamed. It starts with session #1").
+// The name is STORED on every pane of the session (`TabInfo.groupLabel`) and
+// persisted with the layout, so it can never drift when sessions are closed
+// out of order — see `sessionGroups.ts` for the numbering rule.
+// ---------------------------------------------------------------------------
+
+describe("sessionsReducer — session/renamed", () => {
+  function grouped(id: string, project: string, group: string | undefined, groupLabel?: string): TabInfo {
+    return { ...tab(id, project), group, groupLabel };
+  }
+
+  it("names every pane of that session, and nothing else", () => {
+    const before: SessionsState = {
+      projects: [],
+      tabs: [grouped("a", "p1", "g1"), grouped("b", "p1", "g1"), grouped("c", "p1", "g2"), grouped("d", "p2", "g1")],
+      activeTabId: "a",
+    };
+    const next = sessionsReducer(before, {
+      type: "session/renamed",
+      project: "p1",
+      group: "g1",
+      name: "auth refactor",
+    });
+    expect(next.tabs.map((t) => t.groupLabel)).toEqual(["auth refactor", "auth refactor", undefined, undefined]);
+  });
+
+  it("trims the typed name", () => {
+    const before: SessionsState = { projects: [], tabs: [grouped("a", "p1", "g1")], activeTabId: "a" };
+    const next = sessionsReducer(before, { type: "session/renamed", project: "p1", group: "g1", name: "  ship it  " });
+    expect(next.tabs[0].groupLabel).toBe("ship it");
+  });
+
+  it("clears the stored name back to its derived default when renamed to nothing", () => {
+    const before: SessionsState = { projects: [], tabs: [grouped("a", "p1", "g1", "Session 1")], activeTabId: "a" };
+    const next = sessionsReducer(before, { type: "session/renamed", project: "p1", group: "g1", name: "   " });
+    expect(next.tabs[0].groupLabel).toBeUndefined();
+  });
+
+  it("renames a pre-grouping session addressed through the implicit group id", () => {
+    const before: SessionsState = {
+      projects: [],
+      tabs: [grouped("a", "p1", undefined), grouped("b", "p1", "g1")],
+      activeTabId: "a",
+    };
+    const next = sessionsReducer(before, {
+      type: "session/renamed",
+      project: "p1",
+      group: UNGROUPED_SESSION_ID,
+      name: "old work",
+    });
+    expect(next.tabs[0].groupLabel).toBe("old work");
+    expect(next.tabs[1].groupLabel).toBeUndefined();
+  });
+
+  it("is a no-op for a session that has no panes", () => {
+    const before: SessionsState = { projects: [], tabs: [grouped("a", "p1", "g1")], activeTabId: "a" };
+    expect(sessionsReducer(before, { type: "session/renamed", project: "p1", group: "nope", name: "x" })).toBe(before);
+  });
+});
+
+describe("layout persistence — the session name rides along", () => {
+  it("round trips a renamed session so it comes back named after a relaunch", () => {
+    const tabs: TabInfo[] = [
+      { ...tab("sess-1", "p1"), group: "sess-grp-1", groupLabel: "auth refactor" },
+      { ...tab("sess-2", "p1"), group: "sess-grp-1", groupLabel: "auth refactor" },
+    ];
+    expect(deserializeLayout(serializeLayout(tabs))).toEqual([
+      { id: "sess-1", project: "p1", engine: "claude", cwd: "/tmp/p1", group: "sess-grp-1", groupLabel: "auth refactor" },
+      { id: "sess-2", project: "p1", engine: "claude", cwd: "/tmp/p1", group: "sess-grp-1", groupLabel: "auth refactor" },
+    ]);
+  });
+
+  it("persists the default name too, so numbering can never shift under the user", () => {
+    const json = serializeLayout([{ ...tab("sess-1", "p1"), group: "sess-grp-1", groupLabel: "Session 2" }]);
+    expect(JSON.parse(json).tabs[0].groupLabel).toBe("Session 2");
+  });
+
+  it("omits groupLabel entirely for a session that has never been named", () => {
+    const json = serializeLayout([{ ...tab("a", "p1"), group: "sess-grp-1" }]);
+    expect(JSON.parse(json).tabs[0]).not.toHaveProperty("groupLabel");
+  });
+
+  it("drops a garbage session name rather than the whole pane", () => {
+    const raw = JSON.stringify({
+      tabs: [
+        { project: "p1", engine: "claude", cwd: "/tmp/p1", groupLabel: 7 },
+        { project: "p2", engine: "claude", cwd: "/tmp/p2", groupLabel: "   " },
+      ],
+    });
+    const restored = deserializeLayout(raw);
+    expect(restored).toHaveLength(2);
+    for (const t of restored) expect(t).not.toHaveProperty("groupLabel");
+  });
+
+  it("keeps a session name on a pane whose group id was rejected — it is still that pane's session", () => {
+    const raw = JSON.stringify({
+      tabs: [{ project: "p1", engine: "claude", cwd: "/tmp/p1", group: "bad group", groupLabel: "old work" }],
+    });
+    expect(deserializeLayout(raw)).toEqual([
+      { project: "p1", engine: "claude", cwd: "/tmp/p1", groupLabel: "old work" },
+    ]);
   });
 });

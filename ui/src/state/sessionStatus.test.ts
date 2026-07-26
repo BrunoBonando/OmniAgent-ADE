@@ -3,6 +3,7 @@ import {
   SESSION_STATUSES,
   STATUS_PRESENTATION,
   isSessionStatus,
+  mostSignificantStatus,
   statusPresentation,
   type SessionStatus,
 } from "./sessionStatus";
@@ -78,5 +79,28 @@ describe("statusPresentation — status -> colour / motion / label", () => {
     const p = statusPresentation("awaiting_approval");
     expect(p.ariaLabel).toContain(p.label);
     expect(p.ariaLabel).toContain(p.explanation);
+  });
+});
+
+describe("mostSignificantStatus — one light for a whole session", () => {
+  it("is the status of the terminal in the most significant state", () => {
+    expect(mostSignificantStatus(["ready", "thinking"])).toBe("thinking");
+    expect(mostSignificantStatus(["thinking", "awaiting_approval"])).toBe("awaiting_approval");
+    expect(mostSignificantStatus(["awaiting_approval", "error"])).toBe("error");
+    expect(mostSignificantStatus(["tool_execution", "thinking"])).toBe("tool_execution");
+  });
+
+  it("puts what blocks the person above what is merely busy", () => {
+    expect(mostSignificantStatus(["tool_execution", "awaiting_approval"])).toBe("awaiting_approval");
+    expect(mostSignificantStatus(["ready", "error", "thinking"])).toBe("error");
+  });
+
+  it("never guesses: a session where nothing has reported in yet stays unknown", () => {
+    expect(mostSignificantStatus([])).toBeUndefined();
+    expect(mostSignificantStatus([undefined, undefined])).toBeUndefined();
+  });
+
+  it("ignores terminals with no signal yet when others have one", () => {
+    expect(mostSignificantStatus([undefined, "ready"])).toBe("ready");
   });
 });

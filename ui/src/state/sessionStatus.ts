@@ -170,6 +170,39 @@ export function statusPresentation(status: SessionStatus | undefined | null): St
   return isSessionStatus(status) ? STATUS_PRESENTATION[status] : UNKNOWN_PRESENTATION;
 }
 
+/** Severity order for rolling several terminals up into one light — the
+ * sidebar shows one row per session, and a session is one-or-more terminals
+ * (founder brief: "inside it we have a session that contains multiple
+ * terminals").
+ *
+ * Read top-down, the rule is "what would you want to be told first": a
+ * failure, then a session paused on your approval, then whatever is
+ * actively moving, then rest. It deliberately outranks *blocked* over
+ * *busy* — a session running tools is fine on its own, one waiting for you
+ * is not going anywhere until you look.
+ */
+const STATUS_SEVERITY: Record<SessionStatus, number> = {
+  error: 5,
+  awaiting_approval: 4,
+  tool_execution: 3,
+  thinking: 2,
+  ready: 1,
+};
+
+/** The one status that speaks for a whole session. `undefined` when nothing
+ * in it has reported yet — which renders as the neutral "Starting" mark,
+ * never a guess (see `statusPresentation`). */
+export function mostSignificantStatus(
+  statuses: ReadonlyArray<SessionStatus | undefined>,
+): SessionStatus | undefined {
+  let best: SessionStatus | undefined;
+  for (const status of statuses) {
+    if (!isSessionStatus(status)) continue;
+    if (best === undefined || STATUS_SEVERITY[status] > STATUS_SEVERITY[best]) best = status;
+  }
+  return best;
+}
+
 /** "This session is blocked on the person, right now" — the single
  * definition of what used to be `TabInfo.needsAttention`'s latched red dot
  * (2026-07-26; see that field's removal note in `sessions.ts`).
