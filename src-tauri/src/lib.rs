@@ -465,6 +465,8 @@ pub fn run() {
             roots::roots_reingest_project,
             roots::roots_rebuild,
             commands::enrich_queue_pending_count,
+            commands::agents::agents_check_installed,
+            commands::agents::agents_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

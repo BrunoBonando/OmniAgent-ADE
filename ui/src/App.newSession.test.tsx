@@ -40,6 +40,7 @@ vi.mock("./lib/tauri", () => ({
 }));
 
 const { openMock } = vi.hoisted(() => ({ openMock: vi.fn() }));
+const { xtermKeyDownMock } = vi.hoisted(() => ({ xtermKeyDownMock: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: openMock }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
@@ -66,6 +67,14 @@ vi.mock("./components/Workspace", () => ({
   default: function WorkspaceStub(props: { tabs: TabInfo[]; activeTabId: string | null }) {
     return (
       <ul data-testid="workspace-stub" data-active-tab-id={props.activeTabId ?? ""}>
+        <textarea
+          data-testid="xterm-textarea"
+          onKeyDown={(event) => {
+            xtermKeyDownMock();
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+        />
         {props.tabs.map((t) => (
           <li key={t.id} data-testid="tab" data-group={t.group} data-cwd={t.cwd}>
             {`${t.id}:${t.engine}`}
@@ -257,16 +266,20 @@ describe("⌘N -> Session: panes in the project you're already in", () => {
 });
 
 describe("Ctrl+Arrow session navigation", () => {
-  it("moves down one session and stops at the final session", async () => {
+  it("moves down from an xterm descendant and stops at the final session", async () => {
     restoreThreeSessions();
     await boot();
     await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first"));
 
-    fireEvent.keyDown(window, { key: "ArrowDown", ctrlKey: true });
+    const textarea = screen.getByTestId("xterm-textarea");
+    textarea.focus();
+    expect(document.activeElement).toBe(textarea);
+    fireEvent.keyDown(textarea, { key: "ArrowDown", ctrlKey: true });
     await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("second"));
-    fireEvent.keyDown(window, { key: "ArrowDown", ctrlKey: true });
+    expect(xtermKeyDownMock).not.toHaveBeenCalled();
+    fireEvent.keyDown(textarea, { key: "ArrowDown", ctrlKey: true });
     await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("third"));
-    fireEvent.keyDown(window, { key: "ArrowDown", ctrlKey: true });
+    fireEvent.keyDown(textarea, { key: "ArrowDown", ctrlKey: true });
     expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("third");
   });
 
@@ -281,5 +294,27 @@ describe("Ctrl+Arrow session navigation", () => {
     await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("second"));
     fireEvent.keyDown(window, { key: "ArrowUp", ctrlKey: true });
     await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first"));
+  });
+
+  it("owns only exact Ctrl+Arrow chords", async () => {
+    restoreThreeSessions();
+    await boot();
+    await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first"));
+
+    for (const modifiers of [{ shiftKey: true }, { altKey: true }, { metaKey: true }]) {
+      fireEvent.keyDown(window, { key: "ArrowDown", ctrlKey: true, ...modifiers });
+    }
+    expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first");
+  });
+
+  it("does not navigate behind an active dialog", async () => {
+    restoreThreeSessions();
+    await boot();
+    await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first"));
+
+    pressCmdN();
+    expect(await screen.findByRole("dialog", { name: "Create new" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "ArrowDown", ctrlKey: true });
+    expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first");
   });
 });

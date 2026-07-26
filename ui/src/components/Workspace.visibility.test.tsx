@@ -1,11 +1,9 @@
 // Regression coverage for bug 3: `Terminal`'s `visible` prop must reflect
 // real visibility (its project's pane-grid is the selected one AND the
 // overall Workspace view is the active one), not a hardcoded `true`.
-// `Terminal.tsx`'s own become-visible effect (`useEffect(() => { if
-// (!visible) return; ...fit.fit(); term.focus(); void sessionResize(...);
-// }, [visible, sessionId])`) already does the right thing *when given a
-// real changing value* — the bug is entirely in what `Workspace.tsx` passes
-// it. So this test renders the real `Terminal` (with `@xterm/xterm` and its
+// `Terminal.tsx` keeps display/refit on `visible` and DOM focus on the
+// separate `focused` prop. This test renders the real `Terminal` (with
+// `@xterm/xterm` and its
 // addons mocked out, since full canvas/WebGL rendering isn't practically
 // unit-testable) inside the real `Workspace`/`ProjectPaneGrid`/
 // `react-mosaic-component` tree, and proves that switching away from and
@@ -23,18 +21,29 @@ const xtermMocks = vi.hoisted(() => ({
   ctorMock: vi.fn(),
   fitMock: vi.fn(),
   focusMock: vi.fn(),
+  keyDownMock: vi.fn(),
 }));
 
 vi.mock("@xterm/xterm", () => ({
   Terminal: vi.fn().mockImplementation(function (this: unknown, ...args: unknown[]) {
     xtermMocks.ctorMock(...args);
+    let container: HTMLElement | null = null;
     return Object.assign(this as object, {
-      open: vi.fn(),
+      open: vi.fn((nextContainer: HTMLElement) => {
+        container = nextContainer;
+        const textarea = document.createElement("textarea");
+        textarea.addEventListener("keydown", (event) => {
+          xtermMocks.keyDownMock();
+          event.preventDefault();
+          event.stopPropagation();
+        });
+        container.append(textarea);
+      }),
       loadAddon: vi.fn(),
       onData: vi.fn(() => ({ dispose: vi.fn() })),
       write: vi.fn(),
       dispose: vi.fn(),
-      focus: xtermMocks.focusMock,
+      focus: vi.fn(() => xtermMocks.focusMock(container?.dataset.sessionId)),
       cols: 80,
       rows: 24,
       // Real xterm.js `Terminal` instances expose a live-mutable `.options`
@@ -195,7 +204,7 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
     expect(xtermMocks.ctorMock).toHaveBeenCalledTimes(1);
   });
 
-  it("marks the active pane and cycles visible panes with Ctrl+Tab", async () => {
+  it("marks exactly the active pane and cycles from an xterm descendant with Ctrl+Tab", async () => {
     const p1 = project("p1");
     const tabs = [tab("a", "p1"), tab("b", "p1")];
     const onActivateTab = vi.fn();
@@ -211,18 +220,101 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
 
     const { container, rerender } = render(<Workspace {...props} activeTabId="a" hidden={false} />);
 
-    await waitFor(() => expect(container.querySelector(".pane-body.is-focused")).not.toBeNull());
-    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+    await waitFor(() => expect(container.querySelectorAll(".pane-body.is-focused")).toHaveLength(1));
+    expect(container.querySelector(".pane-body.is-focused")).toContainElement(
+      container.querySelector('[data-session-id="a"]'),
+    );
+    const firstTextarea = container.querySelector<HTMLTextAreaElement>('[data-session-id="a"] textarea')!;
+    firstTextarea.focus();
+    expect(document.activeElement).toBe(firstTextarea);
+    fireEvent.keyDown(firstTextarea, {
+      key: "Tab",
+      ctrlKey: true,
+    });
     expect(onActivateTab).toHaveBeenLastCalledWith("b");
+    expect(xtermMocks.keyDownMock).not.toHaveBeenCalled();
 
     rerender(<Workspace {...props} activeTabId="b" hidden={false} />);
-    await waitFor(() => expect(container.querySelector(".pane-body.is-focused")).not.toBeNull());
-    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+    await waitFor(() => expect(container.querySelectorAll(".pane-body.is-focused")).toHaveLength(1));
+    expect(container.querySelector(".pane-body.is-focused")).toContainElement(
+      container.querySelector('[data-session-id="b"]'),
+    );
+    fireEvent.keyDown(container.querySelector('[data-session-id="b"] textarea')!, {
+      key: "Tab",
+      ctrlKey: true,
+    });
     expect(onActivateTab).toHaveBeenLastCalledWith("a");
 
     onActivateTab.mockClear();
     rerender(<Workspace {...props} activeTabId="a" hidden={true} />);
-    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+    fireEvent.keyDown(container.querySelector('[data-session-id="a"] textarea')!, {
+      key: "Tab",
+      ctrlKey: true,
+    });
     expect(onActivateTab).not.toHaveBeenCalled();
+  });
+
+  it("owns only exact Ctrl+Tab and yields while a dialog or menu is open", async () => {
+    const p1 = project("p1");
+    const onActivateTab = vi.fn();
+    const { container } = render(
+      <Workspace
+        projects={[p1]}
+        tabs={[tab("a", "p1"), tab("b", "p1")]}
+        activeTabId="a"
+        selectedProjectId="p1"
+        onActivateTab={onActivateTab}
+        onCloseTab={noop}
+        onNewTabInProject={noop}
+        onRenameTab={noop}
+        hidden={false}
+      />,
+    );
+    await waitFor(() => expect(container.querySelector('[data-session-id="a"] textarea')).not.toBeNull());
+    const textarea = container.querySelector('[data-session-id="a"] textarea')!;
+
+    for (const modifiers of [{ shiftKey: true }, { altKey: true }, { metaKey: true }]) {
+      fireEvent.keyDown(textarea, { key: "Tab", ctrlKey: true, ...modifiers });
+    }
+    expect(onActivateTab).not.toHaveBeenCalled();
+
+    for (const role of ["dialog", "menu"]) {
+      const overlay = document.createElement("div");
+      overlay.setAttribute("role", role);
+      document.body.append(overlay);
+      fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+      overlay.remove();
+    }
+    expect(onActivateTab).not.toHaveBeenCalled();
+  });
+
+  it("focuses the state-selected xterm after pane and session navigation", async () => {
+    const p1 = project("p1");
+    const tabs = [
+      { ...tab("a", "p1"), group: "g1" },
+      { ...tab("b", "p1"), group: "g1" },
+      { ...tab("c", "p1"), group: "g2" },
+    ];
+    const props = {
+      projects: [p1],
+      selectedProjectId: "p1",
+      onActivateTab: noop,
+      onCloseTab: noop,
+      onNewTabInProject: noop,
+      onRenameTab: noop,
+      hidden: false,
+    };
+    const { rerender } = render(<Workspace {...props} tabs={tabs} activeTabId="a" />);
+
+    await waitFor(() => expect(xtermMocks.focusMock).toHaveBeenCalled());
+    expect(xtermMocks.focusMock).toHaveBeenLastCalledWith("a");
+
+    xtermMocks.focusMock.mockClear();
+    rerender(<Workspace {...props} tabs={tabs} activeTabId="b" />);
+    await waitFor(() => expect(xtermMocks.focusMock).toHaveBeenLastCalledWith("b"));
+
+    xtermMocks.focusMock.mockClear();
+    rerender(<Workspace {...props} tabs={tabs} activeTabId="c" />);
+    await waitFor(() => expect(xtermMocks.focusMock).toHaveBeenLastCalledWith("c"));
   });
 });

@@ -67,6 +67,7 @@ import {
 import type { CreateChoice } from "./state/newChooserState";
 import { ENGINE_LABEL } from "./theme";
 import type { TerminalThemeId } from "./lib/terminalThemes";
+import { ownsCtrlOnlyShortcut } from "./lib/keyboard";
 import { usePerSessionEvent } from "./lib/usePerSessionEvent";
 import {
   FILE_TREE_VISIBLE_SETTING_KEY,
@@ -1136,12 +1137,9 @@ function App() {
   // through to here like ⌘T and ⌘K always did.
   // -------------------------------------------------------------------
   useEffect(() => {
-    function onKeyDown(e: KeyboardEvent) {
+    function onNavigationKeyDown(e: KeyboardEvent) {
       if (
-        e.ctrlKey &&
-        !e.metaKey &&
-        !e.altKey &&
-        !e.shiftKey &&
+        ownsCtrlOnlyShortcut(e) &&
         (e.key === "ArrowDown" || e.key === "ArrowUp")
       ) {
         if (selectedProjectId !== null) {
@@ -1153,11 +1151,13 @@ function App() {
           );
           if (next) {
             e.preventDefault();
+            e.stopPropagation();
             activateTab(next.id);
           }
         }
-        return;
       }
+    }
+    function onKeyDown(e: KeyboardEvent) {
       if (!e.metaKey) return;
       if (e.key.toLowerCase() === "t") {
         e.preventDefault();
@@ -1185,8 +1185,12 @@ function App() {
         }
       }
     }
+    window.addEventListener("keydown", onNavigationKeyDown, true);
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onNavigationKeyDown, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, [activateTab, selectedProject, selectedProjectId, requestNewTab, state.activeTabId, state.tabs]);
 
   // The chrome's breadcrumb — "which workspace, which session am I in" —

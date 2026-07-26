@@ -18,6 +18,7 @@ import { resolveTerminalTheme, type TerminalThemeId } from "../lib/terminalTheme
 interface TerminalProps {
   sessionId: string;
   visible: boolean;
+  focused: boolean;
   /** This pane's terminal color-theme override — `undefined` renders
    * `terminalThemes.ts`'s global default. See `TabInfo.themeId`'s doc
    * (sessions.ts) for the global-default-with-per-pane-override design. */
@@ -48,7 +49,7 @@ function base64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
-export default function Terminal({ sessionId, visible, themeId, onFirstInput }: TerminalProps) {
+export default function Terminal({ sessionId, visible, focused, themeId, onFirstInput }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -203,8 +204,8 @@ export default function Terminal({ sessionId, visible, themeId, onFirstInput }: 
     term.options.theme = resolveTerminalTheme(themeId);
   }, [themeId]);
 
-  // Re-fit and refocus whenever this tab becomes the visible one (covers
-  // both "just switched to it" and "window resized while it was hidden").
+  // Re-fit whenever this tab becomes visible (covers both "just switched
+  // to it" and "window resized while it was hidden").
   useEffect(() => {
     if (!visible) return;
     const frame = requestAnimationFrame(() => {
@@ -216,11 +217,14 @@ export default function Terminal({ sessionId, visible, themeId, onFirstInput }: 
       } catch {
         // container not laid out yet — next resize/visibility flip retries.
       }
-      term.focus();
       void sessionResize(sessionId, term.cols, term.rows);
     });
     return () => cancelAnimationFrame(frame);
   }, [visible, sessionId]);
+
+  useEffect(() => {
+    if (focused) termRef.current?.focus();
+  }, [focused, sessionId]);
 
   return (
     <div

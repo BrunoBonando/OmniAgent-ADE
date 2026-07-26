@@ -16,6 +16,8 @@
 //! directly rather than re-deriving the same `NodeView`/`ProjectView`
 //! projections a second time in this crate.
 
+pub mod agents;
+
 use std::path::PathBuf;
 use std::sync::Mutex;
 

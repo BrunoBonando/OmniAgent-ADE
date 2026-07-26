@@ -31,13 +31,11 @@
 //! ([`resolve_mcp_server_binary`]), writes a throwaway `--mcp-config` JSON
 //! file registering it (with `OMNIAGENT_ADE_DATA_DIR` set in its `env`
 //! block), and — if a `briefing` was supplied — forwards it verbatim via
-//! `--append-system-prompt`. If the MCP binary can't be found, `claude` is
-//! still spawned, just without that flag (logged, never a hard failure —
-//! see [`resolve_mcp_server_binary`]'s doc comment for why). `codex` and
-//! `shell` are spawned completely stock: no injected flags, nothing written
-//! to the user's own `~/.claude/*`, project `CLAUDE.md`, or any global MCP
-//! config — every bit of wiring is a per-invocation CLI flag on the child
-//! process we spawn, never a file we edit.
+//! `--append-system-prompt`. Codex receives the same MCP server through its
+//! per-invocation `--config mcp_servers.omniagent=…` override. If the MCP
+//! binary can't be found, either engine is still spawned without ADE wiring
+//! (logged, never a hard failure — see [`resolve_mcp_server_binary`]'s doc
+//! comment). Nothing is written to the user's own config.
 //!
 //! ## Attention detection (founder feedback, 2026-07-24)
 //! Bruno: "every claude session[...] can notify the app whenever it needs
@@ -2134,10 +2132,22 @@ fn build_engine_argv(
             })
         }
         "codex" => {
-            // Stock spawn — no flags, nothing injected (Zero-config
-            // principle: only `claude` gets ADE wiring in this task).
+            let mut argv = vec!["codex".to_string()];
+            if let Some(bin) = resolve_mcp_server_binary() {
+                let command = serde_json::to_string(&bin.to_string_lossy())?;
+                let data_dir = serde_json::to_string(&data_dir.to_string_lossy())?;
+                argv.push("--config".to_string());
+                argv.push(format!(
+                    "mcp_servers.omniagent={{command={command},args=[],env={{OMNIAGENT_ADE_DATA_DIR={data_dir}}}}}"
+                ));
+            } else {
+                eprintln!(
+                    "omniagent-ade: omniagent-mcp binary not found next to the app \
+                     binary; launching codex for session {session_id} without ADE's MCP wiring"
+                );
+            }
             Ok(EngineCommand {
-                argv: vec!["codex".to_string()],
+                argv,
                 env,
                 cwd: req.cwd.clone(),
                 mcp_config_path: None,
@@ -3569,6 +3579,38 @@ mod tests {
     }
 
     #[test]
+    fn codex_gets_omniagent_mcp_wiring() {
+        let exe = std::env::current_exe().unwrap();
+        let sibling = exe.parent().unwrap().join("omniagent-mcp");
+        std::fs::write(&sibling, b"fake").unwrap();
+        struct RemoveOnDrop(PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _sibling_guard = RemoveOnDrop(sibling.clone());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let req = CreateSessionRequest {
+            project: "demo".into(),
+            engine: "codex".into(),
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            briefing: None,
+            restore_id: None,
+        };
+        let cmd =
+            build_engine_command(&req, tmp.path(), "sess-codex-mcp", ClaudeIdentity::Stock).unwrap();
+
+        assert_eq!(cmd.argv[1], "--config");
+        assert!(cmd.argv[2].contains("mcp_servers.omniagent="));
+        assert!(cmd.argv[2].contains(&serde_json::to_string(&sibling.to_string_lossy()).unwrap()));
+        assert!(cmd.argv[2].contains(
+            &serde_json::to_string(&tmp.path().to_string_lossy()).unwrap()
+        ));
+    }
+
+    #[test]
     fn rejects_unknown_engine() {
         let tmp = tempfile::tempdir().unwrap();
         let req = CreateSessionRequest {
@@ -4927,10 +4969,9 @@ mod tests {
                     restore_id: None,
                 };
                 let cmd = build_engine_command(&req, tmp.path(), "sess-x", identity).unwrap();
-                assert_eq!(
-                    cmd.argv.len(),
-                    1,
-                    "{engine} must be spawned stock under {identity:?}, got {:?}",
+                assert!(
+                    !cmd.argv.iter().any(|arg| arg == "--session-id" || arg == "--resume"),
+                    "{engine} must not receive Claude identity flags under {identity:?}: {:?}",
                     cmd.argv
                 );
             }

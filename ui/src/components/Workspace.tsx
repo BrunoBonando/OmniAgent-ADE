@@ -102,6 +102,7 @@ import {
 } from "../state/sessions";
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
 import type { TerminalThemeId } from "../lib/terminalThemes";
+import { ownsCtrlOnlyShortcut } from "../lib/keyboard";
 
 interface ProjectPaneGridProps {
   hidden: boolean;
@@ -181,14 +182,15 @@ function ProjectPaneGrid({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!event.ctrlKey || event.key !== "Tab" || hidden) return;
+      if (!ownsCtrlOnlyShortcut(event) || event.key !== "Tab" || hidden) return;
       const ids = paneIds(tree);
       if (ids.length < 2) return;
       event.preventDefault();
+      event.stopPropagation();
       onActivateTab(ids[(Math.max(ids.indexOf(activeTabId ?? ""), 0) + 1) % ids.length]);
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [activeTabId, hidden, onActivateTab, tree]);
 
   return (
@@ -256,6 +258,7 @@ function ProjectPaneGrid({
                   <Terminal
                     sessionId={tab.id}
                     visible={terminalsVisible}
+                    focused={terminalsVisible && tab.id === activeTabId}
                     themeId={tab.themeId}
                     onFirstInput={onFirstInput}
                   />

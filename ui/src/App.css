@@ -1815,6 +1815,27 @@ code {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--signal) 58%, transparent);
 }
 
+/* The 1px ring alone was too easy to lose in a grid (founder, 2026-07-26:
+   "it's currently very difficult to know where I am... a gradient subtle
+   effect should be enough"), so the focused pane also takes a wash of the
+   focus colour falling from under its header.
+   An overlay (`::after`) rather than a background: xterm paints its own
+   opaque canvas (`TERMINAL_THEMES[*].background`) over anything behind it,
+   so a background here would never be seen. Low alpha and
+   `pointer-events: none`, so it neither eats clicks nor meaningfully moves
+   the text contrast underneath. */
+.pane-body.is-focused::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--signal) 13%, transparent),
+    transparent 45%
+  );
+}
+
 .terminal-surface {
   position: absolute;
   inset: 0;
