@@ -20,6 +20,7 @@
 // modal.
 import { basenameOf } from "./addProjectState";
 import { ENGINES, type Engine } from "./sessions";
+import { getDefaultAgentSelection, type AgentsState } from "./agents";
 import { LAYOUT_PRESETS, type LayoutPreset } from "./paneGrid";
 
 export interface NewWorkspaceState {
@@ -38,11 +39,14 @@ export interface NewWorkspaceState {
   error: string | null;
 }
 
-/** Only Claude checked by default — the same "if the default is Claude, it
+/** The checklist a dialog falls back to when nothing is known about which
+ * agents exist yet — only Claude, the same "if the default is Claude, it
  * basically runs Claude" precedent `sessions.ts`'s `resolveDefaultEngine`
- * and `EnginePicker.tsx` already establish for the single-tab flow, applied
- * here to the bulk checklist: the common case (one pre-briefed Claude
- * session) is zero clicks, Codex/Shell are one click away to add. */
+ * and `EnginePicker.tsx` establish for the single-tab flow.
+ *
+ * Prefer {@link initialNewWorkspaceStateFor}, which picks from the agents
+ * actually installed on this machine. This constant is the zero-knowledge
+ * case (and what the pre-agent-registry tests pin). */
 export const DEFAULT_ENGINE_SELECTION: Record<Engine, boolean> = {
   claude: true,
   codex: false,
@@ -60,6 +64,35 @@ export const initialNewWorkspaceState: NewWorkspaceState = {
   submitting: false,
   error: null,
 };
+
+/** The state a New Workspace dialog opens with, given what is installed.
+ *
+ * Founder brief (2026-07-26, verbatim): *"the last one that they created,
+ * should be pre-selected. if it's a brand new installation, it should be
+ * shell selected or if it's only one agent installed, let's say: claude is
+ * the only agent installed, then you pre-select claude."*
+ *
+ * The rule itself is `getDefaultAgentSelection` (`agents.ts`) — this only
+ * turns its answer into the `Record<Engine, boolean>` the checklist renders,
+ * so there is one definition of "which agents should start checked" rather
+ * than one here and one there.
+ *
+ * Filtered against `installed` on the way out: a row for a missing agent is
+ * rendered *disabled*, so a checked-and-disabled box would be one the user
+ * cannot clear and cannot submit with. Pre-selecting only what can actually
+ * run keeps the dialog always submittable. */
+export function initialNewWorkspaceStateFor(agents: AgentsState): NewWorkspaceState {
+  const selected = new Set(
+    getDefaultAgentSelection(agents).filter((a) => agents.installed.has(a)),
+  );
+  return {
+    ...initialNewWorkspaceState,
+    engines: Object.fromEntries(ENGINES.map((e) => [e, selected.has(e)])) as Record<
+      Engine,
+      boolean
+    >,
+  };
+}
 
 export type NewWorkspaceAction =
   | { type: "folder_picked"; path: string }

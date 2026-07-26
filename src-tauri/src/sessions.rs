@@ -2192,8 +2192,32 @@ fn build_engine_argv(
                 mcp_config_path,
             })
         }
+        // Copilot and Antigravity are spawned bare: neither accepts ADE's MCP
+        // config format, and passing invented flags would fail at launch. They
+        // get a terminal and their own CLI, which is what the founder asked
+        // for ("if the default is Claude, it basically runs Claude" — the same
+        // principle, applied to engines ADE has no wiring for).
+        //
+        // The binary comes from `commands::agents::AGENTS` rather than a
+        // literal, because the engine's name is not always its executable
+        // (Antigravity's CLI is `agy`). That table is also what
+        // `agents_check_installed` reports from, so an agent can never be
+        // detected as installed and then fail to spawn — the exact break this
+        // dispatch shipped with when the frontend's engine list was widened to
+        // five and this match was left at three.
+        name @ ("copilot" | "antigravity") => {
+            let binary = crate::commands::agents::binary_for(name)
+                .ok_or_else(|| anyhow!("no binary registered for engine {name:?}"))?;
+            Ok(EngineCommand {
+                argv: vec![binary.to_string()],
+                env,
+                cwd: req.cwd.clone(),
+                mcp_config_path: None,
+            })
+        }
         other => Err(anyhow!(
-            "unsupported engine: {other:?} (expected \"claude\", \"codex\", or \"shell\")"
+            "unsupported engine: {other:?} (expected one of \"claude\", \"codex\", \
+             \"shell\", \"copilot\", \"antigravity\")"
         )),
     }
 }
@@ -3622,6 +3646,54 @@ mod tests {
         };
         let err = build_command(&req, tmp.path(), "sess-test").unwrap_err();
         assert!(err.to_string().contains("unsupported engine"));
+    }
+
+    /// **The guard for the bug this dispatch actually shipped with.**
+    ///
+    /// When the frontend's engine list was widened from three agents to five,
+    /// this match was left at three. Every unit test still passed — each one
+    /// covered a single agent, and none asked "is every agent the app offers
+    /// actually spawnable?". The result was a Copilot row the user could
+    /// tick, install, and select, that then failed at `session_create` with
+    /// "unsupported engine".
+    ///
+    /// So: walk the SAME table `agents_check_installed` reports from. Any
+    /// agent that can be offered in the UI must build a command here, and its
+    /// argv must lead with that agent's real binary (`agy`, not
+    /// "antigravity"). Adding a row to `AGENTS` without an arm here now fails
+    /// this test instead of shipping.
+    #[test]
+    fn every_offerable_agent_can_be_spawned() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        for spec in crate::commands::agents::AGENTS {
+            let req = CreateSessionRequest {
+                project: "demo".into(),
+                engine: spec.name.into(),
+                cwd: tmp.path().to_string_lossy().into_owned(),
+                briefing: None,
+                restore_id: None,
+            };
+            let (cmd, _mcp_cfg) = build_command(&req, tmp.path(), "sess-test")
+                .unwrap_or_else(|e| panic!("engine {:?} is offered but cannot spawn: {e}", spec.name));
+
+            let argv = cmd.get_argv();
+            let argv0 = argv
+                .first()
+                .unwrap_or_else(|| panic!("{}: empty argv", spec.name))
+                .to_string_lossy()
+                .into_owned();
+            let argv0 = &argv0;
+            match spec.binary {
+                // Built-in: whatever $SHELL resolved to, not a table entry.
+                None => assert!(!argv0.is_empty(), "{}: empty shell path", spec.name),
+                Some(bin) => assert!(
+                    argv0 == bin || argv0.ends_with(&format!("/{bin}")),
+                    "{}: spawns {argv0:?}, expected its registered binary {bin:?}",
+                    spec.name
+                ),
+            }
+        }
     }
 
     // -- Shell-PATH resolution (founder bug, 2026-07-25 -- see module docs

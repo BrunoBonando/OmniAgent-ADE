@@ -1,127 +1,218 @@
-//! Agent management commands: checking which agents are installed and
-//! installing new agents. Agents are executables that can be detected on PATH
-//! and installed via platform-specific package managers.
+//! Which agents this app can run, whether they're installed, and how to
+//! install the ones that aren't.
+//!
+//! # Everything about an agent lives in [`AGENTS`]
+//!
+//! This module exists because three facts about an agent kept drifting apart
+//! when they lived in three files:
+//!
+//! 1. its **name** — what the UI shows and what `session_create` receives,
+//! 2. its **binary** — what proves it is installed, and what we spawn,
+//! 3. its **install command**.
+//!
+//! They are not interchangeable. Antigravity's name is `antigravity` but its
+//! CLI is `agy`; `shell` has no binary at all. Detecting an agent by its
+//! *name* silently reports Antigravity as missing on a machine that has it,
+//! and reports `shell` as missing on every machine there has ever been.
+//!
+//! So all three live in one table, and [`binary_for`] is what
+//! `sessions.rs` uses to spawn — one definition, no second copy to fall out
+//! of sync with this one.
+//!
+//! **To add or fix an agent, edit [`AGENTS`] and nothing else** (plus the
+//! matching entry in `ui/src/state/agents.ts`, which `agents_match_frontend`
+//! pins).
 
 use tauri::Emitter;
 
-/// The five supported agents in this deployment.
-const SUPPORTED_AGENTS: &[&str] = &["claude", "codex", "shell", "copilot", "antigravity"];
-
-/// Checks which agents are currently installed by testing if their binaries
-/// are available on the system PATH using the `which` crate.
-///
-/// Returns a list of installed agent names. Always returns `Ok` — failures to
-/// detect individual agents are silent (the agent simply doesn't appear in the
-/// list).
-#[tauri::command]
-pub async fn agents_check_installed() -> Result<Vec<String>, String> {
-    let mut installed = Vec::new();
-
-    for agent in SUPPORTED_AGENTS {
-        if which::which(agent).is_ok() {
-            installed.push(agent.to_string());
-        }
-    }
-
-    Ok(installed)
+/// How an agent gets onto the machine.
+pub enum Install {
+    /// Nothing to install — part of the OS. Always reports as installed.
+    BuiltIn,
+    /// A shell one-liner. Run through `sh -c`, so pipes and `&&` work.
+    Command(&'static str),
+    /// No scriptable install exists; the UI opens this page instead. Better
+    /// than a fabricated command that fails on every machine.
+    Page(&'static str),
 }
 
-/// Installs an agent by downloading/installing it via the appropriate method
-/// for that agent. Emits `agent-install-progress:{agent}` events during the
-/// installation process with status updates ("installing", "completed", or
-/// "failed").
+pub struct AgentSpec {
+    /// What the UI and `session_create` call this agent.
+    pub name: &'static str,
+    /// The executable to look for on PATH and to spawn. `None` for built-ins.
+    /// **Not always `name`** — see the module doc.
+    pub binary: Option<&'static str>,
+    pub install: Install,
+}
+
+/// The five agents, and the single source of truth for all three facts.
 ///
-/// The installation method varies by agent:
-/// - `claude`: via `pip install` (Claude Code CLI)
-/// - `codex`: via `pip install` (Codex CLI)
-/// - `shell`: via system package manager or direct installation
-/// - `copilot`: via `pip install` (GitHub Copilot CLI)
-/// - `antigravity`: via `pip install` (Antigravity agent)
+/// Install channels verified against a machine with all four CLIs present
+/// (2026-07-26). They are the part most likely to rot — when an agent moves
+/// to a new channel, this is the only line that changes.
+pub const AGENTS: &[AgentSpec] = &[
+    AgentSpec {
+        name: "claude",
+        binary: Some("claude"),
+        // Native installer; drops a versioned symlink in ~/.local/bin.
+        install: Install::Command("curl -fsSL https://claude.ai/install.sh | bash"),
+    },
+    AgentSpec {
+        name: "codex",
+        binary: Some("codex"),
+        install: Install::Command("npm install -g @openai/codex"),
+    },
+    AgentSpec {
+        name: "shell",
+        binary: None,
+        install: Install::BuiltIn,
+    },
+    AgentSpec {
+        name: "copilot",
+        binary: Some("copilot"),
+        // npm rather than `brew install --cask copilot-cli`: same CLI, and it
+        // is not macOS-only. (Note the `copilot` *formula* is a different
+        // tool entirely — AWS ECS Copilot — so brew is a trap here.)
+        install: Install::Command("npm install -g @github/copilot"),
+    },
+    AgentSpec {
+        name: "antigravity",
+        // The CLI is `agy`. This mismatch is the reason this table exists.
+        binary: Some("agy"),
+        // Ships as a Google IDE download that self-updates via `agy update`;
+        // no package-manager channel to script. ponytail: a Page beats
+        // inventing a command that fails for everyone.
+        install: Install::Page("https://antigravity.google/download"),
+    },
+];
+
+fn spec(name: &str) -> Option<&'static AgentSpec> {
+    AGENTS.iter().find(|a| a.name == name)
+}
+
+/// The executable for an agent, for callers that need to spawn it.
+/// `None` means built-in (or unknown) — the caller decides what that means.
+pub fn binary_for(name: &str) -> Option<&'static str> {
+    spec(name).and_then(|a| a.binary)
+}
+
+/// Which agents are installed right now.
 ///
-/// If installation fails, emits a "failed" event before returning an error.
+/// Built-ins always count. Everything else is a PATH lookup on its *binary*,
+/// never its name.
+#[tauri::command]
+pub async fn agents_check_installed() -> Result<Vec<String>, String> {
+    Ok(AGENTS
+        .iter()
+        .filter(|a| match a.binary {
+            None => true,
+            Some(bin) => which::which(bin).is_ok(),
+        })
+        .map(|a| a.name.to_string())
+        .collect())
+}
+
+/// Install an agent, emitting `agent-install-progress:{agent}` as it goes
+/// ("installing" -> "completed" | "failed"). The frontend drives its pane
+/// overlay off that event.
+///
+/// [`Install::Page`] agents return an error naming the URL: there is nothing
+/// to run, and claiming success would leave the UI showing an agent as
+/// installed that isn't.
 #[tauri::command]
 pub async fn agents_install(agent: String, window: tauri::Window) -> Result<(), String> {
-    // Validate the agent name
-    if !SUPPORTED_AGENTS.contains(&agent.as_str()) {
+    let Some(spec) = spec(&agent) else {
         return Err(format!("Unknown agent: {agent}"));
-    }
+    };
 
-    // Emit "installing" status
     let _ = window.emit(&format!("agent-install-progress:{agent}"), "installing");
 
-    // Execute the installation command based on the agent
-    let result = match agent.as_str() {
-        "claude" => {
-            install_via_pip(&agent, "claude-code").await
-        }
-        "codex" => {
-            install_via_pip(&agent, "codex").await
-        }
-        "shell" => {
-            install_shell_agent().await
-        }
-        "copilot" => {
-            install_via_pip(&agent, "github-copilot-cli").await
-        }
-        "antigravity" => {
-            install_via_pip(&agent, "antigravity").await
-        }
-        _ => unreachable!(), // Protected by the check above
+    let result = match spec.install {
+        Install::BuiltIn => Ok(()),
+        Install::Page(url) => Err(format!("{agent} has no scriptable install; see {url}")),
+        Install::Command(cmd) => run_install(cmd).await,
     };
 
     match result {
-        Ok(_) => {
-            // Emit "completed" status
+        Ok(()) => {
             let _ = window.emit(&format!("agent-install-progress:{agent}"), "completed");
             Ok(())
         }
         Err(e) => {
-            // Emit "failed" status before returning error
             let _ = window.emit(&format!("agent-install-progress:{agent}"), "failed");
             Err(format!("Failed to install {agent}: {e}"))
         }
     }
 }
 
-/// Helper: install an agent via `pip install`
-async fn install_via_pip(_agent: &str, package: &str) -> Result<(), String> {
-    let output = std::process::Command::new("pip")
-        .args(&["install", package])
-        .output()
-        .map_err(|e| format!("Failed to run pip: {e}"))?;
+/// Run an install one-liner.
+///
+/// On a blocking thread, not inline: these download hundreds of megabytes and
+/// take minutes, and `agents_install` is an async command — running the child
+/// process inline parks a runtime worker for the whole install and stalls
+/// unrelated IPC. `spawn_blocking` is Tauri's own re-export, so this costs no
+/// new dependency.
+async fn run_install(cmd: &'static str) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .map_err(|e| format!("could not run {cmd:?}: {e}"))?;
 
-    if !output.status.success() {
+        if output.status.success() {
+            return Ok(());
+        }
+
+        // Installers are chatty on the way down; the last few lines are the
+        // part that says why, and the whole log would not fit in a banner.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("pip install {package} failed: {stderr}"));
-    }
-
-    Ok(())
-}
-
-/// Helper: install the shell agent
-/// The shell agent is typically a built-in feature of the terminal environment,
-/// so this just ensures it's available and returns success if it is.
-async fn install_shell_agent() -> Result<(), String> {
-    // Check if shell is already available
-    if which::which("sh").is_ok() || which::which("bash").is_ok() {
-        return Ok(());
-    }
-
-    // If neither sh nor bash is available, this is a critical system issue
-    Err("Neither sh nor bash found on system".to_string())
+        let lines: Vec<&str> = stderr.lines().collect();
+        let tail = lines[lines.len().saturating_sub(5)..].join("\n");
+        Err(format!("{cmd:?} failed: {tail}"))
+    })
+    .await
+    .map_err(|e| format!("install task failed to run: {e}"))?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The frontend's `AVAILABLE_AGENTS` (ui/src/state/agents.ts) and this
+    /// table have to name the same five agents in the same order — the UI
+    /// sends these strings straight to `session_create`.
     #[test]
-    fn supported_agents_contains_expected_agents() {
-        assert_eq!(SUPPORTED_AGENTS.len(), 5);
-        assert!(SUPPORTED_AGENTS.contains(&"claude"));
-        assert!(SUPPORTED_AGENTS.contains(&"codex"));
-        assert!(SUPPORTED_AGENTS.contains(&"shell"));
-        assert!(SUPPORTED_AGENTS.contains(&"copilot"));
-        assert!(SUPPORTED_AGENTS.contains(&"antigravity"));
+    fn agents_match_frontend() {
+        let names: Vec<_> = AGENTS.iter().map(|a| a.name).collect();
+        assert_eq!(
+            names,
+            ["claude", "codex", "shell", "copilot", "antigravity"]
+        );
+    }
+
+    /// The bug this module was rewritten to kill: detecting an agent by its
+    /// name instead of its binary. If someone "simplifies" `binary` away,
+    /// this fails.
+    #[test]
+    fn binary_is_not_always_the_name() {
+        assert_eq!(binary_for("antigravity"), Some("agy"));
+        assert_eq!(binary_for("shell"), None, "shell is built-in, not a binary");
+    }
+
+    /// Every non-built-in agent must be spawnable, which means
+    /// `build_engine_argv` needs an arm for it. Cheap guard against adding a
+    /// row here and forgetting sessions.rs — the exact seam that shipped
+    /// broken.
+    #[test]
+    fn every_agent_has_a_binary_or_is_builtin() {
+        for a in AGENTS {
+            match (&a.install, a.binary) {
+                (Install::BuiltIn, None) => {}
+                (Install::BuiltIn, Some(_)) => panic!("{}: built-in with a binary", a.name),
+                (_, Some(_)) => {}
+                (_, None) => panic!("{}: installable but no binary to detect", a.name),
+            }
+        }
     }
 }

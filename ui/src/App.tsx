@@ -782,21 +782,40 @@ function App() {
   async function handleInstallAgent(agent: Agent) {
     agentDispatch({ type: "agents/install_started", agent });
 
-    try {
-      // Listen for install progress
-      await onAgentInstallProgress(agent, (status) => {
-        if (status === "completed") {
-          agentDispatch({ type: "agents/install_completed", agent });
-        } else if (status === "failed") {
-          agentDispatch({ type: "agents/install_failed", agent });
-        }
-      });
+    // The listener drops ITSELF on the terminal event, rather than being
+    // dropped in a `finally` once `agentInstall` resolves. The backend emits
+    // "completed" and *then* returns, and event delivery to the webview is
+    // async IPC — so unsubscribing the moment the await resolves can race the
+    // very event this is waiting for, and losing it leaves the agent stuck in
+    // `installing` with its pane dimmed forever. Unsubscribing only once the
+    // event is in hand cannot lose it.
+    //
+    // It still has to be dropped: each Install/Retry click registers its own
+    // listener, and one that outlived its install would keep dispatching for
+    // every later install of any agent.
+    let unlisten: (() => void) | undefined;
+    let settled = false;
 
-      // Trigger install in backend
+    const finish = (action: Parameters<typeof agentDispatch>[0]) => {
+      if (settled) return; // first terminal signal wins
+      settled = true;
+      agentDispatch(action);
+      unlisten?.();
+    };
+
+    try {
+      unlisten = await onAgentInstallProgress(agent, (status) => {
+        if (status === "completed") finish({ type: "agents/install_completed", agent });
+        else if (status === "failed") finish({ type: "agents/install_failed", agent });
+      });
+      // A fast install can settle before the line above assigned `unlisten`,
+      // leaving `finish`'s own call a no-op — so drop it here instead.
+      if (settled) unlisten();
+
       await agentInstall(agent);
     } catch (err) {
       console.error(`Failed to install ${agent}:`, err);
-      agentDispatch({ type: "agents/install_failed", agent });
+      finish({ type: "agents/install_failed", agent });
     }
   }
 

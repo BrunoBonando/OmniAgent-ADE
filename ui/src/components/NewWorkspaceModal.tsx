@@ -38,7 +38,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   canSubmit,
   checkedEngines,
-  initialNewWorkspaceState,
+  initialNewWorkspaceStateFor,
   newWorkspaceReducer,
 } from "../state/newWorkspaceState";
 import { LAYOUT_PRESETS, layoutCaption, type LayoutPreset } from "../state/paneGrid";
@@ -78,7 +78,16 @@ function FolderIcon() {
 }
 
 export default function NewWorkspaceModal({ onCreate, onClose, agentState, onInstallAgent }: NewWorkspaceModalProps) {
-  const [state, dispatch] = useReducer(newWorkspaceReducer, initialNewWorkspaceState);
+  // Lazy initializer rather than a mount effect: the checklist has to be
+  // right on the FIRST render (an effect would flash Claude-checked, then
+  // correct itself). `agentState` is only read to seed this — later changes
+  // to it, e.g. an install finishing while the dialog is open, must not
+  // stomp on boxes the user has ticked since.
+  const [state, dispatch] = useReducer(
+    newWorkspaceReducer,
+    agentState,
+    initialNewWorkspaceStateFor,
+  );
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {

@@ -33,11 +33,11 @@ const DEFAULT_AGENT_STATE: AgentsState = {
   installing: new Map(),
 };
 
-function setup() {
+function setup(agents: Partial<AgentsState> = {}) {
   const onCreate = vi.fn();
   const onClose = vi.fn();
   const onInstallAgent = vi.fn();
-  const agentState = DEFAULT_AGENT_STATE;
+  const agentState = { ...DEFAULT_AGENT_STATE, ...agents };
   render(
     <NewWorkspaceModal
       onCreate={onCreate}
@@ -71,16 +71,37 @@ describe("NewWorkspaceModal — rendering", () => {
     expect(screen.getByText("2×2 grid layout")).toBeInTheDocument();
   });
 
-  it("checks only Claude by default among all available agents", () => {
+  // The pre-fill rule itself (last-selected -> single-installed -> shell) is
+  // unit-tested in `state/agents.test.ts`. These two prove the MODAL actually
+  // consults it — it previously hardcoded "Claude checked", which made
+  // `getDefaultAgentSelection` dead code that every unit test passed against
+  // while the dialog ignored it.
+
+  it("with no history, defaults to shell — not to whichever agent is listed first", () => {
     setup();
-    const claude = screen.getByRole("checkbox", { name: /claude code/i });
-    const codex = screen.getByRole("checkbox", { name: /codex/i });
-    const shell = screen.getByRole("checkbox", { name: /shell/i });
-    expect(claude).toBeChecked();
-    expect(codex).not.toBeChecked();
-    expect(shell).not.toBeChecked();
+    // Founder rule, verbatim: "if it's a brand new installation, it should be
+    // shell selected". Two agents installed and nothing used before, so
+    // neither the last-selected nor the only-one-installed branch applies.
+    expect(screen.getByRole("checkbox", { name: /shell/i })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /claude code/i })).not.toBeChecked();
     // Exactly 5 agent checkboxes — claude, codex, shell, copilot, antigravity
     expect(screen.getAllByRole("checkbox")).toHaveLength(5);
+  });
+
+  it("pre-selects the agents used for the last workspace", () => {
+    // "the last one that they created, should be pre-selected."
+    setup({ installed: new Set(["claude", "shell"]), lastSelected: ["claude"] });
+    expect(screen.getByRole("checkbox", { name: /claude code/i })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /shell/i })).not.toBeChecked();
+  });
+
+  it("never pre-checks an agent that is no longer installed", () => {
+    // Its row renders disabled, so a checked box would be one the user can
+    // neither clear nor submit with.
+    setup({ installed: new Set(["shell"]), lastSelected: ["codex"] });
+    expect(screen.getByRole("checkbox", { name: /codex/i })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /codex/i })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: /shell/i })).toBeChecked();
   });
 
   it("Create Workspace starts disabled — no folder chosen yet", () => {
@@ -107,12 +128,14 @@ describe("NewWorkspaceModal — AI Agents checklist", () => {
     await waitFor(() => expect(screen.getByDisplayValue("demo-workspace")).toBeInTheDocument());
 
     const submit = screen.getByRole("button", { name: /create workspace/i });
-    expect(submit).toBeEnabled(); // claude still checked
+    expect(submit).toBeEnabled(); // shell checked by default
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /claude code/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /shell/i }));
     expect(submit).toBeDisabled(); // nothing checked now
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /codex/i }));
+    // Claude rather than Codex: only installed agents have an enabled
+    // checkbox, and this fixture installs claude + shell.
+    fireEvent.click(screen.getByRole("checkbox", { name: /claude code/i }));
     expect(submit).toBeEnabled();
   });
 
@@ -172,7 +195,9 @@ describe("NewWorkspaceModal — submit", () => {
     const { onCreate } = setup();
     addProjectMock.mockResolvedValue(PROJECT);
     await pickFolder();
-    fireEvent.click(screen.getByRole("checkbox", { name: /shell/i })); // claude + shell checked
+    // Shell starts checked (the default), so this ticks claude as well —
+    // clicked second, but it must still come back FIRST, in ENGINES order.
+    fireEvent.click(screen.getByRole("checkbox", { name: /claude code/i }));
     fireEvent.click(screen.getByRole("button", { name: /^9\b/ })); // pick the "9" layout
 
     fireEvent.click(screen.getByRole("button", { name: /create workspace/i }));

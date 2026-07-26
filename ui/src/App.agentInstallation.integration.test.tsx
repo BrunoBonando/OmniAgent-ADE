@@ -9,8 +9,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Engine, ProjectInfo, TabInfo } from "./state/sessions";
-import type { LayoutPreset } from "./state/paneGrid";
-import type { Agent } from "./state/agents";
+import type { Agent, AgentsState } from "./state/agents";
 
 const tauriMocks = vi.hoisted(() => {
   const progressCallbacks = new Map<string, (status: string) => void>();
@@ -62,6 +61,7 @@ vi.mock("./components/Sidebar", () => ({
     onWorkspaceCreated: (project: ProjectInfo, engines: Engine[]) => void;
     onSetView?: (view: "workspace" | "map") => void;
     onInstallAgent?: (agent: Agent) => void;
+    agentState?: AgentsState;
   }) {
     return (
       <div>
@@ -74,6 +74,14 @@ vi.mock("./components/Sidebar", () => ({
         <button onClick={() => props.onInstallAgent?.("copilot")}>
           install-agent
         </button>
+        {/* App's agent state, surfaced so tests can assert on what the user
+            would actually see change rather than on which mocks were called. */}
+        <div data-testid="installed-agents">
+          {[...(props.agentState?.installed ?? [])].sort().join(",")}
+        </div>
+        <div data-testid="installing-agents">
+          {[...(props.agentState?.installing.keys() ?? [])].sort().join(",")}
+        </div>
       </div>
     );
   },
@@ -344,7 +352,7 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
       expect(tauriMocks.agentInstallMock).toHaveBeenCalledWith("copilot");
     });
 
-    // Verify onAgentInstallProgress was called to set up the listener
+    // The listener has to be in place BEFORE the install can report anything.
     await waitFor(() => {
       expect(tauriMocks.onAgentInstallProgressMock).toHaveBeenCalledWith(
         "copilot",
@@ -352,17 +360,38 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
       );
     });
 
-    // Verify the progress callback was captured and can be manually triggered
-    // (in the real flow, agentInstall would trigger it asynchronously)
-    const callback = tauriMocks.progressCallbacks.get("copilot");
-    expect(callback).toBeDefined();
+    // What actually matters: the "completed" event (fired by the agentInstall
+    // mock, the way the backend fires it) moves copilot out of `installing`
+    // and into `installed`. That transition is what un-dims the pane, so
+    // assert it rather than asserting that a mock was called.
+    await waitFor(() => {
+      expect(screen.getByTestId("installed-agents")).toHaveTextContent(
+        "claude,copilot,shell"
+      );
+    });
+    expect(screen.getByTestId("installing-agents")).toHaveTextContent("");
 
-    // Simulate completion by manually calling the callback
-    if (callback) {
-      callback("completed");
+    // ...and the listener unsubscribed itself on that event. Without this,
+    // every later install of any agent would also be handled by this stale
+    // listener. The mock's unlisten drops it from `progressCallbacks`.
+    expect(tauriMocks.progressCallbacks.has("copilot")).toBe(false);
+  });
 
-      // Give React time to process the state update
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
+  it("a failed install leaves the agent uninstalled and marked failed, ready to retry", async () => {
+    tauriMocks.agentCheckInstalledMock.mockResolvedValue(["claude", "shell"]);
+    // The backend rejects rather than emitting — e.g. Antigravity, which has
+    // no scriptable install, or a network failure mid-download.
+    tauriMocks.agentInstallMock.mockRejectedValue(new Error("no install channel"));
+
+    render(<App />);
+    await waitFor(() => expect(tauriMocks.agentCheckInstalledMock).toHaveBeenCalled());
+
+    fireEvent.click(await screen.findByRole("button", { name: "install-agent" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("installing-agents")).toHaveTextContent("copilot");
+    });
+    // Still not installed — a failed install must never look like a success.
+    expect(screen.getByTestId("installed-agents")).toHaveTextContent("claude,shell");
   });
 });
