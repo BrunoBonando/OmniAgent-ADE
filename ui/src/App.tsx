@@ -11,6 +11,7 @@ import CodeReviewPanel from "./components/CodeReviewPanel";
 import AppChrome from "./components/AppChrome";
 import NewChooserModal from "./components/NewChooserModal";
 import NewSessionModal from "./components/NewSessionModal";
+import ClosePaneConfirm from "./components/ClosePaneConfirm";
 import BrainMap from "./map/BrainMap";
 import FirstRun from "./onboarding/FirstRun";
 import AuthGate from "./onboarding/AuthGate";
@@ -95,6 +96,8 @@ function App() {
   // still owns its OTHER overlays locally, e.g. aboutOpen/reviewOpen/
   // importOpen) because the sidebar's "+" opens it too.
   const [newChooserOpen, setNewChooserOpen] = useState(false);
+  /** The pane ⌘W is asking about, if any — see the ⌘W handler below. */
+  const [closingTabId, setClosingTabId] = useState<string | null>(null);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
@@ -936,14 +939,19 @@ function App() {
     setReviewTarget((target) => (target?.id === id ? null : target));
   }, []);
 
-  // ---- ⌘T new tab / ⌘K palette / ⌘N new workspace. ⌘W is deliberately
-  // left alone — see the module comment at the bottom of this file for
-  // why. No existing binding (native menu or app-level) claimed ⌘N before
-  // this — `lib.rs`'s `.menu(tauri::menu::Menu::default)` only supplies the
-  // standard macOS Quit/Hide/Edit/Window items, no File/New — so it's wired
-  // here exactly like ⌘T/⌘K, the established place app-level shortcuts that
-  // need live UI state (as opposed to a static native-menu event) already
-  // live. -------------------------------------------------------------
+  // ---- ⌘T new tab / ⌘K palette / ⌘N new workspace / ⌘W close pane. The
+  // established place for app-level shortcuts that need live UI state (which
+  // tab, which project) rather than a static native-menu event.
+  //
+  // ⌘W joined them on 2026-07-26 (founder bug: *"cmd+w is closing the full
+  // app instead of confirming closing the current terminal"*). It could not
+  // simply be added here: macOS handles a native menu accelerator in AppKit
+  // *before* the key event reaches the webview, and `Menu::default` bound
+  // ⌘W to `close_window` in two submenus — so this handler was never even
+  // entered, and `preventDefault` had nothing to prevent. `lib.rs`'s
+  // `build_menu` now omits both, which is what lets the keystroke fall
+  // through to here like ⌘T and ⌘K always did.
+  // -------------------------------------------------------------------
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (!e.metaKey) return;
@@ -958,15 +966,30 @@ function App() {
         // Since 2026-07-26 this asks first (session or workspace) instead
         // of opening the workspace dialog outright — see `newChooserOpen`.
         setNewChooserOpen(true);
+      } else if (e.key.toLowerCase() === "w") {
+        // Always prevented, focused pane or not: with the native item gone
+        // the default would be nothing at all, and letting it through is how
+        // a stray "close the window" behaviour would quietly come back.
+        e.preventDefault();
+        if (state.activeTabId) {
+          setClosingTabId(state.activeTabId);
+        } else {
+          // Sane and honest rather than silent — the user pressed a key and
+          // is owed an answer, and "nothing happened" reads as a broken
+          // shortcut.
+          setErrorBanner("No terminal focused — there is nothing here to close.");
+        }
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedProject, requestNewTab]);
+  }, [selectedProject, requestNewTab, state.activeTabId]);
 
   // The chrome's breadcrumb — "which workspace, which session am I in" —
   // built from the same `groupTabsBySession` derivation the sidebar renders
   // its tree from, so the two can never disagree.
+  const closingTab = closingTabId ? (state.tabs.find((t) => t.id === closingTabId) ?? null) : null;
+
   const currentGroupId = currentSessionGroupId(state.tabs, state.activeTabId);
   const currentSessionLabel =
     groupTabsBySession(state.tabs, state.activeTabId)
@@ -1083,6 +1106,21 @@ function App() {
           opens it too) — see `newWorkspaceOpen`'s declaration. */}
       {newChooserOpen && (
         <NewChooserModal onChoose={handleCreateChoice} onClose={() => setNewChooserOpen(false)} />
+      )}
+
+      {/* ⌘W's confirmation. Resolved from live state rather than captured at
+          keypress time, so a pane that goes away underneath the dialog (its
+          engine exits, the session is closed from the pane menu) takes the
+          dialog with it instead of leaving a prompt about nothing. */}
+      {closingTab && (
+        <ClosePaneConfirm
+          label={closingTab.label ?? ENGINE_LABEL[closingTab.engine] ?? closingTab.engine}
+          onConfirm={() => {
+            setClosingTabId(null);
+            void closeTab(closingTab.id);
+          }}
+          onCancel={() => setClosingTabId(null)}
+        />
       )}
 
       {newSessionOpen && selectedProject && (

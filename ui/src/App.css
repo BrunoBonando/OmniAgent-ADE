@@ -5509,3 +5509,72 @@ code {
 .project-row-new-session:hover {
   color: var(--signal);
 }
+
+/* ------------------------------------------------- close-pane confirm */
+/* ⌘W's confirmation (founder bug, 2026-07-26). Deliberately built from
+   `.new-chooser-panel`'s exact surface treatment — same panel, border,
+   radius and shadow — so it reads as one of this app's dialogs rather than
+   a system alert dropped into it. Only the confirm button departs, because
+   this is the one dialog here whose primary action destroys something. */
+
+.close-pane-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  width: 400px;
+  max-width: 90vw;
+  padding: 20px 22px 16px;
+}
+
+.close-pane-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.close-pane-body {
+  margin: 0 0 16px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+}
+
+.close-pane-body strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.close-pane-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.close-pane-actions button {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* The destructive one carries the danger tone on its border rather than as
+   a filled red button: this is a confirmation the user asked for, not an
+   alarm, and a solid red block would out-shout every other dialog here. */
+.close-pane-confirm {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.close-pane-confirm:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.close-pane-cancel:hover {
+  border-color: var(--line-strong, var(--line));
+  background: var(--surface-hover, var(--surface));
+}

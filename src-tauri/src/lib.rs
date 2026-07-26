@@ -70,6 +70,153 @@ pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// The app's native menu bar: Tauri's standard macOS menu with **every
+/// `close_window` item removed**.
+///
+/// Founder bug (Bruno, 2026-07-26): *"cmd+w is closing the full app instead of
+/// confirming closing the current terminal"*. In this app a pane is the unit a
+/// user closes, not the window — the window holds every project, every session
+/// and every tab, so the native "Close Window" is a destructive
+/// button-with-no-undo sitting on the most reflexive shortcut on macOS.
+///
+/// It has to be removed *here* rather than swallowed in JS: a native menu
+/// accelerator is handled by AppKit before the key event ever reaches the
+/// webview, so a `preventDefault` in the React handler cannot win a race it is
+/// never entered into. With no menu item bound to ⌘W, the keystroke falls
+/// through to the webview like any other and `App.tsx`'s keydown handler owns
+/// it (`ui/src/App.tsx`, "⌘T new tab / ⌘K palette / ⌘W close pane").
+///
+/// This mirrors `tauri::menu::Menu::default` (tauri 2.11.5) item for item, so
+/// ⌘Q/⌘M/⌘H/⌘Z/⌘C/⌘V and the rest keep behaving exactly like a normal Mac
+/// app, with two deliberate differences:
+/// - the **File** submenu is dropped entirely — on macOS its only item *was*
+///   `close_window`, so keeping it would leave an empty menu;
+/// - the **Window** submenu keeps Minimize/Maximize but loses `close_window`.
+///
+/// Both had to go: `Menu::default` binds ⌘W in *two* places, and leaving
+/// either one would keep closing the window out from under the JS handler.
+fn build_menu<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+
+    let pkg_info = app.package_info();
+    let config = app.config();
+    let about_metadata = AboutMetadata {
+        name: Some(pkg_info.name.clone()),
+        version: Some(pkg_info.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+
+    let mut submenus = Vec::new();
+    for (title, entries) in MENU_BAR {
+        let mut items: Vec<PredefinedMenuItem<R>> = Vec::with_capacity(entries.len());
+        for entry in *entries {
+            items.push(match entry {
+                MenuEntry::About => {
+                    PredefinedMenuItem::about(app, None, Some(about_metadata.clone()))?
+                }
+                MenuEntry::Separator => PredefinedMenuItem::separator(app)?,
+                MenuEntry::Services => PredefinedMenuItem::services(app, None)?,
+                MenuEntry::Hide => PredefinedMenuItem::hide(app, None)?,
+                MenuEntry::HideOthers => PredefinedMenuItem::hide_others(app, None)?,
+                MenuEntry::Quit => PredefinedMenuItem::quit(app, None)?,
+                MenuEntry::Undo => PredefinedMenuItem::undo(app, None)?,
+                MenuEntry::Redo => PredefinedMenuItem::redo(app, None)?,
+                MenuEntry::Cut => PredefinedMenuItem::cut(app, None)?,
+                MenuEntry::Copy => PredefinedMenuItem::copy(app, None)?,
+                MenuEntry::Paste => PredefinedMenuItem::paste(app, None)?,
+                MenuEntry::SelectAll => PredefinedMenuItem::select_all(app, None)?,
+                MenuEntry::Fullscreen => PredefinedMenuItem::fullscreen(app, None)?,
+                MenuEntry::Minimize => PredefinedMenuItem::minimize(app, None)?,
+                MenuEntry::Maximize => PredefinedMenuItem::maximize(app, None)?,
+            });
+        }
+        let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> =
+            items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<R>).collect();
+        let title = if *title == APP_SUBMENU {
+            pkg_info.name.clone()
+        } else {
+            (*title).to_string()
+        };
+        submenus.push(Submenu::with_items(app, title, true, &refs)?);
+    }
+
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = submenus
+        .iter()
+        .map(|s| s as &dyn tauri::menu::IsMenuItem<R>)
+        .collect();
+    Menu::with_items(app, &refs)
+}
+
+/// Placeholder for the leftmost submenu, whose real title is the app's own
+/// name (`package_info().name`) rather than a literal.
+const APP_SUBMENU: &str = "<app>";
+
+/// Every predefined item this app's menu bar is allowed to contain.
+///
+/// **There is deliberately no `CloseWindow` variant.** That is the fix, stated
+/// in the type system rather than as an item somebody remembered to delete:
+/// ⌘W belongs to the focused pane (see [`build_menu`]), so a native menu item
+/// that closes the window cannot be expressed here at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MenuEntry {
+    About,
+    Separator,
+    Services,
+    Hide,
+    HideOthers,
+    Quit,
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Fullscreen,
+    Minimize,
+    Maximize,
+}
+
+/// The menu bar, as data: `Menu::default`'s macOS layout minus every
+/// `close_window`. The **File** submenu is absent entirely because on macOS
+/// `close_window` was the only thing in it.
+///
+/// One description, read both by [`build_menu`] (which materializes it) and by
+/// this module's tests (which assert on it) — so the two cannot drift, and the
+/// assertion doesn't need a main-thread AppKit menu to run against.
+const MENU_BAR: &[(&str, &[MenuEntry])] = &[
+    (
+        APP_SUBMENU,
+        &[
+            MenuEntry::About,
+            MenuEntry::Separator,
+            MenuEntry::Services,
+            MenuEntry::Separator,
+            MenuEntry::Hide,
+            MenuEntry::HideOthers,
+            MenuEntry::Separator,
+            MenuEntry::Quit,
+        ],
+    ),
+    (
+        "Edit",
+        &[
+            MenuEntry::Undo,
+            MenuEntry::Redo,
+            MenuEntry::Separator,
+            MenuEntry::Cut,
+            MenuEntry::Copy,
+            MenuEntry::Paste,
+            MenuEntry::SelectAll,
+        ],
+    ),
+    ("View", &[MenuEntry::Fullscreen]),
+    ("Window", &[MenuEntry::Minimize, MenuEntry::Maximize]),
+];
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -77,16 +224,8 @@ pub fn run() {
         // Task 8.1: FirstRun's native folder picker ("Where do your
         // projects live?").
         .plugin(tauri_plugin_dialog::init())
-        // Standard macOS app menu (App/Edit/Window submenus — Quit, Hide,
-        // Cut/Copy/Paste/Select All, Close Window, Minimize). App-specific
-        // shortcuts (⌘T new tab, ⌘K command palette) are handled in the
-        // React shell via a keydown listener rather than as native menu
-        // accelerators — this is the standard Tauri pattern for shortcuts
-        // that need to reach into live UI state (which tab, which project)
-        // rather than firing a static menu event. This menu's job is just
-        // making sure ⌘W/⌘Q/⌘M etc. behave like a normal Mac app instead of
-        // doing nothing (Tauri ships no menu at all by default).
-        .menu(tauri::menu::Menu::default)
+        // Standard macOS app menu, minus ⌘W — see [`build_menu`].
+        .menu(build_menu)
         .setup(|app| {
             let handle = app.handle().clone();
             let data_dir = brain_core::Store::default_data_dir();
@@ -400,4 +539,56 @@ mod tests {
         let other_payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
         assert_eq!(panic_message(&other_payload), "non-string panic payload");
     }
+
+    // -- ⌘W belongs to the focused pane, not to the window (founder bug,
+    // 2026-07-26) --------------------------------------------------------
+
+    /// The menu must not contain a **Close Window** item anywhere.
+    ///
+    /// This is the whole fix: `Menu::default` binds `close_window` — and with
+    /// it ⌘W — in *two* submenus (File and Window), AppKit handles a native
+    /// accelerator before the webview ever sees the key, and so the React
+    /// handler could never have won. Asserted structurally rather than by
+    /// reading accelerators, because `muda` exposes no accelerator getter:
+    /// the top-level submenus are pinned exactly (no **File**, which on macOS
+    /// held nothing but `close_window`), and **Window** is pinned to exactly
+    /// its two survivors.
+    #[test]
+    fn the_native_menu_binds_no_close_window_item_anywhere() {
+        // Asserted against [`MENU_BAR`], the same data `build_menu`
+        // materializes, because a real `muda` menu can only be constructed on
+        // the main thread — which a test thread never is.
+        let titles: Vec<&str> = MENU_BAR.iter().map(|(t, _)| *t).collect();
+        assert_eq!(
+            titles,
+            vec![APP_SUBMENU, "Edit", "View", "Window"],
+            "the File submenu must stay gone — on macOS its only item was Close Window"
+        );
+
+        let window = MENU_BAR
+            .iter()
+            .find(|(t, _)| *t == "Window")
+            .map(|(_, items)| *items)
+            .expect("a Window submenu");
+        assert_eq!(
+            window,
+            [MenuEntry::Minimize, MenuEntry::Maximize],
+            "Window must hold only Minimize and Maximize; anything else here is a \
+             window-closing item creeping back in and taking ⌘W with it"
+        );
+
+        // And nothing anywhere else sneaks one in. `MenuEntry` has no
+        // `CloseWindow` variant to begin with, so this is really a statement
+        // that no *other* entry acquired that behaviour — kept as an explicit
+        // sweep so the intent survives someone adding a variant.
+        for (title, entries) in MENU_BAR {
+            for entry in *entries {
+                assert!(
+                    !format!("{entry:?}").to_lowercase().contains("close"),
+                    "{title} contains a closing item: {entry:?}"
+                );
+            }
+        }
+    }
+
 }
