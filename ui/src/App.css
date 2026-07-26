@@ -4877,29 +4877,52 @@ code {
 }
 
 /* =====================================================================
-   The top chrome strip — where you are, and the two always-available
-   controls (AppChrome.tsx). Both of the founder's 2026-07-26 reference
-   screenshots put notifications + account together in the window's top
-   right, and this app had no such surface: the account badge was inside
-   the 240px sidebar header, and there was nowhere for a notifications
-   popover to hang from.
+   THE WINDOW TITLE BAR (AppChrome.tsx) — founder, 2026-07-26: "The user
+   and notification menu must be on the title of the application, just like
+   warp does."
+
+   This row is not a strip under the title bar; it IS the title bar.
+   `tauri.conf.json` sets `titleBarStyle: "Overlay"`, so the webview extends
+   to the top of the window and AppKit paints the traffic lights and the
+   window title over these pixels. Two numbers below are therefore dictated
+   by macOS rather than chosen:
+
+   - `--titlebar-h: 28px` is the standard macOS title bar height. Matching
+     it exactly is what leaves the traffic lights vertically centred in our
+     row with no `trafficLightPosition` override — a setting whose units are
+     fiddly (an inset that also redefines the title bar container's height)
+     and which cannot be checked without looking at a real window. Match the
+     native height and there is nothing to get wrong.
+   - `--titlebar-lights: 78px` clears the three buttons (they end around
+     x=70) with room to spare. Nothing of ours may be drawn or clicked
+     there.
+
+   The strip used to cost 30px *below* an opaque native title bar. It now
+   costs nothing — that 30px went back to the workspace.
 
    Deliberately quiet: the app background rather than a panel fill, one
-   hairline underneath, 30px tall, three children and no more. DESIGN.md's
-   "chrome must not compete with the terminal workspace" is why this is a
-   strip and not a toolbar.
+   hairline underneath, three children and no more. DESIGN.md's "chrome must
+   not compete with the terminal workspace" is why this is a title bar and
+   not a toolbar.
    ===================================================================== */
 
 .app-chrome {
+  --titlebar-h: 28px;
+  --titlebar-lights: 78px;
   flex: 0 0 auto;
-  height: 30px;
+  height: var(--titlebar-h);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 10px 0 14px;
+  /* Left padding is the traffic-light reservation, not decoration. */
+  padding: 0 10px 0 var(--titlebar-lights);
   background: var(--void);
   border-bottom: 1px solid var(--line-soft);
+  /* The whole bar is a drag region; a text cursor over it reads as
+     selectable text and invites a drag that does nothing. */
+  cursor: default;
+  user-select: none;
 }
 
 .app-chrome-breadcrumb {
@@ -4907,6 +4930,12 @@ code {
   align-items: baseline;
   gap: 6px;
   min-width: 0;
+  /* AppKit centres the real window title across the FULL window width, on
+     top of this row. At the 960px minimum that title starts around x=415,
+     so the breadcrumb is capped well short of it — a workspace called
+     something long ellipsizes instead of colliding with the app's own
+     name. */
+  max-width: 280px;
   font-family: var(--mono);
   font-size: 10.5px;
   letter-spacing: 0.03em;

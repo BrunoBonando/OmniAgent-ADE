@@ -648,4 +648,102 @@ mod tests {
         assert_eq!(config["productName"].as_str(), Some("OmniAgent"));
         assert_eq!(config["app"]["windows"][0]["title"].as_str(), Some("OmniAgent"));
     }
+
+    // -- the window hands its title bar to the web content (founder ask,
+    // 2026-07-26: "The user and notification menu must be on the title of
+    // the application, just like warp does") ----------------------------
+
+    /// The account badge and the notifications bell can only sit *in* the
+    /// title bar if the window is configured to let web content draw there.
+    ///
+    /// The real `tauri.conf.json` is deserialized here through Tauri's own
+    /// `WindowConfig` — deliberately not compared as JSON strings, because
+    /// `TitleBarStyle`'s `Deserialize` falls back to `Visible` for
+    /// *anything* it doesn't recognise (tauri-utils 2.9.3, `lib.rs`): no
+    /// error, no warning. A typo like `"overlays"` would silently restore
+    /// the opaque native title bar, push the whole app back down 28px and
+    /// strand the chrome underneath it — and a string assertion would
+    /// happily pass while that happened. Running the actual parser is the
+    /// only check that can't be fooled.
+    ///
+    /// (`tauri::test::mock_app()` is no use here: its context is built from
+    /// `noop_assets()` and carries Tauri's *default* config, not this
+    /// crate's file.)
+    #[test]
+    fn the_window_hands_its_title_bar_to_the_web_content() {
+        use tauri::utils::config::WindowConfig;
+        use tauri::utils::TitleBarStyle;
+
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let window: WindowConfig =
+            serde_json::from_value(config["app"]["windows"][0].clone()).expect("the main window");
+
+        assert_eq!(
+            window.title_bar_style,
+            TitleBarStyle::Overlay,
+            "the title bar must be an overlay over the web content — without it the account \
+             badge and notifications bell have no title bar to live in, and note that an \
+             unrecognised value deserialises to Visible in silence"
+        );
+
+        // `Overlay` keeps the *native* traffic lights; turning decorations
+        // off would remove them (and would mean reimplementing close/
+        // minimise/zoom by hand, plus lose the native title). It is also a
+        // documented precondition for `trafficLightPosition`.
+        assert!(
+            window.decorations,
+            "decorations must stay on — they are what draws the real traffic lights"
+        );
+
+        // The window title (`window_title` above, set at runtime with the
+        // shipped version) is drawn by AppKit over our chrome. Hiding it
+        // would mean re-presenting the version somewhere by hand.
+        assert!(
+            !window.hidden_title,
+            "the title must stay visible — it is how the version reaches the title bar"
+        );
+
+        // …and it must be legible against our own dark chrome. With a
+        // transparent title bar AppKit draws the title in the window's
+        // appearance, so a Light-mode Mac would paint dark text onto the
+        // near-black strip underneath it. Pinning the window to Dark is what
+        // keeps the title readable regardless of the user's system setting —
+        // correct for this app in any case, its whole shell is dark.
+        assert_eq!(
+            window.theme,
+            Some(tauri::utils::Theme::Dark),
+            "the window must be pinned to the dark appearance or the native title goes \
+             dark-on-dark for Light-mode users"
+        );
+    }
+
+    /// Dragging the window by its title bar has to be *granted*, not just
+    /// marked up.
+    ///
+    /// With `titleBarStyle: Overlay` the webview covers the title bar, so
+    /// the only thing that still moves the window is Tauri's
+    /// `data-tauri-drag-region` (`AppChrome.tsx`) — and that attribute is
+    /// inert on its own: its handler invokes `plugin:window|start_dragging`,
+    /// which **`core:window:default` does not include** (checked against
+    /// `gen/schemas/acl-manifests.json`: the default set grants
+    /// `allow-internal-toggle-maximize` but not `allow-start-dragging`).
+    /// Without the explicit grant the window simply stops being draggable,
+    /// with nothing but a rejected IPC call in the console to say why.
+    #[test]
+    fn the_title_bars_drag_region_is_actually_permitted() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let permissions = capability["permissions"]
+            .as_array()
+            .expect("the default capability's permission list");
+
+        assert!(
+            permissions
+                .iter()
+                .any(|p| p.as_str() == Some("core:window:allow-start-dragging")),
+            "`core:window:allow-start-dragging` must be granted explicitly — it is NOT part \
+             of `core:window:default`, and without it the title bar's drag region is dead"
+        );
+    }
 }
