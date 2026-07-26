@@ -356,14 +356,16 @@ describe("resolveDefaultEngine (EnginePicker default-selection logic)", () => {
 });
 
 describe("cycleEngine", () => {
-  it("cycles forward through claude -> codex -> shell -> claude", () => {
+  it("cycles forward through all engines", () => {
     expect(cycleEngine("claude", 1)).toBe("codex");
     expect(cycleEngine("codex", 1)).toBe("shell");
-    expect(cycleEngine("shell", 1)).toBe("claude");
+    expect(cycleEngine("shell", 1)).toBe("copilot");
+    expect(cycleEngine("copilot", 1)).toBe("antigravity");
+    expect(cycleEngine("antigravity", 1)).toBe("claude");
   });
 
   it("cycles backward wrapping at the start", () => {
-    expect(cycleEngine("claude", -1)).toBe("shell");
+    expect(cycleEngine("claude", -1)).toBe("antigravity");
   });
 });
 

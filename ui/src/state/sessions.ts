@@ -7,9 +7,10 @@
 
 import { isTerminalThemeId, type TerminalThemeId } from "../lib/terminalThemes";
 import type { SessionStatus } from "./sessionStatus";
+import { AVAILABLE_AGENTS, type Agent } from "./agents";
 
-export const ENGINES = ["claude", "codex", "shell"] as const;
-export type Engine = (typeof ENGINES)[number];
+export const ENGINES = AVAILABLE_AGENTS;
+export type Engine = Agent;
 
 /** The implicit session every pane with no `group` belongs to, per project.
  * Two kinds of pane land here: layouts persisted before groups existed
@@ -25,7 +26,7 @@ export type Engine = (typeof ENGINES)[number];
 export const UNGROUPED_SESSION_ID = "__ungrouped__";
 
 export function isEngine(value: unknown): value is Engine {
-  return value === "claude" || value === "codex" || value === "shell";
+  return ENGINES.includes(value as Engine);
 }
 
 /** Sidebar row — the `brain_query{kind:"list_projects"}` shape. */
