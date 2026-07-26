@@ -47,6 +47,8 @@ export const DEFAULT_ENGINE_SELECTION: Record<Engine, boolean> = {
   claude: true,
   codex: false,
   shell: false,
+  copilot: false,
+  antigravity: false,
 };
 
 export const initialNewWorkspaceState: NewWorkspaceState = {

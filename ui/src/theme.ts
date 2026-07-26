@@ -8,6 +8,8 @@ export const ENGINE_LABEL: Record<Engine, string> = {
   claude: "Claude Code",
   codex: "Codex",
   shell: "Shell",
+  copilot: "GitHub Copilot",
+  antigravity: "AntiGravity",
 };
 
 // Sampled directly from the founder's reference screenshot (BridgeSpace),
@@ -34,10 +36,14 @@ export const ENGINE_COLOR: Record<Engine, string> = {
   claude: "#cc96f2",
   codex: "#a2e7f9",
   shell: "#9a9ca6",
+  copilot: "#2ea043",
+  antigravity: "#ff7f50",
 };
 
 export const ENGINE_HINT: Record<Engine, string> = {
   claude: "Pre-briefed from the brain, MCP-wired",
   codex: "Stock spawn, no ADE wiring",
   shell: "Your default $SHELL",
+  copilot: "GitHub Copilot AI",
+  antigravity: "AntiGravity agent",
 };
