@@ -1,9 +1,8 @@
 // Component-level coverage for NewWorkspaceModal.tsx — the BridgeSpace
 // "New Workspace" dialog rebuild (see this component's own module doc for
-// the reference description and the scoping correction: the real 3
-// engines, not the reference's 4). Mocks `@tauri-apps/plugin-dialog`'s
-// `open()` and `../lib/tauri`'s `addProject` the same way
-// `FileTree.test.tsx` mocks its own Tauri surfaces.
+// the available agents). Mocks `@tauri-apps/plugin-dialog`'s `open()` and
+// `../lib/tauri`'s `addProject` the same way `FileTree.test.tsx` mocks its
+// own Tauri surfaces.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Engine } from "../state/sessions";
@@ -56,7 +55,7 @@ describe("NewWorkspaceModal — rendering", () => {
     expect(screen.getByText("2×2 grid layout")).toBeInTheDocument();
   });
 
-  it("checks only Claude by default among the real 3 engines — no Antigravity/OpenCode fakes", () => {
+  it("checks only Claude by default among all available agents", () => {
     setup();
     const claude = screen.getByRole("checkbox", { name: /claude code/i });
     const codex = screen.getByRole("checkbox", { name: /codex/i });
@@ -64,9 +63,8 @@ describe("NewWorkspaceModal — rendering", () => {
     expect(claude).toBeChecked();
     expect(codex).not.toBeChecked();
     expect(shell).not.toBeChecked();
-    // Exactly 3 engine checkboxes — the reference's "Antigravity"/"OpenCode"
-    // rows have no real engine here, so they must not be rendered at all.
-    expect(screen.getAllByRole("checkbox")).toHaveLength(3);
+    // Exactly 5 agent checkboxes — claude, codex, shell, copilot, antigravity
+    expect(screen.getAllByRole("checkbox")).toHaveLength(5);
   });
 
   it("Create Workspace starts disabled — no folder chosen yet", () => {
@@ -113,9 +111,9 @@ describe("NewWorkspaceModal — AI Agents checklist", () => {
 
   it("shows a checked/total count badge", () => {
     setup();
-    expect(screen.getByText("1/3")).toBeInTheDocument();
+    expect(screen.getByText("1/5")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("checkbox", { name: /codex/i }));
-    expect(screen.getByText("2/3")).toBeInTheDocument();
+    expect(screen.getByText("2/5")).toBeInTheDocument();
   });
 });
 

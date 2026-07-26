@@ -1,22 +1,16 @@
 // The sidebar's "+" flow, rebuilt from a founder reference (Bruno,
 // 2026-07-25): a screenshot of BridgeSpace's "New Workspace" dialog,
 // described precisely rather than checked in as an image. Structure: a
-// title + close button; a LAYOUT section (four preset cards — 2/4/6/8 —
+// title + close button; a LAYOUT section (four preset cards — 2/4/6/9 —
 // each a small grid glyph with a caption for whichever is selected); a
 // DIRECTORY section (folder path + Browse, plus an editable project name);
-// a collapsible AI AGENTS section (checkbox rows, one per engine); a
+// a collapsible AI AGENTS section (checkbox rows, one per agent); a
 // footer (Cancel / Create Workspace).
 //
-// **Scoping correction from the reference** (the task's own instruction,
-// following DESIGN.md's zero-config-stock-engines principle): the
-// reference shows 4 example agents (Claude Code, Codex, Antigravity,
-// OpenCode), but OmniAgent only actually runs the 3 engines in
-// `state/sessions.ts`'s `ENGINES` — there is no Antigravity/OpenCode
-// integration here. Faking rows for engines that don't work would violate
-// the same principle `EnginePicker.tsx` already follows. This checklist is
-// built directly from the real `ENGINES` array, `ENGINE_COLOR`/
-// `ENGINE_LABEL` (theme.ts) supplying each row's dot color and label —
-// when a 4th real engine is ever added there, it appears here for free.
+// The checklist is built directly from the real `ENGINES` array (which is
+// `AVAILABLE_AGENTS` from `state/agents.ts`), with `ENGINE_COLOR`/
+// `ENGINE_LABEL` (theme.ts) supplying each row's dot color and label.
+// When a new agent is added to `AVAILABLE_AGENTS`, it appears here for free.
 //
 // **This REPLACES `AddProjectModal.tsx`** as the sidebar's "+" trigger
 // (`Sidebar.tsx`'s own doc comment has the reasoning: this flow is a
