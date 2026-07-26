@@ -3070,8 +3070,8 @@ code {
 .new-workspace-install-btn {
   padding: 0.4rem 0.8rem;
   font-size: 0.875rem;
-  background: var(--color-primary);
-  color: white;
+  background: var(--signal);
+  color: #06101f;
   border: none;
   border-radius: 4px;
   cursor: pointer;
@@ -3090,7 +3090,7 @@ code {
 }
 
 .status-installing {
-  color: var(--text-secondary);
+  color: var(--color-text-secondary);
   animation: pulse 2s infinite;
 }
 
