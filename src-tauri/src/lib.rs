@@ -217,6 +217,26 @@ const MENU_BAR: &[(&str, &[MenuEntry])] = &[
     ("Window", &[MenuEntry::Minimize, MenuEntry::Maximize]),
 ];
 
+/// The window title, with the shipped version in it (founder ask, Bruno,
+/// 2026-07-26: *"Add on the title of the app OmniAgent - {number of version,
+/// example: v2.3}"*).
+///
+/// Built from `package_info().version` and set at runtime rather than written
+/// into `tauri.conf.json`'s static `windows[0].title`, so there is exactly one
+/// version string in the repo. That call is genuinely the shipped version and
+/// not a second copy of it: `tauri::generate_context!` compiles
+/// `PackageInfo::version` **from `tauri.conf.json`'s own `version` field**
+/// (falling back to `CARGO_PKG_VERSION` only when the config omits it —
+/// `tauri-codegen` 2.6.3, `context.rs`), which is the same value the bundler
+/// stamps into the `.app`. Bump the config, and the title, the bundle and the
+/// About panel all move together.
+///
+/// `productName` deliberately stays plain `OmniAgent`: it names the `.app`
+/// bundle and the menu-bar item, where a version number would be noise.
+fn window_title(version: &str) -> String {
+    format!("OmniAgent — v{version}")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -229,6 +249,14 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let data_dir = brain_core::Store::default_data_dir();
+
+            // Founder ask: the window title carries the version. Set here
+            // rather than in `tauri.conf.json` so the version lives in exactly
+            // one place — see [`window_title`].
+            let title = window_title(&app.package_info().version.to_string());
+            for (_, window) in app.webview_windows() {
+                let _ = window.set_title(&title);
+            }
 
             let brain = BrainState::open(data_dir.clone())
                 .map_err(|e| format!("failed to open brain store at {data_dir:?}: {e}"))?;
@@ -591,4 +619,33 @@ mod tests {
         }
     }
 
+    /// The window title carries the shipped version, and carries it in the
+    /// shape the founder asked for (`OmniAgent — v0.1.0`).
+    #[test]
+    fn the_window_title_carries_the_version() {
+        assert_eq!(window_title("0.1.0"), "OmniAgent — v0.1.0");
+        assert_eq!(window_title("2.3"), "OmniAgent — v2.3");
+    }
+
+    /// …and that version is the one `tauri.conf.json` declares, not a second
+    /// copy of it living in Rust. `mock_app` is built from this crate's real
+    /// `tauri.conf.json` via `generate_context!`, so this compares the title
+    /// the app will actually show against the config file on disk.
+    #[test]
+    fn the_titles_version_is_the_one_tauri_conf_json_declares() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let declared = config["version"].as_str().expect("tauri.conf.json version");
+
+        let app = tauri::test::mock_app();
+        assert_eq!(
+            window_title(&app.handle().package_info().version.to_string()),
+            window_title(declared),
+            "the runtime version and tauri.conf.json have drifted apart"
+        );
+        // And productName stays plain — it names the .app bundle and the
+        // menu-bar item, where a version number would just be noise.
+        assert_eq!(config["productName"].as_str(), Some("OmniAgent"));
+        assert_eq!(config["app"]["windows"][0]["title"].as_str(), Some("OmniAgent"));
+    }
 }

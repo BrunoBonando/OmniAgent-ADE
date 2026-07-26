@@ -44,4 +44,8 @@ brain-ingest = { path = "../crates/brain-ingest" }
 [dev-dependencies]
 tempfile = "3"
 libc = "0.2"
+# `tauri::test::mock_app()` — lets the window title be asserted against the
+# version a real Tauri app handle reports, so "the title's version is the one
+# tauri.conf.json declares" is a test rather than a promise.
+tauri = { version = "2", features = ["test"] }
 
