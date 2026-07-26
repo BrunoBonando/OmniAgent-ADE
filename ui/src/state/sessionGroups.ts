@@ -43,6 +43,7 @@
 //   a legacy session can never collide with a typed one.
 // - Renaming is `session/renamed` (sessions.ts), which writes the name onto
 //   every pane in the group.
+import { gridShape } from "./paneGrid";
 import { UNGROUPED_SESSION_ID, type Engine, type TabInfo } from "./sessions";
 
 /** Re-exported from `sessions.ts`, where it now lives so the reducer can
@@ -310,4 +311,14 @@ export function sessionEngineBreakdown(session: SessionGroup): Array<{ engine: E
     else counts.push({ engine: tab.engine, count: 1 });
   }
   return counts;
+}
+
+/** The sidebar row's layout badge (Task 4 redesign, 2026-07-27): "1", "1×2",
+ * "2×2", "2×3", "2×4" — `rows×cols` of `gridShape`, the SAME function the
+ * real pane grid derives its arrangement from, so the badge can never claim
+ * a shape the grid doesn't actually produce. A single pane collapses to bare
+ * "1" rather than "1×1", matching the design's badges. */
+export function sessionShapeBadge(paneCount: number): string {
+  const { cols, rows } = gridShape(paneCount);
+  return cols === 1 && rows === 1 ? "1" : `${rows}×${cols}`;
 }

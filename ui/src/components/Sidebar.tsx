@@ -289,6 +289,22 @@ export default function Sidebar({
     project: ProjectInfo;
     session: SessionGroup;
   } | null>(null);
+  /** Which sessions the user has manually expanded (Task 4 redesign,
+   * 2026-07-27) — the terminal list under a session row is otherwise closed
+   * by default. Keyed by session id rather than a single "the expanded one"
+   * value because nothing stops more than one session's list being open at
+   * once. Starts empty: `session.isCurrent` (see the per-row `expanded`
+   * below) already opens the session holding the focused pane without this
+   * set knowing about it. */
+  const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
+  const toggleSession = useCallback((id: string) => {
+    setExpandedSessions((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
   const grouped = tabsByProject(tabs);
   const sessionsByProject = groupTabsBySession(tabs, activeTabId);
   // Which session the pane grid is showing for the selected workspace — the
@@ -473,7 +489,15 @@ export default function Sidebar({
               // "is this workspace selected" half of the old test is
               // implied.
               isCurrent={session.id === onScreenSession}
+              // Auto-expanded for the session holding the focused pane
+              // (`SessionGroup.isCurrent` — not the `isCurrent` prop above,
+              // which answers the different "on screen in the grid"
+              // question), or once the user has toggled it open by hand.
+              expanded={session.isCurrent || expandedSessions.has(session.id)}
+              activeTabId={activeTabId}
               onActivate={() => onActivateTab(session.tabs[0].id)}
+              onToggleExpanded={() => toggleSession(session.id)}
+              onActivateTab={onActivateTab}
               onRename={(name) => onRenameSession?.(selectedProject, session.id, name)}
               onClose={
                 onCloseSession

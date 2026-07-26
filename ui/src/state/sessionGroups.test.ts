@@ -8,6 +8,7 @@ import {
   nextSessionName,
   sessionEngineBreakdown,
   sessionGroupForNewPane,
+  sessionShapeBadge,
   tabsInSession,
   visibleSessionGroupId,
 } from "./sessionGroups";
@@ -231,6 +232,16 @@ describe("nextSessionName — what a session about to be created is called", () 
 
   it("ignores a user-chosen name that isn't a number at all", () => {
     expect(nextSessionName([named("a", "p1", "g1", "auth refactor")], "p1")).toBe("Session 1");
+  });
+});
+
+describe("sessionShapeBadge", () => {
+  it("matches the design's badges", () => {
+    expect(sessionShapeBadge(1)).toBe("1");
+    expect(sessionShapeBadge(2)).toBe("1×2");
+    expect(sessionShapeBadge(4)).toBe("2×2");
+    expect(sessionShapeBadge(6)).toBe("2×3");
+    expect(sessionShapeBadge(8)).toBe("2×4");
   });
 });
 
