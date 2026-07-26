@@ -71,6 +71,9 @@ vi.mock("./components/Sidebar", () => ({
         >
           create-workspace-with-agents
         </button>
+        <button onClick={() => props.onInstallAgent?.("copilot")}>
+          install-agent
+        </button>
       </div>
     );
   },
@@ -162,7 +165,7 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
       settingsStore.set(key, value)
     );
 
-    // Agent installation mock: capture progress callback, then simulate completion
+    // Agent installation mock: capture progress callback for manual triggering in tests
     tauriMocks.onAgentInstallProgressMock.mockImplementation(
       async (agent: Agent, callback: (status: string) => void) => {
         tauriMocks.progressCallbacks.set(agent, callback);
@@ -171,6 +174,16 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
         };
       }
     );
+
+    // Mock agentInstall to simulate installation completion after onAgentInstallProgress is set up
+    tauriMocks.agentInstallMock.mockImplementation(async (agent: Agent) => {
+      // Simulate async installation: get the callback and fire it with "completed"
+      const callback = tauriMocks.progressCallbacks.get(agent);
+      if (callback) {
+        // Use setTimeout to ensure callback is called after install is awaited
+        setTimeout(() => callback("completed"), 0);
+      }
+    });
   });
 
   it("loads agent installation state on app boot", async () => {
@@ -310,5 +323,46 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
     await waitFor(() => {
       expect(screen.getByText(/couldn.t start shell/i)).toBeInTheDocument();
     });
+  });
+
+  it("triggers agent installation and handles progress callback", async () => {
+    // Set up: copilot is not installed
+    tauriMocks.agentCheckInstalledMock.mockResolvedValue(["claude", "shell"]);
+
+    render(<App />);
+
+    // Wait for initial agent check
+    await waitFor(() => {
+      expect(tauriMocks.agentCheckInstalledMock).toHaveBeenCalled();
+    });
+
+    // Trigger agent installation
+    fireEvent.click(await screen.findByRole("button", { name: "install-agent" }));
+
+    // Verify agentInstall was called with the agent
+    await waitFor(() => {
+      expect(tauriMocks.agentInstallMock).toHaveBeenCalledWith("copilot");
+    });
+
+    // Verify onAgentInstallProgress was called to set up the listener
+    await waitFor(() => {
+      expect(tauriMocks.onAgentInstallProgressMock).toHaveBeenCalledWith(
+        "copilot",
+        expect.any(Function)
+      );
+    });
+
+    // Verify the progress callback was captured and can be manually triggered
+    // (in the real flow, agentInstall would trigger it asynchronously)
+    const callback = tauriMocks.progressCallbacks.get("copilot");
+    expect(callback).toBeDefined();
+
+    // Simulate completion by manually calling the callback
+    if (callback) {
+      callback("completed");
+
+      // Give React time to process the state update
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
   });
 });
