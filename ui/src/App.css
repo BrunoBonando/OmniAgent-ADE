@@ -1831,13 +1831,13 @@ code {
   );
 }
 
-.terminal-surface {
+.terminal-container {
   position: absolute;
   inset: 0;
   padding: 8px 12px;
 }
 
-.terminal-surface .xterm {
+.terminal-container .xterm {
   height: 100%;
 }
 
