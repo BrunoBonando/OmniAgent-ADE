@@ -25,6 +25,7 @@ import {
 import {
   GLOBAL_DEFAULT_ENGINE_KEY,
   LAYOUT_SETTING_KEY,
+  UNGROUPED_SESSION_ID,
   defaultEngineSettingKey,
   deserializeLayout,
   initialSessionsState,
@@ -38,11 +39,19 @@ import {
 } from "./state/sessions";
 import { buildLayoutTree, type LayoutPreset, type PaneTree } from "./state/paneGrid";
 import { importFailureBanner, type ImportBatchResult } from "./state/importState";
+import {
+  CLOSED_WORKSPACES_SETTING_KEY,
+  deserializeClosedWorkspaces,
+  nextSelectedAfterClose,
+  openWorkspaces,
+  serializeClosedWorkspaces,
+} from "./state/closedWorkspaces";
 import { isSessionStatus, type SessionStatusEvent } from "./state/sessionStatus";
 import {
   currentSessionGroupId,
   groupTabsBySession,
   newSessionGroupId,
+  nextSessionName,
   sessionGroupForNewPane,
 } from "./state/sessionGroups";
 import {
@@ -112,6 +121,13 @@ function App() {
   // `LAYOUT_SETTING_KEY`/`REVIEW_MEMORY_SETTING_KEY` already use, restored
   // in the boot effect below alongside the tab layout.
   const [fileTreeVisible, setFileTreeVisible] = useState(true);
+  // Workspaces the user has closed (founder ask: "add the possibility to
+  // close a workspace, on hover"). Held here rather than derived from the
+  // brain because the brain is deliberately not told — closing is a window
+  // close, not a delete (see `state/closedWorkspaces.ts`). Restored on boot
+  // and written back on every change, so a closed workspace does not quietly
+  // reappear on the next launch.
+  const [closedProjectIds, setClosedProjectIds] = useState<Set<string>>(() => new Set());
 
   // ---- the per-session code review column (founder ask, 2026-07-26) -----
   //
@@ -284,6 +300,16 @@ function App() {
       }
 
       try {
+        const rawClosed = await settingsGet(CLOSED_WORKSPACES_SETTING_KEY);
+        const closed = deserializeClosedWorkspaces(rawClosed);
+        if (!cancelled && closed.length > 0) setClosedProjectIds(new Set(closed));
+      } catch (err) {
+        // Fail open: showing a workspace the user closed is a small
+        // annoyance, hiding one they didn't is lost work.
+        console.error("failed to read closed_workspaces setting, showing every workspace", err);
+      }
+
+      try {
         const storedFileTreeVisible = await settingsGet(FILE_TREE_VISIBLE_SETTING_KEY);
         // Unset (first run) keeps the `useState(true)` default — only an
         // explicit "false" ever hides it on boot.
@@ -360,6 +386,9 @@ function App() {
               // `sessionGroups.ts`'s implicit group rather than by inventing
               // one here.
               group: t.group,
+              // …and its NAME, so a relaunch comes back with the sessions
+              // the user named rather than a fresh "Session 1, 2, 3…".
+              groupLabel: t.groupLabel,
               restored: info.restored === true,
             });
           } catch (err) {
@@ -498,12 +527,21 @@ function App() {
     }
   }, [tabIds]);
 
+  // The workspaces the sidebar lists: what the brain knows, minus what the
+  // user has closed. Everything else — the map, the palette, the brain
+  // itself — deliberately still sees all of them: closing a workspace closes
+  // a window, it does not unlearn a project.
+  const visibleProjects = useMemo(
+    () => openWorkspaces(state.projects, closedProjectIds),
+    [state.projects, closedProjectIds],
+  );
+
   // ---- default the sidebar's "current project" once projects arrive -----
   useEffect(() => {
-    if (selectedProjectId === null && state.projects.length > 0) {
-      setSelectedProjectId(state.projects[0].id);
+    if (selectedProjectId === null && visibleProjects.length > 0) {
+      setSelectedProjectId(visibleProjects[0].id);
     }
-  }, [state.projects, selectedProjectId]);
+  }, [visibleProjects, selectedProjectId]);
 
   const selectedProject = useMemo(
     () => state.projects.find((p) => p.id === selectedProjectId) ?? null,
@@ -524,9 +562,17 @@ function App() {
   // `cwd` overrides the project's own folder — the "or subfolder" half of
   // Bruno's session brief (`NewSessionModal` validates that the override is
   // genuinely inside the project before it ever gets here). `group` is the
-  // session (pane group) the new pane belongs to.
+  // session (pane group) the new pane belongs to, and `groupLabel` is that
+  // session's NAME — carried on every one of its panes (see
+  // `TabInfo.groupLabel`), which is what makes it survive a relaunch.
   const createSessionTab = useCallback(
-    async (project: ProjectInfo, engine: Engine, group: string, cwd?: string): Promise<TabInfo> => {
+    async (
+      project: ProjectInfo,
+      engine: Engine,
+      group: string,
+      groupLabel: string | undefined,
+      cwd?: string,
+    ): Promise<TabInfo> => {
       const briefing = engine === "claude" ? await getBriefing(project.id) : undefined;
       const info = await sessionCreate(project.id, engine, cwd ?? project.path ?? project.id, briefing);
       return {
@@ -536,10 +582,27 @@ function App() {
         cwd: info.cwd,
         createdAt: info.created,
         group,
+        groupLabel,
       };
     },
     [],
   );
+
+  /** Takes a workspace back out of the closed set (and persists that), so
+   * anything that *opens* it — a terminal from the map or the palette,
+   * re-adding the folder, importing it — undoes the close instead of
+   * leaving a workspace with live terminals hidden from the sidebar. A
+   * no-op for a workspace that was never closed, so every entry point can
+   * call it unconditionally. */
+  const reopenWorkspace = useCallback((projectId: string) => {
+    setClosedProjectIds((closed) => {
+      if (!closed.has(projectId)) return closed;
+      const next = new Set(closed);
+      next.delete(projectId);
+      void settingsSet(CLOSED_WORKSPACES_SETTING_KEY, serializeClosedWorkspaces(next));
+      return next;
+    });
+  }, []);
 
   // ---- new-tab flow: resolve the default engine, open it immediately ----
   // Founder ask (verbatim): "When a new terminal is created, it should
@@ -564,6 +627,7 @@ function App() {
   const requestNewTab = useCallback(
     async (project: ProjectInfo) => {
       setSelectedProjectId(project.id);
+      reopenWorkspace(project.id);
       let perProject: string | null = null;
       let global: string | null = null;
       try {
@@ -583,9 +647,21 @@ function App() {
         // A single new pane joins the session you're already in for that
         // project (`sessionGroupForNewPane`) — ⌘T, the sidebar "+" and the
         // pane header's split all mean "one more terminal here", not "a new
-        // session". A project with no panes at all starts one.
-        const group = sessionGroupForNewPane(state.tabs, project.id, state.activeTabId) ?? newSessionGroupId();
-        const tab = await createSessionTab(project, engine, group);
+        // session". A project with no panes at all starts one, named.
+        //
+        // Joining an existing session means inheriting its name from the
+        // panes already in it (`undefined` for a pre-naming session, which
+        // keeps showing its derived default) — never minting a second name
+        // for a session that already has one.
+        const existingGroup = sessionGroupForNewPane(state.tabs, project.id, state.activeTabId);
+        const group = existingGroup ?? newSessionGroupId();
+        const groupLabel =
+          existingGroup === null
+            ? nextSessionName(state.tabs, project.id)
+            : state.tabs.find(
+                (t) => t.project === project.id && (t.group ?? UNGROUPED_SESSION_ID) === existingGroup && t.groupLabel,
+              )?.groupLabel;
+        const tab = await createSessionTab(project, engine, group, groupLabel);
         dispatch({ type: "tab/opened", tab });
         // Cross-view integration point (Task 6.2): the map's "Open terminal
         // here" action calls `requestNewTab` too (via `onOpenTerminal`
@@ -597,7 +673,7 @@ function App() {
         setErrorBanner(`Couldn't start ${engine} in ${project.label}: ${err}`);
       }
     },
-    [createSessionTab, state.tabs, state.activeTabId],
+    [createSessionTab, reopenWorkspace, state.tabs, state.activeTabId],
   );
 
   // ---- PaneHeader's 3-dot "Change engine" -------------------------------
@@ -625,10 +701,16 @@ function App() {
         console.error(`failed to kill session ${tab.id} before restarting with ${engine} (continuing anyway)`, err);
       }
       try {
-        // `tab.group` rides along for the same reason `label`/`themeId` do:
-        // restarting the engine must not move the pane out of the session
-        // it belongs to.
-        const spawned = await createSessionTab(project, engine, tab.group ?? newSessionGroupId(), tab.cwd);
+        // `tab.group`/`tab.groupLabel` ride along for the same reason
+        // `label`/`themeId` do: restarting the engine must not move the pane
+        // out of the session it belongs to, nor cost that session its name.
+        const spawned = await createSessionTab(
+          project,
+          engine,
+          tab.group ?? newSessionGroupId(),
+          tab.groupLabel,
+          tab.cwd,
+        );
         const restarted: TabInfo = { ...spawned, label: tab.label, themeId: tab.themeId };
         dispatch({ type: "tab/engineRestarted", oldId: tab.id, tab: restarted });
       } catch (err) {
@@ -681,13 +763,15 @@ function App() {
       void reloadProjects();
       setSelectedProjectId(project.id);
 
-      // A new workspace's first batch of panes is its first session.
+      // A new workspace's first batch of panes is its first session —
+      // "Session 1", the founder's own starting point.
       const group = newSessionGroupId();
+      const groupLabel = nextSessionName(state.tabs, project.id);
       const created: TabInfo[] = [];
       const failed: Engine[] = [];
       for (const engine of engines) {
         try {
-          created.push(await createSessionTab(project, engine, group));
+          created.push(await createSessionTab(project, engine, group, groupLabel));
         } catch (err) {
           console.error(`failed to start ${engine} in ${project.label}`, err);
           failed.push(engine);
@@ -711,7 +795,7 @@ function App() {
 
       setView("workspace");
     },
-    [reloadProjects, createSessionTab],
+    [reloadProjects, createSessionTab, state.tabs],
   );
 
   // ---- NewSessionModal's create (⌘N -> "Session") -----------------------
@@ -731,11 +815,12 @@ function App() {
       setSelectedProjectId(project.id);
 
       const group = newSessionGroupId();
+      const groupLabel = nextSessionName(state.tabs, project.id);
       const created: TabInfo[] = [];
       const failed: Engine[] = [];
       for (const engine of engines) {
         try {
-          created.push(await createSessionTab(project, engine, group, cwd));
+          created.push(await createSessionTab(project, engine, group, groupLabel, cwd));
         } catch (err) {
           console.error(`failed to start ${engine} in ${cwd}`, err);
           failed.push(engine);
@@ -759,7 +844,7 @@ function App() {
 
       setView("workspace");
     },
-    [createSessionTab],
+    [createSessionTab, state.tabs],
   );
 
   // ⌘N's chooser resolved. "Session" needs a project to run in — with none
@@ -848,6 +933,17 @@ function App() {
     [],
   );
 
+  // The sidebar's double-click-to-rename on a session row (founder brief:
+  // "Each session has a name and can be renamed"). Writes the name onto
+  // every pane in the group; the layout-persist effect below then carries it
+  // to the settings table, so the name survives a relaunch exactly like a
+  // pane's own rename does.
+  const renameSession = useCallback(
+    (project: ProjectInfo, group: string, name: string) =>
+      dispatch({ type: "session/renamed", project: project.id, group, name }),
+    [],
+  );
+
   // Same optimistic-flip-then-persist shape as `ReviewPanel.tsx`'s
   // `toggleReviewMode` (its own settings-table boolean toggle) — flip local
   // state immediately so the panel opens/closes with no round-trip latency,
@@ -921,6 +1017,49 @@ function App() {
         return;
       }
       setErrorBanner(`"${entry.title}" is gone: ${entry.projectLabel} isn't in your projects any more.`);
+    },
+    [state.tabs, state.projects],
+  );
+
+  // ---- closing a whole workspace (founder ask: "add the possibility to
+  // close a workspace, on hover") --------------------------------------
+  //
+  // The cascade, in the only order that can't strand anything: kill every
+  // terminal in the workspace (each `session_kill` also tears down the tmux
+  // session behind it, so nothing outlives the close), drop them from state,
+  // then hide the row and remember the choice.
+  //
+  // What it deliberately does NOT do: call anything on the brain. No
+  // project is removed, nothing is un-ingested, no memory note is touched —
+  // `list_projects` will keep returning this project, and re-adding the
+  // folder (or opening a terminal in it from the map) brings the row
+  // straight back. `CloseWorkspaceConfirm` says exactly this before any of
+  // it happens; `state/closedWorkspaces.ts` records why.
+  //
+  // Kills run in parallel and are individually best-effort: one wedged PTY
+  // must not leave the other terminals of a closed workspace running.
+  const closeWorkspace = useCallback(
+    async (project: ProjectInfo) => {
+      const doomed = state.tabs.filter((t) => t.project === project.id);
+      await Promise.all(
+        doomed.map((tab) =>
+          sessionKill(tab.id).catch((err) =>
+            console.error(`failed to kill session ${tab.id} while closing ${project.label}`, err),
+          ),
+        ),
+      );
+      for (const tab of doomed) dispatch({ type: "tab/closed", id: tab.id });
+      setReviewTarget((target) => (doomed.some((t) => t.id === target?.id) ? null : target));
+
+      setClosedProjectIds((closed) => {
+        const next = new Set(closed);
+        next.add(project.id);
+        void settingsSet(CLOSED_WORKSPACES_SETTING_KEY, serializeClosedWorkspaces(next));
+        setSelectedProjectId((selected) =>
+          nextSelectedAfterClose(state.projects, next, project.id, selected),
+        );
+        return next;
+      });
     },
     [state.tabs, state.projects],
   );
@@ -1022,7 +1161,7 @@ function App() {
       )}
       <div className="app-body">
         <Sidebar
-          projects={state.projects}
+          projects={visibleProjects}
           tabs={state.tabs}
           activeTabId={state.activeTabId}
           selectedProjectId={selectedProjectId}
@@ -1044,6 +1183,8 @@ function App() {
             setSelectedProjectId(p.id);
             setNewSessionOpen(true);
           }}
+          onRenameSession={renameSession}
+          onCloseWorkspace={(p) => void closeWorkspace(p)}
         />
         <Workspace
           projects={state.projects}

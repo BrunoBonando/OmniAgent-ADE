@@ -645,13 +645,10 @@ code {
   box-shadow: inset 3px 0 0 0 var(--accent-select);
 }
 
-.project-row.is-selected .project-row-count {
-  color: var(--accent-select);
-  background: rgba(237, 129, 195, 0.16);
-}
-
 .project-row-main {
-  width: calc(100% - 48px);
+  /* Room for the three hover-revealed controls at the right end of the row:
+     "+" (new terminal), "⋯" (pause/re-check) and "×" (close workspace). */
+  width: calc(100% - 70px);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -701,15 +698,6 @@ code {
   flex: 1;
 }
 
-.project-row-count {
-  font-size: 10px;
-  color: var(--signal);
-  background: rgba(77, 141, 255, 0.12);
-  border-radius: 999px;
-  padding: 1px 6px;
-  flex: 0 0 auto;
-}
-
 /* Task 8.1: stale/paused degradation indicators inline in the row label. */
 .project-row-stale-dot {
   width: 6px;
@@ -755,7 +743,7 @@ code {
 
 .project-row-add {
   position: absolute;
-  right: 26px;
+  right: 48px;
   top: 3px;
   width: 20px;
   height: 20px;
@@ -779,7 +767,7 @@ code {
 
 .project-row-menu-trigger {
   position: absolute;
-  right: 4px;
+  right: 26px;
   top: 3px;
   width: 20px;
   height: 20px;
@@ -800,6 +788,42 @@ code {
 .project-row-menu-trigger:hover {
   border-color: var(--line);
   color: var(--ink);
+}
+
+/* Founder ask, 2026-07-26: "add the possibility to close a workspace, on
+   hover". Last in the cluster, hard against the right edge — where a close
+   sits on every window and tab this app is used beside — and the only one
+   of the three that turns a colour on hover, because it is the only one
+   that ends something. It still asks first (`CloseWorkspaceConfirm`). */
+.project-row-close {
+  position: absolute;
+  right: 4px;
+  top: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-dim);
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0;
+}
+
+.project-row:hover .project-row-close {
+  opacity: 1;
+}
+
+.project-row-close:hover {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
+}
+
+/* Keyboard users get the same controls the pointer does. */
+.project-row-add:focus-visible,
+.project-row-menu-trigger:focus-visible,
+.project-row-close:focus-visible {
+  opacity: 1;
 }
 
 /* -------------------------------------------------------- project menu
@@ -910,71 +934,6 @@ code {
 .project-menu-recheck:disabled {
   color: var(--ink-faint);
   cursor: default;
-}
-
-.project-row-tabs {
-  list-style: none;
-  margin: 2px 0 4px 18px;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.project-row-tab {
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: none;
-  border-left: 2px solid var(--line);
-  color: var(--ink-dim);
-  font-family: var(--mono);
-  font-size: 11px;
-  padding: 3px 8px;
-}
-
-.project-row-tab:hover {
-  color: var(--ink);
-}
-
-.project-row-tab.is-active {
-  color: var(--signal);
-  border-left-color: var(--signal);
-}
-
-/* Founder feedback (2026-07-24): which specific session in this project
-   needs attention, not just "the project" — same red dot idiom as
-   `.tab-pill-attention-dot`/`.project-row-attention-dot`, sized for this
-   smaller sub-row. */
-/* Which specific session in this project is waiting on the user. Derived
-   from its live status since 2026-07-26 (`statusNeedsAttention`), and
-   tinted with that status's own colour — amber for "needs approval", red
-   for "error" — so the sidebar and the pane's light are never two
-   vocabularies for the same fact. */
-.project-row-tab.has-attention {
-  color: var(--status-approval);
-  border-left-color: var(--status-approval);
-}
-
-.project-row-tab-attention-dot {
-  display: inline-block;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--status-approval);
-  box-shadow: 0 0 4px rgba(245, 185, 58, 0.7);
-  margin-right: 5px;
-  vertical-align: middle;
-}
-
-.project-row-tab-attention-dot[data-status="error"] {
-  background: var(--status-error);
-  box-shadow: 0 0 4px rgba(255, 61, 113, 0.75);
-}
-
-.project-row-tab.has-attention:has(.project-row-tab-attention-dot[data-status="error"]) {
-  color: var(--status-error);
-  border-left-color: var(--status-error);
 }
 
 .sidebar-view-toggle {
@@ -1558,14 +1517,17 @@ code {
 
 /* ----------------------------------------------------- session hover card
    Founder ask: "for each session, have a hover with more info, like warp
-   does" (+ "on hover, it explains" for the status light — one surface, see
-   SessionHoverCard.tsx). Modelled on his reference screenshot,
-   docs/reference/warp-session-hover-card.png: a small dark slab under the
-   session, status badge first, then the facts, then the agent.
+   does". Modelled on his reference screenshot,
+   docs/reference/warp-session-hover-card.png: a small dark slab beside the
+   session, status badge first, then the facts, then what is running in it.
 
-   `position: fixed` and a high z-index because every pane is its own
-   stacking context inside react-mosaic and the toolbar clips — placed from
-   a rect the header measured when the card opened.
+   It hangs off the SIDEBAR's session row (2026-07-26: "The hover part is
+   currently wrong: it's not on the terminal itself, but on session menu on
+   the left"), placed to the right of the row rather than under it — the
+   sidebar is against the left edge, so a card dropped below would cover the
+   list the pointer is travelling through. `position: fixed` and a high
+   z-index because the sidebar is its own stacking context; the position
+   comes from a rect the row measured when the card opened.
 
    Typography is split down the middle on purpose: the facts (path, branch,
    title, agent) are set in the mono face, the one human sentence in the
@@ -1687,23 +1649,43 @@ code {
   color: var(--ink-faint);
 }
 
+/* The foot answers "what is running in here": how many terminals, and which
+   engines. It is the one place the counts the sidebar stopped showing still
+   live — one hover away, which is exactly the trade the founder asked for
+   ("Just the session, so it's cleaner… On hover, it shows full details").
+   Warp's `+12891` diff stat would sit at the end of this row; left empty
+   until real git-review data exists — see SessionCardModel.diff. */
 .session-card-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   margin-top: 10px;
   padding-top: 9px;
   border-top: 1px solid var(--line-soft);
   font-size: 11px;
   color: var(--ink-dim);
-  /* The right-hand slot is where Warp's `+12891` diff stat lives. Left
-     empty until real git-review data exists — see HoverCardModel.diff. */
+}
+
+.session-card-terminals {
+  flex: 0 0 auto;
+  color: var(--ink);
+}
+
+.session-card-engines {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px 10px;
+  min-width: 0;
 }
 
 .session-card-engine {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .session-card-engine-dot {
@@ -1711,6 +1693,11 @@ code {
   height: 7px;
   border-radius: 50%;
   flex: 0 0 auto;
+}
+
+.session-card-engine-count {
+  color: var(--ink-faint);
+  margin-left: 3px;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -5430,68 +5417,102 @@ code {
   text-decoration: underline;
 }
 
-/* ------------------------------------- sidebar: project -> session -> pane
-   Founder brief, 2026-07-26: "Inside each workspace (first column) it must
-   show the session it's currently on the screen." A project's panes are
-   grouped under the session that created them; the one holding the focused
-   pane wears the accent rule and an "on screen" tag. */
+/* --------------------------------------------- sidebar: workspace -> session
+   Founder brief, 2026-07-26: "The menu on the left should not show the
+   amount of tabs and their names. Just the session, so it's cleaner.
+   Session and current github branch. On hover, it shows full details."
+
+   So a session row is one line of three parts — light, name, branch — and
+   the two things it used to carry underneath (the "N panes · engines" meta
+   line and the list of every terminal) are gone from the sidebar entirely.
+   The session on screen is marked the way a selected workspace chip is
+   marked, with an accent rail rather than a word: same language, one less
+   thing to read. */
 
 .project-row-sessions {
   list-style: none;
-  margin: 2px 0 6px 10px;
+  margin: 0 0 6px 10px;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 1px;
 }
 
-.project-row-session {
-  padding-left: 8px;
+.session-row {
+  position: relative;
   border-left: 1px solid var(--line);
+  border-radius: 0 4px 4px 0;
 }
 
-.project-row-session.is-current {
+.session-row.is-current {
   border-left-color: var(--accent-select);
 }
 
-.project-row-session-head {
+.session-row:hover {
+  background: var(--panel-raised);
+}
+
+.session-row-main {
+  width: 100%;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
-}
-
-.project-row-session-label {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  background: transparent;
+  border: none;
   color: var(--ink-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: left;
+  padding: 3px 6px 3px 8px;
 }
 
-.project-row-session.is-current .project-row-session-label {
+.session-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--ink-dim);
 }
 
-.project-row-session-current {
-  font-family: var(--mono);
-  font-size: 8.5px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--accent-select);
-  border: 1px solid rgba(237, 129, 195, 0.4);
-  border-radius: 999px;
-  padding: 0 5px;
+.session-row.is-current .session-row-name,
+.session-row:hover .session-row-name {
+  color: var(--ink);
 }
 
-.project-row-session-meta {
-  display: block;
+/* The branch reads as a fact about the session, not as a control: no
+   capsule, no hover state of its own, just the fork glyph and the name at
+   the quietest weight the panel has. Same idiom as the pane header's tag,
+   one step smaller and untinted — an engine colour here would claim the
+   branch belongs to one of the session's terminals. */
+.session-row-branch {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 10px;
   color: var(--ink-faint);
-  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46%;
 }
 
-.project-row-sessions .project-row-tabs {
-  margin-left: 0;
+.session-row-branch-glyph {
+  opacity: 0.7;
+}
+
+.session-row-rename-input {
+  width: calc(100% - 10px);
+  margin: 2px 0 2px 8px;
+  background: var(--void);
+  border: 1px solid var(--signal-dim);
+  border-radius: 3px;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 4px;
 }
 
 .project-row-new-session {

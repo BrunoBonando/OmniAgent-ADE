@@ -18,6 +18,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NOTIFICATIONS_SETTING_KEY } from "./state/notifications";
+import { CLOSED_WORKSPACES_SETTING_KEY } from "./state/closedWorkspaces";
 import { LAYOUT_SETTING_KEY, type ProjectInfo, type TabInfo } from "./state/sessions";
 import {
   AUTH_GATE_RESOLVED_SETTING_KEY,
@@ -134,7 +135,8 @@ describe("App — instant-default-engine new tab", () => {
         key === AUTH_GATE_RESOLVED_SETTING_KEY ||
         key === AUTH_SIGNED_IN_SETTING_KEY ||
         key === AUTH_PERSONA_SETTING_KEY ||
-        key === NOTIFICATIONS_SETTING_KEY
+        key === NOTIFICATIONS_SETTING_KEY ||
+        key === CLOSED_WORKSPACES_SETTING_KEY
       ) {
         return Promise.resolve(null);
       }
@@ -170,7 +172,8 @@ describe("App — instant-default-engine new tab", () => {
         key === AUTH_GATE_RESOLVED_SETTING_KEY ||
         key === AUTH_SIGNED_IN_SETTING_KEY ||
         key === AUTH_PERSONA_SETTING_KEY ||
-        key === NOTIFICATIONS_SETTING_KEY
+        key === NOTIFICATIONS_SETTING_KEY ||
+        key === CLOSED_WORKSPACES_SETTING_KEY
       ) {
         return Promise.resolve(null);
       }

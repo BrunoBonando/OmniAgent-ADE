@@ -23,12 +23,19 @@
 // 2. *"terminal title has a dropdown with main, remove it. This must be
 //    connected to the session as a tag"* — the git-branch pill is now a tag
 //    (`.pane-header-tag`), same data, no control affordance.
-// 3. *"for each session, have a hover with more info, like warp does"* +
-//    *"on hover, it explains, of course"* — one `SessionHoverCard`, opened
-//    by resting on the header, carrying the status explanation *and* the
-//    session facts. Deliberately ONE surface: a tooltip on the light nested
-//    inside a card on the header would be two popovers racing each other
-//    every time the pointer crosses on its way to the close button.
+// 3. *"on hover, it explains, of course"* — the status light explains
+//    itself on hover, and that is the only popover this header has.
+//
+// ## The hover card left this header (2026-07-26, later the same day)
+//
+// It briefly lived here too: resting on the header opened a `SessionHoverCard`
+// carrying the status sentence and the session's facts. Bruno, on seeing it:
+// *"The hover part is currently wrong: it's not on the terminal itself, but
+// on session menu on the left."* It now hangs off the sidebar's session row
+// (`SidebarSessionRow.tsx`), scoped to the whole session rather than to one
+// terminal, and this header keeps only the light's own tooltip — which is a
+// different, deliberate affordance, and the one thing here that genuinely
+// describes this single pane.
 //
 // **Engine identity** used to be this header's leading dot
 // (`ENGINE_COLOR[tab.engine]`). Status took that slot, so the signal moved
@@ -41,20 +48,12 @@
 // repo has no tag, so its engine shows only in the card (and, until it is
 // renamed or auto-titled, in the header label, which still falls back to the
 // engine name).
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { tabDisplayLabel, type Engine, type TabInfo } from "../state/sessions";
-import { deriveHoverCard } from "../state/sessionHoverCard";
 import { useGitBranch } from "../lib/useGitBranch";
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeId } from "../lib/terminalThemes";
 import PaneMenu from "./PaneMenu";
-import SessionHoverCard from "./SessionHoverCard";
 import SessionStatusLight from "./SessionStatusLight";
-
-/** How long the pointer must rest on a pane header before its card appears.
- * Long enough that crossing the header on the way to the close button never
- * summons it, short enough that deliberately pointing at a pane feels
- * answered. Closing is immediate — a card that lingers is in the way. */
-export const HOVER_CARD_DELAY_MS = 320;
 
 interface PaneHeaderProps {
   tab: TabInfo;
@@ -104,36 +103,7 @@ export default function PaneHeader({
   const [draft, setDraft] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
 
-  // ---- hover card -------------------------------------------------------
-  // `cardAnchor` doubles as "is the card open": it holds the header rect
-  // measured at open time, which is what the fixed-position card is placed
-  // from (see SessionHoverCard's own doc for why fixed).
-  const headerRef = useRef<HTMLDivElement>(null);
-  const [cardAnchor, setCardAnchor] = useState<DOMRect | null>(null);
-  const openTimer = useRef<number | null>(null);
-
-  const closeCard = useCallback(() => {
-    if (openTimer.current !== null) {
-      window.clearTimeout(openTimer.current);
-      openTimer.current = null;
-    }
-    setCardAnchor(null);
-  }, []);
-
-  // Clears a pending open timer if the pane closes (or the grid remounts it)
-  // mid-hover, so a card never appears for a session that's gone.
-  useEffect(() => () => closeCard(), [closeCard]);
-
-  function scheduleCard() {
-    if (openTimer.current !== null) return;
-    openTimer.current = window.setTimeout(() => {
-      openTimer.current = null;
-      setCardAnchor(headerRef.current?.getBoundingClientRect() ?? null);
-    }, HOVER_CARD_DELAY_MS);
-  }
-
   function startRename() {
-    closeCard();
     setDraft(tabDisplayLabel(tab));
     setRenaming(true);
   }
@@ -143,28 +113,14 @@ export default function PaneHeader({
     setRenaming(false);
   }
 
-  // The card is suppressed while renaming or while the 3-dot menu is open —
-  // both are real interactions with this header, and a popover drifting in
-  // over them would be noise, not information.
-  const cardVisible = cardAnchor !== null && !renaming && !menuOpen;
-
   return (
     <div
-      ref={headerRef}
       // The `has-attention` red border is gone with `needsAttention` itself
       // (2026-07-26): `awaiting_approval` breathes amber and `error` flashes
       // red in the light below, which is the same fact in the language the
       // rest of the app now uses. See `state/sessions.ts`'s `TabInfo` doc.
       className={`pane-header${isFocused ? " is-focused" : ""}`}
-      onMouseDown={() => {
-        // Also the start of a pane-rearrange drag (this whole element is
-        // react-mosaic's drag handle) — a card hanging around mid-drag would
-        // follow nothing.
-        closeCard();
-        onFocus();
-      }}
-      onMouseEnter={scheduleCard}
-      onMouseLeave={closeCard}
+      onMouseDown={onFocus}
     >
       {/* The five-state light: the OmniAgent mark, tinted and animated by
           this session's live status. Replaced the engine-coloured dot that
@@ -222,10 +178,7 @@ export default function PaneHeader({
             className={`pane-header-btn pane-header-btn-menu${menuOpen ? " is-active" : ""}`}
             draggable={false}
             onMouseDown={stopForDrag}
-            onClick={() => {
-              closeCard();
-              setMenuOpen((open) => !open);
-            }}
+            onClick={() => setMenuOpen((open) => !open)}
             aria-label={`${tabDisplayLabel(tab)} options`}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
@@ -266,9 +219,6 @@ export default function PaneHeader({
       >
         ×
       </button>
-      {cardVisible && (
-        <SessionHoverCard model={deriveHoverCard({ tab, projectLabel, branch })} anchor={cardAnchor} />
-      )}
     </div>
   );
 }

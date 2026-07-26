@@ -66,6 +66,13 @@ export default function SessionStatusLight({ status, size, decorative }: Session
       role={decorative ? undefined : "img"}
       aria-label={decorative ? undefined : presentation.ariaLabel}
       aria-hidden={decorative ? true : undefined}
+      // "on hover, it explains, of course" (Bruno, 2026-07-26) — the light's
+      // own affordance, and since 2026-07-26 (later) its ONLY one: the big
+      // hover card that used to carry this sentence moved to the sidebar's
+      // session row, so a pane header light that explained nothing would
+      // have quietly lost a feature. Skipped when decorative, where the
+      // label sitting next to it already says the same words.
+      title={decorative ? undefined : presentation.ariaLabel}
     >
       <span className="session-light-mark">
         <span className="session-light-fill" />

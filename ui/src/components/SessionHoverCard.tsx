@@ -1,52 +1,71 @@
-// The per-session hover card (founder ask, 2026-07-26, verbatim: "for each
+// The session hover card (founder ask, 2026-07-26, verbatim: "for each
 // session, have a hover with more info, like warp does" — his reference
 // screenshot is docs/reference/warp-session-hover-card.png).
 //
-// Warp's card carries a status badge, the `~`-collapsed working path, the
-// branch, the session title, the agent name with its avatar, and a diff
-// stat. This one carries the same information in the same reading order,
-// with two deliberate differences:
+// ## It hangs off the sidebar now, not off a terminal
 //
-// - it opens with the status **explained in a sentence**, which is also
-//   Bruno's "on hover, it explains" for the five-state light — one hover
-//   surface for the whole pane rather than a tooltip on the light nested
-//   inside a card on the header, which would fight each other on the way to
-//   the close button;
-// - the diff stat is **absent, not invented**. The git review data behind
-//   Warp's `+12891` is a later dispatch; `HoverCardModel.diff` is the seam,
-//   and the footer already leaves it the room.
+// Same day, after seeing it: *"The hover part is currently wrong: it's not on
+// the terminal itself, but on session menu on the left. […] On hover, it
+// shows full details."* So `SidebarSessionRow` opens it and the pane header
+// no longer has one — there is exactly one hover surface for a session, in
+// the place the sessions are listed. The pane header kept the one thing that
+// is genuinely about a single terminal: its status light, with its own
+// explanation on hover.
 //
-// Positioned `fixed` from a measured anchor rect rather than absolutely
-// inside the header: the header lives inside react-mosaic's toolbar, which
-// clips, and every pane is its own stacking context — a fixed layer sidesteps
-// both without touching the library's CSS.
+// The contents moved with it, from one pane to the whole session
+// (`state/sessionHoverCard.ts`): the session's name, its root folder, its
+// branch, how many terminals and which engines are in it, and the one status
+// that speaks for all of them.
 //
-// Type is split on purpose: machine facts (path, branch, title, engine) in
+// Warp's card also carries a diff stat; that one is **absent, not invented**
+// — the git review data behind its `+12891` is a later dispatch, and
+// `SessionCardModel.diff` is the seam.
+//
+// Positioned `fixed` from a measured anchor rect and placed to the *right* of
+// the row: the sidebar is against the left edge of the window, so a card
+// dropped below the row would sit on top of the very list the pointer is
+// travelling through. High z-index because the sidebar is its own stacking
+// context.
+//
+// Type is split on purpose: machine facts (path, branch, name, engines) in
 // the app's mono face, the human sentence in the sans face. It's the same
 // split the terminal itself makes — what the computer says vs what we say.
 import { ENGINE_COLOR } from "../theme";
-import type { HoverCardModel } from "../state/sessionHoverCard";
+import type { SessionCardModel } from "../state/sessionHoverCard";
 import SessionStatusLight from "./SessionStatusLight";
 
 /** Kept in sync with `.session-card { width }` in App.css — only used to
  * keep the card from hanging off the right edge of the window. */
 export const HOVER_CARD_WIDTH = 300;
+/** Ditto for the vertical clamp: the tallest the card gets (status line,
+ * sentence, three facts, engine row). Over-estimating only pushes the card
+ * up a few pixels; under-estimating would let it run off the bottom. */
+const HOVER_CARD_MAX_HEIGHT = 200;
 const VIEWPORT_MARGIN = 10;
-const ANCHOR_GAP = 6;
+const ANCHOR_GAP = 8;
 
 interface SessionHoverCardProps {
-  model: HoverCardModel;
-  /** The hovered pane header's rect (`getBoundingClientRect()`), captured
+  model: SessionCardModel;
+  /** The hovered session row's rect (`getBoundingClientRect()`), captured
    * when the card opened. */
   anchor: DOMRect | null;
 }
 
 export default function SessionHoverCard({ model, anchor }: SessionHoverCardProps) {
   const viewportWidth = typeof window === "undefined" ? HOVER_CARD_WIDTH : window.innerWidth;
+  const viewportHeight = typeof window === "undefined" ? HOVER_CARD_MAX_HEIGHT : window.innerHeight;
   const left = anchor
-    ? Math.max(VIEWPORT_MARGIN, Math.min(anchor.left, viewportWidth - HOVER_CARD_WIDTH - VIEWPORT_MARGIN))
+    ? Math.max(
+        VIEWPORT_MARGIN,
+        Math.min(anchor.right + ANCHOR_GAP, viewportWidth - HOVER_CARD_WIDTH - VIEWPORT_MARGIN),
+      )
     : VIEWPORT_MARGIN;
-  const top = anchor ? anchor.bottom + ANCHOR_GAP : VIEWPORT_MARGIN;
+  const top = anchor
+    ? Math.max(
+        VIEWPORT_MARGIN,
+        Math.min(anchor.top, viewportHeight - HOVER_CARD_MAX_HEIGHT - VIEWPORT_MARGIN),
+      )
+    : VIEWPORT_MARGIN;
 
   return (
     <div className="session-card" role="tooltip" style={{ left, top }}>
@@ -75,22 +94,30 @@ export default function SessionHoverCard({ model, anchor }: SessionHoverCardProp
           </div>
         )}
         <div className="session-card-title">
-          {model.title}
+          {model.name}
           <span className="session-card-project"> · {model.projectLabel}</span>
         </div>
       </div>
 
       <div className="session-card-foot">
-        <span className="session-card-engine">
-          <span
-            className="session-card-engine-dot"
-            style={{ background: ENGINE_COLOR[model.engine] }}
-            aria-hidden="true"
-          />
-          {model.engineLabel}
+        <span className="session-card-terminals">
+          {model.terminals} terminal{model.terminals === 1 ? "" : "s"}
+        </span>
+        <span className="session-card-engines">
+          {model.engines.map((e) => (
+            <span className="session-card-engine" key={e.engine}>
+              <span
+                className="session-card-engine-dot"
+                style={{ background: ENGINE_COLOR[e.engine] }}
+                aria-hidden="true"
+              />
+              {e.label}
+              {e.count > 1 && <span className="session-card-engine-count">×{e.count}</span>}
+            </span>
+          ))}
         </span>
         {/* Warp's `+12891` sits here. Left empty until real git-review data
-            exists — see `HoverCardModel.diff`. */}
+            exists — see `SessionCardModel.diff`. */}
       </div>
     </div>
   );

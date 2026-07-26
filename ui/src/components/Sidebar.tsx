@@ -62,27 +62,48 @@
 // for the user immediately instead of holding a stale badge. See
 // `state/sessions.ts`'s `TabInfo` doc for the whole reconciliation.
 //
-// ## Project -> session -> pane (founder brief, 2026-07-26)
+// ## Workspace -> session (founder brief, 2026-07-26)
 //
 // Bruno: *"Inside each workspace (first column) it must show the session
 // it's currently on the screen."* A project's panes are no longer a flat
 // list under the project row: they're grouped by session
-// (`state/sessionGroups.ts`), each session names itself and its agents, and
-// the one holding the focused pane is marked as being on screen.
+// (`state/sessionGroups.ts`), and the one holding the focused pane wears the
+// accent rail.
+//
+// **Later the same day, he cut the rest of it away:** *"The menu on the left
+// should not show the amount of tabs and their names. Just the session, so
+// it's cleaner. Session and current github branch. On hover, it shows full
+// details."* Three things left this file in that pass:
+//
+// - the per-project **tab count** badge (`.project-row-count`);
+// - the per-session **"N panes · Claude Code, Shell"** meta line;
+// - the nested **list of every terminal** in every session.
+//
+// What a session row shows now is `SidebarSessionRow`'s whole job: its live
+// light, its name (double-click to rename), and the git branch of its own
+// root. Everything that was cut is one hover away, in the card that row
+// opens — which is also where the card moved *from* the pane header.
+//
+// ## Closing a workspace (same brief: "add the possibility to close a
+// ## workspace, on hover")
+//
+// The `×` beside the row's other hover controls. It ends every terminal in
+// the workspace and takes the row out of the list — and nothing else: see
+// `state/closedWorkspaces.ts` for the full "this is a window close, not a
+// delete" reasoning, and `CloseWorkspaceConfirm` for what the user is told
+// before anything is killed.
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import logo from "../assets/omniagent-logo.png";
 import {
   PRESSURE_THRESHOLD,
   isUnderPressure,
-  tabDisplayLabel,
   tabsByProject,
   type Engine,
   type ProjectInfo,
   type TabInfo,
 } from "../state/sessions";
-import { describeSession, groupTabsBySession } from "../state/sessionGroups";
+import { groupTabsBySession } from "../state/sessionGroups";
 import { statusNeedsAttention } from "../state/sessionStatus";
-import { ENGINE_LABEL } from "../theme";
 import type { LayoutPreset } from "../state/paneGrid";
 import {
   rootsPausedProjects,
@@ -97,6 +118,8 @@ import ReviewPanel from "./ReviewPanel";
 import ProjectMenu from "./ProjectMenu";
 import NewWorkspaceModal from "./NewWorkspaceModal";
 import ImportProjectsFlow from "./ImportProjectsFlow";
+import SidebarSessionRow from "./SidebarSessionRow";
+import CloseWorkspaceConfirm from "./CloseWorkspaceConfirm";
 import type { ImportBatchResult } from "../state/importState";
 
 /** How often to refresh pause/staleness state in the background — cheap
@@ -174,6 +197,15 @@ interface SidebarProps {
    * `NewSessionModal` for that project (⌘N -> Session reaches the same
    * dialog). Optional, same convention as the props above. */
   onNewSessionInProject?: (project: ProjectInfo) => void;
+  /** A session's double-click rename. `App.tsx` owns the dispatch
+   * (`session/renamed`), which writes the name onto every pane in the group
+   * and persists it with the layout — this component owns only the inline
+   * edit UI, the same split `onRenameProject`/`ProjectMenu` uses. */
+  onRenameSession?: (project: ProjectInfo, group: string, name: string) => void;
+  /** The hover-revealed workspace close. Called only after
+   * `CloseWorkspaceConfirm` is accepted — `App.tsx` kills the terminals and
+   * drops the row (see `state/closedWorkspaces.ts`). */
+  onCloseWorkspace?: (project: ProjectInfo) => void;
 }
 
 export default function Sidebar({
@@ -196,13 +228,16 @@ export default function Sidebar({
   fileTreeVisible = false,
   onToggleFileTree,
   onNewSessionInProject,
+  onRenameSession,
+  onCloseWorkspace,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  /** The workspace whose close is waiting on a confirmation, if any. */
+  const [closingProject, setClosingProject] = useState<ProjectInfo | null>(null);
   const grouped = tabsByProject(tabs);
   const sessionsByProject = groupTabsBySession(tabs, activeTabId);
-  const paneCountByProject = new Map(grouped.map((g) => [g.project, g.tabs.length]));
   // Founder feedback (2026-07-24): a session's attention badge must stay
   // visible from the sidebar even while looking at a different project's
   // tabs, or the Map view — this is the whole reason the badge lives at two
@@ -370,7 +405,6 @@ export default function Sidebar({
         ) : (
           <ul className="project-list">
             {projects.map((project) => {
-              const count = paneCountByProject.get(project.id) ?? 0;
               const sessions = sessionsByProject.find((p) => p.project === project.id)?.sessions ?? [];
               const isSelected = project.id === selectedProjectId;
               const isPaused = pausedProjects.has(project.id);
@@ -408,7 +442,6 @@ export default function Sidebar({
                       <span className="project-row-label">{project.label}</span>
                     </span>
                     {isPaused && <span className="project-row-paused">paused</span>}
-                    {count > 0 && <span className="project-row-count">{count}</span>}
                   </button>
                   <button
                     className="project-row-add"
@@ -426,6 +459,21 @@ export default function Sidebar({
                   >
                     ⋯
                   </button>
+                  {/* Founder ask: "add the possibility to close a workspace,
+                      on hover" — revealed with the row's other two controls,
+                      last in the cluster because that is where a close lives
+                      in every window and tab this app sits beside. Confirms
+                      first: it ends live engines. */}
+                  {onCloseWorkspace && (
+                    <button
+                      className="project-row-close"
+                      onClick={() => setClosingProject(project)}
+                      aria-label={`Close workspace ${project.label}`}
+                      title="Close workspace"
+                    >
+                      ×
+                    </button>
+                  )}
                   {menuProjectId === project.id && (
                     <ProjectMenu
                       project={project}
@@ -438,51 +486,23 @@ export default function Sidebar({
                       onClose={() => setMenuProjectId(null)}
                     />
                   )}
-                  {/* Project -> session -> pane. The session holding the
-                      focused pane is marked "on screen" (founder brief:
-                      "Inside each workspace (first column) it must show the
-                      session it's currently on the screen"). */}
+                  {/* Workspace -> session. One row per session: its light,
+                      its name and its branch, and nothing else (see this
+                      file's module doc for what was cut and where it went).
+                      The session holding the focused pane wears the accent
+                      rail — the founder's "it must show the session it's
+                      currently on the screen", now carried by the row's own
+                      styling rather than by a text tag beside it. */}
                   {sessions.length > 0 && (
                     <ul className="project-row-sessions">
                       {sessions.map((session) => (
-                        <li
+                        <SidebarSessionRow
                           key={session.id}
-                          className={`project-row-session${session.isCurrent ? " is-current" : ""}`}
-                        >
-                          <div className="project-row-session-head">
-                            <span className="project-row-session-label">{session.label}</span>
-                            {session.isCurrent && (
-                              <span className="project-row-session-current" title="The session on screen right now">
-                                on screen
-                              </span>
-                            )}
-                          </div>
-                          <span className="project-row-session-meta">
-                            {describeSession(session, (engine) => ENGINE_LABEL[engine as Engine] ?? engine)}
-                          </span>
-                          <ul className="project-row-tabs">
-                            {session.tabs.map((tab) => {
-                              const wants = statusNeedsAttention(tab.status);
-                              return (
-                                <li key={tab.id}>
-                                  <button
-                                    className={`project-row-tab${tab.id === activeTabId ? " is-active" : ""}${wants ? " has-attention" : ""}`}
-                                    onClick={() => onActivateTab(tab.id)}
-                                  >
-                                    {wants && (
-                                      <span
-                                        className="project-row-tab-attention-dot"
-                                        data-status={tab.status}
-                                        aria-hidden="true"
-                                      />
-                                    )}
-                                    {tabDisplayLabel(tab)}
-                                  </button>
-                                </li>
-                              );
-                            })}
-                          </ul>
-                        </li>
+                          session={session}
+                          projectLabel={project.label}
+                          onActivate={() => onActivateTab(session.tabs[0].id)}
+                          onRename={(name) => onRenameSession?.(project, session.id, name)}
+                        />
                       ))}
                       {isSelected && onNewSessionInProject && (
                         <li>
@@ -540,6 +560,21 @@ export default function Sidebar({
             onImportCompleted(result);
           }}
           onClose={() => setImportOpen(false)}
+        />
+      )}
+      {closingProject && (
+        <CloseWorkspaceConfirm
+          label={closingProject.label}
+          terminals={grouped.find((g) => g.project === closingProject.id)?.tabs.length ?? 0}
+          sessions={
+            sessionsByProject.find((p) => p.project === closingProject.id)?.sessions.length ?? 0
+          }
+          onConfirm={() => {
+            const project = closingProject;
+            setClosingProject(null);
+            onCloseWorkspace?.(project);
+          }}
+          onCancel={() => setClosingProject(null)}
         />
       )}
     </aside>

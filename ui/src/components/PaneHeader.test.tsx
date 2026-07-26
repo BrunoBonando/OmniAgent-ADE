@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import PaneHeader, { HOVER_CARD_DELAY_MS } from "./PaneHeader";
+import PaneHeader from "./PaneHeader";
 import type { TabInfo } from "../state/sessions";
 
 const { useGitBranchMock } = vi.hoisted(() => ({ useGitBranchMock: vi.fn() }));
@@ -237,98 +237,29 @@ describe("PaneHeader", () => {
     });
   });
 
-  describe("session hover card", () => {
-    // Founder ask: "for each session, have a hover with more info, like warp
-    // does" + "on hover, it explains, of course" — one surface for both.
+  describe("no hover card here any more — it belongs to the sidebar's session row", () => {
+    // Founder, 2026-07-26: "The hover part is currently wrong: it's not on
+    // the terminal itself, but on session menu on the left." What survived
+    // on this header is the status light's own explanation, which is a
+    // different affordance ("on hover, it explains, of course").
     beforeEach(() => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       useGitBranchMock.mockReturnValue("main");
     });
     afterEach(() => vi.useRealTimers());
 
-    function hoverHeader() {
+    it("opens nothing when the pointer rests on the header", () => {
+      setup();
       const header = document.querySelector(".pane-header")!;
       fireEvent.mouseEnter(header);
-      act(() => void vi.advanceTimersByTime(HOVER_CARD_DELAY_MS));
-      return header;
-    }
-
-    it("stays closed until the pointer has actually rested on the header", () => {
-      setup();
-      fireEvent.mouseEnter(document.querySelector(".pane-header")!);
-      act(() => void vi.advanceTimersByTime(HOVER_CARD_DELAY_MS - 50));
+      act(() => void vi.advanceTimersByTime(2000));
       expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
-      act(() => void vi.advanceTimersByTime(60));
-      expect(screen.getByRole("tooltip")).toBeInTheDocument();
     });
 
-    it("explains the current status in plain language", () => {
+    it("still explains the session's state on the light itself", () => {
       setup({ tab: tab({ status: "tool_execution" }) });
-      hoverHeader();
-      const card = screen.getByRole("tooltip");
-      expect(card.textContent).toContain("Running tools");
-      expect(card.textContent).toContain("Running a command or writing files right now.");
-    });
-
-    it("shows the session's folder, branch, title and engine", () => {
-      setup({
-        tab: tab({ label: "backend fix", cwd: "/Users/bonando/Documents/Bruno.Digital/My-Brain" }),
-        projectLabel: "My-Brain",
-      });
-      hoverHeader();
-      const card = screen.getByRole("tooltip");
-      expect(card.textContent).toContain("~/Documents/Bruno.Digital/My-Brain");
-      expect(card.textContent).toContain("main");
-      expect(card.textContent).toContain("backend fix");
-      expect(card.textContent).toContain("Claude Code");
-    });
-
-    it("says so when the session was reattached to a still-running engine", () => {
-      setup({ tab: tab({ restored: true }) });
-      hoverHeader();
-      expect(screen.getByRole("tooltip").textContent).toContain("Restored");
-    });
-
-    it("does not say 'Restored' for an ordinary fresh session", () => {
-      setup();
-      hoverHeader();
-      expect(screen.getByRole("tooltip").textContent).not.toContain("Restored");
-    });
-
-    it("invents no diff stat — Warp's `+12891` has no data behind it here yet", () => {
-      setup();
-      hoverHeader();
-      expect(screen.getByRole("tooltip").textContent).not.toMatch(/[+-]\d/);
-    });
-
-    it("closes as soon as the pointer leaves", () => {
-      setup();
-      const header = hoverHeader();
-      fireEvent.mouseLeave(header);
-      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
-    });
-
-    it("gets out of the way the moment the header is pressed (that press may start a pane drag)", () => {
-      setup();
-      const header = hoverHeader();
-      fireEvent.mouseDown(header);
-      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
-    });
-
-    it("does not hover over its own rename input", () => {
-      setup();
-      hoverHeader();
-      // The card is open and echoes the session title, so target the
-      // header's own label element rather than the text.
-      fireEvent.doubleClick(document.querySelector(".pane-header-label")!);
-      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
-    });
-
-    it("does not fight the 3-dot menu for the same space", () => {
-      setup({ onChangeEngine: vi.fn() });
-      hoverHeader();
-      fireEvent.click(screen.getByRole("button", { name: /options/i }));
-      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+      const light = document.querySelector(".session-light")!;
+      expect(light.getAttribute("title")).toContain("Running a command or writing files right now.");
     });
   });
 
