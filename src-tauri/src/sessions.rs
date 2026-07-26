@@ -208,6 +208,62 @@
 //! A missing/broken tmux must never be a way for session creation to fail —
 //! same rule [`resolve_shell_path`] already follows for `PATH`.
 //!
+//! ## Why tmux needs an *absolute* engine path (founder bug, 2026-07-26)
+//! Bruno, verbatim: *"every terminal is a black screen"*. Every transcript in
+//! his data dir held literally `no sessions\r` and nothing else, and every
+//! lifecycle file an `exit_code: 1`. The whole chain was measured against real
+//! tmux 3.7b / claude 2.1.220 rather than reasoned about:
+//!
+//! 1. **tmux resolves a pane's command against the environment of the tmux
+//!    *client* that asked for it — never the per-session `-e PATH`.** `-e
+//!    KEY=VALUE` does reach the pane process's environment (tmux module docs
+//!    #4), but by then the `exec` has already happened, so it cannot help
+//!    *find* the binary. Isolated against real tmux by crossing the two
+//!    environments: a server started with a full `PATH` driven by a client
+//!    with `env -i PATH=/usr/bin:/bin` could **not** run bare `claude`, while
+//!    a server started with the minimal `PATH` driven by a full-`PATH` client
+//!    could. The client is what matters — and an **absolute** program path
+//!    works under either.
+//! 2. The client here *is this app*: `Tmux::ensure_session` runs `tmux
+//!    new-session` as a subprocess of OmniAgent. A GUI-launched `.app`
+//!    inherits macOS's minimal default `PATH`
+//!    (`/usr/bin:/bin:/usr/sbin:/sbin`) — the same environment
+//!    [`resolve_shell_path`] already exists to work around. `claude` lives at
+//!    `~/.local/bin/claude` on this machine, which only `~/.zshrc` adds. So
+//!    the one process that had to be able to find `claude` was the one that
+//!    couldn't.
+//! 3. So `new-session -d -- claude …` **succeeds** (exit 0 — tmux reports on
+//!    creating the pane, not on the `exec` inside it), the pane dies within
+//!    ~150 ms, and `remain-on-exit off` destroys the session immediately. The
+//!    last session going away takes the whole server with it.
+//! 4. The `attach-session` that follows therefore finds **no server at all**,
+//!    which is precisely the state tmux reports as `no sessions` (a *running*
+//!    server missing that one session says `can't find session: X` instead —
+//!    the distinction is what pinned this down). One line of text, then EOF:
+//!    a black rectangle.
+//!
+//! Two things kept this invisible. It never reproduces from a terminal — a
+//! `cargo run`/`cargo test` process has the user's full `PATH`, so the server
+//! it starts resolves `claude` by bare name and everything works; only the
+//! packaged, Finder-launched `.app` fails. And the retry ladder below could
+//! not save it: all three rungs fail identically and instantly (the flags were
+//! never the problem — the binary was), and the last rung is deliberately
+//! unprobed, so its dead attach client was handed straight to the user.
+//!
+//! The fix is three-layered, root cause outward:
+//! - [`resolve_engine_binary`] resolves every engine to an **absolute path**
+//!   against the same shell-resolved `PATH` the engine itself is handed, so
+//!   the tmux server's own environment stops mattering.
+//! - [`tmux_session_survives_startup`] verifies a *freshly created* tmux
+//!   session is still alive before its pane is handed over, so "the command
+//!   never started" is caught on the tmux side — where it is observable —
+//!   rather than only through the attach client, and **every** rung is checked,
+//!   including the last.
+//! - When even the last rung's pane dies, [`SessionManager::spawn_with_notice`]
+//!   spawns the engine directly into the PTY behind a printed explanation, so
+//!   the user reads what went wrong (and usually still gets a working, merely
+//!   non-persistent session) instead of staring at nothing.
+//!
 //! ## Every `claude` pane owns its own conversation (founder bug, 2026-07-26)
 //! The first version of rungs 2/3 above used `claude -c/--continue`, and it
 //! was wrong in a way a single-session test can never catch. Bruno caught it:
@@ -1143,11 +1199,17 @@ impl SessionManager {
         tmux_name: &str,
         identity: ClaudeIdentity,
     ) -> Result<Spawned> {
-        // One attempt per rung, and the last rung ([`ClaudeIdentity::Stock`])
-        // is never probed — there is nothing left to fall back to, and a stock
-        // `claude` carries no flag that could refuse to start.
-        let mut rungs = identity.ladder().into_iter().peekable();
-        while let Some(identity) = rungs.next() {
+        // One attempt per rung. The last rung ([`ClaudeIdentity::Stock`]) is
+        // never *PTY*-probed — there is no lower rung to fall back to, and a
+        // stock `claude` carries no flag that could refuse to start — but it
+        // is still checked on the tmux side, because "the binary never even
+        // started" is a failure no flag ladder can fix and the one that
+        // produced the black screen (module docs).
+        let ladder = identity.ladder();
+        let last_rung = ladder.len() - 1;
+        let mut tmux_refusal: Option<String> = None;
+
+        for (rung, identity) in ladder.into_iter().enumerate() {
             let engine_cmd = build_engine_command(req, &self.data_dir, id, identity)?;
             // Armed the instant the temp `--mcp-config` file might exist, and
             // disarmed only once this attempt has fully succeeded — the same
@@ -1170,7 +1232,57 @@ impl SessionManager {
                     &engine_cmd.env,
                     &engine_cmd.argv,
                 ) {
-                    Ok(_) => (
+                    // A session that was *already there* needs no proof of
+                    // life: its engine has been running since before the app
+                    // restarted. Only one we just created has to show that the
+                    // command inside it actually started — `new-session`
+                    // reports on creating the pane, not on the `exec` in it.
+                    Ok(true) => (
+                        tmux_attach_command(t, tmux_name, &req.cwd, &engine_cmd.env),
+                        Some(tmux_name.to_string()),
+                    ),
+                    Ok(false)
+                        if !tmux_session_survives_startup(
+                            t,
+                            tmux_name,
+                            TMUX_PANE_STARTUP_WINDOW,
+                        ) =>
+                    {
+                        // The engine died before it rendered a byte, so tmux
+                        // has already destroyed the session. Attaching now is
+                        // exactly the black screen this check exists to
+                        // prevent: the client would print `no sessions` and
+                        // exit.
+                        // The identity hint is only true when an identity
+                        // flag was actually carried. `Stock` covers `codex`,
+                        // `shell` and claude's last rung alike, and telling a
+                        // `codex` user that "stock claude refused to start"
+                        // would be a confident lie in the one message they
+                        // have to debug from.
+                        let refusal = match identity {
+                            ClaudeIdentity::Stock => format!(
+                                "`{}` exited immediately inside tmux",
+                                engine_cmd.argv[0]
+                            ),
+                            flagged => format!(
+                                "`{}` exited immediately inside tmux ({})",
+                                engine_cmd.argv[0],
+                                flagged.failure_hint()
+                            ),
+                        };
+                        eprintln!(
+                            "omniagent-ade: {refusal} for session {id} in {}; falling back",
+                            req.cwd
+                        );
+                        tmux_refusal = Some(refusal);
+                        // Nothing should be left behind, but a husk here would
+                        // make the *next* rung's `ensure_session` short-circuit
+                        // onto a dead session — the one shape that turns this
+                        // guard into the very bug it prevents.
+                        t.kill_session(tmux_name);
+                        continue;
+                    }
+                    Ok(false) => (
                         tmux_attach_command(t, tmux_name, &req.cwd, &engine_cmd.env),
                         Some(tmux_name.to_string()),
                     ),
@@ -1233,7 +1345,7 @@ impl SessionManager {
             // nothing at all for this. Under tmux the PTY child is the attach
             // client, which exits when its session dies — so this single check
             // covers both spawn shapes.
-            let probe = rungs.peek().map(|_| identity.liveness_window());
+            let probe = (rung < last_rung).then(|| identity.liveness_window());
             if matches!(probe, Some(window) if !child_survives_startup(&mut child, window)) {
                 eprintln!(
                     "omniagent-ade: `claude {}` exited immediately for session {id} in {} \
@@ -1269,13 +1381,117 @@ impl SessionManager {
                 tmux_session,
             });
         }
-        // Unreachable: every ladder ends on an unprobed rung, which always
-        // returns above. Stated as an error rather than `unreachable!()` so a
-        // future ladder change degrades into a failed `create` (which callers
-        // already handle) instead of a panic that takes the app down.
-        Err(anyhow!(
-            "no claude spawn attempt survived for session {id} — the identity ladder ran out"
-        ))
+        // Every rung's tmux pane died before it rendered anything (the only
+        // way to fall out of that loop — without tmux the last rung is
+        // unprobed and always returns). Attaching would hand over a black
+        // rectangle, so don't: run the engine directly, behind an explanation.
+        self.spawn_with_notice(req, id, tmux_refusal)
+    }
+
+    /// Last resort, and the reason a user can no longer end up looking at a
+    /// black pane with no signal: every tmux attempt's engine died at startup,
+    /// so the engine is spawned **directly into the PTY** — no tmux, no
+    /// persistence — behind a printed line saying so.
+    ///
+    /// Two outcomes, both strictly better than silence:
+    /// - the direct spawn works (tmux itself was the problem — a wedged
+    ///   server, a socket the app can't write) and the user gets a working,
+    ///   merely non-persistent session plus a note explaining the downgrade;
+    /// - it fails too (the engine really isn't installed, or is broken) and
+    ///   the engine's *own* error — `claude: command not found`, a dylib
+    ///   complaint, whatever it actually is — lands in the pane and in the
+    ///   transcript, where the user and a later bug report can both read it.
+    ///
+    /// The notice is printed by a `/bin/sh` wrapper rather than pushed through
+    /// [`OutputSink`] because the frontend only subscribes to
+    /// `session-output:<id>` *after* `create` returns it an id — anything
+    /// emitted during `create` would be written to nobody. Coming from the
+    /// child, it is ordinary PTY output: it reaches the terminal whenever the
+    /// terminal starts listening and is tee'd into the transcript by the same
+    /// reader thread as everything else.
+    ///
+    /// The wrapper passes the message and the engine argv as **separate argv
+    /// entries** (`sh -c '…' _ <notice> <program> <args…>`), so nothing is ever
+    /// interpolated into a shell string — a briefing full of quotes, `$(…)`
+    /// and newlines rides through untouched, exactly as it does under tmux.
+    fn spawn_with_notice(
+        &self,
+        req: &CreateSessionRequest,
+        id: &str,
+        reason: Option<String>,
+    ) -> Result<Spawned> {
+        let engine_cmd = build_engine_command(req, &self.data_dir, id, ClaudeIdentity::Stock)?;
+        let mut mcp_cleanup_guard = McpConfigCleanupGuard::new(engine_cmd.mcp_config_path.clone());
+
+        let reason = reason.unwrap_or_else(|| "the engine did not start inside tmux".to_string());
+        let notice = format!(
+            "\r\n\x1b[33mOmniAgent:\x1b[0m {reason}.\r\n\
+             \x1b[2mStarting \x1b[0m{}\x1b[2m directly instead — this pane will not survive \
+             quitting the app.\x1b[0m\r\n\r\n",
+            engine_cmd.argv[0]
+        );
+
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        // `$0` is the placeholder, `$1` the notice, `"$@"` (after the shift)
+        // the engine and its arguments.
+        cmd.arg("printf '%s' \"$1\"; shift; exec \"$@\"");
+        cmd.arg("omniagent-ade");
+        cmd.arg(&notice);
+        for arg in &engine_cmd.argv {
+            cmd.arg(arg);
+        }
+        cmd.cwd(&engine_cmd.cwd);
+        for (k, v) in &engine_cmd.env {
+            cmd.env(k, v);
+        }
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("open pty")?;
+        let reader = pair.master.try_clone_reader().context("clone pty reader")?;
+        let writer = pair.master.take_writer().context("take pty writer")?;
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .context("spawn engine process")?;
+        drop(pair.slave);
+
+        let activity = Arc::new(SessionActivity::new(
+            req.engine.clone(),
+            None,
+            self.on_status.is_some(),
+        ));
+        let reader_thread = spawn_reader_thread(
+            id.to_string(),
+            reader,
+            transcript_path(&self.data_dir, id),
+            lifecycle_path(&self.data_dir, id),
+            self.sink.clone(),
+            Arc::clone(&self.sessions),
+            self.on_end.clone(),
+            self.on_attention.clone(),
+            req.project.clone(),
+            req.cwd.clone(),
+            req.engine.clone(),
+            Arc::clone(&activity),
+        );
+
+        mcp_cleanup_guard.disarm();
+        Ok(Spawned {
+            master: pair.master,
+            writer,
+            child,
+            reader_thread,
+            activity,
+            mcp_config_path: engine_cmd.mcp_config_path,
+            tmux_session: None,
+        })
     }
 
     /// Writes raw bytes to a session's PTY (keystrokes, pasted text, etc).
@@ -1577,6 +1793,85 @@ fn child_survives_startup(child: &mut Box<dyn Child + Send + Sync>, window: Dura
     true
 }
 
+/// How long a **freshly created** tmux session is watched before its pane
+/// counts as genuinely started (module docs, "Why tmux needs an absolute
+/// engine path").
+///
+/// Sized from the measured failure it exists to catch, not from taste: a pane
+/// whose command cannot be `exec`'d at all dies — and takes its session with
+/// it — within ~150 ms (measured against real tmux 3.7b; `new-session` itself
+/// still reports success, because it reports on creating the pane rather than
+/// on the `exec` inside it). 300 ms is ~2× that.
+///
+/// Deliberately short, because unlike the identity probes this one is on
+/// *every* new tab's critical path. It only has to separate "the command
+/// never started" from "the command is running"; a slower death — `claude`
+/// refusing a `--resume` after ~1.25 s — is still caught by
+/// [`child_survives_startup`] on the attach client, which is what
+/// [`ClaudeIdentity::liveness_window`] sizes. A session that already existed
+/// is never watched at all: its engine has been running since before the app
+/// restarted, so there is nothing to start.
+const TMUX_PANE_STARTUP_WINDOW: Duration = Duration::from_millis(300);
+
+/// Poll granularity for [`tmux_session_survives_startup`]. Each poll is a real
+/// `tmux has-session` subprocess (single-digit milliseconds against a local
+/// unix socket), so this trades a handful of cheap spawns for detecting a dead
+/// pane almost the instant it dies.
+const TMUX_PANE_STARTUP_POLL: Duration = Duration::from_millis(25);
+
+/// `true` if the tmux session `name` was still alive at the end of `window` —
+/// i.e. the command inside it did not immediately fail to start. Returns as
+/// soon as the session is gone, so the failure path is fast; only the healthy
+/// path waits out the window.
+///
+/// This is the tmux-side twin of [`child_survives_startup`], and it exists
+/// because the PTY-side probe is blind here: under tmux the PTY child is the
+/// `attach-session` client, not the engine, so an engine that dies *before*
+/// the client attaches leaves the client reporting `no sessions` rather than
+/// the engine reporting anything. Asking tmux directly is both earlier and
+/// unambiguous.
+fn tmux_session_survives_startup(t: &Tmux, name: &str, window: Duration) -> bool {
+    let deadline = Instant::now() + window;
+    loop {
+        if !t.has_session(name) {
+            return false;
+        }
+        if Instant::now() >= deadline {
+            return true;
+        }
+        thread::sleep(TMUX_PANE_STARTUP_POLL);
+    }
+}
+
+/// The absolute path of the binary an engine name refers to, resolved against
+/// the user's real, shell-resolved `PATH` ([`cached_shell_path`]) with this
+/// process's own `PATH` as a backstop.
+///
+/// See the module docs' "Why tmux needs an absolute engine path" for the
+/// founder bug behind it. In short: `tmux new-session -- claude …` `exec`s
+/// against the tmux **server's** environment, which for a GUI-launched `.app`
+/// is macOS's minimal default `PATH`, so a bare engine name is simply not
+/// found — and tmux reports that as a session that quietly disappears rather
+/// than as an error.
+///
+/// `None` when the engine genuinely isn't installed anywhere on that `PATH`.
+/// Callers keep the bare name in that case, so the spawn fails with the real
+/// OS error naming the engine instead of with something invented here.
+fn resolve_engine_binary(program: &str) -> Option<PathBuf> {
+    let as_path = Path::new(program);
+    // Already a path (`$SHELL` is always one): honour it as given, so nothing
+    // here can ever redirect a session to a *different* binary than asked for.
+    if program.contains(std::path::MAIN_SEPARATOR) {
+        return tmux::is_executable_file(as_path).then(|| as_path.to_path_buf());
+    }
+    let search = cached_shell_path()
+        .map(str::to_string)
+        .or_else(|| std::env::var("PATH").ok())?;
+    std::env::split_paths(&search)
+        .map(|dir| dir.join(program))
+        .find(|candidate| tmux::is_executable_file(candidate))
+}
+
 /// The namespace every OmniAgent-owned Claude conversation UUID is derived
 /// under ([`claude_conversation_uuid`]).
 ///
@@ -1746,6 +2041,19 @@ struct EngineCommand {
 }
 
 impl EngineCommand {
+    /// Rewrites `argv[0]` to the engine binary's absolute path when it can be
+    /// resolved ([`resolve_engine_binary`]), leaving the bare name alone when
+    /// it can't. Applied to *both* spawn paths on purpose: the direct spawn
+    /// doesn't need it (it inherits this process's `PATH` plus the `PATH` set
+    /// on the `CommandBuilder`), but having one resolved program means the two
+    /// paths can never launch a different binary as each other — which is the
+    /// same reason `build_engine_command` is shared in the first place.
+    fn resolve_program(&mut self) {
+        if let Some(absolute) = resolve_engine_binary(&self.argv[0]) {
+            self.argv[0] = absolute.to_string_lossy().into_owned();
+        }
+    }
+
     fn to_command_builder(&self) -> CommandBuilder {
         let mut cmd = CommandBuilder::new(&self.argv[0]);
         for arg in &self.argv[1..] {
@@ -1768,6 +2076,23 @@ impl EngineCommand {
 /// `identity` only ever applies to `claude` — see [`ClaudeIdentity`] and the
 /// module docs' degradation ladder.
 fn build_engine_command(
+    req: &CreateSessionRequest,
+    data_dir: &Path,
+    session_id: &str,
+    identity: ClaudeIdentity,
+) -> Result<EngineCommand> {
+    let mut cmd = build_engine_argv(req, data_dir, session_id, identity)?;
+    // Absolute, so tmux's own environment stops deciding whether the engine
+    // can be found at all — see [`resolve_engine_binary`].
+    cmd.resolve_program();
+    Ok(cmd)
+}
+
+/// The engine wiring proper: which program, which flags, which environment.
+/// Split from [`build_engine_command`] only so that every arm below can be
+/// written in terms of the *engine's own name* and have the absolute-path
+/// resolution applied once, in one place, rather than three times.
+fn build_engine_argv(
     req: &CreateSessionRequest,
     data_dir: &Path,
     session_id: &str,
@@ -3968,7 +4293,15 @@ mod tests {
 
         let fresh =
             build_engine_command(&req, tmp.path(), "sess-fresh", ClaudeIdentity::Claim).unwrap();
-        assert_eq!(fresh.argv[0], "claude");
+        // `argv[0]` is the *resolved absolute path* to claude, not the bare
+        // name — see the module docs' "Why tmux needs an absolute engine
+        // path". What still has to hold is that it is claude and nothing else.
+        assert_eq!(
+            Path::new(&fresh.argv[0]).file_name().unwrap(),
+            "claude",
+            "{:?}",
+            fresh.argv
+        );
         assert_eq!(
             fresh.argv[1..3],
             ["--session-id".to_string(), claude_conversation_uuid("sess-fresh")],
@@ -4266,6 +4599,236 @@ mod tests {
             !seen.contains("--session-id") && !seen.contains("--resume"),
             "saw: {seen:?}"
         );
+    }
+
+    // -- The black-pane regression (founder bug, 2026-07-26) --------------
+    //
+    // Bruno: *"every terminal is a black screen"*. Every transcript in his
+    // data dir contained literally `no sessions\r` and nothing else. See the
+    // module docs' "Why tmux needs an absolute path" section for the measured
+    // root cause; these are the tests that hold it closed.
+
+    /// A private tmux server pinned to macOS's minimal default `PATH` — the
+    /// environment a GUI-launched `.app` runs in, and the condition under
+    /// which every pane went black.
+    ///
+    /// The keep-alive session is what pins it: without it the server exits as
+    /// soon as the session under test dies, and the next `tmux` command
+    /// silently restarts it from this test process's own environment.
+    ///
+    /// One honest limit, stated because it changes what these tests prove.
+    /// The *client* environment is what tmux actually resolves against (see
+    /// the module docs), and the client is this test process, which
+    /// necessarily has a full `PATH` — no test can clear its own environment.
+    /// So these tests don't reproduce production's "binary not found
+    /// anywhere"; they reproduce the same defect one step earlier, and
+    /// arguably more sharply: [`FakeClaude`] is reachable **only** through the
+    /// shell-resolved `PATH` this module overrides, never through any real
+    /// environment, so bare-name resolution provably cannot find it. Against
+    /// the pre-fix code the pane therefore comes up running *the machine's
+    /// real `claude`* instead of the fake — proof that the binary tmux
+    /// `exec`s is not the binary OmniAgent resolved. Absolute argv fixes both
+    /// symptoms at once, because it removes the resolution step entirely.
+    struct MinimalPathTmuxServer {
+        tmux: Tmux,
+        _dir: tempfile::TempDir,
+    }
+
+    impl MinimalPathTmuxServer {
+        fn start() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = format!(
+                "omniagent-minpath-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let config = tmux::write_config(dir.path()).unwrap();
+            let bin = Tmux::resolve(&socket, cached_shell_path())
+                .expect("tmux must be installed to run this test")
+                .binary()
+                .to_path_buf();
+
+            let status = std::process::Command::new(&bin)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("HOME", std::env::var("HOME").unwrap_or_default())
+                .arg("-L")
+                .arg(&socket)
+                .arg("-f")
+                .arg(&config)
+                .args(["new-session", "-d", "-s", "keepalive", "--"])
+                .args(["/bin/sleep", "120"])
+                .status()
+                .expect("start the minimal-PATH tmux server");
+            assert!(status.success(), "minimal-PATH tmux server failed to start");
+
+            Self {
+                tmux: Tmux::with_binary(bin, &socket).with_config(config),
+                _dir: dir,
+            }
+        }
+    }
+
+    impl Drop for MinimalPathTmuxServer {
+        fn drop(&mut self) {
+            self.tmux.kill_server();
+        }
+    }
+
+    /// Drives one `create` against a [`FakeClaude`] through a
+    /// [`MinimalPathTmuxServer`] and returns everything the pane emitted.
+    /// The fake `claude` lives in a temp dir that is reachable **only** via
+    /// the shell-resolved `PATH` this module overrides — never via the tmux
+    /// server's own minimal `PATH` — which is exactly the founder's setup
+    /// (`claude` at `~/.local/bin`, added to `PATH` by `~/.zshrc`).
+    fn pane_output_under_a_minimal_path_tmux(restore_id: Option<&str>, refuse: &[&str]) -> String {
+        let _fake = FakeClaude::refusing(refuse);
+        let server = MinimalPathTmuxServer::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let sink: OutputSink = Arc::new(move |_id: &str, chunk: &[u8]| {
+            let _ = tx.send(chunk.to_vec());
+        });
+        let manager = SessionManager::new(tmp.path().to_path_buf(), sink)
+            .with_tmux(Some(server.tmux.clone()));
+
+        let info = manager
+            .create(CreateSessionRequest {
+                project: "demo".into(),
+                engine: "claude".into(),
+                cwd: tmp.path().to_string_lossy().into_owned(),
+                briefing: None,
+                restore_id: restore_id.map(str::to_string),
+            })
+            .expect("a tmux server with a minimal PATH must never fail session creation");
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen = String::new();
+        while Instant::now() < deadline && !seen.contains("FAKE_CLAUDE_ARGV:") {
+            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        }
+        let _ = manager.kill(&info.id);
+        seen
+    }
+
+    /// **The founder bug itself.** tmux resolves a pane's command against the
+    /// asking *client's* environment, not the per-session `-e PATH` — so under
+    /// a GUI-launched app the bare name `claude` was never found, the pane
+    /// died before it rendered a byte, tmux destroyed the session, and the
+    /// `attach-session` that followed printed `no sessions` into a black
+    /// rectangle. The pane must come back alive, running the engine OmniAgent
+    /// actually resolved.
+    #[test]
+    fn a_tmux_server_with_a_gui_apps_minimal_path_still_lands_a_live_engine() {
+        let seen = pane_output_under_a_minimal_path_tmux(Some("sess-minpath-plain"), &[]);
+        assert!(
+            !seen.contains("no sessions"),
+            "the pane attached to a tmux session that no longer existed — this is the \
+             black screen; saw: {seen:?}"
+        );
+        assert!(
+            seen.contains("FAKE_CLAUDE_ARGV:"),
+            "the engine never started inside tmux; saw: {seen:?}"
+        );
+    }
+
+    /// The same minimal-`PATH` server, plus a refused `--resume` (every
+    /// session created before the conversation-identity work). Both failure
+    /// modes stack, and the pane must still come back alive — the retry ladder
+    /// has to work *through tmux*, not only on the direct-spawn path.
+    #[test]
+    fn under_a_minimal_path_tmux_server_a_refused_resume_still_lands_a_live_engine() {
+        let seen =
+            pane_output_under_a_minimal_path_tmux(Some("sess-minpath-resume"), &["--resume"]);
+        assert!(!seen.contains("no sessions"), "saw: {seen:?}");
+        assert!(
+            seen.contains(&format!(
+                "--session-id {}",
+                claude_conversation_uuid("sess-minpath-resume")
+            )),
+            "the ladder must have stepped down to --session-id under tmux; saw: {seen:?}"
+        );
+    }
+
+    /// Every engine reaches tmux as an **absolute** path. tmux `exec`s the
+    /// argv against the server's environment, so a bare name is only as good
+    /// as the environment the server happened to start with — see the module
+    /// docs. Resolution uses the same shell-resolved `PATH` the engine itself
+    /// is handed, so the two can never disagree.
+    #[test]
+    fn every_engine_reaches_tmux_by_absolute_path() {
+        let _fake = FakeClaude::refusing(&[]);
+        let tmp = tempfile::tempdir().unwrap();
+        for engine in ["claude", "shell"] {
+            let req = CreateSessionRequest {
+                project: "demo".into(),
+                engine: engine.into(),
+                cwd: tmp.path().to_string_lossy().into_owned(),
+                briefing: None,
+                restore_id: None,
+            };
+            let cmd = build_engine_command(&req, tmp.path(), "sess-abs", ClaudeIdentity::Stock)
+                .unwrap();
+            let program = Path::new(&cmd.argv[0]);
+            assert!(
+                program.is_absolute(),
+                "{engine} reached tmux as {:?}, which the tmux server can only resolve if \
+                 its own PATH happens to contain it",
+                cmd.argv[0]
+            );
+            assert!(
+                program.is_file(),
+                "{engine} resolved to {program:?}, which is not a real file"
+            );
+        }
+    }
+
+    /// An engine that genuinely isn't installed keeps its bare name rather
+    /// than becoming an empty or bogus path — `create` then fails with a real
+    /// spawn error naming it, which is honest, instead of silently launching
+    /// something else.
+    #[test]
+    fn an_engine_that_is_not_installed_keeps_its_bare_name() {
+        assert_eq!(resolve_engine_binary("definitely-not-a-real-engine-9271"), None);
+    }
+
+    /// The tmux-side liveness check: a pane whose command cannot even be
+    /// `exec`'d takes its session down instantly, and that must read as
+    /// "this rung failed" rather than as a healthy session to attach to.
+    #[test]
+    fn tmux_session_survival_distinguishes_a_dead_pane_from_a_live_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = format!("omniagent-survive-{}", std::process::id());
+        let t = Tmux::resolve(&socket, cached_shell_path())
+            .expect("tmux must be installed to run this test");
+        let t = Tmux::with_binary(t.binary(), &socket)
+            .with_config(tmux::write_config(dir.path()).unwrap());
+
+        // A command that cannot be exec'd at all — the founder bug's shape.
+        t.ensure_session(
+            "dead",
+            dir.path(),
+            &[],
+            &["/no/such/binary/anywhere".to_string()],
+        )
+        .expect("new-session itself succeeds even when the command cannot be exec'd");
+        assert!(
+            !tmux_session_survives_startup(&t, "dead", TMUX_PANE_STARTUP_WINDOW),
+            "a pane whose command never started must not read as alive"
+        );
+
+        t.ensure_session("alive", dir.path(), &[], &["/bin/sleep".into(), "60".into()])
+            .unwrap();
+        assert!(
+            tmux_session_survives_startup(&t, "alive", TMUX_PANE_STARTUP_WINDOW),
+            "a healthy pane must read as alive"
+        );
+        t.kill_server();
     }
 
     /// Conversation identity is Claude-specific; `codex` and `shell` have no

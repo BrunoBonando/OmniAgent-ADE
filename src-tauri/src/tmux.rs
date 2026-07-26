@@ -454,7 +454,11 @@ fn find_tmux_binary(search_path: Option<&str>) -> Option<PathBuf> {
         .find(|p| is_executable_file(p))
 }
 
-fn is_executable_file(path: &Path) -> bool {
+/// True for a real file with at least one execute bit. Shared with
+/// [`crate::sessions::resolve_engine_binary`], which resolves *engine*
+/// binaries the same way this module resolves `tmux` — and for the same
+/// reason (a GUI-launched `.app` inherits macOS's minimal default `PATH`).
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
