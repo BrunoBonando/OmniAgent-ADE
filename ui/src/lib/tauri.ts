@@ -572,26 +572,15 @@ export async function agentInstall(agent: string): Promise<void> {
 
 /**
  * Listen for agent install progress events
- * Returns unlistener function
+ * Returns unlistener function (awaitable)
  */
-export function onAgentInstallProgress(
+export async function onAgentInstallProgress(
   agent: string,
   callback: (status: string) => void
-): () => void {
+): Promise<() => void> {
   const eventName = `agent-install-progress:${agent}`;
-  let unlisten: (() => void) | null = null;
-
-  listen(eventName, (event: { payload: unknown }) => {
+  const unlisten = await listen(eventName, (event: { payload: unknown }) => {
     callback(event.payload as string);
-  }).then((unlistenFn: () => void) => {
-    unlisten = unlistenFn;
-  }).catch((err: unknown) => {
-    console.error(`Failed to listen to ${eventName}:`, err);
   });
-
-  return () => {
-    if (unlisten) {
-      unlisten();
-    }
-  };
+  return unlisten;
 }
