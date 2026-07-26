@@ -72,8 +72,9 @@
 //!    and exit 1, with or without `-d`/`-D`. So the idempotency here is
 //!    explicit instead: [`Tmux::has_session`] first, `new-session -d` only if
 //!    absent ([`Tmux::ensure_session`]). That check is also what tells the
-//!    caller whether this was a *restore* or a fresh start, which the
-//!    no-tmux `claude --continue` fallback needs anyway.
+//!    caller whether this was a *restore* or a fresh start, which is what
+//!    decides whether `claude` claims a new conversation or reopens its own
+//!    (`sessions.rs`, "Every claude pane owns its own conversation").
 //! 2. **Targets need a `=` prefix, and pane targets need a trailing `:`.**
 //!    tmux does *prefix* matching on session names by default, so
 //!    `has-session -t omniagent-sess-1` happily matches

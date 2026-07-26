@@ -198,38 +198,81 @@
 //! 1. **tmux present, session exists** → attach. Full restoration.
 //! 2. **tmux present, no session** → create it, attach. Fresh engine, but
 //!    persistent from here on. If this was a *restore* attempt (an id came
-//!    in) the `claude` engine additionally gets `--continue` — see #3.
+//!    in) the `claude` engine reopens its own conversation — see below.
 //! 3. **tmux absent** → spawn the engine directly into the PTY, exactly as
 //!    before. Nothing survives an app close, but on a restore attempt
-//!    `claude` gets `-c/--continue` ("Continue the most recent conversation
-//!    in the current directory", verified against `claude --help`, 2.1.220),
-//!    so the *conversation* still carries over even though the process
-//!    doesn't. `codex`/`shell` have no equivalent and simply start fresh.
+//!    `claude` still reopens its own conversation, so the *conversation*
+//!    carries over even though the process doesn't. `codex`/`shell` have no
+//!    equivalent and simply start fresh.
 //!
 //! A missing/broken tmux must never be a way for session creation to fail —
 //! same rule [`resolve_shell_path`] already follows for `PATH`.
 //!
-//! ### `--continue` is a booby trap, and is handled as one
-//! Measured on this machine against real `claude` 2.1.220, **not** assumed
-//! from the help text: interactive `claude --continue` **exits 1 after
-//! ~1.3 s** printing `No conversation found to continue` whenever it decides
-//! there's nothing continuable in that directory — and "nothing continuable"
-//! is *not* predictable from the on-disk conversation store: a directory with
-//! six `~/.claude/projects/<dir>/*.jsonl` files, where `claude --continue -p`
-//! succeeds, still refused the interactive form. Reproduced outside tmux
-//! entirely (bare `script`-driven PTY), so this is Claude's own behavior, not
-//! anything tmux does.
+//! ## Every `claude` pane owns its own conversation (founder bug, 2026-07-26)
+//! The first version of rungs 2/3 above used `claude -c/--continue`, and it
+//! was wrong in a way a single-session test can never catch. Bruno caught it:
+//! `--continue` continues *the most recent conversation **in that
+//! directory***, and this app's whole shape encourages several Claude panes
+//! in one project folder. After a reboot (tmux is userspace — it dies with
+//! the machine, so every restore falls to rung 2/3 at once) **every** pane in
+//! a project would reopen the same, most-recent conversation: panes 2..N
+//! silently lose their own history and become duplicates of pane 1. Not
+//! hypothetical — this repo's own directory already holds 11 distinct
+//! conversation `.jsonl` files.
 //!
-//! Passed naively, that turns "restore my tab" into an instantly-dead
-//! terminal — strictly worse than a fresh, working Claude. So a session
-//! spawned *with* `--continue` is probed for liveness
-//! ([`child_survives_startup`], [`CONTINUE_LIVENESS_WINDOW`]) and, if the
-//! process bailed, **transparently respawned once without the flag** before
-//! `create` ever returns. The caller sees one healthy session either way; the
-//! only cost is up to [`CONTINUE_LIVENESS_WINDOW`] of extra latency on the
-//! one rare path that uses the flag at all (a *restore* whose tmux session is
-//! gone — after a reboot, say; the ordinary restore attaches and never goes
-//! near it).
+//! The fix is to stop letting "most recent" decide. `claude` has the right
+//! primitives (verified against real `claude --help`, 2.1.220):
+//! `--session-id <uuid>` ("Use a specific session ID for the conversation")
+//! and `-r/--resume <uuid>` ("Resume a conversation by session ID"). So:
+//!
+//! - **first spawn** → `--session-id <U>`: OmniAgent, not Claude's
+//!   most-recent heuristic, decides which conversation this pane owns.
+//! - **restore that has to start a fresh engine** → `--resume <U>`: the pane
+//!   gets *its own* conversation back, however many others share the folder.
+//!
+//! `U` is derived, not stored: [`claude_conversation_uuid`] is a UUIDv5 of
+//! the OmniAgent session id under a fixed OmniAgent namespace, so the same id
+//! always maps to the same conversation and **nothing new has to be
+//! persisted** — `restore_id` (already round-tripping through the frontend)
+//! remains the only piece of state. `codex`/`shell` are untouched.
+//!
+//! `--continue` is gone entirely. `--resume <U>` is strictly better on every
+//! path that used it, and its directory-scoped "most recent" semantics *were*
+//! the bug.
+//!
+//! ### The identity flags are booby traps, and are handled as ones
+//! All measured on this machine against real `claude` 2.1.220, **not** assumed
+//! from the help text — interactive, through a real PTY, in a trusted
+//! directory:
+//!
+//! - `--resume <uuid>` with no such conversation **exits 1 after ~1.25 s**
+//!   printing `No conversation found with session ID: <uuid>`. Every session
+//!   that existed *before* this fix lands is exactly this case: its
+//!   conversation was created without a chosen id, so the derived `U` names
+//!   nothing.
+//! - `--session-id <uuid>` for a conversation that already exists **exits 1
+//!   after ~0.20 s** printing `Error: Session ID <uuid> is already in use.`
+//!   (measured three times).
+//! - `--session-id` accepts any `8-4-4-4-12` hex string — a nil UUID and a
+//!   variant-0 UUID were both taken. The v5 value we derive is well inside
+//!   what it validates, and it composes fine with this module's other flags
+//!   (`--mcp-config`, `--append-system-prompt`), verified together.
+//!
+//! Passed naively, either failure turns "open a tab" into an instantly-dead
+//! terminal — strictly worse than a fresh, working Claude. So every spawn
+//! carrying an identity flag is probed for liveness ([`child_survives_startup`])
+//! and, if the process bailed, **transparently respawned down a ladder**
+//! ([`ClaudeIdentity::ladder`]) before `create` ever returns:
+//! `--resume <U>` → `--session-id <U>` → stock `claude`. The middle rung is
+//! what quietly *adopts* a pre-existing session: its old conversation is
+//! unreachable, but the fresh one it starts is claimed under `U`, so from
+//! that restore onward the pane is addressable and every later restore lands
+//! on its own history. The caller sees one healthy session either way.
+//!
+//! Probe windows are sized per rung from those measurements
+//! ([`RESUME_LIVENESS_WINDOW`], [`SESSION_ID_LIVENESS_WINDOW`]). Attaching to
+//! a live tmux session carries no identity flag and is never probed, so the
+//! ordinary restore still pays nothing.
 //!
 //! ## Five-state session status (founder brief, 2026-07-26, revised same day)
 //! The first version of this was a three-state traffic light (*"Green means
@@ -428,6 +471,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
+use uuid::Uuid;
 
 use brain_core::{now_ts, redact::redact};
 
@@ -986,17 +1030,18 @@ impl SessionManager {
 
         // Is there already a live tmux session for this id (i.e. did the app
         // close without this tab being closed)? Answered *before* building
-        // the engine command, because it decides whether `claude` needs
-        // `--continue`: only a restore that has to start a fresh engine does.
-        // A restore that attaches doesn't need it (the conversation never
-        // ended), and a brand-new session must never get it.
+        // the engine command, because it decides which conversation-identity
+        // flag `claude` gets: a restore that attaches needs none (the
+        // conversation never ended, and the flag would only cost a liveness
+        // probe), a restore that has to start a fresh engine reopens its own
+        // conversation, and a brand-new session claims one.
         let tmux_name = tmux::session_name(&id);
         let tmux_session_exists = self
             .tmux
             .as_ref()
             .map(|t| t.has_session(&tmux_name))
             .unwrap_or(false);
-        let continue_conversation = is_restore && !tmux_session_exists;
+        let identity = spawn_identity(&req.engine, is_restore, tmux_session_exists);
 
         let Spawned {
             master,
@@ -1006,7 +1051,7 @@ impl SessionManager {
             activity,
             mcp_config_path,
             tmux_session,
-        } = self.spawn_session_process(&req, &id, &tmux_name, continue_conversation)?;
+        } = self.spawn_session_process(&req, &id, &tmux_name, identity)?;
 
         // Armed the instant the file (if any) might exist; disarmed only
         // once the session below has been fully, successfully created --
@@ -1073,11 +1118,11 @@ impl SessionManager {
 
     /// Opens the PTY, starts whatever the session should actually run — a
     /// `tmux attach-session` client, or the engine itself when tmux isn't
-    /// usable — and starts its reader thread, retrying once without `claude
-    /// --continue` if that flag turns out to have killed the process (module
-    /// docs, "`--continue` is a booby trap"). Everything about *which*
-    /// process to run lives here; `create` only deals with what to do once
-    /// it's running.
+    /// usable — and starts its reader thread, walking down
+    /// [`ClaudeIdentity::ladder`] if a conversation-identity flag turns out to
+    /// have killed the process (module docs, "The identity flags are booby
+    /// traps"). Everything about *which* process to run lives here; `create`
+    /// only deals with what to do once it's running.
     ///
     /// The reader thread is started **before** the liveness probe, and that
     /// ordering is load-bearing rather than incidental: on macOS a process
@@ -1096,13 +1141,14 @@ impl SessionManager {
         req: &CreateSessionRequest,
         id: &str,
         tmux_name: &str,
-        continue_conversation: bool,
+        identity: ClaudeIdentity,
     ) -> Result<Spawned> {
-        // At most two attempts, and only ever two when `--continue` was
-        // used: with the flag, then without it.
-        let mut with_continue = continue_conversation;
-        loop {
-            let engine_cmd = build_engine_command(req, &self.data_dir, id, with_continue)?;
+        // One attempt per rung, and the last rung ([`ClaudeIdentity::Stock`])
+        // is never probed — there is nothing left to fall back to, and a stock
+        // `claude` carries no flag that could refuse to start.
+        let mut rungs = identity.ladder().into_iter().peekable();
+        while let Some(identity) = rungs.next() {
+            let engine_cmd = build_engine_command(req, &self.data_dir, id, identity)?;
             // Armed the instant the temp `--mcp-config` file might exist, and
             // disarmed only once this attempt has fully succeeded — the same
             // contract `create` applies to the steps *after* this function
@@ -1182,15 +1228,19 @@ impl SessionManager {
                 Arc::clone(&activity),
             );
 
-            // Only the `--continue` attempt is ever probed, so the ordinary
-            // create path pays nothing at all for this. Under tmux the PTY
-            // child is the attach client, which exits when its session dies
-            // — so this single check covers both spawn shapes.
-            if with_continue && !child_survives_startup(&mut child, CONTINUE_LIVENESS_WINDOW) {
+            // Only an attempt that still has a rung beneath it is probed, so
+            // attaching to a live tmux session (and any last-rung spawn) pays
+            // nothing at all for this. Under tmux the PTY child is the attach
+            // client, which exits when its session dies — so this single check
+            // covers both spawn shapes.
+            let probe = rungs.peek().map(|_| identity.liveness_window());
+            if matches!(probe, Some(window) if !child_survives_startup(&mut child, window)) {
                 eprintln!(
-                    "omniagent-ade: `claude --continue` exited immediately for session {id} \
-                     (no continuable conversation in {}); retrying as a fresh claude session",
-                    req.cwd
+                    "omniagent-ade: `claude {}` exited immediately for session {id} in {} \
+                     ({}); falling back",
+                    identity.describe_flags(),
+                    req.cwd,
+                    identity.failure_hint(),
                 );
                 // Tear the failed attempt down exactly the way `kill()`
                 // does, minus the parts that assume a registered session:
@@ -1202,7 +1252,6 @@ impl SessionManager {
                 drop(writer);
                 drop(pair.master);
                 let _ = reader_thread.join();
-                with_continue = false;
                 continue;
             }
 
@@ -1220,6 +1269,13 @@ impl SessionManager {
                 tmux_session,
             });
         }
+        // Unreachable: every ladder ends on an unprobed rung, which always
+        // returns above. Stated as an error rather than `unreachable!()` so a
+        // future ladder change degrades into a failed `create` (which callers
+        // already handle) instead of a panic that takes the app down.
+        Err(anyhow!(
+            "no claude spawn attempt survived for session {id} — the identity ladder ran out"
+        ))
     }
 
     /// Writes raw bytes to a session's PTY (keystrokes, pasted text, etc).
@@ -1474,15 +1530,33 @@ struct Spawned {
     tmux_session: Option<String>,
 }
 
-/// How long a `--continue` spawn is watched before it's declared healthy.
+/// How long a `--resume <uuid>` spawn is watched before it's declared healthy.
 ///
-/// Sized from a real measurement, not a guess: interactive `claude
-/// --continue` in a directory with nothing to continue prints `No
-/// conversation found to continue` and exits 1 after ~1.3 s (measured twice
-/// on claude 2.1.220), while a successful one is still running well past
-/// that. 2.5 s is ~2× the observed failure latency — comfortably past it
-/// without being an eternity on the one path that pays it.
-const CONTINUE_LIVENESS_WINDOW: Duration = Duration::from_millis(2500);
+/// Sized from a real measurement, not a guess: interactive `claude --resume
+/// <uuid>` naming a conversation that doesn't exist prints `No conversation
+/// found with session ID: <uuid>` and exits 1 after ~1.25 s (measured on
+/// claude 2.1.220 through a real PTY), while a successful one is still
+/// running well past that. 2.5 s is ~2× the observed failure latency —
+/// comfortably past it without being an eternity on the one path that pays
+/// it (a *restore* whose tmux session is gone; the ordinary restore attaches
+/// and is never probed).
+const RESUME_LIVENESS_WINDOW: Duration = Duration::from_millis(2500);
+
+/// How long a `--session-id <uuid>` spawn is watched before it's declared
+/// healthy. Much shorter than [`RESUME_LIVENESS_WINDOW`] because its only
+/// failure mode is much faster: `--session-id` naming a conversation that
+/// already exists prints `Error: Session ID <uuid> is already in use.` and
+/// exits 1 after ~0.20 s (measured three times, same PTY harness) — this is
+/// startup-time validation, not a store lookup that has to fail. 500 ms is
+/// ~2.5× that.
+///
+/// This one is on the *new tab* path, which is why the size matters: a fresh
+/// session's derived UUID cannot realistically already be in use (ids are
+/// minted from nanos plus a per-process counter, so nothing re-derives an
+/// old one), but "cannot realistically" is not "cannot", and the cost of
+/// being wrong is a dead terminal. Half a second on tab creation buys the
+/// guarantee that there is always a working Claude behind the pane.
+const SESSION_ID_LIVENESS_WINDOW: Duration = Duration::from_millis(500);
 
 /// Poll granularity for [`child_survives_startup`]. Fine enough that a
 /// failure is detected (and the retry started) within a blink of the process
@@ -1501,6 +1575,161 @@ fn child_survives_startup(child: &mut Box<dyn Child + Send + Sync>, window: Dura
         }
     }
     true
+}
+
+/// The namespace every OmniAgent-owned Claude conversation UUID is derived
+/// under ([`claude_conversation_uuid`]).
+///
+/// Not a magic constant: it is itself `uuid5(NAMESPACE_URL,
+/// "https://omni-agent.ai/ade/claude-conversation")` (that string is kept
+/// beside it as `CLAUDE_CONVERSATION_NAMESPACE_URL`), so anyone — in any
+/// language with a UUID library — can rederive it and check it, and
+/// `the_namespace_is_the_documented_derivation_not_a_magic_constant` asserts
+/// exactly that. Written out as a literal rather than computed at startup
+/// because it must never drift: change it and every existing pane loses its
+/// conversation.
+const CLAUDE_CONVERSATION_NAMESPACE: Uuid =
+    Uuid::from_u128(0x9337750e_5a2b_59c8_82f3_650bc0f53cfa);
+
+/// The URL whose UUIDv5 is [`CLAUDE_CONVERSATION_NAMESPACE`]. Test-only
+/// because nothing at runtime should ever recompute the namespace — the
+/// literal above is the value, and this exists so the suite can prove where
+/// that literal came from rather than leaving it to a commit message.
+#[cfg(test)]
+const CLAUDE_CONVERSATION_NAMESPACE_URL: &str = "https://omni-agent.ai/ade/claude-conversation";
+
+/// The Claude conversation an OmniAgent session owns, as the `<uuid>` for
+/// `claude --session-id` / `claude --resume`.
+///
+/// **Derived, never stored.** A UUIDv5 (RFC 4122 name-based, SHA-1) of the
+/// OmniAgent session id under [`CLAUDE_CONVERSATION_NAMESPACE`]. That single
+/// property — same session id, same UUID, forever, on any machine — is what
+/// lets this fix ship without persisting anything new and without touching
+/// the frontend contract: `restore_id` already round-trips the session id, so
+/// the conversation id comes along for free.
+///
+/// Why this and not `--continue`: `--continue` picks the most recent
+/// conversation *in the directory*, which makes every Claude pane in a
+/// project collapse onto one conversation after a reboot (module docs, "Every
+/// claude pane owns its own conversation"). A per-session UUID is the only
+/// thing that keeps N panes in one folder distinct.
+///
+/// Verified against the real binary, not inferred: `claude --session-id`
+/// accepts this exact shape (it validates the `8-4-4-4-12` hex form — a nil
+/// UUID and a variant-0 UUID were both accepted, so a proper v5 is
+/// comfortably inside it), and the conversation it then writes is named
+/// `~/.claude/projects/<dir>/<this uuid>.jsonl`.
+fn claude_conversation_uuid(session_id: &str) -> String {
+    Uuid::new_v5(&CLAUDE_CONVERSATION_NAMESPACE, session_id.as_bytes()).to_string()
+}
+
+/// The conversation identity a given `create` should spawn with.
+///
+/// Three "no identity at all" cases converge on [`ClaudeIdentity::Stock`],
+/// and lumping them together is deliberate — `Stock` is also the only value
+/// whose ladder has a single rung, i.e. the only one that is never
+/// liveness-probed:
+///
+/// - **not `claude`** — `codex` and `shell` have no conversation concept.
+///   Giving them an identity would be a no-op on their argv but would still
+///   arm the probe, making every new terminal tab wait out a window for a
+///   flag it never carried.
+/// - **a live tmux session** — the engine has been running since before the
+///   app closed; the argv is never used (`Tmux::ensure_session` short-circuits)
+///   and the PTY child is just an attach client, so there is nothing to probe.
+/// - the last rung of a ladder whose earlier rungs were refused.
+fn spawn_identity(engine: &str, is_restore: bool, tmux_session_exists: bool) -> ClaudeIdentity {
+    if engine != "claude" || tmux_session_exists {
+        ClaudeIdentity::Stock
+    } else if is_restore {
+        ClaudeIdentity::Resume
+    } else {
+        ClaudeIdentity::Claim
+    }
+}
+
+/// Which conversation-identity flag a `claude` spawn carries — the thing that
+/// decides whether a restored pane gets *its own* history back or somebody
+/// else's (module docs, "Every claude pane owns its own conversation").
+///
+/// Only ever meaningful for `claude`; `codex` and `shell` ignore it entirely
+/// and stay bit-for-bit stock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeIdentity {
+    /// `--session-id <U>` — a brand-new pane claiming the conversation it
+    /// will own for the rest of its life.
+    Claim,
+    /// `--resume <U>` — a pane reopening the conversation it already owns,
+    /// after the process behind it went away (app closed with no tmux, or
+    /// tmux itself gone because the machine rebooted).
+    Resume,
+    /// No identity flag at all. Two very different situations converge here,
+    /// and both genuinely want stock `claude`: attaching to a still-live tmux
+    /// session (the engine is already running; argv is never used), and the
+    /// last rung of a ladder whose earlier rungs were refused.
+    Stock,
+}
+
+impl ClaudeIdentity {
+    /// The spawn attempts to make, in order, starting from this identity.
+    ///
+    /// Every ladder ends on [`Stock`](Self::Stock), which is what guarantees
+    /// `create` can always hand back a working pane: a stock `claude` carries
+    /// no flag that can be refused. The middle rung of the `Resume` ladder is
+    /// the interesting one — it is how a session created *before* this fix
+    /// existed gets adopted. Its old conversation was written without a
+    /// chosen id, so `--resume <U>` finds nothing; the `--session-id <U>`
+    /// retry starts a fresh conversation *under the right id*, and from that
+    /// point on the pane restores its own history like any other.
+    fn ladder(self) -> Vec<Self> {
+        match self {
+            Self::Resume => vec![Self::Resume, Self::Claim, Self::Stock],
+            Self::Claim => vec![Self::Claim, Self::Stock],
+            Self::Stock => vec![Self::Stock],
+        }
+    }
+
+    /// The argv fragment this identity contributes to a `claude` invocation.
+    fn argv(self, session_id: &str) -> Vec<String> {
+        match self {
+            Self::Claim => vec!["--session-id".to_string(), claude_conversation_uuid(session_id)],
+            Self::Resume => vec!["--resume".to_string(), claude_conversation_uuid(session_id)],
+            Self::Stock => Vec::new(),
+        }
+    }
+
+    /// How long a spawn carrying this identity is watched before it counts as
+    /// healthy — see the two window constants for the measurements behind the
+    /// numbers.
+    fn liveness_window(self) -> Duration {
+        match self {
+            Self::Resume => RESUME_LIVENESS_WINDOW,
+            Self::Claim => SESSION_ID_LIVENESS_WINDOW,
+            // Never probed (it is always the last rung), so any value is
+            // unused; zero is the honest one.
+            Self::Stock => Duration::ZERO,
+        }
+    }
+
+    /// The flags as they appear on the command line — for log messages only.
+    fn describe_flags(self) -> &'static str {
+        match self {
+            Self::Claim => "--session-id <uuid>",
+            Self::Resume => "--resume <uuid>",
+            Self::Stock => "(no identity flag)",
+        }
+    }
+
+    /// The measured reason a spawn with this identity refuses to start — for
+    /// log messages only, so a user reading the console sees the actual
+    /// Claude-side cause rather than a generic "it died".
+    fn failure_hint(self) -> &'static str {
+        match self {
+            Self::Claim => "that conversation id is already in use",
+            Self::Resume => "no conversation exists under this pane's id yet",
+            Self::Stock => "stock claude refused to start",
+        }
+    }
 }
 
 /// An engine invocation, resolved but not yet materialized — the shape both
@@ -1536,14 +1765,13 @@ impl EngineCommand {
 /// an engine is invoked (DESIGN principle 5: tmux *wraps* stock engines, it
 /// does not reconfigure them).
 ///
-/// `continue_conversation` only ever applies to `claude`, and only on the
-/// no-tmux (or tmux-session-is-gone) restore path — see the module docs'
-/// degradation ladder.
+/// `identity` only ever applies to `claude` — see [`ClaudeIdentity`] and the
+/// module docs' degradation ladder.
 fn build_engine_command(
     req: &CreateSessionRequest,
     data_dir: &Path,
     session_id: &str,
-    continue_conversation: bool,
+    identity: ClaudeIdentity,
 ) -> Result<EngineCommand> {
     let env = engine_env();
     match req.engine.as_str() {
@@ -1569,14 +1797,11 @@ fn build_engine_command(
         "claude" => {
             let mut argv = vec!["claude".to_string()];
 
-            if continue_conversation {
-                // `-c/--continue`: "Continue the most recent conversation in
-                // the current directory" (verified against `claude --help`,
-                // 2.1.220). This is the *fallback* continuity path — it
-                // resumes the conversation, not the process, and only fires
-                // when there's no live tmux session to attach to instead.
-                argv.push("--continue".to_string());
-            }
+            // Which conversation this pane owns, decided by OmniAgent rather
+            // than by Claude's directory-scoped "most recent" heuristic —
+            // first, so it reads the way it would be typed. See
+            // [`ClaudeIdentity`] and [`claude_conversation_uuid`].
+            argv.extend(identity.argv(session_id));
 
             let mcp_config_path = match resolve_mcp_server_binary() {
                 Some(bin) => {
@@ -2890,7 +3115,8 @@ mod tests {
         data_dir: &Path,
         session_id: &str,
     ) -> Result<(CommandBuilder, Option<PathBuf>)> {
-        let engine_cmd = build_engine_command(req, data_dir, session_id, false)?;
+        let engine_cmd =
+            build_engine_command(req, data_dir, session_id, ClaudeIdentity::Claim)?;
         let cmd = engine_cmd.to_command_builder();
         Ok((cmd, engine_cmd.mcp_config_path))
     }
@@ -3604,8 +3830,8 @@ mod tests {
         assert_eq!(s, "short");
     }
 
-    // -- Session persistence: ids, `claude --continue`, tmux wrapping
-    // (founder brief, 2026-07-26) --------------------------------------
+    // -- Session persistence: ids, conversation identity, tmux wrapping
+    // (founder brief + founder bug, 2026-07-26) ------------------------
 
     #[test]
     fn generated_session_ids_are_accepted_by_the_restore_id_validator() {
@@ -3644,13 +3870,93 @@ mod tests {
         assert!(!is_valid_session_id(&"x".repeat(MAX_SESSION_ID_LEN + 1)));
     }
 
-    /// The no-tmux continuity path: when a restore can't attach to a live
-    /// process, `claude` at least resumes the *conversation*
-    /// (`-c/--continue`, verified against `claude --help` 2.1.220). It must
-    /// never appear on a genuinely new session — that would silently graft a
-    /// brand-new tab onto whatever the user last did in that directory.
+    // -- Per-pane conversation identity (founder bug, 2026-07-26) ---------
+
+    /// The derivation's whole contract in one test: same session id → same
+    /// UUID forever (that is what lets this ship with nothing new persisted),
+    /// and a shape `claude --session-id` accepts.
     #[test]
-    fn claude_gets_continue_only_when_restoring_without_a_live_session() {
+    fn a_session_ids_conversation_uuid_is_stable_and_well_formed() {
+        let a = claude_conversation_uuid("sess-18c1a2b3c4d5e6f-0");
+        assert_eq!(a, claude_conversation_uuid("sess-18c1a2b3c4d5e6f-0"));
+
+        // `8-4-4-4-12` lowercase hex — the form `claude --session-id`
+        // validates (measured: it rejects anything else with `Invalid session
+        // ID. Must be a valid UUID.`).
+        let groups: Vec<&str> = a.split('-').collect();
+        assert_eq!(groups.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12], "{a}");
+        assert!(
+            a.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+            "{a} must be hex + hyphens"
+        );
+        assert!(
+            a.chars().all(|c| !c.is_ascii_uppercase()),
+            "{a} must be lowercase"
+        );
+
+        // RFC 4122 v5: version nibble 5, variant bits `10xx` (`8`/`9`/`a`/`b`).
+        let parsed = Uuid::parse_str(&a).expect("must parse as a UUID");
+        assert_eq!(parsed.get_version_num(), 5, "{a}");
+        assert!(matches!(groups[3].chars().next(), Some('8' | '9' | 'a' | 'b')), "{a}");
+    }
+
+    /// **The bug, as an assertion.** Many Claude panes live in one project
+    /// folder — Bruno's own already has 11 stored conversations — and
+    /// `--continue`'s "most recent in this directory" made every one of them
+    /// restore the same conversation. Distinct sessions must derive distinct
+    /// conversation ids, or the fix is no fix at all.
+    #[test]
+    fn every_session_derives_a_conversation_uuid_of_its_own() {
+        let ids: Vec<String> = (0..64).map(|_| generate_session_id()).collect();
+        let uuids: std::collections::HashSet<String> =
+            ids.iter().map(|id| claude_conversation_uuid(id)).collect();
+        assert_eq!(
+            uuids.len(),
+            ids.len(),
+            "two sessions collided onto one conversation — panes would overwrite each other"
+        );
+        // Neighbouring ids (same nanosecond, adjacent counters) are the
+        // realistic collision risk — two panes opened by one ⌘N burst.
+        assert_ne!(
+            claude_conversation_uuid("sess-18c1a2b3c4d5e6f-0"),
+            claude_conversation_uuid("sess-18c1a2b3c4d5e6f-1")
+        );
+    }
+
+    /// The namespace is a checkable derivation, not a number someone typed:
+    /// it is the UUIDv5 of [`CLAUDE_CONVERSATION_NAMESPACE_URL`] under the
+    /// standard URL namespace. Pinning it here means an accidental edit to
+    /// the literal — which would silently orphan every existing pane's
+    /// conversation — fails the suite instead of shipping.
+    #[test]
+    fn the_namespace_is_the_documented_derivation_not_a_magic_constant() {
+        assert_eq!(
+            CLAUDE_CONVERSATION_NAMESPACE,
+            Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                CLAUDE_CONVERSATION_NAMESPACE_URL.as_bytes()
+            )
+        );
+        assert_eq!(
+            CLAUDE_CONVERSATION_NAMESPACE.to_string(),
+            "9337750e-5a2b-59c8-82f3-650bc0f53cfa"
+        );
+        // And the derivation really is textbook RFC 4122 v5, so the ids stay
+        // reproducible outside this codebase (the published vector every UUID
+        // library ships a test for).
+        assert_eq!(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"python.org").to_string(),
+            "886313e1-3b8a-5372-9b90-0c9aee199e5d"
+        );
+    }
+
+    /// Which flag each situation actually puts on the command line. A fresh
+    /// pane *claims* its conversation; a restore that can't attach *resumes
+    /// its own*; an attach carries nothing. Getting `Claim` onto a restore
+    /// would refuse to start (`already in use`); getting `Resume` onto a new
+    /// tab would graft it onto history it never had.
+    #[test]
+    fn claude_claims_a_conversation_when_new_and_resumes_its_own_when_restored() {
         let tmp = tempfile::tempdir().unwrap();
         let req = CreateSessionRequest {
             project: "demo".into(),
@@ -3660,25 +3966,93 @@ mod tests {
             restore_id: None,
         };
 
-        let fresh = build_engine_command(&req, tmp.path(), "sess-fresh", false).unwrap();
-        assert!(
-            !fresh.argv.iter().any(|a| a == "--continue"),
-            "a new session must never continue an old conversation: {:?}",
+        let fresh =
+            build_engine_command(&req, tmp.path(), "sess-fresh", ClaudeIdentity::Claim).unwrap();
+        assert_eq!(fresh.argv[0], "claude");
+        assert_eq!(
+            fresh.argv[1..3],
+            ["--session-id".to_string(), claude_conversation_uuid("sess-fresh")],
+            "{:?}",
             fresh.argv
         );
 
-        let restored = build_engine_command(&req, tmp.path(), "sess-restored", true).unwrap();
-        assert!(
-            restored.argv.iter().any(|a| a == "--continue"),
-            "a restore with no live process must continue the conversation: {:?}",
+        let restored =
+            build_engine_command(&req, tmp.path(), "sess-restored", ClaudeIdentity::Resume)
+                .unwrap();
+        assert_eq!(
+            restored.argv[1..3],
+            ["--resume".to_string(), claude_conversation_uuid("sess-restored")],
+            "{:?}",
             restored.argv
         );
-        assert_eq!(restored.argv[0], "claude");
+
+        let attached =
+            build_engine_command(&req, tmp.path(), "sess-attached", ClaudeIdentity::Stock).unwrap();
+        assert!(
+            !attached.argv.iter().any(|a| a == "--session-id" || a == "--resume"),
+            "attaching to a live engine must carry no identity flag: {:?}",
+            attached.argv
+        );
+
+        for cmd in [&fresh, &restored, &attached] {
+            assert!(
+                !cmd.argv.iter().any(|a| a == "--continue" || a == "-c"),
+                "`--continue` is gone for good — it is the bug: {:?}",
+                cmd.argv
+            );
+        }
         cleanup_mcp_config(&fresh.mcp_config_path);
         cleanup_mcp_config(&restored.mcp_config_path);
+        cleanup_mcp_config(&attached.mcp_config_path);
     }
 
-    /// The liveness probe behind the `--continue` retry, against real
+    /// Who gets an identity flag at all — and, just as importantly, who
+    /// never pays the liveness probe that comes with one. A `shell` tab
+    /// waiting out a `--resume` window for a flag it was never given would be
+    /// a pure latency regression on the most common path there is.
+    #[test]
+    fn only_a_claude_spawning_a_fresh_engine_carries_an_identity() {
+        use ClaudeIdentity::*;
+        assert_eq!(spawn_identity("claude", false, false), Claim);
+        assert_eq!(spawn_identity("claude", true, false), Resume);
+        // Attaching to a live tmux session: the engine never restarts.
+        assert_eq!(spawn_identity("claude", true, true), Stock);
+        assert_eq!(spawn_identity("claude", false, true), Stock);
+        for engine in ["codex", "shell"] {
+            for is_restore in [false, true] {
+                for tmux_exists in [false, true] {
+                    assert_eq!(
+                        spawn_identity(engine, is_restore, tmux_exists),
+                        Stock,
+                        "{engine} restore={is_restore} tmux={tmux_exists}"
+                    );
+                    // Single-rung ladder == never probed. This is the
+                    // property that actually protects the latency.
+                    assert_eq!(
+                        spawn_identity(engine, is_restore, tmux_exists).ladder().len(),
+                        1
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every ladder ends on an unflagged `claude`, which is the only reason
+    /// `create` can promise a working pane: `Stock` carries nothing that can
+    /// be refused. The `Resume` ladder's middle rung is how a session created
+    /// *before* this fix gets adopted — see [`ClaudeIdentity::ladder`].
+    #[test]
+    fn every_identity_ladder_ends_on_a_spawn_that_cannot_be_refused() {
+        use ClaudeIdentity::*;
+        assert_eq!(Resume.ladder(), vec![Resume, Claim, Stock]);
+        assert_eq!(Claim.ladder(), vec![Claim, Stock]);
+        assert_eq!(Stock.ladder(), vec![Stock]);
+        for start in [Resume, Claim, Stock] {
+            assert_eq!(*start.ladder().last().unwrap(), Stock, "{start:?}");
+        }
+    }
+
+    /// The liveness probe behind the identity-ladder retry, against real
     /// processes: one that dies immediately (`false` — and *fast*, it must
     /// not wait out the window) and one that keeps running (`true`).
     ///
@@ -3714,9 +4088,10 @@ mod tests {
             (child, drain)
         }
 
-        // Stands in for `claude --continue`'s measured real behavior: print
-        // a complaint, exit 1, right away.
-        let (mut child, drain) = spawn_probe("echo 'No conversation found to continue'; exit 1");
+        // Stands in for a refused identity flag's measured real behavior:
+        // print a complaint, exit 1, right away.
+        let (mut child, drain) =
+            spawn_probe("echo 'No conversation found with session ID: x'; exit 1");
         let started = Instant::now();
         assert!(
             !child_survives_startup(&mut child, Duration::from_secs(5)),
@@ -3740,65 +4115,75 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// End-to-end proof of the retry, through the real `create()`: a fake
-    /// `claude` on this thread's `PATH` reproduces the exact real behavior
-    /// measured on claude 2.1.220 — refuse `--continue` with `No conversation
-    /// found to continue` and exit 1 — and `create` must still hand back one
-    /// healthy, running session, having silently retried without the flag.
+    /// A fake `claude` on this thread's `PATH`, reproducing claude 2.1.220's
+    /// real refusals: it exits 1 for any flag named in `refuse`, printing the
+    /// message that binary actually prints, and otherwise announces the
+    /// full argv it was given and stays alive.
     ///
     /// Uses [`TEST_SHELL_PATH_OVERRIDE`] rather than mutating the real
     /// `PATH`; see that thread-local's doc comment for the cross-test race
     /// that rules the obvious approach out.
-    #[test]
-    fn a_claude_restore_whose_continue_is_refused_retries_without_it() {
-        struct OverrideShellPath;
-        impl OverrideShellPath {
-            fn engage(path: String) -> Self {
-                TEST_SHELL_PATH_OVERRIDE
-                    .with(|o| o.set(Some(Box::leak(path.into_boxed_str()))));
-                Self
-            }
-        }
-        impl Drop for OverrideShellPath {
-            fn drop(&mut self) {
-                TEST_SHELL_PATH_OVERRIDE.with(|o| o.set(None));
-            }
-        }
+    struct FakeClaude {
+        _dir: tempfile::TempDir,
+    }
 
+    impl FakeClaude {
+        fn refusing(refuse: &[&str]) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let bin_dir = dir.path().join("fakebin");
+            std::fs::create_dir_all(&bin_dir).unwrap();
+            let mut script = String::from("#!/bin/sh\n");
+            for flag in refuse {
+                let message = match *flag {
+                    "--resume" => "No conversation found with session ID: <uuid>",
+                    "--session-id" => "Error: Session ID <uuid> is already in use.",
+                    other => other,
+                };
+                script.push_str(&format!(
+                    "for a in \"$@\"; do\n  if [ \"$a\" = \"{flag}\" ]; then\n    \
+                     echo '{message}'\n    exit 1\n  fi\ndone\n"
+                ));
+            }
+            script.push_str("echo \"FAKE_CLAUDE_ARGV:$*\"\nsleep 30\n");
+            let fake_claude = bin_dir.join("claude");
+            std::fs::write(&fake_claude, script).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            TEST_SHELL_PATH_OVERRIDE.with(|o| {
+                o.set(Some(Box::leak(
+                    format!(
+                        "{}:{}",
+                        bin_dir.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    )
+                    .into_boxed_str(),
+                )))
+            });
+            Self { _dir: dir }
+        }
+    }
+
+    impl Drop for FakeClaude {
+        fn drop(&mut self) {
+            TEST_SHELL_PATH_OVERRIDE.with(|o| o.set(None));
+        }
+    }
+
+    /// Drives one `create` against a [`FakeClaude`] and returns the argv the
+    /// surviving attempt was actually launched with.
+    fn argv_of_surviving_claude(restore_id: Option<&str>, refuse: &[&str]) -> String {
+        let _fake = FakeClaude::refusing(refuse);
         let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("fakebin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let fake_claude = bin_dir.join("claude");
-        std::fs::write(
-            &fake_claude,
-            "#!/bin/sh\n\
-             for a in \"$@\"; do\n\
-             \x20 if [ \"$a\" = \"--continue\" ]; then\n\
-             \x20   echo 'No conversation found to continue'\n\
-             \x20   exit 1\n\
-             \x20 fi\n\
-             done\n\
-             echo FAKE_CLAUDE_STARTED_FRESH\n\
-             sleep 30\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let _path_override = OverrideShellPath::engage(format!(
-            "{}:{}",
-            bin_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        ));
-
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let sink: OutputSink = Arc::new(move |_id: &str, chunk: &[u8]| {
             let _ = tx.send(chunk.to_vec());
         });
-        // No tmux: this is precisely the degraded path `--continue` exists
-        // for (module docs, degradation ladder step 3).
+        // No tmux: precisely the degraded path the identity flags exist for
+        // (module docs, degradation ladder step 3).
         let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(None);
 
         let info = manager
@@ -3807,46 +4192,104 @@ mod tests {
                 engine: "claude".into(),
                 cwd: tmp.path().to_string_lossy().into_owned(),
                 briefing: None,
-                restore_id: Some("sess-continue-refused".into()),
+                restore_id: restore_id.map(str::to_string),
             })
-            .expect("a refused --continue must never fail session creation");
-        assert_eq!(info.id, "sess-continue-refused");
+            .expect("a refused identity flag must never fail session creation");
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(15);
         let mut seen = String::new();
-        while Instant::now() < deadline && !seen.contains("FAKE_CLAUDE_STARTED_FRESH") {
+        while Instant::now() < deadline && !seen.contains("FAKE_CLAUDE_ARGV:") {
             if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
                 seen.push_str(&String::from_utf8_lossy(&chunk));
             }
         }
-        assert!(
-            seen.contains("FAKE_CLAUDE_STARTED_FRESH"),
-            "create must have retried without --continue and left a live engine; saw: {seen:?}"
-        );
-
         manager.kill(&info.id).unwrap();
+        assert!(
+            seen.contains("FAKE_CLAUDE_ARGV:"),
+            "create must have left a live engine behind; saw: {seen:?}"
+        );
+        seen
     }
 
-    /// `--continue` is Claude-specific; `codex` and `shell` have no
-    /// equivalent and must stay bit-for-bit stock even on a restore.
+    /// The happy restore: `--resume <this pane's uuid>` is what actually
+    /// reaches the binary, through the real `create()`.
     #[test]
-    fn continue_never_leaks_into_codex_or_shell_invocations() {
+    fn a_restore_launches_claude_against_its_own_conversation_uuid() {
+        let seen = argv_of_surviving_claude(Some("sess-resume-ok"), &[]);
+        assert!(
+            seen.contains(&format!(
+                "--resume {}",
+                claude_conversation_uuid("sess-resume-ok")
+            )),
+            "saw: {seen:?}"
+        );
+    }
+
+    /// **Every session that existed before this fix lands.** Its conversation
+    /// was created without a chosen id, so `--resume <derived uuid>` names
+    /// nothing and claude exits 1. `create` must still hand back one healthy
+    /// session — and it must be one that *claims* the derived id, so this
+    /// pane is addressable from now on instead of being permanently stranded.
+    #[test]
+    fn a_restore_whose_conversation_does_not_exist_adopts_the_derived_id() {
+        let seen = argv_of_surviving_claude(Some("sess-no-such-convo"), &["--resume"]);
+        assert!(
+            seen.contains(&format!(
+                "--session-id {}",
+                claude_conversation_uuid("sess-no-such-convo")
+            )),
+            "the retry must claim this pane's id, not start anonymously; saw: {seen:?}"
+        );
+    }
+
+    /// Bottom of the ladder: both identity flags refused (a corrupt or
+    /// half-written conversation store would do it — `--resume` finds nothing
+    /// usable while `--session-id` still reports the id taken). The pane must
+    /// come back as a plain, working `claude` rather than dying.
+    #[test]
+    fn a_restore_refused_at_every_rung_still_lands_on_a_working_claude() {
+        let seen =
+            argv_of_surviving_claude(Some("sess-both-refused"), &["--resume", "--session-id"]);
+        assert!(
+            !seen.contains("--resume") && !seen.contains("--session-id"),
+            "the last rung must be stock claude; saw: {seen:?}"
+        );
+    }
+
+    /// A brand-new tab whose derived id is somehow already taken (it cannot
+    /// realistically be — see [`SESSION_ID_LIVENESS_WINDOW`] — but a dead
+    /// terminal is not an acceptable way to find out) falls to stock claude.
+    #[test]
+    fn a_new_session_whose_claim_is_refused_falls_back_to_stock_claude() {
+        let seen = argv_of_surviving_claude(None, &["--session-id"]);
+        assert!(
+            !seen.contains("--session-id") && !seen.contains("--resume"),
+            "saw: {seen:?}"
+        );
+    }
+
+    /// Conversation identity is Claude-specific; `codex` and `shell` have no
+    /// equivalent and must stay bit-for-bit stock on every rung.
+    #[test]
+    fn identity_flags_never_leak_into_codex_or_shell_invocations() {
         let tmp = tempfile::tempdir().unwrap();
         for engine in ["codex", "shell"] {
-            let req = CreateSessionRequest {
-                project: "demo".into(),
-                engine: engine.into(),
-                cwd: tmp.path().to_string_lossy().into_owned(),
-                briefing: None,
-                restore_id: None,
-            };
-            let cmd = build_engine_command(&req, tmp.path(), "sess-x", true).unwrap();
-            assert_eq!(
-                cmd.argv.len(),
-                1,
-                "{engine} must be spawned stock, got {:?}",
-                cmd.argv
-            );
+            for identity in [ClaudeIdentity::Claim, ClaudeIdentity::Resume, ClaudeIdentity::Stock] {
+                let req = CreateSessionRequest {
+                    project: "demo".into(),
+                    engine: engine.into(),
+                    cwd: tmp.path().to_string_lossy().into_owned(),
+                    briefing: None,
+                    restore_id: None,
+                };
+                let cmd = build_engine_command(&req, tmp.path(), "sess-x", identity).unwrap();
+                assert_eq!(
+                    cmd.argv.len(),
+                    1,
+                    "{engine} must be spawned stock under {identity:?}, got {:?}",
+                    cmd.argv
+                );
+            }
         }
     }
 
@@ -3867,7 +4310,8 @@ mod tests {
             briefing: Some(briefing.to_string()),
             restore_id: None,
         };
-        let cmd = build_engine_command(&req, tmp.path(), "sess-briefing", false).unwrap();
+        let cmd =
+            build_engine_command(&req, tmp.path(), "sess-briefing", ClaudeIdentity::Claim).unwrap();
         let idx = cmd
             .argv
             .iter()

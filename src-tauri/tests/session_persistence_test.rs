@@ -352,6 +352,36 @@ fn restoring_an_id_whose_tmux_session_is_gone_starts_fresh_without_failing() {
     manager.kill(&info.id).unwrap();
 }
 
+/// A `shell` tab must never pay for `claude`'s conversation-identity liveness
+/// probe. The probe waits out its whole window on a *healthy* child, so
+/// arming it for an engine that carries no identity flag would silently add
+/// seconds to the most ordinary action in the app — opening a terminal.
+///
+/// Asserted as real wall-clock time through the real `create`, on the restore
+/// path specifically: that is the one that would arm the longest window
+/// (`--resume`'s 2.5 s) if the engine check were ever dropped.
+#[test]
+fn opening_a_shell_never_waits_out_claudes_liveness_probe() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_tmux(None);
+
+    let started = Instant::now();
+    let info = manager
+        .create(CreateSessionRequest {
+            restore_id: Some("sess-shell-timing".to_string()),
+            ..shell_request(tmp.path())
+        })
+        .unwrap();
+    let elapsed = started.elapsed();
+    manager.kill(&info.id).unwrap();
+
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "restoring a shell took {elapsed:?} — it is being liveness-probed as if it \
+         carried a claude identity flag"
+    );
+}
+
 /// Two live tabs must never collide onto one tmux session, and a `restore_id`
 /// naming a tab that's already open is a frontend bug worth surfacing rather
 /// than silently hijacking the running session.

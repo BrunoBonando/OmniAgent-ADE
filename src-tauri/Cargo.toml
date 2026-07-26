@@ -28,6 +28,12 @@ serde_json = "1"
 anyhow = "1"
 base64 = "0.22"
 portable-pty = "0.9"
+# Every `claude` pane owns a conversation whose id OmniAgent derives, rather
+# than letting `--continue` guess "most recent in this directory" (see
+# `sessions.rs`, "Every claude pane owns its own conversation"). `v5` is the
+# name-based, SHA-1 derivation that makes an OmniAgent session id map to the
+# same conversation UUID forever, with no extra state to persist.
+uuid = { version = "1", features = ["v5"] }
 brain-core = { path = "../crates/brain-core" }
 mcp-server = { path = "../crates/mcp-server" }
 # Task 7.1: the app now ticks brain-ingest's enrichment drain loop itself
