@@ -101,6 +101,11 @@ interface ProjectPaneGridProps {
   onChangeEngine: (tab: TabInfo, engine: Engine) => void;
   /** PaneHeader's 3-dot "Terminal theme" picker. */
   onChangeTheme: (id: string, themeId: TerminalThemeId) => void;
+  /** PaneHeader's 3-dot "Code review": opens the right-hand review column
+   * for this pane's session (founder ask, 2026-07-26 — "Make sure that the
+   * code panel is for session, okay?"). `App.tsx` owns which session the
+   * column is currently targeting. */
+  onOpenCodeReview: (tab: TabInfo) => void;
   /** Auto-title from the first prompt — forwarded straight through to each
    * pane's `<Terminal>` (see that component's own doc). */
   onFirstInput: (id: string, line: string) => void;
@@ -131,6 +136,7 @@ function ProjectPaneGrid({
   onRenameTab,
   onChangeEngine,
   onChangeTheme,
+  onOpenCodeReview,
   onFirstInput,
   initialTree,
 }: ProjectPaneGridProps) {
@@ -212,6 +218,7 @@ function ProjectPaneGrid({
                       onRename={(label) => onRenameTab(tab.id, label)}
                       onChangeEngine={(engine) => onChangeEngine(tab, engine)}
                       onChangeTheme={(themeId) => onChangeTheme(tab.id, themeId)}
+                      onOpenCodeReview={() => onOpenCodeReview(tab)}
                     />
                   </div>
                 )}
@@ -250,6 +257,8 @@ interface WorkspaceProps {
   onChangeEngine?: (tab: TabInfo, engine: Engine) => void;
   /** PaneHeader's 3-dot "Terminal theme" picker. Optional, same reasoning. */
   onChangeTheme?: (id: string, themeId: TerminalThemeId) => void;
+  /** PaneHeader's 3-dot "Code review". Optional, same reasoning. */
+  onOpenCodeReview?: (tab: TabInfo) => void;
   /** Auto-title from the first prompt, forwarded to every pane's
    * `<Terminal>`. Optional, same reasoning. */
   onFirstInput?: (id: string, line: string) => void;
@@ -274,6 +283,7 @@ export default function Workspace({
   onRenameTab,
   onChangeEngine = () => {},
   onChangeTheme = () => {},
+  onOpenCodeReview = () => {},
   onFirstInput = () => {},
   hidden,
   initialLayouts,
@@ -319,6 +329,7 @@ export default function Workspace({
             onRenameTab={onRenameTab}
             onChangeEngine={onChangeEngine}
             onChangeTheme={onChangeTheme}
+            onOpenCodeReview={onOpenCodeReview}
             onFirstInput={onFirstInput}
             initialTree={initialLayouts?.get(g.project)}
           />

@@ -73,6 +73,10 @@ interface PaneHeaderProps {
   /** 3-dot menu's "Terminal theme" picker — applied and persisted
    * immediately on click (`App.tsx`'s `tab/themeChanged` dispatch). */
   onChangeTheme?: (themeId: TerminalThemeId) => void;
+  /** 3-dot menu's "Code review" entry (founder ask, 2026-07-26): opens the
+   * right-hand review column scoped to THIS pane's cwd. Optional, like the
+   * two above, so tests that don't care about the menu can omit it. */
+  onOpenCodeReview?: () => void;
 }
 
 /** Stops the click from also bubbling into the header's own
@@ -93,6 +97,7 @@ export default function PaneHeader({
   onRename,
   onChangeEngine,
   onChangeTheme,
+  onOpenCodeReview,
 }: PaneHeaderProps) {
   const branch = useGitBranch(tab.cwd);
   const [renaming, setRenaming] = useState(false);
@@ -215,7 +220,7 @@ export default function PaneHeader({
           {branch}
         </span>
       )}
-      {(onChangeEngine || onChangeTheme) && (
+      {(onChangeEngine || onChangeTheme || onOpenCodeReview) && (
         <span className="pane-header-menu-anchor">
           <button
             className={`pane-header-btn pane-header-btn-menu${menuOpen ? " is-active" : ""}`}
@@ -238,6 +243,8 @@ export default function PaneHeader({
               currentThemeId={tab.themeId ?? DEFAULT_TERMINAL_THEME}
               onChangeEngine={(engine) => onChangeEngine?.(engine)}
               onChangeTheme={(themeId) => onChangeTheme?.(themeId)}
+              repoPath={tab.cwd}
+              onOpenCodeReview={onOpenCodeReview}
               onClose={() => setMenuOpen(false)}
             />
           )}

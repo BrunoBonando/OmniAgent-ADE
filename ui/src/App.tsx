@@ -7,6 +7,7 @@ import Sidebar from "./components/Sidebar";
 import Workspace from "./components/Workspace";
 import CommandPalette from "./components/CommandPalette";
 import FileTree from "./components/FileTree";
+import CodeReviewPanel from "./components/CodeReviewPanel";
 import BrainMap from "./map/BrainMap";
 import FirstRun from "./onboarding/FirstRun";
 import AuthGate from "./onboarding/AuthGate";
@@ -26,6 +27,7 @@ import {
   resolveDefaultEngine,
   serializeLayout,
   sessionsReducer,
+  tabDisplayLabel,
   type Engine,
   type ProjectInfo,
   type TabInfo,
@@ -83,6 +85,25 @@ function App() {
   // `LAYOUT_SETTING_KEY`/`REVIEW_MEMORY_SETTING_KEY` already use, restored
   // in the boot effect below alongside the tab layout.
   const [fileTreeVisible, setFileTreeVisible] = useState(true);
+
+  // ---- the per-session code review column (founder ask, 2026-07-26) -----
+  //
+  // `null` = closed. When open it holds the session the panel is reviewing,
+  // captured at open time from the pane whose 3-dot menu was used — which is
+  // the whole "Make sure that the code panel is for session, okay?" contract.
+  // Opening it from a different pane re-targets it rather than stacking a
+  // second column.
+  //
+  // COEXISTENCE WITH THE FILE TREE: they share the one right-hand dock and
+  // are mutually exclusive, because at realistic window widths they aren't
+  // both affordable — a 1440px MacBook already spends ~220px on the sidebar,
+  // and a file tree (260) plus a review column (440) would leave the
+  // terminals under 520px, which is where a terminal grid stops being usable.
+  // The review column wins while it's open and the file tree comes back
+  // exactly as the user left it on close: `fileTreeVisible` is deliberately
+  // NOT mutated here, it stays the user's own preference and is only
+  // suppressed from rendering.
+  const [reviewTarget, setReviewTarget] = useState<{ id: string; cwd: string; label: string } | null>(null);
 
   // NewWorkspaceModal's bulk-create: `projectId -> PaneTree` arrangement
   // hints for a project's very first pane-grid render (see
@@ -678,6 +699,11 @@ function App() {
       console.error("failed to kill session (closing tab anyway)", err);
     }
     dispatch({ type: "tab/closed", id });
+    // The review column belongs to a session, so it goes when that session
+    // does. Its cwd would still resolve to a perfectly valid repo, which is
+    // exactly the problem: the panel would keep showing a live-looking review
+    // headed by the name of a pane that isn't there any more.
+    setReviewTarget((target) => (target?.id === id ? null : target));
   }, []);
 
   // ---- ⌘T new tab / ⌘K palette / ⌘N new workspace. ⌘W is deliberately
@@ -750,6 +776,9 @@ function App() {
           onRenameTab={renameTab}
           onChangeEngine={(tab, engine) => void restartTabWithEngine(tab, engine)}
           onChangeTheme={changeTabTheme}
+          onOpenCodeReview={(tab) =>
+            setReviewTarget({ id: tab.id, cwd: tab.cwd, label: tabDisplayLabel(tab) })
+          }
           onFirstInput={autoTitleTab}
           hidden={view !== "workspace"}
           initialLayouts={pendingLayoutsRef.current}
@@ -760,8 +789,21 @@ function App() {
           hidden={view !== "map"}
           livePollMs={ingestion?.running ? INGESTION_POLL_MS : undefined}
         />
-        {fileTreeVisible && (
-          <FileTree project={selectedProject} activeTabId={state.activeTabId} onClose={toggleFileTree} />
+        {/* One right-hand dock, one panel at a time — see `reviewTarget`'s
+            declaration for why these are mutually exclusive rather than
+            side by side, and why closing the review column restores the
+            file tree to whatever the user had chosen. */}
+        {reviewTarget ? (
+          <CodeReviewPanel
+            key={reviewTarget.id}
+            repoPath={reviewTarget.cwd}
+            sessionLabel={reviewTarget.label}
+            onClose={() => setReviewTarget(null)}
+          />
+        ) : (
+          fileTreeVisible && (
+            <FileTree project={selectedProject} activeTabId={state.activeTabId} onClose={toggleFileTree} />
+          )
         )}
       </div>
 

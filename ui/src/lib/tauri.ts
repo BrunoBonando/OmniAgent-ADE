@@ -432,3 +432,120 @@ export async function detectImportableTools(): Promise<DetectedTool[]> {
 export async function listImportCandidates(tool: string): Promise<ImportCandidate[]> {
   return invoke<ImportCandidate[]>("list_import_candidates", { tool });
 }
+
+// ------------------------------------------------- per-session code review
+// Founder ask, 2026-07-26 (verbatim): "For each session, have a top right
+// menu with three things: Code Review Panel info (number of changes within
+// files that are uncommited) and if clicked, it should show a code review
+// panel for that session ... as a new column, dedicated on the right", plus
+// "Make sure that the code panel is for session, okay?".
+//
+// Every call takes `repoPath` — the cwd of the pane the panel was opened
+// from — and the backend holds no state between calls, which is exactly what
+// makes the panel per-session rather than app-global. Thin wrappers over
+// `brain_ingest::gitreview` (via `src-tauri/src/commands.rs`), same
+// one-invoke-per-function house style as everything above; every error these
+// reject with is already user-facing and is shown directly, never re-wrapped.
+
+/** How git classifies one changed file. `untracked` is deliberately distinct
+ * from `added` (staged-new): both lack a committed version, but only one has
+ * been `git add`ed, and reverting them differs. */
+export type ChangeStatus = "modified" | "added" | "deleted" | "renamed" | "untracked";
+
+export interface ChangedFile {
+  /** Repo-relative, POSIX separators — the id every other call takes back. */
+  path: string;
+  status: ChangeStatus;
+  /** Only set when `status === "renamed"`. */
+  old_path: string | null;
+  /** `null` for a binary file — deliberately absent rather than `0`, so the
+   * badge can say "binary" instead of a truthful-looking `+0 · -0`. */
+  added: number | null;
+  removed: number | null;
+  binary: boolean;
+}
+
+export interface ReviewStatus {
+  repo_root: string;
+  /** `null` on a detached HEAD or a repo with no commits yet. */
+  branch: string | null;
+  detached: boolean;
+  has_head: boolean;
+  files: ChangedFile[];
+  /** The true total even when `files` was capped — the header never lies
+   * about how many changes there are. */
+  file_count: number;
+  added: number;
+  removed: number;
+  /** How many of `file_count` are binary and therefore absent from the
+   * aggregate above. */
+  binary_count: number;
+  truncated: boolean;
+}
+
+export type DiffLineKind = "context" | "added" | "removed";
+
+export interface DiffLine {
+  kind: DiffLineKind;
+  /** `null` on an added line; `new_line` is `null` on a removed one. */
+  old_line: number | null;
+  new_line: number | null;
+  /** Already stripped of the leading `+`/`-`/space. */
+  text: string;
+}
+
+export interface DiffHunk {
+  header: string;
+  lines: DiffLine[];
+}
+
+export interface FileDiff {
+  path: string;
+  binary: boolean;
+  hunks: DiffHunk[];
+  truncated: boolean;
+  line_count: number;
+}
+
+export interface CommitResult {
+  sha: string;
+  short_sha: string;
+  files_committed: number;
+}
+
+export type RevertOutcome = "restored_from_head" | "moved_to_trash";
+
+/** Everything uncommitted in the repo `repoPath` sits inside. Backs both the
+ * pane menu's badge count and the panel header. Rejects for a path that
+ * isn't a git repo or no longer exists — callers show that message as-is. */
+export async function reviewStatus(repoPath: string): Promise<ReviewStatus> {
+  return invoke<ReviewStatus>("review_status", { repoPath });
+}
+
+/** One file's diff, already parsed into hunks with both line-number gutters
+ * resolved in Rust — the panel renders line numbers without re-deriving
+ * them. A binary file comes back `binary: true` with no hunks. */
+export async function reviewFileDiff(repoPath: string, path: string): Promise<FileDiff> {
+  return invoke<FileDiff>("review_file_diff", { repoPath, path });
+}
+
+/** Stages and commits *every* uncommitted change in the repo — the exact set
+ * the panel is listing, matching the reference's single Commit button. Never
+ * amends, forces, skips hooks, or pushes. */
+export async function reviewCommit(repoPath: string, message: string): Promise<CommitResult> {
+  return invoke<CommitResult>("review_commit", { repoPath, message });
+}
+
+/** Throws away one file's uncommitted changes. **Destructive** — only ever
+ * called from the panel's explicit two-step in-row confirmation, never from
+ * a bare click. A file with no committed version goes to the macOS Trash
+ * (recoverable); anything else is restored from HEAD. */
+export async function reviewRevertFile(repoPath: string, path: string): Promise<RevertOutcome> {
+  return invoke<RevertOutcome>("review_revert_file", { repoPath, path });
+}
+
+/** Settings-table key for the review panel's resized width (px, plain
+ * decimal string) — same convention as `FILE_TREE_WIDTH_SETTING_KEY`, and
+ * deliberately a *separate* key: the two right-hand panels want different
+ * widths (a file tree is a narrow list, a diff needs room to breathe). */
+export const CODE_REVIEW_WIDTH_SETTING_KEY = "code_review_width";

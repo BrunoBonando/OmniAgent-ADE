@@ -16,8 +16,19 @@
 // Same small-popover pattern as `ProjectMenu.tsx` (transparent click-away
 // backdrop, anchored under the trigger rather than centered — a utility,
 // not a modal moment).
+//
+// - CODE REVIEW (founder ask, 2026-07-26, verbatim): "For each session, have
+//   a top right menu with three things: Code Review Panel info (number of
+//   changes within files that are uncommited) and if clicked, it should show
+//   a code review panel for that session". The count is fetched here, on
+//   open, for THIS pane's own cwd — this component only mounts while the
+//   menu is actually open, so that's exactly one `git status` per menu
+//   opening and no background polling at all. A pane whose cwd isn't a git
+//   repo simply shows no badge rather than an error.
+import { useEffect, useState } from "react";
 import { ENGINES, type Engine } from "../state/sessions";
 import { ENGINE_COLOR, ENGINE_LABEL } from "../theme";
+import { reviewStatus } from "../lib/tauri";
 import { TERMINAL_THEME_HINT, TERMINAL_THEME_IDS, TERMINAL_THEME_LABELS, TERMINAL_THEMES, type TerminalThemeId } from "../lib/terminalThemes";
 
 interface PaneMenuProps {
@@ -28,6 +39,12 @@ interface PaneMenuProps {
   currentThemeId: TerminalThemeId;
   onChangeEngine: (engine: Engine) => void;
   onChangeTheme: (themeId: TerminalThemeId) => void;
+  /** This pane's cwd — what the change count is counted for, and what the
+   * panel is scoped to. */
+  repoPath?: string;
+  /** Opens the review column for this pane. Optional so callers that don't
+   * wire it (most existing tests) simply don't get the entry. */
+  onOpenCodeReview?: () => void;
   onClose: () => void;
 }
 
@@ -36,12 +53,74 @@ export default function PaneMenu({
   currentThemeId,
   onChangeEngine,
   onChangeTheme,
+  repoPath,
+  onOpenCodeReview,
   onClose,
 }: PaneMenuProps) {
+  // `null` = still counting, `undefined` = not a git repo / lookup failed.
+  const [changeCount, setChangeCount] = useState<number | null | undefined>(null);
+
+  useEffect(() => {
+    if (!repoPath || !onOpenCodeReview) return;
+    let cancelled = false;
+    reviewStatus(repoPath)
+      .then((s) => {
+        if (!cancelled) setChangeCount(s.file_count);
+      })
+      .catch(() => {
+        // Not a git repo is the common, boring case — no badge, no error.
+        if (!cancelled) setChangeCount(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repoPath, onOpenCodeReview]);
+
   return (
     <>
       <div className="pane-menu-backdrop" onMouseDown={onClose} />
       <div className="pane-menu" role="menu" aria-label="Terminal options" onMouseDown={(e) => e.stopPropagation()}>
+        {onOpenCodeReview && (
+          <>
+            <div className="pane-menu-section-label">Review</div>
+            <ul className="pane-menu-list">
+              <li>
+                <button
+                  type="button"
+                  className="pane-menu-row"
+                  onClick={() => {
+                    onOpenCodeReview();
+                    onClose();
+                  }}
+                >
+                  <span className="pane-menu-review-glyph" aria-hidden>
+                    ⇄
+                  </span>
+                  <span className="pane-menu-row-text">
+                    <span className="pane-menu-row-label">Code review</span>
+                    <span className="pane-menu-row-hint">
+                      {changeCount === null
+                        ? "counting uncommitted changes…"
+                        : changeCount === undefined
+                          ? "this session isn't in a git repo"
+                          : changeCount === 0
+                            ? "no uncommitted changes"
+                            : `${changeCount} uncommitted ${changeCount === 1 ? "change" : "changes"}`}
+                    </span>
+                  </span>
+                  {typeof changeCount === "number" && changeCount > 0 && (
+                    <span className="pane-menu-badge" aria-label={`${changeCount} uncommitted changes`}>
+                      {changeCount}
+                    </span>
+                  )}
+                </button>
+              </li>
+            </ul>
+
+            <div className="pane-menu-divider" />
+          </>
+        )}
+
         <div className="pane-menu-section-label">Change engine</div>
         <ul className="pane-menu-list">
           {ENGINES.map((engine) => {
