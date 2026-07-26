@@ -12,9 +12,19 @@
 //!
 //! ```sh
 //! cd src-tauri
-//! cargo run --example manual_black_pane_verify              # all four cases
+//! cargo run --example manual_black_pane_verify              # every case
 //! cargo run --example manual_black_pane_verify -- restore   # just one
+//!
+//! # point `restore` at one of the user's ACTUAL black-screen sessions:
+//! # its id, and the cwd from its .lifecycle.jsonl `start` event
+//! cargo run --example manual_black_pane_verify -- restore \
+//!   sess-18c5c98fb5d2c0c0-0 /Users/bonando/Documents/Bruno.Digital/OmniAgent-ADE
 //! ```
+//!
+//! Even pointed at a real session id this stays on a **scratch data dir and a
+//! private tmux socket**, so it reads the user's real Claude conversation store
+//! (which is the point — that is where the missing conversation is) without
+//! touching the app's own transcripts, tmux sessions or settings.
 //!
 //! Cases:
 //! - `restore` — **the bug**: restore an id whose derived conversation UUID has
@@ -50,6 +60,12 @@ use omniagent_ade_lib::tmux::{self, Tmux};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let only = args.get(1).cloned();
+    // Optional: a real session id and its cwd, so `restore` can be aimed at
+    // one of the user's own black-screen sessions rather than a synthetic id.
+    let real: Option<(String, String)> = match (args.get(2), args.get(3)) {
+        (Some(id), Some(cwd)) => Some((id.clone(), cwd.clone())),
+        _ => None,
+    };
 
     let cases: Vec<&str> = match only.as_deref() {
         Some(c) => vec![c],
@@ -58,7 +74,7 @@ fn main() {
 
     let mut results: Vec<(String, bool, String)> = Vec::new();
     for case in cases {
-        let (ok, note) = run_case(case);
+        let (ok, note) = run_case(case, real.as_ref());
         results.push((case.to_string(), ok, note));
     }
 
@@ -78,7 +94,7 @@ fn main() {
     }
 }
 
-fn run_case(case: &str) -> (bool, String) {
+fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
     println!("\n\n######## case: {case} ########");
     let scratch = std::env::temp_dir().join(format!(
         "omniagent-blackpane-{case}-{}",
@@ -86,7 +102,10 @@ fn run_case(case: &str) -> (bool, String) {
     ));
     let _ = std::fs::create_dir_all(&scratch);
     let socket = format!("blackpane-{case}-{}", std::process::id());
-    let cwd = std::env::current_dir().unwrap();
+    let cwd = match real {
+        Some((_, dir)) if case == "restore" => std::path::PathBuf::from(dir),
+        _ => std::env::current_dir().unwrap(),
+    };
 
     let tmux = Tmux::resolve(&socket, std::env::var("PATH").ok().as_deref())
         .expect("tmux must be installed for this harness")
@@ -119,7 +138,14 @@ fn run_case(case: &str) -> (bool, String) {
     );
 
     let (engine, restore_id) = match case {
-        "restore" => ("claude", Some(format!("sess-blackpane-{uniq}"))),
+        "restore" => (
+            "claude",
+            Some(match real {
+                // One of the user's real black-screen sessions.
+                Some((id, _)) => id.clone(),
+                None => format!("sess-blackpane-{uniq}"),
+            }),
+        ),
         "fresh" => ("claude", None),
         "shell" => ("shell", None),
         "reattach" => ("claude", Some(format!("sess-reattach-{uniq}"))),
