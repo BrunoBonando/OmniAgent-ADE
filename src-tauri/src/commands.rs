@@ -462,6 +462,59 @@ pub fn list_import_candidates(tool: String) -> Result<Vec<brain_ingest::import_d
     brain_ingest::import_detect::list_candidates(&tool)
 }
 
+// ------------------------------------------------------------------------
+// Per-session code review panel. Founder ask, 2026-07-26, verbatim: "For
+// each session, have a top right menu with three things: Code Review Panel
+// info (number of changes within files that are uncommited) and if clicked,
+// it should show a code review panel for that session ... as a new column,
+// dedicated on the right", plus "Make sure that the code panel is for
+// session, okay?".
+//
+// That last sentence is why every command below takes a `repo_path` and
+// holds no state: the panel is scoped to the cwd of the pane it was opened
+// from. Thin wrappers, same house style as the `fileops` block above — all
+// the real logic, safety rules and edge-case handling live in
+// `brain_ingest::gitreview`, independently unit-tested there against real
+// temporary git repos. Take no `State`, like `list_dir`/`git_branch`.
+// ------------------------------------------------------------------------
+
+/// Everything uncommitted in the repo `repo_path` sits inside — the branch,
+/// each changed file with its own added/removed counts, and the aggregate.
+/// Backs both the pane menu's change-count badge and the panel header.
+/// `Err` for a path that isn't a git repo or doesn't exist.
+#[tauri::command]
+pub fn review_status(repo_path: String) -> Result<brain_ingest::gitreview::ReviewStatus, String> {
+    brain_ingest::gitreview::status(&repo_path)
+}
+
+/// One file's diff, parsed into hunks with both line-number gutters already
+/// resolved (see `gitreview::parse_unified_diff`) so the panel renders line
+/// numbers without re-deriving them. Binary files come back `binary: true`
+/// with no hunks rather than an empty diff that would read as "no changes".
+#[tauri::command]
+pub fn review_file_diff(repo_path: String, path: String) -> Result<brain_ingest::gitreview::FileDiff, String> {
+    brain_ingest::gitreview::file_diff(&repo_path, &path)
+}
+
+/// Stages every uncommitted change in the repo and commits it with
+/// `message` — all of it, matching the single "Commit" button in the
+/// reference panel and the exact set of files the panel lists. No `--amend`,
+/// no force, no `--no-verify`, and no push (see `gitreview`'s module doc).
+#[tauri::command]
+pub fn review_commit(repo_path: String, message: String) -> Result<brain_ingest::gitreview::CommitResult, String> {
+    brain_ingest::gitreview::commit(&repo_path, &message)
+}
+
+/// Throws away one file's uncommitted changes. **Destructive** — the
+/// frontend confirms this in-row before calling it and never wires it to a
+/// bare one-click. A file with no committed version goes to the macOS Trash
+/// (recoverable) instead of being `git clean`ed; anything else is restored
+/// from HEAD. Renames are refused rather than half-undone.
+#[tauri::command]
+pub fn review_revert_file(repo_path: String, path: String) -> Result<brain_ingest::gitreview::RevertOutcome, String> {
+    brain_ingest::gitreview::revert_file(&repo_path, &path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,5 +809,85 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["id"], "p1");
         assert_eq!(items[0]["path"], "/tmp/p1");
+    }
+
+    // ---------------------------------------------- review panel wrappers
+    //
+    // Every real edge case (not-a-repo, no commits, binary, unicode names,
+    // huge diffs, the destructive-revert rules) is covered exhaustively in
+    // `brain_ingest::gitreview`'s own 38-test suite against real temporary
+    // git repos. These are smoke tests proving the `String` plumbing and
+    // error propagation work end to end through the actual
+    // `#[tauri::command]` functions the frontend calls — same split as the
+    // fileops wrappers above.
+
+    /// Builds a real throwaway git repo with one real uncommitted change.
+    /// Never run against this repository itself.
+    fn scratch_repo() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "baseline"]);
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn review_status_command_reports_the_branch_and_the_changed_file() {
+        let dir = scratch_repo();
+        let status = review_status(dir.path().to_string_lossy().to_string()).unwrap();
+        assert_eq!(status.branch.as_deref(), Some("main"));
+        assert_eq!(status.file_count, 1);
+        assert_eq!(status.files[0].path, "a.txt");
+        assert_eq!(status.added, 1);
+    }
+
+    #[test]
+    fn review_status_command_propagates_the_not_a_repo_error() {
+        let dir = tempdir().unwrap();
+        let err = review_status(dir.path().to_string_lossy().to_string()).unwrap_err();
+        assert!(err.contains("isn't inside a git repository"), "{err}");
+    }
+
+    #[test]
+    fn review_file_diff_command_returns_structured_hunks() {
+        let dir = scratch_repo();
+        let diff = review_file_diff(dir.path().to_string_lossy().to_string(), "a.txt".to_string()).unwrap();
+        assert!(!diff.binary);
+        assert_eq!(diff.hunks.len(), 1);
+        assert!(diff.line_count >= 1);
+    }
+
+    #[test]
+    fn review_commit_command_creates_a_real_commit_in_a_scratch_repo() {
+        let dir = scratch_repo();
+        let result = review_commit(
+            dir.path().to_string_lossy().to_string(),
+            "test: wrapper smoke commit".to_string(),
+        )
+        .unwrap();
+        assert_eq!(result.short_sha.len(), 7);
+        let after = review_status(dir.path().to_string_lossy().to_string()).unwrap();
+        assert_eq!(after.file_count, 0, "the tree should be clean after committing");
+    }
+
+    #[test]
+    fn review_revert_file_command_restores_a_modified_file() {
+        let dir = scratch_repo();
+        let outcome = review_revert_file(dir.path().to_string_lossy().to_string(), "a.txt".to_string()).unwrap();
+        assert_eq!(outcome, brain_ingest::gitreview::RevertOutcome::RestoredFromHead);
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "one\n");
     }
 }

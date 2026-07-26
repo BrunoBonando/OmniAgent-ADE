@@ -11,6 +11,7 @@ pub mod docs;
 pub mod enrich;
 pub mod fileops;
 pub mod gitmine;
+pub mod gitreview;
 pub mod import_detect;
 mod paths;
 pub mod walk;
