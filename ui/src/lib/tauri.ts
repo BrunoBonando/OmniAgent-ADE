@@ -4,6 +4,7 @@
 // keeping the invoke() call sites in one file makes the frozen backend
 // contract easy to audit).
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { Engine, ProjectInfo } from "../state/sessions";
 import type { SessionStatusEvent } from "../state/sessionStatus";
 
@@ -549,3 +550,48 @@ export async function reviewRevertFile(repoPath: string, path: string): Promise<
  * deliberately a *separate* key: the two right-hand panels want different
  * widths (a file tree is a narrow list, a diff needs room to breathe). */
 export const CODE_REVIEW_WIDTH_SETTING_KEY = "code_review_width";
+
+// ----------------------------------------------------- agent installation
+// Agent manager: check installed agents, install agents, and listen for
+// install progress events. Thin wrappers over `src-tauri/src/commands.rs`,
+// same one-invoke-per-function house style.
+
+/**
+ * Check which agents are installed
+ */
+export async function agentCheckInstalled(): Promise<string[]> {
+  return await invoke("agents_check_installed");
+}
+
+/**
+ * Install an agent
+ */
+export async function agentInstall(agent: string): Promise<void> {
+  return await invoke("agents_install", { agent });
+}
+
+/**
+ * Listen for agent install progress events
+ * Returns unlistener function
+ */
+export function onAgentInstallProgress(
+  agent: string,
+  callback: (status: string) => void
+): () => void {
+  const eventName = `agent-install-progress:${agent}`;
+  let unlisten: (() => void) | null = null;
+
+  listen(eventName, (event: { payload: unknown }) => {
+    callback(event.payload as string);
+  }).then((unlistenFn: () => void) => {
+    unlisten = unlistenFn;
+  }).catch((err: unknown) => {
+    console.error(`Failed to listen to ${eventName}:`, err);
+  });
+
+  return () => {
+    if (unlisten) {
+      unlisten();
+    }
+  };
+}
