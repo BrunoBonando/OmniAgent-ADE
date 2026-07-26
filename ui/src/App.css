@@ -946,9 +946,14 @@ code {
    needs attention, not just "the project" — same red dot idiom as
    `.tab-pill-attention-dot`/`.project-row-attention-dot`, sized for this
    smaller sub-row. */
+/* Which specific session in this project is waiting on the user. Derived
+   from its live status since 2026-07-26 (`statusNeedsAttention`), and
+   tinted with that status's own colour — amber for "needs approval", red
+   for "error" — so the sidebar and the pane's light are never two
+   vocabularies for the same fact. */
 .project-row-tab.has-attention {
-  color: var(--danger);
-  border-left-color: var(--danger);
+  color: var(--status-approval);
+  border-left-color: var(--status-approval);
 }
 
 .project-row-tab-attention-dot {
@@ -956,10 +961,20 @@ code {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: var(--danger);
-  box-shadow: 0 0 4px rgba(229, 72, 77, 0.7);
+  background: var(--status-approval);
+  box-shadow: 0 0 4px rgba(245, 185, 58, 0.7);
   margin-right: 5px;
   vertical-align: middle;
+}
+
+.project-row-tab-attention-dot[data-status="error"] {
+  background: var(--status-error);
+  box-shadow: 0 0 4px rgba(255, 61, 113, 0.75);
+}
+
+.project-row-tab.has-attention:has(.project-row-tab-attention-dot[data-status="error"]) {
+  color: var(--status-error);
+  border-left-color: var(--status-error);
 }
 
 .sidebar-view-toggle {
@@ -1219,10 +1234,6 @@ code {
   color: var(--ink);
 }
 
-.pane-header.has-attention {
-  box-shadow: inset 0 0 0 1px var(--danger);
-}
-
 /* ---------------------------------------------------------------------
    The five-state session light — the OmniAgent mark, tinted and animated
    per status (SessionStatusLight.tsx; read that file's header first, it
@@ -1403,20 +1414,13 @@ code {
   }
 }
 
-.pane-header-attention-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--danger);
-  box-shadow: 0 0 4px rgba(229, 72, 77, 0.7);
-  flex: 0 0 auto;
-  animation: pulse 1.6s ease-in-out infinite;
-}
+/* `.pane-header-attention-dot` / `.pane-header.has-attention` lived here
+   until 2026-07-26. The latched red attention badge folded into the
+   five-state light below (`awaiting_approval` breathes amber, `error`
+   flashes red) — one signal, one vocabulary; see `state/sessions.ts`'s
+   `TabInfo` doc for the reconciliation. */
 
 @media (prefers-reduced-motion: reduce) {
-  .pane-header-attention-dot {
-    animation: none;
-  }
 
   /* Every state collapses to its flat colour: still five distinguishable
      lights, zero motion. `background-image: none` is what strips the
@@ -4909,4 +4913,599 @@ code {
   border-radius: 999px;
   background: var(--signal-dim);
   color: var(--ink);
+}
+
+/* =====================================================================
+   The top chrome strip — where you are, and the two always-available
+   controls (AppChrome.tsx). Both of the founder's 2026-07-26 reference
+   screenshots put notifications + account together in the window's top
+   right, and this app had no such surface: the account badge was inside
+   the 240px sidebar header, and there was nowhere for a notifications
+   popover to hang from.
+
+   Deliberately quiet: the app background rather than a panel fill, one
+   hairline underneath, 30px tall, three children and no more. DESIGN.md's
+   "chrome must not compete with the terminal workspace" is why this is a
+   strip and not a toolbar.
+   ===================================================================== */
+
+.app-chrome {
+  flex: 0 0 auto;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 10px 0 14px;
+  background: var(--void);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.app-chrome-breadcrumb {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-chrome-project {
+  color: var(--ink-dim);
+}
+
+.app-chrome-separator {
+  color: var(--ink-faint);
+}
+
+/* The session you're on, everywhere — the same answer the sidebar gives
+   inside the project row, readable from the map view too. */
+.app-chrome-session {
+  color: var(--signal);
+}
+
+.app-chrome-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+/* ------------------------------------------------- notifications badge */
+
+.notifications-anchor {
+  position: relative;
+  display: flex;
+}
+
+.notifications-trigger {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.notifications-trigger:hover {
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+.notifications-trigger.has-unread {
+  color: var(--ink);
+}
+
+/* The count itself carries the urgency, so it sits on the mark rather
+   than beside it — the reference's own treatment. */
+.notifications-badge {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--status-error);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 13px;
+  text-align: center;
+  box-shadow: 0 0 0 1.5px var(--void);
+}
+
+.notifications-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+}
+
+.notifications-panel {
+  position: absolute;
+  right: 0;
+  top: 28px;
+  z-index: 56;
+  width: 372px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  padding: 14px 14px 8px;
+}
+
+.notifications-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.notifications-title {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.notifications-close {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 14px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.notifications-close:hover {
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+.notifications-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.notifications-chip {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 4px 10px;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notifications-chip:hover:not(:disabled) {
+  color: var(--ink);
+}
+
+.notifications-chip.is-active {
+  background: var(--panel-raised);
+  color: var(--ink);
+}
+
+.notifications-chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.notifications-clear {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--ink-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 4px 2px;
+}
+
+.notifications-clear:hover {
+  color: var(--ink-dim);
+  text-decoration: underline;
+}
+
+.notifications-empty {
+  margin: 22px 6px 26px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-faint);
+}
+
+.notifications-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.notification-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.notification-row:last-child {
+  border-bottom: none;
+}
+
+.notification-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 6px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+
+.notification-row-main:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.notification-row.is-stale .notification-row-main {
+  opacity: 0.62;
+}
+
+.notification-row-mark {
+  flex: 0 0 auto;
+  padding-top: 2px;
+}
+
+.notification-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.notification-row-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-dim);
+}
+
+.notification-row-branch {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-row-time {
+  flex: 0 0 auto;
+  color: var(--ink-faint);
+}
+
+/* The title is the loudest thing in the row — it's what the person is
+   scanning for. Two lines max: a Claude auto-title can be a whole
+   sentence, and the reference's own rows clamp the same way. */
+.notification-row-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.notification-row.is-unread .notification-row-title::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--signal);
+  vertical-align: middle;
+}
+
+.notification-row-subtitle {
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.notification-row-dismiss {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 2px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+}
+
+.notification-row:hover .notification-row-dismiss,
+.notification-row-dismiss:focus-visible {
+  opacity: 1;
+}
+
+.notification-row-dismiss:hover {
+  color: var(--ink);
+  background: var(--panel-raised);
+}
+
+/* ------------------------------------------------------- account menu
+   Grew a name header and grouped rows on 2026-07-26 (the founder's
+   user-menu reference). The trigger/menu shell above is unchanged. */
+
+.account-menu-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 6px 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.account-menu-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.account-menu-list li.has-separator {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line-soft);
+}
+
+/* ------------------------------------------------ keyboard shortcuts */
+
+.shortcuts-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  width: 430px;
+  max-width: 90vw;
+  padding: 20px 22px 16px;
+}
+
+.shortcuts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.shortcuts-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.shortcuts-group {
+  margin-bottom: 16px;
+}
+
+.shortcuts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shortcuts-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.shortcuts-keys {
+  flex: 0 0 118px;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.shortcuts-key {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink);
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 2px 6px;
+  line-height: 1.3;
+}
+
+.shortcuts-description {
+  flex: 1;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.shortcuts-footer {
+  margin: 4px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+
+/* --------------------------------------------------- the ⌘N chooser
+   Same selectable-card language as NewWorkspaceModal's LAYOUT row (the
+   founder asked for "a similar style of the layout options"), just two
+   wider cards. Everything visual is inherited from
+   `.new-workspace-layout-card`; only the proportions differ. */
+
+.new-chooser-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  width: 400px;
+  max-width: 90vw;
+  padding: 20px 22px 16px;
+}
+
+.new-chooser-card {
+  position: relative;
+  padding: 18px 10px 14px;
+  gap: 10px;
+}
+
+.new-chooser-card-key {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--ink-faint);
+}
+
+.new-workspace-layout-glyph.is-folder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 22px;
+  color: var(--ink-faint);
+}
+
+.new-workspace-layout-card.is-selected .new-workspace-layout-glyph.is-folder {
+  color: var(--accent-select);
+}
+
+/* ---------------------------------------------------- the session dialog */
+
+.new-session-scope-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.new-session-scope-reset {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--signal);
+  font-family: inherit;
+  font-size: 11px;
+  font-style: italic;
+  text-decoration: underline;
+}
+
+/* ------------------------------------- sidebar: project -> session -> pane
+   Founder brief, 2026-07-26: "Inside each workspace (first column) it must
+   show the session it's currently on the screen." A project's panes are
+   grouped under the session that created them; the one holding the focused
+   pane wears the accent rule and an "on screen" tag. */
+
+.project-row-sessions {
+  list-style: none;
+  margin: 2px 0 6px 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.project-row-session {
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+
+.project-row-session.is-current {
+  border-left-color: var(--accent-select);
+}
+
+.project-row-session-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.project-row-session-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.project-row-session.is-current .project-row-session-label {
+  color: var(--ink-dim);
+}
+
+.project-row-session-current {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent-select);
+  border: 1px solid rgba(237, 129, 195, 0.4);
+  border-radius: 999px;
+  padding: 0 5px;
+}
+
+.project-row-session-meta {
+  display: block;
+  font-size: 10px;
+  color: var(--ink-faint);
+  margin-top: 1px;
+}
+
+.project-row-sessions .project-row-tabs {
+  margin-left: 0;
+}
+
+.project-row-new-session {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--ink-faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 3px 8px;
+  margin-top: 2px;
+}
+
+.project-row-new-session:hover {
+  color: var(--signal);
 }

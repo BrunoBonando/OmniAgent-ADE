@@ -1,111 +1,186 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
-import AccountBadge from "./AccountBadge";
+// The account badge + its user menu (founder ask, 2026-07-26). Mocks the
+// same two Tauri surfaces the one genuinely-wired filesystem row touches —
+// `@tauri-apps/api/path` and `@tauri-apps/plugin-opener` — the same way
+// `FileTree.test.tsx` already does for its reveal-in-Finder action.
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const mocks = vi.hoisted(() => ({
+  homeDirMock: vi.fn(),
+  joinMock: vi.fn(),
+  revealItemInDirMock: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/path", () => ({
+  homeDir: mocks.homeDirMock,
+  join: mocks.joinMock,
+}));
+
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  revealItemInDir: mocks.revealItemInDirMock,
+}));
+
+const { default: AccountBadge } = await import("./AccountBadge");
+
+/** Default props = the app's own default state: signed in as the fake dev
+ * identity (nothing written to the settings table yet). */
 function setup(overrides: Partial<Parameters<typeof AccountBadge>[0]> = {}) {
   const onResetAuthGate = vi.fn();
   render(<AccountBadge signedInRaw={null} personaRaw={null} onResetAuthGate={onResetAuthGate} {...overrides} />);
   return { onResetAuthGate };
 }
 
-describe("AccountBadge — not signed in (the common case: fresh/dev-mode install)", () => {
-  it("is always present as a neutral placeholder trigger, never just absent", () => {
+function openMenu(name = "Bruno Bonando — account menu") {
+  fireEvent.click(screen.getByRole("button", { name }));
+}
+
+beforeEach(() => {
+  mocks.homeDirMock.mockReset().mockResolvedValue("/Users/bruno");
+  mocks.joinMock.mockReset().mockImplementation(async (...parts: string[]) => parts.join("/"));
+  mocks.revealItemInDirMock.mockReset().mockResolvedValue(undefined);
+});
+
+describe("AccountBadge — the fake signed-in default", () => {
+  it("reads as Bruno Bonando with no settings written at all", () => {
     setup();
-    expect(screen.getByRole("button", { name: "Not signed in (dev mode)." })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Bruno Bonando — account menu" })).toBeInTheDocument();
+    expect(screen.getByText("B")).toBeInTheDocument();
   });
 
-  it("the menu is closed until the trigger is clicked", () => {
+  it("names the user in the menu header, over an honest dev-mode subtitle", () => {
+    setup();
+    openMenu();
+    expect(screen.getByText("Bruno Bonando")).toBeInTheDocument();
+    expect(screen.getByText(/dev mode/)).toBeInTheDocument();
+  });
+
+  it("shows the captured persona as the subtitle once there is one", () => {
+    setup({ signedInRaw: "true", personaRaw: "data-ml" });
+    openMenu();
+    expect(screen.getByText("Data & ML")).toBeInTheDocument();
+  });
+
+  it("the menu is closed until the trigger is clicked, and closes again on a second click", () => {
     setup();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-  });
-
-  it("clicking the trigger opens the menu with the not-signed-in item set", () => {
-    setup();
-    fireEvent.click(screen.getByRole("button", { name: "Not signed in (dev mode)." }));
+    openMenu();
     expect(screen.getByRole("menu")).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /Preferences/ })).toBeDisabled();
-    expect(screen.getByRole("menuitem", { name: /Billing/ })).toBeDisabled();
-    expect(screen.getAllByText("Sign in to access")).toHaveLength(2);
-    expect(screen.getByRole("menuitem", { name: "Sign in" })).toBeEnabled();
-    expect(screen.queryByRole("menuitem", { name: "Log out" })).not.toBeInTheDocument();
-  });
-
-  it("clicking the trigger again closes the menu", () => {
-    setup();
-    const trigger = screen.getByRole("button", { name: "Not signed in (dev mode)." });
-    fireEvent.click(trigger);
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-    fireEvent.click(trigger);
+    openMenu();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-  });
-
-  it("clicking Sign in re-triggers the AuthGate flow via onResetAuthGate, and closes the menu", () => {
-    const { onResetAuthGate } = setup();
-    fireEvent.click(screen.getByRole("button", { name: "Not signed in (dev mode)." }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Sign in" }));
-    expect(onResetAuthGate).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-  });
-
-  it("clicking a disabled Preferences/Billing row does nothing", () => {
-    const { onResetAuthGate } = setup();
-    fireEvent.click(screen.getByRole("button", { name: "Not signed in (dev mode)." }));
-    fireEvent.click(screen.getByRole("menuitem", { name: /Preferences/ }));
-    expect(onResetAuthGate).not.toHaveBeenCalled();
-    expect(screen.queryByText("Coming soon.")).not.toBeInTheDocument();
-    expect(screen.getByRole("menu")).toBeInTheDocument(); // still open, no-op
   });
 
   it("clicking the backdrop closes the menu without doing anything", () => {
     const { onResetAuthGate } = setup();
-    fireEvent.click(screen.getByRole("button", { name: "Not signed in (dev mode)." }));
+    openMenu();
     fireEvent.mouseDown(document.querySelector(".account-menu-backdrop")!);
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(onResetAuthGate).not.toHaveBeenCalled();
   });
 });
 
-describe("AccountBadge — signed in", () => {
-  it("shows the persona-aware tooltip and an initial avatar derived from the persona", () => {
-    setup({ signedInRaw: "true", personaRaw: "data-ml" });
-    expect(screen.getByRole("button", { name: "Signed in — Data & ML." })).toBeInTheDocument();
-    expect(screen.getByText("D")).toBeInTheDocument();
+describe("AccountBadge — signed out", () => {
+  it("falls back to the neutral placeholder trigger and swaps Log out for Sign in", () => {
+    setup({ signedInRaw: "false" });
+    expect(screen.getByRole("button", { name: "Not signed in — account menu" })).toBeInTheDocument();
+    expect(screen.queryByText("B")).not.toBeInTheDocument();
+    openMenu("Not signed in — account menu");
+    expect(screen.getByRole("menuitem", { name: "Sign in" })).toBeEnabled();
+    expect(screen.queryByRole("menuitem", { name: "Log out" })).not.toBeInTheDocument();
   });
 
-  it("falls back to the generic glyph (no initial letter) when signed in but no persona was captured", () => {
-    setup({ signedInRaw: "true", personaRaw: null });
-    expect(screen.getByRole("button", { name: "Signed in." })).toBeInTheDocument();
-    expect(screen.queryByText(/^[A-Z]$/)).not.toBeInTheDocument();
+  it("gates the account rows but leaves the local ones usable", () => {
+    setup({ signedInRaw: "false" });
+    openMenu("Not signed in — account menu");
+    expect(screen.getByRole("menuitem", { name: /Preferences/ })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: /Billing/ })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Keyboard shortcuts" })).toBeEnabled();
+    expect(screen.getByRole("menuitem", { name: "View session logs" })).toBeEnabled();
   });
 
-  it("opening the menu shows Preferences/Billing enabled and a Log out row, no Sign in row", () => {
-    setup({ signedInRaw: "true", personaRaw: "student" });
-    fireEvent.click(screen.getByRole("button", { name: "Signed in — Student." }));
-    expect(screen.getByRole("menuitem", { name: "Preferences" })).toBeEnabled();
-    expect(screen.getByRole("menuitem", { name: "Billing" })).toBeEnabled();
-    expect(screen.queryByText("Sign in to access")).not.toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Log out" })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "Sign in" })).not.toBeInTheDocument();
+  it("clicking Sign in re-runs the fake auth flow and closes the menu", () => {
+    const { onResetAuthGate } = setup({ signedInRaw: "false" });
+    openMenu("Not signed in — account menu");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Sign in" }));
+    expect(onResetAuthGate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+});
+
+describe("AccountBadge — the rows that really do something", () => {
+  it("Keyboard shortcuts opens a sheet of the app's real bindings", async () => {
+    setup();
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Keyboard shortcuts" }));
+    const sheet = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    expect(sheet).toBeInTheDocument();
+    expect(screen.getByText("⌘T")).toBeInTheDocument();
+    expect(screen.getByText("⌘K")).toBeInTheDocument();
+    expect(screen.getByText("⌘N")).toBeInTheDocument();
+    // The menu itself steps out of the way once the sheet is up.
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
-  it("clicking Preferences shows an honest Coming soon placeholder, menu stays open", () => {
-    setup({ signedInRaw: "true", personaRaw: "student" });
-    fireEvent.click(screen.getByRole("button", { name: "Signed in — Student." }));
+  it("the shortcuts sheet closes on Escape", async () => {
+    setup();
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Keyboard shortcuts" }));
+    const sheet = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    fireEvent.keyDown(sheet, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
+  });
+
+  it("View session logs reveals the transcripts folder in Finder", async () => {
+    setup();
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "View session logs" }));
+    await waitFor(() =>
+      expect(mocks.revealItemInDirMock).toHaveBeenCalledWith(
+        "/Users/bruno/Library/Application Support/OmniAgent-ADE/transcripts",
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+  });
+
+  it("says so plainly when there's nothing to reveal, instead of failing silently", async () => {
+    mocks.revealItemInDirMock.mockRejectedValue(new Error("no such file"));
+    setup();
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "View session logs" }));
+    expect(await screen.findByText("No session logs on this machine yet.")).toBeInTheDocument();
+    expect(screen.getByRole("menu")).toBeInTheDocument(); // stays open to show it
+  });
+});
+
+describe("AccountBadge — the rows that honestly do not", () => {
+  it("Preferences says Coming soon rather than opening a fake screen", () => {
+    setup();
+    openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Preferences" }));
     expect(screen.getByText("Coming soon.")).toBeInTheDocument();
     expect(screen.getByRole("menu")).toBeInTheDocument();
   });
 
-  it("clicking Billing shows an honest Coming soon placeholder, menu stays open", () => {
-    setup({ signedInRaw: "true", personaRaw: "student" });
-    fireEvent.click(screen.getByRole("button", { name: "Signed in — Student." }));
+  it("Billing says Coming soon too", () => {
+    setup();
+    openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Billing" }));
     expect(screen.getByText("Coming soon.")).toBeInTheDocument();
   });
 
-  it("clicking Log out clears the fake sign-in via onResetAuthGate, and closes the menu", () => {
-    const { onResetAuthGate } = setup({ signedInRaw: "true", personaRaw: "student" });
-    fireEvent.click(screen.getByRole("button", { name: "Signed in — Student." }));
+  it("has no row for anything this product doesn't have", () => {
+    // The reference menu's update/what's-new/docs/feedback/community/
+    // upgrade/invite rows are omitted, not faked — see accountBadgeState's
+    // module doc.
+    setup();
+    openMenu();
+    for (const absent of ["Update", "What's new", "Documentation", "Feedback", "Upgrade", "Invite"]) {
+      expect(screen.queryByRole("menuitem", { name: new RegExp(absent, "i") })).not.toBeInTheDocument();
+    }
+  });
+
+  it("clicking Log out clears the fake sign-in and closes the menu", () => {
+    const { onResetAuthGate } = setup();
+    openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Log out" }));
     expect(onResetAuthGate).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();

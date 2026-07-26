@@ -46,15 +46,29 @@
 // reachable any time, exactly like "+" itself.
 //
 // Attention badge (founder feedback, 2026-07-24 — Bruno, verbatim: "every
-// claude session[...] can require attention, generate a badge"): a red dot
-// on `project-row-main` (`attentionByProject`, derived from `TabInfo.
-// needsAttention` — `state/sessions.ts`) whenever any session in that
-// project needs the user's notice, plus a smaller one on the specific
-// `project-row-tab` sub-row so it's clear which session. This is the
-// "visible even if looking at a different project" half of the feature —
-// `PaneHeader.tsx` (the terminal grid's per-pane header, née `TabBar.tsx`
-// before the BridgeSpace pane-grid rebuild) owns the other half, the badge
-// on the pane itself.
+// claude session[...] can require attention, generate a badge"): a dot on
+// `project-row-main` whenever any session in that project is waiting on the
+// user, plus a smaller one on the specific pane row so it's clear which
+// session. This is the "visible even if looking at a different project"
+// half of the feature.
+//
+// **2026-07-26 — it is now derived from status, not latched.** It used to
+// read `TabInfo.needsAttention`, a boolean set by a separate
+// `session-attention:` event and cleared when the tab was clicked. That
+// field is gone: the five-state light's `awaiting_approval`/`error` come
+// from the same detection and mean the same thing, so the dot now asks
+// `statusNeedsAttention(tab.status)` and is tinted with that state's own
+// colour. One vocabulary, and a session that unblocks itself stops asking
+// for the user immediately instead of holding a stale badge. See
+// `state/sessions.ts`'s `TabInfo` doc for the whole reconciliation.
+//
+// ## Project -> session -> pane (founder brief, 2026-07-26)
+//
+// Bruno: *"Inside each workspace (first column) it must show the session
+// it's currently on the screen."* A project's panes are no longer a flat
+// list under the project row: they're grouped by session
+// (`state/sessionGroups.ts`), each session names itself and its agents, and
+// the one holding the focused pane is marked as being on screen.
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import logo from "../assets/omniagent-logo.png";
 import {
@@ -66,6 +80,9 @@ import {
   type ProjectInfo,
   type TabInfo,
 } from "../state/sessions";
+import { describeSession, groupTabsBySession } from "../state/sessionGroups";
+import { statusNeedsAttention } from "../state/sessionStatus";
+import { ENGINE_LABEL } from "../theme";
 import type { LayoutPreset } from "../state/paneGrid";
 import {
   rootsPausedProjects,
@@ -80,7 +97,6 @@ import ReviewPanel from "./ReviewPanel";
 import ProjectMenu from "./ProjectMenu";
 import NewWorkspaceModal from "./NewWorkspaceModal";
 import ImportProjectsFlow from "./ImportProjectsFlow";
-import AccountBadge from "./AccountBadge";
 import type { ImportBatchResult } from "../state/importState";
 
 /** How often to refresh pause/staleness state in the background — cheap
@@ -154,19 +170,10 @@ interface SidebarProps {
    * don't care about the file tree don't need to pass it. */
   fileTreeVisible?: boolean;
   onToggleFileTree?: () => void;
-  /** `AccountBadge`'s "Sign in"/"Log out" menu rows (`App.tsx` owns the
-   * persisted `auth_gate_resolved`/etc. settings — see
-   * `onboarding/authGateState.ts`). Optional, same reasoning as
-   * `view`/`fileTreeVisible` above, so tests that don't care about the
-   * auth gate don't need to pass it — defaults to a no-op so the always-
-   * visible badge still renders (just inertly) without it. */
-  onResetAuthGate?: () => void;
-  /** The account badge's raw settings values, read once by `App.tsx` on
-   * boot and kept live across `AuthGate`/`AccountBadge` resolving — see
-   * that file's own doc comment. Optional/defaulted to `null` (= not
-   * signed in), same convention as every other prop in this block. */
-  authSignedIn?: string | null;
-  authPersona?: string | null;
+  /** "+ New session" under a project's session list — opens
+   * `NewSessionModal` for that project (⌘N -> Session reaches the same
+   * dialog). Optional, same convention as the props above. */
+  onNewSessionInProject?: (project: ProjectInfo) => void;
 }
 
 export default function Sidebar({
@@ -188,22 +195,22 @@ export default function Sidebar({
   onSetView,
   fileTreeVisible = false,
   onToggleFileTree,
-  onResetAuthGate = () => {},
-  authSignedIn = null,
-  authPersona = null,
+  onNewSessionInProject,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const grouped = tabsByProject(tabs);
-  const sessionCountByProject = new Map(grouped.map((g) => [g.project, g.tabs.length]));
+  const sessionsByProject = groupTabsBySession(tabs, activeTabId);
+  const paneCountByProject = new Map(grouped.map((g) => [g.project, g.tabs.length]));
   // Founder feedback (2026-07-24): a session's attention badge must stay
   // visible from the sidebar even while looking at a different project's
   // tabs, or the Map view — this is the whole reason the badge lives at two
-  // levels (`TabBar`'s per-pill dot, and this per-project one), not just on
-  // the tab pill itself.
+  // levels (this per-project one, and the per-pane row below), not just on
+  // the pane itself. Derived from the live status since 2026-07-26 (see the
+  // module doc), so it can never disagree with the pane's own light.
   const attentionByProject = new Map(
-    grouped.map((g) => [g.project, g.tabs.some((t) => t.needsAttention)]),
+    grouped.map((g) => [g.project, g.tabs.some((t) => statusNeedsAttention(t.status))]),
   );
   const underPressure = isUnderPressure(tabs);
   // Warp-direction reskin: the session-pressure capsule meter's fill —
@@ -323,7 +330,6 @@ export default function Sidebar({
             </span>
             {tabs.length}/{PRESSURE_THRESHOLD}
           </span>
-          <AccountBadge signedInRaw={authSignedIn} personaRaw={authPersona} onResetAuthGate={onResetAuthGate} />
         </div>
       </div>
 
@@ -364,7 +370,8 @@ export default function Sidebar({
         ) : (
           <ul className="project-list">
             {projects.map((project) => {
-              const count = sessionCountByProject.get(project.id) ?? 0;
+              const count = paneCountByProject.get(project.id) ?? 0;
+              const sessions = sessionsByProject.find((p) => p.project === project.id)?.sessions ?? [];
               const isSelected = project.id === selectedProjectId;
               const isPaused = pausedProjects.has(project.id);
               const isStale = staleness.get(project.id)?.stale ?? false;
@@ -431,23 +438,63 @@ export default function Sidebar({
                       onClose={() => setMenuProjectId(null)}
                     />
                   )}
-                  {count > 0 && (
-                    <ul className="project-row-tabs">
-                      {grouped
-                        .find((g) => g.project === project.id)!
-                        .tabs.map((tab) => (
-                          <li key={tab.id}>
-                            <button
-                              className={`project-row-tab${tab.id === activeTabId ? " is-active" : ""}${tab.needsAttention ? " has-attention" : ""}`}
-                              onClick={() => onActivateTab(tab.id)}
-                            >
-                              {tab.needsAttention && (
-                                <span className="project-row-tab-attention-dot" aria-hidden="true" />
-                              )}
-                              {tabDisplayLabel(tab)}
-                            </button>
-                          </li>
-                        ))}
+                  {/* Project -> session -> pane. The session holding the
+                      focused pane is marked "on screen" (founder brief:
+                      "Inside each workspace (first column) it must show the
+                      session it's currently on the screen"). */}
+                  {sessions.length > 0 && (
+                    <ul className="project-row-sessions">
+                      {sessions.map((session) => (
+                        <li
+                          key={session.id}
+                          className={`project-row-session${session.isCurrent ? " is-current" : ""}`}
+                        >
+                          <div className="project-row-session-head">
+                            <span className="project-row-session-label">{session.label}</span>
+                            {session.isCurrent && (
+                              <span className="project-row-session-current" title="The session on screen right now">
+                                on screen
+                              </span>
+                            )}
+                          </div>
+                          <span className="project-row-session-meta">
+                            {describeSession(session, (engine) => ENGINE_LABEL[engine as Engine] ?? engine)}
+                          </span>
+                          <ul className="project-row-tabs">
+                            {session.tabs.map((tab) => {
+                              const wants = statusNeedsAttention(tab.status);
+                              return (
+                                <li key={tab.id}>
+                                  <button
+                                    className={`project-row-tab${tab.id === activeTabId ? " is-active" : ""}${wants ? " has-attention" : ""}`}
+                                    onClick={() => onActivateTab(tab.id)}
+                                  >
+                                    {wants && (
+                                      <span
+                                        className="project-row-tab-attention-dot"
+                                        data-status={tab.status}
+                                        aria-hidden="true"
+                                      />
+                                    )}
+                                    {tabDisplayLabel(tab)}
+                                  </button>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </li>
+                      ))}
+                      {isSelected && onNewSessionInProject && (
+                        <li>
+                          <button
+                            className="project-row-new-session"
+                            onClick={() => onNewSessionInProject(project)}
+                            title="New session in this project (⌘N)"
+                          >
+                            + New session
+                          </button>
+                        </li>
+                      )}
                     </ul>
                   )}
                 </li>

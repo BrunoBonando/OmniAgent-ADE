@@ -59,12 +59,12 @@
 // application code short of patching the library. Documented, with a
 // suggested mitigation, in the task report and in
 // `Workspace.mountStability.test.tsx`'s last test.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Mosaic, MosaicWindow, type MosaicNode } from "react-mosaic-component";
 import "react-mosaic-component/react-mosaic-component.css";
 import PaneHeader from "./PaneHeader";
 import Terminal from "./Terminal";
-import { paneIds, syncPaneTree, type PaneTree } from "../state/paneGrid";
+import { addPaneSubtree, paneIds, syncPaneTree, type PaneTree } from "../state/paneGrid";
 import {
   isUnderPressure,
   PRESSURE_THRESHOLD,
@@ -74,6 +74,7 @@ import {
   type ProjectInfo,
   type TabInfo,
 } from "../state/sessions";
+import { UNGROUPED_SESSION_ID } from "../state/sessionGroups";
 import type { TerminalThemeId } from "../lib/terminalThemes";
 
 interface ProjectPaneGridProps {
@@ -109,14 +110,19 @@ interface ProjectPaneGridProps {
   /** Auto-title from the first prompt — forwarded straight through to each
    * pane's `<Terminal>` (see that component's own doc). */
   onFirstInput: (id: string, line: string) => void;
-  /** NewWorkspaceModal's bulk-create: when this project's very first
-   * render already has its whole tab set present (see `sessions.ts`'s
-   * `tabs/opened_bulk`), and this tree's leaf ids are EXACTLY that set,
-   * seed the grid with this shape instead of the ordinary flat-row
-   * `syncPaneTree` build — see the effect below and `paneGrid.ts`'s
-   * `buildLayoutTree` doc. `undefined`/non-matching is the normal path,
-   * unchanged from before this prop existed. */
-  initialTree?: PaneTree | null;
+  /** Layout hints from every bulk-create, keyed by SESSION-GROUP id —
+   * `NewWorkspaceModal`'s first batch for a new project, and (since
+   * 2026-07-26) each `NewSessionModal` batch inside an existing one.
+   *
+   * An entry is applied once, the first render where every one of its
+   * panes is present: as the grid's whole shape if this project has none
+   * yet, otherwise merged in beside what's already there via
+   * `addPaneSubtree` — which appends to the existing root split rather
+   * than re-wrapping it, so no live terminal is remounted (see that
+   * function's doc and `Workspace.mountStability.test.tsx`). Entries for
+   * other projects' sessions are ignored by construction: only groups that
+   * appear in THIS grid's own tabs are considered. */
+  sessionLayouts?: Map<string, PaneTree>;
 }
 
 /** One project's grid — always mounted for as long as that project has any
@@ -138,35 +144,54 @@ function ProjectPaneGrid({
   onChangeTheme,
   onOpenCodeReview,
   onFirstInput,
-  initialTree,
+  sessionLayouts,
 }: ProjectPaneGridProps) {
   const [tree, setTree] = useState<PaneTree | null>(null);
   const idsKey = tabs.map((t) => t.id).join(" ");
+  const groupsKey = tabs.map((t) => t.group ?? UNGROUPED_SESSION_ID).join(" ");
+  // Session groups whose layout hint has already been folded in. A ref, not
+  // state: applying one must not itself cause a render, and it has to
+  // survive React's development double-invocation of this effect (which is
+  // why the bookkeeping happens OUT here and the `setTree` updater below
+  // stays a pure function of `prev`).
+  const appliedGroups = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const ids = idsKey.length > 0 ? idsKey.split(" ") : [];
-    setTree((prev) => {
-      // `prev === null` only ever true on this instance's very first
-      // relevant render (see `initialTree`'s own doc above) — once
-      // anything has been synced in, it's never null again for the rest
-      // of this component's mounted lifetime (a project dropping to 0
-      // tabs unmounts `ProjectPaneGrid` entirely, see `Workspace`'s
-      // `grouped` filter below, rather than resetting this to null in
-      // place). Matching on the exact leaf-id SET (not just "some
-      // initialTree exists") means an unrelated/stale `initialTree` value
-      // can never misfire onto a project it wasn't built for — session
-      // ids are unique, so an exact-set match only ever happens for the
-      // batch it was actually computed from.
-      if (prev === null && initialTree) {
-        const initialIds = paneIds(initialTree);
-        if (initialIds.length === ids.length && initialIds.every((id) => ids.includes(id))) {
-          return initialTree;
-        }
+    const groupsHere = new Set(groupsKey.length > 0 ? groupsKey.split(" ") : []);
+
+    // Which layout hints are ready to land: this project's own groups, not
+    // applied yet, and with every one of their panes already in `ids` — a
+    // half-arrived batch waits rather than landing in pieces (which would
+    // defeat the chosen preset's arrangement).
+    const pending: PaneTree[] = [];
+    if (sessionLayouts) {
+      for (const [groupId, subtree] of sessionLayouts) {
+        if (appliedGroups.current.has(groupId) || !groupsHere.has(groupId)) continue;
+        const subtreeIds = paneIds(subtree);
+        if (subtreeIds.length === 0 || !subtreeIds.every((id) => ids.includes(id))) continue;
+        appliedGroups.current.add(groupId);
+        pending.push(subtree);
       }
-      const next = syncPaneTree(prev, ids);
+    }
+
+    setTree((prev) => {
+      // Order matters: sync in everything that ISN'T part of an arriving
+      // batch first, then merge each batch in beside it. Doing it the other
+      // way round would make a stray pane become a sibling *inside* the
+      // batch's own arrangement (a 5th row under a 2x2 grid) instead of the
+      // batch landing beside the pane. The closing sync is the backstop
+      // that removes anything closed and adds anything a batch didn't
+      // cover.
+      const batchIds = new Set(pending.flatMap(paneIds));
+      let next = syncPaneTree(prev, ids.filter((id) => !batchIds.has(id)));
+      for (const subtree of pending) {
+        next = next === null ? subtree : addPaneSubtree(next, subtree);
+      }
+      next = syncPaneTree(next, ids);
       return next === prev ? prev : next;
     });
-  }, [idsKey, initialTree]);
+  }, [idsKey, groupsKey, sessionLayouts]);
 
   const tabsById = useMemo(() => new Map(tabs.map((t) => [t.id, t])), [tabs]);
 
@@ -263,12 +288,11 @@ interface WorkspaceProps {
    * `<Terminal>`. Optional, same reasoning. */
   onFirstInput?: (id: string, line: string) => void;
   hidden: boolean;
-  /** NewWorkspaceModal's bulk-create: `projectId -> PaneTree` hints for a
-   * project's very first grid render, keyed by project id — see
-   * `ProjectPaneGridProps.initialTree`'s doc. Optional so every existing
-   * caller/test that only ever opens tabs one at a time (⌘T, the map's
-   * "Open terminal here") is unaffected. */
-  initialLayouts?: Map<string, PaneTree>;
+  /** `sessionGroupId -> PaneTree` hints from every bulk-create (New
+   * Workspace, New Session) — see `ProjectPaneGridProps.sessionLayouts`'s
+   * doc. Optional so every caller/test that only ever opens panes one at a
+   * time (⌘T, the map's "Open terminal here") is unaffected. */
+  sessionLayouts?: Map<string, PaneTree>;
 }
 
 export default function Workspace({
@@ -286,7 +310,7 @@ export default function Workspace({
   onOpenCodeReview = () => {},
   onFirstInput = () => {},
   hidden,
-  initialLayouts,
+  sessionLayouts,
 }: WorkspaceProps) {
   const projectLabel = useCallback(
     (id: string) => projects.find((p) => p.id === id)?.label ?? id,
@@ -331,7 +355,7 @@ export default function Workspace({
             onChangeTheme={onChangeTheme}
             onOpenCodeReview={onOpenCodeReview}
             onFirstInput={onFirstInput}
-            initialTree={initialLayouts?.get(g.project)}
+            sessionLayouts={sessionLayouts}
           />
         );
       })}

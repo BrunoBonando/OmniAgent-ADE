@@ -151,7 +151,11 @@ export default function PaneHeader({
   return (
     <div
       ref={headerRef}
-      className={`pane-header${isFocused ? " is-focused" : ""}${tab.needsAttention ? " has-attention" : ""}`}
+      // The `has-attention` red border is gone with `needsAttention` itself
+      // (2026-07-26): `awaiting_approval` breathes amber and `error` flashes
+      // red in the light below, which is the same fact in the language the
+      // rest of the app now uses. See `state/sessions.ts`'s `TabInfo` doc.
+      className={`pane-header${isFocused ? " is-focused" : ""}`}
       onMouseDown={() => {
         // Also the start of a pane-rearrange drag (this whole element is
         // react-mosaic's drag handle) — a card hanging around mid-drag would
@@ -167,14 +171,6 @@ export default function PaneHeader({
           used to sit here — engine identity moved to the session tag's tint
           and to the hover card's footer, see this file's module doc. */}
       <SessionStatusLight status={tab.status} />
-      {tab.needsAttention && (
-        <span
-          className="pane-header-attention-dot"
-          role="status"
-          aria-label={`${tabDisplayLabel(tab)} needs your attention`}
-          title="Needs your attention"
-        />
-      )}
       {renaming ? (
         <input
           className="pane-header-rename-input"

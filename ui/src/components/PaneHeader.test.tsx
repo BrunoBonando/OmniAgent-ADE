@@ -13,7 +13,6 @@ function tab(overrides: Partial<TabInfo> = {}): TabInfo {
     engine: "claude",
     cwd: "/tmp/p1",
     createdAt: 0,
-    needsAttention: false,
     ...overrides,
   };
 }
@@ -104,10 +103,14 @@ describe("PaneHeader", () => {
     });
   });
 
-  it("shows the attention dot only when the tab needs attention", () => {
+  it("says a session needs attention through its light, not a second red dot", () => {
+    // 2026-07-26: the latched `needsAttention` badge folded into the
+    // five-state status (see state/sessions.ts's TabInfo doc). The header
+    // must carry that meaning exactly once — the light — with no separate
+    // attention marker beside it.
     const { rerender } = render(
       <PaneHeader
-        tab={tab({ needsAttention: false })}
+        tab={tab({ status: "thinking" })}
         projectLabel="p"
         isFocused={false}
         onFocus={() => {}}
@@ -117,10 +120,11 @@ describe("PaneHeader", () => {
       />,
     );
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(document.querySelector(".pane-header-attention-dot")).toBeNull();
 
     rerender(
       <PaneHeader
-        tab={tab({ needsAttention: true })}
+        tab={tab({ status: "awaiting_approval" })}
         projectLabel="p"
         isFocused={false}
         onFocus={() => {}}
@@ -129,7 +133,9 @@ describe("PaneHeader", () => {
         onRename={() => {}}
       />,
     );
-    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(document.querySelector(".pane-header-attention-dot")).toBeNull();
+    expect(document.querySelector('.session-light[data-status="awaiting_approval"]')).not.toBeNull();
+    expect(document.querySelector(".pane-header.has-attention")).toBeNull();
   });
 
   it("calls onFocus on mousedown anywhere in the header", () => {

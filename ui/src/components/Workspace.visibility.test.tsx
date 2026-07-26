@@ -106,7 +106,7 @@ function project(id: string): ProjectInfo {
 }
 
 function tab(id: string, project: string): TabInfo {
-  return { id, project, engine: "claude", cwd: `/tmp/${project}`, createdAt: 0, needsAttention: false };
+  return { id, project, engine: "claude", cwd: `/tmp/${project}`, createdAt: 0 };
 }
 
 const noop = () => {};

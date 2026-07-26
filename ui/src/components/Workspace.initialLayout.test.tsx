@@ -4,10 +4,12 @@
 // isolation. `ProjectPaneGrid`'s `tree` state is otherwise built purely by
 // `syncPaneTree`/`addPane` (see Workspace.tsx's own module doc), which
 // always appends new panes as flat siblings of the root split — on its
-// own it can never produce an actual 2x2/2x3/2x4 grid. The `initialTree`
-// prop (looked up per-project from the `initialLayouts` map App.tsx
-// passes down) is what lets a freshly-created workspace's very first
-// render skip straight to the chosen preset's real shape.
+// own it can never produce an actual 2x2/2x3/2x4 grid. The
+// `sessionLayouts` map App.tsx passes down (keyed by session-group id
+// since 2026-07-26, when a project gained the ability to hold several
+// sessions) is what lets a freshly-created batch of panes land in the
+// chosen preset's real shape — as the whole grid for a brand-new project,
+// or merged in beside what's already there for a new session inside one.
 //
 // react-mosaic-component (real library, not mocked) renders every leaf as
 // a `.mosaic-tile` positioned via inline `top`/`left`/`width`/`height`
@@ -41,8 +43,8 @@ function project(id: string): ProjectInfo {
   return { id, label: id, path: `/tmp/${id}` };
 }
 
-function tab(id: string, projectId: string): TabInfo {
-  return { id, project: projectId, engine: "claude", cwd: `/tmp/${projectId}`, createdAt: 0, needsAttention: false };
+function tab(id: string, projectId: string, group = "g1"): TabInfo {
+  return { id, project: projectId, engine: "claude", cwd: `/tmp/${projectId}`, createdAt: 0, group };
 }
 
 const noop = () => {};
@@ -56,11 +58,11 @@ function tilePositions(container: HTMLElement): Array<{ top: number; left: numbe
   }));
 }
 
-describe("Workspace — NewWorkspaceModal's initialLayouts seeds a brand-new project's grid shape", () => {
-  it("with an initialLayouts entry matching the 2x2 preset, renders a real 2-row x 2-col grid (not a flat row)", () => {
+describe("Workspace — a session's layout preset seeds the shape its panes land in", () => {
+  it("with a sessionLayouts entry matching the 2x2 preset, renders a real 2-row x 2-col grid (not a flat row)", () => {
     const p1 = project("p1");
     const tabs = [tab("a", "p1"), tab("b", "p1"), tab("c", "p1"), tab("d", "p1")];
-    const initialLayouts = new Map([["p1", buildLayoutTree(["a", "b", "c", "d"], 4)!]]);
+    const sessionLayouts = new Map([["g1", buildLayoutTree(["a", "b", "c", "d"], 4)!]]);
 
     const { container } = render(
       <Workspace
@@ -74,7 +76,7 @@ describe("Workspace — NewWorkspaceModal's initialLayouts seeds a brand-new pro
         onNewTabInProject={noop}
         onRenameTab={noop}
         hidden={false}
-        initialLayouts={initialLayouts}
+        sessionLayouts={sessionLayouts}
       />,
     );
 
@@ -88,7 +90,7 @@ describe("Workspace — NewWorkspaceModal's initialLayouts seeds a brand-new pro
     expect(lefts.size).toBe(2);
   });
 
-  it("without a matching initialLayouts entry, falls back to the ordinary flat-row arrangement (unchanged existing behavior)", () => {
+  it("without a matching sessionLayouts entry, falls back to the ordinary flat-row arrangement (unchanged existing behavior)", () => {
     const p1 = project("p1");
     const tabs = [tab("a", "p1"), tab("b", "p1"), tab("c", "p1"), tab("d", "p1")];
 
@@ -115,13 +117,13 @@ describe("Workspace — NewWorkspaceModal's initialLayouts seeds a brand-new pro
     expect(lefts.size).toBe(4);
   });
 
-  it("an initialLayouts entry for a DIFFERENT project never gets applied to this one (keyed lookup, not first-match)", () => {
+  it("a sessionLayouts entry for a DIFFERENT session never gets applied to this project (keyed by group, not first-match)", () => {
     const p1 = project("p1");
     const tabs = [tab("a", "p1"), tab("b", "p1")];
     // Deliberately mismatched: an entry under a different project id, plus
     // one for p1 that doesn't match its actual ids — neither should apply.
-    const initialLayouts = new Map([
-      ["someone-elses-project", buildLayoutTree(["x", "y", "z", "w"], 4)!],
+    const sessionLayouts = new Map([
+      ["someone-elses-session", buildLayoutTree(["x", "y", "z", "w"], 4)!],
     ]);
 
     const { container } = render(
@@ -136,7 +138,7 @@ describe("Workspace — NewWorkspaceModal's initialLayouts seeds a brand-new pro
         onNewTabInProject={noop}
         onRenameTab={noop}
         hidden={false}
-        initialLayouts={initialLayouts}
+        sessionLayouts={sessionLayouts}
       />,
     );
 
@@ -145,5 +147,41 @@ describe("Workspace — NewWorkspaceModal's initialLayouts seeds a brand-new pro
     expect(positions).toHaveLength(2);
     expect(new Set(positions.map((p) => p.top)).size).toBe(1);
     expect(new Set(positions.map((p) => p.left)).size).toBe(2);
+  });
+
+  it("a second session's preset merges in beside the panes already open, without disturbing them", () => {
+    // The ⌘N -> Session case: project p1 already has one pane from session
+    // g1; session g2 arrives as a 2x2 batch of four. Result: five tiles,
+    // and the four new ones really are arranged as a grid (2 distinct row
+    // offsets) rather than flattened into one long row.
+    const p1 = project("p1");
+    const tabs = [
+      tab("a", "p1", "g1"),
+      tab("b", "p1", "g2"),
+      tab("c", "p1", "g2"),
+      tab("d", "p1", "g2"),
+      tab("e", "p1", "g2"),
+    ];
+    const sessionLayouts = new Map([["g2", buildLayoutTree(["b", "c", "d", "e"], 4)!]]);
+
+    const { container } = render(
+      <Workspace
+        projects={[p1]}
+        tabs={tabs}
+        activeTabId="b"
+        selectedProjectId="p1"
+        selectedProjectLabel="p1"
+        onActivateTab={noop}
+        onCloseTab={noop}
+        onNewTabInProject={noop}
+        onRenameTab={noop}
+        hidden={false}
+        sessionLayouts={sessionLayouts}
+      />,
+    );
+
+    const positions = tilePositions(container);
+    expect(positions).toHaveLength(5);
+    expect(new Set(positions.map((p) => p.top)).size).toBe(2);
   });
 });

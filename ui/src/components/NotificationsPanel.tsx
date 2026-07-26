@@ -1,0 +1,300 @@
+// The notifications badge + panel (founder ask, 2026-07-26, verbatim:
+// *"notification badge (each agent, terminal, whatever... whenever it
+// requires attention or finalizes a run, it should notify there)"*, with the
+// rule *"only green, yellow or red generate a notification (in case the user
+// is somewhere else (maybe not in that terminal) or in another session or
+// even workspace)"*). Structure follows his reference screenshot,
+// docs/reference/warp-notifications-panel.png: a title row with a close
+// button, a filter chip carrying a count, then rows of
+// [agent mark] [branch] [title] [what happened] [when].
+//
+// Everything about *whether* something becomes a notification lives in
+// `state/notifications.ts` (and, for the rule itself, in Rust — see that
+// module's doc). This file only renders, and owns three interaction
+// decisions:
+//
+// 1. **Opening marks everything read.** The badge counts what happened
+//    while you were away; having looked at the list, you're no longer away.
+//    Rows stay in the list afterwards — read is not the same as gone.
+// 2. **A row is a jump, not a card.** Clicking navigates to that session
+//    (select its project, focus its pane) — the whole point of the feature.
+//    A row whose session no longer exists still selects its project when
+//    that project is still there, and otherwise says so rather than
+//    pretending to navigate.
+// 3. **The mark is the session's own light.** `SessionStatusLight` renders
+//    the status the notification is *about*, frozen at the moment it fired —
+//    the same glyph the pane header shows, so the two read as the same
+//    system rather than two vocabularies for one event.
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  filterChipLabel,
+  filterNotifications,
+  notificationSubtitle,
+  relativeTime,
+  type NotificationEntry,
+  type NotificationFilter,
+} from "../state/notifications";
+import { useGitBranch } from "../lib/useGitBranch";
+import SessionStatusLight from "./SessionStatusLight";
+
+/** Relative timestamps go stale while the panel sits open; re-render them
+ * on a coarse tick rather than per second — the strings themselves are
+ * coarse ("45m ago"), so anything finer would just churn. */
+const CLOCK_TICK_MS = 30_000;
+
+interface NotificationsPanelProps {
+  entries: NotificationEntry[];
+  /** Session ids that are live right now — decides whether a row can jump
+   * to its pane or only back to its project. */
+  liveSessionIds: string[];
+  /** Projects that still exist, for the same reason. */
+  knownProjectIds: string[];
+  selectedProjectId: string | null;
+  selectedProjectLabel: string | null;
+  /** Marks everything read — fired the moment the panel opens. */
+  onOpened: () => void;
+  /** Navigate to this notification's session/project. */
+  onSelect: (entry: NotificationEntry) => void;
+  onDismiss: (id: string) => void;
+  onClearAll: () => void;
+  /** Injectable clock, for tests; live otherwise. */
+  now?: number;
+}
+
+/** Small inbox/tray glyph, matching the reference's badge. Inline SVG for
+ * the same reason every other glyph in this app is: no asset pipeline, and
+ * `currentColor` follows the trigger's own state. */
+function InboxGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M2 9.2 3.6 3.3A1.4 1.4 0 0 1 5 2.3h6a1.4 1.4 0 0 1 1.4 1L14 9.2v2.4a1.4 1.4 0 0 1-1.4 1.4H3.4A1.4 1.4 0 0 1 2 11.6V9.2Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path d="M2 9.2h3.1l.9 1.6h4l.9-1.6H14" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function NotificationRow({
+  entry,
+  now,
+  canJump,
+  onSelect,
+  onDismiss,
+}: {
+  entry: NotificationEntry;
+  now: number;
+  canJump: boolean;
+  onSelect: () => void;
+  onDismiss: () => void;
+}) {
+  // Per-row so each notification shows the branch of the folder its session
+  // ran in — the same `useGitBranch` the pane header uses, one call per
+  // visible row, only while the panel is open.
+  const branch = useGitBranch(entry.cwd);
+
+  return (
+    <li className={`notification-row${canJump ? "" : " is-stale"}${entry.read ? "" : " is-unread"}`}>
+      <button
+        type="button"
+        className="notification-row-main"
+        onClick={onSelect}
+        // Named explicitly rather than left to the row's own text: read
+        // aloud, "wire session restore main Just now Task completed." is a
+        // pile of fragments; this says what the control does and where it
+        // goes, which is what a name is for.
+        aria-label={
+          canJump
+            ? `Go to ${entry.title} in ${entry.projectLabel} — ${notificationSubtitle(entry.status)}`
+            : `${entry.title} in ${entry.projectLabel} — session closed`
+        }
+        title={canJump ? `Go to ${entry.title} in ${entry.projectLabel}` : `${entry.projectLabel} — session closed`}
+      >
+        <span className="notification-row-mark">
+          <SessionStatusLight status={entry.status} size={17} decorative />
+        </span>
+        <span className="notification-row-body">
+          <span className="notification-row-meta">
+            <span className="notification-row-branch">
+              {branch ? (
+                <>
+                  <span aria-hidden="true">⑂</span> {branch}
+                </>
+              ) : (
+                entry.projectLabel
+              )}
+            </span>
+            <span className="notification-row-time">{relativeTime(entry.createdAt, now)}</span>
+          </span>
+          <span className="notification-row-title">{entry.title}</span>
+          <span className="notification-row-subtitle">{notificationSubtitle(entry.status)}</span>
+        </span>
+      </button>
+      <button
+        type="button"
+        className="notification-row-dismiss"
+        onClick={onDismiss}
+        aria-label={`Dismiss notification from ${entry.title}`}
+        title="Dismiss"
+      >
+        &#215;
+      </button>
+    </li>
+  );
+}
+
+export default function NotificationsPanel({
+  entries,
+  liveSessionIds,
+  knownProjectIds,
+  selectedProjectId,
+  selectedProjectLabel,
+  onOpened,
+  onSelect,
+  onDismiss,
+  onClearAll,
+  now,
+}: NotificationsPanelProps) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState<NotificationFilter>("all");
+  const [tick, setTick] = useState(() => now ?? Date.now());
+  const panelRef = useRef<HTMLDivElement | null>(null);
+
+  const clock = now ?? tick;
+  const unread = entries.filter((e) => !e.read).length;
+  const live = useMemo(() => new Set(liveSessionIds), [liveSessionIds]);
+  const projects = useMemo(() => new Set(knownProjectIds), [knownProjectIds]);
+  const visible = filterNotifications(entries, filter, selectedProjectId);
+  const projectCount = filterNotifications(entries, "project", selectedProjectId).length;
+
+  useEffect(() => {
+    if (!open || now !== undefined) return;
+    const interval = window.setInterval(() => setTick(Date.now()), CLOCK_TICK_MS);
+    return () => window.clearInterval(interval);
+  }, [open, now]);
+
+  useEffect(() => {
+    if (open) panelRef.current?.focus();
+  }, [open]);
+
+  function openPanel() {
+    setTick(Date.now());
+    setOpen(true);
+    onOpened();
+  }
+
+  function toggle() {
+    if (open) setOpen(false);
+    else openPanel();
+  }
+
+  return (
+    <div className="notifications-anchor">
+      <button
+        type="button"
+        className={`notifications-trigger${unread > 0 ? " has-unread" : ""}`}
+        onClick={toggle}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={
+          unread > 0
+            ? `Notifications — ${unread} new`
+            : entries.length > 0
+              ? "Notifications"
+              : "Notifications — nothing new"
+        }
+        title="Notifications"
+      >
+        <InboxGlyph />
+        {unread > 0 && (
+          <span className="notifications-badge" aria-hidden="true">
+            {unread > 9 ? "9+" : unread}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          <div className="notifications-backdrop" onMouseDown={() => setOpen(false)} />
+          <div
+            ref={panelRef}
+            className="notifications-panel"
+            role="dialog"
+            aria-label="Notifications"
+            tabIndex={-1}
+            onMouseDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setOpen(false);
+              }
+            }}
+          >
+            <div className="notifications-header">
+              <h2 className="notifications-title">Notifications</h2>
+              <button
+                className="notifications-close"
+                onClick={() => setOpen(false)}
+                aria-label="Close notifications"
+              >
+                &#215;
+              </button>
+            </div>
+
+            <div className="notifications-filters">
+              <button
+                type="button"
+                className={`notifications-chip${filter === "all" ? " is-active" : ""}`}
+                aria-pressed={filter === "all"}
+                onClick={() => setFilter("all")}
+              >
+                {filterChipLabel("all", entries.length, null)}
+              </button>
+              <button
+                type="button"
+                className={`notifications-chip${filter === "project" ? " is-active" : ""}`}
+                aria-pressed={filter === "project"}
+                disabled={selectedProjectId === null}
+                onClick={() => setFilter("project")}
+              >
+                {filterChipLabel("project", projectCount, selectedProjectLabel)}
+              </button>
+              {entries.length > 0 && (
+                <button type="button" className="notifications-clear" onClick={onClearAll}>
+                  Clear all
+                </button>
+              )}
+            </div>
+
+            {visible.length === 0 ? (
+              <p className="notifications-empty">
+                {entries.length === 0
+                  ? "Nothing yet. Sessions tell you here when they finish, need approval, or fail."
+                  : "Nothing from this project."}
+              </p>
+            ) : (
+              <ul className="notifications-list">
+                {visible.map((entry) => (
+                  <NotificationRow
+                    key={entry.id}
+                    entry={entry}
+                    now={clock}
+                    canJump={live.has(entry.sessionId) || projects.has(entry.project)}
+                    onSelect={() => {
+                      onSelect(entry);
+                      setOpen(false);
+                    }}
+                    onDismiss={() => onDismiss(entry.id)}
+                  />
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
