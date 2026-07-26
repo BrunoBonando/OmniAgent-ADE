@@ -108,36 +108,36 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// tests to assert "one session, not two" against real tmux output.cket name for OmniAgent's private tmux server (`tmux -L <this>`). Not
+/// Socket name for OmniAgent's private tmux server (`tmux -L <this>`). Not
 /// the default socket, so nothing here can ever see, resize, or kill a
-/// tests to assert "one session, not two" against real tmux output.ssion the user started themselves.
+/// session the user started themselves.
 pub const DEFAULT_SOCKET: &str = "omniagent-ade";
 
 /// Prefix for every tmux session this app owns. Combined with the OmniAgent
-/// tests to assert "one session, not two" against real tmux output.ssion id (`omniagent-sess-…`), it makes ownership obvious in a stray
-/// tests to assert "one session, not two" against real tmux output.mux -L omniagent-ade ls`.
+/// session id (`omniagent-sess-…`), it makes ownership obvious in a stray
+/// `tmux -L omniagent-ade ls`.
 pub const SESSION_NAME_PREFIX: &str = "omniagent-";
 
 /// Longest tmux session name we'll build. tmux itself has no hard limit
 /// worth hitting, but ids come partly from the frontend (`restore_id`), and
-/// tests to assert "one session, not two" against real tmux output. unbounded name is an unbounded argv.
+/// an unbounded name is an unbounded argv.
 const MAX_SESSION_NAME_LEN: usize = 128;
 
 /// Hard ceiling on any single tmux control command (`has-session`,
-/// tests to assert "one session, not two" against real tmux output.ill-session`, `display-message`, `new-session -d`). These are local IPC
+/// `kill-session`, `display-message`, `new-session -d`). These are local IPC
 /// to a server on a unix socket and normally return in single-digit
 /// milliseconds; if the server is wedged, session creation and the status
-/// tests to assert "one session, not two" against real tmux output.ller must degrade rather than hang. Every helper below treats a timeout
-/// tests to assert "one session, not two" against real tmux output.actly like a failure — i.e. "tmux can't help here", which every caller
-/// tests to assert "one session, not two" against real tmux output.ready has a fallback for.
+/// poller must degrade rather than hang. Every helper below treats a timeout
+/// exactly like a failure — i.e. "tmux can't help here", which every caller
+/// already has a fallback for.
 const TMUX_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The config OmniAgent's own tmux server runs with (`-f`). See the module
 /// docs for why `prefix None` and `status off` are correctness requirements
-/// tests to assert "one session, not two" against real tmux output.ther than taste.
+/// rather than taste.
 ///
-/// tests to assert "one session, not two" against real tmux output.efault-terminal xterm-256color` matches what `sessions.rs` already sets
-/// tests to assert "one session, not two" against real tmux output.r direct spawns and what this app's xterm.js + WebGL renderer actually
+/// `default-terminal xterm-256color` matches what `sessions.rs` already sets
+/// for direct spawns and what this app's xterm.js + WebGL renderer actually
 /// implements; `terminal-features … RGB` is what lets 24-bit color survive
 /// tmux's own re-rendering (tmux downsamples to 256 colors unless it's told
 /// the outer terminal handles RGB).
@@ -161,7 +161,7 @@ set -g remain-on-exit off
 /// A resolved tmux binary plus the socket/config this app talks to it with.
 /// Cheap to clone (three small owned values) — cloned into the status poller
 /// thread and into each `SessionManager` operation rather than shared behind
-/// tests to assert "one session, not two" against real tmux output.lock.
+/// a lock.
 #[derive(Clone, Debug)]
 pub struct Tmux {
     bin: PathBuf,
@@ -171,15 +171,15 @@ pub struct Tmux {
 
 impl Tmux {
     /// Locates a real, executable `tmux` and pins it to `socket`. Returns
-    /// tests to assert "one session, not two" against real tmux output.one` when tmux isn't installed — the only correct answer, since
-    /// tests to assert "one session, not two" against real tmux output.ery caller must degrade to direct spawning rather than fail.
+    /// `None` when tmux isn't installed — the only correct answer, since
+    /// every caller must degrade to direct spawning rather than fail.
     ///
     /// Resolution deliberately does **not** rely on `std::env::var("PATH")`:
-    /// tests to assert "one session, not two" against real tmux output.GUI-launched `.app` inherits macOS's minimal default `PATH`
+    /// a GUI-launched `.app` inherits macOS's minimal default `PATH`
     /// (`/usr/bin:/bin:/usr/sbin:/sbin`), which contains no Homebrew — the
-    /// tests to assert "one session, not two" against real tmux output.act bug `sessions.rs`'s `resolve_shell_path` was written for. The
+    /// exact bug `sessions.rs`'s `resolve_shell_path` was written for. The
     /// caller passes the user's real, shell-resolved `PATH` in
-    /// tests to assert "one session, not two" against real tmux output.earch_path`; [`COMMON_TMUX_DIRS`] is a last-resort backstop for the
+    /// `search_path`; [`COMMON_TMUX_DIRS`] is a last-resort backstop for the
     /// case where even that resolution failed.
     pub fn resolve(socket: &str, search_path: Option<&str>) -> Option<Self> {
         let bin = find_tmux_binary(search_path)?;
@@ -194,7 +194,7 @@ impl Tmux {
     /// tests use to prove the no-tmux fallback without uninstalling tmux
     /// (point it at a path that doesn't exist) and to prove real tmux
     /// behavior on a per-test socket (so parallel tests never collide, and
-    /// tests to assert "one session, not two" against real tmux output. test can touch a real user session).
+    /// no test can touch a real user session).
     pub fn with_binary(bin: impl Into<PathBuf>, socket: &str) -> Self {
         Self {
             bin: bin.into(),
@@ -205,8 +205,8 @@ impl Tmux {
 
     /// Points this server at a config file (`tmux -f`). Written by
     /// [`write_config`]. Note tmux only reads it when the *server starts*;
-    /// tests to assert "one session, not two" against real tmux output.ssing it to a command that reaches an already-running server is
-    /// tests to assert "one session, not two" against real tmux output.rmless and ignored.
+    /// passing it to a command that reaches an already-running server is
+    /// harmless and ignored.
     pub fn with_config(mut self, config: impl Into<PathBuf>) -> Self {
         self.config = Some(config.into());
         self
@@ -220,7 +220,7 @@ impl Tmux {
         &self.bin
     }
 
-    /// tests to assert "one session, not two" against real tmux output.mux -L <socket> [-f <config>] …` — the prefix every command shares.
+    /// `tmux -L <socket> [-f <config>] …` — the prefix every command shares.
     fn base(&self) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("-L").arg(&self.socket);
@@ -232,8 +232,8 @@ impl Tmux {
     }
 
     /// True when a session with exactly this name exists. `=name` (not
-    /// tests to assert "one session, not two" against real tmux output.ame`) — see module docs #2: tmux prefix-matches otherwise, and
-    /// tests to assert "one session, not two" against real tmux output.mniagent-sess-1` would match `omniagent-sess-12`.
+    /// `name`) — see module docs #2: tmux prefix-matches otherwise, and
+    /// `omniagent-sess-1` would match `omniagent-sess-12`.
     pub fn has_session(&self, name: &str) -> bool {
         let mut cmd = self.base();
         cmd.arg("has-session").arg("-t").arg(format!("={name}"));
@@ -243,13 +243,13 @@ impl Tmux {
     /// Creates the detached session running `argv` if — and only if — it
     /// doesn't already exist, and reports which of the two happened.
     ///
-    /// tests to assert "one session, not two" against real tmux output.k(true)` = a live session was already there and we left it strictly
-    /// tests to assert "one session, not two" against real tmux output.one (**the restore path**: the engine inside is the same process
-    /// tests to assert "one session, not two" against real tmux output.om before the app closed, scrollback and all). `Ok(false)` = a
-    /// tests to assert "one session, not two" against real tmux output.esh session was created and `argv` was started in it.
+    /// `Ok(true)` = a live session was already there and we left it strictly
+    /// alone (**the restore path**: the engine inside is the same process
+    /// from before the app closed, scrollback and all). `Ok(false)` = a
+    /// fresh session was created and `argv` was started in it.
     ///
     /// The explicit has-session-then-create shape (rather than
-    /// tests to assert "one session, not two" against real tmux output.ew-session -A`) is forced by real tmux behavior — module docs #1.
+    /// `new-session -A`) is forced by real tmux behavior — module docs #1.
     pub fn ensure_session(
         &self,
         name: &str,
@@ -288,7 +288,7 @@ impl Tmux {
     }
 
     /// The argv for the PTY child that attaches to `name`. `-d` detaches any
-    /// tests to assert "one session, not two" against real tmux output.her client first, so a stale client left behind by a hard app crash
+    /// other client first, so a stale client left behind by a hard app crash
     /// can never fight the new one for the pane's size.
     pub fn attach_argv(&self, name: &str) -> Vec<String> {
         let mut argv = vec![self.bin.to_string_lossy().into_owned()];
@@ -306,8 +306,8 @@ impl Tmux {
     }
 
     /// Destroys a session and everything running in it. Best-effort: a
-    /// tests to assert "one session, not two" against real tmux output.ssion that already ended on its own (the engine exited) is not an
-    /// tests to assert "one session, not two" against real tmux output.ror worth surfacing.
+    /// session that already ended on its own (the engine exited) is not an
+    /// error worth surfacing.
     pub fn kill_session(&self, name: &str) -> bool {
         let mut cmd = self.base();
         cmd.arg("kill-session").arg("-t").arg(format!("={name}"));
@@ -315,15 +315,15 @@ impl Tmux {
     }
 
     /// What's actually running in the session's current pane —
-    /// tests to assert "one session, not two" against real tmux output.{pane_current_command}`, which tmux derives from the pane tty's
+    /// `#{pane_current_command}`, which tmux derives from the pane tty's
     /// *foreground process group*. This is the honest "is it busy" signal
-    /// tests to assert "one session, not two" against real tmux output.r shell sessions: an interactive shell puts each job in its own
-    /// tests to assert "one session, not two" against real tmux output.ocess group and hands it the terminal, so this reads `zsh` at the
-    /// tests to assert "one session, not two" against real tmux output.ompt and `sleep` (or `cargo`, `vim`, …) while a command runs —
+    /// for shell sessions: an interactive shell puts each job in its own
+    /// process group and hands it the terminal, so this reads `zsh` at the
+    /// prompt and `sleep` (or `cargo`, `vim`, …) while a command runs —
     /// verified against real tmux, including the no-output case (`sleep 4`)
     /// that no output-activity heuristic could ever catch.
     ///
-    /// tests to assert "one session, not two" against real tmux output.name:` — a *pane* target (module docs #2).
+    /// `=name:` — a *pane* target (module docs #2).
     pub fn pane_current_command(&self, name: &str) -> Option<String> {
         let mut cmd = self.base();
         cmd.arg("display-message")
@@ -378,13 +378,13 @@ impl Tmux {
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
-    /// tests to assert "one session, not two" against real tmux output.uts this socket's whole tmux server down, killing every session on
+    /// Shuts this socket's whole tmux server down, killing every session on
     /// it and unlinking the socket file.
     ///
     /// Never used against the app's own server — a running OmniAgent must
-    /// tests to assert "one session, not two" against real tmux output.ver nuke every session at once. It exists for tests, whose
-    /// tests to assert "one session, not two" against real tmux output.r-test sockets would otherwise pile up dead socket inodes in
-    /// tests to assert "one session, not two" against real tmux output.tmp/tmux-<uid>/` forever (a full test suite creates one per
+    /// never nuke every session at once. It exists for tests, whose
+    /// per-test sockets would otherwise pile up dead socket inodes in
+    /// `/tmp/tmux-<uid>/` forever (a full test suite creates one per
     /// tmux-using test per run; killing only the sessions leaves the file
     /// behind even after the server exits).
     pub fn kill_server(&self) -> bool {
@@ -418,11 +418,11 @@ impl Tmux {
 
 /// Runs a tmux control command with a hard timeout ([`TMUX_COMMAND_TIMEOUT`]).
 ///
-/// tests to assert "one session, not two" against real tmux output.ommand::output()` blocks forever if the tmux server is wedged, and these
+/// `Command::output()` blocks forever if the tmux server is wedged, and these
 /// calls sit on session creation's critical path *and* in the status poller's
-/// tests to assert "one session, not two" against real tmux output.op — the same reasoning (and the same channel-plus-`recv_timeout` shape)
-/// tests to assert "one session, not two" against real tmux output.essions.rs`'s `spawn_and_capture_path` already uses for the login-shell
-/// tests to assert "one session, not two" against real tmux output.ATH` probe. On timeout the child is left to finish on its own; the
+/// loop — the same reasoning (and the same channel-plus-`recv_timeout` shape)
+/// `sessions.rs`'s `spawn_and_capture_path` already uses for the login-shell
+/// `PATH` probe. On timeout the child is left to finish on its own; the
 /// timeout only stops *us* from waiting.
 fn run(mut cmd: Command) -> std::io::Result<std::process::Output> {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -439,7 +439,7 @@ fn run(mut cmd: Command) -> std::io::Result<std::process::Output> {
 }
 
 /// Fallback locations checked when the shell-resolved `PATH` is unavailable
-/// tests to assert "one session, not two" against real tmux output. doesn't contain tmux. Homebrew on Apple Silicon, Homebrew on Intel,
+/// or doesn't contain tmux. Homebrew on Apple Silicon, Homebrew on Intel,
 /// MacPorts, and a plain `/usr/bin` install, in that order.
 const COMMON_TMUX_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"];
 
@@ -478,16 +478,16 @@ pub fn write_config(data_dir: &Path) -> Option<PathBuf> {
 }
 
 /// The tmux session name for an OmniAgent session id — deterministic, so the
-/// tests to assert "one session, not two" against real tmux output.me id always finds the same session after a relaunch, and prefixed so
+/// same id always finds the same session after a relaunch, and prefixed so
 /// OmniAgent's sessions are distinguishable at a glance.
 ///
-/// tests to assert "one session, not two" against real tmux output.nitizing is a safety net, not the primary defense: ids generated here
-/// tests to assert "one session, not two" against real tmux output.e already `[a-z0-9-]`, and `restore_id` values coming from the frontend
-/// tests to assert "one session, not two" against real tmux output.e validated far more strictly before they ever reach this function (see
-/// tests to assert "one session, not two" against real tmux output.essions::is_valid_session_id`). But tmux itself rejects `.` and `:` in
-/// tests to assert "one session, not two" against real tmux output.ssion names (they're target syntax), so anything outside
-/// tests to assert "one session, not two" against real tmux output.A-Za-z0-9_-]` collapses to `_` rather than producing a name tmux will
-/// tests to assert "one session, not two" against real tmux output.fuse.
+/// Sanitizing is a safety net, not the primary defense: ids generated here
+/// are already `[a-z0-9-]`, and `restore_id` values coming from the frontend
+/// are validated far more strictly before they ever reach this function (see
+/// `sessions::is_valid_session_id`). But tmux itself rejects `.` and `:` in
+/// session names (they're target syntax), so anything outside
+/// `[A-Za-z0-9_-]` collapses to `_` rather than producing a name tmux will
+/// refuse.
 pub fn session_name(id: &str) -> String {
     let mut name = String::with_capacity(SESSION_NAME_PREFIX.len() + id.len());
     name.push_str(SESSION_NAME_PREFIX);
