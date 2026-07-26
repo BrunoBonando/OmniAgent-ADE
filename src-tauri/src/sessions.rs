@@ -839,6 +839,19 @@ struct SessionActivity {
     /// refuses to call the session busy within [`TYPING_ECHO_GRACE`] of the
     /// last keystroke — see that constant for the trade-off.
     last_user_input: Mutex<Option<Instant>>,
+    /// What the activity heuristic said at the moment the current typing
+    /// burst BEGAN — `Some(busy status)` if the session was already visibly
+    /// working, `None` if it was quiet. The typing grace returns this
+    /// instead of forcing `Ready` (founder, 2026-07-26, second round: "it
+    /// shouldn't change the status based on whether I'm hovering or typing.
+    /// And whenever I do it, it turns into green. I don't like it.").
+    ///
+    /// Snapshotted only on a burst's FIRST keystroke ([`SessionActivity::
+    /// mark_user_input`]): re-sampling on every keystroke would let the
+    /// burst's own echo — which sustains a run past
+    /// [`SUSTAINED_ACTIVITY_MIN`] under continuous typing — promote itself
+    /// to busy mid-burst, which is the original bug this grace exists for.
+    status_when_typing_began: Mutex<Option<SessionStatus>>,
     /// When the *current* run of continuous output began — reset whenever a
     /// gap longer than [`OUTPUT_QUIET_THRESHOLD`] breaks the run. Together
     /// with `last_output` this distinguishes "genuinely busy" from "an idle
@@ -916,6 +929,7 @@ impl SessionActivity {
             tmux_session,
             last_output: Mutex::new(Instant::now()),
             last_user_input: Mutex::new(None),
+            status_when_typing_began: Mutex::new(None),
             busy_since: Mutex::new(None),
             attention: AtomicBool::new(false),
             error: AtomicBool::new(false),
@@ -947,8 +961,19 @@ impl SessionActivity {
     /// there is no screen to ask, so the write is all we have and the latch is
     /// cleared the old way.
     fn mark_user_input(&self) {
+        let now = Instant::now();
         if let Ok(mut last) = self.last_user_input.lock() {
-            *last = Some(Instant::now());
+            // A burst's first keystroke (nothing typed within the grace)
+            // freezes what the light currently says; every keystroke after
+            // it merely re-arms the grace. See `status_when_typing_began`.
+            let new_burst =
+                last.map_or(true, |t| now.saturating_duration_since(t) >= TYPING_ECHO_GRACE);
+            if new_burst {
+                if let Ok(mut held) = self.status_when_typing_began.lock() {
+                    *held = self.raw_busy_status(now);
+                }
+            }
+            *last = Some(now);
         }
         self.attention.store(false, Ordering::Relaxed);
         self.clear_marker_window.store(true, Ordering::Relaxed);
@@ -963,6 +988,35 @@ impl SessionActivity {
             }
         } else {
             self.error.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// The activity heuristic's raw answer, grace-free: `Some(busy status)`
+    /// when output is both recent ([`OUTPUT_QUIET_THRESHOLD`]) and part of a
+    /// sustained run ([`SUSTAINED_ACTIVITY_MIN`]), `None` when the session is
+    /// quiet. The shared core of [`status_from_output_activity`] (which lays
+    /// the typing grace over it) and the burst snapshot in
+    /// [`SessionActivity::mark_user_input`] (which must ignore the grace —
+    /// it's asking what was true as the typing began).
+    fn raw_busy_status(&self, now: Instant) -> Option<SessionStatus> {
+        let last = self
+            .last_output
+            .lock()
+            .map(|g| *g)
+            .unwrap_or_else(|e| *e.into_inner());
+        if now.saturating_duration_since(last) >= OUTPUT_QUIET_THRESHOLD {
+            return None;
+        }
+        let busy_since = self
+            .busy_since
+            .lock()
+            .map(|g| *g)
+            .unwrap_or_else(|e| *e.into_inner());
+        match busy_since {
+            Some(started) if now.saturating_duration_since(started) >= SUSTAINED_ACTIVITY_MIN => {
+                Some(busy_status_for_engine(&self.engine))
+            }
+            _ => None,
         }
     }
 
@@ -1549,7 +1603,12 @@ impl SessionManager {
         let handle = sessions
             .get_mut(id)
             .ok_or_else(|| anyhow!("no such session: {id}"))?;
-        handle.activity.mark_user_input();
+        // Pointer traffic (mouse tracking, focus events) reaches the pty but
+        // is not "the user typed" — hovering a pane must neither arm the
+        // typing grace nor clear an attention latch. See `is_pointer_report`.
+        if !is_pointer_report(data) {
+            handle.activity.mark_user_input();
+        }
         handle.writer.write_all(data.as_bytes())?;
         handle.writer.flush()?;
         Ok(())
@@ -3317,9 +3376,15 @@ const SUSTAINED_ACTIVITY_MIN: Duration = Duration::from_millis(1000);
 /// echo repaints, short enough that real work the user kicks off with Enter
 /// shows busy at most a second later than it otherwise would (the run
 /// clock keeps counting through the grace — suppression hides the label,
-/// it does not reset the run). Known, accepted edge: typing a follow-up
-/// while the engine is genuinely streaming dips the light to ready for
-/// about a second; it self-corrects the moment the typing pauses.
+/// it does not reset the run).
+///
+/// What the grace DOES changed on 2026-07-26, second founder round. It used
+/// to force `Ready`, which dipped a genuinely streaming session to green
+/// under every keystroke — shipped as a "known, accepted edge", rejected on
+/// sight ("whenever I do it, it turns into green. I don't like it"). It now
+/// FREEZES the status at whatever was true as the burst began
+/// ([`SessionActivity::status_when_typing_began`]): quiet stays quiet under
+/// echo, busy stays busy under typing.
 const TYPING_ECHO_GRACE: Duration = Duration::from_millis(1000);
 
 /// Foreground commands that mean "this pane is sitting at a prompt". `-zsh`
@@ -3332,6 +3397,55 @@ const IDLE_SHELL_COMMANDS: &[&str] = &[
 
 fn is_idle_shell_command(pane_command: &str) -> bool {
     IDLE_SHELL_COMMANDS.contains(&pane_command)
+}
+
+/// True when `data` consists purely of terminal pointer traffic: SGR mouse
+/// reports (`ESC [ < b;x;y M|m` — presses, releases, wheel and motion),
+/// legacy X10 reports (`ESC [ M` + 3 bytes), or focus in/out (`ESC [ I` /
+/// `ESC [ O`).
+///
+/// Exists because the engines turn mouse tracking on, so xterm.js forwards
+/// every pointer movement over the pane as PTY input — and counting that as
+/// "the user typed" armed [`TYPING_ECHO_GRACE`] and cleared the attention
+/// latch on a hover (founder, 2026-07-26: "it shouldn't change the status
+/// based on whether I'm hovering"). Pointer reports still go TO the pty —
+/// the TUI wants them — they just aren't evidence the user responded to
+/// anything. A chunk mixing pointer reports with real keys counts as typing
+/// (xterm.js emits them separately in practice; mixed means keys were hit).
+fn is_pointer_report(data: &str) -> bool {
+    let bytes = data.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b || i + 1 >= bytes.len() || bytes[i + 1] != b'[' {
+            return false;
+        }
+        i += 2;
+        match bytes.get(i) {
+            Some(b'I') | Some(b'O') => i += 1,
+            Some(b'M') => {
+                // X10: exactly three payload bytes follow.
+                i += 4;
+                if i > bytes.len() {
+                    return false;
+                }
+            }
+            Some(b'<') => {
+                i += 1;
+                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b';') {
+                    i += 1;
+                }
+                if !matches!(bytes.get(i), Some(b'M') | Some(b'm')) {
+                    return false;
+                }
+                i += 1;
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// What a tmux pane's foreground command tells us, if anything.
@@ -3377,19 +3491,15 @@ fn status_from_pane_command(pane_command: &str, engine: &str) -> Option<SessionS
 /// second answer is refined into `ToolExecution`, and the module docs for why
 /// it isn't refined more often.
 fn status_from_output_activity(activity: &SessionActivity, now: Instant) -> SessionStatus {
-    let last = activity
-        .last_output
-        .lock()
-        .map(|g| *g)
-        .unwrap_or_else(|e| *e.into_inner());
-    if now.saturating_duration_since(last) >= OUTPUT_QUIET_THRESHOLD {
-        return SessionStatus::Ready;
-    }
-    // Output right behind the user's own keystrokes is (or at least may be)
-    // the engine echoing them, not the engine working — see
-    // [`TYPING_ECHO_GRACE`]. The run clock is left alone on purpose: the
-    // moment the grace expires, a genuinely busy session is already past
-    // SUSTAINED_ACTIVITY_MIN and flips busy immediately.
+    // Inside the typing grace the status is FROZEN at whatever was true when
+    // the burst began ([`SessionActivity::status_when_typing_began`]): echo
+    // must not light a quiet pane up, and — founder, 2026-07-26, second
+    // round — a keystroke into a busy pane must not dip it to green either.
+    // The run clock is left alone on purpose: the moment the grace expires,
+    // a genuinely busy session is already past SUSTAINED_ACTIVITY_MIN and
+    // reads busy immediately. (Freezing also means a session that finishes
+    // mid-burst stays busy-coloured up to a grace past the last keystroke —
+    // bounded, and self-correcting the moment the typing pauses.)
     let typed = activity
         .last_user_input
         .lock()
@@ -3397,20 +3507,15 @@ fn status_from_output_activity(activity: &SessionActivity, now: Instant) -> Sess
         .unwrap_or_else(|e| *e.into_inner());
     if let Some(typed) = typed {
         if now.saturating_duration_since(typed) < TYPING_ECHO_GRACE {
-            return SessionStatus::Ready;
+            let held = activity
+                .status_when_typing_began
+                .lock()
+                .map(|g| *g)
+                .unwrap_or_else(|e| *e.into_inner());
+            return held.unwrap_or(SessionStatus::Ready);
         }
     }
-    let busy_since = activity
-        .busy_since
-        .lock()
-        .map(|g| *g)
-        .unwrap_or_else(|e| *e.into_inner());
-    match busy_since {
-        Some(started) if now.saturating_duration_since(started) >= SUSTAINED_ACTIVITY_MIN => {
-            busy_status_for_engine(&activity.engine)
-        }
-        _ => SessionStatus::Ready,
-    }
+    activity.raw_busy_status(now).unwrap_or(SessionStatus::Ready)
 }
 
 /// What "this session is producing sustained output" means for each engine.
@@ -5260,15 +5365,16 @@ mod tests {
         );
     }
 
-    /// Founder, 2026-07-26: "I also don't want the executing effect to be
-    /// triggered when I'm typing." Typing makes the engine echo, echo is
-    /// output, and output used to read as busy — [`TYPING_ECHO_GRACE`] is
-    /// the rule that stops it, without resetting the run clock.
+    /// Founder, 2026-07-26, second round: "it shouldn't change the status
+    /// based on whether I'm hovering or typing. And whenever I do it, it
+    /// turns into green. I don't like it." The grace used to force `Ready`
+    /// for a second after every keystroke — an accepted edge at the time,
+    /// now the bug. Typing must HOLD the status the session already had.
     #[test]
-    fn typing_echo_does_not_read_as_busy_but_real_work_resumes_after_the_grace() {
+    fn typing_mid_run_holds_the_busy_status_instead_of_dipping_green() {
         let activity = SessionActivity::new("claude".into(), None, true);
         let now = Instant::now();
-        // A sustained output run is in progress...
+        // A genuinely busy session: sustained run, output still flowing.
         *activity.last_output.lock().unwrap() = now;
         *activity.busy_since.lock().unwrap() = Some(now - Duration::from_secs(3));
         assert_eq!(
@@ -5276,34 +5382,72 @@ mod tests {
             SessionStatus::Thinking
         );
 
-        // ...but the user just typed, so that output is (may be) echo.
-        *activity.last_user_input.lock().unwrap() = Some(now);
-        assert_eq!(
-            status_from_output_activity(&activity, now),
-            SessionStatus::Ready,
-            "output on the heels of a keystroke must not light the pane up"
-        );
-        assert_eq!(
-            status_from_output_activity(&activity, now + TYPING_ECHO_GRACE / 2),
-            SessionStatus::Ready,
-            "still inside the grace"
-        );
-
-        // Once the grace passes and output continues, busy resumes at once —
-        // the run clock kept counting through the suppression.
-        let after = now + TYPING_ECHO_GRACE;
-        *activity.last_output.lock().unwrap() = after;
-        assert_eq!(
-            status_from_output_activity(&activity, after),
-            SessionStatus::Thinking,
-            "a genuinely working engine flips busy the moment the grace ends"
-        );
-
-        // And mark_user_input (the real write path) arms the same grace.
+        // The user types into it (the real write path).
         activity.mark_user_input();
         assert_eq!(
             status_from_output_activity(&activity, Instant::now()),
-            SessionStatus::Ready
+            SessionStatus::Thinking,
+            "a keystroke must not change what the light was already saying"
+        );
+
+        // And once the grace passes with output continuing, still busy —
+        // the run clock never stopped.
+        let after = now + TYPING_ECHO_GRACE + Duration::from_millis(50);
+        *activity.last_output.lock().unwrap() = after;
+        assert_eq!(
+            status_from_output_activity(&activity, after),
+            SessionStatus::Thinking
+        );
+    }
+
+    /// Hovering a pane makes the TUI's mouse tracking stream reports through
+    /// `write` — none of which is the user typing. Founder: "it shouldn't
+    /// change the status based on whether I'm hovering".
+    #[test]
+    fn pointer_reports_do_not_count_as_typing() {
+        // SGR motion/wheel/press — what xterm.js sends while hovering and
+        // scrolling — alone or batched.
+        assert!(is_pointer_report("\x1b[<35;80;24M"));
+        assert!(is_pointer_report("\x1b[<64;10;5M\x1b[<65;10;6M"));
+        assert!(is_pointer_report("\x1b[<0;3;3M\x1b[<0;3;3m"));
+        // Legacy X10 encoding and focus in/out.
+        assert!(is_pointer_report("\x1b[M !!"));
+        assert!(is_pointer_report("\x1b[I"));
+        assert!(is_pointer_report("\x1b[O"));
+
+        // Real input — plain keys, Enter, arrows, ESC, pasted text — is
+        // typing, even when it starts with an escape.
+        assert!(!is_pointer_report("a"));
+        assert!(!is_pointer_report("\r"));
+        assert!(!is_pointer_report("\x1b[A"));
+        assert!(!is_pointer_report("\x1b"));
+        assert!(!is_pointer_report("\x1b[200~hello\x1b[201~"));
+        // Mixed pointer + key counts as typing.
+        assert!(!is_pointer_report("\x1b[<0;3;3Mq"));
+        assert!(!is_pointer_report(""));
+    }
+
+    /// The original founder ask this grace exists for ("I also don't want
+    /// the executing effect to be triggered when I'm typing") must survive
+    /// the hold semantics: a burst that STARTS on a quiet session stays
+    /// ready for its whole duration, even once the engine's own echo has
+    /// sustained a run longer than [`SUSTAINED_ACTIVITY_MIN`].
+    #[test]
+    fn typing_echo_alone_never_reads_as_busy() {
+        let activity = SessionActivity::new("claude".into(), None, true);
+        // First keystroke lands on a quiet session (no run at all).
+        activity.mark_user_input();
+        let t0 = Instant::now();
+
+        // 1.5s of continuous typing later: the echo itself has built a
+        // sustained run, and the last keystroke is still inside the grace.
+        *activity.busy_since.lock().unwrap() = Some(t0);
+        *activity.last_output.lock().unwrap() = t0 + Duration::from_millis(1500);
+        *activity.last_user_input.lock().unwrap() = Some(t0 + Duration::from_millis(1400));
+        assert_eq!(
+            status_from_output_activity(&activity, t0 + Duration::from_millis(1500)),
+            SessionStatus::Ready,
+            "echo during a burst that began quiet must never light the pane up"
         );
     }
 
@@ -5412,15 +5556,19 @@ mod tests {
             SessionStatus::AwaitingApproval
         );
 
-        // 5. the user types: both latches drop, and for the length of the
-        //    typing grace the ongoing output is treated as their own echo
-        //    ([`TYPING_ECHO_GRACE`]) — green, not busy.
+        // 5. the user types: both latches drop, and the typing grace HOLDS
+        //    the busy state the session was already in — typing must not
+        //    change the status (founder, 2026-07-26, second round; the
+        //    grace used to force green here).
         activity.mark_user_input();
         let typed = activity.last_user_input.lock().unwrap().unwrap();
-        assert_eq!(compute_status(&activity, None, typed), SessionStatus::Ready);
+        assert_eq!(
+            compute_status(&activity, None, typed),
+            SessionStatus::Thinking
+        );
 
         // 6. the grace expires with output still flowing: back to the live
-        //    signal, immediately — the run clock counted right through.
+        //    signal, seamlessly — the run clock counted right through.
         let after = typed + TYPING_ECHO_GRACE;
         *activity.last_output.lock().unwrap() = after;
         assert_eq!(compute_status(&activity, None, after), SessionStatus::Thinking);
