@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.omniagent.app",
   "build": {
-    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm --prefix ui run build && cargo build --release -p mcp-server --bin omniagent-mcp",
+    "beforeBuildCommand": "npm run build && cargo build --release -p mcp-server --bin omniagent-mcp",
     "frontendDist": "../ui/dist"
   },
   "app": {

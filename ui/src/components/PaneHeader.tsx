@@ -50,6 +50,7 @@
 // engine name).
 import { useState } from "react";
 import { tabDisplayLabel, type Engine, type TabInfo } from "../state/sessions";
+import { statusPresentation } from "../state/sessionStatus";
 import { useGitBranch } from "../lib/useGitBranch";
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeId } from "../lib/terminalThemes";
 import { ENGINE_LABEL } from "../theme";
@@ -101,6 +102,7 @@ export default function PaneHeader({
   onOpenCodeReview,
 }: PaneHeaderProps) {
   const branch = useGitBranch(tab.cwd);
+  const presentation = statusPresentation(tab.status);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -122,6 +124,16 @@ export default function PaneHeader({
       // red in the light below, which is the same fact in the language the
       // rest of the app now uses. See `state/sessions.ts`'s `TabInfo` doc.
       className={`pane-header${isFocused ? " is-focused" : ""}`}
+      // Founder ask, 2026-07-26: "Make the title bar of each terminal an
+      // animation similar to the logo status of the terminal." Same two
+      // attributes the light next to it already carries — the whole header
+      // strip then runs the same colour and the same rhythm in App.css, so a
+      // pane's state is readable from the bar itself, not just from a 15px
+      // mark. Decorative: `SessionStatusLight` below is the accessible
+      // rendering of this exact fact, and announcing it twice per pane is
+      // noise.
+      data-status={presentation.key}
+      data-motion={presentation.motion}
       onMouseDown={onFocus}
     >
       {/* The five-state light: the OmniAgent mark, tinted and animated by

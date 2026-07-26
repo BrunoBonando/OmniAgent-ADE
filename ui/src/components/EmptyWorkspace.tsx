@@ -46,8 +46,10 @@ interface EmptyWorkspaceProps {
 
 export default function EmptyWorkspace({ project, onStart }: EmptyWorkspaceProps) {
   // Same default as `newSessionState.ts`'s `initialNewSessionState` — a
-  // side-by-side pair.
-  const [layout, setLayout] = useState<LayoutPreset>(LAYOUT_PRESETS[0]);
+  // side-by-side pair. Written literally, not as `LAYOUT_PRESETS[0]`: the
+  // list now starts at the single-terminal preset, and this default is "2",
+  // not "whatever happens to be first".
+  const [layout, setLayout] = useState<LayoutPreset>(2);
   const [goal, setGoal] = useState("");
 
   if (project === null) {

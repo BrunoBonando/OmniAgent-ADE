@@ -141,10 +141,18 @@ describe("NewSessionModal — keyboard", () => {
 
   it("picks a layout by number", () => {
     const { onCreate, dialog } = setup();
-    fireEvent.keyDown(dialog, { key: "3" }); // the third preset — 6
+    fireEvent.keyDown(dialog, { key: "4" }); // the fourth preset — 6
     expect(screen.getByText("2×3 grid layout")).toBeInTheDocument();
     fireEvent.keyDown(dialog, { key: "Enter" });
     expect(onCreate).toHaveBeenCalledWith(PROJECT, "/Users/bruno/code/ade", ["claude"], 6);
+  });
+
+  it("picks the single-terminal layout", () => {
+    const { onCreate, dialog } = setup();
+    fireEvent.keyDown(dialog, { key: "1" });
+    expect(screen.getByText("Single terminal")).toBeInTheDocument();
+    fireEvent.keyDown(dialog, { key: "Enter" });
+    expect(onCreate).toHaveBeenCalledWith(PROJECT, "/Users/bruno/code/ade", ["claude"], 1);
   });
 
   it("Escape cancels", () => {

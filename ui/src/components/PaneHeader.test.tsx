@@ -231,6 +231,22 @@ describe("PaneHeader", () => {
       expect(light()).toHaveAttribute("data-motion", "steady");
     });
 
+    // "Make the title bar of each terminal an animation similar to the logo
+    // status" (founder, 2026-07-26) — the header carries the same pair, so
+    // App.css can run the same colour and rhythm along the whole bar. If
+    // these ever disagree, a pane's strip is lying about its own state.
+    it.each([
+      ["tool_execution", "chase"],
+      ["error", "flash"],
+      [undefined, "steady"],
+    ] as const)("runs the title bar on the same state as the mark (%s)", (status, motion) => {
+      setup({ tab: tab({ status }) });
+      const header = document.querySelector(".pane-header")!;
+      expect(header).toHaveAttribute("data-status", status ?? "unknown");
+      expect(header).toHaveAttribute("data-motion", motion);
+      expect(header.getAttribute("data-status")).toBe(light().getAttribute("data-status"));
+    });
+
     it("explains itself to a screen reader as well as on hover", () => {
       setup({ tab: tab({ status: "awaiting_approval" }) });
       const img = screen.getByRole("img", { name: /needs approval/i });
