@@ -12,30 +12,31 @@
 
 ## Global Constraints
 
-- **Only `claude`, `codex`, `shell` may ever be offered.** `build_engine_argv`
-  (`src-tauri/src/sessions.rs:2117`) has arms for exactly those three and returns
-  `unsupported engine` for anything else (`:2195`).
+- **All five agents are offerable.** As of commit `1b34dee` ("make the five-agent list actually
+  work end to end", a parallel session, 2026-07-26 17:5x) the backend supports every agent the
+  frontend names:
+  - `build_engine_argv` (`src-tauri/src/sessions.rs:2208`) gained a
+    `name @ ("copilot" | "antigravity")` arm that spawns the agent bare via `binary_for(name)`.
+  - `src-tauri/src/commands/agents.rs` now holds one `AGENTS` table of `{name, binary, install}`.
+    `shell` has `binary: None` and is always reported installed; `antigravity`'s binary is `agy`.
+  - `agents_check_installed` filters on `binary`, not `name` — so its answer is now **correct as
+    given** and needs no frontend correction.
 
-  ⚠️ **`ENGINES` is no longer a safe filter.** Commit `f9bf83c` (a parallel session, 2026-07-26
-  15:52) redefined `ui/src/state/sessions.ts` as `export const ENGINES = AVAILABLE_AGENTS` and
-  `export type Engine = Agent` — so `ENGINES` now contains all five names, including the two the
-  backend rejects. `theme.ts` likewise gained `copilot`/`antigravity` entries in `ENGINE_LABEL`,
-  `ENGINE_COLOR` and `ENGINE_HINT` (commit `8867d57`).
-
-  This plan therefore filters against its **own explicit list** of spawnable engines, declared
-  once in `lib/useInstalledAgents.ts` as `SPAWNABLE` and derived from the Rust match arms — not
-  from `ENGINES`, which no longer means "what can spawn". Task 2 defines it; nothing else may
-  re-derive it.
+  This replaces an earlier draft of this plan that carried a `SPAWNABLE` literal and a
+  shell special-case to work around those two bugs. Both are now fixed at the source; do not
+  reintroduce either. `ENGINES` (= `AVAILABLE_AGENTS`, all five) is once again a truthful list.
+- **Do not edit `ui/src/state/agents.ts` or `src-tauri/src/commands/agents.rs`.** The Rust test
+  `agents_match_frontend` pins the two to the same five names in the same order. This plan
+  consumes that list and never redefines it.
 - **`shell` is always installed.** `agents_check_installed` runs `which::which("shell")`, which never resolves; shell spawns `$SHELL` and cannot fail to be available.
-- **Do not touch `ui/src/state/agents.ts`.** Its reducer belongs to the separate agent-installation design and stays unwired.
+- **Do not wire `agents.ts`'s reducer.** Its install-state machine belongs to the parallel
+  agent-installation work. This plan reads the installed list via `agentCheckInstalled()` only.
 - **Do not change behaviour of the sidebar `+` or the map's "Open terminal here."** Both keep spawning the default silently.
 - No new npm dependencies. Icon geometry is inlined, not fetched.
 - Run tests from `ui/`: `npm test`.
 - Conventional commits: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`.
-- ⚠️ **A parallel session is committing to `main` right now**, building the agent-installation
-  feature (`NewWorkspaceModal` install rows, `agents_check_installed` wiring). It has uncommitted
-  edits in `PaneHeader.tsx`, `Workspace.tsx`, `App.tsx`, `Sidebar.tsx` and their tests. Check
-  `git log` and `git status` before each task, and rebase rather than reverting its work.
+- Baseline at branch point (`1b34dee`): 60 test files, 1024 tests, all passing. Any failure you
+  see is yours.
 
 ---
 
@@ -74,7 +75,7 @@
 
 **Background the implementer needs:** `Icon.tsx` renders one shared `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor">`. Brand marks are *solid* shapes, not strokes, so each sets `fill="currentColor" stroke="none"` on its own `<path>` — exactly how the existing `more` icon overrides the shared attributes for its dots (`Icon.tsx:76-80`). No prop or signature change to `Icon`.
 
-**`AGENT_ICON` must cover all five agents, not three.** `Engine` now aliases `Agent` (commit `f9bf83c`), so `Record<Engine, IconName>` will not type-check without `copilot` and `antigravity` keys — and `theme.ts` already carries all five in `ENGINE_LABEL`/`ENGINE_COLOR`/`ENGINE_HINT` (commit `8867d57`). Giving all five an icon also means the parallel session's `NewWorkspaceModal` install rows can use them. Only three ever reach the picker — that filtering is Task 2's job, not this one's.
+**`AGENT_ICON` must cover all five agents.** `Engine` aliases `Agent` (commit `f9bf83c`), so `Record<Engine, IconName>` will not type-check without `copilot` and `antigravity` keys — and `theme.ts` already carries all five in `ENGINE_LABEL`/`ENGINE_COLOR`/`ENGINE_HINT` (commit `8867d57`). All five genuinely reach the ⌘T picker on a machine that has them installed, since commit `1b34dee` made every one spawnable. These marks are user-facing for all five, not placeholders for two of them.
 
 Claude, codex and copilot geometry is copied from [simple-icons](https://github.com/simple-icons/simple-icons) (`claude.svg`, `openai.svg`, `githubcopilot.svg`), which is CC0 — that licence is why we use their traced paths rather than copying marks off a vendor site.
 
@@ -197,9 +198,9 @@ import type { IconName } from "./components/Icon";
 ```ts
 /** Which mark stands for each agent — the fourth per-engine lookup, kept
  * here with LABEL/COLOR/HINT so adding one means editing a single file.
- * Covers all five *installable* agents, matching the other three maps;
- * only the three spawnable ones reach the ⌘T picker, which is
- * `lib/useInstalledAgents.ts`'s filtering job, not this map's. */
+ * Covers all five agents, matching the other three maps. Which of them a
+ * given machine is offered is `lib/useInstalledAgents.ts`'s question, not
+ * this map's — every agent has a mark whether or not it is installed. */
 export const AGENT_ICON: Record<Engine, IconName> = {
   claude: "agent-claude",
   codex: "agent-codex",
@@ -230,15 +231,14 @@ git commit -m "feat(ui): add per-agent logo icons"
 - Test: `ui/src/lib/useInstalledAgents.test.ts`
 
 **Interfaces:**
-- Consumes: `agentCheckInstalled(): Promise<string[]>` from `ui/src/lib/tauri.ts:563`; `Engine` type from `ui/src/state/sessions.ts`.
-- Produces:
-  - `SPAWNABLE: readonly Engine[]` — `["claude", "codex", "shell"]`, this module's own list.
-  - `installedEngines(names: string[]): Engine[]` — pure filter.
-  - `useInstalledAgents(): Engine[]` — hook, returns all of `SPAWNABLE` until detection resolves.
+- Consumes: `agentCheckInstalled(): Promise<string[]>` from `ui/src/lib/tauri.ts:562`; `ENGINES`, `isEngine`, `Engine` from `ui/src/state/sessions.ts:12,28`.
+- Produces: `useInstalledAgents(): Engine[]` — hook, returns all of `ENGINES` until detection resolves.
 
-**Background the implementer needs:** the backend reports installed agents by running `which` over five names, two of which (`copilot`, `antigravity`) cannot be spawned and one of which (`shell`) can never be detected. Both distortions are corrected here, in one pure function, so no component has to know about them.
+**Background the implementer needs:** as of commit `1b34dee` the backend's answer is correct on its own — `agents_check_installed` reports built-ins (`shell`) as always present and probes everything else by its real binary (`agy` for antigravity). There is nothing left to correct here, so this hook does almost nothing: call, validate, store.
 
-Do **not** import `ENGINES` for the filter. Since commit `f9bf83c` it aliases `AVAILABLE_AGENTS` — all five names — so filtering by it would let `copilot`/`antigravity` through to a spawn the Rust side rejects. `SPAWNABLE` is declared here, literally, and mirrors the match arms in `build_engine_argv`.
+The one thing it does add is `isEngine` (`state/sessions.ts:28`) as a filter. That is not defensive padding against the current backend — it is the seam where a future backend/frontend list drift shows up as a missing button rather than as an `unsupported engine` crash at spawn time. `agents_match_frontend` pins the two lists today; `isEngine` is what keeps a broken pin cheap.
+
+**Do not** reintroduce a `SPAWNABLE` literal or a `shell` special-case. An earlier draft of this plan had both, as workarounds for bugs commit `1b34dee` has since fixed at the source. Duplicating the agent list in the frontend is the exact drift that caused the original break.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -251,50 +251,43 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { agentCheckInstalledMock } = vi.hoisted(() => ({ agentCheckInstalledMock: vi.fn() }));
 vi.mock("./tauri", () => ({ agentCheckInstalled: agentCheckInstalledMock }));
 
-const { SPAWNABLE, installedEngines, useInstalledAgents } = await import("./useInstalledAgents");
-
-describe("installedEngines", () => {
-  it("keeps shell even though `which shell` can never find it", () => {
-    expect(installedEngines([])).toEqual(["shell"]);
-  });
-
-  it("drops copilot and antigravity, which session_create cannot spawn", () => {
-    expect(installedEngines(["claude", "copilot", "antigravity"])).toEqual(["claude", "shell"]);
-  });
-
-  it("keeps detected engines in SPAWNABLE order, not report order", () => {
-    expect(installedEngines(["codex", "claude"])).toEqual(["claude", "codex", "shell"]);
-  });
-
-  // Guards the reason SPAWNABLE is a literal rather than `ENGINES`: since
-  // commit f9bf83c, ENGINES aliases AVAILABLE_AGENTS (all five). If someone
-  // "simplifies" SPAWNABLE back to ENGINES, this fails.
-  it("lists exactly the three engines build_engine_argv has arms for", () => {
-    expect([...SPAWNABLE]).toEqual(["claude", "codex", "shell"]);
-  });
-});
+const { useInstalledAgents } = await import("./useInstalledAgents");
 
 describe("useInstalledAgents", () => {
   beforeEach(() => agentCheckInstalledMock.mockReset());
 
-  it("offers every spawnable engine until detection resolves", () => {
+  it("offers every agent until detection resolves", () => {
     agentCheckInstalledMock.mockReturnValue(new Promise(() => {}));
     const { result } = renderHook(() => useInstalledAgents());
-    expect(result.current).toEqual(["claude", "codex", "shell"]);
+    expect(result.current).toEqual(["claude", "codex", "shell", "copilot", "antigravity"]);
   });
 
-  it("narrows to the detected set once it resolves", async () => {
+  it("narrows to what the backend reports, in the order it reports", async () => {
+    agentCheckInstalledMock.mockResolvedValue(["claude", "shell", "antigravity"]);
+    const { result } = renderHook(() => useInstalledAgents());
+    await waitFor(() => expect(result.current).toEqual(["claude", "shell", "antigravity"]));
+  });
+
+  it("trusts the backend about shell — no frontend special-case re-adds it", async () => {
     agentCheckInstalledMock.mockResolvedValue(["codex"]);
     const { result } = renderHook(() => useInstalledAgents());
-    await waitFor(() => expect(result.current).toEqual(["codex", "shell"]));
+    await waitFor(() => expect(result.current).toEqual(["codex"]));
   });
 
-  it("falls back to every spawnable engine when detection fails", async () => {
+  // The seam that keeps a frontend/backend list drift cheap: an unknown name
+  // becomes a missing button, not an `unsupported engine` crash at spawn.
+  it("drops names it does not recognise as engines", async () => {
+    agentCheckInstalledMock.mockResolvedValue(["claude", "cursor", "shell"]);
+    const { result } = renderHook(() => useInstalledAgents());
+    await waitFor(() => expect(result.current).toEqual(["claude", "shell"]));
+  });
+
+  it("falls back to every agent when detection fails", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     agentCheckInstalledMock.mockRejectedValue(new Error("no ipc"));
     const { result } = renderHook(() => useInstalledAgents());
     await waitFor(() => expect(err).toHaveBeenCalled());
-    expect(result.current).toEqual(["claude", "codex", "shell"]);
+    expect(result.current).toEqual(["claude", "codex", "shell", "copilot", "antigravity"]);
     err.mockRestore();
   });
 });
@@ -312,57 +305,42 @@ Create `ui/src/lib/useInstalledAgents.ts`:
 ```ts
 // Which agents this machine can actually start a terminal with.
 //
-// The backend's `agents_check_installed` answers a slightly different
-// question than the picker asks, in two ways this module corrects once so
-// no component has to remember either:
+// Thin on purpose. `agents_check_installed` (src-tauri/src/commands/agents.rs)
+// answers exactly this question as of commit 1b34dee: it walks the one
+// `AGENTS` table, counts built-ins (`shell`, which has no binary) as always
+// present, and probes everything else by its real executable — `agy` for
+// antigravity, whose name and binary differ. There is no distortion left for
+// the frontend to correct.
 //
-// 1. It reports over `SUPPORTED_AGENTS` — five names, two of which
-//    (`copilot`, `antigravity`) `build_engine_argv` rejects outright
-//    (`src-tauri/src/sessions.rs`: "unsupported engine"). Offering one
-//    would be a button that errors, so the result is intersected with
-//    `SPAWNABLE` below.
-// 2. It detects by `which::which(agent)`, and nothing on PATH is named
-//    `shell`. Shell is therefore always reported missing while being the
-//    one engine that cannot fail (it spawns `$SHELL`, defaulting to
-//    `/bin/zsh`), so it is added back unconditionally.
+// An earlier draft of this module re-derived the spawnable set here, with a
+// hardcoded three-engine list and a `shell` special-case, because the backend
+// was wrong on both counts. It isn't anymore, and a second copy of the agent
+// list in the frontend is precisely the drift that broke it the first time.
+// If an agent is missing from the picker, fix `AGENTS` — not this file.
 import { useEffect, useState } from "react";
 import { agentCheckInstalled } from "./tauri";
-import type { Engine } from "../state/sessions";
-
-/**
- * The engines `build_engine_argv` (`src-tauri/src/sessions.rs`) actually has
- * match arms for. Its fallback arm errors with "unsupported engine", so
- * anything outside this list is a picker button that cannot spawn.
- *
- * Deliberately a literal and NOT `ENGINES`: since commit f9bf83c that
- * constant aliases `AVAILABLE_AGENTS` — all five *installable* names,
- * including `copilot` and `antigravity`, which the Rust side has no arms
- * for. "Installable" and "spawnable" are two different sets, and this is
- * the spawnable one. Widen it only alongside a matching arm in Rust.
- */
-export const SPAWNABLE = ["claude", "codex", "shell"] as const satisfies readonly Engine[];
-
-/** The spawnable subset of a raw `agents_check_installed` report, in
- * `SPAWNABLE` order so the picker's layout never depends on probe order. */
-export function installedEngines(names: string[]): Engine[] {
-  return SPAWNABLE.filter((engine) => engine === "shell" || names.includes(engine));
-}
+import { ENGINES, isEngine, type Engine } from "../state/sessions";
 
 export function useInstalledAgents(): Engine[] {
-  // Starts permissive: detection is async, and a picker that opens empty
-  // for a frame — or forever, if the call fails — leaves the user with no
-  // way to open a terminal at all. Over-offering degrades to the old
-  // behaviour (a spawn that may fail loudly); under-offering is a dead end.
-  const [installed, setInstalled] = useState<Engine[]>(() => [...SPAWNABLE]);
+  // Starts permissive: detection is async, and a picker that opens empty for
+  // a frame — or forever, if the IPC call fails — leaves the user with no way
+  // to open a terminal at all. Over-offering degrades to a spawn that fails
+  // loudly and legibly; under-offering is a dead end with no error to read.
+  const [installed, setInstalled] = useState<Engine[]>(() => [...ENGINES]);
 
   useEffect(() => {
     let alive = true;
     agentCheckInstalled()
       .then((names) => {
-        if (alive) setInstalled(installedEngines(names));
+        // `isEngine` is the seam, not paranoia: if `AGENTS` and
+        // `AVAILABLE_AGENTS` ever drift past the `agents_match_frontend`
+        // test that pins them, an unknown name becomes a button this UI
+        // simply doesn't draw — instead of one that reaches `session_create`
+        // and dies with "unsupported engine".
+        if (alive) setInstalled(names.filter(isEngine));
       })
       .catch((err) => {
-        console.error("agent detection failed, offering every engine", err);
+        console.error("agent detection failed, offering every agent", err);
       });
     return () => {
       alive = false;
@@ -764,7 +742,9 @@ git commit -m "feat(ui): pane + opens an agent menu instead of spawning the defa
 
 **Background the implementer needs:** `EnginePicker.tsx` is the same modal minus logos — read it before deleting it; its keyboard model is being kept, not reinvented. That model (focus on mount, Escape cancels, Enter confirms, digits `1..n` select **and** confirm in one keystroke, hover-selects / click-confirms) is shared with `NewChooserModal.tsx` and `state/keyboardShortcuts.ts`'s `chooserKeyAction`.
 
-Two things change. Rows become a horizontal grid of buttons, so `ArrowLeft`/`ArrowRight` join `ArrowUp`/`ArrowDown`. And selection wraps over the **`agents` array** — do **not** use `cycleEngine` (`state/sessions.ts:411`), which wraps over `ENGINES`. That was already wrong (it ignores what is installed) and is now worse: since commit `f9bf83c`, `ENGINES` includes `copilot` and `antigravity`, so `cycleEngine` would step the selection onto an engine the backend cannot spawn at all.
+Two things change. Rows become a horizontal grid of buttons, so `ArrowLeft`/`ArrowRight` join `ArrowUp`/`ArrowDown`. And selection wraps over the **`agents` array** — do **not** use `cycleEngine` (`state/sessions.ts:411`), which wraps over all of `ENGINES` and would step the selection onto an agent this machine has not installed.
+
+The grid holds **up to five** tiles, so `1`-`5` are all live digit keys and the frame is sized for two rows.
 
 `defaultEngine` may not be in `agents` (a project configured for codex on a machine without it), so the initial selection falls back to `agents[0]`.
 
@@ -1000,10 +980,10 @@ Append to `ui/src/App.css`, after `.engine-picker-footer`:
 ```css
 /* ⌘T's agent grid — the "beautiful buttons with their respective logos"
    half of the 2026-07-26 picker ask. Wider than the shared 420px chooser
-   frame so three logo tiles breathe; `auto-fit` keeps two or one centred
-   when a machine has fewer agents installed. */
+   frame so three tiles per row breathe; `auto-fit` reflows to two rows at
+   four or five agents, and centres one or two on a sparse machine. */
 .agent-picker {
-  width: 520px;
+  width: 560px;
 }
 
 .agent-picker-grid {
@@ -1133,7 +1113,9 @@ describe("cmd+T agent picker", () => {
     // Same default wiring App.requestNewTab.test.tsx sets up in its own
     // beforeEach — one project, no stored engine overrides, sessions that
     // create successfully. Copy that block.
-    tauriMocks.agentCheckInstalledMock.mockResolvedValue(["claude", "codex"]);
+    // Includes "shell" explicitly: since commit 1b34dee the backend reports
+    // built-ins itself, and the hook no longer re-adds shell on the frontend.
+    tauriMocks.agentCheckInstalledMock.mockResolvedValue(["claude", "codex", "shell"]);
   });
 
   it("opens the picker instead of spawning, preselecting the resolved default", async () => {
@@ -1174,13 +1156,27 @@ describe("cmd+T agent picker", () => {
   });
 
   it("only offers agents this machine has installed", async () => {
-    tauriMocks.agentCheckInstalledMock.mockResolvedValue([]);
+    tauriMocks.agentCheckInstalledMock.mockResolvedValue(["claude", "shell"]);
     render(<App />);
     await screen.findByText("new-tab-p1");
     fireEvent.keyDown(window, { key: "t", metaKey: true });
     await screen.findByRole("dialog", { name: /New terminal in/ });
     await waitFor(() => expect(screen.queryByRole("button", { name: /Codex/ })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /Claude Code/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Shell/ })).toBeInTheDocument();
+  });
+
+  it("offers copilot and antigravity too, now that both can spawn", async () => {
+    tauriMocks.agentCheckInstalledMock.mockResolvedValue(["shell", "copilot", "antigravity"]);
+    render(<App />);
+    await screen.findByText("new-tab-p1");
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    await screen.findByRole("dialog", { name: /New terminal in/ });
+    await waitFor(() => expect(screen.getByRole("button", { name: /Copilot/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /AntiGravity/ }));
+    await waitFor(() =>
+      expect(tauriMocks.sessionCreateMock).toHaveBeenCalledWith("p1", "antigravity", expect.any(String), undefined),
+    );
   });
 });
 ```
@@ -1327,7 +1323,7 @@ If steps 1-7 all pass, there is nothing to commit — say so rather than inventi
 
 | Spec section | Task |
 |---|---|
-| 1. `useInstalledAgents` — shell always, spawnable-set intersection, error fallback | Task 2 |
+| 1. `useInstalledAgents` — trusts the backend, `isEngine` drift seam, error fallback | Task 2 |
 | 2. Logos in `Icon.tsx` + `AGENT_ICON` in `theme.ts` | Task 1 |
 | 3. `AgentMenu` popover, `.pane-menu` reuse, native focus order, `onSplit(engine)` | Tasks 3, 4 |
 | 4. `AgentPicker` modal, grid, wrap over installed, `defaultEngineFor` preselect | Task 5 |

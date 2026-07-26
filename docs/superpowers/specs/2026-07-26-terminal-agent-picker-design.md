@@ -158,9 +158,12 @@ renders `AgentPicker`; its `onConfirm(engine)` calls `requestNewTab(project, eng
 
 ## Explicitly out of scope
 
-- **Spawning `copilot`/`antigravity`.** Needs a new `build_engine_argv` arm plus widening
-  `Engine` across `theme.ts`, `PaneMenu`, `cycleEngine`, `resolveDefaultEngine` and their tests.
-  Add when those two agents are actually wanted live.
+- ~~**Spawning `copilot`/`antigravity`.**~~ **Resolved upstream, 2026-07-26.** Commit `1b34dee`
+  ("make the five-agent list actually work end to end") added a
+  `name @ ("copilot" | "antigravity")` arm to `build_engine_argv` and consolidated agent facts
+  into one `AGENTS` table. All five agents now spawn, and all five appear in the picker when
+  installed. Constraints 1 and 2 in the section above describe the code as it was when this spec
+  was written; both were fixed at the source rather than worked around here.
 - **Install-on-select.** `PaneInstallOverlay.tsx` and `agents_install` exist but are unwired;
   the picker only ever offers what is already installed.
 - **The sidebar's per-project `+`** (`Sidebar.tsx:477`) and the map's "Open terminal here" keep
