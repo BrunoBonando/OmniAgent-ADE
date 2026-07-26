@@ -7,6 +7,8 @@ import {
   authGateAlreadyResolved,
   authGateReducer,
   describeAuthSummary,
+  resolveSignedIn,
+  FAKE_ACCOUNT_NAME,
   initialAuthGateState,
   personaLabel,
   type AuthGateState,
@@ -116,21 +118,38 @@ describe("personaLabel", () => {
 });
 
 describe("describeAuthSummary (AboutPanel's light-touch surfacing)", () => {
-  it("describes a fresh/unresolved state plainly", () => {
-    expect(describeAuthSummary(null, null)).toBe("Not signed in (dev mode).");
+  it("describes an unwritten state as the fake dev identity (2026-07-26 default)", () => {
+    // The signed-in default: only an explicit "false" means signed out.
+    expect(describeAuthSummary(null, null)).toBe("Bruno Bonando (dev mode).");
   });
 
-  it("describes an explicit skip", () => {
+  it("describes an explicit skip or log out", () => {
     expect(describeAuthSummary("false", null)).toBe("Not signed in (dev mode).");
   });
 
   it("describes a fake sign-in with a captured persona", () => {
-    expect(describeAuthSummary("true", "data-ml")).toBe("Signed in — Data & ML.");
+    expect(describeAuthSummary("true", "data-ml")).toBe("Bruno Bonando — Data & ML.");
   });
 
   it("describes a fake sign-in where the question was skipped", () => {
-    expect(describeAuthSummary("true", null)).toBe("Signed in.");
-    expect(describeAuthSummary("true", "")).toBe("Signed in.");
+    expect(describeAuthSummary("true", null)).toBe("Bruno Bonando (dev mode).");
+    expect(describeAuthSummary("true", "")).toBe("Bruno Bonando (dev mode).");
+  });
+});
+
+describe("resolveSignedIn (the fake-identity default)", () => {
+  it("treats an unwritten setting as signed in", () => {
+    expect(resolveSignedIn(null)).toBe(true);
+  });
+
+  it("treats only an explicit \"false\" as signed out", () => {
+    expect(resolveSignedIn("false")).toBe(false);
+    expect(resolveSignedIn("true")).toBe(true);
+    expect(resolveSignedIn("")).toBe(true);
+  });
+
+  it("names the fake identity as an obvious constant, not a fabricated account", () => {
+    expect(FAKE_ACCOUNT_NAME).toBe("Bruno Bonando");
   });
 });
 

@@ -1,69 +1,126 @@
 import { describe, expect, it } from "vitest";
-import { accountBadgeInitial, accountMenuItems, deriveAccountBadgeState } from "./accountBadgeState";
+import {
+  accountBadgeInitial,
+  accountBadgeSubtitle,
+  accountMenuItems,
+  deriveAccountBadgeState,
+} from "./accountBadgeState";
+import { FAKE_ACCOUNT_NAME } from "../onboarding/authGateState";
 
 describe("deriveAccountBadgeState", () => {
-  it("is not signed in for a fresh/never-resolved state", () => {
-    expect(deriveAccountBadgeState(null, null)).toEqual({ signedIn: false, personaLabel: null });
+  it("defaults to signed in as the fake dev identity when nothing has been written", () => {
+    // Bruno, 2026-07-26: "just make a fake one as if I was logged in as
+    // BrunoBonando" — a fresh install shows the signed-in experience.
+    expect(deriveAccountBadgeState(null, null)).toEqual({
+      signedIn: true,
+      personaLabel: null,
+      displayName: FAKE_ACCOUNT_NAME,
+    });
   });
 
-  it("is not signed in after an explicit skip-from-login", () => {
-    expect(deriveAccountBadgeState("false", null)).toEqual({ signedIn: false, personaLabel: null });
+  it("is not signed in after an explicit skip-from-login or log out", () => {
+    expect(deriveAccountBadgeState("false", null)).toEqual({
+      signedIn: false,
+      personaLabel: null,
+      displayName: null,
+    });
   });
 
   it("is signed in with a resolved persona label", () => {
-    expect(deriveAccountBadgeState("true", "data-ml")).toEqual({ signedIn: true, personaLabel: "Data & ML" });
+    expect(deriveAccountBadgeState("true", "data-ml")).toEqual({
+      signedIn: true,
+      personaLabel: "Data & ML",
+      displayName: FAKE_ACCOUNT_NAME,
+    });
   });
 
   it("is signed in with no persona when the personalize question was skipped", () => {
-    expect(deriveAccountBadgeState("true", "")).toEqual({ signedIn: true, personaLabel: null });
-    expect(deriveAccountBadgeState("true", null)).toEqual({ signedIn: true, personaLabel: null });
+    expect(deriveAccountBadgeState("true", "").personaLabel).toBeNull();
+    expect(deriveAccountBadgeState("true", null).personaLabel).toBeNull();
   });
 
   it("ignores a persona value when not signed in, even if one is somehow present", () => {
     // Defensive: authGateReducer never actually produces this combination,
-    // but the badge must never show a persona for a signed-out user.
+    // but the badge must never show a persona (or a name) for a signed-out
+    // user.
     expect(deriveAccountBadgeState("false", "software-engineering")).toEqual({
       signedIn: false,
       personaLabel: null,
+      displayName: null,
     });
   });
 
   it("treats an unknown persona id the same as no persona", () => {
-    expect(deriveAccountBadgeState("true", "not-a-real-id")).toEqual({ signedIn: true, personaLabel: null });
+    expect(deriveAccountBadgeState("true", "not-a-real-id").personaLabel).toBeNull();
   });
 });
 
 describe("accountBadgeInitial", () => {
-  it("is null when there's no persona label (not signed in, or signed in but skipped)", () => {
-    expect(accountBadgeInitial({ signedIn: false, personaLabel: null })).toBeNull();
-    expect(accountBadgeInitial({ signedIn: true, personaLabel: null })).toBeNull();
+  it("is the signed-in user's initial", () => {
+    expect(accountBadgeInitial(deriveAccountBadgeState("true", "data-ml"))).toBe("B");
+    expect(accountBadgeInitial(deriveAccountBadgeState(null, null))).toBe("B");
   });
 
-  it("is the uppercased first letter of the persona label", () => {
-    expect(accountBadgeInitial({ signedIn: true, personaLabel: "Data & ML" })).toBe("D");
-    expect(accountBadgeInitial({ signedIn: true, personaLabel: "Student" })).toBe("S");
+  it("is null when signed out, so the badge falls back to its placeholder glyph", () => {
+    expect(accountBadgeInitial(deriveAccountBadgeState("false", null))).toBeNull();
+  });
+});
+
+describe("accountBadgeSubtitle", () => {
+  it("shows the captured persona when there is one", () => {
+    expect(accountBadgeSubtitle(deriveAccountBadgeState("true", "devops-infra"))).toBe("DevOps & Infrastructure");
+  });
+
+  it("is honest that the identity is a dev-mode placeholder", () => {
+    expect(accountBadgeSubtitle(deriveAccountBadgeState("true", null))).toContain("dev mode");
+    expect(accountBadgeSubtitle(deriveAccountBadgeState("false", null))).toBe("Not signed in (dev mode).");
   });
 });
 
 describe("accountMenuItems", () => {
-  it("signed in: Preferences/Billing enabled with no gating hint, Log out present, no Sign in row", () => {
+  it("signed in: everything enabled, Log out present, no Sign in row", () => {
     const items = accountMenuItems(true);
-    expect(items.map((i) => i.id)).toEqual(["preferences", "billing", "log-out"]);
+    expect(items.map((i) => i.id)).toEqual([
+      "preferences",
+      "keyboard-shortcuts",
+      "view-logs",
+      "billing",
+      "log-out",
+    ]);
     expect(items.every((i) => i.enabled)).toBe(true);
     expect(items.find((i) => i.id === "preferences")?.hint).toBeUndefined();
-    expect(items.find((i) => i.id === "billing")?.hint).toBeUndefined();
   });
 
-  it("not signed in: Preferences/Billing disabled with a gating hint, Sign in present and enabled, no Log out row", () => {
+  it("not signed in: account rows gated, the local ones still work, Sign in swapped in", () => {
     const items = accountMenuItems(false);
-    expect(items.map((i) => i.id)).toEqual(["preferences", "billing", "sign-in"]);
+    expect(items.map((i) => i.id)).toEqual([
+      "preferences",
+      "keyboard-shortcuts",
+      "view-logs",
+      "billing",
+      "sign-in",
+    ]);
     expect(items.find((i) => i.id === "preferences")).toMatchObject({ enabled: false, hint: "Sign in to access" });
     expect(items.find((i) => i.id === "billing")).toMatchObject({ enabled: false, hint: "Sign in to access" });
+    // Shortcuts and logs are facts about this machine, not about an account.
+    expect(items.find((i) => i.id === "keyboard-shortcuts")?.enabled).toBe(true);
+    expect(items.find((i) => i.id === "view-logs")?.enabled).toBe(true);
     expect(items.find((i) => i.id === "sign-in")).toMatchObject({ enabled: true, label: "Sign in" });
   });
 
   it("item order is stable across both auth states (no reshuffle on sign-in)", () => {
-    expect(accountMenuItems(true).map((i) => i.id).slice(0, 2)).toEqual(["preferences", "billing"]);
-    expect(accountMenuItems(false).map((i) => i.id).slice(0, 2)).toEqual(["preferences", "billing"]);
+    expect(accountMenuItems(true).map((i) => i.id).slice(0, 4)).toEqual(
+      accountMenuItems(false).map((i) => i.id).slice(0, 4),
+    );
+  });
+
+  it("says of every row whether it really does something", () => {
+    // The honesty contract: a row is a real action, an explicit placeholder,
+    // or the auth reset — never a dead button pretending otherwise.
+    for (const item of [...accountMenuItems(true), ...accountMenuItems(false)]) {
+      expect(["action", "placeholder", "auth"]).toContain(item.kind);
+    }
+    const wired = accountMenuItems(true).filter((i) => i.kind === "action").map((i) => i.id);
+    expect(wired).toEqual(["keyboard-shortcuts", "view-logs"]);
   });
 });

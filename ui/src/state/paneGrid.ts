@@ -58,6 +58,50 @@ export function addPane(tree: PaneTree | null, id: string): PaneTree {
 }
 
 /**
+ * Adds a whole pre-arranged *sub-tree* (a brand-new session's panes, already
+ * shaped by `buildLayoutTree` into its chosen LAYOUT preset) beside what's
+ * already on screen — the "new session in a project that already has panes"
+ * case (founder brief, 2026-07-26: a session is created "with a new layout,
+ * agents, etc... but in the same folder or subfolder").
+ *
+ * Follows `addPane`'s load-bearing rule exactly, and for the same reason:
+ * the sub-tree is appended as one more child of the *existing root split*,
+ * never by wrapping the current tree in a new one. Appending leaves every
+ * existing leaf's tree path untouched, so react-mosaic-component keeps their
+ * `<Terminal>`s mounted (see `addPane`'s doc and
+ * `Workspace.mountStability.test.tsx` — wrapping remounts every open
+ * terminal, which for live agent sessions means dropping their output
+ * stream). An empty grid simply becomes the sub-tree; a single-leaf grid
+ * pairs with it in a row split, same shape `addPane` produces for the second
+ * pane.
+ *
+ * Ids already present in `tree` are dropped from the incoming sub-tree
+ * first — a duplicate leaf id would make Mosaic render the same session
+ * twice — and a sub-tree that adds nothing new returns the same tree
+ * reference back.
+ */
+export function addPaneSubtree(tree: PaneTree | null, subtree: PaneTree): PaneTree {
+  const present = new Set(paneIds(tree));
+  const fresh = paneIds(subtree).filter((id) => !present.has(id));
+  if (fresh.length === 0) return tree ?? subtree;
+
+  // Only prune when something actually collides, so the common case keeps
+  // the caller's exact arrangement (including any split percentages).
+  let incoming: PaneTree | null = subtree;
+  if (fresh.length !== paneIds(subtree).length) {
+    for (const id of paneIds(subtree)) {
+      if (present.has(id)) incoming = removePane(incoming, id);
+    }
+  }
+  if (incoming === null) return tree ?? subtree;
+  if (tree === null) return incoming;
+  if (typeof tree !== "string" && tree.type === "split") {
+    return { type: "split", direction: tree.direction, children: [...tree.children, incoming] };
+  }
+  return { type: "split", direction: "row", children: [tree, incoming] };
+}
+
+/**
  * Removes `id`'s pane. A split left with exactly one remaining child
  * collapses to that child directly (so closing a pane never leaves a
  * pointless single-child split node around) — recursively, so removing the

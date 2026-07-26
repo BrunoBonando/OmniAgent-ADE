@@ -82,13 +82,52 @@ export function authGateAlreadyResolved(settingValue: string | null): boolean {
  * gate again on the next check. */
 export const AUTH_GATE_RESOLVED_SETTING_KEY = "auth_gate_resolved";
 
-/** `"true"`/`"false"` — which exit the user took. Only meaningful once
- * `AUTH_GATE_RESOLVED_SETTING_KEY === "true"`. */
+/** `"true"`/`"false"` — which exit the user took. Unset means "nobody has
+ * said otherwise", which — see `FAKE_ACCOUNT_NAME`/`resolveSignedIn` below
+ * — now reads as signed in. */
 export const AUTH_SIGNED_IN_SETTING_KEY = "auth_signed_in";
 
 /** The chosen `PersonaOption.id`, or `""` if signed in but skipped the
  * question (or never signed in at all). */
 export const AUTH_PERSONA_SETTING_KEY = "auth_persona";
+
+// ---------------------------------------------------- the fake identity
+// Bruno, 2026-07-26, verbatim: "I know that we didn't implement the login
+// part yet, so just make a fake one as if I was logged in as
+// BrunoBonando."
+//
+// This is the WHOLE implementation of that: one exported constant, used as
+// the display name wherever a signed-in user's name is shown, plus the
+// "unset means signed in" default below. There is deliberately no fake
+// account object, no fake token, no fake profile fetch and no fake backend
+// — nothing here pretends a login happened; the app simply starts in its
+// signed-in *state*, wearing a name that is obviously a constant in the
+// source. When a real auth system lands, the name comes from it and this
+// constant is deleted; nothing else has to be untangled.
+
+/** The dev-mode placeholder identity. NOT a real account: no credential,
+ * no server, no profile — see the block comment above. */
+export const FAKE_ACCOUNT_NAME = "Bruno Bonando";
+
+/**
+ * Whether the app should behave as signed in, given the raw
+ * `AUTH_SIGNED_IN_SETTING_KEY` value.
+ *
+ * **Unset defaults to signed in** — so a fresh install (and Bruno's own
+ * machine, where nothing has written this key) shows the logged-in
+ * experience without anyone having to click through a login that isn't
+ * real. Only the explicit string `"false"` — which is exactly what "Log
+ * out"/"Continue without signing in" write — means signed out, so both
+ * flows stay fully testable: log out, and the badge really does go
+ * anonymous until the next sign-in.
+ *
+ * Deliberately the mirror image of `authGateAlreadyResolved`'s "only an
+ * explicit 'true' counts" convention, for the opposite default, and the
+ * one place that asymmetry is written down.
+ */
+export function resolveSignedIn(settingValue: string | null): boolean {
+  return settingValue !== "false";
+}
 
 // ------------------------------------------------------------ persona list
 // Adapted from the ChatGPT Desktop reference Bruno shared — same PATTERN
@@ -122,7 +161,7 @@ export function personaLabel(id: string | null): string | null {
  * the two raw setting values as read (both `string | null`) so it stays
  * pure/testable without mocking `settingsGet`. */
 export function describeAuthSummary(signedInRaw: string | null, personaRaw: string | null): string {
-  if (signedInRaw !== "true") return "Not signed in (dev mode).";
+  if (!resolveSignedIn(signedInRaw)) return "Not signed in (dev mode).";
   const label = personaLabel(personaRaw);
-  return label ? `Signed in — ${label}.` : "Signed in.";
+  return label ? `${FAKE_ACCOUNT_NAME} — ${label}.` : `${FAKE_ACCOUNT_NAME} (dev mode).`;
 }

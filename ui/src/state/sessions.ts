@@ -27,17 +27,26 @@ export interface ProjectInfo {
  * `TabBar` to set one) — falls back to `engine` when unset. See
  * `tabDisplayLabel`.
  *
- * `needsAttention` (founder feedback, 2026-07-24 — Bruno, verbatim: "every
- * claude session can notify the app whenever it needs attention[...]
- * generate a badge"): set by the `tab/attention` action when a
- * `session-attention:{id}` Tauri event arrives (`sessions.rs`'s PTY reader
- * thread pattern-matches the raw output stream for Claude's own
- * tool-permission-prompt text — see that file's module docs for the full
- * investigation), cleared by `tab/activated` — the same action every
- * existing tab-focus path (`TabBar`, `Sidebar`'s per-project tab list,
- * `CommandPalette`) already dispatches through `onActivateTab`, so "the
- * user actually looked at this tab" needs no new UI wiring, just this
- * reducer case doing one more thing.
+ * ## `needsAttention` is gone (2026-07-26), folded into `status`
+ *
+ * This used to carry a latched `needsAttention: boolean`, set by a
+ * `tab/attention` action fed from the `session-attention:{id}` event and
+ * cleared by `tab/activated`, rendered as a red dot in three places (pane
+ * header, sidebar project row, sidebar tab row). The five-state light
+ * (`status` below) is driven by the *same* underlying detection in
+ * `sessions.rs` and now says the same thing in a richer language:
+ * `awaiting_approval` is exactly "this session is waiting on you" and
+ * `error` is exactly "this one is stuck". Keeping both meant the UI
+ * claimed the same fact twice, in two colours, with two different
+ * lifetimes (one latched-until-clicked, one live) — which is worse than
+ * either alone, because they disagree the moment a session resolves
+ * itself without the user ever looking.
+ *
+ * So attention is now *derived*, never stored: `statusNeedsAttention`
+ * (`sessionStatus.ts`) is the one definition, the sidebar tints its dot
+ * with the same status colour the pane's light uses, and the notifications
+ * panel (`state/notifications.ts`) owns the "you were somewhere else when
+ * this happened" job the latched badge was really being used for.
  *
  * `themeId` (founder ask, verbatim: "you can add some themes for each
  * terminal already ... The theme is applied to the terminal only and it
@@ -58,7 +67,28 @@ export interface TabInfo {
   cwd: string;
   createdAt: number;
   label?: string;
-  needsAttention: boolean;
+  /** Which *session* (pane group) inside its project this pane belongs to
+   * — founder brief, 2026-07-26, verbatim: "Each session can be created
+   * with a new layout, agents, etc... but in the same folder or subfolder"
+   * and "Inside each workspace (first column) it must show the session
+   * it's currently on the screen".
+   *
+   * A **workspace** is a project (a sidebar row, its own folder); a
+   * **session** is the set of one-or-more agent panes created together
+   * inside it, with their own layout preset, their own engines and their
+   * own cwd (the project folder or a subfolder of it). This id is what
+   * makes that grouping real — see `state/sessionGroups.ts` for the
+   * derivations built on it and `components/Sidebar.tsx` for the
+   * project -> session -> pane tree it renders.
+   *
+   * Optional on purpose: layouts persisted before this existed have no
+   * group, and every one of those panes still has to restore and render
+   * exactly as it did (they're collected under a single implicit group per
+   * project — `UNGROUPED_SESSION_ID`). Carried across a relaunch through
+   * `PersistedTab`, and across an engine restart by the caller, for the
+   * same reason `label`/`themeId` are: it describes the PANE, not the
+   * process underneath it. */
+  group?: string;
   themeId?: TerminalThemeId;
   /** This pane's five-state light (`sessionStatus.ts`), set by the
    * `tab/status` action from the `session-status:{id}` event stream and the
@@ -110,7 +140,6 @@ export type SessionsAction =
   | { type: "tab/closed"; id: string }
   | { type: "tab/activated"; id: string }
   | { type: "tab/renamed"; id: string; label: string }
-  | { type: "tab/attention"; id: string }
   // The five-state light — one `session-status:{id}` transition, or the
   // one-shot `session_status` pull for a pane that just appeared.
   | { type: "tab/status"; id: string; status: SessionStatus }
@@ -187,28 +216,13 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
     }
 
     case "tab/activated": {
-      const target = state.tabs.find((t) => t.id === action.id);
-      if (!target) return state;
-      // Activating a tab is the one place "the user actually looked at
-      // this" gets observed — clear its badge here rather than adding a
-      // second action every activation call site would need to remember to
-      // also dispatch. Skips the tabs-array rebuild when there was nothing
-      // to clear, so repeatedly clicking an already-active, already-quiet
-      // tab doesn't churn a new array on every render.
-      if (!target.needsAttention) return { ...state, activeTabId: action.id };
-      return {
-        ...state,
-        activeTabId: action.id,
-        tabs: state.tabs.map((t) => (t.id === action.id ? { ...t, needsAttention: false } : t)),
-      };
-    }
-
-    case "tab/attention": {
+      // Pure focus now: this used to ALSO clear the activated tab's latched
+      // `needsAttention` badge, which no longer exists (see `TabInfo`'s doc
+      // for why attention folded into `status`). Nothing about looking at a
+      // pane changes what its session is actually doing, so activation
+      // touches only `activeTabId` and never rebuilds the tabs array.
       if (!state.tabs.some((t) => t.id === action.id)) return state;
-      return {
-        ...state,
-        tabs: state.tabs.map((t) => (t.id === action.id ? { ...t, needsAttention: true } : t)),
-      };
+      return { ...state, activeTabId: action.id };
     }
 
     case "tab/status": {
@@ -397,6 +411,14 @@ export interface PersistedTab {
   id?: string;
   label?: string;
   themeId?: TerminalThemeId;
+  /** The pane's session (pane-group) id — see `TabInfo.group`. Persisted
+   * for the same reason `label`/`themeId` are: it's pure UI state
+   * describing the pane, and a relaunch that scattered every pane back
+   * into one anonymous pile would lose the grouping the user built. Kept
+   * optional so pre-grouping layouts restore unchanged, and validated on
+   * the way back in — a corrupt group id costs that pane its grouping, not
+   * its terminal. */
+  group?: string;
 }
 export interface Layout {
   tabs: PersistedTab[];
@@ -404,7 +426,7 @@ export interface Layout {
 
 export function serializeLayout(tabs: TabInfo[]): string {
   const layout: Layout = {
-    tabs: tabs.map(({ id, project, engine, cwd, label, themeId }) => ({
+    tabs: tabs.map(({ id, project, engine, cwd, label, themeId, group }) => ({
       project,
       engine,
       cwd,
@@ -413,6 +435,7 @@ export function serializeLayout(tabs: TabInfo[]): string {
       ...(isValidSessionId(id) ? { id } : {}),
       ...(label ? { label } : {}),
       ...(themeId ? { themeId } : {}),
+      ...(isValidSessionId(group) ? { group } : {}),
     })),
   };
   return JSON.stringify(layout);
@@ -448,6 +471,16 @@ export function deserializeLayout(raw: string | null | undefined): PersistedTab[
           (t.label === undefined || typeof t.label === "string"),
       )
       .map((t) => (t.themeId !== undefined && !isTerminalThemeId(t.themeId) ? { ...t, themeId: undefined } : t))
+      // A group id is a plain opaque token (same `[A-Za-z0-9_-]{1,96}`
+      // shape as a session id, generated by `newSessionGroupId`), so an
+      // invalid one drops just that field: the pane restores, ungrouped,
+      // instead of vanishing.
+      .map((t) => {
+        if (t.group === undefined) return t;
+        if (isValidSessionId(t.group)) return t;
+        const { group: _dropped, ...rest } = t;
+        return rest;
+      })
       .map((t) => {
         if (t.id === undefined) return t;
         if (!isValidSessionId(t.id) || seenIds.has(t.id)) {

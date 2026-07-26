@@ -9,7 +9,6 @@ function tab(overrides: Partial<TabInfo> = {}): TabInfo {
     engine: "claude",
     cwd: "/Users/bonando/Documents/Bruno.Digital/My-Brain",
     createdAt: 0,
-    needsAttention: false,
     ...overrides,
   };
 }

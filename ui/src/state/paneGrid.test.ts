@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addPane,
+  addPaneSubtree,
   buildLayoutTree,
   layoutCaption,
   LAYOUT_PRESETS,
@@ -272,5 +273,48 @@ describe("buildLayoutTree", () => {
       const tree = buildLayoutTree(ids, preset);
       expect(paneIds(tree).sort()).toEqual([...ids].sort());
     }
+  });
+});
+
+describe("addPaneSubtree — a new session's panes join the project's grid", () => {
+  it("an empty grid becomes the sub-tree itself", () => {
+    expect(addPaneSubtree(null, row(["a", "b"]))).toEqual(row(["a", "b"]));
+  });
+
+  it("a single-leaf grid pairs with the sub-tree in a row split", () => {
+    expect(addPaneSubtree("a", row(["b", "c"]))).toEqual(row(["a", row(["b", "c"])]));
+  });
+
+  it("appends to the existing root split rather than re-wrapping it", () => {
+    // The mount-stability rule: every already-open pane keeps its exact tree
+    // path, so its live <Terminal> is never remounted (see addPane's doc).
+    const before = row(["a", "b"]);
+    const after = addPaneSubtree(before, column(["c", "d"]));
+    expect(after).toEqual(row(["a", "b", column(["c", "d"])]));
+    const children = (after as { children: PaneTree[] }).children;
+    expect(children[0]).toBe("a");
+    expect(children[1]).toBe("b");
+  });
+
+  it("keeps every existing and incoming id exactly once", () => {
+    const after = addPaneSubtree(column([row(["a", "b"]), "c"]), row(["d", "e"]));
+    expect(paneIds(after).sort()).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it("drops incoming ids that are already on the grid", () => {
+    const after = addPaneSubtree(row(["a", "b"]), row(["b", "c"]));
+    expect(paneIds(after)).toEqual(["a", "b", "c"]);
+  });
+
+  it("is a no-op when the sub-tree adds nothing new", () => {
+    const before = row(["a", "b"]);
+    expect(addPaneSubtree(before, "a")).toBe(before);
+    expect(addPaneSubtree(before, row(["a", "b"]))).toBe(before);
+  });
+
+  it("a sub-tree built for the chosen preset lands with its arrangement intact", () => {
+    const subtree = buildLayoutTree(["s1", "s2", "s3", "s4"], 4);
+    const after = addPaneSubtree("existing", subtree!);
+    expect(after).toEqual(row(["existing", column([row(["s1", "s2"]), row(["s3", "s4"])])]));
   });
 });

@@ -169,3 +169,19 @@ export const STATUS_PRESENTATION: Record<SessionStatus, StatusPresentation> = {
 export function statusPresentation(status: SessionStatus | undefined | null): StatusPresentation {
   return isSessionStatus(status) ? STATUS_PRESENTATION[status] : UNKNOWN_PRESENTATION;
 }
+
+/** "This session is blocked on the person, right now" — the single
+ * definition of what used to be `TabInfo.needsAttention`'s latched red dot
+ * (2026-07-26; see that field's removal note in `sessions.ts`).
+ *
+ * Deliberately NARROWER than the backend's `notify` flag, which is also
+ * true for `ready`: a finished task is worth a notification ("your thing is
+ * done") but is not something the sidebar should mark as *wanting* you —
+ * `awaiting_approval` (paused for your approval) and `error` (failed or
+ * blocked) are. Derived from the live status on every render rather than
+ * stored, so a session that resolves itself while you were elsewhere stops
+ * asking for you the instant it does, instead of holding a stale badge
+ * until someone clicks the pane. */
+export function statusNeedsAttention(status: SessionStatus | undefined | null): boolean {
+  return status === "awaiting_approval" || status === "error";
+}

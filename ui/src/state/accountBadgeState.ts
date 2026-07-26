@@ -1,76 +1,136 @@
-// Pure, framework-free state for the persistent account badge in the
-// sidebar header (founder direction, verbatim: "Somewhere should show the
-// small logged user, since the user is not logged in yet, it should at
-// least show a placeholder, with a menu for logout, or preferences,
-// billing, etc."). This is a SECOND, always-visible surface reading the
-// SAME settings-table state `onboarding/authGateState.ts` already owns and
-// persists (`AuthGate.tsx`'s fake sign-in) — it never duplicates that
-// module's reducer/persistence logic, only adds the two small derivations
-// this always-on chrome needs on top of it: what the badge's avatar shows,
-// and which menu rows are enabled. See `components/AccountBadge.tsx` for
-// the component this backs.
-import { personaLabel } from "../onboarding/authGateState";
+// Pure, framework-free state for the account badge + its menu (founder
+// direction: "Somewhere should show the small logged user… with a menu for
+// logout, or preferences, billing, etc.", then 2026-07-26: "and here's the
+// user menu: [Warp screenshot]" + "I know that we didn't implement the login
+// part yet, so just make a fake one as if I was logged in as
+// BrunoBonando."). This is a SECOND, always-visible surface reading the SAME
+// settings-table state `onboarding/authGateState.ts` owns and persists — it
+// never duplicates that module's reducer/persistence logic, only adds the
+// derivations this chrome needs: who the badge says you are, and which menu
+// rows do something.
+//
+// ## What's in the menu, and what deliberately isn't
+//
+// The reference (docs/reference/warp-user-menu.png) lists: name · update and
+// relaunch · what's new · settings · keyboard shortcuts · documentation ·
+// feedback · view logs · community · upgrade · invite a friend · log out.
+// Most of those describe a shipped commercial product with a website, a
+// release channel and a paid tier. OmniAgent ADE is a local-first beta with
+// none of those, and this codebase's standing rule is that a control either
+// does the thing it says or says it doesn't do it yet — so the menu adapts
+// rather than mimics:
+//
+// - **Wired, genuinely** — "Keyboard shortcuts" (this app has real ⌘T/⌘K/⌘N
+//   bindings and a sheet listing them is useful today), "View logs" (session
+//   transcripts are real files on disk under the app's data dir; the row
+//   reveals that folder in Finder through the same `revealItemInDir` the
+//   file tree already uses), and "Log out" (the existing fake-auth reset).
+// - **Honest placeholder** — "Preferences" and "Billing", which were already
+//   handled this way ("Coming soon") before this menu grew.
+// - **Omitted, not faked** — update/relaunch (no updater), what's new (no
+//   changelog surface), documentation (no docs site), feedback (no channel),
+//   community (no community), upgrade + invite a friend (DESIGN.md §1: "v1
+//   monetization: none"). A row that opened nothing, or worse a fabricated
+//   page, would be exactly the fake functionality this project refuses.
+import { FAKE_ACCOUNT_NAME, personaLabel, resolveSignedIn } from "../onboarding/authGateState";
 
 /** The badge's display-relevant slice of auth state, derived from the same
- * two raw settings values `describeAuthSummary` already reads
- * (`AUTH_SIGNED_IN_SETTING_KEY`/`AUTH_PERSONA_SETTING_KEY`) — kept as its
- * own small struct here rather than reusing that function's plain-string
- * output, since the badge needs the persona label as data (to derive the
- * avatar's initial), not just baked into a sentence. */
+ * two raw settings values `describeAuthSummary` reads
+ * (`AUTH_SIGNED_IN_SETTING_KEY`/`AUTH_PERSONA_SETTING_KEY`). */
 export interface AccountBadgeState {
   signedIn: boolean;
   /** Non-null only when signed in AND a persona was actually captured —
    * `null` covers both "not signed in" and "signed in but skipped the
-   * personalize question", same as `personaLabel`'s own "no answer"
-   * convention. */
+   * personalize question", same as `personaLabel`'s own convention. */
   personaLabel: string | null;
+  /** Who the menu's header row names. The fake dev identity while signed
+   * in (see `FAKE_ACCOUNT_NAME`), `null` when not — never a guess. */
+  displayName: string | null;
 }
 
 export function deriveAccountBadgeState(signedInRaw: string | null, personaRaw: string | null): AccountBadgeState {
-  const signedIn = signedInRaw === "true";
-  return { signedIn, personaLabel: signedIn ? personaLabel(personaRaw) : null };
+  const signedIn = resolveSignedIn(signedInRaw);
+  return {
+    signedIn,
+    personaLabel: signedIn ? personaLabel(personaRaw) : null,
+    displayName: signedIn ? FAKE_ACCOUNT_NAME : null,
+  };
 }
 
-/** The one-letter "avatar" the badge shows when there's a real persona to
- * initial from; `null` tells `AccountBadge.tsx` to fall back to the
- * generic person-silhouette glyph instead — the not-signed-in placeholder
- * Bruno's own words call for, and (styled filled rather than outlined) the
- * same glyph's reuse for a signed-in user who skipped the personalize
- * question, since the fake sign-in never captures a real name to initial
- * from either way. */
+/** The one-letter "avatar": the signed-in user's initial (B for Bruno
+ * Bonando), `null` when signed out — which tells `AccountBadge.tsx` to fall
+ * back to the generic person-silhouette placeholder instead. */
 export function accountBadgeInitial(state: AccountBadgeState): string | null {
-  if (!state.personaLabel) return null;
-  return state.personaLabel.charAt(0).toUpperCase();
+  if (!state.displayName) return null;
+  return state.displayName.charAt(0).toUpperCase();
+}
+
+/** The line under the name in the menu header: the captured persona while
+ * we have one, else an honest note that this identity isn't real yet. */
+export function accountBadgeSubtitle(state: AccountBadgeState): string {
+  if (!state.signedIn) return "Not signed in (dev mode).";
+  return state.personaLabel ?? "Signed in (dev mode).";
 }
 
 // ------------------------------------------------------------ menu items
 
-export type AccountMenuItemId = "preferences" | "billing" | "sign-in" | "log-out";
+export type AccountMenuItemId =
+  | "preferences"
+  | "keyboard-shortcuts"
+  | "view-logs"
+  | "billing"
+  | "sign-in"
+  | "log-out";
+
+/** What a row actually does when clicked — the honesty contract, as data:
+ * `action` rows do a real thing, `placeholder` rows say "Coming soon", and
+ * `auth` rows run the fake sign-in/out reset. Nothing else exists. */
+export type AccountMenuItemKind = "action" | "placeholder" | "auth";
 
 export interface AccountMenuItem {
   id: AccountMenuItemId;
   label: string;
+  kind: AccountMenuItemKind;
   enabled: boolean;
-  /** Shown next to a disabled row — the not-signed-in gating hint a real
-   * app would show ("Preferences"/"Billing" stay visible but inert until
-   * there's an account behind them, matching the task's own framing). */
+  /** Shown next to a disabled row — why it's inert. */
   hint?: string;
+  /** Draw a divider above this row (the reference groups its items). */
+  separatorBefore?: boolean;
 }
 
 const GATED_HINT = "Sign in to access";
 
-/** The account menu's contents for each auth state — the same three
- * "realistic account menu" rows either way (Preferences, Billing, plus a
- * sign-in/out row), just with Preferences/Billing disabled-and-hinted and
- * "Log out" swapped for "Sign in" when nobody's signed in. Row order is
- * stable across both states so the menu doesn't visually reshuffle the
- * instant a fake sign-in resolves. */
+/**
+ * The menu's contents for each auth state. Row order is stable across both
+ * states so the menu doesn't visually reshuffle the instant a sign-in
+ * resolves; only the account-gated rows' enablement and the final
+ * sign-in/log-out row change.
+ *
+ * "Keyboard shortcuts" and "View logs" are enabled in BOTH states on
+ * purpose: they're facts about this machine's app, not about an account,
+ * and gating them behind a sign-in that doesn't exist yet would be theatre.
+ */
 export function accountMenuItems(signedIn: boolean): AccountMenuItem[] {
   return [
-    { id: "preferences", label: "Preferences", enabled: signedIn, hint: signedIn ? undefined : GATED_HINT },
-    { id: "billing", label: "Billing", enabled: signedIn, hint: signedIn ? undefined : GATED_HINT },
+    {
+      id: "preferences",
+      label: "Preferences",
+      kind: "placeholder",
+      enabled: signedIn,
+      hint: signedIn ? undefined : GATED_HINT,
+    },
+    { id: "keyboard-shortcuts", label: "Keyboard shortcuts", kind: "action", enabled: true },
+    { id: "view-logs", label: "View session logs", kind: "action", enabled: true },
+    {
+      id: "billing",
+      label: "Billing",
+      kind: "placeholder",
+      enabled: signedIn,
+      hint: signedIn ? undefined : GATED_HINT,
+      separatorBefore: true,
+    },
     signedIn
-      ? { id: "log-out", label: "Log out", enabled: true }
-      : { id: "sign-in", label: "Sign in", enabled: true },
+      ? { id: "log-out", label: "Log out", kind: "auth", enabled: true, separatorBefore: true }
+      : { id: "sign-in", label: "Sign in", kind: "auth", enabled: true, separatorBefore: true },
   ];
 }

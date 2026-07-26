@@ -17,7 +17,7 @@ import {
 } from "./sessions";
 
 function tab(id: string, project: string, engine: TabInfo["engine"] = "claude"): TabInfo {
-  return { id, project, engine, cwd: `/tmp/${project}`, createdAt: 0, needsAttention: false };
+  return { id, project, engine, cwd: `/tmp/${project}`, createdAt: 0 };
 }
 
 describe("sessionsReducer — tab/opened", () => {
@@ -83,80 +83,31 @@ describe("sessionsReducer — tab/activated", () => {
     expect(next.activeTabId).toBe("a");
   });
 
-  // Founder feedback, 2026-07-24: activating a tab is "the user actually
-  // looked at it" — clears any pending attention badge.
-  it("clears needsAttention on the activated tab", () => {
-    const state: SessionsState = {
-      projects: [],
-      tabs: [{ ...tab("a", "p1"), needsAttention: true }, tab("b", "p1")],
-      activeTabId: "b",
-    };
-    const next = sessionsReducer(state, { type: "tab/activated", id: "a" });
-    expect(next.activeTabId).toBe("a");
-    expect(next.tabs.find((t) => t.id === "a")?.needsAttention).toBe(false);
-  });
-
-  it("leaves other tabs' needsAttention untouched", () => {
-    const state: SessionsState = {
-      projects: [],
-      tabs: [{ ...tab("a", "p1"), needsAttention: true }, { ...tab("b", "p1"), needsAttention: true }],
-      activeTabId: "a",
-    };
-    const next = sessionsReducer(state, { type: "tab/activated", id: "a" });
-    expect(next.tabs.find((t) => t.id === "a")?.needsAttention).toBe(false);
-    expect(next.tabs.find((t) => t.id === "b")?.needsAttention).toBe(true);
-  });
-
-  it("activating a tab with no pending attention returns the same tabs array (no unnecessary rebuild)", () => {
+  // 2026-07-26: activation used to also clear a latched `needsAttention`
+  // badge. That field is gone (folded into the five-state `status` — see
+  // `TabInfo`'s doc), so activation is now pure focus and must never
+  // rebuild the tabs array.
+  it("only moves focus — the tabs array itself is untouched", () => {
     const state: SessionsState = { projects: [], tabs: [tab("a", "p1"), tab("b", "p1")], activeTabId: "b" };
     const next = sessionsReducer(state, { type: "tab/activated", id: "a" });
+    expect(next.activeTabId).toBe("a");
     expect(next.tabs).toBe(state.tabs);
   });
 
-  it("activating an unknown tab id is a no-op even when other tabs need attention", () => {
+  it("does not touch a session's status — looking at a pane doesn't change what it's doing", () => {
     const state: SessionsState = {
       projects: [],
-      tabs: [{ ...tab("a", "p1"), needsAttention: true }],
-      activeTabId: "a",
+      tabs: [{ ...tab("a", "p1"), status: "awaiting_approval" }, tab("b", "p1")],
+      activeTabId: "b",
     };
+    const next = sessionsReducer(state, { type: "tab/activated", id: "a" });
+    expect(next.tabs.find((t) => t.id === "a")?.status).toBe("awaiting_approval");
+  });
+
+  it("activating an unknown tab id is a no-op", () => {
+    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
     const next = sessionsReducer(state, { type: "tab/activated", id: "ghost" });
     expect(next).toBe(state);
-  });
-});
-
-describe("sessionsReducer — tab/attention", () => {
-  it("sets needsAttention on the matching tab, leaving others untouched", () => {
-    const state: SessionsState = { projects: [], tabs: [tab("a", "p1"), tab("b", "p1")], activeTabId: "a" };
-    const next = sessionsReducer(state, { type: "tab/attention", id: "b" });
-    expect(next.tabs.find((t) => t.id === "a")?.needsAttention).toBe(false);
-    expect(next.tabs.find((t) => t.id === "b")?.needsAttention).toBe(true);
-  });
-
-  it("setting it on the already-active tab still flags it (clearing only happens on (re-)activation)", () => {
-    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
-    const next = sessionsReducer(state, { type: "tab/attention", id: "a" });
-    expect(next.tabs[0].needsAttention).toBe(true);
-  });
-
-  it("is idempotent when fired repeatedly for the same tab (debounced upstream, but the reducer shouldn't care)", () => {
-    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
-    const once = sessionsReducer(state, { type: "tab/attention", id: "a" });
-    const twice = sessionsReducer(once, { type: "tab/attention", id: "a" });
-    expect(twice.tabs[0].needsAttention).toBe(true);
-  });
-
-  it("firing it for an unknown tab id is a no-op", () => {
-    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
-    const next = sessionsReducer(state, { type: "tab/attention", id: "ghost" });
-    expect(next).toBe(state);
-  });
-
-  it("round trips: attention set, then tab activation clears it", () => {
-    const state: SessionsState = { projects: [], tabs: [tab("a", "p1")], activeTabId: "a" };
-    const flagged = sessionsReducer(state, { type: "tab/attention", id: "a" });
-    expect(flagged.tabs[0].needsAttention).toBe(true);
-    const cleared = sessionsReducer(flagged, { type: "tab/activated", id: "a" });
-    expect(cleared.tabs[0].needsAttention).toBe(false);
   });
 });
 
@@ -555,13 +506,17 @@ describe("sessionsReducer — tab/status (the five-state light)", () => {
     expect(next).toBe(two);
   });
 
-  it("leaves the attention badge alone — the light and the badge are separate signals", () => {
-    const withBadge: SessionsState = {
+  it("is the only thing that says a session needs attention — there is no second latched flag", () => {
+    // 2026-07-26: `needsAttention` folded into this status (TabInfo's doc).
+    // A session that resolves itself goes from error to ready and stops
+    // asking for the user, with nothing left behind to clear.
+    const blocked: SessionsState = {
       ...two,
-      tabs: [{ ...tab("a", "p1"), needsAttention: true }, tab("b", "p1")],
+      tabs: [{ ...tab("a", "p1"), status: "error" }, tab("b", "p1")],
     };
-    const next = sessionsReducer(withBadge, { type: "tab/status", id: "a", status: "ready" });
-    expect(next.tabs[0].needsAttention).toBe(true);
+    const next = sessionsReducer(blocked, { type: "tab/status", id: "a", status: "ready" });
+    expect(next.tabs[0].status).toBe("ready");
+    expect(Object.keys(next.tabs[0])).not.toContain("needsAttention");
   });
 });
 
