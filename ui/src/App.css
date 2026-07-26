@@ -169,6 +169,7 @@
   --accent-tint: rgba(139, 149, 255, 0.14);
   --accent-tint-strong: rgba(139, 149, 255, 0.18);
   --accent-ring: rgba(139, 149, 255, 0.16);
+  --accent-focus-border: rgba(139, 149, 255, 0.55);
 
   color-scheme: dark;
   font-family: var(--sans);
@@ -6293,7 +6294,7 @@ code {
   outline: none;
 }
 .modal-text-input:focus {
-  border-color: rgba(139, 149, 255, 0.55);
+  border-color: var(--accent-focus-border);
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
 .btn-primary {
