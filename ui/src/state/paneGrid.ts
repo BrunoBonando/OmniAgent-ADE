@@ -25,113 +25,77 @@ export function paneIds(tree: PaneTree | null): string[] {
   return tree.children.flatMap(paneIds);
 }
 
-/**
- * Adds a new pane for `id`. A brand-new grid becomes a single leaf; the
- * second pane wraps that leaf into a 2-child row split; every pane after
- * that is appended as an *additional child of the existing root split*
- * rather than by wrapping the whole tree in a new one — a deterministic,
- * always-correct placement (PLAN's accepted v1 simplification: no attempt
- * to guess "the right place" to insert a directional split; the user can
- * drag to rearrange afterward, same as the founder's screenshot allows).
- *
- * The "append as a sibling, don't re-wrap" choice is load-bearing, not
- * cosmetic: `Workspace.tsx` renders each pane's `<Terminal>` directly
- * inside `react-mosaic-component`'s `renderTile`, and that library keys
- * intermediate split nodes by *tree path* (see that file's module doc) —
- * wrapping the whole existing tree in a new split changes every existing
- * leaf's path, which is exactly what makes react-mosaic-component discard
- * and remount their subtrees (confirmed against the real library in
- * `Workspace.mountStability.test.tsx`; a leaf directly rendered in
- * `renderTile` loses its React state exactly when its parent path
- * changes). Appending to the existing root split's `children` array keeps
- * every existing leaf's path identical, so opening a 3rd/4th/Nth terminal
- * in a project never disturbs the ones already open. A no-op (returns the
- * same tree reference) when `id` is already present.
- */
-export function addPane(tree: PaneTree | null, id: string): PaneTree {
-  if (tree === null) return id;
-  if (paneIds(tree).includes(id)) return tree;
-  if (typeof tree !== "string" && tree.type === "split") {
-    return { type: "split", direction: tree.direction, children: [...tree.children, id] };
-  }
-  return { type: "split", direction: "row", children: [tree, id] };
+// ----------------------------------------------------------------------
+// The approved grid shapes (founder brief, 2026-07-26, verbatim: "I want the
+// layout of the terminals to be consistent when adding a new tab... it should
+// automatically go to 2x1 and then 2x2 and the 3x2, 3x3, 4x3, 4x4. And then
+// no more terminals are available.")
+//
+// `[cols, rows]`, ascending capacity. A session's grid is ALWAYS the first
+// rung that fits its pane count, so the arrangement is a pure function of
+// *how many* panes are open — never of the order they were opened in, which
+// path opened them (⌘T, a bulk create, a restore), or what the previous shape
+// happened to be. Two sessions with 5 panes each look identical.
+const GRID_LADDER = [
+  [1, 1],
+  [2, 1],
+  [2, 2],
+  [3, 2],
+  [3, 3],
+  [4, 3],
+  [4, 4],
+] as const;
+
+/** Panes one session can hold — the last rung's capacity. The open-a-terminal
+ * path (`App.tsx`'s `requestNewTab`) refuses past this; `buildGrid` below
+ * still lays out any excess (in more 4-wide rows) rather than dropping a live
+ * session on the floor if one ever arrives another way (a restore of an older,
+ * uncapped workspace). */
+export const MAX_PANES = 16;
+
+/** The approved shape for `count` panes. */
+export function gridShape(count: number): { cols: number; rows: number } {
+  const [cols] = GRID_LADDER.find(([c, r]) => c * r >= count) ?? GRID_LADDER[GRID_LADDER.length - 1];
+  return { cols, rows: Math.max(1, Math.ceil(count / cols)) };
 }
 
 /**
- * Adds a whole pre-arranged *sub-tree* (a brand-new session's panes, already
- * shaped by `buildLayoutTree` into its chosen LAYOUT preset) beside what's
- * already on screen — the "new session in a project that already has panes"
- * case (founder brief, 2026-07-26: a session is created "with a new layout,
- * agents, etc... but in the same folder or subfolder").
+ * Arranges `ids` into their approved grid: rows of `gridShape().cols`, left
+ * to right, top to bottom, stacked in a column split. A single row needs no
+ * column wrapper, and a row holding exactly one id renders as a bare leaf
+ * rather than a pointless 1-child split.
  *
- * Follows `addPane`'s load-bearing rule exactly, and for the same reason:
- * the sub-tree is appended as one more child of the *existing root split*,
- * never by wrapping the current tree in a new one. Appending leaves every
- * existing leaf's tree path untouched, so react-mosaic-component keeps their
- * `<Terminal>`s mounted (see `addPane`'s doc and
- * `Workspace.mountStability.test.tsx` — wrapping remounts every open
- * terminal, which for live agent sessions means dropping their output
- * stream). An empty grid simply becomes the sub-tree; a single-leaf grid
- * pairs with it in a row split, same shape `addPane` produces for the second
- * pane.
+ * This is the ONLY function in this file that decides a shape — `syncPaneTree`
+ * below routes every add and every close through it, so no caller can produce
+ * an unapproved arrangement.
  *
- * Ids already present in `tree` are dropped from the incoming sub-tree
- * first — a duplicate leaf id would make Mosaic render the same session
- * twice — and a sub-tree that adds nothing new returns the same tree
- * reference back.
+ * ponytail: a shape change moves panes between rows, and
+ * react-mosaic-component keys its split nodes by tree path (see
+ * `Workspace.tsx`'s module doc), so the panes that change row are remounted —
+ * their xterm loses its scrollback, while tmux keeps the session and repaints
+ * the visible screen on the resize that every reflow causes. Within one rung
+ * every full row keeps its path, so an add costs at most the one pane that was
+ * alone on the last row. Upgrade path if the scrollback loss ever bites: a
+ * `session_snapshot` command over `tmux capture-pane -p -e`, written into
+ * xterm on mount.
  */
-export function addPaneSubtree(tree: PaneTree | null, subtree: PaneTree): PaneTree {
-  const present = new Set(paneIds(tree));
-  const fresh = paneIds(subtree).filter((id) => !present.has(id));
-  if (fresh.length === 0) return tree ?? subtree;
+export function buildGrid(ids: string[]): PaneTree | null {
+  if (ids.length === 0) return null;
+  if (ids.length === 1) return ids[0];
 
-  // Only prune when something actually collides, so the common case keeps
-  // the caller's exact arrangement (including any split percentages).
-  let incoming: PaneTree | null = subtree;
-  if (fresh.length !== paneIds(subtree).length) {
-    for (const id of paneIds(subtree)) {
-      if (present.has(id)) incoming = removePane(incoming, id);
-    }
+  const { cols } = gridShape(ids.length);
+  const rows: PaneTree[] = [];
+  for (let i = 0; i < ids.length; i += cols) {
+    const rowIds = ids.slice(i, i + cols);
+    rows.push(rowIds.length === 1 ? rowIds[0] : { type: "split", direction: "row", children: rowIds });
   }
-  if (incoming === null) return tree ?? subtree;
-  if (tree === null) return incoming;
-  if (typeof tree !== "string" && tree.type === "split") {
-    return { type: "split", direction: tree.direction, children: [...tree.children, incoming] };
-  }
-  return { type: "split", direction: "row", children: [tree, incoming] };
+  return rows.length === 1 ? rows[0] : { type: "split", direction: "column", children: rows };
 }
 
 /**
- * Removes `id`'s pane. A split left with exactly one remaining child
- * collapses to that child directly (so closing a pane never leaves a
- * pointless single-child split node around) — recursively, so removing the
- * second-to-last leaf out of a deeply nested tree still resolves to a plain
- * leaf. Returns `null` if the removed id was the only pane. A no-op (same
- * reference back) when `id` isn't present. For the common case — removing
- * one child from a flat, single-level split (i.e. undoing what `addPane`
- * above builds) — the survivors keep their existing path, so, same as
- * `addPane`, this never remounts their `<Terminal>` (verified in
- * `Workspace.mountStability.test.tsx`).
- */
-export function removePane(tree: PaneTree | null, id: string): PaneTree | null {
-  if (tree === null) return null;
-  if (typeof tree === "string") return tree === id ? null : tree;
-  if (!paneIds(tree).includes(id)) return tree;
-
-  const children = tree.children
-    .map((child) => removePane(child, id))
-    .filter((child): child is PaneTree => child !== null);
-
-  if (children.length === 0) return null;
-  if (children.length === 1) return children[0];
-  return { type: "split", direction: tree.direction, children };
-}
-
-/**
- * Swaps one leaf's id for another, preserving the tree's exact shape/
- * nesting/position — unlike `removePane` + `addPane` (which always
- * re-appends the new id as a sibling of the root split, relocating it),
- * this never moves anything else. `null`/no-match are no-ops (same
+ * Swaps one leaf's id for another, preserving the tree's exact shape,
+ * nesting, position and split percentages — unlike a rebuild through
+ * `buildGrid`, which puts the new id last. `null`/no-match are no-ops (same
  * reference back). Used by `syncPaneTree`'s 1-for-1-swap case below, and
  * exported on its own since it's independently useful (e.g. a future
  * caller that already knows exactly which old id maps to which new one).
@@ -149,12 +113,15 @@ export function replacePaneId(tree: PaneTree | null, oldId: string, newId: strin
 
 /**
  * Reconciles a grid tree against the desired set of open session ids for a
- * project — adds any missing ids, removes any stale ones, and leaves
- * everything else (arrangement, split percentages Mosaic has attached)
- * untouched. Returns the *same* tree reference when nothing changed, so
- * `Workspace.tsx` can skip a `setState` (and the resulting re-render) on
- * every tick where a project's open-tab set hasn't actually moved. Order of
- * `desiredIds` doesn't matter — this only cares about set membership.
+ * session — the one entry point `Workspace.tsx` uses. Any change to the set
+ * re-lays the whole grid out through `buildGrid`, i.e. into the approved shape
+ * for the new pane count: opening the 3rd terminal in a 2x1 gives a 2x2,
+ * closing back down to 2 gives the 2x1 again. Surviving panes keep their
+ * left-to-right order (including one the user drag-rearranged into); new ids
+ * land at the end. Returns the *same* tree reference when the set hasn't
+ * moved, so `Workspace.tsx` can skip a `setState` — and so a manual resize
+ * (split percentages Mosaic attached) survives every render that isn't an
+ * actual open or close.
  *
  * **1-for-1 swap special case**: when the diff between `tree`'s current ids
  * and `desiredIds` is *exactly* one id removed and one different id added,
@@ -171,97 +138,33 @@ export function replacePaneId(tree: PaneTree | null, oldId: string, newId: strin
  */
 export function syncPaneTree(tree: PaneTree | null, desiredIds: string[]): PaneTree | null {
   const desired = new Set(desiredIds);
-  const present = new Set(paneIds(tree));
+  const present = paneIds(tree);
+  const presentSet = new Set(present);
 
-  const removed = [...present].filter((id) => !desired.has(id));
-  const added = desiredIds.filter((id) => !present.has(id));
+  const removed = present.filter((id) => !desired.has(id));
+  const added = desiredIds.filter((id) => !presentSet.has(id));
 
+  if (removed.length === 0 && added.length === 0) return tree;
   if (removed.length === 1 && added.length === 1) {
     return replacePaneId(tree, removed[0], added[0]);
   }
-
-  let next = tree;
-  for (const id of removed) next = removePane(next, id);
-  for (const id of added) next = addPane(next, id);
-  return next;
+  return buildGrid([...present.filter((id) => desired.has(id)), ...added]);
 }
 
 // ----------------------------------------------------------------------
-// NewWorkspaceModal's LAYOUT presets (BridgeSpace "New Workspace" dialog
-// reference — a founder screenshot described precisely, no image file
-// checked in; see NewWorkspaceModal.tsx's module doc) — the "2"/"4"/"6"/"8"
-// preset cards, each previewing an RxC grid glyph. `addPane`/`syncPaneTree`
-// above are deliberately dumb: every pane after the first two is always
-// appended as a flat sibling of the root split (see `addPane`'s own doc —
-// that flatness is load-bearing for mount stability). Neither function can
-// produce an actual 2x2/2x3/2x4 grid shape, so a genuinely new pure
-// function is needed for "arrange this fresh batch of panes into the
-// chosen preset's grid" — this is that function, used exactly once, when
-// NewWorkspaceModal's bulk session-create seeds a brand-new project's pane
-// grid (see `ProjectPaneGrid`'s `initialTree` prop in `Workspace.tsx`).
-// Every pane opened/closed *after* that initial arrangement still goes
-// through the ordinary `addPane`/`removePane`/`syncPaneTree` path above,
-// unchanged.
-export const LAYOUT_PRESETS = [2, 4, 6, 8] as const;
+// The LAYOUT preset cards (NewWorkspaceModal / NewSessionModal /
+// EmptyWorkspace — BridgeSpace "New Workspace" dialog reference, see
+// NewWorkspaceModal.tsx's module doc). Now exactly the ladder rungs that fill
+// a grid completely, so a card can never promise a shape the grid won't
+// produce: pick "6" and you get the 3x2 `gridShape(6)` describes, because the
+// grid derives its own shape from the pane count either way.
+export const LAYOUT_PRESETS = [2, 4, 6, 9] as const;
 export type LayoutPreset = (typeof LAYOUT_PRESETS)[number];
 
-/** The (rows, cols) grid shape a preset represents when given exactly
- * `preset` panes — what the modal's glyph icon previews, and what
- * `buildLayoutTree` below targets as its row-wrap width for any actual
- * pane count (see that function's own doc for how counts that don't
- * exactly match `preset` are handled). "2" is a single row of 2 (the
- * reference's plain left/right split, not a "1x2 grid"); "4"/"6"/"8" are
- * always 2 rows, growing wider (2/3/4 columns) rather than taller — matches
- * the reference's own glyphs (2x2, 2x3, 2x4). */
-export function nominalGridShape(preset: LayoutPreset): { rows: number; cols: number } {
-  switch (preset) {
-    case 2:
-      return { rows: 1, cols: 2 };
-    case 4:
-      return { rows: 2, cols: 2 };
-    case 6:
-      return { rows: 2, cols: 3 };
-    case 8:
-      return { rows: 2, cols: 4 };
-  }
-}
-
-/** The plain-language caption NewWorkspaceModal shows under whichever
- * LAYOUT card is currently selected (the reference screenshot's own
- * example: "2×2 grid layout" under the selected "4" card). */
+/** The plain-language caption the modals show under whichever LAYOUT card is
+ * currently selected (the reference screenshot's own example: "2×2 grid
+ * layout" under the selected "4" card). */
 export function layoutCaption(preset: LayoutPreset): string {
-  const { rows, cols } = nominalGridShape(preset);
+  const { rows, cols } = gridShape(preset);
   return rows === 1 ? "Side-by-side split" : `${rows}×${cols} grid layout`;
-}
-
-/**
- * Arranges a freshly-created batch of pane ids into the chosen layout
- * preset's grid shape — wraps `ids` into rows of `nominalGridShape(preset)
- * .cols` (left to right, top to bottom), then stacks those rows in a
- * column split (a single row needs no column wrapper). A row left with
- * exactly one id renders as a bare leaf rather than a pointless 1-child
- * split, mirroring `addPane`/`removePane`'s own "no pointless single-child
- * split" rule above.
- *
- * The preset is an **arrangement-style hint, not an enforced slot count**
- * (NewWorkspaceModal's own product decision — see its module doc): this
- * never invents empty/placeholder panes to pad a short list up to the
- * preset's nominal count (checking only 2 agents under the "4" (2x2)
- * preset just gives a plain 2-wide row, not a 2x2 grid with two blank
- * cells), and never drops ids past the nominal count either (checking 5
- * agents under "4" wraps into a third, shorter row rather than silently
- * discarding the 5th) — `react-mosaic-component` trees aren't hard-capped,
- * so there's no real ceiling to enforce.
- */
-export function buildLayoutTree(ids: string[], preset: LayoutPreset): PaneTree | null {
-  if (ids.length === 0) return null;
-  if (ids.length === 1) return ids[0];
-
-  const { cols } = nominalGridShape(preset);
-  const rows: PaneTree[] = [];
-  for (let i = 0; i < ids.length; i += cols) {
-    const rowIds = ids.slice(i, i + cols);
-    rows.push(rowIds.length === 1 ? rowIds[0] : { type: "split", direction: "row", children: rowIds });
-  }
-  return rows.length === 1 ? rows[0] : { type: "split", direction: "column", children: rows };
 }

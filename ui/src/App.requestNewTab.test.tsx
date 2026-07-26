@@ -20,6 +20,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NOTIFICATIONS_SETTING_KEY } from "./state/notifications";
 import { CLOSED_WORKSPACES_SETTING_KEY } from "./state/closedWorkspaces";
 import { LAYOUT_SETTING_KEY, type ProjectInfo, type TabInfo } from "./state/sessions";
+import { MAX_PANES } from "./state/paneGrid";
 import {
   AUTH_GATE_RESOLVED_SETTING_KEY,
   AUTH_PERSONA_SETTING_KEY,
@@ -123,6 +124,31 @@ describe("App — instant-default-engine new tab", () => {
     await waitFor(() => {
       expect(screen.getByText("A:claude")).toBeInTheDocument();
     });
+  });
+
+  it(`refuses the ${MAX_PANES + 1}th terminal in one session — the approved shapes stop at 4x4`, async () => {
+    // Founder, 2026-07-26: "...4x3, 4x4. And then no more terminals are
+    // available." The ceiling is per SESSION (the unit a grid renders), and it
+    // refuses BEFORE spawning — a live PTY the grid has no approved shape for
+    // would be worse than the refusal.
+    const a: ProjectInfo = { id: "A", label: "Project A", path: "/tmp/a" };
+    tauriMocks.listProjectsMock.mockResolvedValue([a]);
+    tauriMocks.settingsGetMock.mockResolvedValue(null);
+    let created = 0;
+    tauriMocks.sessionCreateMock.mockImplementation(() =>
+      Promise.resolve({ id: `A-sess-${++created}`, project: "A", engine: "claude", cwd: "/tmp/a", created: 0 }),
+    );
+
+    render(<App />);
+    const newTab = await screen.findByRole("button", { name: "new-tab-A" });
+    for (let i = 1; i <= MAX_PANES; i++) {
+      fireEvent.click(newTab);
+      await waitFor(() => expect(screen.getAllByTestId("tab-info")).toHaveLength(i));
+    }
+
+    fireEvent.click(newTab);
+    expect(await screen.findByText(new RegExp(`already has ${MAX_PANES} terminals`))).toBeInTheDocument();
+    expect(tauriMocks.sessionCreateMock).toHaveBeenCalledTimes(MAX_PANES);
   });
 
   it("resolves the per-project override over the global default, same chain EnginePicker's old default used", async () => {

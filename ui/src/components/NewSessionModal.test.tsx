@@ -43,7 +43,7 @@ describe("NewSessionModal — rendering", () => {
 
   it("offers all four layout presets, side-by-side selected by default", () => {
     setup();
-    for (const preset of [2, 4, 6, 8]) {
+    for (const preset of [2, 4, 6, 9]) {
       expect(screen.getByRole("button", { name: new RegExp(`^${preset}$`) })).toBeInTheDocument();
     }
     expect(screen.getByText("Side-by-side split")).toBeInTheDocument();

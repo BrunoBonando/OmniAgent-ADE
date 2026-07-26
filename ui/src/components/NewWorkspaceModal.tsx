@@ -47,7 +47,8 @@ import {
   initialNewWorkspaceState,
   newWorkspaceReducer,
 } from "../state/newWorkspaceState";
-import { LAYOUT_PRESETS, layoutCaption, nominalGridShape, type LayoutPreset } from "../state/paneGrid";
+import { LAYOUT_PRESETS, layoutCaption, type LayoutPreset } from "../state/paneGrid";
+import { LayoutGlyph } from "./NewSessionModal";
 import { ENGINES, type Engine, type ProjectInfo } from "../state/sessions";
 import { ENGINE_COLOR, ENGINE_LABEL } from "../theme";
 import { addProject } from "../lib/tauri";
@@ -55,28 +56,6 @@ import { addProject } from "../lib/tauri";
 interface NewWorkspaceModalProps {
   onCreate: (project: ProjectInfo, engines: Engine[], layout: LayoutPreset) => void;
   onClose: () => void;
-}
-
-/** A small CSS-drawn grid of squares previewing a layout preset's shape —
- * deliberately not an icon library or hand-authored SVG path set for just
- * four glyphs (frontend-design's own "match complexity to the vision":
- * this is a utility glyph, not the page's signature element). Reuses
- * `nominalGridShape` (paneGrid.ts) — the exact same (rows, cols) pair
- * `buildLayoutTree` targets — so the preview can never drift out of sync
- * with the real arrangement it represents. */
-function LayoutGlyph({ preset }: { preset: LayoutPreset }) {
-  const { rows, cols } = nominalGridShape(preset);
-  return (
-    <span
-      className="new-workspace-layout-glyph"
-      style={{ gridTemplateRows: `repeat(${rows}, 1fr)`, gridTemplateColumns: `repeat(${cols}, 1fr)` }}
-      aria-hidden
-    >
-      {Array.from({ length: rows * cols }).map((_, i) => (
-        <span key={i} className="new-workspace-layout-glyph-cell" />
-      ))}
-    </span>
-  );
 }
 
 /** Simple inline folder icon — the reference's DIRECTORY section leads with

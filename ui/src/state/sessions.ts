@@ -232,10 +232,9 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
     // workspace lands in a single dispatch (never a `tab/opened` per
     // session) so a brand-new project's `ProjectPaneGrid` (Workspace.tsx)
     // mounts directly with its whole final tab set already present in one
-    // render — see `paneGrid.ts`'s `buildLayoutTree` doc for why an
-    // incremental, one-at-a-time reveal would both defeat the chosen
-    // LAYOUT preset's arrangement and risk remounting already-open panes
-    // mid-batch. Same "newest tab becomes active" rule as `tab/opened`,
+    // render — an incremental, one-at-a-time reveal would instead walk the
+    // grid up one approved shape per pane (`paneGrid.ts`'s `GRID_LADDER`),
+    // remounting panes on every rung it crossed on the way. Same "newest tab becomes active" rule as `tab/opened`,
     // generalized to the last tab in the batch. A no-op for an empty batch
     // (every session in the batch failed to create — the caller still has
     // something to show via the error banner, just no new tabs to add).

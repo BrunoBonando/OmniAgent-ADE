@@ -92,6 +92,14 @@
   --pane-header: #1a1b20;
   --pane-header-focus: #3e4049;
 
+  /* OmniAgent's own blue, sampled from ui/src/assets/omniagent-logo.png
+     (the bright end of the mark's gradient — the logo runs #265ba2 ->
+     #3d8dcb; the darker stops disappear against --panel). Founder ask,
+     2026-07-26: "the selected workspace must have a blue selection, to
+     match the blue of OmniAgent" — so selection is brand, not the
+     reference screenshot's magenta. */
+  --brand-blue: #3d8dcb;
+
   /* Diff green/red for the code review panel (founder ask, 2026-07-26).
      The file header above notes these were deliberately left unsampled
      ("its diff red/green are scoped to BridgeMind's own parsed-output
@@ -628,21 +636,19 @@ code {
   position: relative;
 }
 
-/* Founder pane-grid rebuild: the reference screenshot's selected-workspace
-   row is a tinted background plus a magenta left-edge accent bar (sampled
-   (200,255) for the tint, (61,255) for the bar — same magenta as
-   --accent-select, which also happens to be the reference's antigravity
-   engine dot, purely coincidental reuse of one accent color, not a
-   semantic link). `box-shadow` for the bar rather than `border-left` so it
-   doesn't shift the row's inner padding. */
-/* Restrained on purpose (founder brief: "the selected chip has a subtly
+/* Founder pane-grid rebuild: the selected-workspace row is a tinted
+   background plus a thin left-edge accent bar. `box-shadow` for the bar
+   rather than `border-left` so it doesn't shift the row's inner padding.
+   Restrained on purpose (founder brief: "the selected chip has a subtly
    lighter background fill plus a thin colored accent bar... restrained, not
-   a loud highlight") — a modest lift off the chip's own resting fill rather
-   than the old, more saturated `#493c4e`, so the left accent bar (unchanged)
-   carries the actual color signal instead of a loud full-row tint. */
+   a loud highlight") — a modest lift off the chip's own resting fill, so the
+   bar carries the actual color signal instead of a loud full-row tint.
+   The colour is OmniAgent's blue (--brand-blue), not the reference
+   screenshot's magenta; the tint is the same lightness the magenta-era fill
+   had (#413a49) rotated onto the blue side, so only the hue changed. */
 .project-row.is-selected {
-  background: #413a49;
-  box-shadow: inset 3px 0 0 0 var(--accent-select);
+  background: #3a4149;
+  box-shadow: inset 3px 0 0 0 var(--brand-blue);
 }
 
 .project-row-main {
@@ -1805,6 +1811,10 @@ code {
   width: 100%;
 }
 
+.pane-body.is-focused {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--signal) 58%, transparent);
+}
+
 .terminal-surface {
   position: absolute;
   inset: 0;
@@ -1815,6 +1825,13 @@ code {
   height: 100%;
 }
 
+/* A workspace with no terminals in it (founder brief, 2026-07-26: "a nice
+   black gradient dark blue background with a window in the middle") — see
+   EmptyWorkspace.tsx for what the window itself holds. Black at the top
+   corners falling into a deep navy at the bottom, with one soft blue bloom
+   behind the panel so the window sits IN the gradient rather than on top of
+   a flat fill. Deliberately the only place in the shell with a coloured
+   background: it is the one screen with nothing else on it. */
 .empty-workspace {
   position: absolute;
   inset: 0;
@@ -1825,18 +1842,50 @@ code {
   gap: 4px;
   color: var(--ink-faint);
   text-align: center;
-}
-
-.empty-workspace-prompt {
-  font-family: var(--mono);
-  font-size: 32px;
-  color: var(--ink-faint);
-  margin-bottom: 6px;
+  background:
+    radial-gradient(60% 55% at 50% 42%, rgba(58, 96, 190, 0.22), transparent 70%),
+    linear-gradient(168deg, #05060a 0%, #070b16 45%, #0b1730 78%, #12233f 100%);
+  background-color: #0b1730;
 }
 
 .empty-workspace p {
   margin: 0;
   font-size: 12.5px;
+}
+
+/* The window. `.new-workspace-panel` (above) already carries the surface,
+   border, radius, shadow and 520px width the New Session dialog uses — this
+   only adds what differs: a centred head, and enough lift off the gradient
+   that the panel edge stays visible against the bloom behind it. */
+.empty-workspace-panel {
+  text-align: center;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.6);
+}
+
+.empty-workspace-question {
+  font-size: 19px;
+  letter-spacing: -0.01em;
+}
+
+.empty-workspace-sub {
+  margin: 6px 0 20px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.empty-workspace-sub strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.empty-workspace-panel .new-workspace-footer {
+  justify-content: space-between;
+}
+
+.empty-workspace-keys {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-faint);
 }
 
 .empty-workspace-hint {
@@ -5438,17 +5487,23 @@ code {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
 }
 
+/* Founder ask, 2026-07-26: "make the session on the left a bit taller, and
+   each session has its own color". The colour is `--session-tint`, set
+   inline per row from a stable hash of the session id (see
+   `SidebarSessionRow`), and it rides the rail the row already had —
+   dimmed at rest so the *on-screen* session still wins the eye. */
 .session-row {
   position: relative;
-  border-left: 1px solid var(--line);
+  border-left: 2px solid color-mix(in srgb, var(--session-tint, var(--line)) 45%, transparent);
   border-radius: 0 4px 4px 0;
 }
 
 .session-row.is-current {
-  border-left-color: var(--accent-select);
+  border-left-color: var(--session-tint, var(--accent-select));
+  background: color-mix(in srgb, var(--session-tint, var(--accent-select)) 12%, transparent);
 }
 
 .session-row:hover {
@@ -5466,7 +5521,7 @@ code {
   font-family: var(--mono);
   font-size: 11px;
   text-align: left;
-  padding: 3px 6px 3px 8px;
+  padding: 7px 6px 7px 8px;
 }
 
 .session-row-name {

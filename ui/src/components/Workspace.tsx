@@ -38,18 +38,19 @@
 // complexity (a ref-callback cache, an off-screen host div, a manual
 // render-count "tick" to notice when refs attach), they were removed.
 //
-// **Opening/closing/resizing panes within one project's grid** is instead
-// made safe at the *tree-shape* level: react-mosaic-component's own
-// `MosaicRoot` keys intermediate split nodes by tree *path* (see that
-// library's `MosaicRoot.tsx`), so a leaf whose parent path changes gets
-// discarded and remounted by React — no portal indirection changes that.
-// `paneGrid.ts`'s `addPane`/`removePane` are written specifically to never
-// change an *existing* leaf's path when adding or removing a sibling (see
-// their own doc comments) — verified against the real library in
-// `Workspace.mountStability.test.tsx`, which is what actually caught this
-// class of bug (the first `addPane` implementation wrapped the whole
-// existing tree on every add, which silently remounted every already-open
-// terminal each time a new one was created).
+// **Opening/closing panes within one session's grid** is bounded rather than
+// free: react-mosaic-component's own `MosaicRoot` keys intermediate split
+// nodes by tree *path* (see that library's `MosaicRoot.tsx`), so a leaf whose
+// enclosing split changes gets discarded and remounted by React — no portal
+// indirection changes that. Since the founder's approved-shape ladder
+// (`paneGrid.ts`'s `GRID_LADDER`) re-lays the grid out whenever the pane count
+// crosses a rung, the panes that move to a different ROW on such a reflow do
+// remount: their xterm starts empty, while tmux keeps the session alive and
+// repaints the visible screen on the resize the reflow itself causes. Adds
+// and closes *within* one rung keep every full row's path, so they cost at
+// most the one pane that was alone on the last row. Exactly which edits cost
+// what is pinned down against the real library in
+// `Workspace.mountStability.test.tsx`.
 //
 // **The one known, deliberately-not-fixed gap**: a user physically
 // dragging one pane's header onto a *different* pane's edge (forcing a
@@ -81,18 +82,16 @@
 // session the user isn't looking at is still a live agent doing work, and
 // switching away from it must cost nothing but a repaint.
 //
-// A pleasant consequence: each session's panes now get their own mosaic
-// tree, so a session's layout preset lands as that grid's whole shape
-// instead of being merged in beside a neighbouring session's panes, and one
-// session's drag-rearrange can't move another's. `addPaneSubtree` is kept in
-// the reconciliation below anyway — it costs nothing and still does the
-// right thing if a batch ever lands in a grid that already has panes.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// A pleasant consequence: each session's panes get their own mosaic tree, so
+// a session's shape is its own and one session's drag-rearrange can't move
+// another's.
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Mosaic, MosaicWindow, type MosaicNode } from "react-mosaic-component";
 import "react-mosaic-component/react-mosaic-component.css";
+import EmptyWorkspace from "./EmptyWorkspace";
 import PaneHeader from "./PaneHeader";
 import Terminal from "./Terminal";
-import { addPaneSubtree, paneIds, syncPaneTree, type PaneTree } from "../state/paneGrid";
+import { paneIds, syncPaneTree, type LayoutPreset, type PaneTree } from "../state/paneGrid";
 import {
   isUnderPressure,
   PRESSURE_THRESHOLD,
@@ -101,11 +100,7 @@ import {
   type ProjectInfo,
   type TabInfo,
 } from "../state/sessions";
-import {
-  UNGROUPED_SESSION_ID,
-  groupTabsBySession,
-  visibleSessionGroupId,
-} from "../state/sessionGroups";
+import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
 import type { TerminalThemeId } from "../lib/terminalThemes";
 
 interface ProjectPaneGridProps {
@@ -146,19 +141,6 @@ interface ProjectPaneGridProps {
   /** Auto-title from the first prompt — forwarded straight through to each
    * pane's `<Terminal>` (see that component's own doc). */
   onFirstInput: (id: string, line: string) => void;
-  /** Layout hints from every bulk-create, keyed by SESSION-GROUP id —
-   * `NewWorkspaceModal`'s first batch for a new project, and (since
-   * 2026-07-26) each `NewSessionModal` batch inside an existing one.
-   *
-   * An entry is applied once, the first render where every one of its
-   * panes is present: as the grid's whole shape if this project has none
-   * yet, otherwise merged in beside what's already there via
-   * `addPaneSubtree` — which appends to the existing root split rather
-   * than re-wrapping it, so no live terminal is remounted (see that
-   * function's doc and `Workspace.mountStability.test.tsx`). Entries for
-   * other projects' sessions are ignored by construction: only groups that
-   * appear in THIS grid's own tabs are considered. */
-  sessionLayouts?: Map<string, PaneTree>;
 }
 
 /** One **session's** grid — always mounted for as long as that session has
@@ -181,56 +163,33 @@ function ProjectPaneGrid({
   onChangeTheme,
   onOpenCodeReview,
   onFirstInput,
-  sessionLayouts,
 }: ProjectPaneGridProps) {
   const [tree, setTree] = useState<PaneTree | null>(null);
   const idsKey = tabs.map((t) => t.id).join(" ");
-  const groupsKey = tabs.map((t) => t.group ?? UNGROUPED_SESSION_ID).join(" ");
-  // Session groups whose layout hint has already been folded in. A ref, not
-  // state: applying one must not itself cause a render, and it has to
-  // survive React's development double-invocation of this effect (which is
-  // why the bookkeeping happens OUT here and the `setTree` updater below
-  // stays a pure function of `prev`).
-  const appliedGroups = useRef<Set<string>>(new Set());
 
+  // The whole reconciliation: this session's open panes in, their approved
+  // grid out (`syncPaneTree` -> `buildGrid`, paneGrid.ts). No layout hint from
+  // the create dialogs is needed or wanted — the shape is a pure function of
+  // the pane count, so a bulk-created batch of 4 lands in the same 2x2 that
+  // opening a 4th terminal by hand produces.
   useEffect(() => {
     const ids = idsKey.length > 0 ? idsKey.split(" ") : [];
-    const groupsHere = new Set(groupsKey.length > 0 ? groupsKey.split(" ") : []);
-
-    // Which layout hints are ready to land: this project's own groups, not
-    // applied yet, and with every one of their panes already in `ids` — a
-    // half-arrived batch waits rather than landing in pieces (which would
-    // defeat the chosen preset's arrangement).
-    const pending: PaneTree[] = [];
-    if (sessionLayouts) {
-      for (const [groupId, subtree] of sessionLayouts) {
-        if (appliedGroups.current.has(groupId) || !groupsHere.has(groupId)) continue;
-        const subtreeIds = paneIds(subtree);
-        if (subtreeIds.length === 0 || !subtreeIds.every((id) => ids.includes(id))) continue;
-        appliedGroups.current.add(groupId);
-        pending.push(subtree);
-      }
-    }
-
-    setTree((prev) => {
-      // Order matters: sync in everything that ISN'T part of an arriving
-      // batch first, then merge each batch in beside it. Doing it the other
-      // way round would make a stray pane become a sibling *inside* the
-      // batch's own arrangement (a 5th row under a 2x2 grid) instead of the
-      // batch landing beside the pane. The closing sync is the backstop
-      // that removes anything closed and adds anything a batch didn't
-      // cover.
-      const batchIds = new Set(pending.flatMap(paneIds));
-      let next = syncPaneTree(prev, ids.filter((id) => !batchIds.has(id)));
-      for (const subtree of pending) {
-        next = next === null ? subtree : addPaneSubtree(next, subtree);
-      }
-      next = syncPaneTree(next, ids);
-      return next === prev ? prev : next;
-    });
-  }, [idsKey, groupsKey, sessionLayouts]);
+    setTree((prev) => syncPaneTree(prev, ids));
+  }, [idsKey]);
 
   const tabsById = useMemo(() => new Map(tabs.map((t) => [t.id, t])), [tabs]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || event.key !== "Tab" || hidden) return;
+      const ids = paneIds(tree);
+      if (ids.length < 2) return;
+      event.preventDefault();
+      onActivateTab(ids[(Math.max(ids.indexOf(activeTabId ?? ""), 0) + 1) % ids.length]);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeTabId, hidden, onActivateTab, tree]);
 
   return (
     <div
@@ -290,7 +249,10 @@ function ProjectPaneGrid({
                   </div>
                 )}
               >
-                <div className="pane-body" onMouseDownCapture={() => onActivateTab(tab.id)}>
+                <div
+                  className={`pane-body${tab.id === activeTabId ? " is-focused" : ""}`}
+                  onMouseDownCapture={() => onActivateTab(tab.id)}
+                >
                   <Terminal
                     sessionId={tab.id}
                     visible={terminalsVisible}
@@ -312,7 +274,6 @@ interface WorkspaceProps {
   tabs: TabInfo[];
   activeTabId: string | null;
   selectedProjectId: string | null;
-  selectedProjectLabel: string | undefined;
   onActivateTab: (id: string) => void;
   onCloseTab: (id: string) => void;
   onNewTabInProject: (project: ProjectInfo) => void;
@@ -329,12 +290,12 @@ interface WorkspaceProps {
   /** Auto-title from the first prompt, forwarded to every pane's
    * `<Terminal>`. Optional, same reasoning. */
   onFirstInput?: (id: string, line: string) => void;
+  /** `EmptyWorkspace`'s "Start session" — a workspace with no terminals in
+   * it is a front door, not a hint (see that component's own doc).
+   * Optional/no-op, same reasoning as the props above: the layout and
+   * visibility tests never press it. */
+  onStartSession?: (project: ProjectInfo, layout: LayoutPreset, goal: string) => void;
   hidden: boolean;
-  /** `sessionGroupId -> PaneTree` hints from every bulk-create (New
-   * Workspace, New Session) — see `ProjectPaneGridProps.sessionLayouts`'s
-   * doc. Optional so every caller/test that only ever opens panes one at a
-   * time (⌘T, the map's "Open terminal here") is unaffected. */
-  sessionLayouts?: Map<string, PaneTree>;
 }
 
 export default function Workspace({
@@ -342,7 +303,6 @@ export default function Workspace({
   tabs,
   activeTabId,
   selectedProjectId,
-  selectedProjectLabel,
   onActivateTab,
   onCloseTab,
   onNewTabInProject,
@@ -351,8 +311,8 @@ export default function Workspace({
   onChangeTheme = () => {},
   onOpenCodeReview = () => {},
   onFirstInput = () => {},
+  onStartSession = () => {},
   hidden,
-  sessionLayouts,
 }: WorkspaceProps) {
   const projectLabel = useCallback(
     (id: string) => projects.find((p) => p.id === id)?.label ?? id,
@@ -386,7 +346,7 @@ export default function Workspace({
           // Two conditions, both required: this is the selected workspace,
           // AND this is the session that workspace is currently showing.
           // Everything else stays mounted and simply isn't painted.
-          const gridHidden = p.project !== selectedProjectId || session.id !== visibleSession;
+          const gridHidden = hidden || p.project !== selectedProjectId || session.id !== visibleSession;
           return (
             <ProjectPaneGrid
               // Keyed by session, so a session keeps its React identity —
@@ -399,7 +359,7 @@ export default function Workspace({
               // Only the displayed session's grid, in the active (non-Map)
               // workspace view, is real visibility for its terminals — see
               // `ProjectPaneGridProps.terminalsVisible`'s doc.
-              terminalsVisible={!gridHidden && !hidden}
+              terminalsVisible={!gridHidden}
               projectId={p.project}
               sessionId={session.id}
               projectLabel={projectLabel(p.project)}
@@ -414,22 +374,16 @@ export default function Workspace({
               onChangeTheme={onChangeTheme}
               onOpenCodeReview={onOpenCodeReview}
               onFirstInput={onFirstInput}
-              sessionLayouts={sessionLayouts}
             />
           );
         }),
       )}
 
       {!selectedHasTabs && (
-        <div className="empty-workspace">
-          <div className="empty-workspace-prompt">&gt;_</div>
-          <p>No terminal open.</p>
-          <p className="empty-workspace-hint">
-            {projects.length === 0
-              ? "Add a project (+ in the sidebar), then press ⌘T."
-              : `⌘T to start one in ${selectedProjectLabel ?? "the selected project"}.`}
-          </p>
-        </div>
+        <EmptyWorkspace
+          project={projects.find((p) => p.id === selectedProjectId) ?? null}
+          onStart={onStartSession}
+        />
       )}
     </div>
   );

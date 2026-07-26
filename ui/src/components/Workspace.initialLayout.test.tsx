@@ -1,36 +1,26 @@
-// Regression coverage for NewWorkspaceModal's LAYOUT presets actually
-// landing as the *starting arrangement* of a brand-new project's pane
-// grid, not just as a value `buildLayoutTree` (paneGrid.ts) computes in
-// isolation. `ProjectPaneGrid`'s `tree` state is otherwise built purely by
-// `syncPaneTree`/`addPane` (see Workspace.tsx's own module doc), which
-// always appends new panes as flat siblings of the root split — on its
-// own it can never produce an actual 2x2/2x3/2x4 grid. The
-// `sessionLayouts` map App.tsx passes down (keyed by session-group id
-// since 2026-07-26, when a project gained the ability to hold several
-// sessions) is what lets a freshly-created batch of panes land in the
-// chosen preset's real shape.
-//
-// Later the same day the grid became session-filtered (`Workspace.tsx`
-// renders one always-mounted grid per session and displays one of them), so
-// a preset is now simply the shape of its own session's grid — the last
-// test here is what that changed.
+// Regression coverage for the founder's approved layout ladder actually
+// reaching the DOM: a session's panes are laid out in the shape
+// `paneGrid.ts`'s `GRID_LADDER` prescribes for their *count* — 2x1, 2x2, 3x2,
+// 3x3, 4x3, 4x4 — no matter how they got there (a bulk create, ⌘T one at a
+// time, a close that drops the grid back down a rung). There is deliberately
+// no layout hint plumbed from the create dialogs any more: the count IS the
+// instruction, which is what makes every path agree.
 //
 // react-mosaic-component (real library, not mocked) renders every leaf as
 // a `.mosaic-tile` positioned via inline `top`/`left`/`width`/`height`
 // percentages computed from the tree's bounding-box splits (see
-// `node_modules/react-mosaic-component/lib/MosaicRoot.cjs`'s
-// `renderRecursively`) — so the *number of distinct top/left offsets*
-// among the rendered tiles is a real, DOM-level fingerprint of the tree's
-// shape: a flat row of N tiles has 1 distinct top and N distinct lefts; an
-// R-row grid has R distinct tops. This test reads that fingerprint
-// directly rather than reaching into React internals for the tree.
+// `node_modules/react-mosaic-component/lib/MosaicRoot.mjs`'s
+// `renderRecursively`) — so the *number of distinct top/left offsets* among
+// the rendered tiles is a real, DOM-level fingerprint of the tree's shape: a
+// flat row of N tiles has 1 distinct top and N distinct lefts; an R-row grid
+// has R distinct tops. These tests read that fingerprint directly rather than
+// reaching into React internals for the tree.
 //
 // `Terminal`/`PaneHeader` are stubbed to trivial probes — this test is
 // about grid geometry, not terminal rendering (already covered by
 // `Workspace.visibility.test.tsx` and `Workspace.mountStability.test.tsx`).
 import { render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { buildLayoutTree } from "../state/paneGrid";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
 
 vi.mock("./Terminal", () => ({
@@ -62,106 +52,78 @@ function tilePositions(container: HTMLElement): Array<{ top: number; left: numbe
   }));
 }
 
-describe("Workspace — a session's layout preset seeds the shape its panes land in", () => {
-  it("with a sessionLayouts entry matching the 2x2 preset, renders a real 2-row x 2-col grid (not a flat row)", () => {
-    const p1 = project("p1");
-    const tabs = [tab("a", "p1"), tab("b", "p1"), tab("c", "p1"), tab("d", "p1")];
-    const sessionLayouts = new Map([["g1", buildLayoutTree(["a", "b", "c", "d"], 4)!]]);
+/** `{ rows, cols }` as the rendered tiles actually report it: one row per
+ * distinct top offset, and the width of the FIRST row as the column count —
+ * a short final row (5 panes in a 3x2) uses its own wider left offsets, so
+ * counting distinct lefts across the whole grid would over-count. */
+function renderedShape(container: HTMLElement): { rows: number; cols: number; panes: number } {
+  const positions = tilePositions(container);
+  const tops = positions.map((p) => p.top);
+  const firstRow = Math.min(...tops);
+  return {
+    rows: new Set(tops).size,
+    cols: tops.filter((top) => top === firstRow).length,
+    panes: positions.length,
+  };
+}
 
-    const { container } = render(
-      <Workspace
-        projects={[p1]}
-        tabs={tabs}
-        activeTabId="d"
-        selectedProjectId="p1"
-        selectedProjectLabel="p1"
-        onActivateTab={noop}
-        onCloseTab={noop}
-        onNewTabInProject={noop}
-        onRenameTab={noop}
-        hidden={false}
-        sessionLayouts={sessionLayouts}
-      />,
-    );
+function workspaceWith(tabs: TabInfo[]) {
+  return (
+    <Workspace
+      projects={[project("p1")]}
+      tabs={tabs}
+      activeTabId={tabs[tabs.length - 1]?.id ?? null}
+      selectedProjectId="p1"
+      onActivateTab={noop}
+      onCloseTab={noop}
+      onNewTabInProject={noop}
+      onRenameTab={noop}
+      hidden={false}
+    />
+  );
+}
 
-    const positions = tilePositions(container);
-    expect(positions).toHaveLength(4);
-    const tops = new Set(positions.map((p) => p.top));
-    const lefts = new Set(positions.map((p) => p.left));
-    // A literal 2x2 grid: exactly 2 distinct row offsets, 2 distinct
-    // column offsets — a flat row of 4 would instead be 1 top x 4 lefts.
-    expect(tops.size).toBe(2);
-    expect(lefts.size).toBe(2);
+/** n panes in one session of project p1. */
+function panes(n: number): TabInfo[] {
+  return Array.from({ length: n }, (_, i) => tab(String(i + 1), "p1"));
+}
+
+describe("Workspace — a session's panes render in their approved shape", () => {
+  it.each([
+    [1, { rows: 1, cols: 1 }],
+    [2, { rows: 1, cols: 2 }],
+    [3, { rows: 2, cols: 2 }],
+    [4, { rows: 2, cols: 2 }],
+    [5, { rows: 2, cols: 3 }],
+    [6, { rows: 2, cols: 3 }],
+    [9, { rows: 3, cols: 3 }],
+    [12, { rows: 3, cols: 4 }],
+    [16, { rows: 4, cols: 4 }],
+  ])("%i panes render as a real %o grid", (count, shape) => {
+    const { container } = render(workspaceWith(panes(count)));
+    expect(renderedShape(container)).toEqual({ ...shape, panes: count });
   });
 
-  it("without a matching sessionLayouts entry, falls back to the ordinary flat-row arrangement (unchanged existing behavior)", () => {
-    const p1 = project("p1");
-    const tabs = [tab("a", "p1"), tab("b", "p1"), tab("c", "p1"), tab("d", "p1")];
+  it("opening one more terminal reflows the grid up a rung, live", () => {
+    const { container, rerender } = render(workspaceWith(panes(2)));
+    expect(renderedShape(container)).toEqual({ rows: 1, cols: 2, panes: 2 });
 
-    const { container } = render(
-      <Workspace
-        projects={[p1]}
-        tabs={tabs}
-        activeTabId="d"
-        selectedProjectId="p1"
-        selectedProjectLabel="p1"
-        onActivateTab={noop}
-        onCloseTab={noop}
-        onNewTabInProject={noop}
-        onRenameTab={noop}
-        hidden={false}
-      />,
-    );
-
-    const positions = tilePositions(container);
-    expect(positions).toHaveLength(4);
-    const tops = new Set(positions.map((p) => p.top));
-    const lefts = new Set(positions.map((p) => p.left));
-    expect(tops.size).toBe(1);
-    expect(lefts.size).toBe(4);
+    rerender(workspaceWith(panes(3)));
+    expect(renderedShape(container)).toEqual({ rows: 2, cols: 2, panes: 3 });
   });
 
-  it("a sessionLayouts entry for a DIFFERENT session never gets applied to this project (keyed by group, not first-match)", () => {
-    const p1 = project("p1");
-    const tabs = [tab("a", "p1"), tab("b", "p1")];
-    // Deliberately mismatched: an entry under a different project id, plus
-    // one for p1 that doesn't match its actual ids — neither should apply.
-    const sessionLayouts = new Map([
-      ["someone-elses-session", buildLayoutTree(["x", "y", "z", "w"], 4)!],
-    ]);
+  it("closing one drops it back down a rung", () => {
+    const { container, rerender } = render(workspaceWith(panes(5)));
+    expect(renderedShape(container)).toEqual({ rows: 2, cols: 3, panes: 5 });
 
-    const { container } = render(
-      <Workspace
-        projects={[p1]}
-        tabs={tabs}
-        activeTabId="b"
-        selectedProjectId="p1"
-        selectedProjectLabel="p1"
-        onActivateTab={noop}
-        onCloseTab={noop}
-        onNewTabInProject={noop}
-        onRenameTab={noop}
-        hidden={false}
-        sessionLayouts={sessionLayouts}
-      />,
-    );
-
-    // Ordinary 2-pane flat row: 1 top, 2 lefts.
-    const positions = tilePositions(container);
-    expect(positions).toHaveLength(2);
-    expect(new Set(positions.map((p) => p.top)).size).toBe(1);
-    expect(new Set(positions.map((p) => p.left)).size).toBe(2);
+    rerender(workspaceWith(panes(4)));
+    expect(renderedShape(container)).toEqual({ rows: 2, cols: 2, panes: 4 });
   });
 
-  it("a second session's preset shapes that session's own grid, leaving the first session's panes alone", () => {
-    // The ⌘N -> Session case, as it works since the grid became
-    // session-filtered (2026-07-26): project p1 already has one pane from
-    // session g1; session g2 arrives as a 2x2 batch of four. They do NOT
-    // share a tree any more — g2's preset is the whole shape of g2's own
-    // grid, and g1's single pane sits untouched in its own (now hidden)
-    // one. This used to assert a merge into one tree; the merge is gone
-    // because sessions no longer share a grid at all.
-    const p1 = project("p1");
+  it("each session is shaped by its OWN pane count, not the workspace's", () => {
+    // The ⌘N -> Session case: p1 holds one pane in session g1 and four in g2.
+    // They don't share a tree (see Workspace.tsx's module doc), so g2 is a
+    // 2x2 while g1 stays a single full-bleed pane in its own hidden grid.
     const tabs = [
       tab("a", "p1", "g1"),
       tab("b", "p1", "g2"),
@@ -169,39 +131,14 @@ describe("Workspace — a session's layout preset seeds the shape its panes land
       tab("d", "p1", "g2"),
       tab("e", "p1", "g2"),
     ];
-    const sessionLayouts = new Map([["g2", buildLayoutTree(["b", "c", "d", "e"], 4)!]]);
-
-    const { container } = render(
-      <Workspace
-        projects={[p1]}
-        tabs={tabs}
-        activeTabId="b"
-        selectedProjectId="p1"
-        selectedProjectLabel="p1"
-        onActivateTab={noop}
-        onCloseTab={noop}
-        onNewTabInProject={noop}
-        onRenameTab={noop}
-        hidden={false}
-        sessionLayouts={sessionLayouts}
-      />,
-    );
-
+    const { container } = render(workspaceWith(tabs));
     const gridFor = (group: string) =>
       container.querySelector<HTMLElement>(`.pane-grid-project[data-session="${group}"]`)!;
 
-    // g2 is the focused session, so it is the one on screen, and its four
-    // panes really are a 2x2 (2 distinct row offsets, 2 distinct columns) —
-    // not one flat row of four.
     const g2 = gridFor("g2");
-    expect(g2.style.display).not.toBe("none");
-    const g2Tiles = tilePositions(g2);
-    expect(g2Tiles).toHaveLength(4);
-    expect(new Set(g2Tiles.map((p) => p.top)).size).toBe(2);
-    expect(new Set(g2Tiles.map((p) => p.left)).size).toBe(2);
+    expect(g2.style.display).not.toBe("none"); // the focused session is the visible one
+    expect(renderedShape(g2)).toEqual({ rows: 2, cols: 2, panes: 4 });
 
-    // g1 keeps its single pane, mounted and full-bleed in its own grid —
-    // the new batch never reached into it.
     const g1 = gridFor("g1");
     expect(g1.style.display).toBe("none");
     expect(tilePositions(g1)).toEqual([{ top: 0, left: 0 }]);

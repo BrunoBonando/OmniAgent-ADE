@@ -33,7 +33,7 @@ import {
   isSubfolder,
   newSessionReducer,
 } from "../state/newSessionState";
-import { LAYOUT_PRESETS, layoutCaption, nominalGridShape, type LayoutPreset } from "../state/paneGrid";
+import { LAYOUT_PRESETS, gridShape, layoutCaption, type LayoutPreset } from "../state/paneGrid";
 import { ENGINES, type Engine, type ProjectInfo } from "../state/sessions";
 import { ENGINE_COLOR, ENGINE_LABEL } from "../theme";
 
@@ -43,11 +43,12 @@ interface NewSessionModalProps {
   onClose: () => void;
 }
 
-/** Same CSS-drawn preset preview `NewWorkspaceModal` uses — shared through
- * `nominalGridShape` so the glyph can never drift from the arrangement
- * `buildLayoutTree` actually produces. */
-function LayoutGlyph({ preset }: { preset: LayoutPreset }) {
-  const { rows, cols } = nominalGridShape(preset);
+/** The CSS-drawn preset preview every LAYOUT row uses (`NewWorkspaceModal`
+ * and `EmptyWorkspace` import it from here) — shared through `gridShape` so
+ * the glyph can never drift from the arrangement the grid actually produces,
+ * and one hand-copy per dialog is how they would eventually disagree. */
+export function LayoutGlyph({ preset }: { preset: LayoutPreset }) {
+  const { rows, cols } = gridShape(preset);
   return (
     <span
       className="new-workspace-layout-glyph"

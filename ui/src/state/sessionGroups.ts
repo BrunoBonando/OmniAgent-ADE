@@ -156,6 +156,18 @@ export function groupTabsBySession(tabs: TabInfo[], activeTabId: string | null):
   });
 }
 
+/** The first pane in the adjacent session, or `null` at a project boundary. */
+export function adjacentSessionTab(
+  tabs: TabInfo[],
+  project: string,
+  activeTabId: string | null,
+  offset: number,
+): TabInfo | null {
+  const sessions = groupTabsBySession(tabs, activeTabId).find((entry) => entry.project === project)?.sessions ?? [];
+  const currentIndex = sessions.findIndex((session) => session.isCurrent);
+  return sessions[(currentIndex === -1 ? 0 : currentIndex) + offset]?.tabs[0] ?? null;
+}
+
 /** The name stored on a session's panes: the first one that carries a
  * non-empty `groupLabel`. Renaming writes it onto every pane, so they
  * normally agree; taking the first keeps a half-written group (an engine

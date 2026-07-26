@@ -15,7 +15,7 @@
 // unmounts `<Terminal>` itself (a regression of the mount-stability rule
 // `Workspace.mountStability.test.tsx` already guards) by asserting the
 // mocked xterm `Terminal` constructor is only ever invoked once per pane.
-import { render, waitFor } from "@testing-library/react";
+import { fireEvent, render, waitFor } from "@testing-library/react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
 
@@ -129,7 +129,6 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
       projects: [p1, p2],
       tabs,
       activeTabId: "a",
-      selectedProjectLabel: "p1",
       onActivateTab: noop,
       onCloseTab: noop,
       onNewTabInProject: noop,
@@ -173,7 +172,6 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
       tabs,
       activeTabId: "a",
       selectedProjectId: "p1",
-      selectedProjectLabel: "p1",
       onActivateTab: noop,
       onCloseTab: noop,
       onNewTabInProject: noop,
@@ -195,5 +193,36 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
     });
     expect(tauriMocks.sessionResizeMock.mock.calls.length).toBeGreaterThan(resizeCallsAtMount);
     expect(xtermMocks.ctorMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks the active pane and cycles visible panes with Ctrl+Tab", async () => {
+    const p1 = project("p1");
+    const tabs = [tab("a", "p1"), tab("b", "p1")];
+    const onActivateTab = vi.fn();
+    const props = {
+      projects: [p1],
+      tabs,
+      selectedProjectId: "p1",
+      onActivateTab,
+      onCloseTab: noop,
+      onNewTabInProject: noop,
+      onRenameTab: noop,
+    };
+
+    const { container, rerender } = render(<Workspace {...props} activeTabId="a" hidden={false} />);
+
+    await waitFor(() => expect(container.querySelector(".pane-body.is-focused")).not.toBeNull());
+    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+    expect(onActivateTab).toHaveBeenLastCalledWith("b");
+
+    rerender(<Workspace {...props} activeTabId="b" hidden={false} />);
+    await waitFor(() => expect(container.querySelector(".pane-body.is-focused")).not.toBeNull());
+    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+    expect(onActivateTab).toHaveBeenLastCalledWith("a");
+
+    onActivateTab.mockClear();
+    rerender(<Workspace {...props} activeTabId="a" hidden={true} />);
+    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+    expect(onActivateTab).not.toHaveBeenCalled();
   });
 });

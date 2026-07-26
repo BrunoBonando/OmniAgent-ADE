@@ -63,9 +63,9 @@ vi.mock("./components/Sidebar", () => ({
 }));
 
 vi.mock("./components/Workspace", () => ({
-  default: function WorkspaceStub(props: { tabs: TabInfo[] }) {
+  default: function WorkspaceStub(props: { tabs: TabInfo[]; activeTabId: string | null }) {
     return (
-      <ul data-testid="workspace-stub">
+      <ul data-testid="workspace-stub" data-active-tab-id={props.activeTabId ?? ""}>
         {props.tabs.map((t) => (
           <li key={t.id} data-testid="tab" data-group={t.group} data-cwd={t.cwd}>
             {`${t.id}:${t.engine}`}
@@ -118,6 +118,27 @@ async function boot() {
 
 function pressCmdN() {
   fireEvent.keyDown(window, { key: "n", metaKey: true });
+}
+
+function restoreThreeSessions() {
+  tauriMocks.sessionCreateMock.mockImplementation(
+    (project: string, engine: string, cwd: string, _briefing: unknown, restoreId?: string) =>
+      Promise.resolve({ id: restoreId ?? "new-session", project, engine, cwd, created: 0 }),
+  );
+  tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+    if (key === LAYOUT_SETTING_KEY) {
+      return Promise.resolve(
+        JSON.stringify({
+          tabs: [
+            { id: "first", project: "p1", engine: "claude", cwd: "/tmp/p1", group: "g1" },
+            { id: "second", project: "p1", engine: "claude", cwd: "/tmp/p1", group: "g2" },
+            { id: "third", project: "p1", engine: "claude", cwd: "/tmp/p1", group: "g3" },
+          ],
+        }),
+      );
+    }
+    return Promise.resolve(null);
+  });
 }
 
 describe("⌘N asks first", () => {
@@ -232,5 +253,33 @@ describe("⌘N -> Session: panes in the project you're already in", () => {
 
     await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(1));
     expect(await screen.findByText(/couldn't run Shell/i)).toBeInTheDocument();
+  });
+});
+
+describe("Ctrl+Arrow session navigation", () => {
+  it("moves down one session and stops at the final session", async () => {
+    restoreThreeSessions();
+    await boot();
+    await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first"));
+
+    fireEvent.keyDown(window, { key: "ArrowDown", ctrlKey: true });
+    await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("second"));
+    fireEvent.keyDown(window, { key: "ArrowDown", ctrlKey: true });
+    await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("third"));
+    fireEvent.keyDown(window, { key: "ArrowDown", ctrlKey: true });
+    expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("third");
+  });
+
+  it("moves up one session and stops at the first session", async () => {
+    restoreThreeSessions();
+    await boot();
+    await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first"));
+
+    fireEvent.keyDown(window, { key: "ArrowUp", ctrlKey: true });
+    expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first");
+    fireEvent.keyDown(window, { key: "ArrowDown", ctrlKey: true });
+    await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("second"));
+    fireEvent.keyDown(window, { key: "ArrowUp", ctrlKey: true });
+    await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first"));
   });
 });

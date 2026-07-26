@@ -25,7 +25,7 @@
 // validated subfolder), so its terminals normally agree; when they drift, the
 // row answers for the session, not for whichever terminal happens to be
 // focused.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { deriveSessionCard } from "../state/sessionHoverCard";
 import { mostSignificantStatus } from "../state/sessionStatus";
 import type { SessionGroup } from "../state/sessionGroups";
@@ -73,6 +73,11 @@ interface SidebarSessionRowProps {
    * with `visibleSessionGroupId` — the same function `Workspace.tsx` uses to
    * decide what to paint — so the rail and the grid cannot disagree. */
   isCurrent: boolean;
+  /** This session's own colour, for its rail. Computed by `Sidebar` (same
+   * hash/palette the workspace avatars use) rather than here, so both
+   * columns of the sidebar cycle one palette and this file doesn't need a
+   * second copy of the hash. */
+  tint: string;
   /** Bring this session on screen — `App.tsx` activates one of its
    * terminals, which also selects its workspace. */
   onActivate: () => void;
@@ -85,6 +90,7 @@ export default function SidebarSessionRow({
   session,
   projectLabel,
   isCurrent,
+  tint,
   onActivate,
   onRename,
 }: SidebarSessionRowProps) {
@@ -135,6 +141,7 @@ export default function SidebarSessionRow({
     <li
       ref={rowRef}
       className={`session-row${isCurrent ? " is-current" : ""}`}
+      style={{ "--session-tint": tint } as CSSProperties}
       onMouseEnter={scheduleCard}
       onMouseLeave={closeCard}
     >

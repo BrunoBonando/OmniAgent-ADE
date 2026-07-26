@@ -31,6 +31,7 @@ function setup(overrides: Partial<Parameters<typeof SidebarSessionRow>[0]> = {})
       session={session()}
       projectLabel="api"
       isCurrent={false}
+      tint="#78a9ff"
       onActivate={onActivate}
       onRename={onRename}
       {...overrides}
@@ -64,7 +65,7 @@ describe("SidebarSessionRow — the session and its branch, nothing else", () =>
   it("shows no branch tag at all outside a git repo, rather than an empty one", () => {
     useGitBranchMock.mockReturnValue(null);
     const { container } = render(
-      <SidebarSessionRow session={session()} projectLabel="api" isCurrent={false} onActivate={() => {}} onRename={() => {}} />,
+      <SidebarSessionRow session={session()} projectLabel="api" isCurrent={false} tint="#78a9ff" onActivate={() => {}} onRename={() => {}} />,
     );
     expect(container.querySelector(".session-row-branch")).toBeNull();
   });
@@ -75,6 +76,7 @@ describe("SidebarSessionRow — the session and its branch, nothing else", () =>
         session={session([tab({ id: "s1", label: "backend fix" }), tab({ id: "s2", engine: "shell" })])}
         projectLabel="api"
         isCurrent={false}
+        tint="#78a9ff"
         onActivate={() => {}}
         onRename={() => {}}
       />,
@@ -96,6 +98,7 @@ describe("SidebarSessionRow — the session and its branch, nothing else", () =>
         session={session([tab({ id: "s1", status: "ready" }), tab({ id: "s2", status: "awaiting_approval" })])}
         projectLabel="api"
         isCurrent={false}
+        tint="#78a9ff"
         onActivate={() => {}}
         onRename={() => {}}
       />,

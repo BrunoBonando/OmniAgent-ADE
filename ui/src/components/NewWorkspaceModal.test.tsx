@@ -50,7 +50,7 @@ describe("NewWorkspaceModal — rendering", () => {
 
   it("shows all four layout presets, 4 selected by default with its caption", () => {
     setup();
-    for (const preset of [2, 4, 6, 8]) {
+    for (const preset of [2, 4, 6, 9]) {
       expect(screen.getByRole("button", { name: new RegExp(`^${preset}\\b`) })).toBeInTheDocument();
     }
     expect(screen.getByText("2×2 grid layout")).toBeInTheDocument();
@@ -159,7 +159,7 @@ describe("NewWorkspaceModal — submit", () => {
     addProjectMock.mockResolvedValue(PROJECT);
     await pickFolder();
     fireEvent.click(screen.getByRole("checkbox", { name: /shell/i })); // claude + shell checked
-    fireEvent.click(screen.getByRole("button", { name: /^8\b/ })); // pick the "8" layout
+    fireEvent.click(screen.getByRole("button", { name: /^9\b/ })); // pick the "9" layout
 
     fireEvent.click(screen.getByRole("button", { name: /create workspace/i }));
 
@@ -168,7 +168,7 @@ describe("NewWorkspaceModal — submit", () => {
     const [project, engines, layout] = onCreate.mock.calls[0] as [ProjectInfo, Engine[], LayoutPreset];
     expect(project).toEqual(PROJECT);
     expect(engines).toEqual(["claude", "shell"]); // ENGINES order, not click order
-    expect(layout).toBe(8);
+    expect(layout).toBe(9);
   });
 
   it("does not call onClose itself on success — the caller closes the modal (same split as AddProjectModal/Sidebar)", async () => {

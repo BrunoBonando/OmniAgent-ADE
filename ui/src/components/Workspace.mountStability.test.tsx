@@ -11,16 +11,18 @@
 // with a matching `key`, so the portal indirection bought nothing and was
 // removed).
 //
-// What actually protects mount stability is `paneGrid.ts`'s `addPane`/
-// `removePane` shape: react-mosaic-component's `MosaicRoot` keys
-// intermediate split nodes by *tree path* (see that library's
-// `MosaicRoot.tsx`), so a leaf whose parent path changes gets discarded
-// and remounted by React, regardless of the leaf's own stable key. These
-// tests render the *real* library (not a mock) and assert, with a mount
-// counter, exactly which tree edits are safe — this is what caught the
-// original `addPane` implementation (wrap the *whole* existing tree in a
-// new split on every add) silently remounting every already-open pane's
-// terminal each time a new one opened.
+// react-mosaic-component's `MosaicRoot` keys intermediate split nodes by
+// *tree path* (see that library's `MosaicRoot.mjs`), so a leaf whose enclosing
+// split changes gets discarded and remounted by React regardless of the leaf's
+// own stable key. Since the founder's approved-shape ladder (`paneGrid.ts`'s
+// `GRID_LADDER`) re-lays a session's whole grid out when the pane count
+// crosses a rung, some remounting is now the deliberate PRICE of the ladder
+// rather than a bug to be eliminated — so these tests render the *real*
+// library (not a mock) with a mount counter and pin down exactly what each
+// kind of edit costs. A remounted pane starts with an empty xterm; tmux keeps
+// the session and repaints the visible screen on the resize the reflow itself
+// causes (see `buildGrid`'s own `ponytail:` note for the snapshot-on-mount
+// upgrade path if that ever isn't enough).
 //
 // ## Session filtering rides on the SAME rule (2026-07-26)
 //
@@ -37,7 +39,7 @@ import { render } from "@testing-library/react";
 import { useEffect } from "react";
 import { Mosaic, MosaicWindow, type MosaicNode } from "react-mosaic-component";
 import { describe, expect, it, vi } from "vitest";
-import { addPane, removePane, type PaneTree } from "../state/paneGrid";
+import { buildGrid, syncPaneTree, type PaneTree } from "../state/paneGrid";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
 
 const probes = vi.hoisted(() => ({
@@ -91,39 +93,68 @@ function Harness({ tree }: { tree: PaneTree | null }) {
 }
 
 describe("mount stability against the real react-mosaic-component library", () => {
-  it("opening a 2nd, 3rd, and 4th pane via addPane never remounts the ones already open", () => {
+  /** ids "1".."n", the pane set a session holds at that count. */
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => String(i + 1));
+
+  it("adding a pane WITHIN a rung costs at most the one pane sharing its row", () => {
+    // 7 -> 8 -> 9 panes, all three the 3x3 rung. Every full row (1-2-3,
+    // 4-5-6) keeps its exact tree path and its live terminal. The only pane
+    // that pays is the one that was ALONE on the last row: a solitary pane
+    // renders as a bare leaf (the codebase's "no pointless single-child
+    // split" rule), so gaining a neighbour turns it into a real row split and
+    // React discards it. "8" joining "7" costs "7"; "9" joining an existing
+    // 2-wide row costs nobody.
     mounts = [];
-    let tree: PaneTree | null = null;
+    let tree: PaneTree | null = buildGrid(ids(7));
     const { rerender } = render(<Harness tree={tree} />);
+    expect(mounts).toEqual(ids(7));
 
-    tree = addPane(tree, "a");
+    tree = syncPaneTree(tree, ids(8));
     rerender(<Harness tree={tree} />);
-    expect(mounts).toEqual(["a"]);
+    expect(mounts.slice(7)).toEqual(["7", "8"]);
 
-    tree = addPane(tree, "b");
+    tree = syncPaneTree(tree, ids(9));
     rerender(<Harness tree={tree} />);
-    expect(mounts).toEqual(["a", "b"]); // 'a' did not remount
-
-    tree = addPane(tree, "c");
-    rerender(<Harness tree={tree} />);
-    expect(mounts).toEqual(["a", "b", "c"]); // neither 'a' nor 'b' remounted
-
-    tree = addPane(tree, "d");
-    rerender(<Harness tree={tree} />);
-    expect(mounts).toEqual(["a", "b", "c", "d"]);
+    expect(mounts.slice(9)).toEqual(["9"]); // nothing already open moved
   });
 
-  it("closing one pane out of several never remounts the survivors", () => {
+  it("crossing a rung remounts only the panes whose ROW changes", () => {
+    // 4 panes (2x2: rows [1,2] [3,4]) -> 5 panes (3x2: rows [1,2,3] [4,5]).
+    // "3" moves up into the first row and "5" is new; "1", "2" and "4" keep
+    // their row and their live terminal.
     mounts = [];
-    let tree: PaneTree | null = "a";
-    tree = addPane(tree, "b");
-    tree = addPane(tree, "c");
+    let tree: PaneTree | null = buildGrid(ids(4));
     const { rerender } = render(<Harness tree={tree} />);
-    expect(mounts).toEqual(["a", "b", "c"]);
+    expect(mounts).toEqual(ids(4));
 
-    tree = removePane(tree, "b");
+    tree = syncPaneTree(tree, ids(5));
     rerender(<Harness tree={tree} />);
-    expect(mounts).toEqual(["a", "b", "c"]); // no new entries — 'a' and 'c' stayed mounted
+    expect(mounts.slice(4).sort()).toEqual(["3", "5"]);
+  });
+
+  it("the first split (1 pane -> 2) remounts nothing", () => {
+    mounts = [];
+    let tree: PaneTree | null = syncPaneTree(null, ["a"]);
+    const { rerender } = render(<Harness tree={tree} />);
+    expect(mounts).toEqual(["a"]);
+
+    tree = syncPaneTree(tree, ["a", "b"]);
+    rerender(<Harness tree={tree} />);
+    expect(mounts).toEqual(["a", "b"]);
+  });
+
+  it("closing the last pane of a row leaves the rows above it mounted", () => {
+    // 5 panes (rows [1,2,3] [4,5]) -> close "5" -> 4 panes (rows [1,2] [3,4]).
+    // The panes that stay in the same row keep their terminals; "3" moves down
+    // a row and pays for it.
+    mounts = [];
+    let tree: PaneTree | null = buildGrid(ids(5));
+    const { rerender } = render(<Harness tree={tree} />);
+    expect(mounts).toEqual(ids(5));
+
+    tree = syncPaneTree(tree, ["1", "2", "3", "4"]);
+    rerender(<Harness tree={tree} />);
+    expect(mounts.slice(5)).toEqual(["3"]);
   });
 
   it("resizing (splitPercentages only) never remounts any pane", () => {
@@ -213,7 +244,6 @@ describe("session filtering shows one session without unmounting the others", ()
     projects: [p1],
     tabs,
     selectedProjectId: "p1",
-    selectedProjectLabel: "p1",
     onActivateTab: noop,
     onCloseTab: noop,
     onNewTabInProject: noop,

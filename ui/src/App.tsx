@@ -37,7 +37,7 @@ import {
   type ProjectInfo,
   type TabInfo,
 } from "./state/sessions";
-import { buildLayoutTree, type LayoutPreset, type PaneTree } from "./state/paneGrid";
+import { MAX_PANES, type LayoutPreset } from "./state/paneGrid";
 import { importFailureBanner, type ImportBatchResult } from "./state/importState";
 import {
   CLOSED_WORKSPACES_SETTING_KEY,
@@ -48,6 +48,7 @@ import {
 } from "./state/closedWorkspaces";
 import { isSessionStatus, type SessionStatusEvent } from "./state/sessionStatus";
 import {
+  adjacentSessionTab,
   groupTabsBySession,
   newSessionGroupId,
   nextSessionName,
@@ -148,25 +149,6 @@ function App() {
   // suppressed from rendering.
   const [reviewTarget, setReviewTarget] = useState<{ id: string; cwd: string; label: string } | null>(null);
 
-  // Arrangement hints for a freshly-created batch of panes (see
-  // `Workspace.tsx`'s `sessionLayouts` doc). A plain mutable ref, not React
-  // state — nothing needs to
-  // re-render *because* this map changed; it only needs to hold the right
-  // value by the time the `tabs/opened_bulk` dispatch below triggers
-  // `Workspace`'s next render, and mutating-then-dispatching in the same
-  // synchronous call does exactly that. `ProjectPaneGrid` applies each
-  // entry exactly once (it remembers which groups it has folded in), so
-  // entries are deliberately never cleaned up afterward — bounded by "how
-  // many sessions this run has created," negligible for a desktop app that
-  // restarts on relaunch.
-  // Keyed by SESSION-GROUP id (2026-07-26), not project id as it was when
-  // only `NewWorkspaceModal` could bulk-create: a project can now hold
-  // several sessions, each created with its own layout preset, so the
-  // arrangement hint belongs to the batch that chose it. `Workspace.tsx`
-  // merges each entry into that project's grid the first time all of its
-  // panes are present (see `addPaneSubtree` — appended beside what's
-  // already there, never re-wrapping it, so live terminals never remount).
-  const pendingLayoutsRef = useRef<Map<string, PaneTree>>(new Map());
 
   // ---- fake sign-in + personalization gate — a SEPARATE, EARLIER gate
   // than Task 8.1's FirstRun below (Bruno, verbatim: "let's Focus on
@@ -624,36 +606,64 @@ function App() {
   // session independently, so two concurrent calls for different projects
   // can never clobber each other regardless of which `settingsGet` settles
   // first.
+  //
+  // The per-project-override-else-global-else-claude resolution itself lives
+  // in `defaultEngineFor` just below, shared with `EmptyWorkspace`'s
+  // zero-decision "Start session" (`handleQuickStart`) — both mean "the
+  // engine this project opens by default", and two copies of that chain
+  // would be two places to forget a settings key.
+  const defaultEngineFor = useCallback(async (projectId: string): Promise<Engine> => {
+    let perProject: string | null = null;
+    let global: string | null = null;
+    try {
+      [perProject, global] = await Promise.all([
+        settingsGet(defaultEngineSettingKey(projectId)),
+        settingsGet(GLOBAL_DEFAULT_ENGINE_KEY),
+      ]);
+    } catch (err) {
+      console.error("failed to read engine-default settings, falling back to claude", err);
+    }
+    const settingsMap: Record<string, string | undefined> = {};
+    if (perProject) settingsMap[defaultEngineSettingKey(projectId)] = perProject;
+    if (global) settingsMap[GLOBAL_DEFAULT_ENGINE_KEY] = global;
+    return resolveDefaultEngine(projectId, settingsMap);
+  }, []);
+
   const requestNewTab = useCallback(
     async (project: ProjectInfo) => {
       setSelectedProjectId(project.id);
       reopenWorkspace(project.id);
-      let perProject: string | null = null;
-      let global: string | null = null;
-      try {
-        [perProject, global] = await Promise.all([
-          settingsGet(defaultEngineSettingKey(project.id)),
-          settingsGet(GLOBAL_DEFAULT_ENGINE_KEY),
-        ]);
-      } catch (err) {
-        console.error("failed to read engine-default settings, falling back to claude", err);
+
+      // A single new pane joins the session you're already in for that
+      // project (`sessionGroupForNewPane`) — ⌘T, the sidebar "+" and the
+      // pane header's split all mean "one more terminal here", not "a new
+      // session". A project with no panes at all starts one, named.
+      const existingGroup = sessionGroupForNewPane(state.tabs, project.id, state.activeTabId);
+
+      // The approved-shape ladder tops out at 4x4 (`paneGrid.ts`'s
+      // `GRID_LADDER` — founder: "and then no more terminals are
+      // available"), so refuse the 17th pane instead of spawning a live
+      // session the grid has no approved shape for. Per SESSION, not per
+      // project or per app: a workspace can hold as many 16-pane sessions as
+      // the machine will take (`isUnderPressure` is the softer, advisory
+      // warning about that).
+      const inSession = state.tabs.filter(
+        (t) => t.project === project.id && (t.group ?? UNGROUPED_SESSION_ID) === existingGroup,
+      ).length;
+      if (existingGroup !== null && inSession >= MAX_PANES) {
+        setErrorBanner(
+          `This session already has ${MAX_PANES} terminals — the most one grid holds. Close one, or start a new session (⌘N).`,
+        );
+        return;
       }
-      const settingsMap: Record<string, string | undefined> = {};
-      if (perProject) settingsMap[defaultEngineSettingKey(project.id)] = perProject;
-      if (global) settingsMap[GLOBAL_DEFAULT_ENGINE_KEY] = global;
-      const engine = resolveDefaultEngine(project.id, settingsMap);
+
+      const engine = await defaultEngineFor(project.id);
 
       try {
-        // A single new pane joins the session you're already in for that
-        // project (`sessionGroupForNewPane`) — ⌘T, the sidebar "+" and the
-        // pane header's split all mean "one more terminal here", not "a new
-        // session". A project with no panes at all starts one, named.
-        //
         // Joining an existing session means inheriting its name from the
         // panes already in it (`undefined` for a pre-naming session, which
         // keeps showing its derived default) — never minting a second name
         // for a session that already has one.
-        const existingGroup = sessionGroupForNewPane(state.tabs, project.id, state.activeTabId);
         const group = existingGroup ?? newSessionGroupId();
         const groupLabel =
           existingGroup === null
@@ -673,7 +683,7 @@ function App() {
         setErrorBanner(`Couldn't start ${engine} in ${project.label}: ${err}`);
       }
     },
-    [createSessionTab, reopenWorkspace, state.tabs, state.activeTabId],
+    [createSessionTab, reopenWorkspace, defaultEngineFor, state.tabs, state.activeTabId],
   );
 
   // ---- PaneHeader's 3-dot "Change engine" -------------------------------
@@ -759,7 +769,10 @@ function App() {
   // chosen for this project's next ⌘T", and a multi-engine batch has no
   // one answer to write there.
   const handleWorkspaceCreated = useCallback(
-    async (project: ProjectInfo, engines: Engine[], layout: LayoutPreset) => {
+    // `layout` is deliberately absent: the LAYOUT card the dialog offers is a
+    // preview, not an instruction — the grid derives its own approved shape
+    // from how many panes end up open (`paneGrid.ts`'s `GRID_LADDER`).
+    async (project: ProjectInfo, engines: Engine[]) => {
       void reloadProjects();
       setSelectedProjectId(project.id);
 
@@ -779,8 +792,6 @@ function App() {
       }
 
       if (created.length > 0) {
-        const tree = buildLayoutTree(created.map((t) => t.id), layout);
-        if (tree) pendingLayoutsRef.current.set(group, tree);
         dispatch({ type: "tabs/opened_bulk", tabs: created });
       }
 
@@ -809,13 +820,26 @@ function App() {
   // 1. no `add_project` — the project already exists, this runs inside it;
   // 2. `cwd` is the project folder or a validated subfolder of it, not a
   //    brand-new folder chosen from anywhere on disk.
+  //
+  // `name` overrides the derived "Session N" — the goal typed into
+  // `EmptyWorkspace` ("what do you want to achieve today?"), which is the
+  // most useful name a session can have. Empty/absent falls back to the
+  // derived one, so the dialog's own path is unchanged.
   const handleSessionCreated = useCallback(
-    async (project: ProjectInfo, cwd: string, engines: Engine[], layout: LayoutPreset) => {
+    async (
+      project: ProjectInfo,
+      cwd: string,
+      engines: Engine[],
+      // Same as `handleWorkspaceCreated` above: the shape follows the pane
+      // count, so the picked preset has nothing left to do down here.
+      _layout: LayoutPreset,
+      name?: string,
+    ) => {
       setNewSessionOpen(false);
       setSelectedProjectId(project.id);
 
       const group = newSessionGroupId();
-      const groupLabel = nextSessionName(state.tabs, project.id);
+      const groupLabel = name?.trim() || nextSessionName(state.tabs, project.id);
       const created: TabInfo[] = [];
       const failed: Engine[] = [];
       for (const engine of engines) {
@@ -828,8 +852,6 @@ function App() {
       }
 
       if (created.length > 0) {
-        const tree = buildLayoutTree(created.map((t) => t.id), layout);
-        if (tree) pendingLayoutsRef.current.set(group, tree);
         dispatch({ type: "tabs/opened_bulk", tabs: created });
       }
 
@@ -845,6 +867,28 @@ function App() {
       setView("workspace");
     },
     [createSessionTab, state.tabs],
+  );
+
+  // ---- EmptyWorkspace's "Start session" ---------------------------------
+  // The zero-decision sibling of `handleSessionCreated` above, and nothing
+  // more than a set of defaults in front of it: the project's own folder,
+  // the project's default engine (`defaultEngineFor` — same chain ⌘T uses),
+  // and one pane per slot in the chosen layout, so picking "4" gives four
+  // terminals in a 2x2 rather than four slots waiting for engines that were
+  // never chosen. The typed goal becomes the session's name.
+  const handleQuickStart = useCallback(
+    async (project: ProjectInfo, layout: LayoutPreset, goal: string) => {
+      reopenWorkspace(project.id);
+      const engine = await defaultEngineFor(project.id);
+      await handleSessionCreated(
+        project,
+        project.path ?? project.id,
+        Array.from({ length: layout }, () => engine),
+        layout,
+        goal,
+      );
+    },
+    [defaultEngineFor, handleSessionCreated, reopenWorkspace],
   );
 
   // ⌘N's chooser resolved. "Session" needs a project to run in — with none
@@ -1093,6 +1137,27 @@ function App() {
   // -------------------------------------------------------------------
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      if (
+        e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !e.shiftKey &&
+        (e.key === "ArrowDown" || e.key === "ArrowUp")
+      ) {
+        if (selectedProjectId !== null) {
+          const next = adjacentSessionTab(
+            state.tabs,
+            selectedProjectId,
+            state.activeTabId,
+            e.key === "ArrowDown" ? 1 : -1,
+          );
+          if (next) {
+            e.preventDefault();
+            activateTab(next.id);
+          }
+        }
+        return;
+      }
       if (!e.metaKey) return;
       if (e.key.toLowerCase() === "t") {
         e.preventDefault();
@@ -1122,7 +1187,7 @@ function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedProject, requestNewTab, state.activeTabId]);
+  }, [activateTab, selectedProject, selectedProjectId, requestNewTab, state.activeTabId, state.tabs]);
 
   // The chrome's breadcrumb — "which workspace, which session am I in" —
   // built from the same `groupTabsBySession` derivation the sidebar renders
@@ -1176,7 +1241,7 @@ function App() {
           onSelectProject={(p) => setSelectedProjectId(p.id)}
           onNewTabInProject={(p) => void requestNewTab(p)}
           onActivateTab={activateTab}
-          onWorkspaceCreated={(p, engines, layout) => void handleWorkspaceCreated(p, engines, layout)}
+          onWorkspaceCreated={(p, engines) => void handleWorkspaceCreated(p, engines)}
           newWorkspaceOpen={newWorkspaceOpen}
           onOpenNewWorkspace={() => setNewWorkspaceOpen(true)}
           onCloseNewWorkspace={() => setNewWorkspaceOpen(false)}
@@ -1199,7 +1264,6 @@ function App() {
           tabs={state.tabs}
           activeTabId={state.activeTabId}
           selectedProjectId={selectedProjectId}
-          selectedProjectLabel={selectedProject?.label}
           onActivateTab={activateTab}
           onCloseTab={(id) => void closeTab(id)}
           onNewTabInProject={(p) => void requestNewTab(p)}
@@ -1210,8 +1274,8 @@ function App() {
             setReviewTarget({ id: tab.id, cwd: tab.cwd, label: tabDisplayLabel(tab) })
           }
           onFirstInput={autoTitleTab}
+          onStartSession={(p, layout, goal) => void handleQuickStart(p, layout, goal)}
           hidden={view !== "workspace"}
-          sessionLayouts={pendingLayoutsRef.current}
         />
         <BrainMap
           projects={state.projects}

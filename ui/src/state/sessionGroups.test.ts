@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   UNGROUPED_SESSION_ID,
+  adjacentSessionTab,
   currentSessionGroupId,
   groupTabsBySession,
   newSessionGroupId,
@@ -118,6 +119,32 @@ describe("sessionGroupForNewPane", () => {
   it("returns null for a project with no panes at all — the caller mints a session", () => {
     expect(sessionGroupForNewPane([tab("z", "p2", "g9")], "p1", "z")).toBeNull();
     expect(sessionGroupForNewPane([], "p1", null)).toBeNull();
+  });
+});
+
+describe("adjacentSessionTab", () => {
+  const tabs = [
+    tab("first", "p1", "g1"),
+    tab("second", "p1", "g2"),
+    tab("second-pane", "p1", "g2"),
+    tab("third", "p1", "g3"),
+  ];
+
+  it("moves to the first pane in the next session", () => {
+    expect(adjacentSessionTab(tabs, "p1", "second-pane", 1)?.id).toBe("third");
+  });
+
+  it("moves to the first pane in the previous session", () => {
+    expect(adjacentSessionTab(tabs, "p1", "second", -1)?.id).toBe("first");
+  });
+
+  it("stops at the outer session boundaries", () => {
+    expect(adjacentSessionTab(tabs, "p1", "first", -1)).toBeNull();
+    expect(adjacentSessionTab(tabs, "p1", "third", 1)).toBeNull();
+  });
+
+  it("starts from the visible first session when focus is outside the project", () => {
+    expect(adjacentSessionTab([...tabs, tab("other", "p2", "g4")], "p1", "other", 1)?.id).toBe("second");
   });
 });
 

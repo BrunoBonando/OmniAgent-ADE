@@ -514,6 +514,30 @@
 //! from, not an engine-specific behavior — the engines themselves stay
 //! completely stock, only the env OmniAgent's own spawn call hands them
 //! changes (DESIGN principle 5).
+//!
+//! ## The two things a GUI-launched pane was still missing (founder bug,
+//! ## 2026-07-26)
+//! Bruno opened a claude session in the packaged app and got a working
+//! banner drawn in mojibake, over three `SessionStart:startup hook error /
+//! /bin/sh: node: command not found`. Both halves are the same empty-GUI-
+//! environment story as `PATH` and `TERM` above, one layer further out —
+//! what the *engine's own children* inherit:
+//!
+//! - **`PATH` never reached the pane.** `-e PATH=…` sets the tmux *session*
+//!   environment (`show-environment` shows it) but a pane's `PATH` comes
+//!   from the tmux **client** that ran `new-session` — measured three ways
+//!   in `crate::tmux`'s module docs #4a. The pane therefore ran on
+//!   `/usr/bin:/bin:/usr/sbin:/sbin`: `claude` itself started (it's passed
+//!   as an absolute path — [`resolve_engine_binary`]), but every `node`,
+//!   `git`, `gh` or `npm` it shelled out to was unfindable. Fixed in
+//!   [`crate::tmux::Tmux::ensure_session`] by setting the env on the
+//!   `new-session` command itself, not only as `-e` pairs.
+//! - **No locale at all.** tmux decides UTF-8 mode from
+//!   `LC_ALL`/`LC_CTYPE`/`LANG`; with none set, every ADE client reported
+//!   `#{client_utf8}` = 0 and `capture-pane` returned invalid UTF-8, which
+//!   is why claude's `──` frame arrived as `‚îÄ‚îÄ`. Filled by
+//!   [`utf8_locale_override`], on the same "assert what the renderer
+//!   supports" principle as `TERM`.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -2184,8 +2208,65 @@ fn engine_env() -> Vec<(String, String)> {
     }
     env.push(("TERM".to_string(), TERM_VALUE.to_string()));
     env.push(("COLORTERM".to_string(), COLORTERM_VALUE.to_string()));
+    if let Some(locale) = utf8_locale_override(
+        std::env::var("LC_ALL").ok().as_deref(),
+        std::env::var("LC_CTYPE").ok().as_deref(),
+        std::env::var("LANG").ok().as_deref(),
+    ) {
+        env.push(locale);
+    }
     env
 }
+
+/// A UTF-8 locale for the spawned engine and the tmux client, when — and only
+/// when — the ambient environment doesn't already name one.
+///
+/// Founder bug, 2026-07-26: claude's box-drawing frame arrived as mojibake
+/// (`‚îÄ‚îÄ` where `──` belongs — UTF-8 bytes shown one glyph per byte).
+/// Measured on his live server: every ADE tmux client reported
+/// `#{client_utf8}` = **0**, and `capture-pane -p` returned bytes that aren't
+/// valid UTF-8 — tmux had byte-split the pane. tmux decides UTF-8 mode from
+/// `LC_ALL`/`LC_CTYPE`/`LANG`, and a Finder-launched `.app` has none of them
+/// (the same empty-environment root cause as [`resolve_shell_path`] and
+/// [`TERM_VALUE`]).
+///
+/// Asserted rather than resolved, for [`TERM_VALUE`]'s exact reason: xterm.js
+/// decodes UTF-8 and nothing else, so "what should the encoding be" has one
+/// right answer regardless of what a login shell would have said. A real
+/// locale already in the environment (`tauri dev` from a terminal) is
+/// respected untouched — this only fills a vacuum.
+///
+/// ponytail: the *language* half of `en_US.UTF-8` is a guess (it only moves
+/// CLI number/date formatting), where the charset half is the actual fix. If
+/// that ever matters, resolve `$LANG` from the login shell in the same spawn
+/// [`spawn_and_capture_path`] already makes, rather than adding a second one.
+fn utf8_locale_override(
+    lc_all: Option<&str>,
+    lc_ctype: Option<&str>,
+    lang: Option<&str>,
+) -> Option<(String, String)> {
+    // `LC_ALL` outranks the other two, so if it is set to anything at all,
+    // adding `LANG` cannot change the outcome — leave the environment alone
+    // and let a deliberate setting stand, UTF-8 or not.
+    if lc_all.is_some() {
+        return None;
+    }
+    let names_utf8 = |v: Option<&str>| {
+        v.is_some_and(|v| {
+            let v = v.to_ascii_uppercase().replace('-', "");
+            v.contains("UTF8")
+        })
+    };
+    if names_utf8(lc_ctype) || names_utf8(lang) {
+        return None;
+    }
+    Some(("LANG".to_string(), UTF8_LOCALE.to_string()))
+}
+
+/// The locale [`utf8_locale_override`] asserts when the environment names
+/// none. `en_US.UTF-8` is present on every macOS install (`locale -a`), so
+/// this can't fail the way a `de_DE.UTF-8`-style guess could.
+const UTF8_LOCALE: &str = "en_US.UTF-8";
 
 /// The PTY child that attaches to a tmux session. Gets the same
 /// `PATH`/`TERM`/`COLORTERM` as an engine would: `TERM` in particular matters
@@ -4899,6 +4980,30 @@ mod tests {
                 "no resolved PATH means don't set one at all (inherit)"
             ),
         }
+    }
+
+    /// The mojibake half of the founder's 2026-07-26 report: with no locale
+    /// in the environment tmux leaves UTF-8 mode off and byte-splits the
+    /// pane, so claude's frame renders as `‚îÄ‚îÄ`. A vacuum gets filled; a
+    /// locale that is already UTF-8, and any deliberate `LC_ALL`, are left
+    /// exactly as they are.
+    #[test]
+    fn a_utf8_locale_is_asserted_only_when_the_environment_names_none() {
+        let utf8 = Some(("LANG".to_string(), UTF8_LOCALE.to_string()));
+        // The GUI case: nothing set at all.
+        assert_eq!(utf8_locale_override(None, None, None), utf8);
+        // Set, but not UTF-8 — tmux would still byte-split.
+        assert_eq!(utf8_locale_override(None, None, Some("C")), utf8);
+        assert_eq!(
+            utf8_locale_override(None, Some("en_US.ISO8859-1"), None),
+            utf8
+        );
+        // Already UTF-8, spelled either of the two common ways.
+        assert_eq!(utf8_locale_override(None, None, Some("de_DE.UTF-8")), None);
+        assert_eq!(utf8_locale_override(None, Some("en_US.utf8"), None), None);
+        // `LC_ALL` outranks `LANG`, so adding one could not have helped —
+        // whatever it says, it stands.
+        assert_eq!(utf8_locale_override(Some("C"), None, None), None);
     }
 
     // -- Traffic-light status heuristics --------------------------------

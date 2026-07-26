@@ -90,11 +90,35 @@
 //!    what makes it safe to pass `claude --append-system-prompt <a whole
 //!    multi-line briefing>` through unquoted — the briefing never goes near a
 //!    shell.
-//! 4. **`-e KEY=VALUE` reaches the pane's process environment**, so `PATH`
-//!    (shell-resolved — see `sessions.rs`) and `COLORTERM` survive the trip
-//!    through the tmux server. `TERM` is the exception: tmux always sets it
-//!    inside the pane from `default-terminal`, so that's set in the config
-//!    file instead.
+//! 4. **`-e KEY=VALUE` reaches the pane's process environment**, so
+//!    `COLORTERM` survives the trip through the tmux server. `TERM` is one
+//!    exception: tmux always sets it inside the pane from
+//!    `default-terminal`, so that's set in the config file instead.
+//! 4a. **`PATH` is the other exception, and it is not a small one** (founder
+//!    bug, 2026-07-26: claude started fine but every hook it ran died with
+//!    `/bin/sh: node: command not found` — and with it every `git`, `gh`,
+//!    `npm`, `rg` a Bash tool call would reach for). Measured three ways on
+//!    the same real tmux, with `-e PATH=<rich>` passed every time:
+//!      - server started minimal, client minimal → pane `PATH` **minimal**,
+//!        while `show-environment -t <session> PATH` shows the rich one. So
+//!        `-e` genuinely sets the *session* environment and the pane
+//!        genuinely does not get it.
+//!      - server started minimal, **client rich** → pane `PATH` **rich**.
+//!      - `set-environment -g PATH <rich>` on the server, then a minimal
+//!        client → pane `PATH` **minimal**. The server's global environment
+//!        loses too.
+//!    So the pane's `PATH` is the `PATH` of the tmux **client process that
+//!    ran `new-session`** — nothing else. This is the same "the client is
+//!    what matters" rule that already forced absolute engine paths (see
+//!    "Why tmux needs an *absolute* engine path" in `sessions.rs`), and it
+//!    has the same cause: a GUI-launched `.app` client inherits macOS's
+//!    minimal default `PATH`. Absolute argv fixed *finding the engine*; it
+//!    could not fix what the engine's own children see, because that comes
+//!    from the pane's inherited environment. Hence [`Tmux::ensure_session`]
+//!    setting the env on the `new-session` command itself, not only as `-e`.
+//!    Second case above is why this also works when a server is already
+//!    running with a stale minimal `PATH`: each `new-session` client brings
+//!    its own.
 //!
 //! ## What is deliberately *not* here
 //!
@@ -267,6 +291,13 @@ impl Tmux {
         cmd.arg("-c").arg(cwd);
         for (k, v) in env {
             cmd.arg("-e").arg(format!("{k}={v}"));
+            // ...and on THIS process's own environment, because `-e` alone
+            // does not carry `PATH` into the pane — module docs #4a, and the
+            // `node: command not found` bug it fixes. Setting both is not
+            // belt-and-braces: `-e` is what a *later* pane in the same
+            // session (a `new-window`, a split) inherits, this is what the
+            // pane created right here gets.
+            cmd.env(k, v);
         }
         // `--` then the argv verbatim: tmux `exec`s a multi-argument command
         // instead of handing it to a shell (module docs #3), so a briefing
@@ -597,4 +628,60 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), CONFIG_BODY);
     }
 
+    /// **The `node: command not found` bug** (founder, 2026-07-26: claude
+    /// itself came up, then every SessionStart hook it ran failed on a
+    /// missing `node`). The engine's own children resolve commands against
+    /// the *pane's* environment, and `-e PATH=…` never reaches it — see
+    /// module docs #4a for the three-way measurement. So this asserts the
+    /// only thing that actually matters: whatever `PATH` we hand
+    /// `ensure_session` is the `PATH` the pane process really has.
+    ///
+    /// Runs against real tmux, and deliberately asks for a `PATH` that is
+    /// neither this test process's nor any plausible default, so passing by
+    /// coincidence isn't possible — against the pre-fix code the pane
+    /// reports the test runner's own `PATH` instead.
+    #[test]
+    fn the_pane_gets_the_path_we_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = format!("omniagent-panepath-{}", std::process::id());
+        let t = match Tmux::resolve(&socket, None) {
+            Some(t) => t,
+            None => return, // tmux genuinely not installed — nothing to prove
+        };
+        let out = dir.path().join("path.out");
+        let wanted = format!("{}/marker-bin:/usr/bin:/bin", dir.path().display());
+
+        t.ensure_session(
+            "panepath",
+            dir.path(),
+            &[("PATH".to_string(), wanted.clone())],
+            &[
+                "/bin/sh".into(),
+                "-c".into(),
+                // `sleep` keeps the pane (and so the server) alive while the
+                // assertion polls, instead of racing session teardown.
+                format!("printenv PATH > {}; sleep 10", out.display()),
+            ],
+        )
+        .expect("create the probe session");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut seen = String::new();
+        while std::time::Instant::now() < deadline {
+            if let Ok(s) = std::fs::read_to_string(&out) {
+                if !s.trim().is_empty() {
+                    seen = s.trim().to_string();
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        t.kill_server();
+
+        assert_eq!(
+            seen, wanted,
+            "the pane's PATH is not the one OmniAgent resolved — every command the engine \
+             shells out to (node, git, npm) resolves against this"
+        );
+    }
 }

@@ -525,10 +525,9 @@ describe("sessionsReducer — tabs/opened_bulk", () => {
   // NewWorkspaceModal's bulk-create: all N of a brand-new project's sessions
   // land in ONE dispatch (never one `tab/opened` per session) so
   // `ProjectPaneGrid` (Workspace.tsx) mounts directly with the full,
-  // final tab set already present -- see paneGrid.ts's `buildLayoutTree`
-  // doc and Workspace.tsx's `initialTree` prop for why an incremental,
-  // one-at-a-time reveal would defeat the chosen LAYOUT preset's
-  // arrangement and risk remounting already-open panes.
+  // final tab set already present -- an incremental, one-at-a-time reveal
+  // would instead walk the grid up one approved shape per pane
+  // (paneGrid.ts's GRID_LADDER), remounting panes on each rung it crossed.
   it("appends every tab in one go and activates the last one", () => {
     const next = sessionsReducer(initialSessionsState, {
       type: "tabs/opened_bulk",

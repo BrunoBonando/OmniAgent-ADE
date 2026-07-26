@@ -98,8 +98,9 @@ export function newWorkspaceReducer(state: NewWorkspaceState, action: NewWorkspa
 
 /** The checked engines, always in `ENGINES` order regardless of click
  * order — this is also the exact order NewWorkspaceModal's bulk-create
- * spawns sessions in and `buildLayoutTree` arranges them in, so panes land
- * in a stable, predictable left-to-right/top-to-bottom order every time. */
+ * spawns sessions in and `buildGrid` (paneGrid.ts) fills the grid in, so panes
+ * land in a stable, predictable left-to-right/top-to-bottom order every
+ * time. */
 export function checkedEngines(state: NewWorkspaceState): Engine[] {
   return ENGINES.filter((engine) => state.engines[engine]);
 }

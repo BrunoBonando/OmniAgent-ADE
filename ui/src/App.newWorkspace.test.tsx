@@ -4,14 +4,14 @@
 // per-engine spawn logic (`getBriefing` for claude only, `sessionCreate`
 // with the project's cwd) `confirmNewTab` already used for the single-tab
 // ⌘T flow — dispatches them as ONE bulk batch (see `sessions.ts`'s
-// `tabs/opened_bulk` and `paneGrid.ts`'s `buildLayoutTree` docs for why:
-// a brand-new project's grid must mount with its final tab set already
-// present so the chosen LAYOUT preset's arrangement actually lands, and
-// panes already opened never remount mid-batch), computes an
-// `sessionLayouts` entry (keyed by the new session's group id) for the
-// chosen preset, selects the project, and
-// switches to the workspace view — surfacing any per-engine failure via
-// the existing `errorBanner` without aborting the rest of the batch.
+// `tabs/opened_bulk`'s doc for why: a brand-new project's grid must mount with
+// its final tab set already present, so it lands in one approved shape instead
+// of reflowing once per pane as the batch trickles in), selects the project,
+// and switches to the workspace view — surfacing any per-engine failure via
+// the existing `errorBanner` without aborting the rest of the batch. The
+// resulting arrangement itself is no longer App's business at all: the grid
+// derives it from the pane count (`paneGrid.ts`'s `GRID_LADDER`), covered in
+// `Workspace.initialLayout.test.tsx`.
 //
 // Same stubbing approach as `App.requestNewTab.test.tsx`/
 // `App.bootRestore.test.tsx`: heavy children stubbed to minimal probes.
@@ -22,9 +22,8 @@
 // enough (`hidden`, `tabs`, `sessionLayouts`) to assert on.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { buildLayoutTree } from "./state/paneGrid";
 import type { Engine, ProjectInfo, TabInfo } from "./state/sessions";
-import type { PaneTree, LayoutPreset } from "./state/paneGrid";
+import type { LayoutPreset } from "./state/paneGrid";
 
 const tauriMocks = vi.hoisted(() => ({
   getBriefingMock: vi.fn(),
@@ -84,11 +83,7 @@ vi.mock("./components/Sidebar", () => ({
 }));
 
 vi.mock("./components/Workspace", () => ({
-  default: function WorkspaceStub(props: {
-    hidden: boolean;
-    tabs: TabInfo[];
-    sessionLayouts?: Map<string, PaneTree>;
-  }) {
+  default: function WorkspaceStub(props: { hidden: boolean; tabs: TabInfo[] }) {
     return (
       <div data-testid="workspace-stub" data-hidden={String(props.hidden)}>
         <ul>
@@ -98,9 +93,6 @@ vi.mock("./components/Workspace", () => ({
             </li>
           ))}
         </ul>
-        <span data-testid="initial-layout-fresh">
-          {JSON.stringify([...(props.sessionLayouts?.values() ?? [])][0] ?? null)}
-        </span>
       </div>
     );
   },
@@ -165,24 +157,6 @@ describe("App — NewWorkspaceModal bulk-create orchestration", () => {
     // View flips back from map to workspace once the workspace is created.
     expect(screen.getByTestId("workspace-stub").dataset.hidden).toBe("false");
     expect(screen.getByTestId("brainmap-stub").dataset.hidden).toBe("true");
-  });
-
-  it("seeds the new session's layout hint with buildLayoutTree(createdIds, layout)", async () => {
-    tauriMocks.sessionCreateMock.mockImplementation((_project: string, engine: string) =>
-      Promise.resolve(sessionInfoFor(engine)),
-    );
-
-    render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "create-workspace-claude-codex" }));
-
-    await waitFor(() => {
-      const raw = screen.getByTestId("initial-layout-fresh").textContent;
-      expect(raw).not.toBe("null");
-    });
-
-    const expected = buildLayoutTree(["claude-session", "codex-session"], 4);
-    const actual = JSON.parse(screen.getByTestId("initial-layout-fresh").textContent!);
-    expect(actual).toEqual(expected);
   });
 
   it("partial failure: one engine's session_create rejects — the rest still land, and an error banner names the failure", async () => {
