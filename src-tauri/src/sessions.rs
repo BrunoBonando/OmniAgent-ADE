@@ -231,59 +231,123 @@
 //! gone — after a reboot, say; the ordinary restore attaches and never goes
 //! near it).
 //!
-//! ## Traffic-light status (founder brief, 2026-07-26)
-//! Bruno: *"Green means ready for any new command, yellow means executing,
-//! red means requires attention or input."* → [`SessionStatus::Ready` /
-//! `Executing` / `Attention`], pushed as `session-status:{id}` on change and
-//! pullable on demand via [`SessionManager::status`] (so a tab can render the
-//! right light the instant it mounts, without waiting for a transition).
+//! ## Five-state session status (founder brief, 2026-07-26, revised same day)
+//! The first version of this was a three-state traffic light (*"Green means
+//! ready for any new command, yellow means executing, red means requires
+//! attention or input"*). Bruno then revised it to five, verbatim:
 //!
-//! Per-engine detection, and its honest limits:
+//! > White/Blue: pulsing gradient — the agent is thinking, reasoning, or
+//! > generating tokens. · Green: solid steady — a task completed successfully
+//! > and results are ready or just waiting for input. · Amber/Yellow:
+//! > breathing slow rhythm — the agent is paused, waiting for your approval. ·
+//! > Red/Magenta: rapid flashing — an error occurred, a process failed, or a
+//! > block exists. · Cyan/Teal: rapid chasing — active tool execution, like
+//! > terminal commands or file writes.
+//! >
+//! > But only green, yellow or red generate a notification (in case the user
+//! > is somewhere else…).
 //!
-//! - **attention (red)** — the existing `ATTENTION_MARKERS` match. Latched by
-//!   the reader thread the moment the marker appears, cleared when the user
-//!   next writes to the session (answering the prompt is the only real
-//!   "handled" signal available). Note this latch reads the *raw* match, not
-//!   the [`AttentionDebouncer`]-gated event: the debouncer exists to stop a
-//!   redraw storm becoming 100 notifications, but a status latch has no such
-//!   problem, and using the debounced signal would mean a second prompt
-//!   arriving inside the 15s cooldown never turned the light red again.
-//!   Known limit, since the signal is *screen text*: while the marker is
-//!   still displayed, any full repaint re-emits it as genuinely new output
-//!   and re-latches red. For a real Claude prompt that is correct behavior
-//!   (answering it repaints *without* the dialog, so the marker stops
-//!   arriving); for text that merely happens to contain the phrase and stays
-//!   on screen, the light can stick red until that text scrolls away.
-//! - **shell sessions, with tmux (the good case)** — `tmux display-message -p
-//!   '#{pane_current_command}'`, which tmux derives from the pane tty's
-//!   foreground process group. Reads `zsh` at the prompt → **ready**; reads
-//!   `sleep`/`cargo`/`vim`/… → **executing**. Verified against real tmux
-//!   including `sleep 4`, the case that produces *no output at all* and that
-//!   therefore no activity heuristic could ever get right.
-//! - **`claude`/`codex` sessions** — `pane_current_command` is always the
-//!   engine itself (it never returns to a shell prompt), so it carries no
-//!   information; these fall back to **sustained output activity**: output
-//!   must have arrived within [`OUTPUT_QUIET_THRESHOLD`] *and* the unbroken
-//!   run it belongs to must already be [`SUSTAINED_ACTIVITY_MIN`] long.
+//! → [`SessionStatus::Thinking` / `Ready` / `AwaitingApproval` / `Error` /
+//! `ToolExecution`], pushed as `session-status:{id}` on change (payload:
+//! [`SessionStatusEvent`], `notify` flag included — [`SessionStatus::notifies`]
+//! is the single source of truth for that rule) and pullable on demand via
+//! [`SessionManager::status`], which returns the identical shape so a tab can
+//! render the right light the instant it mounts.
 //!
-//!   The second condition is not decoration — it comes from measuring a real
-//!   idle `claude`, which turns out not to be quiet at all: it repaints in a
-//!   ~50 ms burst every 4–8 s, forever. Plain recency therefore strobed the
-//!   light yellow→green every few seconds on a session doing nothing
-//!   (observed live). Requiring the *run* to last ≥ 1 s separates an idle
-//!   twitch from real streaming work.
+//! ### Where the signals come from (all measured, 2026-07-26)
 //!
-//!   Limits, stated plainly: "executing" shows up about a second late; an
-//!   engine that genuinely works in isolated sub-second bursts spaced
-//!   seconds apart reads as ready; and an engine thinking in complete silence
-//!   also reads as ready. It is a *liveness* signal, not an idle protocol —
-//!   no stock engine exposes one (see the attention-detection investigation
-//!   above for how thoroughly that was chased), so this is deliberately the
-//!   simple, honest approximation rather than a fragile TUI-scraping guess.
+//! The one structural fact everything below depends on: **the ADE reads
+//! tmux's re-rendered stream, not the engine's own output.** That matters more
+//! than it sounds. Claude Code's raw PTY output is *word-addressed* — its
+//! "Running 1 shell command" line goes out as
+//! `Running\x1b[11G1\x1b[13Gshell\x1b[19Gcommand…`, with a cursor-position
+//! escape between every word — so plain substring matching against the raw
+//! engine stream would match essentially nothing. tmux maintains its own
+//! screen model and re-emits contiguous runs of text, which is why the marker
+//! matching here works at all. Verified both ways against real `claude`
+//! 2.1.220: the same marker that matches through tmux fails on the direct
+//! stream.
+//!
+//! - **awaiting_approval (amber)** — the existing `ATTENTION_MARKERS` match
+//!   (`"Do you want to"`), verified still contiguous through tmux:
+//!   `" Do you want to create \x1b[1mnotes.txt\x1b(B\x1b[m?"`. Latched by the
+//!   reader thread the moment the marker appears, cleared when the user next
+//!   writes (answering is the only "handled" signal a stock engine gives).
+//!   This latch reads the *raw* match, not the [`AttentionDebouncer`]-gated
+//!   event: the debouncer exists to stop a redraw storm becoming 100
+//!   notifications, but a status latch has no such problem, and using the
+//!   debounced signal would mean a second prompt inside the 15 s cooldown
+//!   never turned the light amber again. A pending prompt was measured
+//!   repainting the full screen ~1.9×/s (17 repaints while one sat unanswered
+//!   for 9 s), which is exactly why [`ATTENTION_INPUT_GRACE`] exists.
+//! - **error (red)** — [`contains_error_marker`]: a non-zero `Exit code N`
+//!   line, the literal Claude Code renders for a failed Bash tool. Latched and
+//!   cleared like approval, sharing [`ATTENTION_INPUT_GRACE`]. See
+//!   [`ERROR_MARKER`] for the measurement, and that constant for the live-run
+//!   correction that made the two graces the same length.
+//! - **tool_execution (cyan), `shell` sessions with tmux (the good case)** —
+//!   `tmux display-message -p '#{pane_current_command}'`, which tmux derives
+//!   from the pane tty's foreground process group. Reads `zsh` at the prompt →
+//!   **ready**; reads `sleep`/`cargo`/`vim`/… → **tool_execution**, because for
+//!   a terminal session "a foreground command is running" *is* Bruno's cyan.
+//!   Verified against real tmux including `sleep 4`, the case that produces no
+//!   output at all and that therefore no activity heuristic could ever catch.
+//! - **thinking (white/blue), `claude`/`codex`** — `pane_current_command` is
+//!   useless here (a real claude pane reports `2.1.220`, the process title
+//!   Claude Code sets, and keeps reporting it while a tool runs), so these
+//!   fall back to **sustained output activity**: output within
+//!   [`OUTPUT_QUIET_THRESHOLD`] *and* an unbroken run already
+//!   [`SUSTAINED_ACTIVITY_MIN`] long. The second condition is not decoration —
+//!   see [`SUSTAINED_ACTIVITY_MIN`] for the idle-strobe measurement it comes
+//!   from. Measured as fit for purpose here too: during a real Claude Bash
+//!   tool run, the largest gap between output chunks was 0.23 s (p95 0.115 s),
+//!   comfortably inside the 700 ms threshold, so a working engine never
+//!   flickers to green mid-turn.
+//! - **tool_execution (cyan), `claude`/`codex`** — the hard one, and the one
+//!   place this deliberately does *less* than the brief. A busy engine is
+//!   refined from `thinking` to `tool_execution` only when `tmux capture-pane`
+//!   shows [`TOOL_EXECUTION_SCREEN_MARKERS`] on the live screen. Screen state,
+//!   not stream events, precisely because a running tool is a state that ends
+//!   and a latch would leave cyan stuck on. See that constant for the four
+//!   candidate signals that were measured and rejected (including the
+//!   process-tree approach, which real sampling showed is swamped by
+//!   hook/status-line/MCP-server children).
 //! - **without tmux** — every engine, including `shell`, falls back to the
-//!   output-activity heuristic. For `shell` that is genuinely worse (a silent
-//!   long-running command looks idle); it is the price of not having tmux,
-//!   and one more reason the tmux path is the default.
+//!   output-activity heuristic, and `claude`/`codex` can never reach
+//!   `tool_execution` at all (no `capture-pane`). For `shell` the fallback is
+//!   genuinely worse (a silent long-running command looks idle); it is the
+//!   price of not having tmux, and one more reason the tmux path is the
+//!   default.
+//!
+//! ### What does *not* fire, stated plainly
+//!
+//! A light the user will never see is worth naming as such:
+//!
+//! - **`error` for a `shell` session: never.** A failed command's exit status
+//!   is genuinely unobtainable here without violating DESIGN principle 5.
+//!   Investigated concretely against tmux 3.7b: `#{pane_dead_status}` is empty
+//!   for a live pane (`pane_dead=0`) and only ever reports the *pane's root
+//!   process* exit under `remain-on-exit on` — i.e. the shell itself dying,
+//!   not a command inside it — and no other tmux format variable exposes a
+//!   command exit status (`display-message -a` lists none). The standard
+//!   robust answer is shell integration: a `precmd`/`PROMPT_COMMAND` hook
+//!   reporting `$?`, or OSC 133 semantic prompt marks. Every route to it
+//!   changes how the user's shell starts — editing their rc files (persistent,
+//!   plainly out), or pointing `ZDOTDIR` at a directory we own (per-invocation,
+//!   but it makes the shell start from *our* config instead of theirs, which
+//!   is precisely "the engine no longer runs exactly as in a plain terminal").
+//!   Ruled out. A `shell` session therefore has four reachable states, not
+//!   five, and red is not one of them.
+//! - **`thinking` for a `shell` session: never**, and correctly so — a shell
+//!   does not think. Sustained output from a shell means a command is running,
+//!   which is cyan.
+//! - **`tool_execution` for `claude`/`codex` without tmux: never** (no
+//!   `capture-pane`), and **only for Bash tools running longer than ~3 s** with
+//!   tmux. Sub-3s tool calls and in-process tools (a file write) read as
+//!   `thinking`. Less specific, never wrong.
+//! - **`error` for `claude`/`codex`** covers a failed *tool* only. API errors,
+//!   rate limits and refusals were not reproducible on demand and are not
+//!   claimed.
 //!
 //! Polling is centralized in one background thread ([`spawn_status_poller`])
 //! at [`STATUS_POLL_INTERVAL`], not one thread per session, and it only emits
@@ -391,34 +455,128 @@ pub type SessionEndHook = Arc<dyn Fn(&SessionEndEvent) + Send + Sync>;
 /// time this is called — callers don't need their own rate limiting.
 pub type AttentionSink = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// The traffic light Bruno asked for (2026-07-26): *"Green means ready for
-/// any new command, yellow means executing, red means requires attention or
-/// input."* Serialized lowercase (`"ready"` / `"executing"` / `"attention"`)
-/// — that string is the `session-status:{id}` payload and the
-/// `session_status` command's return value. See the module docs for exactly
-/// how each state is detected per engine, and what that detection cannot do.
+/// The five-state session light Bruno specified (2026-07-26), replacing the
+/// original three. His words, mapped to these variants:
+///
+/// | Founder's colour | Founder's meaning | Variant |
+/// |---|---|---|
+/// | White/Blue, pulsing gradient | "thinking, reasoning, or generating tokens" | [`Thinking`](Self::Thinking) |
+/// | Green, solid steady | "a task completed successfully and results are ready or just waiting for input" | [`Ready`](Self::Ready) |
+/// | Amber/Yellow, breathing | "paused, waiting for your approval" | [`AwaitingApproval`](Self::AwaitingApproval) |
+/// | Red/Magenta, rapid flashing | "an error occurred, a process failed, or a block exists" | [`Error`](Self::Error) |
+/// | Cyan/Teal, rapid chasing | "active tool execution, like terminal commands or file writes" | [`ToolExecution`](Self::ToolExecution) |
+///
+/// Serialized `snake_case` (`"thinking"` / `"ready"` / `"awaiting_approval"` /
+/// `"error"` / `"tool_execution"`); those strings are the wire contract, in
+/// both the `session-status:{id}` event payload ([`SessionStatusEvent`]) and
+/// the `session_status` command's return value. Self-describing rather than
+/// colour-named on purpose: the colour is a rendering decision the frontend
+/// owns, and a backend that emitted `"amber"` would freeze it.
+///
+/// **Read the module docs' "Five-state session status" section before
+/// rendering any of these.** Two of the five are approximations, and
+/// `ToolExecution` is deliberately narrower for `claude`/`codex` than its name
+/// suggests. That section states exactly what is measured, what is inferred,
+/// and what never fires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
-    /// Green — idle at a prompt, ready for a new command.
+    /// Green — idle, nothing running, waiting for the user.
     Ready,
-    /// Yellow — a command/turn is running.
-    Executing,
-    /// Red — blocked on the user (a Claude Code tool-permission prompt).
-    Attention,
+    /// White/blue — the engine is working and isn't visibly running a tool:
+    /// generating tokens, reasoning, calling the model.
+    Thinking,
+    /// Cyan — a real command/tool is executing (a shell session's foreground
+    /// process, or a Claude Code Bash tool that is visibly still running).
+    ToolExecution,
+    /// Amber — paused on the user's approval (a Claude Code tool-permission
+    /// prompt).
+    AwaitingApproval,
+    /// Red — something failed (a non-zero tool exit reported by the engine).
+    Error,
 }
 
 impl SessionStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             SessionStatus::Ready => "ready",
-            SessionStatus::Executing => "executing",
-            SessionStatus::Attention => "attention",
+            SessionStatus::Thinking => "thinking",
+            SessionStatus::ToolExecution => "tool_execution",
+            SessionStatus::AwaitingApproval => "awaiting_approval",
+            SessionStatus::Error => "error",
+        }
+    }
+
+    /// Whether reaching this state is worth interrupting the user for —
+    /// **the single source of truth for the notifications layer**, so the
+    /// frontend never re-derives the rule (and never drifts from it).
+    ///
+    /// Bruno, 2026-07-26, verbatim: *"only green, yellow or red generate a
+    /// notification (in case the user is somewhere else (maybe not in that
+    /// terminal) or in another session or even workspace)."* — i.e. the three
+    /// states that mean *something has settled and it's your turn again*:
+    /// [`Ready`](Self::Ready) (done),
+    /// [`AwaitingApproval`](Self::AwaitingApproval) (needs a decision),
+    /// [`Error`](Self::Error) (needs a look).
+    ///
+    /// [`Thinking`](Self::Thinking) and [`ToolExecution`](Self::ToolExecution)
+    /// are transient working states the user can watch if they care; notifying
+    /// on them would fire every few seconds during ordinary work and train the
+    /// user to ignore the channel entirely.
+    ///
+    /// Pure and total — a `match` with no wildcard arm, so adding a sixth
+    /// state later fails to compile here rather than silently defaulting to
+    /// "don't notify".
+    pub fn notifies(self) -> bool {
+        match self {
+            SessionStatus::Ready | SessionStatus::AwaitingApproval | SessionStatus::Error => true,
+            SessionStatus::Thinking | SessionStatus::ToolExecution => false,
         }
     }
 }
 
-/// Invoked with `(session_id, new_status)` whenever a session's traffic light
+/// The payload of a `session-status:{id}` event, and what
+/// `commands::session_status` returns — one shape for push and pull, so a pane
+/// that just mounted and a pane reacting to a transition read the same fields.
+///
+/// **On what's in here and what isn't.** `notify` is carried rather than left
+/// for the frontend to recompute: it makes [`SessionStatus::notifies`] the one
+/// place Bruno's rule lives, and a notifications panel can act on the event
+/// without knowing the taxonomy at all. `engine` is carried because a
+/// notification that says *which kind of session* wants you ("Claude needs
+/// approval" vs "a terminal finished") is materially more useful than a bare
+/// id, and it is free — the status poller already holds it.
+///
+/// `project` and the tab title deliberately are **not** carried. The frontend
+/// already owns that mapping in its tab state, and both are *mutable*
+/// (`roots::rename_project` exists) — a copy shipped inside every status event
+/// would be a second, staleable source of truth for something the UI can
+/// already resolve from the session id it is rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionStatusEvent {
+    /// The session this is about. Redundant with the per-session event name,
+    /// and kept anyway: it makes the payload self-contained for a single
+    /// shared listener, a notifications queue, or a log line.
+    pub id: String,
+    pub status: SessionStatus,
+    /// `status.notifies()`, precomputed. See [`SessionStatus::notifies`].
+    pub notify: bool,
+    /// `"claude"` / `"codex"` / `"shell"` — context for the notification text.
+    pub engine: String,
+}
+
+impl SessionStatusEvent {
+    fn new(id: &str, status: SessionStatus, engine: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            status,
+            notify: status.notifies(),
+            engine: engine.to_string(),
+        }
+    }
+}
+
+/// Invoked with the full [`SessionStatusEvent`] whenever a session's light
 /// actually *changes* — never on every poll. `lib.rs` wires this at boot to
 /// emit `session-status:{id}`, matching the existing
 /// `session-output:{id}`/`session-attention:{id}` convention; tests supply
@@ -426,7 +584,7 @@ impl SessionStatus {
 /// [`SessionManager::with_status_sink`]) is also what starts the single
 /// background poller — with no sink registered, nothing polls and status is
 /// only ever computed on demand.
-pub type StatusSink = Arc<dyn Fn(&str, SessionStatus) + Send + Sync>;
+pub type StatusSink = Arc<dyn Fn(&SessionStatusEvent) + Send + Sync>;
 
 /// Public shape returned by `session_create` — the Task 5.2 UI contract,
 /// plus the two 2026-07-26 persistence flags.
@@ -532,12 +690,25 @@ struct SessionActivity {
     /// with `last_output` this distinguishes "genuinely busy" from "an idle
     /// TUI twitched": see [`SUSTAINED_ACTIVITY_MIN`].
     busy_since: Mutex<Option<Instant>>,
-    /// Latched by the reader thread on an `ATTENTION_MARKERS` hit; cleared by
-    /// [`SessionManager::write`] (the user answering). Deliberately driven by
-    /// the raw match rather than the debounced event — see the module docs.
+    /// Latched by the reader thread on an [`ATTENTION_MARKERS`] hit; cleared
+    /// by [`SessionManager::write`] (the user answering). Deliberately driven
+    /// by the raw match rather than the debounced event — see the module docs.
     attention: AtomicBool,
+    /// Latched by the reader thread on an [`ERROR_MARKER`] hit (a non-zero
+    /// tool exit the engine printed); cleared by [`SessionManager::write`],
+    /// same as `attention` and for the same reason — the user typing is the
+    /// only "I've seen it" signal a stock engine gives us.
+    ///
+    /// A latch and not a screen-state check on purpose: a failure is an
+    /// *event*, and Bruno's red means "an error occurred", not "an error is
+    /// currently visible". The engine happily carries on afterwards (it will
+    /// often narrate the failure and try something else), so without a latch
+    /// the red would flash by in one poll tick and be missed by anyone not
+    /// staring at the tab — which is exactly the person the notification is
+    /// for.
+    error: AtomicBool,
     /// Set by [`SessionManager::write`], consumed by the reader thread on its
-    /// next chunk: discard the rolling attention window before scanning.
+    /// next chunk: discard the rolling marker window before scanning.
     ///
     /// Without this, clearing the latch above achieves nothing. The marker
     /// isn't a momentary event — it sits in a 4 KiB rolling window of recent
@@ -552,7 +723,7 @@ struct SessionActivity {
     /// prompt. Only output produced *after* their input can turn the light
     /// red again — which a genuinely still-pending prompt does immediately,
     /// since it redraws itself (marker included) roughly twice a second.
-    clear_attention_window: AtomicBool,
+    clear_marker_window: AtomicBool,
     /// Last status handed to the [`StatusSink`] (or returned by
     /// [`SessionManager::status`]), so the poller can emit on change only.
     last_status: Mutex<Option<SessionStatus>>,
@@ -571,17 +742,26 @@ impl SessionActivity {
             last_output: Mutex::new(Instant::now()),
             busy_since: Mutex::new(None),
             attention: AtomicBool::new(false),
-            clear_attention_window: AtomicBool::new(false),
+            error: AtomicBool::new(false),
+            clear_marker_window: AtomicBool::new(false),
             last_status: Mutex::new(None),
             status_tracking,
         }
     }
 
-    /// The user just typed into this session: drop the attention latch and
-    /// tell the reader thread to forget the output that produced it.
+    /// The user just typed into this session: drop **both** marker latches
+    /// (approval and error) and tell the reader thread to forget the output
+    /// that produced them.
+    ///
+    /// Both clear together because they share one clearing signal — there is
+    /// no way to tell "the user answered the prompt" apart from "the user
+    /// acknowledged the failure"; a stock engine reports neither. Typing is
+    /// the only evidence either way, so it clears everything the light was
+    /// holding on the user's behalf.
     fn mark_user_input(&self) {
         self.attention.store(false, Ordering::Relaxed);
-        self.clear_attention_window.store(true, Ordering::Relaxed);
+        self.error.store(false, Ordering::Relaxed);
+        self.clear_marker_window.store(true, Ordering::Relaxed);
     }
 
     /// Called by the reader thread for every chunk off the PTY. Keeps both
@@ -1119,9 +1299,13 @@ impl SessionManager {
     ///
     /// `None` only when there's no such live session. Recording the result as
     /// the session's last-known status is deliberate: a pull that returns
-    /// `executing` has already told the caller what the next push would have,
+    /// `thinking` has already told the caller what the next push would have,
     /// so suppressing that redundant push is correct, not a lost update.
-    pub fn status(&self, id: &str) -> Option<SessionStatus> {
+    ///
+    /// Returns the same [`SessionStatusEvent`] shape the push side emits —
+    /// including `notify` — so a caller never has to branch on where the
+    /// status came from.
+    pub fn status(&self, id: &str) -> Option<SessionStatusEvent> {
         let activity = {
             let sessions = self.sessions.lock().unwrap();
             Arc::clone(&sessions.get(id)?.activity)
@@ -1131,9 +1315,8 @@ impl SessionManager {
         if let Ok(mut last) = activity.last_status.lock() {
             *last = Some(status);
         }
-        Some(status)
+        Some(SessionStatusEvent::new(id, status, &activity.engine))
     }
-
 }
 
 fn transcripts_dir(data_dir: &Path) -> PathBuf {
@@ -1776,8 +1959,8 @@ fn spawn_reader_thread(
         // notification sink, or the traffic light (which latches red off the
         // raw match — see this function's doc comment and the module docs for
         // why it deliberately doesn't reuse the debounced event).
-        let watch_for_attention = on_attention.is_some() || activity.status_tracking;
-        let mut attention_window = String::new();
+        let watch_for_markers = on_attention.is_some() || activity.status_tracking;
+        let mut marker_window = String::new();
         let mut attention_debouncer = AttentionDebouncer::new(ATTENTION_COOLDOWN);
         // When this thread last observed a `SessionManager::write` (i.e. the
         // user responding) — the anchor for `ATTENTION_INPUT_GRACE`.
@@ -1802,29 +1985,40 @@ fn spawn_reader_thread(
                     // must reassemble identically for each.
                     let decoded = utf8_decoder.decode(chunk);
 
-                    if watch_for_attention {
+                    if watch_for_markers {
+                        let now = Instant::now();
                         // The user typed since the last chunk: everything
                         // already in the window predates their response and
                         // must not re-trigger (see
-                        // `SessionActivity::clear_attention_window`).
-                        if activity
-                            .clear_attention_window
-                            .swap(false, Ordering::Relaxed)
-                        {
-                            attention_window.clear();
-                            last_user_input = Some(Instant::now());
+                        // `SessionActivity::clear_marker_window`).
+                        if activity.clear_marker_window.swap(false, Ordering::Relaxed) {
+                            marker_window.clear();
+                            last_user_input = Some(now);
                         }
-                        attention_window.push_str(&decoded);
-                        trim_to_last_n_bytes(&mut attention_window, ATTENTION_WINDOW_BYTES);
-                        if contains_attention_marker(&attention_window) {
-                            let now = Instant::now();
+                        marker_window.push_str(&decoded);
+                        trim_to_last_n_bytes(&mut marker_window, ATTENTION_WINDOW_BYTES);
+
+                        // Red: a non-zero tool exit the engine just
+                        // reported. Same window, same clearing rule and same
+                        // grace as the approval latch below — see
+                        // `ATTENTION_INPUT_GRACE` for why a longer error-only
+                        // grace was tried and measured to be wrong.
+                        if contains_error_marker(&marker_window) {
+                            let just_responded = last_user_input
+                                .is_some_and(|t| now.duration_since(t) < ATTENTION_INPUT_GRACE);
+                            if !just_responded {
+                                activity.error.store(true, Ordering::Relaxed);
+                            }
+                        }
+
+                        if contains_attention_marker(&marker_window) {
                             // Grace window: the first repaint after the user
                             // responds legitimately still shows the dialog
                             // they just answered (see
                             // `ATTENTION_INPUT_GRACE`), so it must not turn
-                            // the light red again. A prompt that is genuinely
-                            // still pending redraws ~twice a second and
-                            // re-latches as soon as the grace lapses.
+                            // the light amber again. A prompt that is
+                            // genuinely still pending redraws ~twice a second
+                            // and re-latches as soon as the grace lapses.
                             let just_responded = last_user_input
                                 .is_some_and(|t| now.duration_since(t) < ATTENTION_INPUT_GRACE);
                             if !just_responded {
@@ -1945,7 +2139,7 @@ fn spawn_reader_thread(
 /// live terminal view) — xterm.js handles raw bytes correctly on its own,
 /// and buffering there would add latency to the live render path for zero
 /// benefit. Only the transcript (`pending`) and attention-detection
-/// (`attention_window`) paths, which both need real decoded text rather
+/// (`marker_window`) paths, which both need real decoded text rather
 /// than raw bytes, go through this.
 struct Utf8ChunkDecoder {
     /// Trailing bytes from the previous `decode()` call that didn't form a
@@ -2075,9 +2269,9 @@ const ATTENTION_WINDOW_BYTES: usize = 4096;
 /// attention need; it just avoids re-announcing one already flagged.
 const ATTENTION_COOLDOWN: Duration = Duration::from_secs(15);
 
-/// How long after the user writes to a session the *status latch* refuses to
-/// go red again (the notification event is unaffected — see the reader
-/// thread).
+/// How long after the user writes to a session the *status latches* refuse to
+/// re-arm — shared by both markers, approval and error (the notification event
+/// is unaffected — see the reader thread).
 ///
 /// Clearing the rolling window on input isn't quite enough on its own: the
 /// engine's very next repaint after the user answers still contains the
@@ -2091,12 +2285,121 @@ const ATTENTION_COOLDOWN: Duration = Duration::from_secs(15);
 /// still-pending prompt (which redraws roughly twice a second) re-latches
 /// within about a second of the grace lapsing. The cost of being wrong is
 /// bounded and self-correcting in both directions: at worst the light is
-/// green for ~1 s too long, never red forever.
+/// green for ~1 s too long, never amber forever.
+///
+/// **The error latch deliberately shares this exact value, and that was a
+/// correction.** A separate, much longer error grace (5 s) looked well
+/// reasoned on paper — a failure the user just acknowledged has none of a
+/// pending prompt's urgency about re-latching — and was flatly wrong in
+/// practice. Driving a real `claude` through a failing tool exposed it
+/// immediately: the single most common way a failure happens is *the user
+/// approving a command that then fails*, and the engine reports that failure
+/// within a second or two of the approval keystroke — i.e. inside the very
+/// grace meant to protect against stale repaints, so red never fired at all.
+/// Measured, not reasoned: run 1 of `manual_status_verify claude` went
+/// approval → thinking → **ready**, silently swallowing a real `Exit code 1`.
+///
+/// A longer grace also never actually bought anything: it only *delays* a
+/// repaint re-latch rather than preventing it, because the failure text stays
+/// on screen either way. The window clear on user input is what does the real
+/// work; this grace only has to outlast the echo of the user's own keystroke.
 const ATTENTION_INPUT_GRACE: Duration = Duration::from_millis(750);
 
 fn contains_attention_marker(text: &str) -> bool {
     ATTENTION_MARKERS.iter().any(|marker| text.contains(marker))
 }
+
+// -------------------------------------------------------------------------
+// Error detection (Bruno's red, 2026-07-26: "an error occurred, a process
+// failed, or a block exists"). See the module docs' "Five-state session
+// status" section for the full investigation, including the zero-config wall
+// that stops this from covering plain `shell` sessions at all.
+// -------------------------------------------------------------------------
+
+/// The literal Claude Code prints in a tool-result line when a Bash tool
+/// exits non-zero — measured, not guessed, against real `claude` 2.1.220
+/// running `ls /nonexistent-path-xyz-123` through this app's own tmux config:
+///
+/// ```text
+/// ⎿  Exit code 1 — ls: /nonexistent-path-xyz-123: No such file or directory
+/// ```
+///
+/// The bytes arrive as one contiguous run (`\x1b[39m Exit code 1 —`), which
+/// is what makes a plain `contains` viable at all — Claude's *own* PTY output
+/// is word-addressed (`Running\x1b[11G1\x1b[13Gshell…`) and would defeat it,
+/// but the ADE reads tmux's re-rendered stream, which re-composes runs of text
+/// (see the module docs).
+///
+/// A successful command prints **no** exit-code line at all (verified in the
+/// same session: a zero-exit Bash tool renders `Ran 1 shell command` and
+/// nothing else), so this literal is already failure-specific. The digit check
+/// in [`contains_error_marker`] is belt-and-braces for a future version that
+/// starts printing `Exit code 0`.
+const ERROR_MARKER: &str = "Exit code ";
+
+/// True when `text` contains a non-zero `Exit code N` report.
+///
+/// Deliberately more than `contains(ERROR_MARKER)`: the marker must be
+/// followed by a digit (so prose like "check the exit code manually" doesn't
+/// match) and that digit must not be `0` (so a hypothetical future `Exit code
+/// 0` success line can never light the session red). Kept as a small explicit
+/// scan rather than a regex — this runs on every PTY chunk of every tracked
+/// session, and the crate has no regex dependency.
+fn contains_error_marker(text: &str) -> bool {
+    text.match_indices(ERROR_MARKER).any(|(idx, _)| {
+        matches!(
+            text[idx + ERROR_MARKER.len()..].chars().next(),
+            Some(c) if c.is_ascii_digit() && c != '0'
+        )
+    })
+}
+
+// -------------------------------------------------------------------------
+// Tool-execution detection for claude/codex (Bruno's cyan). Screen state, not
+// stream events — see `status_from_screen`.
+// -------------------------------------------------------------------------
+
+/// Text that is on a Claude Code screen **only while a Bash tool is actually
+/// running**, matched against `tmux capture-pane` output.
+///
+/// Measured against real `claude` 2.1.220 wrapped in this app's tmux config,
+/// running `sleep 8 && echo …`. Claude renders a live tool block:
+///
+/// ```text
+/// ⏺  Running 1 shell command · 3s…
+///   ⎿  $ sleep 8 && echo TOOL_DONE_MARKER (3s)
+///      (ctrl+b ctrl+b (twice) to run in background)
+/// ```
+///
+/// and replaces the whole block with `Ran 1 shell command` the moment it
+/// finishes. The backgrounding hint is the marker used here because it is the
+/// one line in that block that cannot survive the tool ending — it is the
+/// affordance for a *running* command. (Note Claude even adapts it to its
+/// host: outside tmux it reads `(ctrl+b to run in background)`, inside tmux
+/// `(ctrl+b ctrl+b (twice) …)` — hence matching only the invariant tail.)
+///
+/// **Why not the more obvious candidates**, all measured and all rejected:
+/// - `Running 1 shell command` — the noun phrase is per-tool-kind
+///   (`Listing 1 directory…` for `ls`, and so on), so matching it would mean
+///   tracking Claude Code's internal tool vocabulary release by release; and
+///   the completed form (`Ran 1 shell command`) shares the same words, so
+///   presence never meant "running" in the first place.
+/// - The spinner line (`✻ Cascading… (14s · ↓ 92 tokens)`) — present for
+///   thinking *and* tool execution alike, so it can't separate them; its verb
+///   is randomised per turn anyway.
+/// - The process tree under the pane's pid — the honest-looking answer, and it
+///   fails hard in practice: sampling a real session's descendants showed a
+///   constant churn of `sh`, `bash`, `node`, `bun`, `python` children spawned
+///   by MCP servers, status-line commands and hooks, indistinguishable from a
+///   Bash tool's own shell.
+///
+/// The honest cost of this marker: Claude only draws the elapsed timer (and
+/// this hint) after the command has been running ~3 s, so tool executions
+/// shorter than that never turn the light cyan — they read as `thinking`,
+/// which is not a lie, just less specific. And like every marker here it is
+/// UI copy: a future Claude Code that reworded it silently degrades this to
+/// `thinking` rather than reporting anything wrong.
+const TOOL_EXECUTION_SCREEN_MARKERS: &[&str] = &["to run in background)"];
 
 /// Keeps `s` at most `max_bytes` long by dropping from the front, snapping
 /// the cut point forward to the nearest `char` boundary (a `String` can't be
@@ -2208,27 +2511,44 @@ fn is_idle_shell_command(pane_command: &str) -> bool {
 ///
 /// - A shell → the pane is at a prompt: **ready**, whatever the engine is.
 /// - Anything else in a `shell` session → a real command is running:
-///   **executing**. This is the case output-activity can't see at all
-///   (`sleep 4` prints nothing).
+///   **tool_execution**. For a terminal session, "a foreground command is
+///   running" *is* Bruno's cyan ("active tool execution, like terminal
+///   commands") — there is nothing else a shell could be doing. This is also
+///   the case output-activity can't see at all (`sleep 4` prints nothing).
 /// - Anything else in a `claude`/`codex` session → `None`: the engine is
 ///   *always* the pane's foreground command, so this signal carries no
-///   information and the caller must fall back to output activity.
+///   information and the caller must fall back to output activity. Measured,
+///   not assumed: a real `claude` 2.1.220 pane reports `pane_current_command`
+///   = `2.1.220` (the process title Claude Code sets), and it keeps reporting
+///   that while a Bash tool runs, because Claude spawns tool commands as
+///   ordinary children without handing them the tty's foreground process
+///   group.
 fn status_from_pane_command(pane_command: &str, engine: &str) -> Option<SessionStatus> {
     if is_idle_shell_command(pane_command) {
         return Some(SessionStatus::Ready);
     }
     if engine == "shell" {
-        return Some(SessionStatus::Executing);
+        return Some(SessionStatus::ToolExecution);
     }
     None
 }
 
-/// The fallback signal: is this session *sustainedly* producing output?
+/// The fallback signal: is this session *sustainedly* producing output, and
+/// what does that mean for this engine?
 ///
-/// Both halves are required, and the second one is what makes this usable
-/// rather than a strobe light (see [`SUSTAINED_ACTIVITY_MIN`]): output must
-/// have arrived within [`OUTPUT_QUIET_THRESHOLD`] **and** the unbroken run it
-/// belongs to must already be [`SUSTAINED_ACTIVITY_MIN`] long.
+/// Both halves of the activity test are required, and the second one is what
+/// makes this usable rather than a strobe light (see
+/// [`SUSTAINED_ACTIVITY_MIN`]): output must have arrived within
+/// [`OUTPUT_QUIET_THRESHOLD`] **and** the unbroken run it belongs to must
+/// already be [`SUSTAINED_ACTIVITY_MIN`] long.
+///
+/// The engine decides how "busy" is *labelled*, and this is the honest split:
+/// a `shell` producing output is by definition running a command
+/// (**tool_execution**), while a `claude`/`codex` producing output is the
+/// engine working — which, absent a separate tool signal, is
+/// **thinking**. See [`status_from_screen`] for the one case where that
+/// second answer is refined into `ToolExecution`, and the module docs for why
+/// it isn't refined more often.
 fn status_from_output_activity(activity: &SessionActivity, now: Instant) -> SessionStatus {
     let last = activity
         .last_output
@@ -2245,28 +2565,86 @@ fn status_from_output_activity(activity: &SessionActivity, now: Instant) -> Sess
         .unwrap_or_else(|e| *e.into_inner());
     match busy_since {
         Some(started) if now.saturating_duration_since(started) >= SUSTAINED_ACTIVITY_MIN => {
-            SessionStatus::Executing
+            busy_status_for_engine(&activity.engine)
         }
         _ => SessionStatus::Ready,
     }
 }
 
-/// The full traffic-light decision for one session, in priority order:
-/// attention wins over everything (it's the state that needs the user), then
-/// tmux's foreground-command signal where it's meaningful, then output
-/// activity.
+/// What "this session is producing sustained output" means for each engine.
+fn busy_status_for_engine(engine: &str) -> SessionStatus {
+    if engine == "shell" {
+        SessionStatus::ToolExecution
+    } else {
+        SessionStatus::Thinking
+    }
+}
+
+/// Refines a busy `claude`/`codex` session from `Thinking` to `ToolExecution`
+/// when — and only when — its **visible screen** says a tool is running right
+/// now.
+///
+/// `screen` is `tmux capture-pane -p` output (see [`Tmux::capture_pane`]), and
+/// using screen *state* rather than the PTY *stream* is the whole point: a
+/// running tool is a state that ends, and a stream-scan latch would leave cyan
+/// stuck on long after the command finished.
+///
+/// See [`TOOL_EXECUTION_SCREEN_MARKERS`] for what is matched and why that one
+/// string, and the module docs for the far larger set of candidate signals
+/// that were measured and rejected.
+fn status_from_screen(screen: &str) -> Option<SessionStatus> {
+    TOOL_EXECUTION_SCREEN_MARKERS
+        .iter()
+        .any(|m| screen.contains(m))
+        .then_some(SessionStatus::ToolExecution)
+}
+
+/// The full five-state decision for one session, in priority order:
+///
+/// 1. **awaiting_approval** — blocked on the user. Outranks everything: it is
+///    the only state where nothing at all will happen until they act.
+/// 2. **error** — something failed and they should look. Below approval
+///    because if the engine is *also* asking for permission, that's the
+///    actionable one.
+/// 3. **tmux's foreground-command signal**, where it means anything (shell
+///    sessions).
+/// 4. **output activity** → `ready` / `thinking` / `tool_execution`, refined
+///    for a busy `claude`/`codex` by one `capture-pane` look at the screen.
+///
+/// Step 4's `capture-pane` call is deliberately reached *only* when the
+/// session is already busy and the engine is one whose busy-state is
+/// ambiguous: an idle session, and every `shell` session, costs exactly what
+/// it cost before this existed.
 fn compute_status(activity: &SessionActivity, tmux: Option<&Tmux>, now: Instant) -> SessionStatus {
     if activity.attention.load(Ordering::Relaxed) {
-        return SessionStatus::Attention;
+        return SessionStatus::AwaitingApproval;
     }
-    if let (Some(t), Some(name)) = (tmux, activity.tmux_session.as_deref()) {
-        if let Some(pane_command) = t.pane_current_command(name) {
-            if let Some(status) = status_from_pane_command(&pane_command, &activity.engine) {
-                return status;
+    if activity.error.load(Ordering::Relaxed) {
+        return SessionStatus::Error;
+    }
+    let tmux_session = match (tmux, activity.tmux_session.as_deref()) {
+        (Some(t), Some(name)) => {
+            if let Some(pane_command) = t.pane_current_command(name) {
+                if let Some(status) = status_from_pane_command(&pane_command, &activity.engine) {
+                    return status;
+                }
+            }
+            Some((t, name))
+        }
+        _ => None,
+    };
+
+    let status = status_from_output_activity(activity, now);
+    if status == SessionStatus::Thinking {
+        if let Some((t, name)) = tmux_session {
+            if let Some(screen) = t.capture_pane(name) {
+                if let Some(refined) = status_from_screen(&screen) {
+                    return refined;
+                }
             }
         }
     }
-    status_from_output_activity(activity, now)
+    status
 }
 
 /// One background thread for the whole manager (not one per session) that
@@ -2321,7 +2699,7 @@ fn spawn_status_poller(
                 Err(_) => false,
             };
             if changed {
-                sink(&id, status);
+                sink(&SessionStatusEvent::new(&id, status, &activity.engine));
             }
         }
     })
@@ -3361,11 +3739,13 @@ mod tests {
     }
 
     #[test]
-    fn a_running_command_in_a_shell_session_reads_as_executing() {
+    fn a_running_command_in_a_shell_session_reads_as_tool_execution() {
+        // Bruno's cyan is "active tool execution, like terminal commands" —
+        // for a terminal session, a foreground command *is* that.
         for cmd in ["sleep", "cargo", "vim", "node", "git"] {
             assert_eq!(
                 status_from_pane_command(cmd, "shell"),
-                Some(SessionStatus::Executing),
+                Some(SessionStatus::ToolExecution),
                 "{cmd}"
             );
         }
@@ -3383,7 +3763,7 @@ mod tests {
     }
 
     #[test]
-    fn output_activity_reads_sustained_output_as_executing_and_silence_as_ready() {
+    fn output_activity_reads_sustained_output_as_thinking_and_silence_as_ready() {
         let activity = SessionActivity::new("claude".into(), None, true);
         let now = Instant::now();
         // A run that started 2s ago and is still producing output.
@@ -3392,11 +3772,11 @@ mod tests {
 
         assert_eq!(
             status_from_output_activity(&activity, now),
-            SessionStatus::Executing
+            SessionStatus::Thinking
         );
         assert_eq!(
             status_from_output_activity(&activity, now + OUTPUT_QUIET_THRESHOLD / 2),
-            SessionStatus::Executing
+            SessionStatus::Thinking
         );
         assert_eq!(
             status_from_output_activity(&activity, now + OUTPUT_QUIET_THRESHOLD),
@@ -3406,6 +3786,27 @@ mod tests {
         assert_eq!(
             status_from_output_activity(&activity, now + Duration::from_secs(30)),
             SessionStatus::Ready
+        );
+    }
+
+    /// The engine decides what "busy" *means*. A shell producing output is
+    /// running a command (cyan); an agent CLI producing output is working on
+    /// the turn (white/blue). This is the only place the two diverge, and
+    /// `thinking` must never be reported for a `shell` — a shell doesn't think.
+    #[test]
+    fn busy_means_tool_execution_for_a_shell_and_thinking_for_an_engine() {
+        assert_eq!(busy_status_for_engine("shell"), SessionStatus::ToolExecution);
+        assert_eq!(busy_status_for_engine("claude"), SessionStatus::Thinking);
+        assert_eq!(busy_status_for_engine("codex"), SessionStatus::Thinking);
+
+        let shell = SessionActivity::new("shell".into(), None, true);
+        let now = Instant::now();
+        *shell.last_output.lock().unwrap() = now;
+        *shell.busy_since.lock().unwrap() = Some(now - Duration::from_secs(2));
+        assert_eq!(
+            status_from_output_activity(&shell, now),
+            SessionStatus::ToolExecution,
+            "a shell streaming output is running a command, not thinking"
         );
     }
 
@@ -3455,24 +3856,169 @@ mod tests {
         );
     }
 
-    /// Red outranks everything: a session blocked on the user must not be
-    /// reported as merely "executing" because it happens to be redrawing its
-    /// prompt (which a real pending Claude prompt does ~twice a second).
+    /// Amber outranks everything: a session blocked on the user must not be
+    /// reported as merely "thinking" because it happens to be redrawing its
+    /// prompt (which a real pending Claude prompt does ~1.9 times a second).
     #[test]
-    fn attention_outranks_both_other_signals() {
+    fn awaiting_approval_outranks_every_other_signal() {
         let activity = SessionActivity::new("claude".into(), None, true);
         *activity.last_output.lock().unwrap() = Instant::now();
         *activity.busy_since.lock().unwrap() = Some(Instant::now() - Duration::from_secs(5));
         activity.attention.store(true, Ordering::Relaxed);
+        // ...even with an error also latched: if the engine is asking for a
+        // decision, that's the actionable state.
+        activity.error.store(true, Ordering::Relaxed);
         assert_eq!(
             compute_status(&activity, None, Instant::now()),
-            SessionStatus::Attention
+            SessionStatus::AwaitingApproval
         );
+
         activity.attention.store(false, Ordering::Relaxed);
         assert_eq!(
             compute_status(&activity, None, Instant::now()),
-            SessionStatus::Executing
+            SessionStatus::Error,
+            "with approval cleared, the latched failure is what the user needs to see"
         );
+
+        activity.error.store(false, Ordering::Relaxed);
+        assert_eq!(
+            compute_status(&activity, None, Instant::now()),
+            SessionStatus::Thinking
+        );
+    }
+
+    /// The full five-state priority chain in one place, driven only through
+    /// the latches and the activity clock (no tmux), so it asserts the
+    /// ordering rather than any one signal's plumbing.
+    #[test]
+    fn compute_status_walks_the_five_states_in_priority_order() {
+        let activity = SessionActivity::new("claude".into(), None, true);
+        let now = Instant::now();
+
+        // 1. quiet -> green
+        *activity.last_output.lock().unwrap() = now - Duration::from_secs(10);
+        assert_eq!(compute_status(&activity, None, now), SessionStatus::Ready);
+
+        // 2. sustained output -> white/blue
+        *activity.last_output.lock().unwrap() = now;
+        *activity.busy_since.lock().unwrap() = Some(now - Duration::from_secs(3));
+        assert_eq!(compute_status(&activity, None, now), SessionStatus::Thinking);
+
+        // 3. a failure was reported -> red, even though it's still working
+        activity.error.store(true, Ordering::Relaxed);
+        assert_eq!(compute_status(&activity, None, now), SessionStatus::Error);
+
+        // 4. and it now wants permission -> amber
+        activity.attention.store(true, Ordering::Relaxed);
+        assert_eq!(
+            compute_status(&activity, None, now),
+            SessionStatus::AwaitingApproval
+        );
+
+        // 5. the user types: both latches drop, back to the live signal
+        activity.mark_user_input();
+        assert_eq!(compute_status(&activity, None, now), SessionStatus::Thinking);
+    }
+
+    /// A shell session, same chain, without tmux: the states it can reach are
+    /// green and cyan — never `thinking`, and (per the module docs) never
+    /// `error`, because a stock shell's per-command exit status is not
+    /// obtainable without shell integration.
+    #[test]
+    fn a_shell_session_reaches_green_and_cyan_but_never_thinking() {
+        let activity = SessionActivity::new("shell".into(), None, true);
+        let now = Instant::now();
+
+        *activity.last_output.lock().unwrap() = now - Duration::from_secs(10);
+        assert_eq!(compute_status(&activity, None, now), SessionStatus::Ready);
+
+        *activity.last_output.lock().unwrap() = now;
+        *activity.busy_since.lock().unwrap() = Some(now - Duration::from_secs(3));
+        assert_eq!(
+            compute_status(&activity, None, now),
+            SessionStatus::ToolExecution
+        );
+    }
+
+    // -- error detection (Bruno's red) -----------------------------------
+
+    /// The exact line real `claude` 2.1.220 renders for a failed Bash tool,
+    /// captured from a live session through this app's own tmux config.
+    #[test]
+    fn a_non_zero_exit_code_line_is_an_error() {
+        assert!(contains_error_marker(
+            "  \u{23bf}  Exit code 1 \u{2014} ls: /nonexistent-path-xyz-123: No such file or directory"
+        ));
+        for code in ["1", "2", "127", "130"] {
+            assert!(
+                contains_error_marker(&format!("Exit code {code} \u{2014} boom")),
+                "exit {code} must read as a failure"
+            );
+        }
+    }
+
+    /// The two ways this must NOT fire: a success line (should a future
+    /// Claude Code start printing one), and prose that merely mentions the
+    /// words.
+    #[test]
+    fn a_zero_exit_code_and_bare_prose_are_not_errors() {
+        assert!(
+            !contains_error_marker("Exit code 0"),
+            "a zero exit is a success, whatever the engine chooses to print"
+        );
+        assert!(!contains_error_marker(
+            "check the Exit code manually before continuing"
+        ));
+        assert!(!contains_error_marker("Ran 1 shell command"));
+        assert!(!contains_error_marker(""));
+    }
+
+    /// A user write must drop the error latch as well as the approval one —
+    /// they share the single "the user has seen it" signal a stock engine
+    /// affords us.
+    #[test]
+    fn a_user_write_clears_the_error_latch_too() {
+        let activity = SessionActivity::new("claude".into(), None, true);
+        activity.error.store(true, Ordering::Relaxed);
+        activity.attention.store(true, Ordering::Relaxed);
+        activity.mark_user_input();
+        assert!(!activity.error.load(Ordering::Relaxed));
+        assert!(!activity.attention.load(Ordering::Relaxed));
+    }
+
+    // -- tool execution inside claude/codex (Bruno's cyan) ----------------
+
+    /// The screen marker, taken verbatim from a live `claude` 2.1.220 pane
+    /// running `sleep 8 && echo …` inside this app's tmux config — including
+    /// the tmux-aware wording Claude switches to when it detects tmux, which
+    /// is why only the invariant tail is matched.
+    #[test]
+    fn a_visibly_running_bash_tool_reads_as_tool_execution() {
+        let screen = "\u{23fa}  Running 1 shell command \u{b7} 3s\u{2026}\n  \u{23bf}  $ sleep 8 && echo HI (3s)\n     (ctrl+b ctrl+b (twice) to run in background)\n";
+        assert_eq!(
+            status_from_screen(screen),
+            Some(SessionStatus::ToolExecution)
+        );
+        // Outside tmux Claude words it differently; the matched tail is the
+        // part that survives either way.
+        assert_eq!(
+            status_from_screen("     (ctrl+b to run in background)"),
+            Some(SessionStatus::ToolExecution)
+        );
+    }
+
+    /// A screen showing only the spinner is thinking, not tool execution —
+    /// the spinner is present for both, which is exactly why it isn't the
+    /// marker. And a screen showing a *finished* tool must not read as cyan.
+    #[test]
+    fn a_thinking_or_finished_screen_is_not_tool_execution() {
+        assert_eq!(
+            status_from_screen("\u{273b} Cascading\u{2026} (14s \u{b7} \u{2193} 92 tokens)"),
+            None
+        );
+        assert_eq!(status_from_screen("  Ran 1 shell command"), None);
+        assert_eq!(status_from_screen("\u{273b} Cooked for 17s"), None);
+        assert_eq!(status_from_screen(""), None);
     }
 
     #[test]
@@ -3487,11 +4033,11 @@ mod tests {
         *activity.busy_since.lock().unwrap() = Some(now - Duration::from_secs(3));
 
         let broken = Tmux::with_binary("/no/such/tmux/binary", "unused");
-        // No pane command available -> activity heuristic, not a panic and
-        // not a wrong hard answer.
+        // Neither `pane_current_command` nor `capture_pane` can answer ->
+        // activity heuristic, not a panic and not a wrong hard answer.
         assert_eq!(
             compute_status(&activity, Some(&broken), now),
-            SessionStatus::Executing
+            SessionStatus::ToolExecution
         );
         assert_eq!(
             compute_status(&activity, Some(&broken), now + Duration::from_secs(5)),
@@ -3506,19 +4052,98 @@ mod tests {
         activity.mark_user_input();
         assert!(!activity.attention.load(Ordering::Relaxed));
         assert!(
-            activity.clear_attention_window.swap(false, Ordering::Relaxed),
+            activity.clear_marker_window.swap(false, Ordering::Relaxed),
             "the reader thread must be told to discard the pre-response window"
         );
     }
 
     #[test]
     fn session_status_serializes_to_the_strings_the_frontend_renders() {
-        assert_eq!(SessionStatus::Ready.as_str(), "ready");
-        assert_eq!(SessionStatus::Executing.as_str(), "executing");
-        assert_eq!(SessionStatus::Attention.as_str(), "attention");
+        // The wire contract. `as_str()` and serde must never drift apart:
+        // one feeds logs and the other feeds the event payload.
+        let all = [
+            (SessionStatus::Ready, "ready"),
+            (SessionStatus::Thinking, "thinking"),
+            (SessionStatus::ToolExecution, "tool_execution"),
+            (SessionStatus::AwaitingApproval, "awaiting_approval"),
+            (SessionStatus::Error, "error"),
+        ];
+        for (status, wire) in all {
+            assert_eq!(status.as_str(), wire);
+            assert_eq!(
+                serde_json::to_string(&status).unwrap(),
+                format!("\"{wire}\""),
+                "serde and as_str must agree for {wire}"
+            );
+        }
+    }
+
+    // -- notification worthiness (Bruno: "only green, yellow or red generate
+    // a notification") ---------------------------------------------------
+
+    /// The whole rule, exhaustively. This is the contract the notifications
+    /// panel is allowed to trust instead of re-deriving.
+    #[test]
+    fn only_green_amber_and_red_are_notification_worthy() {
+        assert!(SessionStatus::Ready.notifies(), "green: the task finished");
+        assert!(
+            SessionStatus::AwaitingApproval.notifies(),
+            "amber: it needs a decision"
+        );
+        assert!(SessionStatus::Error.notifies(), "red: it needs a look");
+
+        assert!(
+            !SessionStatus::Thinking.notifies(),
+            "white/blue is a transient working state"
+        );
+        assert!(
+            !SessionStatus::ToolExecution.notifies(),
+            "cyan is a transient working state"
+        );
+    }
+
+    /// The flag on the payload must be exactly the classifier's answer — the
+    /// point of carrying it is that there is only ever one rule.
+    #[test]
+    fn the_event_payload_carries_the_classifier_verdict_and_the_session_context() {
+        for status in [
+            SessionStatus::Ready,
+            SessionStatus::Thinking,
+            SessionStatus::ToolExecution,
+            SessionStatus::AwaitingApproval,
+            SessionStatus::Error,
+        ] {
+            let event = SessionStatusEvent::new("sess-abc", status, "claude");
+            assert_eq!(event.id, "sess-abc");
+            assert_eq!(event.status, status);
+            assert_eq!(event.engine, "claude");
+            assert_eq!(
+                event.notify,
+                status.notifies(),
+                "notify must never disagree with SessionStatus::notifies()"
+            );
+        }
+    }
+
+    /// The serialized shape the frontend actually receives — asserted as
+    /// JSON, since that (not the Rust struct) is the contract across the
+    /// Tauri boundary.
+    #[test]
+    fn the_event_serializes_to_the_documented_json_shape() {
+        let json = serde_json::to_value(SessionStatusEvent::new(
+            "sess-1",
+            SessionStatus::AwaitingApproval,
+            "claude",
+        ))
+        .unwrap();
         assert_eq!(
-            serde_json::to_string(&SessionStatus::Attention).unwrap(),
-            "\"attention\""
+            json,
+            serde_json::json!({
+                "id": "sess-1",
+                "status": "awaiting_approval",
+                "notify": true,
+                "engine": "claude",
+            })
         );
     }
 

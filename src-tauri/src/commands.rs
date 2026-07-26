@@ -23,7 +23,7 @@ use mcp_server::tools::{self, ToolContext};
 use serde_json::{json, Value};
 use tauri::State;
 
-use crate::sessions::{CreateSessionRequest, SessionInfo, SessionManager, SessionStatus};
+use crate::sessions::{CreateSessionRequest, SessionInfo, SessionManager, SessionStatusEvent};
 
 /// Shared handle to the local brain DB, managed as Tauri state alongside
 /// [`SessionManager`]. `Store` wraps a plain `rusqlite::Connection` (`Send`
@@ -230,21 +230,27 @@ pub fn session_create(
         .map_err(|e| e.to_string())
 }
 
-/// The traffic light for one session, computed on demand — `"ready"` (green,
-/// idle and accepting a command), `"executing"` (yellow, a command/turn is
-/// running) or `"attention"` (red, blocked on the user). `Ok(None)` when
-/// there's no such live session.
+/// The five-state light for one session, computed on demand — `"ready"`
+/// (green), `"thinking"` (white/blue), `"tool_execution"` (cyan),
+/// `"awaiting_approval"` (amber) or `"error"` (red). `Ok(None)` when there's
+/// no such live session.
 ///
-/// The push counterpart is the `session-status:{id}` event, emitted only when
-/// a session's status actually changes. This pull exists so a pane can render
-/// the right light the moment it mounts (or is restored) instead of showing
-/// a wrong one until the next transition — call it once on mount, then let
-/// the event stream drive it.
+/// Returns the **same [`SessionStatusEvent`] shape** the `session-status:{id}`
+/// event carries, `notify` flag included, so a pane rendering on mount and a
+/// pane reacting to a transition consume one type. The push counterpart is
+/// emitted only when a session's status actually changes; this pull exists so
+/// a pane can render the right light the moment it mounts (or is restored)
+/// instead of showing a wrong one until the next transition — call it once on
+/// mount, then let the event stream drive it.
+///
+/// `notify` is the backend's answer to "should this raise a notification"
+/// (Bruno: only green/amber/red do). Do not re-derive it in the UI — see
+/// `sessions::SessionStatus::notifies`.
 #[tauri::command]
 pub fn session_status(
     id: String,
     manager: State<'_, SessionManager>,
-) -> Result<Option<SessionStatus>, String> {
+) -> Result<Option<SessionStatusEvent>, String> {
     Ok(manager.status(&id))
 }
 

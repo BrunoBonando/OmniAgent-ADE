@@ -343,6 +343,41 @@ impl Tmux {
         }
     }
 
+    /// The pane's **currently visible screen**, as plain text (`capture-pane
+    /// -p`, no `-e`, so escape sequences are already resolved away by tmux's
+    /// own screen model).
+    ///
+    /// This is a fundamentally different kind of signal from the raw PTY
+    /// stream `sessions.rs` reads, and the difference is why it exists:
+    ///
+    /// - The stream is a sequence of *events* ("this text was written"). It
+    ///   answers "did X ever appear?" and needs a latch plus a clearing rule
+    ///   to approximate anything else — which is right for a permission prompt
+    ///   (an event the user must answer) and wrong for a transient *state*
+    ///   like "a tool is running right now", where a latch would stay stuck on
+    ///   after the tool finished.
+    /// - `capture-pane` is *state* ("this is on screen now"). A marker that
+    ///   disappears from the TUI disappears from here on the very next poll,
+    ///   with no clearing heuristic at all.
+    ///
+    /// `None` when tmux can't answer (no server, no such session, timeout) —
+    /// every caller must degrade rather than fail, exactly like
+    /// [`pane_current_command`](Self::pane_current_command).
+    ///
+    /// `=name:` — a *pane* target (module docs #2).
+    pub fn capture_pane(&self, name: &str) -> Option<String> {
+        let mut cmd = self.base();
+        cmd.arg("capture-pane")
+            .arg("-p")
+            .arg("-t")
+            .arg(format!("={name}:"));
+        let out = run(cmd).ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
     /// tests to assert "one session, not two" against real tmux output.uts this socket's whole tmux server down, killing every session on
     /// it and unlinking the socket file.
     ///
@@ -532,6 +567,7 @@ mod tests {
         let t = Tmux::with_binary("/no/such/tmux/binary", "unit-socket");
         assert!(!t.has_session("anything"));
         assert!(t.pane_current_command("anything").is_none());
+        assert!(t.capture_pane("anything").is_none());
         assert!(t.list_sessions().is_empty());
         assert!(!t.kill_session("anything"));
         assert!(t

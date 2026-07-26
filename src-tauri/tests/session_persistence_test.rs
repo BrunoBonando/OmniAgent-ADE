@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use omniagent_ade_lib::sessions::{
-    CreateSessionRequest, OutputSink, SessionManager, SessionStatus, StatusSink,
+    CreateSessionRequest, OutputSink, SessionManager, SessionStatus, SessionStatusEvent, StatusSink,
 };
 use omniagent_ade_lib::tmux::{self, Tmux};
 
@@ -119,24 +119,56 @@ fn wait_for_output(
     (false, seen)
 }
 
+/// A manager plus the channel its status events land on — the shape every
+/// status test below needs.
+fn manager_with_status(
+    data_dir: &std::path::Path,
+    tmux: Option<Tmux>,
+) -> (SessionManager, mpsc::Receiver<SessionStatusEvent>) {
+    let (tx, rx) = mpsc::channel::<SessionStatusEvent>();
+    let status_sink: StatusSink = Arc::new(move |event: &SessionStatusEvent| {
+        let _ = tx.send(event.clone());
+    });
+    let manager = SessionManager::new(data_dir.to_path_buf(), silent_sink())
+        .with_tmux(tmux)
+        .with_status_sink(status_sink);
+    (manager, rx)
+}
+
 /// Waits until the status stream reports `wanted`, collecting the whole
 /// sequence so a failure can show the real transitions.
+///
+/// Also asserts, on every event that goes by, that the payload's `notify`
+/// flag matches [`SessionStatus::notifies`] — so the notification contract is
+/// checked against *real* emitted events in every status test, not only in the
+/// unit test for the classifier.
 fn wait_for_status(
-    rx: &mpsc::Receiver<(String, SessionStatus)>,
+    rx: &mpsc::Receiver<SessionStatusEvent>,
     seen: &mut Vec<SessionStatus>,
     wanted: SessionStatus,
     timeout: Duration,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if let Ok((_, status)) = rx.recv_timeout(Duration::from_millis(100)) {
-            seen.push(status);
-            if status == wanted {
+        if let Ok(event) = rx.recv_timeout(Duration::from_millis(100)) {
+            assert_eq!(
+                event.notify,
+                event.status.notifies(),
+                "a real emitted event disagreed with the notification classifier: {event:?}"
+            );
+            assert!(!event.id.is_empty(), "every event must name its session");
+            seen.push(event.status);
+            if event.status == wanted {
                 return true;
             }
         }
     }
     false
+}
+
+/// The status of a live session, right now, via the pull API.
+fn status_of(manager: &SessionManager, id: &str) -> Option<SessionStatus> {
+    manager.status(id).map(|e| e.status)
 }
 
 // ---------------------------------------------------------------------------
@@ -385,15 +417,15 @@ fn a_malformed_restore_id_is_rejected_rather_than_sanitized() {
 // 3. traffic-light status
 // ---------------------------------------------------------------------------
 
-/// Bruno's traffic light, driven by a real long-running command in a real
-/// tmux-backed shell: **green → yellow → green** around `sleep 2`.
+/// Bruno's cyan, driven by a real long-running command in a real tmux-backed
+/// shell: **green → cyan → green** around `sleep 2`.
 ///
 /// `sleep` is chosen deliberately — it produces *no output at all*, so this
 /// only passes because the shell path uses tmux's `#{pane_current_command}`
 /// (which reports the pane's foreground process group) rather than an
 /// output-activity guess, which would call a silent command "idle".
 #[test]
-fn shell_status_goes_ready_then_executing_then_ready_around_a_real_command() {
+fn shell_status_goes_ready_then_tool_execution_then_ready_around_a_real_command() {
     let tmp = tempfile::tempdir().unwrap();
     let Some(t) = test_tmux("status", tmp.path()) else {
         eprintln!("tmux not installed — skipping");
@@ -401,14 +433,7 @@ fn shell_status_goes_ready_then_executing_then_ready_around_a_real_command() {
     };
     let _guard = ServerGuard(Some(t.clone()));
 
-    let (tx, rx) = mpsc::channel::<(String, SessionStatus)>();
-    let status_sink: StatusSink = Arc::new(move |id: &str, status: SessionStatus| {
-        let _ = tx.send((id.to_string(), status));
-    });
-
-    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
-        .with_tmux(Some(t.clone()))
-        .with_status_sink(status_sink);
+    let (manager, rx) = manager_with_status(tmp.path(), Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     let mut seen = Vec::new();
@@ -417,13 +442,23 @@ fn shell_status_goes_ready_then_executing_then_ready_around_a_real_command() {
         "an idle shell must settle on ready (green); saw {seen:?}"
     );
 
-    // On demand, right now — the pull side the frontend uses on mount.
-    assert_eq!(manager.status(&info.id), Some(SessionStatus::Ready));
+    // On demand, right now — the pull side the frontend uses on mount. It
+    // returns the full event, `notify` included, exactly like the push side.
+    let pulled = manager.status(&info.id).unwrap();
+    assert_eq!(pulled.status, SessionStatus::Ready);
+    assert_eq!(pulled.id, info.id);
+    assert_eq!(pulled.engine, "shell");
+    assert!(pulled.notify, "green is notification-worthy (Bruno's rule)");
 
     manager.write(&info.id, "sleep 2\n").unwrap();
     assert!(
-        wait_for_status(&rx, &mut seen, SessionStatus::Executing, Duration::from_secs(5)),
-        "a running command must show executing (yellow); saw {seen:?}"
+        wait_for_status(
+            &rx,
+            &mut seen,
+            SessionStatus::ToolExecution,
+            Duration::from_secs(5)
+        ),
+        "a running command must show tool execution (cyan); saw {seen:?}"
     );
 
     assert!(
@@ -433,19 +468,23 @@ fn shell_status_goes_ready_then_executing_then_ready_around_a_real_command() {
 
     assert!(
         seen.len() >= 3,
-        "expected at least ready→executing→ready, saw {seen:?}"
+        "expected at least ready→tool_execution→ready, saw {seen:?}"
+    );
+    assert!(
+        !seen.contains(&SessionStatus::Thinking),
+        "a shell must never report `thinking`; saw {seen:?}"
     );
 
     manager.kill(&info.id).unwrap();
 }
 
-/// Red beats everything, and the user answering clears it. Uses the same
+/// Amber beats everything, and the user answering clears it. Uses the same
 /// dependency-free stand-in the existing attention test does (a `shell`
 /// session echoing Claude's exact permission-prompt copy) — see
 /// `sessions.rs`'s `spawn_reader_thread` docs for why detection isn't gated
 /// on the engine name.
 #[test]
-fn attention_marker_turns_the_light_red_and_writing_clears_it() {
+fn approval_marker_turns_the_light_amber_and_writing_clears_it() {
     let tmp = tempfile::tempdir().unwrap();
     let Some(t) = test_tmux("attention", tmp.path()) else {
         eprintln!("tmux not installed — skipping");
@@ -453,14 +492,7 @@ fn attention_marker_turns_the_light_red_and_writing_clears_it() {
     };
     let _guard = ServerGuard(Some(t.clone()));
 
-    let (tx, rx) = mpsc::channel::<(String, SessionStatus)>();
-    let status_sink: StatusSink = Arc::new(move |id: &str, status: SessionStatus| {
-        let _ = tx.send((id.to_string(), status));
-    });
-
-    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
-        .with_tmux(Some(t.clone()))
-        .with_status_sink(status_sink);
+    let (manager, rx) = manager_with_status(tmp.path(), Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     let mut seen = Vec::new();
@@ -476,10 +508,17 @@ fn attention_marker_turns_the_light_red_and_writing_clears_it() {
         .write(&info.id, "sleep 2 && echo 'Do you want to proceed?'\n")
         .unwrap();
     assert!(
-        wait_for_status(&rx, &mut seen, SessionStatus::Attention, Duration::from_secs(15)),
-        "the permission-prompt marker must turn the light red; saw {seen:?}"
+        wait_for_status(
+            &rx,
+            &mut seen,
+            SessionStatus::AwaitingApproval,
+            Duration::from_secs(15)
+        ),
+        "the permission-prompt marker must turn the light amber; saw {seen:?}"
     );
-    assert_eq!(manager.status(&info.id), Some(SessionStatus::Attention));
+    let pulled = manager.status(&info.id).unwrap();
+    assert_eq!(pulled.status, SessionStatus::AwaitingApproval);
+    assert!(pulled.notify, "amber must be notification-worthy");
 
     // The user answers, and the dialog leaves the screen — `clear` stands in
     // for a real engine repainting without its prompt.
@@ -499,13 +538,209 @@ fn attention_marker_turns_the_light_red_and_writing_clears_it() {
     // the on-demand query so it doesn't depend on an event happening to fire.
     manager.write(&info.id, "").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline && manager.status(&info.id) != Some(SessionStatus::Ready) {
+    while Instant::now() < deadline && status_of(&manager, &info.id) != Some(SessionStatus::Ready) {
         std::thread::sleep(Duration::from_millis(200));
     }
     assert_eq!(
-        manager.status(&info.id),
+        status_of(&manager, &info.id),
         Some(SessionStatus::Ready),
-        "writing to the session must clear the attention latch; status stream was {seen:?}"
+        "writing to the session must clear the approval latch; status stream was {seen:?}"
+    );
+
+    manager.kill(&info.id).unwrap();
+}
+
+/// Bruno's red, end to end through a real PTY: a non-zero `Exit code N` line
+/// — the literal real `claude` renders for a failed Bash tool (measured
+/// 2026-07-26, see `sessions.rs`'s `ERROR_MARKER`) — turns the light red, and
+/// the user typing clears it.
+///
+/// Same dependency-free stand-in as the approval test above: a `shell` session
+/// echoing the exact copy, rather than a live `claude` (which would need
+/// network, an API key and an interactive conversation an automated test can't
+/// drive). What's under test is the detection + latch + clear chain, which is
+/// engine-independent by design.
+#[test]
+fn a_failed_tool_exit_turns_the_light_red_and_writing_clears_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(t) = test_tmux("error", tmp.path()) else {
+        eprintln!("tmux not installed — skipping");
+        return;
+    };
+    let _guard = ServerGuard(Some(t.clone()));
+
+    let (manager, rx) = manager_with_status(tmp.path(), Some(t.clone()));
+    let info = manager.create(shell_request(tmp.path())).unwrap();
+
+    let mut seen = Vec::new();
+    assert!(wait_for_status(
+        &rx,
+        &mut seen,
+        SessionStatus::Ready,
+        Duration::from_secs(10)
+    ));
+
+    // The failure lands a beat after the user's own input, the way a real one
+    // does (you approve a command; it fails a second or two later) — the
+    // `sleep` puts it outside `ATTENTION_INPUT_GRACE`. Deliberately only 2 s:
+    // a real `claude` reports a failed tool within ~1-2 s of the approval
+    // keystroke, and an earlier 5 s error-only grace suppressed exactly that
+    // (see `ATTENTION_INPUT_GRACE`), so this test now runs at the timing that
+    // actually caught it.
+    manager
+        .write(
+            &info.id,
+            "sleep 2 && echo 'Exit code 1 \u{2014} ls: nope: No such file or directory'\n",
+        )
+        .unwrap();
+
+    assert!(
+        wait_for_status(&rx, &mut seen, SessionStatus::Error, Duration::from_secs(20)),
+        "a non-zero exit-code line must turn the light red; saw {seen:?}"
+    );
+    let pulled = manager.status(&info.id).unwrap();
+    assert_eq!(pulled.status, SessionStatus::Error);
+    assert!(pulled.notify, "red must be notification-worthy");
+
+    // The user acknowledges by typing, and the failure text leaves the screen
+    // (`clear` stands in for the engine repainting past it), then the terminal
+    // is allowed to settle before the contract is judged — exactly the shape
+    // (and for exactly the reason) the approval test above uses. The signal is
+    // *screen text*: the repaint of the pre-`clear` screen still carries the
+    // failure line, arrives well after the keystroke under parallel load, and
+    // legitimately re-latches red. That is the documented limitation, not a
+    // fudge; asserting through it would make this a load-sensitive coin flip.
+    manager.write(&info.id, "clear\n").unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+
+    // With the screen quiet and no failure on it, the contract under test —
+    // a user write clears the error latch — must hold.
+    manager.write(&info.id, "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && status_of(&manager, &info.id) != Some(SessionStatus::Ready) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(
+        status_of(&manager, &info.id),
+        Some(SessionStatus::Ready),
+        "writing to the session must clear the error latch; status stream was {seen:?}"
+    );
+
+    manager.kill(&info.id).unwrap();
+}
+
+/// **The anti-strobe regression test.** The reason `SUSTAINED_ACTIVITY_MIN`
+/// exists is that a real idle `claude` twitches its TUI periodically and naive
+/// recency made the light flip every few seconds. Whatever else changes about
+/// the state model, an idle session must sit on exactly one state and emit
+/// nothing further.
+///
+/// Uses a `shell` session so it needs no engine, no network and no API key —
+/// what's under test is the poller's emit-on-change contract, which is shared
+/// by every engine. The live five-state check against a genuinely idle
+/// `claude` is the manual verification recorded in this task's report (0
+/// transitions across 60 s).
+#[test]
+fn an_idle_session_settles_on_one_state_and_stops_emitting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(t) = test_tmux("idle", tmp.path()) else {
+        eprintln!("tmux not installed — skipping");
+        return;
+    };
+    let _guard = ServerGuard(Some(t.clone()));
+
+    let (manager, rx) = manager_with_status(tmp.path(), Some(t.clone()));
+    let info = manager.create(shell_request(tmp.path())).unwrap();
+
+    let mut seen = Vec::new();
+    assert!(
+        wait_for_status(&rx, &mut seen, SessionStatus::Ready, Duration::from_secs(10)),
+        "an idle shell must settle on ready; saw {seen:?}"
+    );
+    // Let the prompt finish painting before the quiet window starts.
+    std::thread::sleep(Duration::from_secs(2));
+    while rx.try_recv().is_ok() {}
+
+    // 12 s at a 300 ms poll interval = ~40 evaluations. A light that flaps at
+    // all — for any reason, at any period under ~12 s — cannot survive this.
+    let watch = Duration::from_secs(12);
+    let deadline = Instant::now() + watch;
+    let mut transitions = Vec::new();
+    while Instant::now() < deadline {
+        if let Ok(event) = rx.recv_timeout(Duration::from_millis(200)) {
+            transitions.push(event.status);
+        }
+    }
+
+    assert!(
+        transitions.is_empty(),
+        "an idle session must not change state at all over {watch:?}; got {transitions:?}"
+    );
+    assert_eq!(
+        status_of(&manager, &info.id),
+        Some(SessionStatus::Ready),
+        "and it must still be green at the end"
+    );
+
+    manager.kill(&info.id).unwrap();
+}
+
+/// The plumbing behind claude/codex cyan: `capture-pane` must return the
+/// pane's *live screen* through this app's real tmux config.
+///
+/// This is the one half of that path an automated test can reach without a
+/// live `claude` — the marker matching itself is unit-tested against the real
+/// captured copy (`sessions::tests::a_visibly_running_bash_tool_reads_as_
+/// tool_execution`), and the two together are what the manual verification
+/// exercises end to end.
+#[test]
+fn capture_pane_reads_the_live_screen_through_the_apps_tmux_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(t) = test_tmux("capture", tmp.path()) else {
+        eprintln!("tmux not installed — skipping");
+        return;
+    };
+    let _guard = ServerGuard(Some(t.clone()));
+
+    let manager =
+        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_tmux(Some(t.clone()));
+    let info = manager.create(shell_request(tmp.path())).unwrap();
+    let name = tmux::session_name(&info.id);
+
+    manager
+        .write(&info.id, "echo ON_THE_SCREEN_NOW\n")
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut screen = String::new();
+    while Instant::now() < deadline {
+        screen = t.capture_pane(&name).unwrap_or_default();
+        if screen.contains("ON_THE_SCREEN_NOW") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    assert!(
+        screen.contains("ON_THE_SCREEN_NOW"),
+        "capture-pane must show what's on the pane right now; got {screen:?}"
+    );
+
+    // ...and it must be *state*, not history: once the screen is cleared the
+    // text is gone from the capture, with no clearing heuristic on our side.
+    // (This is exactly why cyan is computed from the screen and not from a
+    // stream latch.)
+    manager.write(&info.id, "clear\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        screen = t.capture_pane(&name).unwrap_or_default();
+        if !screen.contains("ON_THE_SCREEN_NOW") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    assert!(
+        !screen.contains("ON_THE_SCREEN_NOW"),
+        "a cleared screen must stop reporting the old text; got {screen:?}"
     );
 
     manager.kill(&info.id).unwrap();
@@ -573,14 +808,7 @@ fn no_tmux_configured_at_all_still_creates_a_working_session() {
 #[test]
 fn without_tmux_status_still_works_via_the_output_activity_fallback() {
     let tmp = tempfile::tempdir().unwrap();
-    let (tx, rx) = mpsc::channel::<(String, SessionStatus)>();
-    let status_sink: StatusSink = Arc::new(move |id: &str, status: SessionStatus| {
-        let _ = tx.send((id.to_string(), status));
-    });
-
-    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
-        .with_tmux(None)
-        .with_status_sink(status_sink);
+    let (manager, rx) = manager_with_status(tmp.path(), None);
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     let mut seen = Vec::new();
@@ -599,8 +827,13 @@ fn without_tmux_status_still_works_via_the_output_activity_fallback() {
         .write(&info.id, "for i in $(seq 1 20); do echo busy-$i; sleep 0.2; done\n")
         .unwrap();
     assert!(
-        wait_for_status(&rx, &mut seen, SessionStatus::Executing, Duration::from_secs(10)),
-        "streaming output must read as executing; saw {seen:?}"
+        wait_for_status(
+            &rx,
+            &mut seen,
+            SessionStatus::ToolExecution,
+            Duration::from_secs(10)
+        ),
+        "streaming output from a shell must read as tool execution; saw {seen:?}"
     );
     assert!(
         wait_for_status(&rx, &mut seen, SessionStatus::Ready, Duration::from_secs(30)),

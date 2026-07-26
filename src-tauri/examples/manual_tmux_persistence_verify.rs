@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use omniagent_ade_lib::sessions::{
-    default_tmux, CreateSessionRequest, OutputSink, SessionManager, SessionStatus, StatusSink,
+    default_tmux, CreateSessionRequest, OutputSink, SessionManager, SessionStatusEvent, StatusSink,
 };
 use omniagent_ade_lib::tmux;
 
@@ -62,9 +62,9 @@ fn main() {
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
-    let (status_tx, status_rx) = mpsc::channel::<(String, SessionStatus)>();
-    let status_sink: StatusSink = Arc::new(move |id: &str, s: SessionStatus| {
-        let _ = status_tx.send((id.to_string(), s));
+    let (status_tx, status_rx) = mpsc::channel::<SessionStatusEvent>();
+    let status_sink: StatusSink = Arc::new(move |event: &SessionStatusEvent| {
+        let _ = status_tx.send(event.clone());
     });
 
     let manager = SessionManager::new(data_dir, sink)
@@ -141,8 +141,12 @@ fn main() {
         if let Ok((_, chunk)) = rx.recv_timeout(Duration::from_millis(200)) {
             seen.push_str(&String::from_utf8_lossy(&chunk));
         }
-        while let Ok((_, s)) = status_rx.try_recv() {
-            println!("[status] {}", s.as_str());
+        while let Ok(event) = status_rx.try_recv() {
+            println!(
+                "[status] {} (notify={})",
+                event.status.as_str(),
+                event.notify
+            );
         }
     }
 

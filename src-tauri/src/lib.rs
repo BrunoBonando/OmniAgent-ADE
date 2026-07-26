@@ -146,20 +146,27 @@ pub fn run() {
                     ),
                 }
             });
-            // Founder brief (Bruno, 2026-07-26): "Green means ready for any
-            // new command, yellow means executing, red means requires
-            // attention or input." Same thin Tauri-emit adapter shape as
-            // `sink`/`attention_sink` above, same event-naming convention
-            // (`session-status:{id}`). The payload is the state string
-            // ("ready" | "executing" | "attention"); `sessions.rs` only calls
+            // Founder brief (Bruno, 2026-07-26), revised the same day from
+            // three states to five: white/blue thinking · green ready · amber
+            // awaiting approval · red error · cyan tool execution — "but only
+            // green, yellow or red generate a notification". Same thin
+            // Tauri-emit adapter shape as `sink`/`attention_sink` above, same
+            // event-naming convention (`session-status:{id}`).
+            //
+            // The payload is the whole `SessionStatusEvent` struct
+            // (`{id, status, notify, engine}`) rather than a bare state
+            // string: `notify` is the backend's answer to Bruno's
+            // notification rule, so the notifications panel consumes a
+            // decision instead of re-deriving one (see
+            // `sessions::SessionStatus::notifies`). `sessions.rs` only calls
             // this when a session's state actually *changes*, so this is a
             // handful of events per session per minute, not a per-frame feed.
-            // The pull counterpart is `commands::session_status`, for a pane
-            // that just mounted and needs the current light immediately.
+            // The pull counterpart is `commands::session_status`, which
+            // returns the identical shape for a pane that just mounted.
             let status_handle = handle.clone();
             let status_sink: sessions::StatusSink =
-                std::sync::Arc::new(move |id: &str, status: sessions::SessionStatus| {
-                    let _ = status_handle.emit(&format!("session-status:{id}"), status.as_str());
+                std::sync::Arc::new(move |event: &sessions::SessionStatusEvent| {
+                    let _ = status_handle.emit(&format!("session-status:{}", event.id), event);
                 });
 
             // Founder brief (same day): "Every new claude or terminal or
