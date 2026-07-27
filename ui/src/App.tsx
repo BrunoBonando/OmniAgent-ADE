@@ -1203,17 +1203,31 @@ function App() {
   // Re-checked against the CURRENT status at click time: a prompt already
   // answered in the pane must not get a stray "1" typed into whatever
   // replaced it.
+  //
+  // `approveInFlightRef` guards a double-click: `tab.status` only flips on
+  // the backend's NEXT status event, so a second click before that event
+  // arrives sees the very same "still awaiting" status the first click did
+  // and would sail past the check above too. Claude often raises a
+  // follow-up permission prompt immediately, so a second unguarded write can
+  // approve a prompt the user never even saw. The set is checked and added
+  // to synchronously, before any `await`, so the second call in a
+  // double-click — however close together — is always the one that bails.
+  const approveInFlightRef = useRef<Set<string>>(new Set());
   const handleNotificationApprove = useCallback(
     async (entry: NotificationEntry) => {
-      const keystroke = approveKeystroke(entry.engine);
-      const tab = state.tabs.find((t) => t.id === entry.sessionId);
-      if (!keystroke || !tab || tab.status !== "awaiting_approval") return;
+      if (approveInFlightRef.current.has(entry.sessionId)) return;
+      approveInFlightRef.current.add(entry.sessionId);
       try {
+        const keystroke = approveKeystroke(entry.engine);
+        const tab = state.tabs.find((t) => t.id === entry.sessionId);
+        if (!keystroke || !tab || tab.status !== "awaiting_approval") return;
         await sessionWrite(entry.sessionId, keystroke);
         notificationsDispatch({ type: "notification/dismissed", id: entry.id });
       } catch (err) {
         console.error("approve from notifications failed", err);
         setErrorBanner(`Couldn't approve "${entry.title}" — open its pane and answer there.`);
+      } finally {
+        approveInFlightRef.current.delete(entry.sessionId);
       }
     },
     [state.tabs],

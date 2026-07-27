@@ -264,6 +264,31 @@ describe("App — approving a notification from the panel", () => {
       expect(screen.queryByRole("button", { name: /^Approve / })).not.toBeInTheDocument(),
     );
   });
+
+  it("a double-click only writes the approval once — the in-flight guard, not the not-yet-updated tab status", async () => {
+    // `tab.status` only flips on the backend's NEXT status event, so both
+    // clicks of a double-click see the same "still awaiting" status and
+    // pass that guard. Without a synchronous in-flight guard, both clicks
+    // would each call sessionWrite("sess-2", "1") — and Claude often raises
+    // a follow-up permission prompt immediately, so the second "1" can
+    // approve a prompt the user never saw.
+    await bootWithThreeSessions();
+    emit("sess-2", statusEvent("sess-2", "awaiting_approval", true));
+    await waitFor(() => expect(badge()?.textContent).toBe("1"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
+    const approveButton = await screen.findByRole("button", { name: /^Approve / });
+    // Two rapid clicks before anything is awaited — the same shape a real
+    // double-click produces, since `sessionWriteMock` resolves on a later
+    // microtask than these two synchronous `fireEvent.click` calls.
+    fireEvent.click(approveButton);
+    fireEvent.click(approveButton);
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /^Approve / })).not.toBeInTheDocument(),
+    );
+    expect(tauriMocks.sessionWriteMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("App — notifications outlive the app", () => {

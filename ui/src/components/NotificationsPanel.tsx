@@ -25,6 +25,13 @@
 //    the status the notification is *about*, frozen at the moment it fired —
 //    the same glyph the pane header shows, so the two read as the same
 //    system rather than two vocabularies for one event.
+//
+// One deliberate deviation from the checked-in design file
+// (`design/OmniAgent ADE.dc.html`, NOTIFICATIONS POPOVER): its mock puts the
+// timestamp on the title row, next to the engine tag. Here it stays on the
+// meta/branch row instead, because that row is what carries this app's
+// branch chip — a thing the mock's rows don't have at all — and pairing the
+// time with the branch reads better than splitting the title row three ways.
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   approveKeystroke,
@@ -188,6 +195,7 @@ function NotificationRow({
                   e.stopPropagation();
                   onSelect();
                 }}
+                aria-label={`Open pane for ${entry.title} in ${entry.projectLabel}`}
               >
                 Open pane
               </button>
@@ -217,6 +225,7 @@ function Band({
   clock,
   live,
   projects,
+  actionable,
   onSelect,
   onApprove,
   onDismiss,
@@ -227,6 +236,11 @@ function Band({
   clock: number;
   live: Set<string>;
   projects: Set<string>;
+  /** Whether every row in this band gets Approve/Open-pane actions — true
+   * only for the NEEDS YOU band. Passed explicitly by the caller rather
+   * than inferred from `label`, so a label rename can't silently turn the
+   * actions off. */
+  actionable: boolean;
   onSelect: (entry: NotificationEntry) => void;
   onApprove: (entry: NotificationEntry) => void;
   onDismiss: (id: string) => void;
@@ -242,7 +256,7 @@ function Band({
             key={e.id}
             entry={e}
             now={clock}
-            actionable={label === "NEEDS YOU"}
+            actionable={actionable}
             canJump={live.has(e.sessionId) || projects.has(e.project)}
             onSelect={() => {
               onSelect(e);
@@ -397,7 +411,9 @@ export default function NotificationsPanel({
               <p className="notifications-empty">
                 {entries.length === 0
                   ? "Nothing yet. Sessions tell you here when they finish, need approval, or fail."
-                  : "Nothing from this project."}
+                  : filter === "needs_you"
+                    ? "Nothing needs you right now."
+                    : "Nothing from this project."}
               </p>
             ) : (
               <>
@@ -407,6 +423,7 @@ export default function NotificationsPanel({
                   clock={clock}
                   live={live}
                   projects={projects}
+                  actionable={true}
                   onSelect={onSelect}
                   onApprove={onApprove}
                   onDismiss={onDismiss}
@@ -418,6 +435,7 @@ export default function NotificationsPanel({
                   clock={clock}
                   live={live}
                   projects={projects}
+                  actionable={false}
                   onSelect={onSelect}
                   onApprove={onApprove}
                   onDismiss={onDismiss}
@@ -429,6 +447,7 @@ export default function NotificationsPanel({
                   clock={clock}
                   live={live}
                   projects={projects}
+                  actionable={false}
                   onSelect={onSelect}
                   onApprove={onApprove}
                   onDismiss={onDismiss}

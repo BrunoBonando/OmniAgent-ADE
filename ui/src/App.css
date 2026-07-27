@@ -5617,6 +5617,7 @@ code {
   border: none;
   border-radius: var(--radius-sm);
   text-align: left;
+  cursor: pointer;
 }
 
 .notification-row-main:hover {

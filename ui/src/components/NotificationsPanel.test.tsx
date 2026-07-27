@@ -263,6 +263,17 @@ describe("needs-you band and approval", () => {
     expect(screen.getByText("stripe webhook retries")).toBeInTheDocument();
     expect(screen.queryByText("wire session restore")).not.toBeInTheDocument();
   });
+
+  it("says nothing needs you right now, not the generic project empty-state copy", () => {
+    // Entries exist (so this isn't the "nothing yet" empty state), but none
+    // is actionable — filtering to Needs you must not fall back to "Nothing
+    // from this project," which is the wrong sentence for this filter.
+    setup({ entries: [entry({ id: "n2", sessionId: "s2", status: "ready" })], awaitingSessionIds: [] });
+    openPanel();
+    fireEvent.click(screen.getByRole("button", { name: /needs you 0/i }));
+    expect(screen.getByText("Nothing needs you right now.")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing from this project.")).not.toBeInTheDocument();
+  });
 });
 
 describe("engine tag and day bands", () => {

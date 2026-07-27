@@ -140,7 +140,12 @@ export function notificationSubtitle(status: SessionStatus): string {
  * `ATTENTION_MARKERS` scrape that detects the prompt in the first place —
  * one assumption, both sides of it. Other engines return `null` (no known
  * gesture) and their rows offer "Open pane" only; add an entry here when an
- * engine's prompt gesture is verified against a real session. */
+ * engine's prompt gesture is verified against a real session. The write
+ * itself has an inherent race window too, being frontend-only (App.tsx's
+ * in-flight guard narrows it, but doesn't close it): the durable fix is a
+ * Rust-side `session_approve(id)` that re-checks the prompt scrape inside
+ * the same lock before writing, rather than trusting the last status event
+ * the frontend saw. */
 const APPROVE_KEYSTROKES: Record<string, string> = { claude: "1" };
 
 export function approveKeystroke(engine: string): string | null {
@@ -157,18 +162,39 @@ export function isActionable(entry: NotificationEntry, awaiting: ReadonlySet<str
 
 /** The reference panel's three bands: NEEDS YOU (actionable, whatever their
  * age — a blocked session doesn't stop being blocked at midnight), then
- * EARLIER TODAY / OLDER by local calendar day. */
+ * EARLIER TODAY / OLDER by local calendar day.
+ *
+ * A session can carry more than one still-awaiting entry: the reducer only
+ * collapses an *immediate* repeat (same session, same status, nothing else
+ * in between), and a restored persisted entry reuses a session id from a
+ * previous run, so two `awaiting_approval` rows for one session is reachable
+ * without either of those catching it. Two rows means two Approve buttons
+ * for a single prompt, so before banding, only the newest actionable entry
+ * per session id is allowed into NEEDS YOU — the rest are not actionable for
+ * banding purposes and fall through to the ordinary day-band logic below,
+ * same as any other non-actionable row. */
 export function groupNotifications(
   entries: NotificationEntry[],
   awaiting: ReadonlySet<string>,
   now: number,
 ): { needsYou: NotificationEntry[]; earlierToday: NotificationEntry[]; older: NotificationEntry[] } {
   const startOfToday = new Date(now).setHours(0, 0, 0, 0);
+
+  const newestActionableBySession = new Map<string, NotificationEntry>();
+  for (const entry of entries) {
+    if (!isActionable(entry, awaiting)) continue;
+    const current = newestActionableBySession.get(entry.sessionId);
+    if (!current || entry.createdAt > current.createdAt) {
+      newestActionableBySession.set(entry.sessionId, entry);
+    }
+  }
+
   const needsYou: NotificationEntry[] = [];
   const earlierToday: NotificationEntry[] = [];
   const older: NotificationEntry[] = [];
   for (const entry of entries) {
-    if (isActionable(entry, awaiting)) needsYou.push(entry);
+    const isNeedsYouWinner = newestActionableBySession.get(entry.sessionId) === entry;
+    if (isNeedsYouWinner) needsYou.push(entry);
     else if (entry.createdAt >= startOfToday) earlierToday.push(entry);
     else older.push(entry);
   }
@@ -283,9 +309,10 @@ export function filterNotifications(
   return entries.filter((e) => e.project === projectId);
 }
 
-/** Chip text, count included — "All 3". `projectLabel` names the
- * project chip when one is selected, so the chip says "This workspace"
- * rather than the project name (for signature stability, the parameter stays but is unused). */
+/** Chip text, count included — "All 3". The chip copy is fixed per the
+ * design file ("All" / "This workspace" / "Needs you") regardless of the
+ * actual project name; `_projectLabel` is vestigial — kept only so the
+ * signature doesn't need to change at every call site — and unused. */
 export function filterChipLabel(
   filter: NotificationFilter,
   count: number,

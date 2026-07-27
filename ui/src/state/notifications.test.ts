@@ -370,6 +370,30 @@ describe("groupNotifications", () => {
     expect(groups.needsYou).toEqual([]);
     expect(groups.earlierToday.map((e) => e.id)).toEqual(["n1"]);
   });
+
+  it("dedupes NEEDS YOU by session id, keeping only the newest — the loser falls to its own day band", async () => {
+    const { groupNotifications } = await import("./notifications");
+    const awaiting = new Set(["s1"]);
+    // Same session (default sessionId "s1"), two actionable entries: an
+    // older one and the current newest. Only the newest may sit under
+    // NEEDS YOU; the reducer only collapses an *immediate* repeat, and a
+    // restored persisted entry can reuse a session id from a previous run,
+    // so this is reachable without the reducer's own dedupe catching it.
+    const older = n({ id: "n1", createdAt: T0 - 5 * 60_000 });
+    const newer = n({ id: "n2", createdAt: T0 });
+    const groups = groupNotifications([older, newer], awaiting, T0);
+    expect(groups.needsYou.map((e) => e.id)).toEqual(["n2"]);
+    expect(groups.earlierToday.map((e) => e.id)).toEqual(["n1"]);
+    expect(groups.older).toEqual([]);
+  });
+
+  it("a lone actionable entry lands in NEEDS YOU regardless of its own age", async () => {
+    const { groupNotifications } = await import("./notifications");
+    const awaiting = new Set(["s1"]);
+    const groups = groupNotifications([n({ createdAt: T0 - 26 * 3600_000 })], awaiting, T0);
+    expect(groups.needsYou.map((e) => e.id)).toEqual(["n1"]);
+    expect(groups.older).toEqual([]);
+  });
 });
 
 describe("needs_you filter", () => {
