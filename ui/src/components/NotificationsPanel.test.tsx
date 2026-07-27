@@ -219,12 +219,12 @@ describe("needs-you band and approval", () => {
   const awaitingEntry = () =>
     entry({ id: "a1", sessionId: "sess-1", status: "awaiting_approval", title: "stripe webhook retries" });
 
-  it("an actionable row sits under NEEDS YOU with Approve and Open pane", () => {
+  it("an actionable row sits under NEEDS YOU with Approve and Go to terminal", () => {
     setup({ entries: [awaitingEntry()], awaitingSessionIds: ["sess-1"] });
     openPanel();
     expect(screen.getByText("NEEDS YOU")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /approve stripe webhook retries/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /open pane/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /go to terminal/i })).toBeInTheDocument();
   });
 
   it("Approve fires onApprove with the entry and keeps the panel open", () => {
@@ -242,7 +242,7 @@ describe("needs-you band and approval", () => {
     expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
   });
 
-  it("an engine with no approve keystroke gets Open pane only", () => {
+  it("an engine with no approve keystroke gets Go to terminal only", () => {
     setup({
       entries: [entry({ id: "a2", sessionId: "sess-1", status: "awaiting_approval", engine: "codex" })],
       awaitingSessionIds: ["sess-1"],
@@ -250,7 +250,7 @@ describe("needs-you band and approval", () => {
     openPanel();
     expect(screen.getByText("NEEDS YOU")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /open pane/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /go to terminal/i })).toBeInTheDocument();
   });
 
   it("the Needs you chip filters to actionable rows", () => {

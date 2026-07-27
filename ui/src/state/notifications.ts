@@ -139,7 +139,7 @@ export function notificationSubtitle(status: SessionStatus): string {
  * ponytail: version-coupled to Claude Code's own dialog, exactly like the
  * `ATTENTION_MARKERS` scrape that detects the prompt in the first place —
  * one assumption, both sides of it. Other engines return `null` (no known
- * gesture) and their rows offer "Open pane" only; add an entry here when an
+ * gesture) and their rows offer "Go to terminal" only; add an entry here when an
  * engine's prompt gesture is verified against a real session. The write
  * itself has an inherent race window too, being frontend-only (App.tsx's
  * in-flight guard narrows it, but doesn't close it): the durable fix is a

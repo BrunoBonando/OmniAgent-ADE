@@ -188,6 +188,10 @@ function NotificationRow({
                   Approve
                 </button>
               )}
+              {/* Not a reject (founder, 2026-07-27): the second action is
+                  "go look at the question in context" — jump to the terminal
+                  so the user can read the prompt before deciding. Same
+                  navigation the row click does. */}
               <button
                 type="button"
                 className="notification-open-pane"
@@ -195,9 +199,9 @@ function NotificationRow({
                   e.stopPropagation();
                   onSelect();
                 }}
-                aria-label={`Open pane for ${entry.title} in ${entry.projectLabel}`}
+                aria-label={`Go to terminal — ${entry.title} in ${entry.projectLabel}`}
               >
-                Open pane
+                Go to terminal
               </button>
             </span>
           )}
