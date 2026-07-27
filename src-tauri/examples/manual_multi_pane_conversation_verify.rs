@@ -47,9 +47,7 @@ use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use omniagent_ade_lib::sessions::{
-    default_tmux, CreateSessionRequest, OutputSink, SessionManager,
-};
+use omniagent_ade_lib::sessions::{default_tmux, CreateSessionRequest, OutputSink, SessionManager};
 
 /// The two panes: (id suffix, the word only this pane is ever told).
 const PANES: [(&str, &str); 2] = [("a", "PERSIMMON"), ("b", "AUBERGINE")];
@@ -173,9 +171,7 @@ fn main() {
             "\n--- {id} (was told {own_word}) ---\n{}",
             tail(&seen, 1200)
         );
-        println!(
-            ">>> contains {own_word}: {has_own} | contains {other_word}: {has_other}"
-        );
+        println!(">>> contains {own_word}: {has_own} | contains {other_word}: {has_other}");
         verdicts.push(has_own && !has_other);
     }
     println!("\n================ VERDICT ================");

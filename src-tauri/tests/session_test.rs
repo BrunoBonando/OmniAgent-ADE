@@ -89,7 +89,11 @@ fn kill_reaps_the_child_process_no_zombie() {
     let alive = unsafe { libc::kill(pid as i32, 0) };
     let alive_errno = std::io::Error::last_os_error().raw_os_error();
     assert_eq!(alive, -1, "pid {pid} should no longer exist");
-    assert_eq!(alive_errno, Some(libc::ESRCH), "expected ESRCH, got {alive_errno:?}");
+    assert_eq!(
+        alive_errno,
+        Some(libc::ESRCH),
+        "expected ESRCH, got {alive_errno:?}"
+    );
 
     // 2. A second `waitpid` on the same pid must find no such child of
     //    this process (ECHILD) — proving *we* already collected it via
@@ -98,7 +102,11 @@ fn kill_reaps_the_child_process_no_zombie() {
     let wp = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
     let wp_errno = std::io::Error::last_os_error().raw_os_error();
     assert_eq!(wp, -1, "waitpid should find no such child (already reaped)");
-    assert_eq!(wp_errno, Some(libc::ECHILD), "expected ECHILD, got {wp_errno:?}");
+    assert_eq!(
+        wp_errno,
+        Some(libc::ECHILD),
+        "expected ECHILD, got {wp_errno:?}"
+    );
 }
 
 #[test]
@@ -192,13 +200,27 @@ fn multiple_concurrent_sessions_in_the_same_project_are_independent() {
             && seen.get(&c.id).is_some_and(|s| s.contains("FROM_C")))
     {
         if let Ok((id, chunk)) = rx.recv_timeout(Duration::from_millis(200)) {
-            seen.entry(id).or_default().push_str(&String::from_utf8_lossy(&chunk));
+            seen.entry(id)
+                .or_default()
+                .push_str(&String::from_utf8_lossy(&chunk));
         }
     }
 
-    assert!(seen.get(&a.id).is_some_and(|s| s.contains("FROM_A")), "a's output: {:?}", seen.get(&a.id));
-    assert!(seen.get(&b.id).is_some_and(|s| s.contains("FROM_B")), "b's output: {:?}", seen.get(&b.id));
-    assert!(seen.get(&c.id).is_some_and(|s| s.contains("FROM_C")), "c's output: {:?}", seen.get(&c.id));
+    assert!(
+        seen.get(&a.id).is_some_and(|s| s.contains("FROM_A")),
+        "a's output: {:?}",
+        seen.get(&a.id)
+    );
+    assert!(
+        seen.get(&b.id).is_some_and(|s| s.contains("FROM_B")),
+        "b's output: {:?}",
+        seen.get(&b.id)
+    );
+    assert!(
+        seen.get(&c.id).is_some_and(|s| s.contains("FROM_C")),
+        "c's output: {:?}",
+        seen.get(&c.id)
+    );
 
     // No cross-talk: each session's stream carries only its own marker.
     assert!(!seen[&a.id].contains("FROM_B") && !seen[&a.id].contains("FROM_C"));
@@ -207,8 +229,14 @@ fn multiple_concurrent_sessions_in_the_same_project_are_independent() {
 
     // Killing one session (closing that tab) leaves its siblings alive...
     manager.kill(&b.id).unwrap();
-    assert!(manager.pid(&a.id).is_some(), "a should still be alive after b is killed");
-    assert!(manager.pid(&c.id).is_some(), "c should still be alive after b is killed");
+    assert!(
+        manager.pid(&a.id).is_some(),
+        "a should still be alive after b is killed"
+    );
+    assert!(
+        manager.pid(&c.id).is_some(),
+        "c should still be alive after b is killed"
+    );
 
     // ...and still genuinely responsive, not just present in the map.
     manager.write(&a.id, "echo STILL_ALIVE_A\n").unwrap();
@@ -222,7 +250,10 @@ fn multiple_concurrent_sessions_in_the_same_project_are_independent() {
             }
         }
     }
-    assert!(still_alive, "session a should still be responsive after a sibling was killed");
+    assert!(
+        still_alive,
+        "session a should still be responsive after a sibling was killed"
+    );
 
     manager.kill(&a.id).unwrap();
     manager.kill(&c.id).unwrap();

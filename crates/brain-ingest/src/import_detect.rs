@@ -219,7 +219,9 @@ fn backtrack_path(current: &Path, tokens: &[&str], budget: &mut u32) -> Option<P
 fn collapse_worktree(path: &Path) -> PathBuf {
     let components: Vec<std::path::Component> = path.components().collect();
     for (i, c) in components.iter().enumerate() {
-        if c.as_os_str() == ".claude" && components.get(i + 1).map(|n| n.as_os_str()) == Some(std::ffi::OsStr::new("worktrees"))
+        if c.as_os_str() == ".claude"
+            && components.get(i + 1).map(|n| n.as_os_str())
+                == Some(std::ffi::OsStr::new("worktrees"))
         {
             return components[..i].iter().collect();
         }
@@ -428,15 +430,19 @@ fn percent_decode(s: &str) -> String {
 type JsonPathExtractor = fn(&serde_json::Value) -> Vec<PathBuf>;
 
 fn vscode_family_candidates(db_path: &Path) -> Vec<ImportCandidate> {
-    let Ok(conn) = rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
         return Vec::new();
     };
 
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut out: Vec<PathBuf> = Vec::new();
 
-    let sources: [(&str, JsonPathExtractor); 2] =
-        [(RECENTLY_OPENED_KEY, extract_recently_opened), (TERMINAL_DIRS_KEY, extract_terminal_dirs)];
+    let sources: [(&str, JsonPathExtractor); 2] = [
+        (RECENTLY_OPENED_KEY, extract_recently_opened),
+        (TERMINAL_DIRS_KEY, extract_terminal_dirs),
+    ];
 
     for (key, extract) in sources {
         let Some(raw) = read_item_table_value(&conn, key) else {
@@ -485,7 +491,11 @@ fn detect_tools_impl(home: &Path) -> Vec<DetectedTool> {
         .into_iter()
         .map(|tool| {
             let detected = is_present(tool, home);
-            let candidate_count = if detected { candidates_for(tool, home).len() } else { 0 };
+            let candidate_count = if detected {
+                candidates_for(tool, home).len()
+            } else {
+                0
+            };
             DetectedTool {
                 id: tool.id().to_string(),
                 name: tool.display_name().to_string(),
@@ -497,7 +507,8 @@ fn detect_tools_impl(home: &Path) -> Vec<DetectedTool> {
 }
 
 fn list_candidates_impl(home: &Path, tool_id: &str) -> Result<Vec<ImportCandidate>, String> {
-    let tool = Tool::from_id(tool_id).ok_or_else(|| format!("unknown import-detect tool id: {tool_id:?}"))?;
+    let tool = Tool::from_id(tool_id)
+        .ok_or_else(|| format!("unknown import-detect tool id: {tool_id:?}"))?;
     if !is_present(tool, home) {
         return Ok(Vec::new());
     }
@@ -621,7 +632,11 @@ mod tests {
         let started = std::time::Instant::now();
         let result = decode_dash_encoded_dir(&encoded);
         assert!(result.is_none());
-        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     // -------------------------------------------------------- collapse_worktree
@@ -647,10 +662,16 @@ mod tests {
 
         let encoded = encode_like_claude_code(&worktree);
         let decoded = decode_dash_encoded_dir(&encoded).unwrap();
-        assert_eq!(decoded, worktree, "decode itself must resolve the FULL real worktree path");
+        assert_eq!(
+            decoded, worktree,
+            "decode itself must resolve the FULL real worktree path"
+        );
 
         let collapsed = collapse_worktree(&decoded);
-        assert_eq!(collapsed, repo, "collapsing must land on the parent repo, not the worktree");
+        assert_eq!(
+            collapsed, repo,
+            "collapsing must land on the parent repo, not the worktree"
+        );
     }
 
     // ------------------------------------------------------- claude_code_candidates
@@ -685,9 +706,15 @@ mod tests {
         assert!(paths.contains(&repo_a.to_str().unwrap()), "{paths:?}");
         assert!(paths.contains(&repo_b.to_str().unwrap()), "{paths:?}");
         assert!(!paths.iter().any(|p| p.contains("worktrees")), "{paths:?}");
-        assert!(!paths.iter().any(|p| p.contains("DeletedProject")), "{paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.contains("DeletedProject")),
+            "{paths:?}"
+        );
 
-        let names: Vec<&str> = candidates.iter().map(|c| c.suggested_name.as_str()).collect();
+        let names: Vec<&str> = candidates
+            .iter()
+            .map(|c| c.suggested_name.as_str())
+            .collect();
         assert!(names.contains(&"RepoA"), "{names:?}");
         assert!(names.contains(&"RepoB-Two"), "{names:?}");
     }
@@ -709,11 +736,17 @@ mod tests {
     /// the SQLite parsing "against a real database file."
     fn build_fake_state_db(path: &Path, rows: &[(&str, &str)]) {
         let conn = rusqlite::Connection::open(path).unwrap();
-        conn.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
         for (key, value) in rows {
-            conn.execute("INSERT INTO ItemTable (key, value) VALUES (?1, ?2)", rusqlite::params![key, value])
-                .unwrap();
+            conn.execute(
+                "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key, value],
+            )
+            .unwrap();
         }
     }
 
@@ -742,17 +775,32 @@ mod tests {
         .to_string();
 
         let db_path = dir.path().join("state.vscdb");
-        build_fake_state_db(&db_path, &[(RECENTLY_OPENED_KEY, &recently_opened), (TERMINAL_DIRS_KEY, &terminal_dirs)]);
+        build_fake_state_db(
+            &db_path,
+            &[
+                (RECENTLY_OPENED_KEY, &recently_opened),
+                (TERMINAL_DIRS_KEY, &terminal_dirs),
+            ],
+        );
 
         let candidates = vscode_family_candidates(&db_path);
         let paths: Vec<&str> = candidates.iter().map(|c| c.path.as_str()).collect();
 
         assert_eq!(candidates.len(), 2, "{paths:?}");
         assert!(paths.contains(&real_folder.to_str().unwrap()), "{paths:?}");
-        assert!(paths.contains(&real_terminal_dir.to_str().unwrap()), "{paths:?}");
-        assert!(!paths.iter().any(|p| p.contains("DeletedProject")), "{paths:?}");
+        assert!(
+            paths.contains(&real_terminal_dir.to_str().unwrap()),
+            "{paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("DeletedProject")),
+            "{paths:?}"
+        );
         assert!(!paths.iter().any(|p| p.contains("stale")), "{paths:?}");
-        assert!(!paths.iter().any(|p| p.contains("notes.txt")), "fileUri entries must be skipped, {paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.contains("notes.txt")),
+            "fileUri entries must be skipped, {paths:?}"
+        );
     }
 
     #[test]
@@ -761,7 +809,8 @@ mod tests {
         let real_folder = make_real_dir(dir.path(), "Documents/My Project");
         let uri = format!("file://{}", real_folder.display()).replace(' ', "%20");
 
-        let recently_opened = serde_json::json!({ "entries": [ { "folderUri": uri } ] }).to_string();
+        let recently_opened =
+            serde_json::json!({ "entries": [ { "folderUri": uri } ] }).to_string();
         let db_path = dir.path().join("state.vscdb");
         build_fake_state_db(&db_path, &[(RECENTLY_OPENED_KEY, &recently_opened)]);
 
@@ -956,7 +1005,11 @@ mod tests {
         }
         for tool in Tool::ALL {
             let candidates = list_candidates(tool.id()).unwrap();
-            println!("\n--- {} ({} candidate(s)) ---", tool.display_name(), candidates.len());
+            println!(
+                "\n--- {} ({} candidate(s)) ---",
+                tool.display_name(),
+                candidates.len()
+            );
             for c in &candidates {
                 println!("  {:<30} {}", c.suggested_name, c.path);
             }

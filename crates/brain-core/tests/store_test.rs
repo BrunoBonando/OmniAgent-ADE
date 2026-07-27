@@ -282,18 +282,14 @@ fn settings_round_trip() {
     let store = Store::open_in_memory().unwrap();
     assert_eq!(store.get_setting("default_engine:demo").unwrap(), None);
 
-    store
-        .set_setting("default_engine:demo", "codex")
-        .unwrap();
+    store.set_setting("default_engine:demo", "codex").unwrap();
     assert_eq!(
         store.get_setting("default_engine:demo").unwrap(),
         Some("codex".to_string())
     );
 
     // Upsert overwrites rather than duplicating/erroring.
-    store
-        .set_setting("default_engine:demo", "shell")
-        .unwrap();
+    store.set_setting("default_engine:demo", "shell").unwrap();
     assert_eq!(
         store.get_setting("default_engine:demo").unwrap(),
         Some("shell".to_string())
@@ -304,7 +300,12 @@ fn settings_round_trip() {
 fn pending_notes_round_trip_mark_list_approve_discard() {
     let store = Store::open_in_memory().unwrap();
     store
-        .upsert_node(&node("p1:memory:note-1.md", NodeKind::Memory, "p1", "Session: add auth"))
+        .upsert_node(&node(
+            "p1:memory:note-1.md",
+            NodeKind::Memory,
+            "p1",
+            "Session: add auth",
+        ))
         .unwrap();
 
     assert!(!store.is_pending("p1:memory:note-1.md").unwrap());
@@ -339,7 +340,12 @@ fn approve_pending_on_a_non_pending_id_returns_false_not_an_error() {
 fn discard_pending_deletes_node_edges_and_the_pending_row() {
     let store = Store::open_in_memory().unwrap();
     store
-        .upsert_node(&node("p1:memory:note-1.md", NodeKind::Memory, "p1", "Session: add auth"))
+        .upsert_node(&node(
+            "p1:memory:note-1.md",
+            NodeKind::Memory,
+            "p1",
+            "Session: add auth",
+        ))
         .unwrap();
     store
         .upsert_node(&node("p1:a.ts", NodeKind::File, "p1", "a.ts"))
@@ -373,21 +379,35 @@ fn discard_pending_on_a_non_pending_id_returns_none_and_deletes_nothing() {
 
     let deleted = store.discard_pending("p1:a.ts").unwrap();
     assert!(deleted.is_none());
-    assert!(store.get_node("p1:a.ts").unwrap().is_some(), "must not delete a non-pending node");
+    assert!(
+        store.get_node("p1:a.ts").unwrap().is_some(),
+        "must not delete a non-pending node"
+    );
 }
 
 #[test]
 fn search_excludes_pending_notes() {
     let store = Store::open_in_memory().unwrap();
     store
-        .upsert_node(&node("p1:memory:note-1.md", NodeKind::Memory, "p1", "unique-search-term"))
+        .upsert_node(&node(
+            "p1:memory:note-1.md",
+            NodeKind::Memory,
+            "p1",
+            "unique-search-term",
+        ))
         .unwrap();
     store.mark_pending("p1:memory:note-1.md", "p1").unwrap();
 
-    assert!(store.search("unique-search-term", None, 10).unwrap().is_empty());
+    assert!(store
+        .search("unique-search-term", None, 10)
+        .unwrap()
+        .is_empty());
 
     store.approve_pending("p1:memory:note-1.md").unwrap();
-    assert_eq!(store.search("unique-search-term", None, 10).unwrap().len(), 1);
+    assert_eq!(
+        store.search("unique-search-term", None, 10).unwrap().len(),
+        1
+    );
 }
 
 #[test]
@@ -395,11 +415,17 @@ fn pending_job_count_reflects_only_pending_status() {
     let store = Store::open_in_memory().unwrap();
     assert_eq!(store.pending_job_count().unwrap(), 0);
 
-    let a = store.enqueue_job("project_summary", r#"{"node_id":"p1"}"#).unwrap();
-    store.enqueue_job("project_summary", r#"{"node_id":"p2"}"#).unwrap();
+    let a = store
+        .enqueue_job("project_summary", r#"{"node_id":"p1"}"#)
+        .unwrap();
+    store
+        .enqueue_job("project_summary", r#"{"node_id":"p2"}"#)
+        .unwrap();
     assert_eq!(store.pending_job_count().unwrap(), 2);
 
-    store.set_job_status(a, "done", r#"{"node_id":"p1"}"#).unwrap();
+    store
+        .set_job_status(a, "done", r#"{"node_id":"p1"}"#)
+        .unwrap();
     assert_eq!(store.pending_job_count().unwrap(), 1);
 }
 
@@ -447,7 +473,12 @@ fn with_transaction_rolls_back_every_write_on_error() {
     let store = Store::open_in_memory().unwrap();
     // Pre-existing state, untouched by the failed transaction below.
     store
-        .upsert_node(&node("p1:pre-existing.ts", NodeKind::File, "p1", "pre-existing.ts"))
+        .upsert_node(&node(
+            "p1:pre-existing.ts",
+            NodeKind::File,
+            "p1",
+            "pre-existing.ts",
+        ))
         .unwrap();
 
     let result: Result<(), Box<dyn std::error::Error>> = store.with_transaction(|s| {

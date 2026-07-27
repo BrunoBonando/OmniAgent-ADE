@@ -142,7 +142,10 @@ mod tests {
     /// Waits up to `timeout` for at least one event on `rx`, draining any
     /// further ones that arrive within a short settle window — real FSEvents
     /// delivery can report a single fs write as more than one event.
-    fn wait_for_event(rx: &std::sync::mpsc::Receiver<PathBuf>, timeout: Duration) -> Option<PathBuf> {
+    fn wait_for_event(
+        rx: &std::sync::mpsc::Receiver<PathBuf>,
+        timeout: Duration,
+    ) -> Option<PathBuf> {
         let first = match rx.recv_timeout(timeout) {
             Ok(p) => p,
             Err(RecvTimeoutError::Timeout) => return None,
@@ -167,7 +170,11 @@ mod tests {
         fs::write(dir.path().join("new.txt"), "hi").unwrap();
 
         let got = wait_for_event(&rx, Duration::from_secs(5));
-        assert_eq!(got, Some(dir.path().to_path_buf()), "the sink must fire with the watched dir's path");
+        assert_eq!(
+            got,
+            Some(dir.path().to_path_buf()),
+            "the sink must fire with the watched dir's path"
+        );
     }
 
     #[test]
@@ -180,7 +187,11 @@ mod tests {
         assert_eq!(registry.watched_count(), 1);
         registry.watch(dir.path()).unwrap();
         registry.watch(dir.path()).unwrap();
-        assert_eq!(registry.watched_count(), 1, "a repeated watch() must not create a duplicate watcher");
+        assert_eq!(
+            registry.watched_count(),
+            1,
+            "a repeated watch() must not create a duplicate watcher"
+        );
     }
 
     #[test]
@@ -192,7 +203,10 @@ mod tests {
         registry.watch(dir.path()).unwrap();
         std::thread::sleep(Duration::from_millis(300));
         fs::write(dir.path().join("first.txt"), "a").unwrap();
-        assert!(wait_for_event(&rx, Duration::from_secs(5)).is_some(), "sanity: watch works before unwatch");
+        assert!(
+            wait_for_event(&rx, Duration::from_secs(5)).is_some(),
+            "sanity: watch works before unwatch"
+        );
 
         registry.unwatch(dir.path()).unwrap();
         assert_eq!(registry.watched_count(), 0);
@@ -229,7 +243,11 @@ mod tests {
 
         fs::remove_dir(&dir).unwrap();
         registry.unwatch(&dir).unwrap();
-        assert_eq!(registry.watched_count(), 0, "unwatch must still release the watcher for a now-deleted dir");
+        assert_eq!(
+            registry.watched_count(),
+            0,
+            "unwatch must still release the watcher for a now-deleted dir"
+        );
     }
 
     #[test]

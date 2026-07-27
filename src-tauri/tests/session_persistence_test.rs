@@ -68,7 +68,11 @@ impl Drop for ServerGuard {
 fn default_socket_path(socket_name: &str) -> Option<std::path::PathBuf> {
     let base = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
     let uid = unsafe { libc::getuid() };
-    Some(std::path::PathBuf::from(base).join(format!("tmux-{uid}")).join(socket_name))
+    Some(
+        std::path::PathBuf::from(base)
+            .join(format!("tmux-{uid}"))
+            .join(socket_name),
+    )
 }
 
 /// Real tmux on a private socket + this app's real config, or `None` when
@@ -190,12 +194,15 @@ fn a_session_creates_a_real_tmux_session_and_kill_deletes_it() {
     };
     let _guard = ServerGuard(Some(t.clone()));
 
-    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
-        .with_tmux(Some(t.clone()));
+    let manager =
+        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_tmux(Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     let expected_name = tmux::session_name(&info.id);
-    assert!(info.persistent, "a tmux-backed session must report persistent");
+    assert!(
+        info.persistent,
+        "a tmux-backed session must report persistent"
+    );
     assert!(!info.restored, "a brand-new session was not restored");
     assert_eq!(
         t.list_sessions(),
@@ -248,8 +255,8 @@ fn closing_the_app_and_returning_reattaches_the_same_live_session() {
         let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
             let _ = tx.send((id.to_string(), chunk.to_vec()));
         });
-        let manager = SessionManager::new(tmp.path().to_path_buf(), sink)
-            .with_tmux(Some(t.clone()));
+        let manager =
+            SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(Some(t.clone()));
 
         let info = manager
             .create(CreateSessionRequest {
@@ -257,8 +264,14 @@ fn closing_the_app_and_returning_reattaches_the_same_live_session() {
                 ..shell_request(tmp.path())
             })
             .unwrap();
-        assert_eq!(info.id, stable_id, "restore_id must be used verbatim as the id");
-        assert!(!info.restored, "nothing existed yet — this is a fresh start");
+        assert_eq!(
+            info.id, stable_id,
+            "restore_id must be used verbatim as the id"
+        );
+        assert!(
+            !info.restored,
+            "nothing existed yet — this is a fresh start"
+        );
         assert!(info.persistent);
 
         // Put state into the live process that only *it* can know.
@@ -468,7 +481,12 @@ fn shell_status_goes_ready_then_tool_execution_then_ready_around_a_real_command(
 
     let mut seen = Vec::new();
     assert!(
-        wait_for_status(&rx, &mut seen, SessionStatus::Ready, Duration::from_secs(10)),
+        wait_for_status(
+            &rx,
+            &mut seen,
+            SessionStatus::Ready,
+            Duration::from_secs(10)
+        ),
         "an idle shell must settle on ready (green); saw {seen:?}"
     );
 
@@ -492,7 +510,12 @@ fn shell_status_goes_ready_then_tool_execution_then_ready_around_a_real_command(
     );
 
     assert!(
-        wait_for_status(&rx, &mut seen, SessionStatus::Ready, Duration::from_secs(10)),
+        wait_for_status(
+            &rx,
+            &mut seen,
+            SessionStatus::Ready,
+            Duration::from_secs(10)
+        ),
         "the light must go back to green when the command finishes; saw {seen:?}"
     );
 
@@ -526,7 +549,12 @@ fn approval_marker_turns_the_light_amber_and_writing_clears_it() {
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     let mut seen = Vec::new();
-    assert!(wait_for_status(&rx, &mut seen, SessionStatus::Ready, Duration::from_secs(10)));
+    assert!(wait_for_status(
+        &rx,
+        &mut seen,
+        SessionStatus::Ready,
+        Duration::from_secs(10)
+    ));
 
     // The prompt appears a beat *after* the user's own input, the way a real
     // engine's does (you send a message; some seconds later Claude asks for
@@ -631,7 +659,12 @@ fn a_failed_tool_exit_turns_the_light_red_and_writing_clears_it() {
         .unwrap();
 
     assert!(
-        wait_for_status(&rx, &mut seen, SessionStatus::Error, Duration::from_secs(20)),
+        wait_for_status(
+            &rx,
+            &mut seen,
+            SessionStatus::Error,
+            Duration::from_secs(20)
+        ),
         "a non-zero exit-code line must turn the light red; saw {seen:?}"
     );
     let pulled = manager.status(&info.id).unwrap();
@@ -684,7 +717,12 @@ fn an_idle_session_settles_on_one_state_and_stops_emitting() {
 
     let mut seen = Vec::new();
     assert!(
-        wait_for_status(&rx, &mut seen, SessionStatus::Ready, Duration::from_secs(10)),
+        wait_for_status(
+            &rx,
+            &mut seen,
+            SessionStatus::Ready,
+            Duration::from_secs(10)
+        ),
         "an idle shell must settle on ready; saw {seen:?}"
     );
     // Let the prompt finish painting before the quiet window starts.
@@ -737,9 +775,7 @@ fn capture_pane_reads_the_live_screen_through_the_apps_tmux_config() {
     let info = manager.create(shell_request(tmp.path())).unwrap();
     let name = tmux::session_name(&info.id);
 
-    manager
-        .write(&info.id, "echo ON_THE_SCREEN_NOW\n")
-        .unwrap();
+    manager.write(&info.id, "echo ON_THE_SCREEN_NOW\n").unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut screen = String::new();
@@ -802,7 +838,10 @@ fn a_missing_tmux_binary_falls_back_to_a_working_direct_spawn() {
 
     manager.write(&info.id, "echo FALLBACK_WORKS\n").unwrap();
     let (found, seen) = wait_for_output(&rx, &info.id, "FALLBACK_WORKS", Duration::from_secs(10));
-    assert!(found, "the fallback session must actually work; saw {seen:?}");
+    assert!(
+        found,
+        "the fallback session must actually work; saw {seen:?}"
+    );
 
     manager.kill(&info.id).unwrap();
 }
@@ -843,7 +882,12 @@ fn without_tmux_status_still_works_via_the_output_activity_fallback() {
 
     let mut seen = Vec::new();
     assert!(
-        wait_for_status(&rx, &mut seen, SessionStatus::Ready, Duration::from_secs(10)),
+        wait_for_status(
+            &rx,
+            &mut seen,
+            SessionStatus::Ready,
+            Duration::from_secs(10)
+        ),
         "an idle shell must reach ready even without tmux; saw {seen:?}"
     );
 
@@ -854,7 +898,10 @@ fn without_tmux_status_still_works_via_the_output_activity_fallback() {
     // executing. (A tight `seq 1 40000` loop, tried first, was *too* fast —
     // it finished in well under a second, which by design does not qualify.)
     manager
-        .write(&info.id, "for i in $(seq 1 20); do echo busy-$i; sleep 0.2; done\n")
+        .write(
+            &info.id,
+            "for i in $(seq 1 20); do echo busy-$i; sleep 0.2; done\n",
+        )
         .unwrap();
     assert!(
         wait_for_status(
@@ -866,7 +913,12 @@ fn without_tmux_status_still_works_via_the_output_activity_fallback() {
         "streaming output from a shell must read as tool execution; saw {seen:?}"
     );
     assert!(
-        wait_for_status(&rx, &mut seen, SessionStatus::Ready, Duration::from_secs(30)),
+        wait_for_status(
+            &rx,
+            &mut seen,
+            SessionStatus::Ready,
+            Duration::from_secs(30)
+        ),
         "and must settle back to ready once the output stops; saw {seen:?}"
     );
 
@@ -894,13 +946,15 @@ fn a_tmux_backed_session_still_writes_a_redacted_transcript() {
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
-    let manager =
-        SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(Some(t.clone()));
+    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     manager.write(&info.id, "echo API_KEY=abc123\n").unwrap();
     let (found, seen) = wait_for_output(&rx, &info.id, "abc123", Duration::from_secs(10));
-    assert!(found, "the secret should reach the live stream first; saw {seen:?}");
+    assert!(
+        found,
+        "the secret should reach the live stream first; saw {seen:?}"
+    );
 
     manager.kill(&info.id).unwrap();
 
@@ -935,15 +989,16 @@ fn resize_reaches_the_engine_through_tmux() {
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
-    let manager =
-        SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(Some(t.clone()));
+    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     manager.resize(&info.id, 132, 43).unwrap();
     // Let tmux propagate the SIGWINCH to the pane before asking.
     std::thread::sleep(Duration::from_millis(600));
 
-    manager.write(&info.id, "echo COLS_ARE:$(tput cols)\n").unwrap();
+    manager
+        .write(&info.id, "echo COLS_ARE:$(tput cols)\n")
+        .unwrap();
     let (found, seen) = wait_for_output(&rx, &info.id, "COLS_ARE:132", Duration::from_secs(10));
     assert!(
         found,

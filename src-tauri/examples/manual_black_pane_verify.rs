@@ -96,10 +96,8 @@ fn main() {
 
 fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
     println!("\n\n######## case: {case} ########");
-    let scratch = std::env::temp_dir().join(format!(
-        "omniagent-blackpane-{case}-{}",
-        std::process::id()
-    ));
+    let scratch =
+        std::env::temp_dir().join(format!("omniagent-blackpane-{case}-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&scratch);
     let socket = format!("blackpane-{case}-{}", std::process::id());
     let cwd = match real {
@@ -199,7 +197,11 @@ fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
         let relaunched = SessionManager::new(scratch.clone(), {
             let b = Arc::clone(&buffers);
             Arc::new(move |id: &str, chunk: &[u8]| {
-                b.lock().unwrap().entry(id.to_string()).or_default().extend_from_slice(chunk);
+                b.lock()
+                    .unwrap()
+                    .entry(id.to_string())
+                    .or_default()
+                    .extend_from_slice(chunk);
             })
         })
         .with_tmux(Some(tmux.clone()));

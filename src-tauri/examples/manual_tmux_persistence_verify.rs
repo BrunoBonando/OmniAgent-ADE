@@ -49,14 +49,13 @@ fn main() {
 
     let tmux = default_tmux(&data_dir);
     match &tmux {
-        Some(t) => println!(
-            "tmux: {} on socket {:?}",
-            t.binary().display(),
-            t.socket()
-        ),
+        Some(t) => println!("tmux: {} on socket {:?}", t.binary().display(), t.socket()),
         None => println!("tmux: NOT FOUND — sessions will not persist (fallback mode)"),
     }
-    println!("session id: {id}  ->  tmux session: {}", tmux::session_name(&id));
+    println!(
+        "session id: {id}  ->  tmux session: {}",
+        tmux::session_name(&id)
+    );
 
     let (tx, rx) = mpsc::channel::<(String, Vec<u8>)>();
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
@@ -121,7 +120,10 @@ fn main() {
             // Give Claude's TUI time to boot before typing into it.
             std::thread::sleep(Duration::from_secs(8));
             manager
-                .write(&info.id, "Remember the word PERSIMMON. Reply with just: noted.\r")
+                .write(
+                    &info.id,
+                    "Remember the word PERSIMMON. Reply with just: noted.\r",
+                )
                 .unwrap();
         }
         ("resume", "claude") => {
@@ -163,7 +165,11 @@ fn main() {
     std::mem::forget(manager);
 }
 
-fn request(engine: &str, cwd: &std::path::Path, restore_id: Option<String>) -> CreateSessionRequest {
+fn request(
+    engine: &str,
+    cwd: &std::path::Path,
+    restore_id: Option<String>,
+) -> CreateSessionRequest {
     CreateSessionRequest {
         project: "OmniAgent-ADE".to_string(),
         engine: engine.to_string(),

@@ -252,7 +252,9 @@ fn checked_relative(path: &str) -> Result<&str, String> {
     if p.is_absolute() {
         return Err(format!("{path} must be a repo-relative path"));
     }
-    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(format!("{path} must not climb outside the repository"));
     }
     Ok(path)
@@ -617,7 +619,10 @@ pub fn file_diff(repo_path: &str, path: &str) -> Result<FileDiff, String> {
     // git never emits hunks for a binary file — it says so in one line
     // instead. Reporting that honestly beats an empty diff that looks like
     // "no changes".
-    if text.contains("\nBinary files ") || text.starts_with("Binary files ") || text.contains("GIT binary patch") {
+    if text.contains("\nBinary files ")
+        || text.starts_with("Binary files ")
+        || text.contains("GIT binary patch")
+    {
         return Ok(FileDiff {
             path: rel.to_string(),
             binary: true,
@@ -745,8 +750,17 @@ mod tests {
     }
 
     fn run(dir: &Path, args: &[&str]) {
-        let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     fn write(dir: &Path, rel: &str, contents: &str) {
@@ -758,7 +772,11 @@ mod tests {
     }
 
     fn baseline(dir: &Path) {
-        write(dir, "src/main.rs", "fn main() {\n    println!(\"hi\");\n}\n");
+        write(
+            dir,
+            "src/main.rs",
+            "fn main() {\n    println!(\"hi\");\n}\n",
+        );
         write(dir, "README.md", "# Project\n\nHello.\n");
         write(dir, "doomed.txt", "delete me\n");
         write(dir, "movable.txt", "move me\n");
@@ -771,10 +789,12 @@ mod tests {
     }
 
     fn find<'a>(s: &'a ReviewStatus, path: &str) -> &'a ChangedFile {
-        s.files
-            .iter()
-            .find(|f| f.path == path)
-            .unwrap_or_else(|| panic!("{path} not in {:?}", s.files.iter().map(|f| &f.path).collect::<Vec<_>>()))
+        s.files.iter().find(|f| f.path == path).unwrap_or_else(|| {
+            panic!(
+                "{path} not in {:?}",
+                s.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+            )
+        })
     }
 
     // ------------------------------------------------------- guard rails
@@ -841,7 +861,11 @@ mod tests {
         baseline(dir.path());
 
         // modified: +1 line
-        write(dir.path(), "src/main.rs", "fn main() {\n    println!(\"hi\");\n    let x = 1;\n}\n");
+        write(
+            dir.path(),
+            "src/main.rs",
+            "fn main() {\n    println!(\"hi\");\n    let x = 1;\n}\n",
+        );
         // deleted
         run(dir.path(), &["rm", "-q", "doomed.txt"]);
         // renamed
@@ -882,7 +906,11 @@ mod tests {
     fn aggregate_totals_match_git_numstat_summed() {
         let dir = repo();
         baseline(dir.path());
-        write(dir.path(), "src/main.rs", "fn main() {\n    let a = 1;\n    let b = 2;\n}\n");
+        write(
+            dir.path(),
+            "src/main.rs",
+            "fn main() {\n    let a = 1;\n    let b = 2;\n}\n",
+        );
         write(dir.path(), "README.md", "# Project\n");
 
         let s = status(&path_of(&dir)).unwrap();
@@ -899,7 +927,11 @@ mod tests {
             ga += p.next().unwrap().parse::<u32>().unwrap();
             gr += p.next().unwrap().parse::<u32>().unwrap();
         }
-        assert_eq!((s.added, s.removed), (ga, gr), "aggregate disagrees with git");
+        assert_eq!(
+            (s.added, s.removed),
+            (ga, gr),
+            "aggregate disagrees with git"
+        );
     }
 
     // ------------------------------------------------------- awkward names
@@ -926,7 +958,10 @@ mod tests {
         let d = file_diff(&path_of(&dir), "ünïcødé — file.txt").unwrap();
         assert!(!d.binary);
         assert_eq!(d.line_count, 2);
-        assert!(d.hunks[0].lines.iter().all(|l| l.kind == DiffLineKind::Added));
+        assert!(d.hunks[0]
+            .lines
+            .iter()
+            .all(|l| l.kind == DiffLineKind::Added));
     }
 
     // ------------------------------------------------------------- binary
@@ -944,7 +979,10 @@ mod tests {
 
         let tracked = find(&s, "blob.bin");
         assert!(tracked.binary);
-        assert_eq!(tracked.added, None, "a binary file must not claim 0 added lines");
+        assert_eq!(
+            tracked.added, None,
+            "a binary file must not claim 0 added lines"
+        );
         assert_eq!(tracked.removed, None);
 
         let untracked = find(&s, "fresh.bin");
@@ -994,14 +1032,26 @@ mod tests {
     fn file_diff_of_a_modified_file_carries_both_line_number_gutters() {
         let dir = repo();
         baseline(dir.path());
-        write(dir.path(), "src/main.rs", "fn main() {\n    println!(\"bye\");\n}\n");
+        write(
+            dir.path(),
+            "src/main.rs",
+            "fn main() {\n    println!(\"bye\");\n}\n",
+        );
 
         let d = file_diff(&path_of(&dir), "src/main.rs").unwrap();
         assert!(!d.binary);
         assert_eq!(d.hunks.len(), 1);
 
-        let removed: Vec<&DiffLine> = d.hunks[0].lines.iter().filter(|l| l.kind == DiffLineKind::Removed).collect();
-        let added: Vec<&DiffLine> = d.hunks[0].lines.iter().filter(|l| l.kind == DiffLineKind::Added).collect();
+        let removed: Vec<&DiffLine> = d.hunks[0]
+            .lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Removed)
+            .collect();
+        let added: Vec<&DiffLine> = d.hunks[0]
+            .lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Added)
+            .collect();
         assert_eq!(removed.len(), 1);
         assert_eq!(added.len(), 1);
         assert!(removed[0].text.contains("hi"));
@@ -1012,7 +1062,11 @@ mod tests {
         assert_eq!(added[0].new_line, Some(2));
         assert_eq!(added[0].old_line, None);
         // Context lines carry both.
-        let ctx = d.hunks[0].lines.iter().find(|l| l.kind == DiffLineKind::Context).unwrap();
+        let ctx = d.hunks[0]
+            .lines
+            .iter()
+            .find(|l| l.kind == DiffLineKind::Context)
+            .unwrap();
         assert!(ctx.old_line.is_some() && ctx.new_line.is_some());
     }
 
@@ -1062,11 +1116,17 @@ mod tests {
     fn a_huge_diff_is_capped_and_reports_that_it_was_truncated() {
         let dir = repo();
         baseline(dir.path());
-        let big: String = (0..MAX_DIFF_LINES + 500).map(|i| format!("line {i}\n")).collect();
+        let big: String = (0..MAX_DIFF_LINES + 500)
+            .map(|i| format!("line {i}\n"))
+            .collect();
         write(dir.path(), "huge.txt", &big);
 
         let d = file_diff(&path_of(&dir), "huge.txt").unwrap();
-        assert!(d.truncated, "a {}-line file must report truncation", MAX_DIFF_LINES + 500);
+        assert!(
+            d.truncated,
+            "a {}-line file must report truncation",
+            MAX_DIFF_LINES + 500
+        );
         assert_eq!(d.line_count, MAX_DIFF_LINES);
     }
 
@@ -1076,11 +1136,21 @@ mod tests {
     fn commit_creates_a_real_commit_containing_every_listed_change() {
         let dir = repo();
         baseline(dir.path());
-        write(dir.path(), "src/main.rs", "fn main() {\n    let changed = true;\n}\n");
+        write(
+            dir.path(),
+            "src/main.rs",
+            "fn main() {\n    let changed = true;\n}\n",
+        );
         write(dir.path(), "brand new.txt", "fresh\n");
 
         let before = String::from_utf8_lossy(
-            &Command::new("git").arg("-C").arg(dir.path()).args(["rev-parse", "HEAD"]).output().unwrap().stdout,
+            &Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
         )
         .trim()
         .to_string();
@@ -1102,7 +1172,10 @@ mod tests {
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&show.stdout);
-        assert!(text.contains("test: real commit from the review panel"), "{text}");
+        assert!(
+            text.contains("test: real commit from the review panel"),
+            "{text}"
+        );
         assert!(text.contains("brand new.txt"), "{text}");
         assert!(text.contains("src/main.rs"), "{text}");
     }
@@ -1153,7 +1226,10 @@ mod tests {
 
         let outcome = revert_file(&path_of(&dir), "src/main.rs").unwrap();
         assert_eq!(outcome, RevertOutcome::RestoredFromHead);
-        assert_eq!(fs::read_to_string(dir.path().join("src/main.rs")).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            original
+        );
         assert_eq!(status(&path_of(&dir)).unwrap().file_count, 0);
     }
 
@@ -1206,7 +1282,11 @@ mod tests {
         assert_eq!(
             parsed,
             vec![
-                ("renamed.txt".to_string(), ChangeStatus::Renamed, Some("torename.txt".to_string())),
+                (
+                    "renamed.txt".to_string(),
+                    ChangeStatus::Renamed,
+                    Some("torename.txt".to_string())
+                ),
                 ("plain.txt".to_string(), ChangeStatus::Modified, None),
                 ("loose.txt".to_string(), ChangeStatus::Untracked, None),
             ]
@@ -1220,9 +1300,16 @@ mod tests {
         let text = "1\t0\tplain.txt\0-\t-\tblob.bin\x000\t0\t\0torename.txt\0renamed.txt\0";
         let parsed = parse_numstat_z(text);
         assert_eq!(parsed.get("plain.txt"), Some(&Some((1, 0))));
-        assert_eq!(parsed.get("blob.bin"), Some(&None), "binary must parse as None, not (0,0)");
+        assert_eq!(
+            parsed.get("blob.bin"),
+            Some(&None),
+            "binary must parse as None, not (0,0)"
+        );
         assert_eq!(parsed.get("renamed.txt"), Some(&Some((0, 0))));
-        assert!(!parsed.contains_key("torename.txt"), "keyed by the new path only");
+        assert!(
+            !parsed.contains_key("torename.txt"),
+            "keyed by the new path only"
+        );
     }
 
     #[test]
@@ -1251,12 +1338,27 @@ index 111..222 100644
         assert!(h1.header.starts_with("@@ -1,3 +1,4 @@"));
         assert_eq!(h1.lines.len(), 5);
         // " one" — context at old 1 / new 1
-        assert_eq!((h1.lines[0].kind, h1.lines[0].old_line, h1.lines[0].new_line), (DiffLineKind::Context, Some(1), Some(1)));
-        assert_eq!((h1.lines[1].kind, h1.lines[1].old_line, h1.lines[1].new_line), (DiffLineKind::Removed, Some(2), None));
-        assert_eq!((h1.lines[2].kind, h1.lines[2].old_line, h1.lines[2].new_line), (DiffLineKind::Added, None, Some(2)));
-        assert_eq!((h1.lines[3].kind, h1.lines[3].old_line, h1.lines[3].new_line), (DiffLineKind::Added, None, Some(3)));
+        assert_eq!(
+            (h1.lines[0].kind, h1.lines[0].old_line, h1.lines[0].new_line),
+            (DiffLineKind::Context, Some(1), Some(1))
+        );
+        assert_eq!(
+            (h1.lines[1].kind, h1.lines[1].old_line, h1.lines[1].new_line),
+            (DiffLineKind::Removed, Some(2), None)
+        );
+        assert_eq!(
+            (h1.lines[2].kind, h1.lines[2].old_line, h1.lines[2].new_line),
+            (DiffLineKind::Added, None, Some(2))
+        );
+        assert_eq!(
+            (h1.lines[3].kind, h1.lines[3].old_line, h1.lines[3].new_line),
+            (DiffLineKind::Added, None, Some(3))
+        );
         // context after one removal + two additions: old 3, new 4
-        assert_eq!((h1.lines[4].kind, h1.lines[4].old_line, h1.lines[4].new_line), (DiffLineKind::Context, Some(3), Some(4)));
+        assert_eq!(
+            (h1.lines[4].kind, h1.lines[4].old_line, h1.lines[4].new_line),
+            (DiffLineKind::Context, Some(3), Some(4))
+        );
         assert_eq!(h1.lines[2].text, "TWO");
 
         // Second hunk restarts from its own header, with the trailing
@@ -1271,7 +1373,11 @@ index 111..222 100644
     fn unified_diff_parser_ignores_the_no_newline_marker() {
         let text = "@@ -1,2 +1,2 @@\n one\n-two\n\\ No newline at end of file\n+two\n";
         let (hunks, _) = parse_unified_diff(text, 100);
-        assert_eq!(hunks[0].lines.len(), 3, "the \\ marker must not become a line");
+        assert_eq!(
+            hunks[0].lines.len(),
+            3,
+            "the \\ marker must not become a line"
+        );
         assert_eq!(hunks[0].lines[2].kind, DiffLineKind::Added);
         assert_eq!(hunks[0].lines[2].new_line, Some(2));
     }

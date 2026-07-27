@@ -51,7 +51,10 @@ fn main() {
     // A real, tiny git repo so `git diff --stat HEAD` has something real to
     // report, same as a developer's actual working tree.
     run_git(&project_dir, &["init", "-q"]);
-    run_git(&project_dir, &["config", "user.email", "verify@example.com"]);
+    run_git(
+        &project_dir,
+        &["config", "user.email", "verify@example.com"],
+    );
     run_git(&project_dir, &["config", "user.name", "Manual Verify"]);
     std::fs::write(
         project_dir.join("util.ts"),
@@ -69,16 +72,15 @@ fn main() {
 
     // The exact same feedback-hook wiring lib.rs registers at boot.
     let hook_data_dir = data_dir.clone();
-    let end_hook: omniagent_ade_lib::sessions::SessionEndHook = Arc::new(move |event| {
-        match Store::open(&hook_data_dir) {
+    let end_hook: omniagent_ade_lib::sessions::SessionEndHook =
+        Arc::new(move |event| match Store::open(&hook_data_dir) {
             Ok(store) => {
                 if let Err(e) = feedback::on_session_end(&store, event) {
                     eprintln!("feedback hook error: {e}");
                 }
             }
             Err(e) => eprintln!("failed to open store in feedback hook: {e}"),
-        }
-    });
+        });
 
     let manager = SessionManager::new(data_dir.clone(), sink).with_end_hook(end_hook);
 
@@ -88,7 +90,7 @@ fn main() {
             engine: "shell".to_string(),
             cwd: project_dir.to_string_lossy().into_owned(),
             briefing: None,
-        restore_id: None,
+            restore_id: None,
         })
         .expect("session_create should succeed");
     println!("\n-- session created: {info:?} --\n");
@@ -139,7 +141,10 @@ fn main() {
         .search("reviewed", Some("manual-verify-project"), 10)
         .expect("search");
     println!("\n== resulting Memory note(s) ==");
-    for n in hits.iter().filter(|n| n.kind == brain_core::NodeKind::Memory) {
+    for n in hits
+        .iter()
+        .filter(|n| n.kind == brain_core::NodeKind::Memory)
+    {
         println!("  id={}", n.id);
         println!("  label={}", n.label);
         println!("  path={:?}", n.path);
@@ -182,5 +187,8 @@ fn main() {
         hits.iter().any(|n| n.kind == brain_core::NodeKind::Memory)
     );
     println!("  session node found: {}", !session_nodes.is_empty());
-    println!("\nscratch dir left on disk for inspection: {}", scratch.display());
+    println!(
+        "\nscratch dir left on disk for inspection: {}",
+        scratch.display()
+    );
 }

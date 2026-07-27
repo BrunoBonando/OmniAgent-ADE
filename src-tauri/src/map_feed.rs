@@ -423,10 +423,17 @@ mod tests {
             "collapsed view must hide every raw leaf, got {:?}",
             graph.nodes
         );
-        let hubs: Vec<&MapNode> = graph.nodes.iter().filter(|n| n.kind == "community").collect();
+        let hubs: Vec<&MapNode> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == "community")
+            .collect();
         assert_eq!(hubs.len(), 3, "{:?}", graph.nodes);
         assert!(
-            graph.nodes.iter().any(|n| n.kind == "project" && n.id == "sample-project"),
+            graph
+                .nodes
+                .iter()
+                .any(|n| n.kind == "project" && n.id == "sample-project"),
             "{:?}",
             graph.nodes
         );
@@ -459,13 +466,22 @@ mod tests {
         .unwrap();
 
         assert!(
-            !graph.nodes.iter().any(|n| n.id == "sample-project:community:1"),
+            !graph
+                .nodes
+                .iter()
+                .any(|n| n.id == "sample-project:community:1"),
             "expanded hub must be gone: {:?}",
             graph.nodes
         );
         // The other two communities stay collapsed.
-        assert!(graph.nodes.iter().any(|n| n.id == "sample-project:community:0"));
-        assert!(graph.nodes.iter().any(|n| n.id == "sample-project:community:2"));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|n| n.id == "sample-project:community:0"));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|n| n.id == "sample-project:community:2"));
 
         for expected_member in [
             "sample-project:helpers.py",
@@ -483,9 +499,12 @@ mod tests {
         // Real edges between expanded members must survive as links, not
         // just the nodes.
         assert!(
-            graph.links.iter().any(|l| l.src == "sample-project:helpers.py"
-                && l.dst == "sample-project:helpers.py#parse_config"
-                && l.kind == "contains"),
+            graph
+                .links
+                .iter()
+                .any(|l| l.src == "sample-project:helpers.py"
+                    && l.dst == "sample-project:helpers.py#parse_config"
+                    && l.kind == "contains"),
             "{:?}",
             graph.links
         );
@@ -517,13 +536,8 @@ mod tests {
             })
             .unwrap();
 
-        let graph = build_map_graph(
-            &store,
-            Some("sample-project"),
-            &[],
-            &["memory".to_string()],
-        )
-        .unwrap();
+        let graph =
+            build_map_graph(&store, Some("sample-project"), &[], &["memory".to_string()]).unwrap();
 
         assert_eq!(graph.nodes.len(), 1, "{:?}", graph.nodes);
         assert_eq!(graph.nodes[0].id, "sample-project:memory:note-1");
@@ -725,7 +739,10 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         brain_ingest::ingest_project(&store, &fixture_root(), "sample-project").unwrap();
         let graph = build_map_graph(&store, Some("sample-project"), &[], &[]).unwrap();
-        assert_eq!(graph.nodes.iter().filter(|n| n.kind == "community").count(), 3);
+        assert_eq!(
+            graph.nodes.iter().filter(|n| n.kind == "community").count(),
+            3
+        );
     }
 
     // --- Task 6.2's `map_node_detail` command, backing the detail panel ---

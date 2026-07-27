@@ -27,6 +27,13 @@ use tauri::State;
 
 use crate::sessions::{CreateSessionRequest, SessionInfo, SessionManager, SessionStatusEvent};
 
+#[derive(Debug, serde::Serialize)]
+pub struct DaemonStatusInfo {
+    pub running: bool,
+    pub socket_path: String,
+    pub session_count: usize,
+}
+
 /// Shared handle to the local brain DB, managed as Tauri state alongside
 /// [`SessionManager`]. `Store` wraps a plain `rusqlite::Connection` (`Send`
 /// but not `Sync`), hence the `Mutex` — Tauri commands run on a thread pool,
@@ -99,7 +106,8 @@ pub fn brain_get_context(project: String, brain: State<'_, BrainState>) -> Resul
 pub fn brain_briefing(project: String, brain: State<'_, BrainState>) -> Result<String, String> {
     let store = brain.store.lock().map_err(|e| e.to_string())?;
     let ctx = brain.tool_ctx(&store);
-    let context = tools::get_context(&ctx, &json!({ "project": project })).map_err(|e| e.to_string())?;
+    let context =
+        tools::get_context(&ctx, &json!({ "project": project })).map_err(|e| e.to_string())?;
     Ok(render_briefing(&project, &context))
 }
 
@@ -113,7 +121,11 @@ pub fn settings_get(key: String, brain: State<'_, BrainState>) -> Result<Option<
 
 /// Upserts a `settings` table row.
 #[tauri::command]
-pub fn settings_set(key: String, value: String, brain: State<'_, BrainState>) -> Result<(), String> {
+pub fn settings_set(
+    key: String,
+    value: String,
+    brain: State<'_, BrainState>,
+) -> Result<(), String> {
     let store = brain.store.lock().map_err(|e| e.to_string())?;
     store.set_setting(&key, &value).map_err(|e| e.to_string())
 }
@@ -136,15 +148,26 @@ const BRIEFING_LIST_CAP: usize = 8;
 fn render_briefing(project: &str, context: &Value) -> String {
     let mut out = format!("# OmniAgent ADE briefing: {project}\n\n");
 
-    let summary = context.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+    let summary = context
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if !summary.trim().is_empty() {
         out.push_str("## Project summary\n");
         out.push_str(summary.trim());
         out.push_str("\n\n");
     }
 
-    render_node_list(&mut out, "## Recent decisions\n", context.get("recent_decisions"));
-    render_node_list(&mut out, "## Related projects\n", context.get("related_projects"));
+    render_node_list(
+        &mut out,
+        "## Recent decisions\n",
+        context.get("recent_decisions"),
+    );
+    render_node_list(
+        &mut out,
+        "## Related projects\n",
+        context.get("related_projects"),
+    );
     render_node_list(&mut out, "## Memory notes\n", context.get("memory_notes"));
 
     if out.trim_end() == format!("# OmniAgent ADE briefing: {project}") {
@@ -172,7 +195,10 @@ fn render_node_list(out: &mut String, heading: &str, items: Option<&Value>) {
         out.push('\n');
     }
     if items.len() > BRIEFING_LIST_CAP {
-        out.push_str(&format!("- …and {} more\n", items.len() - BRIEFING_LIST_CAP));
+        out.push_str(&format!(
+            "- …and {} more\n",
+            items.len() - BRIEFING_LIST_CAP
+        ));
     }
     out.push('\n');
 }
@@ -256,6 +282,18 @@ pub fn session_status(
     Ok(manager.status(&id))
 }
 
+/// Checks if any open terminal session is currently executing an active agent task.
+#[tauri::command]
+pub fn session_has_working_tasks(manager: State<'_, SessionManager>) -> Result<bool, String> {
+    Ok(manager.has_working_sessions())
+}
+
+/// Interrupts all active working tasks by sending SIGINT (\x03) without killing PTY sessions.
+#[tauri::command]
+pub fn session_stop_working_tasks(manager: State<'_, SessionManager>) -> Result<usize, String> {
+    Ok(manager.stop_active_executions())
+}
+
 /// Writes raw bytes (keystrokes, pasted text, control sequences) to a
 /// session's PTY.
 #[tauri::command]
@@ -283,6 +321,16 @@ pub fn session_resize(
 #[tauri::command]
 pub fn session_kill(id: String, manager: State<'_, SessionManager>) -> Result<(), String> {
     manager.kill(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn pty_daemon_status(manager: State<'_, SessionManager>) -> Result<DaemonStatusInfo, String> {
+    let (running, socket_path, session_count) = manager.pty_daemon_status();
+    Ok(DaemonStatusInfo {
+        running,
+        socket_path,
+        session_count,
+    })
 }
 
 /// The pane header's git-branch pill (BridgeSpace pane-grid rebuild — see
@@ -361,7 +409,11 @@ pub fn rename_path(project_root: String, path: String, new_name: String) -> Resu
 /// parent) — what drag-and-drop-to-reparent in the frontend calls. Returns
 /// the new full path.
 #[tauri::command]
-pub fn move_path(project_root: String, path: String, new_parent_dir: String) -> Result<String, String> {
+pub fn move_path(
+    project_root: String,
+    path: String,
+    new_parent_dir: String,
+) -> Result<String, String> {
     brain_ingest::fileops::move_path(
         std::path::Path::new(&project_root),
         std::path::Path::new(&path),
@@ -375,22 +427,32 @@ pub fn move_path(project_root: String, path: String, new_parent_dir: String) -> 
 /// full path.
 #[tauri::command]
 pub fn duplicate_path(project_root: String, path: String) -> Result<String, String> {
-    brain_ingest::fileops::duplicate_path(std::path::Path::new(&project_root), std::path::Path::new(&path))
-        .map(|p| p.to_string_lossy().into_owned())
+    brain_ingest::fileops::duplicate_path(
+        std::path::Path::new(&project_root),
+        std::path::Path::new(&path),
+    )
+    .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Moves the file/folder to the macOS system Trash — never a permanent
 /// delete (see `brain_ingest::fileops`'s module doc).
 #[tauri::command]
 pub fn delete_to_trash(project_root: String, path: String) -> Result<(), String> {
-    brain_ingest::fileops::delete_to_trash(std::path::Path::new(&project_root), std::path::Path::new(&path))
+    brain_ingest::fileops::delete_to_trash(
+        std::path::Path::new(&project_root),
+        std::path::Path::new(&path),
+    )
 }
 
 /// Creates a new empty file named `name` inside `parent_dir`. Errors on a
 /// name collision (the frontend prompts) rather than auto-incrementing an
 /// "untitled 2" style name. Returns the new full path.
 #[tauri::command]
-pub fn create_file(project_root: String, parent_dir: String, name: String) -> Result<String, String> {
+pub fn create_file(
+    project_root: String,
+    parent_dir: String,
+    name: String,
+) -> Result<String, String> {
     brain_ingest::fileops::create_file(
         std::path::Path::new(&project_root),
         std::path::Path::new(&parent_dir),
@@ -402,7 +464,11 @@ pub fn create_file(project_root: String, parent_dir: String, name: String) -> Re
 /// Creates a new empty folder named `name` inside `parent_dir`. Same
 /// collision policy as [`create_file`]. Returns the new full path.
 #[tauri::command]
-pub fn create_dir(project_root: String, parent_dir: String, name: String) -> Result<String, String> {
+pub fn create_dir(
+    project_root: String,
+    parent_dir: String,
+    name: String,
+) -> Result<String, String> {
     brain_ingest::fileops::create_dir(
         std::path::Path::new(&project_root),
         std::path::Path::new(&parent_dir),
@@ -420,14 +486,20 @@ pub fn create_dir(project_root: String, parent_dir: String, name: String) -> Res
 /// change within that directory. See `brain_ingest::dirwatch`'s module doc
 /// for the full lifecycle design.
 #[tauri::command]
-pub fn watch_dir(path: String, watcher: State<'_, brain_ingest::dirwatch::DirWatchRegistry>) -> Result<(), String> {
+pub fn watch_dir(
+    path: String,
+    watcher: State<'_, brain_ingest::dirwatch::DirWatchRegistry>,
+) -> Result<(), String> {
     watcher.watch(std::path::Path::new(&path))
 }
 
 /// Stops watching `path` — call when the frontend collapses that directory
 /// in the tree. A no-op (not an error) if it wasn't being watched.
 #[tauri::command]
-pub fn unwatch_dir(path: String, watcher: State<'_, brain_ingest::dirwatch::DirWatchRegistry>) -> Result<(), String> {
+pub fn unwatch_dir(
+    path: String,
+    watcher: State<'_, brain_ingest::dirwatch::DirWatchRegistry>,
+) -> Result<(), String> {
     watcher.unwatch(std::path::Path::new(&path))
 }
 
@@ -460,7 +532,9 @@ pub fn detect_importable_tools() -> Result<Vec<brain_ingest::import_detect::Dete
 /// unrecognized `tool` id; a known tool that simply isn't installed/found
 /// returns `Ok(vec![])`.
 #[tauri::command]
-pub fn list_import_candidates(tool: String) -> Result<Vec<brain_ingest::import_detect::ImportCandidate>, String> {
+pub fn list_import_candidates(
+    tool: String,
+) -> Result<Vec<brain_ingest::import_detect::ImportCandidate>, String> {
     brain_ingest::import_detect::list_candidates(&tool)
 }
 
@@ -494,7 +568,10 @@ pub fn review_status(repo_path: String) -> Result<brain_ingest::gitreview::Revie
 /// numbers without re-deriving them. Binary files come back `binary: true`
 /// with no hunks rather than an empty diff that would read as "no changes".
 #[tauri::command]
-pub fn review_file_diff(repo_path: String, path: String) -> Result<brain_ingest::gitreview::FileDiff, String> {
+pub fn review_file_diff(
+    repo_path: String,
+    path: String,
+) -> Result<brain_ingest::gitreview::FileDiff, String> {
     brain_ingest::gitreview::file_diff(&repo_path, &path)
 }
 
@@ -503,7 +580,10 @@ pub fn review_file_diff(repo_path: String, path: String) -> Result<brain_ingest:
 /// reference panel and the exact set of files the panel lists. No `--amend`,
 /// no force, no `--no-verify`, and no push (see `gitreview`'s module doc).
 #[tauri::command]
-pub fn review_commit(repo_path: String, message: String) -> Result<brain_ingest::gitreview::CommitResult, String> {
+pub fn review_commit(
+    repo_path: String,
+    message: String,
+) -> Result<brain_ingest::gitreview::CommitResult, String> {
     brain_ingest::gitreview::commit(&repo_path, &message)
 }
 
@@ -513,7 +593,10 @@ pub fn review_commit(repo_path: String, message: String) -> Result<brain_ingest:
 /// (recoverable) instead of being `git clean`ed; anything else is restored
 /// from HEAD. Renames are refused rather than half-undone.
 #[tauri::command]
-pub fn review_revert_file(repo_path: String, path: String) -> Result<brain_ingest::gitreview::RevertOutcome, String> {
+pub fn review_revert_file(
+    repo_path: String,
+    path: String,
+) -> Result<brain_ingest::gitreview::RevertOutcome, String> {
     brain_ingest::gitreview::revert_file(&repo_path, &path)
 }
 
@@ -559,7 +642,11 @@ mod tests {
         let path = sample_project_path();
         let entries = list_dir(path.to_string_lossy().to_string()).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["docs", "src", "helpers.py", "main.py", "README.md"], "{names:?}");
+        assert_eq!(
+            names,
+            vec!["docs", "src", "helpers.py", "main.py", "README.md"],
+            "{names:?}"
+        );
         assert!(!names.contains(&".git"), "{names:?}");
     }
 
@@ -664,13 +751,23 @@ mod tests {
             outside.path().file_name().unwrap().to_string_lossy()
         );
 
-        let err = delete_to_trash(root.path().to_string_lossy().into_owned(), traversal.clone());
+        let err = delete_to_trash(
+            root.path().to_string_lossy().into_owned(),
+            traversal.clone(),
+        );
         assert!(err.is_err(), "traversal delete must be rejected");
 
-        let err = rename_path(root.path().to_string_lossy().into_owned(), traversal, "pwned.txt".to_string());
+        let err = rename_path(
+            root.path().to_string_lossy().into_owned(),
+            traversal,
+            "pwned.txt".to_string(),
+        );
         assert!(err.is_err(), "traversal rename must be rejected");
 
-        assert_eq!(std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(), "top secret");
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
+            "top secret"
+        );
     }
 
     // ------------------------------------------------------------- dirwatch
@@ -691,7 +788,9 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let calls_clone = calls.clone();
         let sink: brain_ingest::dirwatch::ChangeSink =
-            std::sync::Arc::new(move |p: &std::path::Path| calls_clone.lock().unwrap().push(p.to_path_buf()));
+            std::sync::Arc::new(move |p: &std::path::Path| {
+                calls_clone.lock().unwrap().push(p.to_path_buf())
+            });
         let registry = brain_ingest::dirwatch::DirWatchRegistry::new(sink);
 
         registry.watch(dir.path()).unwrap();
@@ -775,7 +874,9 @@ mod tests {
 
     #[test]
     fn render_briefing_truncates_long_lists_with_a_count() {
-        let items: Vec<Value> = (0..12).map(|i| json!({"label": format!("note {i}")})).collect();
+        let items: Vec<Value> = (0..12)
+            .map(|i| json!({"label": format!("note {i}")}))
+            .collect();
         let context = json!({ "memory_notes": items });
         let out = render_briefing("demo", &context);
         assert!(out.contains("- note 0"));
@@ -834,7 +935,11 @@ mod tests {
                 .args(args)
                 .output()
                 .unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "test@example.com"]);
@@ -866,7 +971,11 @@ mod tests {
     #[test]
     fn review_file_diff_command_returns_structured_hunks() {
         let dir = scratch_repo();
-        let diff = review_file_diff(dir.path().to_string_lossy().to_string(), "a.txt".to_string()).unwrap();
+        let diff = review_file_diff(
+            dir.path().to_string_lossy().to_string(),
+            "a.txt".to_string(),
+        )
+        .unwrap();
         assert!(!diff.binary);
         assert_eq!(diff.hunks.len(), 1);
         assert!(diff.line_count >= 1);
@@ -882,14 +991,27 @@ mod tests {
         .unwrap();
         assert_eq!(result.short_sha.len(), 7);
         let after = review_status(dir.path().to_string_lossy().to_string()).unwrap();
-        assert_eq!(after.file_count, 0, "the tree should be clean after committing");
+        assert_eq!(
+            after.file_count, 0,
+            "the tree should be clean after committing"
+        );
     }
 
     #[test]
     fn review_revert_file_command_restores_a_modified_file() {
         let dir = scratch_repo();
-        let outcome = review_revert_file(dir.path().to_string_lossy().to_string(), "a.txt".to_string()).unwrap();
-        assert_eq!(outcome, brain_ingest::gitreview::RevertOutcome::RestoredFromHead);
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "one\n");
+        let outcome = review_revert_file(
+            dir.path().to_string_lossy().to_string(),
+            "a.txt".to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            brain_ingest::gitreview::RevertOutcome::RestoredFromHead
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "one\n"
+        );
     }
 }

@@ -6,7 +6,6 @@ pub mod roots;
 pub mod sessions;
 pub mod tmux;
 
-
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tauri::{Emitter, Manager};
 
@@ -97,9 +96,7 @@ pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 ///
 /// Both had to go: `Menu::default` binds ⌘W in *two* places, and leaving
 /// either one would keep closing the window out from under the JS handler.
-fn build_menu<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-) -> tauri::Result<tauri::menu::Menu<R>> {
+fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
     use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
 
     let pkg_info = app.package_info();
@@ -136,8 +133,10 @@ fn build_menu<R: tauri::Runtime>(
                 MenuEntry::Maximize => PredefinedMenuItem::maximize(app, None)?,
             });
         }
-        let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> =
-            items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<R>).collect();
+        let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = items
+            .iter()
+            .map(|i| i as &dyn tauri::menu::IsMenuItem<R>)
+            .collect();
         let title = if *title == APP_SUBMENU {
             pkg_info.name.clone()
         } else {
@@ -285,11 +284,10 @@ pub fn run() {
             // one (cheap to have, useful if a "how long has this been
             // waiting" affordance shows up later).
             let attention_handle = handle.clone();
-            let attention_sink: sessions::AttentionSink =
-                std::sync::Arc::new(move |id: &str| {
-                    let _ = attention_handle
-                        .emit(&format!("session-attention:{id}"), brain_core::now_ts());
-                });
+            let attention_sink: sessions::AttentionSink = std::sync::Arc::new(move |id: &str| {
+                let _ =
+                    attention_handle.emit(&format!("session-attention:{id}"), brain_core::now_ts());
+            });
 
             // Task 7.1: the feedback-loop hook. Opens its own short-lived
             // `Store` connection per session end rather than sharing the
@@ -428,6 +426,7 @@ pub fn run() {
             commands::session_write,
             commands::session_resize,
             commands::session_kill,
+            commands::pty_daemon_status,
             commands::session_status,
             commands::session_has_working_tasks,
             commands::session_stop_working_tasks,
@@ -492,7 +491,9 @@ mod tests {
 
     impl PanicOnceEngine {
         fn new() -> Self {
-            Self { calls: AtomicUsize::new(0) }
+            Self {
+                calls: AtomicUsize::new(0),
+            }
         }
     }
 
@@ -546,7 +547,10 @@ mod tests {
         let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             drain_tick(dir.path(), &engine);
         }));
-        assert!(first.is_err(), "the first tick's engine call must have panicked");
+        assert!(
+            first.is_err(),
+            "the first tick's engine call must have panicked"
+        );
 
         // Iteration 2: proves the loop is still alive and functional
         // afterward -- a second tick against the *same* store/queue
@@ -555,7 +559,10 @@ mod tests {
         let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             drain_tick(dir.path(), &engine);
         }));
-        assert!(second.is_ok(), "the loop must keep running after a caught panic");
+        assert!(
+            second.is_ok(),
+            "the loop must keep running after a caught panic"
+        );
 
         // And the job that was pending during the panicked tick actually
         // got drained on the next go-around -- not silently lost.
@@ -652,7 +659,10 @@ mod tests {
         // And productName stays plain — it names the .app bundle and the
         // menu-bar item, where a version number would just be noise.
         assert_eq!(config["productName"].as_str(), Some("OmniAgent"));
-        assert_eq!(config["app"]["windows"][0]["title"].as_str(), Some("OmniAgent"));
+        assert_eq!(
+            config["app"]["windows"][0]["title"].as_str(),
+            Some("OmniAgent")
+        );
     }
 
     // -- the window hands its title bar to the web content (founder ask,

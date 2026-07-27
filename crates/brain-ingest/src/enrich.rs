@@ -391,7 +391,10 @@ fn build_prompt(store: &Store, job: &QueueJob) -> Result<Option<(PromptTarget, S
             };
             let context = session_summary_context(store, &session_payload);
             let prompt = format!("{SESSION_SUMMARY_INSTRUCTION}{context}");
-            Ok(Some((PromptTarget::SessionSummary(session_payload), prompt)))
+            Ok(Some((
+                PromptTarget::SessionSummary(session_payload),
+                prompt,
+            )))
         }
         _ => Ok(None), // unknown kind or malformed payload — leave pending
     }
@@ -460,7 +463,11 @@ fn parse_title_and_body(answer: &str, project: &str) -> (String, String) {
         } else {
             title_line.to_string()
         };
-        let body = if body.is_empty() { trimmed.to_string() } else { body.to_string() };
+        let body = if body.is_empty() {
+            trimmed.to_string()
+        } else {
+            body.to_string()
+        };
         return (title, body);
     }
 
@@ -538,8 +545,13 @@ fn write_session_summary(
 
     let memory = Memory::new(store, data_dir);
     let review_mode = store.get_setting("review_memory")?.as_deref() == Some("true");
-    let (_path, note_id) =
-        memory.write_note_with_status(&payload.project, &title, &body, Origin::MachineSummary, review_mode)?;
+    let (_path, note_id) = memory.write_note_with_status(
+        &payload.project,
+        &title,
+        &body,
+        Origin::MachineSummary,
+        review_mode,
+    )?;
 
     for rel in parse_diff_stat_paths(&payload.git_diff) {
         let file_id = format!("{}:{}", payload.project, rel);
@@ -981,9 +993,7 @@ mod tests {
         // neighbors() inner-joins nodes, so a dangling edge to a
         // not-yet-existing node is invisible here — assert the edge row
         // exists via a fresh ingest of that file, which should "pick it up".
-        store
-            .upsert_node(&file_node("p1", "src/auth.ts"))
-            .unwrap();
+        store.upsert_node(&file_node("p1", "src/auth.ts")).unwrap();
         let neighbors = store.neighbors(note_id, 10).unwrap();
         assert!(
             neighbors
@@ -1126,7 +1136,10 @@ mod tests {
     fn parse_diff_stat_paths_extracts_plain_paths() {
         let stat = " src/auth.ts | 4 ++--\n src/util.ts  | 2 +-\n 2 files changed, 4 insertions(+), 2 deletions(-)";
         let paths = parse_diff_stat_paths(stat);
-        assert_eq!(paths, vec!["src/auth.ts".to_string(), "src/util.ts".to_string()]);
+        assert_eq!(
+            paths,
+            vec!["src/auth.ts".to_string(), "src/util.ts".to_string()]
+        );
     }
 
     #[test]

@@ -123,17 +123,27 @@ fn main() {
     let before_bytes = {
         let pty_system = native_pty_system();
         let pair = pty_system
-            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .expect("open pty");
         let mut cmd = CommandBuilder::new(&shell);
         // Deliberately NOT calling apply_terminal_capability_env here --
         // this is the "before" arm.
-        let mut child = pair.slave.spawn_command(cmd_take(&mut cmd)).expect("spawn shell");
+        let mut child = pair
+            .slave
+            .spawn_command(cmd_take(&mut cmd))
+            .expect("spawn shell");
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().expect("clone reader");
         let mut writer = pair.master.take_writer().expect("take writer");
         use std::io::Write;
-        writer.write_all(PROBE_COMMAND.as_bytes()).expect("write probe");
+        writer
+            .write_all(PROBE_COMMAND.as_bytes())
+            .expect("write probe");
         writer.flush().ok();
 
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -177,7 +187,7 @@ fn main() {
             engine: "shell".to_string(),
             cwd: project_dir.to_string_lossy().into_owned(),
             briefing: None,
-        restore_id: None,
+            restore_id: None,
         })
         .expect("SessionManager::create should succeed");
 
@@ -198,8 +208,14 @@ fn main() {
     println!("\n== summary ==");
     println!("  BEFORE (raw spawn, no TERM) emitted a color escape code: {before_has_color}");
     println!("  AFTER  (SessionManager::create, the fix applied) emitted a color escape code: {after_has_color}");
-    println!("  fix proven with real bytes: {}", !before_has_color && after_has_color);
-    println!("  scratch dir left on disk for inspection: {}", scratch.display());
+    println!(
+        "  fix proven with real bytes: {}",
+        !before_has_color && after_has_color
+    );
+    println!(
+        "  scratch dir left on disk for inspection: {}",
+        scratch.display()
+    );
 }
 
 /// `CommandBuilder` doesn't implement `Clone`/`Copy` and `spawn_command`

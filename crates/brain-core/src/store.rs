@@ -687,7 +687,9 @@ impl Store {
     /// to per-project queries, so this trades a bit of scan cost for not
     /// needing an N-query fan-out over `list_projects()`.
     pub fn all_nodes(&self) -> rusqlite::Result<Vec<Node>> {
-        let mut stmt = self.conn.prepare(&format!("SELECT {NODE_COLS} FROM nodes"))?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {NODE_COLS} FROM nodes"))?;
         let rows = stmt
             .query_map([], row_to_node)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -764,9 +766,10 @@ impl Store {
     /// if `node_id` wasn't pending (nothing to do, not an error — e.g. a
     /// stale UI click after someone else already approved it).
     pub fn approve_pending(&self, node_id: &str) -> rusqlite::Result<bool> {
-        let changed = self
-            .conn
-            .execute("DELETE FROM pending_notes WHERE node_id = ?1", params![node_id])?;
+        let changed = self.conn.execute(
+            "DELETE FROM pending_notes WHERE node_id = ?1",
+            params![node_id],
+        )?;
         Ok(changed > 0)
     }
 
@@ -789,8 +792,10 @@ impl Store {
             .execute("DELETE FROM nodes_fts WHERE id = ?1", params![node_id])?;
         self.conn
             .execute("DELETE FROM nodes WHERE id = ?1", params![node_id])?;
-        self.conn
-            .execute("DELETE FROM pending_notes WHERE node_id = ?1", params![node_id])?;
+        self.conn.execute(
+            "DELETE FROM pending_notes WHERE node_id = ?1",
+            params![node_id],
+        )?;
         Ok(node)
     }
 }
