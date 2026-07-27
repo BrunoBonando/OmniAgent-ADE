@@ -118,8 +118,7 @@ mod tests {
         // "token"/"secret"/"password" with no `[=:]` attached (and no
         // JSON-style quote-then-colon shape either) must be left alone —
         // the fix must not turn these into a value-less match.
-        let input =
-            "This token expires in 30 days. The secret sauce recipe is family-only. \
+        let input = "This token expires in 30 days. The secret sauce recipe is family-only. \
              Choose a strong password for your account.";
         assert_eq!(redact(input), input);
     }

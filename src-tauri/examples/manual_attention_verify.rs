@@ -31,7 +31,9 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use omniagent_ade_lib::sessions::{AttentionSink, CreateSessionRequest, OutputSink, SessionManager};
+use omniagent_ade_lib::sessions::{
+    AttentionSink, CreateSessionRequest, OutputSink, SessionManager,
+};
 
 fn main() {
     let scratch = std::env::temp_dir().join(format!(
@@ -44,7 +46,10 @@ fn main() {
 
     println!("== manual attention verify ==");
     println!("data_dir:    {}", data_dir.display());
-    println!("project_dir: {} (fresh — never trusted before)", project_dir.display());
+    println!(
+        "project_dir: {} (fresh — never trusted before)",
+        project_dir.display()
+    );
 
     let captured = Arc::new(std::sync::Mutex::new(String::new()));
     let captured_sink = Arc::clone(&captured);
@@ -61,8 +66,7 @@ fn main() {
         let _ = attention_tx.send((id.to_string(), Instant::now()));
     });
 
-    let manager =
-        SessionManager::new(data_dir, sink).with_attention_sink(attention_sink);
+    let manager = SessionManager::new(data_dir, sink).with_attention_sink(attention_sink);
 
     let start = Instant::now();
     let info = manager
@@ -71,7 +75,7 @@ fn main() {
             engine: "claude".to_string(),
             cwd: project_dir.to_string_lossy().into_owned(),
             briefing: None,
-        restore_id: None,
+            restore_id: None,
         })
         .expect("session_create should succeed");
     println!("\n-- session created: {info:?} --\n");
@@ -106,7 +110,10 @@ fn main() {
             true
         }
         Err(_) => {
-            println!("\n\n== NO attention event within {}s ==", deadline.as_secs());
+            println!(
+                "\n\n== NO attention event within {}s ==",
+                deadline.as_secs()
+            );
             false
         }
     };
@@ -114,10 +121,7 @@ fn main() {
     // Prove the debounce too: if the dialog is still sitting there
     // re-rendering, no *further* event should show up immediately.
     let extra = attention_rx.recv_timeout(Duration::from_secs(3));
-    println!(
-        "extra event within 3s of the first one: {}",
-        extra.is_ok()
-    );
+    println!("extra event within 3s of the first one: {}", extra.is_ok());
 
     manager.kill(&info.id).expect("kill should succeed");
 
@@ -129,5 +133,8 @@ fn main() {
 
     println!("\n== summary ==");
     println!("  attention event fired: {fired}");
-    println!("  scratch dir left on disk for inspection: {}", scratch.display());
+    println!(
+        "  scratch dir left on disk for inspection: {}",
+        scratch.display()
+    );
 }

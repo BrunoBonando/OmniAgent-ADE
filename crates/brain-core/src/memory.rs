@@ -90,8 +90,9 @@ impl<'a> Memory<'a> {
             Origin::Extracted => "extracted",
         };
         let status_line = if pending { "status: pending\n" } else { "" };
-        let contents =
-            format!("---\norigin: {origin_str}\n{status_line}---\n\n# {title}\n\n{redacted_body}\n");
+        let contents = format!(
+            "---\norigin: {origin_str}\n{status_line}---\n\n# {title}\n\n{redacted_body}\n"
+        );
         fs::write(&path, &contents)?;
 
         let id = format!("{project}:memory:{filename}");

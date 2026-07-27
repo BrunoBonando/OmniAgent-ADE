@@ -5,6 +5,7 @@ members = [
   "crates/brain-core",
   "crates/brain-ingest",
   "crates/mcp-server",
+  "crates/omniagent-pty-daemon",
 ]
 
 [workspace.package]

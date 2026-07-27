@@ -49,15 +49,16 @@ const GUI_MINIMAL_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 fn main() {
     println!("== manual PATH-resolution verify ==");
-    println!(
-        "simulating the real Finder/`open`-launched .app's minimal PATH: {GUI_MINIMAL_PATH}"
-    );
+    println!("simulating the real Finder/`open`-launched .app's minimal PATH: {GUI_MINIMAL_PATH}");
 
     let original_path = std::env::var_os("PATH");
     std::env::set_var("PATH", GUI_MINIMAL_PATH);
 
     println!("\n-- BEFORE (bug reproduction): raw bare `claude` spawn under minimal PATH --");
-    let before_ok = match std::process::Command::new("claude").arg("--version").output() {
+    let before_ok = match std::process::Command::new("claude")
+        .arg("--version")
+        .output()
+    {
         Ok(out) if out.status.success() => {
             println!(
                 "  UNEXPECTED: raw spawn succeeded -- is `claude` somehow already on \
@@ -119,9 +120,9 @@ fn main() {
     println!("\n== summary ==");
     println!("  BEFORE (raw spawn under minimal PATH) succeeded: {before_ok}");
     println!("  AFTER  (SessionManager::create under minimal PATH) succeeded: {after_ok}");
+    println!("  fix proven: {}", !before_ok && after_ok);
     println!(
-        "  fix proven: {}",
-        !before_ok && after_ok
+        "  scratch dir left on disk for inspection: {}",
+        scratch.display()
     );
-    println!("  scratch dir left on disk for inspection: {}", scratch.display());
 }

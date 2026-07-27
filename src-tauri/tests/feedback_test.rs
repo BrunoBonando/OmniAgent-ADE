@@ -71,7 +71,7 @@ fn run_and_end_a_session(manager: &SessionManager, project: &str, project_dir: &
             engine: "shell".to_string(),
             cwd: project_dir.to_string_lossy().into_owned(),
             briefing: None,
-        restore_id: None,
+            restore_id: None,
         })
         .unwrap();
 
@@ -122,7 +122,10 @@ fn ending_a_session_enqueues_a_session_summary_job_with_the_right_payload_shape(
         payload["git_diff"].as_str().unwrap().contains("util.ts"),
         "{payload}"
     );
-    assert!(payload["transcript_path"].as_str().unwrap().ends_with(".log"));
+    assert!(payload["transcript_path"]
+        .as_str()
+        .unwrap()
+        .ends_with(".log"));
 }
 
 #[test]
@@ -171,8 +174,9 @@ fn draining_the_job_writes_a_memory_note_touched_edges_and_a_session_node() {
 
     let neighbors = store.neighbors(&note.id, 10).unwrap();
     assert!(
-        neighbors.iter().any(|(e, n)| e.kind == brain_core::EdgeKind::Touched
-            && n.id == "demo:util.ts"),
+        neighbors
+            .iter()
+            .any(|(e, n)| e.kind == brain_core::EdgeKind::Touched && n.id == "demo:util.ts"),
         "{neighbors:?}"
     );
 
@@ -232,7 +236,10 @@ fn review_mode_on_lands_the_note_pending_and_approving_makes_it_visible() {
     let briefing_before =
         tools::get_context(&ctx, &serde_json::json!({"project": "demo"})).unwrap();
     assert!(
-        briefing_before["memory_notes"].as_array().unwrap().is_empty(),
+        briefing_before["memory_notes"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
         "pending note must not show up in the briefing yet: {briefing_before}"
     );
 
@@ -247,8 +254,7 @@ fn review_mode_on_lands_the_note_pending_and_approving_makes_it_visible() {
 
     store.approve_pending(&pending[0].node_id).unwrap();
 
-    let briefing_after =
-        tools::get_context(&ctx, &serde_json::json!({"project": "demo"})).unwrap();
+    let briefing_after = tools::get_context(&ctx, &serde_json::json!({"project": "demo"})).unwrap();
     assert!(
         briefing_after["memory_notes"]
             .as_array()
@@ -274,7 +280,7 @@ fn an_idle_session_with_no_transcript_content_and_no_diff_does_not_enqueue_a_job
             engine: "shell".to_string(),
             cwd: project_dir.path().to_string_lossy().into_owned(),
             briefing: None,
-        restore_id: None,
+            restore_id: None,
         })
         .unwrap();
     manager.kill(&info.id).unwrap();
@@ -303,7 +309,7 @@ fn kill_returns_promptly_even_when_the_feedback_hook_runs() {
             engine: "shell".to_string(),
             cwd: project_dir.path().to_string_lossy().into_owned(),
             briefing: None,
-        restore_id: None,
+            restore_id: None,
         })
         .unwrap();
 

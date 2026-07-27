@@ -553,6 +553,7 @@ use uuid::Uuid;
 
 use brain_core::{now_ts, redact::redact};
 
+use crate::pty_daemon_client::PtyDaemonClient;
 use crate::tmux::{self, Tmux};
 
 /// A callback invoked with `(session_id, raw_chunk)` for every chunk read
@@ -966,8 +967,9 @@ impl SessionActivity {
             // A burst's first keystroke (nothing typed within the grace)
             // freezes what the light currently says; every keystroke after
             // it merely re-arms the grace. See `status_when_typing_began`.
-            let new_burst =
-                last.map_or(true, |t| now.saturating_duration_since(t) >= TYPING_ECHO_GRACE);
+            let new_burst = last.map_or(true, |t| {
+                now.saturating_duration_since(t) >= TYPING_ECHO_GRACE
+            });
             if new_burst {
                 if let Ok(mut held) = self.status_when_typing_began.lock() {
                     *held = self.raw_busy_status(now);
@@ -1065,6 +1067,7 @@ pub struct SessionManager {
     /// behavior in full: engines spawn straight into the PTY and nothing
     /// survives the app closing.
     tmux: Option<Tmux>,
+    pty_daemon: PtyDaemonClient,
     /// Guards the lazy, at-most-once spawn of the status poller (see
     /// [`SessionManager::with_status_sink`] for why it isn't spawned eagerly).
     status_poller: OnceLock<()>,
@@ -1073,6 +1076,7 @@ pub struct SessionManager {
 impl SessionManager {
     pub fn new(data_dir: PathBuf, sink: OutputSink) -> Self {
         let _ = std::fs::create_dir_all(transcripts_dir(&data_dir));
+        let pty_daemon = PtyDaemonClient::default_for_data_dir(&data_dir);
         Self {
             data_dir,
             sink,
@@ -1081,8 +1085,14 @@ impl SessionManager {
             on_attention: None,
             on_status: None,
             tmux: None,
+            pty_daemon,
             status_poller: OnceLock::new(),
         }
+    }
+
+    pub fn with_pty_daemon(mut self, client: PtyDaemonClient) -> Self {
+        self.pty_daemon = client;
+        self
     }
 
     /// Builder-style setter for tmux-backed persistence — the same additive
@@ -1352,10 +1362,9 @@ impl SessionManager {
                         // would be a confident lie in the one message they
                         // have to debug from.
                         let refusal = match identity {
-                            ClaudeIdentity::Stock => format!(
-                                "`{}` exited immediately inside tmux",
-                                engine_cmd.argv[0]
-                            ),
+                            ClaudeIdentity::Stock => {
+                                format!("`{}` exited immediately inside tmux", engine_cmd.argv[0])
+                            }
                             flagged => format!(
                                 "`{}` exited immediately inside tmux ({})",
                                 engine_cmd.argv[0],
@@ -1620,6 +1629,9 @@ impl SessionManager {
         let handle = sessions
             .get(id)
             .ok_or_else(|| anyhow!("no such session: {id}"))?;
+        if let (Some(t), Some(name)) = (&self.tmux, &handle.tmux_session) {
+            let _ = t.resize_session(name, cols, rows);
+        }
         handle
             .master
             .resize(PtySize {
@@ -1648,18 +1660,13 @@ impl SessionManager {
         };
 
         // Bruno, 2026-07-26: "If the user closes the terminal, tmux or claude
-        // session can be deleted." Destroy the tmux session *first*, so the
-        // engine inside it actually dies — killing only the attach client
-        // below would leave the engine running forever with nothing attached
-        // (the exact leak persistence makes possible). This is the single
-        // place that destroys a tmux session: the natural-exit path
-        // deliberately doesn't (see `spawn_reader_thread`'s doc comment).
+        // session can be deleted." Destroy the backing daemon session first
+        // (via the compatibility substrate), so the engine inside it dies too.
         if let (Some(t), Some(name)) = (&self.tmux, &handle.tmux_session) {
             if !t.kill_session(name) {
-                // Already gone (the engine exited on its own, taking the
-                // session with it) is the common, harmless case.
+                // Already gone (the engine exited on its own) is harmless.
                 eprintln!(
-                    "omniagent-ade: tmux kill-session for {name} reported no such session \
+                    "omniagent-ade: daemon kill-session for {name} reported no such session \
                      (it had most likely already ended on its own)"
                 );
             }
@@ -1749,6 +1756,58 @@ impl SessionManager {
             *last = Some(status);
         }
         Some(SessionStatusEvent::new(id, status, &activity.engine))
+    }
+
+    /// Checks if any open terminal session is currently executing a task (`Thinking` or `ToolExecution`).
+    pub fn has_working_sessions(&self) -> bool {
+        let ids: Vec<String> = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions.keys().cloned().collect()
+        };
+        for id in ids {
+            if let Some(event) = self.status(&id) {
+                if matches!(
+                    event.status,
+                    SessionStatus::Thinking | SessionStatus::ToolExecution
+                ) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Sends SIGINT (\x03 / Ctrl+C) to all active working sessions to interrupt task execution
+    /// without killing PTY sessions.
+    pub fn stop_active_executions(&self) -> usize {
+        let ids: Vec<String> = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions.keys().cloned().collect()
+        };
+        let mut count = 0;
+        for id in ids {
+            if let Some(event) = self.status(&id) {
+                if matches!(
+                    event.status,
+                    SessionStatus::Thinking | SessionStatus::ToolExecution
+                ) {
+                    if self.write(&id, "\x03").is_ok() {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    pub fn pty_daemon_status(&self) -> (bool, String, usize) {
+        let running = self.pty_daemon.is_alive();
+        let sessions = self.pty_daemon.list_sessions().unwrap_or_default();
+        (
+            running,
+            self.pty_daemon.socket_path().display().to_string(),
+            sessions.len(),
+        )
     }
 }
 
@@ -1980,8 +2039,7 @@ fn resolve_engine_binary(program: &str) -> Option<PathBuf> {
 /// exactly that. Written out as a literal rather than computed at startup
 /// because it must never drift: change it and every existing pane loses its
 /// conversation.
-const CLAUDE_CONVERSATION_NAMESPACE: Uuid =
-    Uuid::from_u128(0x9337750e_5a2b_59c8_82f3_650bc0f53cfa);
+const CLAUDE_CONVERSATION_NAMESPACE: Uuid = Uuid::from_u128(0x9337750e_5a2b_59c8_82f3_650bc0f53cfa);
 
 /// The URL whose UUIDv5 is [`CLAUDE_CONVERSATION_NAMESPACE`]. Test-only
 /// because nothing at runtime should ever recompute the namespace — the
@@ -2084,7 +2142,10 @@ impl ClaudeIdentity {
     /// The argv fragment this identity contributes to a `claude` invocation.
     fn argv(self, session_id: &str) -> Vec<String> {
         match self {
-            Self::Claim => vec!["--session-id".to_string(), claude_conversation_uuid(session_id)],
+            Self::Claim => vec![
+                "--session-id".to_string(),
+                claude_conversation_uuid(session_id),
+            ],
             Self::Resume => vec!["--resume".to_string(), claude_conversation_uuid(session_id)],
             Self::Stock => Vec::new(),
         }
@@ -2239,8 +2300,8 @@ fn build_engine_argv(
 
             let mcp_config_path = match resolve_mcp_server_binary() {
                 Some(bin) => {
-                    let cfg_path = write_mcp_config(&bin, data_dir, session_id)
-                        .context("write mcp config")?;
+                    let cfg_path =
+                        write_mcp_config(&bin, data_dir, session_id).context("write mcp config")?;
                     argv.push("--mcp-config".to_string());
                     argv.push(cfg_path.to_string_lossy().into_owned());
                     Some(cfg_path)
@@ -2896,7 +2957,10 @@ fn spawn_reader_thread(
         // message would be wrong far more often than right).
         cleanup_mcp_config(&handle.mcp_config_path);
         let exit_code = status.as_ref().ok().map(|s| s.exit_code());
-        let signal = status.as_ref().ok().and_then(|s| s.signal().map(String::from));
+        let signal = status
+            .as_ref()
+            .ok()
+            .and_then(|s| s.signal().map(String::from));
 
         let _ = append_lifecycle_event(
             &lifecycle_path,
@@ -3292,7 +3356,10 @@ struct AttentionDebouncer {
 
 impl AttentionDebouncer {
     fn new(cooldown: Duration) -> Self {
-        Self { cooldown, last_fired: None }
+        Self {
+            cooldown,
+            last_fired: None,
+        }
     }
 
     /// Call once per marker match. Returns `true` exactly when the caller
@@ -3515,7 +3582,9 @@ fn status_from_output_activity(activity: &SessionActivity, now: Instant) -> Sess
             return held.unwrap_or(SessionStatus::Ready);
         }
     }
-    activity.raw_busy_status(now).unwrap_or(SessionStatus::Ready)
+    activity
+        .raw_busy_status(now)
+        .unwrap_or(SessionStatus::Ready)
 }
 
 /// What "this session is producing sustained output" means for each engine.
@@ -3714,8 +3783,7 @@ mod tests {
         data_dir: &Path,
         session_id: &str,
     ) -> Result<(CommandBuilder, Option<PathBuf>)> {
-        let engine_cmd =
-            build_engine_command(req, data_dir, session_id, ClaudeIdentity::Claim)?;
+        let engine_cmd = build_engine_command(req, data_dir, session_id, ClaudeIdentity::Claim)?;
         let cmd = engine_cmd.to_command_builder();
         Ok((cmd, engine_cmd.mcp_config_path))
     }
@@ -3782,15 +3850,15 @@ mod tests {
             briefing: None,
             restore_id: None,
         };
-        let cmd =
-            build_engine_command(&req, tmp.path(), "sess-codex-mcp", ClaudeIdentity::Stock).unwrap();
+        let cmd = build_engine_command(&req, tmp.path(), "sess-codex-mcp", ClaudeIdentity::Stock)
+            .unwrap();
 
         assert_eq!(cmd.argv[1], "--config");
         assert!(cmd.argv[2].contains("mcp_servers.omniagent="));
         assert!(cmd.argv[2].contains(&serde_json::to_string(&sibling.to_string_lossy()).unwrap()));
-        assert!(cmd.argv[2].contains(
-            &serde_json::to_string(&tmp.path().to_string_lossy()).unwrap()
-        ));
+        assert!(
+            cmd.argv[2].contains(&serde_json::to_string(&tmp.path().to_string_lossy()).unwrap())
+        );
     }
 
     #[test]
@@ -3833,8 +3901,10 @@ mod tests {
                 briefing: None,
                 restore_id: None,
             };
-            let (cmd, _mcp_cfg) = build_command(&req, tmp.path(), "sess-test")
-                .unwrap_or_else(|e| panic!("engine {:?} is offered but cannot spawn: {e}", spec.name));
+            let (cmd, _mcp_cfg) =
+                build_command(&req, tmp.path(), "sess-test").unwrap_or_else(|e| {
+                    panic!("engine {:?} is offered but cannot spawn: {e}", spec.name)
+                });
 
             let argv = cmd.get_argv();
             let argv0 = argv
@@ -3981,7 +4051,9 @@ mod tests {
         };
         let (cmd, _mcp_path) =
             build_command(&req, tmp.path(), &format!("sess-test-path-{engine}")).unwrap();
-        let got = cmd.get_env("PATH").map(|s| s.to_string_lossy().into_owned());
+        let got = cmd
+            .get_env("PATH")
+            .map(|s| s.to_string_lossy().into_owned());
 
         match cached_shell_path() {
             Some(expected) => assert_eq!(
@@ -4067,13 +4139,17 @@ mod tests {
             build_command(&req, tmp.path(), &format!("sess-test-color-{engine}")).unwrap();
 
         assert_eq!(
-            cmd.get_env("TERM").map(|s| s.to_string_lossy().into_owned()).as_deref(),
+            cmd.get_env("TERM")
+                .map(|s| s.to_string_lossy().into_owned())
+                .as_deref(),
             Some("xterm-256color"),
             "{engine} session's TERM should be set for real color support, regardless of \
              whatever (if anything) this process itself inherited"
         );
         assert_eq!(
-            cmd.get_env("COLORTERM").map(|s| s.to_string_lossy().into_owned()).as_deref(),
+            cmd.get_env("COLORTERM")
+                .map(|s| s.to_string_lossy().into_owned())
+                .as_deref(),
             Some("truecolor"),
             "{engine} session's COLORTERM should signal 24-bit color support"
         );
@@ -4200,7 +4276,8 @@ mod tests {
         // that session's own perfectly-legitimate config file inflated the
         // count and failed this assertion.
         let session_id = "sess-mcp-leak-probe";
-        let expected_config = std::env::temp_dir().join(format!("omniagent-ade-mcp-{session_id}.json"));
+        let expected_config =
+            std::env::temp_dir().join(format!("omniagent-ade-mcp-{session_id}.json"));
         let _ = std::fs::remove_file(&expected_config);
 
         let tmp = tempfile::tempdir().unwrap();
@@ -4307,7 +4384,10 @@ mod tests {
         let mut decoder = Utf8ChunkDecoder::new();
         // First two bytes of "─" (E2 94 80), never followed by the third.
         let decoded = decoder.decode(&[0x61, 0xE2, 0x94]);
-        assert_eq!(decoded, "a", "the incomplete tail must be carried, not lost or corrupted");
+        assert_eq!(
+            decoded, "a",
+            "the incomplete tail must be carried, not lost or corrupted"
+        );
         let trailing = decoder.finish();
         assert_eq!(trailing, "\u{FFFD}");
     }
@@ -4351,7 +4431,9 @@ mod tests {
             Ok(())
         }
         fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
-            Box::new(SlowWaitChild { wait_delay: self.wait_delay })
+            Box::new(SlowWaitChild {
+                wait_delay: self.wait_delay,
+            })
         }
     }
 
@@ -4402,7 +4484,12 @@ mod tests {
         // child above.
         let pty_system = native_pty_system();
         let pair = pty_system
-            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .unwrap();
         let reader = pair.master.try_clone_reader().unwrap();
         let writer = pair.master.take_writer().unwrap();
@@ -4412,7 +4499,9 @@ mod tests {
             a_id.clone(),
             reader,
             tmp.path().join("transcripts").join(format!("{a_id}.log")),
-            tmp.path().join("transcripts").join(format!("{a_id}.lifecycle.jsonl")),
+            tmp.path()
+                .join("transcripts")
+                .join(format!("{a_id}.lifecycle.jsonl")),
             silent_sink(),
             Arc::clone(&manager.sessions),
             None,
@@ -4425,7 +4514,9 @@ mod tests {
         let handle = SessionHandle {
             master: pair.master,
             writer,
-            child: Box::new(SlowWaitChild { wait_delay: Duration::from_millis(1500) }),
+            child: Box::new(SlowWaitChild {
+                wait_delay: Duration::from_millis(1500),
+            }),
             mcp_config_path: None,
             project: "demo".to_string(),
             cwd: tmp.path().to_string_lossy().into_owned(),
@@ -4438,7 +4529,11 @@ mod tests {
         // reader thread is already running (blocked in `read()`, since the
         // slave side is still held open by `pair.slave` at this point), so
         // there's no race with its own `sessions.remove(&a_id)`.
-        manager.sessions.lock().unwrap().insert(a_id.clone(), handle);
+        manager
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(a_id.clone(), handle);
 
         // Now close the *only* remaining reference to the slave side
         // (nothing was ever spawned into it) -- this immediately unblocks
@@ -4475,7 +4570,9 @@ mod tests {
         // a Bash-tool prompt and a Write-tool prompt, different trailing
         // wording, shared opening.
         assert!(contains_attention_marker("Do you want to proceed?"));
-        assert!(contains_attention_marker("Do you want to create notes.txt?"));
+        assert!(contains_attention_marker(
+            "Do you want to create notes.txt?"
+        ));
         // Realistic surrounding noise (cursor-position junk, box-drawing
         // characters) shouldn't defeat the match — it's a substring check.
         assert!(contains_attention_marker(
@@ -4486,7 +4583,9 @@ mod tests {
     #[test]
     fn attention_marker_ignores_unrelated_output() {
         assert!(!contains_attention_marker("hi\n"));
-        assert!(!contains_attention_marker("Quick safety check: Is this a project you trust?"));
+        assert!(!contains_attention_marker(
+            "Quick safety check: Is this a project you trust?"
+        ));
         assert!(!contains_attention_marker(""));
     }
 
@@ -4563,7 +4662,11 @@ mod tests {
         // validates (measured: it rejects anything else with `Invalid session
         // ID. Must be a valid UUID.`).
         let groups: Vec<&str> = a.split('-').collect();
-        assert_eq!(groups.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12], "{a}");
+        assert_eq!(
+            groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "{a}"
+        );
         assert!(
             a.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
             "{a} must be hex + hyphens"
@@ -4576,7 +4679,10 @@ mod tests {
         // RFC 4122 v5: version nibble 5, variant bits `10xx` (`8`/`9`/`a`/`b`).
         let parsed = Uuid::parse_str(&a).expect("must parse as a UUID");
         assert_eq!(parsed.get_version_num(), 5, "{a}");
-        assert!(matches!(groups[3].chars().next(), Some('8' | '9' | 'a' | 'b')), "{a}");
+        assert!(
+            matches!(groups[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+            "{a}"
+        );
     }
 
     /// **The bug, as an assertion.** Many Claude panes live in one project
@@ -4658,7 +4764,10 @@ mod tests {
         );
         assert_eq!(
             fresh.argv[1..3],
-            ["--session-id".to_string(), claude_conversation_uuid("sess-fresh")],
+            [
+                "--session-id".to_string(),
+                claude_conversation_uuid("sess-fresh")
+            ],
             "{:?}",
             fresh.argv
         );
@@ -4668,7 +4777,10 @@ mod tests {
                 .unwrap();
         assert_eq!(
             restored.argv[1..3],
-            ["--resume".to_string(), claude_conversation_uuid("sess-restored")],
+            [
+                "--resume".to_string(),
+                claude_conversation_uuid("sess-restored")
+            ],
             "{:?}",
             restored.argv
         );
@@ -4676,7 +4788,10 @@ mod tests {
         let attached =
             build_engine_command(&req, tmp.path(), "sess-attached", ClaudeIdentity::Stock).unwrap();
         assert!(
-            !attached.argv.iter().any(|a| a == "--session-id" || a == "--resume"),
+            !attached
+                .argv
+                .iter()
+                .any(|a| a == "--session-id" || a == "--resume"),
             "attaching to a live engine must carry no identity flag: {:?}",
             attached.argv
         );
@@ -4716,7 +4831,9 @@ mod tests {
                     // Single-rung ladder == never probed. This is the
                     // property that actually protects the latency.
                     assert_eq!(
-                        spawn_identity(engine, is_restore, tmux_exists).ladder().len(),
+                        spawn_identity(engine, is_restore, tmux_exists)
+                            .ladder()
+                            .len(),
                         1
                     );
                 }
@@ -4756,7 +4873,12 @@ mod tests {
     fn child_survives_startup_distinguishes_an_instant_exit_from_a_healthy_process() {
         fn spawn_probe(script: &str) -> (Box<dyn Child + Send + Sync>, thread::JoinHandle<()>) {
             let pair = native_pty_system()
-                .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
                 .unwrap();
             let mut reader = pair.master.try_clone_reader().unwrap();
             let mut cmd = CommandBuilder::new("/bin/sh");
@@ -5005,20 +5127,6 @@ mod tests {
                 .binary()
                 .to_path_buf();
 
-            let status = std::process::Command::new(&bin)
-                .env_clear()
-                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-                .env("HOME", std::env::var("HOME").unwrap_or_default())
-                .arg("-L")
-                .arg(&socket)
-                .arg("-f")
-                .arg(&config)
-                .args(["new-session", "-d", "-s", "keepalive", "--"])
-                .args(["/bin/sleep", "120"])
-                .status()
-                .expect("start the minimal-PATH tmux server");
-            assert!(status.success(), "minimal-PATH tmux server failed to start");
-
             Self {
                 tmux: Tmux::with_binary(bin, &socket).with_config(config),
                 _dir: dir,
@@ -5126,8 +5234,8 @@ mod tests {
                 briefing: None,
                 restore_id: None,
             };
-            let cmd = build_engine_command(&req, tmp.path(), "sess-abs", ClaudeIdentity::Stock)
-                .unwrap();
+            let cmd =
+                build_engine_command(&req, tmp.path(), "sess-abs", ClaudeIdentity::Stock).unwrap();
             let program = Path::new(&cmd.argv[0]);
             assert!(
                 program.is_absolute(),
@@ -5148,7 +5256,10 @@ mod tests {
     /// something else.
     #[test]
     fn an_engine_that_is_not_installed_keeps_its_bare_name() {
-        assert_eq!(resolve_engine_binary("definitely-not-a-real-engine-9271"), None);
+        assert_eq!(
+            resolve_engine_binary("definitely-not-a-real-engine-9271"),
+            None
+        );
     }
 
     /// The tmux-side liveness check: a pane whose command cannot even be
@@ -5164,20 +5275,28 @@ mod tests {
             .with_config(tmux::write_config(dir.path()).unwrap());
 
         // A command that cannot be exec'd at all — the founder bug's shape.
-        t.ensure_session(
+        let dead = t.ensure_session(
             "dead",
             dir.path(),
             &[],
             &["/no/such/binary/anywhere".to_string()],
-        )
-        .expect("new-session itself succeeds even when the command cannot be exec'd");
+        );
         assert!(
             !tmux_session_survives_startup(&t, "dead", TMUX_PANE_STARTUP_WINDOW),
             "a pane whose command never started must not read as alive"
         );
+        assert!(
+            dead.is_err(),
+            "daemon-backed creation should surface spawn failures for invalid binaries"
+        );
 
-        t.ensure_session("alive", dir.path(), &[], &["/bin/sleep".into(), "60".into()])
-            .unwrap();
+        t.ensure_session(
+            "alive",
+            dir.path(),
+            &[],
+            &["/bin/sleep".into(), "60".into()],
+        )
+        .unwrap();
         assert!(
             tmux_session_survives_startup(&t, "alive", TMUX_PANE_STARTUP_WINDOW),
             "a healthy pane must read as alive"
@@ -5191,7 +5310,11 @@ mod tests {
     fn identity_flags_never_leak_into_codex_or_shell_invocations() {
         let tmp = tempfile::tempdir().unwrap();
         for engine in ["codex", "shell"] {
-            for identity in [ClaudeIdentity::Claim, ClaudeIdentity::Resume, ClaudeIdentity::Stock] {
+            for identity in [
+                ClaudeIdentity::Claim,
+                ClaudeIdentity::Resume,
+                ClaudeIdentity::Stock,
+            ] {
                 let req = CreateSessionRequest {
                     project: "demo".into(),
                     engine: engine.into(),
@@ -5201,7 +5324,9 @@ mod tests {
                 };
                 let cmd = build_engine_command(&req, tmp.path(), "sess-x", identity).unwrap();
                 assert!(
-                    !cmd.argv.iter().any(|arg| arg == "--session-id" || arg == "--resume"),
+                    !cmd.argv
+                        .iter()
+                        .any(|arg| arg == "--session-id" || arg == "--resume"),
                     "{engine} must not receive Claude identity flags under {identity:?}: {:?}",
                     cmd.argv
                 );
@@ -5350,7 +5475,10 @@ mod tests {
     /// `thinking` must never be reported for a `shell` — a shell doesn't think.
     #[test]
     fn busy_means_tool_execution_for_a_shell_and_thinking_for_an_engine() {
-        assert_eq!(busy_status_for_engine("shell"), SessionStatus::ToolExecution);
+        assert_eq!(
+            busy_status_for_engine("shell"),
+            SessionStatus::ToolExecution
+        );
         assert_eq!(busy_status_for_engine("claude"), SessionStatus::Thinking);
         assert_eq!(busy_status_for_engine("codex"), SessionStatus::Thinking);
 
@@ -5543,7 +5671,10 @@ mod tests {
         // 2. sustained output -> white/blue
         *activity.last_output.lock().unwrap() = now;
         *activity.busy_since.lock().unwrap() = Some(now - Duration::from_secs(3));
-        assert_eq!(compute_status(&activity, None, now), SessionStatus::Thinking);
+        assert_eq!(
+            compute_status(&activity, None, now),
+            SessionStatus::Thinking
+        );
 
         // 3. a failure was reported -> red, even though it's still working
         activity.error.store(true, Ordering::Relaxed);
@@ -5571,7 +5702,10 @@ mod tests {
         //    signal, seamlessly — the run clock counted right through.
         let after = typed + TYPING_ECHO_GRACE;
         *activity.last_output.lock().unwrap() = after;
-        assert_eq!(compute_status(&activity, None, after), SessionStatus::Thinking);
+        assert_eq!(
+            compute_status(&activity, None, after),
+            SessionStatus::Thinking
+        );
     }
 
     /// A shell session, same chain, without tmux: the states it can reach are
@@ -5689,8 +5823,7 @@ mod tests {
     /// it was effectively permanent.
     #[test]
     fn with_tmux_a_user_write_dismisses_the_error_rather_than_clearing_it() {
-        let activity =
-            SessionActivity::new("claude".into(), Some("omniagent-x".into()), true);
+        let activity = SessionActivity::new("claude".into(), Some("omniagent-x".into()), true);
         activity.error.store(true, Ordering::Relaxed);
         activity.mark_user_input();
         assert!(

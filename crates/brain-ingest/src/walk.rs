@@ -86,7 +86,10 @@ pub struct DirEntry {
 pub fn list_dir(dir: &Path) -> Result<Vec<DirEntry>, String> {
     std::fs::read_dir(dir).map_err(|e| format!("can't read {}: {e}", dir.display()))?;
 
-    let walker = WalkBuilder::new(dir).require_git(false).max_depth(Some(1)).build();
+    let walker = WalkBuilder::new(dir)
+        .require_git(false)
+        .max_depth(Some(1))
+        .build();
     let mut out = Vec::new();
     for entry in walker.filter_map(Result::ok) {
         if entry.path() == dir {
@@ -249,7 +252,11 @@ mod tests {
         let entries = list_dir(&fixture).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
 
-        assert_eq!(names, vec!["docs", "src", "helpers.py", "main.py", "README.md"], "{names:?}");
+        assert_eq!(
+            names,
+            vec!["docs", "src", "helpers.py", "main.py", "README.md"],
+            "{names:?}"
+        );
         assert!(!names.contains(&".git"), "{names:?}");
     }
 }

@@ -377,14 +377,15 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         let dest_path = dst.join(entry.file_name());
 
         if file_type.is_symlink() {
-            let target = std::fs::read_link(&entry_path)
-                .map_err(|e| friendly_io_error(&entry_path, &e))?;
+            let target =
+                std::fs::read_link(&entry_path).map_err(|e| friendly_io_error(&entry_path, &e))?;
             std::os::unix::fs::symlink(&target, &dest_path)
                 .map_err(|e| friendly_io_error(&dest_path, &e))?;
         } else if file_type.is_dir() {
             copy_dir_recursive(&entry_path, &dest_path)?;
         } else {
-            std::fs::copy(&entry_path, &dest_path).map_err(|e| friendly_io_error(&entry_path, &e))?;
+            std::fs::copy(&entry_path, &dest_path)
+                .map_err(|e| friendly_io_error(&entry_path, &e))?;
         }
     }
     Ok(())
@@ -432,10 +433,17 @@ pub fn delete_to_trash(project_root: &Path, path: &Path) -> Result<(), String> {
 fn friendly_trash_error(path: &Path, err: trash::Error) -> String {
     use trash::Error::*;
     match err {
-        Os { description, .. } => format!("couldn't move {} to Trash: {description}", path.display()),
+        Os { description, .. } => {
+            format!("couldn't move {} to Trash: {description}", path.display())
+        }
         CouldNotAccess { target } => format!("{target} doesn't exist or can't be accessed"),
-        TargetedRoot => format!("{} is a root folder and cannot be moved to Trash", path.display()),
-        Unknown { description } => format!("couldn't move {} to Trash: {description}", path.display()),
+        TargetedRoot => format!(
+            "{} is a root folder and cannot be moved to Trash",
+            path.display()
+        ),
+        Unknown { description } => {
+            format!("couldn't move {} to Trash: {description}", path.display())
+        }
         CanonicalizePath { original } => format!("couldn't resolve {}", original.display()),
         ConvertOsString { .. } => format!("{} has a name Trash can't handle", path.display()),
         other => format!("couldn't move {} to Trash: {other:?}", path.display()),
@@ -581,7 +589,11 @@ mod tests {
         let err = rename_path(root.path(), &a, "b.txt").unwrap_err();
         assert!(err.contains("already exists"), "{err}");
         assert!(a.exists(), "source must be untouched");
-        assert_eq!(fs::read_to_string(&b).unwrap(), "B", "destination must not be overwritten");
+        assert_eq!(
+            fs::read_to_string(&b).unwrap(),
+            "B",
+            "destination must not be overwritten"
+        );
     }
 
     #[test]
@@ -620,7 +632,10 @@ mod tests {
         let err = move_path(root.path(), &file, &dest_dir).unwrap_err();
         assert!(err.contains("already exists"), "{err}");
         assert!(file.exists(), "source must be untouched");
-        assert_eq!(fs::read_to_string(dest_dir.join("a.txt")).unwrap(), "existing");
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("a.txt")).unwrap(),
+            "existing"
+        );
     }
 
     #[test]
@@ -749,7 +764,10 @@ mod tests {
 
         delete_to_trash(root.path(), &file).unwrap();
 
-        assert!(!file.exists(), "file must be gone from its original location");
+        assert!(
+            !file.exists(),
+            "file must be gone from its original location"
+        );
     }
 
     #[test]
@@ -788,7 +806,10 @@ mod tests {
         fs::write(root.path().join("new.txt"), "existing").unwrap();
         let err = create_file(root.path(), root.path(), "new.txt").unwrap_err();
         assert!(err.contains("already exists"), "{err}");
-        assert_eq!(fs::read_to_string(root.path().join("new.txt")).unwrap(), "existing");
+        assert_eq!(
+            fs::read_to_string(root.path().join("new.txt")).unwrap(),
+            "existing"
+        );
     }
 
     /// Bug 2 (TOCTOU): `prepare_create`'s `occupied()` pre-check happens
@@ -824,8 +845,14 @@ mod tests {
 
         let ok_count = results.iter().filter(|r| r.is_ok()).count();
         let err_count = results.iter().filter(|r| r.is_err()).count();
-        assert_eq!(ok_count, 1, "exactly one create_new should win: {results:?}");
-        assert_eq!(err_count, 7, "every loser must get a real Err, not silently succeed: {results:?}");
+        assert_eq!(
+            ok_count, 1,
+            "exactly one create_new should win: {results:?}"
+        );
+        assert_eq!(
+            err_count, 7,
+            "every loser must get a real Err, not silently succeed: {results:?}"
+        );
         for r in &results {
             if let Err(e) = r {
                 assert!(e.contains("already exists"), "{e}");
@@ -895,7 +922,10 @@ mod tests {
             // Sanity: this really does point at the real file (canonicalizes
             // successfully) — the rejection must come from the root check,
             // not from the path simply not resolving.
-            assert_eq!(std::fs::canonicalize(&traversal_path).unwrap(), canon(&secret));
+            assert_eq!(
+                std::fs::canonicalize(&traversal_path).unwrap(),
+                canon(&secret)
+            );
 
             let rename_err = rename_path(root.path(), &traversal_path, "pwned.txt").unwrap_err();
             assert!(rename_err.contains("outside"), "{rename_err}");
@@ -922,7 +952,10 @@ mod tests {
             let err = delete_to_trash(root.path(), Path::new(&traversal)).unwrap_err();
             // Whatever the exact message, it must not succeed, and
             // `/etc/passwd` must still be there.
-            assert!(std::path::Path::new("/etc/passwd").exists(), "sanity: /etc/passwd exists");
+            assert!(
+                std::path::Path::new("/etc/passwd").exists(),
+                "sanity: /etc/passwd exists"
+            );
             let _ = err; // rejection is the assertion; message wording isn't load-bearing here
         }
 
@@ -937,7 +970,10 @@ mod tests {
                 .path()
                 .join("..")
                 .join(outside.path().file_name().unwrap());
-            assert_eq!(std::fs::canonicalize(&traversal_dest).unwrap(), canon(outside.path()));
+            assert_eq!(
+                std::fs::canonicalize(&traversal_dest).unwrap(),
+                canon(outside.path())
+            );
 
             let err = move_path(root.path(), &file, &traversal_dest).unwrap_err();
             assert!(err.contains("outside"), "{err}");
@@ -967,7 +1003,10 @@ mod tests {
 
             let renamed = rename_path(root.path(), &link, "renamed-link").unwrap();
             assert!(
-                std::fs::symlink_metadata(&renamed).unwrap().file_type().is_symlink(),
+                std::fs::symlink_metadata(&renamed)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
                 "renaming a symlink must still be a symlink afterward"
             );
             assert_eq!(fs::read_to_string(&secret).unwrap(), "top secret");
@@ -1001,8 +1040,7 @@ mod tests {
             std::os::unix::fs::symlink(outside.path(), &link_dir).unwrap();
             let path_through_link = link_dir.join("real.txt");
 
-            let rename_err =
-                rename_path(root.path(), &path_through_link, "pwned.txt").unwrap_err();
+            let rename_err = rename_path(root.path(), &path_through_link, "pwned.txt").unwrap_err();
             assert!(rename_err.contains("outside"), "{rename_err}");
 
             let delete_err = delete_to_trash(root.path(), &path_through_link).unwrap_err();
@@ -1069,7 +1107,10 @@ mod tests {
             let new_path = rename_path(root.path(), &link, "renamed-link.txt").unwrap();
 
             assert!(
-                std::fs::symlink_metadata(&new_path).unwrap().file_type().is_symlink(),
+                std::fs::symlink_metadata(&new_path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
                 "the renamed entry must still be a symlink"
             );
             assert_eq!(
@@ -1078,9 +1119,15 @@ mod tests {
                 "must still point at the same target"
             );
             // The target itself: untouched, unmoved, unrenamed.
-            assert!(real.exists(), "real.txt must still exist under its original name");
+            assert!(
+                real.exists(),
+                "real.txt must still exist under its original name"
+            );
             assert_eq!(fs::read_to_string(&real).unwrap(), "real content");
-            assert!(!link.exists(), "the old link name is gone (it was renamed, not left behind)");
+            assert!(
+                !link.exists(),
+                "the old link name is gone (it was renamed, not left behind)"
+            );
         }
 
         #[test]
@@ -1096,13 +1143,22 @@ mod tests {
             let new_path = move_path(root.path(), &link, &dest_dir).unwrap();
 
             assert!(
-                std::fs::symlink_metadata(&new_path).unwrap().file_type().is_symlink(),
+                std::fs::symlink_metadata(&new_path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
                 "the moved entry must still be a symlink"
             );
             assert_eq!(std::fs::read_link(&new_path).unwrap(), real);
-            assert!(real.exists(), "real.txt must still exist in its original place");
+            assert!(
+                real.exists(),
+                "real.txt must still exist in its original place"
+            );
             assert_eq!(fs::read_to_string(&real).unwrap(), "real content");
-            assert!(!link.exists(), "the old link location is gone (it was moved, not left behind)");
+            assert!(
+                !link.exists(),
+                "the old link location is gone (it was moved, not left behind)"
+            );
         }
 
         #[test]
@@ -1116,7 +1172,10 @@ mod tests {
             delete_to_trash(root.path(), &link).unwrap();
 
             assert!(!link.exists(), "the link entry must be gone");
-            assert!(real.exists(), "the target file must remain on disk, untouched");
+            assert!(
+                real.exists(),
+                "the target file must remain on disk, untouched"
+            );
             assert_eq!(fs::read_to_string(&real).unwrap(), "real content");
         }
 
@@ -1132,7 +1191,10 @@ mod tests {
 
             assert_eq!(dup, canon(root.path()).join("link copy.txt"));
             assert!(
-                std::fs::symlink_metadata(&dup).unwrap().file_type().is_symlink(),
+                std::fs::symlink_metadata(&dup)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
                 "the duplicate must be a symlink, not a plain-file copy of the target's bytes"
             );
             assert_eq!(
@@ -1164,7 +1226,10 @@ mod tests {
             let dup = duplicate_path(root.path(), &link).unwrap();
 
             assert!(
-                std::fs::symlink_metadata(&dup).unwrap().file_type().is_symlink(),
+                std::fs::symlink_metadata(&dup)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
                 "duplicating a symlinked directory must produce another symlink"
             );
             assert_eq!(std::fs::read_link(&dup).unwrap(), real_dir);

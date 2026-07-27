@@ -35,17 +35,25 @@ impl PtyDaemonClient {
     pub fn send_request(&self, req: &DaemonRequest) -> Result<DaemonResponse> {
         self.ensure_daemon_running()?;
 
-        let mut stream = UnixStream::connect(&self.socket_path)
-            .with_context(|| format!("failed to connect to pty daemon at {}", self.socket_path.display()))?;
+        let mut stream = UnixStream::connect(&self.socket_path).with_context(|| {
+            format!(
+                "failed to connect to pty daemon at {}",
+                self.socket_path.display()
+            )
+        })?;
 
         let mut payload = serde_json::to_vec(req)?;
         payload.push(b'\n');
-        stream.write_all(&payload).context("failed to send RPC request to daemon")?;
+        stream
+            .write_all(&payload)
+            .context("failed to send RPC request to daemon")?;
         stream.flush()?;
 
         let mut reader = BufReader::new(stream);
         let mut response_line = String::new();
-        reader.read_line(&mut response_line).context("failed to read RPC response from daemon")?;
+        reader
+            .read_line(&mut response_line)
+            .context("failed to read RPC response from daemon")?;
 
         let resp: DaemonResponse = serde_json::from_str(&response_line)
             .with_context(|| format!("invalid JSON response from daemon: {response_line}"))?;
@@ -88,7 +96,7 @@ impl PtyDaemonClient {
         ))
     }
 
-    fn is_alive(&self) -> bool {
+    pub fn is_alive(&self) -> bool {
         if let Ok(mut stream) = UnixStream::connect(&self.socket_path) {
             let req = DaemonRequest::ListSessions;
             if let Ok(mut payload) = serde_json::to_vec(&req) {
@@ -114,8 +122,12 @@ impl PtyDaemonClient {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        cmd.spawn()
-            .with_context(|| format!("Failed to spawn omniagent-pty-daemon from {}", exe.display()))?;
+        cmd.spawn().with_context(|| {
+            format!(
+                "Failed to spawn omniagent-pty-daemon from {}",
+                exe.display()
+            )
+        })?;
 
         Ok(())
     }
@@ -148,7 +160,11 @@ impl PtyDaemonClient {
         let resp = self.send_request(&req)?;
         let screen = resp
             .result
-            .and_then(|r| r.get("screen").and_then(|s| s.as_str()).map(|s| s.to_string()))
+            .and_then(|r| {
+                r.get("screen")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+            })
             .unwrap_or_default();
         Ok(screen)
     }
@@ -185,9 +201,11 @@ impl PtyDaemonClient {
         let sessions = resp
             .result
             .and_then(|r| {
-                r.get("sessions")
-                    .and_then(|s| s.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                r.get("sessions").and_then(|s| s.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
             })
             .unwrap_or_default();
         Ok(sessions)

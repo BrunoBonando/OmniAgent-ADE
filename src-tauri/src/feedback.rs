@@ -149,7 +149,10 @@ impl From<brain_core::PendingNote> for PendingNoteView {
 /// Pure, `Store`-only core of `pending_notes_list` — same split as
 /// `map_feed.rs`'s `build_map_graph`/`build_map_node_detail`, so it's
 /// directly unit-testable without constructing a Tauri `State`.
-fn list_pending_notes(store: &Store, project: Option<&str>) -> anyhow::Result<Vec<PendingNoteView>> {
+fn list_pending_notes(
+    store: &Store,
+    project: Option<&str>,
+) -> anyhow::Result<Vec<PendingNoteView>> {
     let notes = store.pending_notes(project)?;
     Ok(notes.into_iter().map(PendingNoteView::from).collect())
 }
@@ -291,8 +294,14 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_str(&pending[0].payload).unwrap();
         assert_eq!(payload["project"], "p1");
         assert_eq!(payload["session_id"], "sess-1");
-        assert_eq!(payload["transcript_path"], transcript_path.to_string_lossy().as_ref());
-        assert!(payload["transcript_tail"].as_str().unwrap().contains("echo hi"));
+        assert_eq!(
+            payload["transcript_path"],
+            transcript_path.to_string_lossy().as_ref()
+        );
+        assert!(payload["transcript_tail"]
+            .as_str()
+            .unwrap()
+            .contains("echo hi"));
         // Non-git cwd -> empty diff, but the key is always present.
         assert_eq!(payload["git_diff"], "");
     }
@@ -333,7 +342,13 @@ mod tests {
         let (path, id) = {
             let memory = Memory::new(&store, dir.path());
             memory
-                .write_note_with_status("p1", "Session: add auth", "did work", Origin::MachineSummary, true)
+                .write_note_with_status(
+                    "p1",
+                    "Session: add auth",
+                    "did work",
+                    Origin::MachineSummary,
+                    true,
+                )
                 .unwrap()
         };
         assert!(store.is_pending(&id).unwrap());
@@ -352,7 +367,13 @@ mod tests {
         let (path, id) = {
             let memory = Memory::new(&store, dir.path());
             memory
-                .write_note_with_status("p1", "Session: throwaway", "did work", Origin::MachineSummary, true)
+                .write_note_with_status(
+                    "p1",
+                    "Session: throwaway",
+                    "did work",
+                    Origin::MachineSummary,
+                    true,
+                )
                 .unwrap()
         };
         assert!(path.exists());

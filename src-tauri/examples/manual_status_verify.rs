@@ -128,8 +128,16 @@ fn script_for(engine: &str) -> (Vec<Step>, u64) {
         // demonstrate the honest gap — neither can turn the light red.
         "shell" => (
             vec![
-                Step { at: 3, text: "sleep 3\n", note: "silent long command -> expect cyan" },
-                Step { at: 12, text: "false\n", note: "failing command -> red NOT expected" },
+                Step {
+                    at: 3,
+                    text: "sleep 3\n",
+                    note: "silent long command -> expect cyan",
+                },
+                Step {
+                    at: 12,
+                    text: "false\n",
+                    note: "failing command -> red NOT expected",
+                },
                 Step {
                     at: 18,
                     text: "ls /nonexistent-path-xyz-123\n",
@@ -147,28 +155,52 @@ fn script_for(engine: &str) -> (Vec<Step>, u64) {
         // carriage return (see manual_tmux_persistence_verify's note).
         _ => (
             vec![
-                Step { at: 4, text: "\r", note: "accept the folder-trust prompt" },
+                Step {
+                    at: 4,
+                    text: "\r",
+                    note: "accept the folder-trust prompt",
+                },
                 Step {
                     at: 10,
                     text: "Write exactly one short haiku about terminals. Do not use any tools.",
                     note: "type a pure text-generation prompt",
                 },
-                Step { at: 12, text: "\r", note: "submit -> expect thinking (white/blue)" },
+                Step {
+                    at: 12,
+                    text: "\r",
+                    note: "submit -> expect thinking (white/blue)",
+                },
                 Step {
                     at: 45,
                     text: "Use the Bash tool to run exactly: ls /nonexistent-path-xyz-123 \
                            - do not fix it, just report the exit code",
                     note: "type a failing-tool prompt",
                 },
-                Step { at: 47, text: "\r", note: "submit -> expect amber, then red" },
-                Step { at: 75, text: "\r", note: "approve the permission prompt" },
+                Step {
+                    at: 47,
+                    text: "\r",
+                    note: "submit -> expect amber, then red",
+                },
+                Step {
+                    at: 75,
+                    text: "\r",
+                    note: "approve the permission prompt",
+                },
                 Step {
                     at: 110,
                     text: "Use the Bash tool to run: sleep 12 && echo SLOW_TOOL_DONE",
                     note: "type a slow-tool prompt",
                 },
-                Step { at: 112, text: "\r", note: "submit -> expect cyan while it runs" },
-                Step { at: 125, text: "\r", note: "approve if it asked" },
+                Step {
+                    at: 112,
+                    text: "\r",
+                    note: "submit -> expect cyan while it runs",
+                },
+                Step {
+                    at: 125,
+                    text: "\r",
+                    note: "approve if it asked",
+                },
             ],
             185,
         ),

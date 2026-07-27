@@ -106,8 +106,14 @@ fn main() {
     );
     if !errors.is_empty() {
         println!("first error: {}", errors[0]);
-        let busy = errors.iter().filter(|e| e.contains("locked") || e.contains("busy")).count();
-        println!("of which look like a lock/busy error: {busy}/{}", errors.len());
+        let busy = errors
+            .iter()
+            .filter(|e| e.contains("locked") || e.contains("busy"))
+            .count();
+        println!(
+            "of which look like a lock/busy error: {busy}/{}",
+            errors.len()
+        );
     }
     if let Some(max) = latencies.last() {
         println!("reader max latency: {max:?}");

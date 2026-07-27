@@ -45,7 +45,10 @@ fn main() {
     print_listing("ui/ (must NOT show node_modules)", &root.join("ui"));
 
     // A path that doesn't exist at all — the graceful-error path.
-    print_listing("a path that doesn't exist", &root.join("no-such-directory-here"));
+    print_listing(
+        "a path that doesn't exist",
+        &root.join("no-such-directory-here"),
+    );
 
     // A path that's a file, not a directory — also graceful-error.
     print_listing("a path that's a file, not a dir", &root.join("Cargo.toml"));

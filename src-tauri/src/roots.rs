@@ -178,7 +178,10 @@ impl IngestionState {
     }
 
     fn snapshot(&self) -> IngestionStatus {
-        self.0.lock().expect("ingestion status mutex poisoned").clone()
+        self.0
+            .lock()
+            .expect("ingestion status mutex poisoned")
+            .clone()
     }
 
     fn update(&self, f: impl FnOnce(&mut IngestionStatus)) {
@@ -327,7 +330,12 @@ fn ingest_roots_in_background(
 /// [`ingest_roots_in_background`] uses, so it composes safely (active-
 /// worker counted, counters additive) if a bulk ingest happens to be
 /// running at the same moment.
-fn ingest_project_in_background(data_dir: PathBuf, name: String, dir: PathBuf, status: IngestionState) {
+fn ingest_project_in_background(
+    data_dir: PathBuf,
+    name: String,
+    dir: PathBuf,
+    status: IngestionState,
+) {
     std::thread::spawn(move || {
         let store = match Store::open(&data_dir) {
             Ok(s) => s,
@@ -380,7 +388,12 @@ pub fn roots_start_ingest(
         add_root(&store, &path).map_err(|e| e.to_string())?;
     }
 
-    ingest_roots_in_background(brain.data_dir.clone(), vec![path], Vec::new(), ingestion.inner().clone());
+    ingest_roots_in_background(
+        brain.data_dir.clone(),
+        vec![path],
+        Vec::new(),
+        ingestion.inner().clone(),
+    );
     Ok(())
 }
 
@@ -411,7 +424,9 @@ pub struct ProjectSummary {
 }
 
 #[tauri::command]
-pub fn roots_biggest_project(brain: State<'_, BrainState>) -> Result<Option<ProjectSummary>, String> {
+pub fn roots_biggest_project(
+    brain: State<'_, BrainState>,
+) -> Result<Option<ProjectSummary>, String> {
     let store = brain.store.lock().map_err(|e| e.to_string())?;
     biggest_project(&store).map_err(|e| e.to_string())
 }
@@ -541,7 +556,8 @@ pub fn add_project(
     brain: State<'_, BrainState>,
     ingestion: State<'_, IngestionState>,
 ) -> Result<ProjectSummary, String> {
-    add_project_impl(brain.inner(), ingestion.inner(), &path, name.as_deref()).map_err(|e| e.to_string())
+    add_project_impl(brain.inner(), ingestion.inner(), &path, name.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 // -------------------------------------------------------------- rename
@@ -578,7 +594,11 @@ fn rename_project_impl(brain: &BrainState, id: &str, new_label: &str) -> Result<
 /// doc for why this writes to the settings table rather than the node's own
 /// `label` column.
 #[tauri::command]
-pub fn rename_project(id: String, new_label: String, brain: State<'_, BrainState>) -> Result<(), String> {
+pub fn rename_project(
+    id: String,
+    new_label: String,
+    brain: State<'_, BrainState>,
+) -> Result<(), String> {
     rename_project_impl(brain.inner(), &id, &new_label).map_err(|e| e.to_string())
 }
 
@@ -602,7 +622,11 @@ pub fn roots_paused_projects(brain: State<'_, BrainState>) -> Result<Vec<String>
 }
 
 #[tauri::command]
-pub fn roots_set_paused(project: String, paused: bool, brain: State<'_, BrainState>) -> Result<(), String> {
+pub fn roots_set_paused(
+    project: String,
+    paused: bool,
+    brain: State<'_, BrainState>,
+) -> Result<(), String> {
     let store = brain.store.lock().map_err(|e| e.to_string())?;
     store
         .set_setting(&pause_key(&project), if paused { "true" } else { "false" })
@@ -674,14 +698,21 @@ pub fn roots_reingest_project(project: String, brain: State<'_, BrainState>) -> 
 /// memory: that directory lives entirely outside `brain.db` and nothing in
 /// this function's path names or opens it.
 #[tauri::command]
-pub fn roots_rebuild(brain: State<'_, BrainState>, ingestion: State<'_, IngestionState>) -> Result<(), String> {
+pub fn roots_rebuild(
+    brain: State<'_, BrainState>,
+    ingestion: State<'_, IngestionState>,
+) -> Result<(), String> {
     if ingestion.snapshot().running {
         return Err("ingestion is already running".to_string());
     }
 
     let (roots, extra_projects) = {
         let mut guard = brain.store.lock().map_err(|e| e.to_string())?;
-        let preserved: HashMap<String, String> = guard.all_settings().map_err(|e| e.to_string())?.into_iter().collect();
+        let preserved: HashMap<String, String> = guard
+            .all_settings()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .collect();
         let roots = get_roots(&guard).map_err(|e| e.to_string())?;
         // Individually-added projects (`add_project`) aren't under any
         // known root, so they'd otherwise vanish after a rebuild — carry
@@ -699,7 +730,12 @@ pub fn roots_rebuild(brain: State<'_, BrainState>, ingestion: State<'_, Ingestio
         (roots, extra_projects)
     };
 
-    ingest_roots_in_background(brain.data_dir.clone(), roots, extra_projects, ingestion.inner().clone());
+    ingest_roots_in_background(
+        brain.data_dir.clone(),
+        roots,
+        extra_projects,
+        ingestion.inner().clone(),
+    );
     Ok(())
 }
 
@@ -791,7 +827,10 @@ mod tests {
             .join("fixtures/sample-project");
         let store = Store::open_in_memory().unwrap();
 
-        assert!(store.get_setting(&last_ingested_key("sample-project")).unwrap().is_none());
+        assert!(store
+            .get_setting(&last_ingested_key("sample-project"))
+            .unwrap()
+            .is_none());
         let stats = ingest_one(&store, "sample-project", &fixture).unwrap();
         assert!(stats.files > 0);
 
@@ -806,8 +845,12 @@ mod tests {
     #[test]
     fn biggest_project_picks_the_project_with_most_nodes() {
         let store = Store::open_in_memory().unwrap();
-        store.upsert_node(&project_node("small", Path::new("/tmp/small"))).unwrap();
-        store.upsert_node(&project_node("big", Path::new("/tmp/big"))).unwrap();
+        store
+            .upsert_node(&project_node("small", Path::new("/tmp/small")))
+            .unwrap();
+        store
+            .upsert_node(&project_node("big", Path::new("/tmp/big")))
+            .unwrap();
         for i in 0..5 {
             store
                 .upsert_node(&Node {
@@ -830,12 +873,21 @@ mod tests {
     #[test]
     fn staleness_is_false_when_never_stamped_and_true_past_the_threshold() {
         let store = Store::open_in_memory().unwrap();
-        store.upsert_node(&project_node("never-stamped", Path::new("/tmp/x"))).unwrap();
-        store.upsert_node(&project_node("stale", Path::new("/tmp/y"))).unwrap();
-        store.upsert_node(&project_node("fresh", Path::new("/tmp/z"))).unwrap();
+        store
+            .upsert_node(&project_node("never-stamped", Path::new("/tmp/x")))
+            .unwrap();
+        store
+            .upsert_node(&project_node("stale", Path::new("/tmp/y")))
+            .unwrap();
+        store
+            .upsert_node(&project_node("fresh", Path::new("/tmp/z")))
+            .unwrap();
 
         store
-            .set_setting(&last_ingested_key("stale"), &(now_ts() - STALE_THRESHOLD_SECS - 10).to_string())
+            .set_setting(
+                &last_ingested_key("stale"),
+                &(now_ts() - STALE_THRESHOLD_SECS - 10).to_string(),
+            )
             .unwrap();
         store
             .set_setting(&last_ingested_key("fresh"), &now_ts().to_string())
@@ -855,8 +907,12 @@ mod tests {
         let dir = tempdir().unwrap();
         {
             let store = Store::open(dir.path()).unwrap();
-            store.upsert_node(&project_node("p1", Path::new("/tmp/p1"))).unwrap();
-            store.set_setting(PROJECT_ROOTS_KEY, r#"["/tmp/p1"]"#).unwrap();
+            store
+                .upsert_node(&project_node("p1", Path::new("/tmp/p1")))
+                .unwrap();
+            store
+                .set_setting(PROJECT_ROOTS_KEY, r#"["/tmp/p1"]"#)
+                .unwrap();
         }
 
         let mut preserved = HashMap::new();
@@ -874,14 +930,19 @@ mod tests {
             Some(r#"["/tmp/p1"]"#.to_string()),
             "preserved settings must survive the rebuild"
         );
-        assert_eq!(fresh.get_setting("review_memory").unwrap(), Some("true".to_string()));
+        assert_eq!(
+            fresh.get_setting("review_memory").unwrap(),
+            Some("true".to_string())
+        );
     }
 
     #[test]
     fn rebuild_store_works_even_while_an_old_connection_to_the_same_file_is_still_open() {
         let dir = tempdir().unwrap();
         let old_store = Store::open(dir.path()).unwrap();
-        old_store.upsert_node(&project_node("p1", Path::new("/tmp/p1"))).unwrap();
+        old_store
+            .upsert_node(&project_node("p1", Path::new("/tmp/p1")))
+            .unwrap();
 
         // The old connection (`old_store`) is deliberately kept alive here —
         // this is exactly the situation `roots_rebuild`'s command body is
@@ -946,8 +1007,14 @@ mod tests {
         status.begin(1);
         let mid = status.snapshot();
         assert!(mid.running);
-        assert_eq!(mid.projects_total, 3, "2 from bulk + 1 from add_project, additive");
-        assert_eq!(mid.projects_done, 1, "must not have been reset by the second begin()");
+        assert_eq!(
+            mid.projects_total, 3,
+            "2 from bulk + 1 from add_project, additive"
+        );
+        assert_eq!(
+            mid.projects_done, 1,
+            "must not have been reset by the second begin()"
+        );
 
         // The bulk ingest's second (and last) project finishes, then the
         // bulk operation itself ends.
@@ -1027,7 +1094,9 @@ mod tests {
         // open (same data_dir).
         {
             let store = Store::open(data_dir.path()).unwrap();
-            store.set_setting(&pause_key("paused-project"), "true").unwrap();
+            store
+                .set_setting(&pause_key("paused-project"), "true")
+                .unwrap();
         }
 
         let status = IngestionState::new();
@@ -1047,7 +1116,10 @@ mod tests {
             snap = status.snapshot();
         }
 
-        assert_eq!(snap.projects_done, 1, "paused project still counts toward progress");
+        assert_eq!(
+            snap.projects_done, 1,
+            "paused project still counts toward progress"
+        );
         let store = Store::open(data_dir.path()).unwrap();
         assert!(
             store.get_node("paused-project").unwrap().is_none(),
@@ -1116,19 +1188,30 @@ mod tests {
 
         // Queryable RIGHT AWAY — no waiting on ingestion.
         let store = brain.store.lock().unwrap();
-        let node = store.get_node("My Project").unwrap().expect("node created synchronously");
+        let node = store
+            .get_node("My Project")
+            .unwrap()
+            .expect("node created synchronously");
         assert_eq!(node.kind, NodeKind::Project);
         assert_eq!(node.path.as_deref(), Some(path.as_str()));
 
         let paths = get_project_paths(&store).unwrap();
-        assert_eq!(paths.get("My Project").map(String::as_str), Some(path.as_str()));
+        assert_eq!(
+            paths.get("My Project").map(String::as_str),
+            Some(path.as_str())
+        );
     }
 
     #[test]
     fn add_project_defaults_the_id_to_the_folder_basename_when_no_name_given() {
         let data_dir = tempdir().unwrap();
         let project_dir = tempdir().unwrap();
-        let expected_id = project_dir.path().file_name().unwrap().to_string_lossy().into_owned();
+        let expected_id = project_dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
         let ingestion = IngestionState::new();
 
@@ -1149,7 +1232,13 @@ mod tests {
         let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
         let ingestion = IngestionState::new();
 
-        let err = add_project_impl(&brain, &ingestion, "/definitely/not/a/real/path-xyz-nope", None).unwrap_err();
+        let err = add_project_impl(
+            &brain,
+            &ingestion,
+            "/definitely/not/a/real/path-xyz-nope",
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("not a directory"), "{err}");
     }
 
@@ -1159,17 +1248,32 @@ mod tests {
         let project_root = tempdir().unwrap();
         std::fs::create_dir_all(project_root.path().join(".git")).unwrap();
         std::fs::write(project_root.path().join("a.ts"), "export const a = 1;\n").unwrap();
-        let project_name = project_root.path().file_name().unwrap().to_string_lossy().into_owned();
+        let project_name = project_root
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
 
         let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
         let ingestion = IngestionState::new();
 
         let started = std::time::Instant::now();
-        let summary = add_project_impl(&brain, &ingestion, &project_root.path().to_string_lossy(), None).unwrap();
+        let summary = add_project_impl(
+            &brain,
+            &ingestion,
+            &project_root.path().to_string_lossy(),
+            None,
+        )
+        .unwrap();
         // Returns essentially immediately — well before a real ingest (even
         // of this tiny fixture) could plausibly have completed if this were
         // synchronous.
-        assert!(started.elapsed() < std::time::Duration::from_millis(200), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "{:?}",
+            started.elapsed()
+        );
         assert_eq!(summary.id, project_name);
 
         let mut snap = ingestion.snapshot();
@@ -1189,7 +1293,10 @@ mod tests {
         // proves this didn't just fake it by relying on the synchronous
         // upsert alone.
         let store = Store::open(data_dir.path()).unwrap();
-        assert!(store.get_setting(&last_ingested_key(&project_name)).unwrap().is_some());
+        assert!(store
+            .get_setting(&last_ingested_key(&project_name))
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -1199,7 +1306,9 @@ mod tests {
         let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
         {
             let store = brain.store.lock().unwrap();
-            store.upsert_node(&project_node("OmniAgent-ADE", project_dir.path())).unwrap();
+            store
+                .upsert_node(&project_node("OmniAgent-ADE", project_dir.path()))
+                .unwrap();
         }
 
         rename_project_impl(&brain, "OmniAgent-ADE", "OmniAgent").unwrap();
@@ -1212,7 +1321,10 @@ mod tests {
         assert_eq!(node.id, "OmniAgent-ADE");
         assert_eq!(node.label, "OmniAgent-ADE");
         assert_eq!(
-            store.get_setting(&mcp_server::tools::project_label_key("OmniAgent-ADE")).unwrap().as_deref(),
+            store
+                .get_setting(&mcp_server::tools::project_label_key("OmniAgent-ADE"))
+                .unwrap()
+                .as_deref(),
             Some("OmniAgent")
         );
     }
@@ -1224,7 +1336,9 @@ mod tests {
         let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
         {
             let store = brain.store.lock().unwrap();
-            store.upsert_node(&project_node("OmniAgent-ADE", project_dir.path())).unwrap();
+            store
+                .upsert_node(&project_node("OmniAgent-ADE", project_dir.path()))
+                .unwrap();
         }
         rename_project_impl(&brain, "OmniAgent-ADE", "OmniAgent").unwrap();
 
@@ -1232,7 +1346,9 @@ mod tests {
         // Project-node upsert) landing after the rename.
         {
             let store = brain.store.lock().unwrap();
-            store.upsert_node(&project_node("OmniAgent-ADE", project_dir.path())).unwrap();
+            store
+                .upsert_node(&project_node("OmniAgent-ADE", project_dir.path()))
+                .unwrap();
         }
 
         let ctx = mcp_server::tools::ToolContext {
@@ -1240,7 +1356,10 @@ mod tests {
             data_dir: data_dir.path(),
         };
         let projects = mcp_server::tools::list_projects(&ctx, &serde_json::json!({})).unwrap();
-        assert_eq!(projects[0]["label"], "OmniAgent", "rename must survive a re-ingest");
+        assert_eq!(
+            projects[0]["label"], "OmniAgent",
+            "rename must survive a re-ingest"
+        );
     }
 
     #[test]
@@ -1250,7 +1369,9 @@ mod tests {
         let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
         {
             let store = brain.store.lock().unwrap();
-            store.upsert_node(&project_node("p1", project_dir.path())).unwrap();
+            store
+                .upsert_node(&project_node("p1", project_dir.path()))
+                .unwrap();
         }
 
         let err = rename_project_impl(&brain, "p1", "   ").unwrap_err();
