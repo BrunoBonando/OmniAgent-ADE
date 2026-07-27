@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   ingestionStatus: vi.fn(),
   listProjects: vi.fn(),
   rootsList: vi.fn(),
+  ptyDaemonStatus: vi.fn(),
   sessionCreate: vi.fn(),
   sessionKill: vi.fn(),
   sessionStatus: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock("./lib/tauri", () => ({
   onAgentInstallProgress: vi.fn().mockResolvedValue(() => {}),
   renameProject: vi.fn(),
   rootsList: mocks.rootsList,
+  ptyDaemonStatus: mocks.ptyDaemonStatus,
   sessionCreate: mocks.sessionCreate,
   sessionKill: mocks.sessionKill,
   sessionStatus: mocks.sessionStatus,
@@ -91,6 +93,7 @@ describe("App workspace-first startup", () => {
     mocks.ingestionStatus.mockResolvedValue({ running: false, projects_total: 0, projects_done: 0, total_nodes: 0 });
     mocks.listProjects.mockResolvedValue([alpha, beta]);
     mocks.rootsList.mockResolvedValue(["/work"]);
+    mocks.ptyDaemonStatus.mockResolvedValue({ available: true });
     mocks.sessionCreate.mockImplementation((project: string, engine: string, cwd: string, _briefing: unknown, id?: string) =>
       Promise.resolve({ id: id ?? `${project}-new`, project, engine, cwd, created: 1, restored: true }),
     );
@@ -116,7 +119,7 @@ describe("App workspace-first startup", () => {
   it("starts no terminal until a workspace is selected, then restores only its first session", async () => {
     render(<App />);
 
-    expect(screen.getByText("Loading…")).toBeInTheDocument();
+    expect(screen.getByText("Loading...")).toBeInTheDocument();
     const alphaButton = await screen.findByRole("button", { name: /Alpha/ });
     expect(mocks.sessionCreate).not.toHaveBeenCalled();
 

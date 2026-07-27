@@ -348,8 +348,8 @@ pub fn run() {
             let tmux = sessions::default_tmux(&data_dir);
             if tmux.is_none() {
                 eprintln!(
-                    "omniagent-ade: tmux not found — sessions will run directly and will NOT \
-                     survive the app closing (install tmux to enable session restore)"
+                    "omniagent-ade: PTY daemon not found — sessions will run directly and will \
+                     NOT survive the app closing"
                 );
             }
             app.manage(

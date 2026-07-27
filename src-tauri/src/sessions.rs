@@ -1301,12 +1301,12 @@ impl SessionManager {
         tmux_name: &str,
         identity: ClaudeIdentity,
     ) -> Result<Spawned> {
-        // One attempt per rung. The last rung ([`ClaudeIdentity::Stock`]) is
-        // never *PTY*-probed — there is no lower rung to fall back to, and a
-        // stock `claude` carries no flag that could refuse to start — but it
-        // is still checked on the tmux side, because "the binary never even
-        // started" is a failure no flag ladder can fix and the one that
-        // produced the black screen (module docs).
+        // One attempt per rung. Under tmux, *every* rung's attach client is
+        // startup-probed, including the last, because an instantly-dead
+        // attach is the black-screen shape this module's degradation path must
+        // never hand to the user. Without tmux, only non-final identity rungs
+        // are probed (`--resume` / `--session-id`) since the stock last rung
+        // has no lower fallback.
         let ladder = identity.ladder();
         let last_rung = ladder.len() - 1;
         let mut tmux_refusal: Option<String> = None;
@@ -1410,10 +1410,20 @@ impl SessionManager {
                 .context("open pty")?;
             let reader = pair.master.try_clone_reader().context("clone pty reader")?;
             let writer = pair.master.take_writer().context("take pty writer")?;
+            let spawn_mode = if tmux_session.is_some() {
+                format!("daemon-attach session={tmux_name}")
+            } else {
+                format!("direct-engine binary={}", engine_cmd.argv[0])
+            };
             let mut child = pair
                 .slave
                 .spawn_command(cmd)
-                .context("spawn engine process")?;
+                .with_context(|| {
+                    format!(
+                        "spawn engine process (engine={}, cwd={}, mode={spawn_mode})",
+                        req.engine, req.cwd
+                    )
+                })?;
             // Crucial: drop our own handle to the slave side. If we keep it
             // open, the kernel won't deliver EOF/EIO to the master reader
             // when the child exits (our fd would still be holding the slave
@@ -1441,20 +1451,28 @@ impl SessionManager {
                 Arc::clone(&activity),
             );
 
-            // Only an attempt that still has a rung beneath it is probed, so
-            // attaching to a live tmux session (and any last-rung spawn) pays
-            // nothing at all for this. Under tmux the PTY child is the attach
-            // client, which exits when its session dies — so this single check
-            // covers both spawn shapes.
-            let probe = (rung < last_rung).then(|| identity.liveness_window());
+            // Under tmux the PTY child is always the daemon-backed attach
+            // client; probe it on every rung (including the last) so an
+            // immediately dead attach can degrade to the direct-spawn fallback
+            // instead of becoming a black pane. Without tmux, only identity
+            // rungs that still have a fallback beneath them are probed.
+            let probe = startup_probe_window(rung, last_rung, identity, tmux_session.is_some());
             if matches!(probe, Some(window) if !child_survives_startup(&mut child, window)) {
-                eprintln!(
-                    "omniagent-ade: `claude {}` exited immediately for session {id} in {} \
-                     ({}); falling back",
-                    identity.describe_flags(),
-                    req.cwd,
-                    identity.failure_hint(),
-                );
+                if tmux_session.is_some() {
+                    eprintln!(
+                        "omniagent-ade: tmux attach exited immediately for session {id} in {}; \
+                         falling back",
+                        req.cwd
+                    );
+                } else {
+                    eprintln!(
+                        "omniagent-ade: `claude {}` exited immediately for session {id} in {} \
+                         ({}); falling back",
+                        identity.describe_flags(),
+                        req.cwd,
+                        identity.failure_hint(),
+                    );
+                }
                 // Tear the failed attempt down exactly the way `kill()`
                 // does, minus the parts that assume a registered session:
                 // the reader thread's own EOF path finds no entry in the
@@ -1560,7 +1578,12 @@ impl SessionManager {
         let child = pair
             .slave
             .spawn_command(cmd)
-            .context("spawn engine process")?;
+            .with_context(|| {
+                format!(
+                    "spawn engine process (engine={}, cwd={}, mode=direct-notice-wrapper binary={})",
+                    req.engine, req.cwd, engine_cmd.argv[0]
+                )
+            })?;
         drop(pair.slave);
 
         let activity = Arc::new(SessionActivity::new(
@@ -1800,10 +1823,12 @@ impl SessionManager {
         count
     }
 
-    pub fn pty_daemon_status(&self) -> (bool, String, usize) {
+    pub fn pty_daemon_status(&self) -> (bool, bool, String, usize) {
+        let available = self.tmux.is_some();
         let running = self.pty_daemon.is_alive();
         let sessions = self.pty_daemon.list_sessions().unwrap_or_default();
         (
+            available,
             running,
             self.pty_daemon.socket_path().display().to_string(),
             sessions.len(),
@@ -1975,6 +2000,29 @@ const TMUX_PANE_STARTUP_WINDOW: Duration = Duration::from_millis(300);
 /// pane almost the instant it dies.
 const TMUX_PANE_STARTUP_POLL: Duration = Duration::from_millis(25);
 
+/// Chooses whether (and for how long) a spawn attempt should be startup-probed.
+///
+/// Under tmux, the PTY child is always an attach client, and an attach that
+/// exits immediately is a dead pane regardless of which identity rung produced
+/// the underlying tmux session. So tmux-backed attempts are always probed.
+///
+/// Without tmux, probes are only for non-final identity rungs where there is a
+/// lower fallback to try.
+fn startup_probe_window(
+    rung: usize,
+    last_rung: usize,
+    identity: ClaudeIdentity,
+    tmux_attached: bool,
+) -> Option<Duration> {
+    if tmux_attached {
+        Some(TMUX_PANE_STARTUP_WINDOW)
+    } else if rung < last_rung {
+        Some(identity.liveness_window())
+    } else {
+        None
+    }
+}
+
 /// `true` if the tmux session `name` was still alive at the end of `window` —
 /// i.e. the command inside it did not immediately fail to start. Returns as
 /// soon as the session is gone, so the failure path is fast; only the healthy
@@ -2086,7 +2134,7 @@ fn claude_conversation_uuid(session_id: &str) -> String {
 ///   flag it never carried.
 /// - **a live tmux session** — the engine has been running since before the
 ///   app closed; the argv is never used (`Tmux::ensure_session` short-circuits)
-///   and the PTY child is just an attach client, so there is nothing to probe.
+///   and the PTY child is an attach client.
 /// - the last rung of a ladder whose earlier rungs were refused.
 fn spawn_identity(engine: &str, is_restore: bool, tmux_session_exists: bool) -> ClaudeIdentity {
     if engine != "claude" || tmux_session_exists {
@@ -2158,8 +2206,9 @@ impl ClaudeIdentity {
         match self {
             Self::Resume => RESUME_LIVENESS_WINDOW,
             Self::Claim => SESSION_ID_LIVENESS_WINDOW,
-            // Never probed (it is always the last rung), so any value is
-            // unused; zero is the honest one.
+            // Direct-spawn path only: stock is the last rung and is not
+            // identity-probed. (tmux-backed attempts are probed separately by
+            // `startup_probe_window`.)
             Self::Stock => Duration::ZERO,
         }
     }
@@ -2259,7 +2308,7 @@ fn build_engine_argv(
     let env = engine_env();
     match req.engine.as_str() {
         "shell" => {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let shell = preferred_shell_binary(std::env::var("SHELL").ok().as_deref());
             Ok(EngineCommand {
                 argv: vec![shell],
                 env,
@@ -2356,6 +2405,22 @@ fn build_engine_argv(
              \"shell\", \"copilot\", \"antigravity\")"
         )),
     }
+}
+
+/// The shell binary a `shell` session should execute.
+///
+/// `$SHELL` can be stale (for example, pointing to an uninstalled shell), so
+/// this only trusts it when it is an executable path. Otherwise it falls back
+/// to known system shells.
+fn preferred_shell_binary(shell_env: Option<&str>) -> String {
+    let from_env = shell_env.map(str::trim).filter(|s| !s.is_empty());
+    for candidate in from_env.into_iter().chain(["/bin/zsh", "/bin/sh"]) {
+        let path = Path::new(candidate);
+        if tmux::is_executable_file(path) {
+            return candidate.to_string();
+        }
+    }
+    from_env.unwrap_or("/bin/zsh").to_string()
 }
 
 /// The environment every engine is handed, whichever way it's spawned.
@@ -3998,6 +4063,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn preferred_shell_binary_ignores_a_stale_shell_env_path() {
+        let shell = preferred_shell_binary(Some("/no/such/shell/binary/on/this/machine"));
+        assert_ne!(shell, "/no/such/shell/binary/on/this/machine");
+        assert!(
+            tmux::is_executable_file(Path::new(&shell)),
+            "fallback shell must be executable, got {shell}"
+        );
+    }
+
+    #[test]
+    fn preferred_shell_binary_returns_an_executable_when_shell_env_is_missing() {
+        let shell = preferred_shell_binary(None);
+        assert!(
+            tmux::is_executable_file(Path::new(&shell)),
+            "missing $SHELL must still resolve to an executable shell, got {shell}"
+        );
+    }
+
     /// The real proof this task called out specifically: run the actual
     /// resolution logic against this machine's real `$SHELL`. Soft-guarded
     /// rather than hard-failed on the exact `~/.local/bin` marker, since a
@@ -4845,8 +4929,7 @@ mod tests {
                         Stock,
                         "{engine} restore={is_restore} tmux={tmux_exists}"
                     );
-                    // Single-rung ladder == never probed. This is the
-                    // property that actually protects the latency.
+                    // Single-rung ladder: no identity fallback work.
                     assert_eq!(
                         spawn_identity(engine, is_restore, tmux_exists)
                             .ladder()
@@ -4871,6 +4954,32 @@ mod tests {
         for start in [Resume, Claim, Stock] {
             assert_eq!(*start.ladder().last().unwrap(), Stock, "{start:?}");
         }
+    }
+
+    #[test]
+    fn startup_probe_windows_cover_tmux_attach_and_identity_retries() {
+        use ClaudeIdentity::*;
+
+        // tmux-backed attempts are always checked, including the last rung.
+        assert_eq!(
+            startup_probe_window(0, 0, Stock, true),
+            Some(TMUX_PANE_STARTUP_WINDOW)
+        );
+        assert_eq!(
+            startup_probe_window(2, 2, Stock, true),
+            Some(TMUX_PANE_STARTUP_WINDOW)
+        );
+
+        // direct spawns only probe non-final identity rungs.
+        assert_eq!(
+            startup_probe_window(0, 2, Resume, false),
+            Some(RESUME_LIVENESS_WINDOW)
+        );
+        assert_eq!(
+            startup_probe_window(1, 2, Claim, false),
+            Some(SESSION_ID_LIVENESS_WINDOW)
+        );
+        assert_eq!(startup_probe_window(2, 2, Stock, false), None);
     }
 
     /// The liveness probe behind the identity-ladder retry, against real
@@ -5908,6 +6017,17 @@ mod tests {
                 "repaint #{repaint} re-reported a failure the user already acknowledged"
             );
         }
+    }
+
+    #[test]
+    fn daemon_status_reports_availability_from_runtime_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sink: OutputSink = Arc::new(|_, _| {});
+        let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(None);
+        let (available, running, _socket_path, session_count) = manager.pty_daemon_status();
+        assert!(!available);
+        assert!(!running);
+        assert_eq!(session_count, 0);
     }
 
     /// No screen available (no tmux, or the capture failed): the latch is

@@ -588,12 +588,18 @@ export default function Sidebar({
             </span>
           )}
         </div>
-        <input
-          className="sidebar-files-filter"
-          placeholder="Filter files"
-          value={fileFilter}
-          onChange={(e) => setFileFilter(e.target.value)}
-        />
+        <div className="sidebar-files-filter-wrap">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="7" cy="7" r="4.3" stroke="currentColor" strokeWidth="1.3" />
+            <path d="m10.4 10.4 3 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+          <input
+            className="sidebar-files-filter"
+            placeholder="Filter files"
+            value={fileFilter}
+            onChange={(e) => setFileFilter(e.target.value)}
+          />
+        </div>
         <div className="sidebar-files-body">
           <FileTree
             project={selectedProject}

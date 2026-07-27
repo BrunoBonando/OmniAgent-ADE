@@ -12,6 +12,7 @@ import AppChrome from "./components/AppChrome";
 import NewSessionModal from "./components/NewSessionModal";
 import NewWorkspaceModal from "./components/NewWorkspaceModal";
 import StartupScreen from "./components/StartupScreen";
+import LoadingOverlay from "./components/LoadingOverlay";
 import { NewTerminalModal } from "./components/NewTerminalModal";
 import ClosePaneConfirm from "./components/ClosePaneConfirm";
 import BrainMap from "./map/BrainMap";
@@ -84,6 +85,7 @@ import {
   rootsList,
   sessionCreate,
   sessionKill,
+  ptyDaemonStatus,
   sessionStatus,
   sessionWrite,
   settingsGet,
@@ -106,6 +108,16 @@ function persistedSessionKey(project: string, group: string): string {
 function serializeLiveAndDormantTabs(live: TabInfo[], dormant: PersistedTab[]): string {
   const liveLayout = JSON.parse(serializeLayout(live)) as { tabs: PersistedTab[] };
   return JSON.stringify({ tabs: [...liveLayout.tabs, ...dormant] });
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error && err.message.trim().length > 0) return err.message;
+  if (typeof err === "string" && err.trim().length > 0) return err;
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim().length > 0) return message;
+  }
+  return String(err);
 }
 
 /** Task 8.1: how often `App.tsx` polls `ingestion_status` — PLAN.md's own
@@ -142,6 +154,11 @@ function App() {
   const [restoringGroupKey, setRestoringGroupKey] = useState<string | null>(null);
   const [requestedGroupKey, setRequestedGroupKey] = useState<string | null>(null);
   const [restoreErrors, setRestoreErrors] = useState<Record<string, string>>({});
+  // Tracks the group key being loaded for a workspace switch (sidebar select
+  // or startup → workspace transition). Non-null while the first session of a
+  // newly-selected workspace is being created; cleared in `restoreSession`'s
+  // finally block, which drives the LoadingOverlay's exit animation.
+  const [workspaceSwitchGroup, setWorkspaceSwitchGroup] = useState<string | null>(null);
   const restoredGroupsRef = useRef(new Set<string>());
   const restoringGroupRef = useRef<string | null>(null);
   const [agentState, agentDispatch] = useReducer(agentsReducer, initialAgentsState);
@@ -348,8 +365,22 @@ function App() {
 
   // ---- boot: load metadata only; terminals wait for workspace selection --
   useEffect(() => {
-    let cancelled = false;
+    if (typeof ptyDaemonStatus !== "function") return;
+    void ptyDaemonStatus()
+      .then((status) => {
+        if (status.available) return;
+        setErrorBanner((current) =>
+          current ??
+          "Session persistence is unavailable: PTY daemon is missing. New terminals run in direct mode and won't restore after app restart.",
+        );
+      })
+      .catch(() => {
+        // Best effort informational check; startup must not fail on it.
+      });
+  }, []);
 
+  useEffect(() => {
+    let cancelled = false;
     (async () => {
       // The closed set is read BEFORE the project list loads: the sidebar
       // must never paint every workspace and then collapse to the open ones
@@ -630,6 +661,7 @@ function App() {
       } finally {
         restoringGroupRef.current = null;
         setRestoringGroupKey((current) => (current === key ? null : current));
+        setWorkspaceSwitchGroup((current) => (current === key ? null : current));
       }
     },
     [persistedTabs],
@@ -640,7 +672,11 @@ function App() {
       setSelectedProjectId(project.id);
       setStartupPhase("workspace-active");
       const first = persistedTabs.find((tab) => tab.project === project.id);
-      if (first) void restoreSession(project.id, persistedGroup(first));
+      if (first) {
+        const key = persistedSessionKey(project.id, persistedGroup(first));
+        setWorkspaceSwitchGroup(key);
+        void restoreSession(project.id, persistedGroup(first));
+      }
     },
     [persistedTabs, restoreSession],
   );
@@ -650,7 +686,11 @@ function App() {
       setSelectedProjectId(project.id);
       if (state.tabs.some((tab) => tab.project === project.id)) return;
       const first = persistedTabs.find((tab) => tab.project === project.id);
-      if (first) void restoreSession(project.id, persistedGroup(first));
+      if (first) {
+        const key = persistedSessionKey(project.id, persistedGroup(first));
+        setWorkspaceSwitchGroup(key);
+        void restoreSession(project.id, persistedGroup(first));
+      }
     },
     [persistedTabs, restoreSession, state.tabs],
   );
@@ -1047,13 +1087,13 @@ function App() {
       // closes, which is the opposite of a name).
       const groupLabel = sessionNameFromPrompt(prompt) ?? nextSessionName(state.tabs, project.id);
       const created: TabInfo[] = [];
-      const failed: Engine[] = [];
+      const failed: Array<{ engine: Engine; error: string }> = [];
       for (const engine of slots) {
         try {
           created.push(await createSessionTab(project, engine, group, groupLabel, cwd));
         } catch (err) {
           console.error(`failed to start ${engine} in ${cwd}`, err);
-          failed.push(engine);
+          failed.push({ engine, error: errorMessage(err) });
         }
       }
 
@@ -1095,11 +1135,12 @@ function App() {
         // Deduplicated: with one engine per slot, the same CLI can fail
         // twice in one batch, and "couldn't run Shell, Shell" reads like a
         // bug in the message rather than a fact about the machine.
-        const names = [...new Set(failed)].map((e) => ENGINE_LABEL[e]).join(", ");
+        const names = [...new Set(failed.map((f) => f.engine))].map((e) => ENGINE_LABEL[e]).join(", ");
+        const details = [...new Set(failed.map((f) => f.error).filter((m) => m.trim().length > 0))].join(" | ");
         setErrorBanner(
           created.length > 0
-            ? `Started the session, but couldn't run ${names} — the rest are up.`
-            : `Couldn't start ${names} in ${project.label} — no panes were opened.`,
+            ? `Started the session, but couldn't run ${names}${details ? `: ${details}` : ""} — the rest are up.`
+            : `Couldn't start ${names} in ${project.label}${details ? `: ${details}` : " — no panes were opened."}`,
         );
       }
 
@@ -1572,6 +1613,7 @@ function App() {
       <AppChrome
         projectLabel={selectedProject?.label ?? null}
         sessionLabel={currentSessionLabel}
+        sessionTerminalCount={visibleSession?.tabs.length ?? null}
         notifications={notifications.entries}
         liveSessionIds={tabIds}
         knownProjectIds={state.projects.map((p) => p.id)}
@@ -1739,6 +1781,11 @@ function App() {
         onActivateTab={activateTab}
         onNewTabInProject={(p) => void requestNewTab(p)}
       />
+      {/* Workspace-switch loading overlay — covers the full window while the
+          first session of a newly-selected workspace (or the startup →
+          workspace transition) is being created. Fades out when the restore
+          settles (success or error). */}
+      <LoadingOverlay visible={workspaceSwitchGroup !== null} />
     </div>
   );
 }

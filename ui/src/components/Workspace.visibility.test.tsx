@@ -232,6 +232,33 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
     expect(xtermMocks.ctorMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does not resize a terminal while its pane is hidden on mount", async () => {
+    const p1 = project("p1");
+    const p2 = project("p2");
+    const tabs = [tab("a", "p1")];
+
+    const props = {
+      projects: [p1, p2],
+      tabs,
+      activeTabId: "a",
+      onActivateTab: noop,
+      onCloseTab: noop,
+      onNewTabInProject: noop,
+      onRenameTab: noop,
+      agentState: initialAgentsState,
+      hidden: false,
+    };
+
+    const { rerender } = render(<Workspace {...props} selectedProjectId="p2" />);
+
+    await waitFor(() => expect(xtermMocks.ctorMock).toHaveBeenCalledTimes(1));
+    expect(tauriMocks.sessionResizeMock).not.toHaveBeenCalled();
+
+    rerender(<Workspace {...props} selectedProjectId="p1" />);
+
+    await waitFor(() => expect(tauriMocks.sessionResizeMock).toHaveBeenCalled());
+  });
+
   it("stamps each pane window with its status/motion classes — the border IS the status display", async () => {
     // Founder, 2026-07-26: "The current terminal status is on the title
     // bar, we could remove it from there and leave only in the border."

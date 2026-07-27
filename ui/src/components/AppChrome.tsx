@@ -29,8 +29,8 @@
 //    "only clicks landing on this exact element", which would leave every
 //    click on the breadcrumb — the widest part of the bar — doing nothing.
 //    `deep` drags from anywhere in the subtree, and Tauri's own handler
-//    stops at clickable elements, so the two <button> triggers below still
-//    click instead of dragging (tauri 2.11.5, `src/window/scripts/drag.js`).
+//    stops at clickable elements, so the notifications <button> still
+//    clicks instead of dragging (tauri 2.11.5, `src/window/scripts/drag.js`).
 //    The matching `core:window:allow-start-dragging` grant is *not* part of
 //    `core:window:default` and had to be added explicitly — see the Rust
 //    test that locks it.
@@ -54,10 +54,12 @@
 // including the map view.
 import NotificationsPanel from "./NotificationsPanel";
 import type { NotificationEntry } from "../state/notifications";
+import omniAgentLogo from "../assets/omniagent-logo.png";
 
 interface AppChromeProps {
   projectLabel: string | null;
   sessionLabel: string | null;
+  sessionTerminalCount?: number | null;
   notifications: NotificationEntry[];
   liveSessionIds: string[];
   knownProjectIds: string[];
@@ -75,6 +77,7 @@ interface AppChromeProps {
 export default function AppChrome({
   projectLabel,
   sessionLabel,
+  sessionTerminalCount = null,
   notifications,
   liveSessionIds,
   knownProjectIds,
@@ -92,21 +95,27 @@ export default function AppChrome({
     // file's module doc for why the bare attribute would leave most of the
     // bar dead.
     <header className="app-chrome" data-tauri-drag-region="deep">
-      <div className="app-chrome-breadcrumb">
-        {projectLabel && (
-          <>
-            <span className="app-chrome-project">{projectLabel}</span>
+      <div className="app-chrome-center">
+        <div className="app-chrome-chip">
+          <img src={omniAgentLogo} alt="" width="13" height="13" className="app-chrome-chip-logo" />
+          <div className="app-chrome-breadcrumb">
+            <span className="app-chrome-project">{projectLabel ?? "OmniAgent"}</span>
             {sessionLabel && (
               <>
-                <span className="app-chrome-separator" aria-hidden="true">
-                  ·
-                </span>
+                <span className="app-chrome-separator">/</span>
                 <span className="app-chrome-session">{sessionLabel}</span>
               </>
             )}
-          </>
-        )}
+            {typeof sessionTerminalCount === "number" && sessionTerminalCount > 0 && (
+              <span className="app-chrome-terminal-count">
+                {sessionTerminalCount} terminal{sessionTerminalCount === 1 ? "" : "s"}
+              </span>
+            )}
+          </div>
+        </div>
       </div>
+
+      <div className="app-chrome-spacer" />
       <div className="app-chrome-actions">
         <NotificationsPanel
           entries={notifications}

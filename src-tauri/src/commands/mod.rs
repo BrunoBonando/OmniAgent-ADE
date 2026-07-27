@@ -29,6 +29,7 @@ use crate::sessions::{CreateSessionRequest, SessionInfo, SessionManager, Session
 
 #[derive(Debug, serde::Serialize)]
 pub struct DaemonStatusInfo {
+    pub available: bool,
     pub running: bool,
     pub socket_path: String,
     pub session_count: usize,
@@ -255,7 +256,7 @@ pub fn session_create(
             briefing,
             restore_id,
         })
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// The five-state light for one session, computed on demand — `"ready"`
@@ -325,8 +326,9 @@ pub fn session_kill(id: String, manager: State<'_, SessionManager>) -> Result<()
 
 #[tauri::command]
 pub fn pty_daemon_status(manager: State<'_, SessionManager>) -> Result<DaemonStatusInfo, String> {
-    let (running, socket_path, session_count) = manager.pty_daemon_status();
+    let (available, running, socket_path, session_count) = manager.pty_daemon_status();
     Ok(DaemonStatusInfo {
+        available,
         running,
         socket_path,
         session_count,

@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProjectInfo } from "../state/sessions";
 import StartupScreen from "./StartupScreen";
 
@@ -9,12 +9,16 @@ const projects: ProjectInfo[] = [
 ];
 
 describe("StartupScreen", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("shows only the OmniAgent loading state while metadata is pending", () => {
     render(
       <StartupScreen loading projects={[]} onSelectWorkspace={vi.fn()} onStartFromScratch={vi.fn()} />,
     );
 
-    expect(screen.getByText("Loading…")).toBeInTheDocument();
+    expect(screen.getByText("Loading...")).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
@@ -54,5 +58,27 @@ describe("StartupScreen", () => {
     start.focus();
     fireEvent.keyDown(start, { key: "ArrowRight" });
     expect(alpha).toHaveFocus();
+  });
+
+  it("keeps the loading overlay visible for at least 3 seconds", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(
+      <StartupScreen loading projects={[]} onSelectWorkspace={vi.fn()} onStartFromScratch={vi.fn()} />,
+    );
+
+    rerender(
+      <StartupScreen
+        loading={false}
+        projects={projects}
+        onSelectWorkspace={vi.fn()}
+        onStartFromScratch={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Loading...")).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(2999));
+    expect(screen.getByText("Loading...")).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
   });
 });

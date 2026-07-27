@@ -58,6 +58,7 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const retryTimerRef = useRef<number | null>(null);
   // Lets the mount effect (keyed only on `[sessionId]`, see below) always
   // call the LATEST `onFirstInput` prop without needing it in that effect's
   // deps — the same ref-for-a-callback pattern used throughout this
@@ -68,6 +69,15 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
   useEffect(() => {
     onFirstInputRef.current = onFirstInput;
   }, [onFirstInput]);
+
+  const reportSizeWithRedrawNudge = (cols: number, rows: number) => {
+    const nudgedRows = Math.max(1, rows - 1);
+    void sessionResize(sessionId, cols, nudgedRows).then(() => {
+      void sessionResize(sessionId, cols, rows);
+    });
+  };
+
+  const hasUsableSize = (cols: number, rows: number) => cols > 0 && rows > 0;
 
   // Mount once per session id — see module doc comment for why this must
   // not depend on `visible`.
@@ -105,26 +115,34 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
     termRef.current = term;
     fitRef.current = fit;
 
-    const fitAndReportSize = () => {
+    const fitAndReportSize = (withNudge: boolean) => {
       try {
         fit.fit();
       } catch {
-        return;
+        return false;
       }
-      void sessionResize(sessionId, term.cols, term.rows);
+      if (!hasUsableSize(term.cols, term.rows)) {
+        return false;
+      }
+      if (withNudge) {
+        reportSizeWithRedrawNudge(term.cols, term.rows);
+      } else {
+        void sessionResize(sessionId, term.cols, term.rows);
+      }
+      return true;
     };
-    fitAndReportSize();
-    // ponytail: a pane that REMOUNTS — a cross-row drag-to-swap, or a ladder
-    // reflow (see `Workspace.mountStability.test.tsx`) — starts with an empty
-    // xterm, and tmux only repaints on a real size change, so two equally
-    // sized panes trading places would sit blank until the agent next
-    // printed. Reporting one row short and then the true size guarantees the
-    // SIGWINCH that makes tmux redraw; the chained call means the pane ends
-    // at its true size whichever order the two IPCs land in. Rows only — a
-    // width change would make tmux reflow its scrollback. Upgrade path if the
-    // one-row flicker ever shows: a `session_snapshot` command over `tmux
-    // capture-pane -p -e`, written into xterm on mount.
-    void sessionResize(sessionId, term.cols, Math.max(1, term.rows - 1)).then(fitAndReportSize);
+
+    const fitWithRetry = (attempt: number, withNudge: boolean) => {
+      if (fitAndReportSize(withNudge)) return;
+      if (attempt >= 8) return;
+      retryTimerRef.current = window.setTimeout(
+        () => fitWithRetry(attempt + 1, withNudge),
+        16 * (attempt + 1),
+      );
+    };
+    if (visible) {
+      fitWithRetry(0, true);
+    }
 
     // Auto-title capture (founder ask): a fresh cycle per mounted session
     // (this local variable lives inside the `[sessionId]`-keyed effect, so
@@ -143,7 +161,7 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
       }
     });
 
-    const resizeObserver = new ResizeObserver(() => fitAndReportSize());
+    const resizeObserver = new ResizeObserver(() => fitWithRetry(0, false));
     resizeObserver.observe(container);
 
     let cancelled = false;
@@ -199,6 +217,10 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
       cancelled = true;
       dataDisposable.dispose();
       resizeObserver.disconnect();
+      if (retryTimerRef.current !== null) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
       unlistenOutput?.();
       unlistenDrop?.();
       term.dispose();
@@ -228,12 +250,26 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
       const term = termRef.current;
       const fit = fitRef.current;
       if (!term || !fit) return;
-      try {
-        fit.fit();
-      } catch {
-        // container not laid out yet — next resize/visibility flip retries.
-      }
-      void sessionResize(sessionId, term.cols, term.rows);
+      const fitOnce = () => {
+        try {
+          fit.fit();
+        } catch {
+          return false;
+        }
+        if (!hasUsableSize(term.cols, term.rows)) {
+          return false;
+        }
+        reportSizeWithRedrawNudge(term.cols, term.rows);
+        return true;
+      };
+      if (fitOnce()) return;
+      let attempt = 0;
+      const retry = () => {
+        attempt += 1;
+        if (fitOnce() || attempt >= 8) return;
+        retryTimerRef.current = window.setTimeout(retry, 16 * attempt);
+      };
+      retry();
     });
     return () => cancelAnimationFrame(frame);
   }, [visible, sessionId]);

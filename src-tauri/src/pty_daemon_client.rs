@@ -247,9 +247,14 @@ impl PtyDaemonClient {
 fn resolve_daemon_binary() -> Result<PathBuf> {
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(parent) = current_exe.parent() {
-            let candidate = parent.join("omniagent-pty-daemon");
-            if candidate.exists() {
-                return Ok(candidate);
+            let candidates = [
+                parent.join("omniagent-pty-daemon"),
+                parent.join("../Resources/omniagent-pty-daemon"),
+            ];
+            for candidate in candidates {
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
             }
         }
     }

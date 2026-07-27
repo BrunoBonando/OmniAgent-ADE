@@ -303,11 +303,20 @@ code {
   box-sizing: border-box;
   display: grid;
   place-items: center;
+  position: relative;
   overflow: hidden;
   padding: 56px 7vw;
   background:
     radial-gradient(circle at 50% 35%, rgba(61, 141, 203, 0.1), transparent 30%),
     var(--void);
+}
+
+.startup-content {
+  width: min(1100px, 100%);
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  transition: filter 220ms ease, opacity 220ms ease, transform 220ms ease;
 }
 
 .startup-brand {
@@ -319,8 +328,11 @@ code {
 }
 
 .startup-screen.is-ready {
-  grid-template-rows: minmax(150px, 0.7fr) auto minmax(40px, 0.35fr);
   align-content: center;
+}
+
+.startup-screen.is-ready .startup-content {
+  grid-template-rows: minmax(150px, 0.7fr) auto minmax(40px, 0.35fr);
 }
 
 .startup-screen.is-ready .startup-brand {
@@ -352,15 +364,113 @@ code {
   animation: startup-rise 420ms ease-out both;
 }
 
+.startup-screen.is-loading .startup-content {
+  filter: blur(16px);
+  opacity: 0.65;
+  transform: scale(1.02);
+  pointer-events: none;
+}
+
+.startup-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  opacity: 1;
+  background: rgba(9, 11, 16, 0.44);
+  backdrop-filter: blur(10px) saturate(150%);
+  transition: opacity 260ms ease, backdrop-filter 260ms ease;
+}
+
+.startup-loading-overlay.is-exiting {
+  opacity: 0;
+  backdrop-filter: blur(0) saturate(110%);
+}
+
+.startup-loading-modal {
+  min-width: 260px;
+  display: grid;
+  justify-items: center;
+  gap: 18px;
+  padding: 28px 34px;
+  border: 1px solid rgba(61, 141, 203, 0.38);
+  border-radius: 16px;
+  background: rgba(20, 23, 31, 0.82);
+  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.46);
+  transition: opacity 260ms ease, transform 260ms ease;
+}
+
+.startup-loading-overlay.is-exiting .startup-loading-modal {
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+}
+
 .startup-loading {
   margin: 0;
-  color: var(--ink-dim);
-  font: 500 12px/1 var(--mono);
-  letter-spacing: 0.08em;
+  color: var(--ink);
+  font: 600 14px/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* --------------------------------------------------------- global loading overlay
+   Fixed over the whole viewport — shown during workspace switches and the
+   startup → workspace transition. Same enter/exit animation as the startup
+   screen's own modal, but `position: fixed` so it covers the full app shell
+   including sidebar and chrome. Stacks above every other overlay (z-index 500). */
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: grid;
+  place-items: center;
+  opacity: 1;
+  background: rgba(9, 11, 16, 0.52);
+  backdrop-filter: blur(12px) saturate(150%);
+  transition: opacity 280ms ease, backdrop-filter 280ms ease;
+}
+
+.loading-overlay.is-exiting {
+  opacity: 0;
+  backdrop-filter: blur(0) saturate(110%);
+}
+
+.loading-overlay-modal {
+  min-width: 260px;
+  display: grid;
+  justify-items: center;
+  gap: 18px;
+  padding: 28px 34px;
+  border: 1px solid rgba(61, 141, 203, 0.38);
+  border-radius: 16px;
+  background: rgba(20, 23, 31, 0.82);
+  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.46);
+  transition: opacity 280ms ease, transform 280ms ease;
+}
+
+.loading-overlay.is-exiting .loading-overlay-modal {
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+}
+
+.loading-overlay-label {
+  margin: 0;
+  color: var(--ink);
+  font: 600 14px/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-overlay,
+  .loading-overlay-modal {
+    transition: none;
+  }
 }
 
 .startup-chooser {
-  width: min(1100px, 100%);
+  width: 100%;
   min-width: 0;
   text-align: center;
   animation: startup-rise 520ms 100ms ease-out both;
@@ -470,13 +580,20 @@ code {
 @media (prefers-reduced-motion: reduce) {
   .startup-brand,
   .startup-logo,
-  .startup-chooser {
+  .startup-chooser,
+  .startup-content {
     animation: none;
     transition: none;
   }
 
   .startup-logo {
     opacity: 1;
+  }
+
+  .startup-screen.is-loading .startup-content {
+    filter: none;
+    opacity: 0.5;
+    transform: none;
   }
 }
 
@@ -5636,49 +5753,85 @@ code {
   height: var(--titlebar-h);
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   /* Left padding is the traffic-light reservation, not decoration. */
   padding: 0 10px 0 var(--titlebar-lights);
-  background: var(--void);
-  border-bottom: 1px solid var(--line-soft);
+  background: rgba(24, 24, 27, 0.86);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
   /* The whole bar is a drag region; a text cursor over it reads as
      selectable text and invites a drag that does nothing. */
   cursor: default;
   user-select: none;
+  position: relative;
+}
+
+.app-chrome-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.app-chrome-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  max-width: min(560px, calc(100% - 240px));
+}
+
+.app-chrome-chip-logo {
+  border-radius: 3px;
+  flex: 0 0 auto;
 }
 
 .app-chrome-breadcrumb {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
+  gap: 7px;
   min-width: 0;
-  /* AppKit centres the real window title across the FULL window width, on
-     top of this row. At the 960px minimum that title starts around x=415,
-     so the breadcrumb is capped well short of it — a workspace called
-     something long ellipsizes instead of colliding with the app's own
-     name. */
-  max-width: 280px;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  letter-spacing: 0.03em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .app-chrome-project {
-  color: var(--ink-dim);
+  color: #d8d8de;
+  font: 600 11.5px/1 var(--sans);
+  letter-spacing: 0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .app-chrome-separator {
-  color: var(--ink-faint);
+  color: #4e4e58;
+  font-size: 11px;
 }
 
 /* The session you're on, everywhere — the same answer the sidebar gives
    inside the project row, readable from the map view too. */
 .app-chrome-session {
-  color: var(--signal);
+  color: #8b8b95;
+  font: 400 11.5px/1 var(--sans);
+  letter-spacing: 0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-chrome-terminal-count {
+  color: #5c5c66;
+  font: 500 10px/1 var(--mono);
+  padding-left: 2px;
+  flex: none;
+}
+
+.app-chrome-spacer {
+  flex: 1;
 }
 
 .app-chrome-actions {
@@ -6829,16 +6982,57 @@ code {
    still the same lazy `listDir`/watcher-backed tree. */
 .sidebar-files { flex: 1; min-height: 0; display: flex; flex-direction: column; border-top: 0.5px solid rgba(255, 255, 255, 0.06); margin-top: 2px; }
 .sidebar-files-header { flex: none; display: flex; align-items: center; gap: 6px; padding: 8px 14px 5px; }
-.sidebar-files-filter {
-  flex: none; margin: 0 9px 7px; height: 24px; padding: 0 8px;
-  border-radius: 6px; background: rgba(255, 255, 255, 0.05);
+.sidebar-files-filter-wrap {
+  flex: none;
+  margin: 0 9px 7px;
+  height: 24px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
   border: 0.5px solid rgba(255, 255, 255, 0.06);
-  font: 400 11px/1 var(--sans); color: var(--ink); outline: none;
+  color: rgba(201, 201, 210, 0.45);
+}
+.sidebar-files-filter {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: 400 11px/1 var(--sans);
+  color: var(--ink);
+  outline: none;
 }
 .sidebar-files-filter::placeholder { color: #5c5c66; }
-.sidebar-files-filter:focus { border-color: var(--accent-focus-border); }
+.sidebar-files-filter-wrap:focus-within { border-color: var(--accent-focus-border); }
 .sidebar-files-body { flex: 1; min-height: 0; overflow: auto; padding: 0 6px 8px; }
 .file-tree.is-embedded { width: 100%; border: 0; background: transparent; }
+.file-tree.is-embedded .file-tree-body { padding: 0; overflow-x: hidden; }
+.file-tree.is-embedded .file-tree-row {
+  gap: 5px;
+  min-height: 23px;
+  padding-right: 8px;
+  border-radius: 6px;
+}
+.file-tree.is-embedded .file-tree-row:hover { background: rgba(255, 255, 255, 0.05); }
+.file-tree.is-embedded .file-tree-row.is-selected {
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: none;
+}
+.file-tree.is-embedded .file-tree-row.is-selected:hover { background: rgba(255, 255, 255, 0.065); }
+.file-tree.is-embedded .file-tree-row-main {
+  height: 23px;
+  padding: 0;
+  gap: 5px;
+  font-family: var(--sans);
+  font-size: 11.5px;
+}
+.file-tree.is-embedded .file-tree-row[data-file-tree-is-dir="true"] .file-tree-name { color: #dcdce2; font-weight: 500; }
+.file-tree.is-embedded .file-tree-row[data-file-tree-is-dir="false"] .file-tree-name { color: #c2c2cb; font-weight: 400; }
+.file-tree.is-embedded .file-tree-row.is-selected .file-tree-name { color: #e8e8ee; }
 
 /* redesign: live git badges in the FILES section (Task 7) — the header's "N
    changed" chip, per-folder descendant-change counts, and per-file M/A/D/R/U

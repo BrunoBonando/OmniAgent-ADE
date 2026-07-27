@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OmniAgent",
-  "version": "2026.7.27",
+  "version": "2026.7.27+005",
   "identifier": "com.omniagent.app",
   "build": {
     "beforeDevCommand": "npm --prefix ui run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm --prefix ui run build && cargo build --release -p mcp-server --bin omniagent-mcp",
+    "beforeBuildCommand": "npm --prefix ui run build && cargo build --release -p mcp-server --bin omniagent-mcp && cargo build --release -p omniagent-pty-daemon --bin omniagent-pty-daemon && cp target/release/omniagent-pty-daemon src-tauri/bin/omniagent-pty-daemon && chmod +x src-tauri/bin/omniagent-pty-daemon",
     "frontendDist": "../ui/dist"
   },
   "app": {
@@ -36,14 +36,24 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../target/release/omniagent-mcp": "omniagent-mcp"
+      "../target/release/omniagent-mcp": "omniagent-mcp",
+      "bin/omniagent-pty-daemon": "omniagent-pty-daemon"
     },
     "macOS": {
       "dmg": {
         "background": "dmg/dmg-background.png",
-        "windowSize": { "width": 700, "height": 400 },
-        "appPosition": { "x": 172, "y": 205 },
-        "applicationFolderPosition": { "x": 528, "y": 205 }
+        "windowSize": {
+          "width": 700,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 172,
+          "y": 205
+        },
+        "applicationFolderPosition": {
+          "x": 528,
+          "y": 205
+        }
       }
     }
   }

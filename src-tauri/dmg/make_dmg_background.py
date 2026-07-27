@@ -112,6 +112,7 @@ RADIUS = 14  # --radius-lg
 ICON1_X, ICON2_X = 172, 528  # -> appPosition.x / applicationFolderPosition.x
 ICON_Y = 205  # -> appPosition.y / applicationFolderPosition.y
 ICON_BOX = 128  # bundle_dmg.sh's default ICON_SIZE, which Tauri does not override
+FINDER_LABEL_BASELINE_OFFSET = 24  # nudged down so white backplates sit slightly lower
 
 # Pane wide enough to clear the 128pt icon by ~36pt each side, and tall enough
 # that Finder's icon label (drawn just under the icon box) still lands inside.
@@ -466,7 +467,7 @@ def draw_finder_label_backplates(img: Image.Image) -> Image.Image:
     d = ImageDraw.Draw(layer)
     f = font("Inter-Regular", 12.5)
     for cx, label in ((ICON1_X, "OmniAgent"), (ICON2_X, "Applications")):
-        ty = ICON_Y + ICON_BOX / 2 + 15
+        ty = ICON_Y + ICON_BOX / 2 + FINDER_LABEL_BASELINE_OFFSET
         tw = f.getlength(label) / SS
         plate = [s(cx - tw / 2 - 12), s(ty - 14.0),
                  s(cx + tw / 2 + 12), s(ty + 6.0)]
@@ -536,7 +537,7 @@ def render_preview(bg: Image.Image) -> Image.Image:
             d.rounded_rectangle([left, top, left + box, top + box], radius=s(20),
                                 fill=rgba(BRAND_BLUE, 0.85))
         # Finder's own label placement: centred, just under the icon box
-        ty = ICON_Y + ICON_BOX / 2 + 15
+        ty = ICON_Y + ICON_BOX / 2 + FINDER_LABEL_BASELINE_OFFSET
         tw = f.getlength(label)
         pill = [s(cx) - tw / 2 - s(12), s(ty) - s(14.0),
                 s(cx) + tw / 2 + s(12), s(ty) + s(6.0)]

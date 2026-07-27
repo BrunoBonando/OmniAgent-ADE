@@ -332,6 +332,17 @@ describe("⌘N -> Session: panes in the project you're already in", () => {
     await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(1));
     expect(await screen.findByText(/couldn't run Shell/i)).toBeInTheDocument();
   });
+
+  it("shows the backend error when no pane could be opened", async () => {
+    tauriMocks.sessionCreateMock.mockRejectedValue(new Error("daemon socket not ready"));
+    await boot();
+    const dialog = await openSessionDialog();
+    fireEvent.click(screen.getByRole("button", { name: "1" }));
+    fireEvent.keyDown(dialog, { key: "Enter" });
+
+    expect(await screen.findByText(/couldn't start Claude in Project One/i)).toBeInTheDocument();
+    expect(await screen.findByText(/daemon socket not ready/i)).toBeInTheDocument();
+  });
 });
 
 describe("Ctrl+Arrow session navigation", () => {

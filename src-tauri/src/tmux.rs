@@ -31,7 +31,7 @@ pub struct Tmux {
 
 impl Tmux {
     pub fn resolve(socket: &str, _search_path: Option<&str>) -> Option<Self> {
-        let bin = resolve_daemon_binary().unwrap_or_else(|| PathBuf::from("omniagent-pty-daemon"));
+        let bin = resolve_daemon_binary()?;
         Some(Self {
             bin,
             socket: socket.to_string(),
@@ -339,6 +339,7 @@ fn resolve_daemon_binary() -> Option<PathBuf> {
         if let Some(parent) = current_exe.parent() {
             let candidates = [
                 parent.join("omniagent-pty-daemon"),
+                parent.join("../Resources/omniagent-pty-daemon"),
                 parent.join("../omniagent-pty-daemon"),
                 parent.join("../../omniagent-pty-daemon"),
             ];
