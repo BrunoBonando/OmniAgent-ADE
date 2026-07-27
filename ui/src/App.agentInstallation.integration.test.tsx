@@ -151,7 +151,6 @@ vi.mock("./components/Workspace", () => ({
   },
 }));
 
-vi.mock("./components/EnginePicker", () => ({ default: () => null }));
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({

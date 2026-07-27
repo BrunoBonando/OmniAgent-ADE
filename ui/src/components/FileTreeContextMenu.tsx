@@ -1,6 +1,6 @@
 // The file tree's right-click menu (Part B, item 4). Same small-popover
 // house style as `ProjectMenu.tsx` (transparent click-away backdrop — a
-// context menu is a utility, not a modal moment) plus `EnginePicker.tsx`'s
+// context menu is a utility, not a modal moment) plus `ClosePaneConfirm.tsx`'s
 // focus-on-open + Escape-to-close handling, since unlike `ProjectMenu` this
 // one is positioned at the cursor rather than anchored under a fixed
 // trigger row.
@@ -58,7 +58,7 @@ export default function FileTreeContextMenu({
 }: FileTreeContextMenuProps) {
   const menuRef = useRef<HTMLDivElement | null>(null);
   // Clamped so the menu never overflows the window — load-bearing here in a
-  // way `ProjectMenu`/`EnginePicker` never had to worry about: the file
+  // way `ProjectMenu`/`AboutPanel` never had to worry about: the file
   // tree panel is docked at the RIGHT edge of the window, so every
   // right-click inside it opens a menu whose natural `x` is already close
   // to (or past) the right edge. Measured post-mount (an unrendered menu

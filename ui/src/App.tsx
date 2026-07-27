@@ -8,7 +8,6 @@ import Workspace from "./components/Workspace";
 import CommandPalette from "./components/CommandPalette";
 import CodeReviewPanel from "./components/CodeReviewPanel";
 import AppChrome from "./components/AppChrome";
-import NewChooserModal from "./components/NewChooserModal";
 import NewSessionModal from "./components/NewSessionModal";
 import { NewTerminalModal } from "./components/NewTerminalModal";
 import ClosePaneConfirm from "./components/ClosePaneConfirm";
@@ -66,7 +65,6 @@ import {
   serializeNotifications,
   type NotificationEntry,
 } from "./state/notifications";
-import type { CreateChoice } from "./state/newChooserState";
 import { ENGINE_LABEL } from "./theme";
 import type { TerminalThemeId } from "./lib/terminalThemes";
 import { ownsCtrlOnlyShortcut } from "./lib/keyboard";
@@ -126,16 +124,16 @@ function App() {
   const [agentState, agentDispatch] = useReducer(agentsReducer, initialAgentsState);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  // ⌘N — since 2026-07-26 it no longer opens the workspace dialog directly
-  // (Bruno: "cmd + N now has a new meaning. Either a new session or a new
-  // workspace"). It opens `NewChooserModal` first; that hands back
-  // "session" or "workspace" and exactly one of the two dialogs below
-  // opens. `newWorkspaceOpen` stays lifted out of `Sidebar.tsx` (which
-  // still owns its OTHER overlays locally, e.g. aboutOpen/reviewOpen/
-  // importOpen) because the sidebar's "+" opens it too.
-  const [newChooserOpen, setNewChooserOpen] = useState(false);
   /** The pane ⌘W is asking about, if any — see the ⌘W handler below. */
   const [closingTabId, setClosingTabId] = useState<string | null>(null);
+  // ⌘N (Task 13, 2026-07-27, retiring the 2026-07-26 chooser step): direct
+  // again — opens `NewSessionModal` when a workspace is selected,
+  // `NewWorkspaceModal` otherwise (see the ⌘N handler below). The
+  // intermediate "session or workspace?" step (`NewChooserModal`/
+  // `state/newChooserState.ts`) is gone; see git history if you need it.
+  // `newWorkspaceOpen` stays lifted out of `Sidebar.tsx` (which still owns
+  // its OTHER overlays locally, e.g. aboutOpen/reviewOpen/importOpen)
+  // because the sidebar's "+" opens it too.
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   // ⌘T (Task 9, 2026-07-27): used to spawn the default engine directly
@@ -1022,19 +1020,6 @@ function App() {
     [defaultEngineFor, handleSessionCreated, reopenWorkspace],
   );
 
-  // ⌘N's chooser resolved. "Session" needs a project to run in — with none
-  // selected (a brand-new install with no projects at all) the only
-  // meaningful thing to create is a workspace, so it falls through to that
-  // rather than opening a dialog with nowhere to put its panes.
-  const handleCreateChoice = useCallback(
-    (choice: CreateChoice) => {
-      setNewChooserOpen(false);
-      if (choice === "workspace" || !selectedProject) setNewWorkspaceOpen(true);
-      else setNewSessionOpen(true);
-    },
-    [selectedProject],
-  );
-
   // ---- ImportProjectsFlow's bulk-import ("import from other tools") -----
   // `ImportProjectsFlow.tsx` owns every Tauri call in the flow itself
   // (`detect_importable_tools`, `list_import_candidates`, and one
@@ -1333,9 +1318,9 @@ function App() {
     [state.tabs, state.activeTabId, selectedProjectId],
   );
 
-  // ---- ⌘T new tab / ⌘K palette / ⌘N new workspace / ⌘W close pane. The
-  // established place for app-level shortcuts that need live UI state (which
-  // tab, which project) rather than a static native-menu event.
+  // ---- ⌘T new tab / ⌘K palette / ⌘N new session or workspace / ⌘W close
+  // pane. The established place for app-level shortcuts that need live UI
+  // state (which tab, which project) rather than a static native-menu event.
   //
   // ⌘W joined them on 2026-07-26 (founder bug: *"cmd+w is closing the full
   // app instead of confirming closing the current terminal"*). It could not
@@ -1407,9 +1392,15 @@ function App() {
         setPaletteOpen((open) => !open);
       } else if (e.key.toLowerCase() === "n") {
         e.preventDefault();
-        // Since 2026-07-26 this asks first (session or workspace) instead
-        // of opening the workspace dialog outright — see `newChooserOpen`.
-        setNewChooserOpen(true);
+        // Task 13 (2026-07-27): direct again, no "session or workspace?"
+        // chooser in between. A session needs a project to run in — with
+        // none selected (a brand-new install with no projects at all) the
+        // only meaningful thing to create is a workspace, so it falls
+        // through to that rather than opening a dialog with nowhere to put
+        // its panes (the same fallback `handleCreateChoice` used to encode
+        // for the now-retired chooser).
+        if (selectedProject) setNewSessionOpen(true);
+        else setNewWorkspaceOpen(true);
       } else if (e.key.toLowerCase() === "w") {
         // Always prevented, focused pane or not: with the native item gone
         // the default would be nothing at all, and letting it through is how
@@ -1546,13 +1537,6 @@ function App() {
           onImportCompleted={handleImportCompleted}
           onDismiss={() => setFirstRunDismissed(true)}
         />
-      )}
-
-      {/* ⌘N's two steps: the chooser, then whichever dialog it picked.
-          `NewWorkspaceModal` itself still lives inside `Sidebar` (its "+"
-          opens it too) — see `newWorkspaceOpen`'s declaration. */}
-      {newChooserOpen && (
-        <NewChooserModal onChoose={handleCreateChoice} onClose={() => setNewChooserOpen(false)} />
       )}
 
       {/* ⌘W's confirmation. Resolved from live state rather than captured at

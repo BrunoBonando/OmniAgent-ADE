@@ -1,5 +1,5 @@
 // Shared design tokens for the workspace shell (Task 5.2). One place so
-// Sidebar/PaneHeader/Terminal/EnginePicker/CommandPalette agree on what an
+// Sidebar/PaneHeader/Terminal/CommandPalette agree on what an
 // "engine" looks like — see App.css for the rest of the HUD token system
 // (color/type/spacing custom properties).
 import type { Engine } from "./state/sessions";

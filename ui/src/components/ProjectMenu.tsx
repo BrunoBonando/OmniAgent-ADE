@@ -4,7 +4,7 @@
 // anchored under the triggering row instead of centered — a project menu is
 // a utility, not a modal moment, so its backdrop is transparent (click-away
 // to dismiss) rather than the dimmed/blurred `.overlay-backdrop` used for
-// AboutPanel/ReviewPanel/EnginePicker.
+// AboutPanel/ReviewPanel/NewSessionModal.
 //
 // Rename (founder ask: closing the root cause of "OmniAgent-ADE" — a
 // project's real folder-basename-derived label — showing up in every pane

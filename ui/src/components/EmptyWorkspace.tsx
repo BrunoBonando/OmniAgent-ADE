@@ -7,13 +7,12 @@
 // text block — same slot, same absolute-fill container, now a real front
 // door rather than a hint.
 //
-// "Similar to the new session flow" is taken literally, the way
-// `NewChooserModal` already took it: this is `NewSessionModal`'s LAYOUT
-// section — the same cards, the same glyph (imported from there, not
-// re-drawn), the same caption-under-the-row — inside the same
-// `.new-workspace-panel` window, so the empty state reads as the first step
-// of the flow the user already knows instead of a second way to start a
-// session.
+// "Similar to the new session flow" is taken literally: this is
+// `NewSessionModal`'s LAYOUT section — the same cards, the same glyph
+// (imported from there, not re-drawn), the same caption-under-the-row —
+// inside the same `.new-workspace-panel` window, so the empty state reads
+// as the first step of the flow the user already knows instead of a second
+// way to start a session.
 //
 // What it deliberately does NOT carry over from that dialog: the folder
 // picker and the AI-agents checklist. This is the zero-decision path —

@@ -1,7 +1,10 @@
-// ⌘N end to end (founder brief, 2026-07-26): the chooser, then either the
-// existing workspace flow or the new session flow — driven entirely from
-// the keyboard, through the real `App.tsx` wiring and the real
-// `NewChooserModal`/`NewSessionModal`.
+// ⌘N end to end (Task 13, 2026-07-27): direct again — `NewSessionModal`
+// (the real component) for the selected workspace, or a request to open
+// `NewWorkspaceModal` (still owned by `Sidebar`, since its "+" opens it
+// too) with none selected. This retires the intermediate "session or
+// workspace?" chooser this file used to drive through first
+// (`NewChooserModal`/`state/newChooserState.ts`, both deleted this task —
+// see git history for the step in between).
 //
 // Same stubbing approach as the other `App.*.test.tsx` files. `Sidebar` is
 // stubbed to a probe that reports whether App asked it to open the New
@@ -135,17 +138,33 @@ async function boot() {
   render(<App />);
   await screen.findByText("select-p1");
   await waitFor(() => expect(tauriMocks.rootsListMock).toHaveBeenCalled());
+  // `selectedProjectId` defaults to the first project via its own effect,
+  // one render tick behind the project list landing — wait for the
+  // chrome's breadcrumb (`selectedProject?.label`) so `pressCmdN()` below
+  // never races it. Only matters now that ⌘N reads `selectedProject`
+  // directly on keydown (Task 13) instead of via an intervening chooser
+  // dialog, which used to give this effect enough time to flush for free.
+  await screen.findByText("Project One");
+}
+
+/** Same boot, but with zero projects — `selectedProject` can never resolve,
+ * which is exactly the "no workspace selected" branch ⌘N has to fall
+ * through to `NewWorkspaceModal` for. */
+async function bootWithNoProjects() {
+  tauriMocks.listProjectsMock.mockResolvedValue([]);
+  render(<App />);
+  await screen.findByTestId("sidebar-stub");
+  await waitFor(() => expect(tauriMocks.rootsListMock).toHaveBeenCalled());
 }
 
 function pressCmdN() {
   fireEvent.keyDown(window, { key: "n", metaKey: true });
 }
 
-/** ⌘N, then the chooser's default ("Session") — the whole way into the
- * session dialog, which every case below starts with. */
+/** ⌘N, direct into the session dialog for the selected project (Task 13 —
+ * no chooser in between any more), which every case below starts with. */
 async function openSessionDialog() {
   pressCmdN();
-  fireEvent.keyDown(await screen.findByRole("dialog", { name: "Create new" }), { key: "Enter" });
   return screen.findByRole("dialog", { name: "New session" });
 }
 
@@ -175,40 +194,34 @@ function restoreThreeSessions() {
   });
 }
 
-describe("⌘N asks first", () => {
-  it("opens the chooser, not the workspace dialog", async () => {
+describe("⌘N branches directly — no chooser in between (Task 13)", () => {
+  it("opens the new-session modal directly for the selected workspace", async () => {
     await boot();
     pressCmdN();
-    expect(await screen.findByRole("dialog", { name: "Create new" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "New session" })).toBeInTheDocument();
     expect(screen.getByTestId("sidebar-stub").dataset.newWorkspaceOpen).toBe("false");
   });
 
-  it("Escape closes it without creating anything", async () => {
-    await boot();
+  it("with no workspace selected, asks the sidebar to open New Workspace instead", async () => {
+    await bootWithNoProjects();
     pressCmdN();
-    const dialog = await screen.findByRole("dialog", { name: "Create new" });
-    fireEvent.keyDown(dialog, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create new" })).not.toBeInTheDocument());
-    expect(tauriMocks.sessionCreateMock).not.toHaveBeenCalled();
-    expect(screen.getByTestId("sidebar-stub").dataset.newWorkspaceOpen).toBe("false");
-  });
-
-  it("choosing Workspace opens the existing New Workspace flow", async () => {
-    await boot();
-    pressCmdN();
-    const dialog = await screen.findByRole("dialog", { name: "Create new" });
-    fireEvent.keyDown(dialog, { key: "ArrowRight" });
-    fireEvent.keyDown(dialog, { key: "Enter" });
     await waitFor(() => expect(screen.getByTestId("sidebar-stub").dataset.newWorkspaceOpen).toBe("true"));
+    expect(screen.queryByRole("dialog", { name: "New session" })).not.toBeInTheDocument();
+  });
+
+  it("Escape closes the session dialog without creating anything", async () => {
+    await boot();
+    const dialog = await openSessionDialog();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New session" })).not.toBeInTheDocument());
+    expect(tauriMocks.sessionCreateMock).not.toHaveBeenCalled();
   });
 });
 
 describe("⌘N -> Session: panes in the project you're already in", () => {
-  it("Enter alone opens the session dialog for the selected project", async () => {
+  it("⌘N alone opens the session dialog for the selected project", async () => {
     await boot();
-    pressCmdN();
-    fireEvent.keyDown(await screen.findByRole("dialog", { name: "Create new" }), { key: "Enter" });
-    const dialog = await screen.findByRole("dialog", { name: "New session" });
+    const dialog = await openSessionDialog();
     expect(dialog).toBeInTheDocument();
     expect(screen.getByText("in Project One workspace")).toBeInTheDocument();
     expect(screen.getByText("/tmp/p1")).toBeInTheDocument();
@@ -367,7 +380,7 @@ describe("Ctrl+Arrow session navigation", () => {
     await waitFor(() => expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first"));
 
     pressCmdN();
-    expect(await screen.findByRole("dialog", { name: "Create new" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "New session" })).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "ArrowDown", ctrlKey: true });
     expect(screen.getByTestId("workspace-stub").dataset.activeTabId).toBe("first");
   });

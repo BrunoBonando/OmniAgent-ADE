@@ -4,8 +4,9 @@
 // a trailing newline so nothing auto-executes.
 //
 // Real end-to-end wiring, same approach as `App.newSession.test.tsx`
-// (⌘N -> chooser -> `NewSessionModal` -> `handleSessionCreated`), combined
-// with `App.notifications.test.tsx`'s real `session-status:{id}` listener
+// (⌘N -> `NewSessionModal` -> `handleSessionCreated`, direct since Task 13
+// retired the intermediate chooser), combined with
+// `App.notifications.test.tsx`'s real `session-status:{id}` listener
 // registry — needed here because these cases must deliver a genuine event
 // to whichever session id the dialog actually spawned, not a fixed one.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -146,17 +147,23 @@ async function boot() {
   render(<App />);
   await screen.findByText("select-p1");
   await waitFor(() => expect(tauriMocks.rootsListMock).toHaveBeenCalled());
+  // `selectedProjectId` defaults to the first project via its own effect,
+  // one render tick behind the project list landing — wait for the
+  // chrome's breadcrumb (`selectedProject?.label`) so `pressCmdN()` below
+  // never races it. Only matters now that ⌘N reads `selectedProject`
+  // directly on keydown (Task 13) instead of via an intervening chooser
+  // dialog, which used to give this effect enough time to flush for free.
+  await screen.findByText("Project One");
 }
 
 function pressCmdN() {
   fireEvent.keyDown(window, { key: "n", metaKey: true });
 }
 
-/** ⌘N, then the chooser's default ("Session") — the whole way into the
- * session dialog, which every case below starts with. */
+/** ⌘N, direct into the session dialog for the selected project (Task 13 —
+ * no chooser in between any more), which every case below starts with. */
 async function openSessionDialog() {
   pressCmdN();
-  fireEvent.keyDown(await screen.findByRole("dialog", { name: "Create new" }), { key: "Enter" });
   return screen.findByRole("dialog", { name: "New session" });
 }
 

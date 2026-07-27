@@ -37,7 +37,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     shortcuts: [
       { keys: ["⌘T"], description: "New terminal in the selected project" },
       { keys: ["⌘K"], description: "Command palette — switch session, search the brain" },
-      { keys: ["⌘N"], description: "New session or workspace" },
+      { keys: ["⌘N"], description: "New session — or new workspace, with none selected" },
     ],
   },
   {

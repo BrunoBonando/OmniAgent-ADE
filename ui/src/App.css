@@ -2303,7 +2303,6 @@ code {
   z-index: 50;
 }
 
-.engine-picker,
 .command-palette,
 .about-panel,
 .first-run-panel,
@@ -2317,41 +2316,6 @@ code {
   max-width: 90vw;
 }
 
-.engine-picker {
-  padding: 14px;
-}
-
-.engine-picker-eyebrow {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  color: var(--ink-faint);
-  margin-bottom: 10px;
-}
-
-.engine-picker-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.engine-picker-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.engine-picker-row.is-selected {
-  background: var(--panel-raised);
-  outline: 1px solid var(--signal-dim);
-}
-
 .engine-dot {
   width: 8px;
   height: 8px;
@@ -2359,44 +2323,10 @@ code {
   flex: 0 0 auto;
 }
 
-.engine-picker-label {
-  font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 600;
-  flex: 0 0 auto;
-}
-
-.engine-picker-hint {
-  font-style: italic;
-  font-size: 11px;
-  color: var(--ink-dim);
-  flex: 1;
-}
-
-.engine-picker-key {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--ink-faint);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  width: 16px;
-  height: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.engine-picker-default {
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--signal);
-  border: 1px solid var(--signal-dim);
-  border-radius: 999px;
-  padding: 1px 6px;
-}
-
+/* `.engine-picker-footer` outlived `EnginePicker.tsx` itself (Task 13,
+   2026-07-27, retired the component) — every close-confirm dialog
+   (`ClosePaneConfirm`/`CloseWorkspaceConfirm`/`CloseSessionConfirm`) still
+   renders its keyboard-hint row with this class, so it stays live. */
 .engine-picker-footer {
   display: flex;
   gap: 14px;
@@ -2658,9 +2588,8 @@ code {
 
 /* --------------------------------------------------------- review panel
    Task 7.1: the review-mode toggle + pending session-summary list. Reuses
-   .overlay-backdrop and the engine-picker/command-palette/about-panel's
-   shared frame (width, radius, shadow) rather than a fourth near-identical
-   ruleset. */
+   .overlay-backdrop and the command-palette/about-panel's shared frame
+   (width, radius, shadow) rather than a fourth near-identical ruleset. */
 
 .review-panel {
   background: var(--panel);
@@ -2796,9 +2725,9 @@ code {
    the brain map (HUD glow, node-kind color, force motion) — DESIGN.md 4
    names the map's own live growth as the onboarding moment, not a screen
    this owns. So the picker is a quiet terminal-boot prompt (reuses the
-   engine-picker/about-panel/command-palette frame above) and everything
-   after it is a thin, non-blocking telemetry readout that gets out of the
-   growing map's way. */
+   about-panel/command-palette frame above) and everything after it is a
+   thin, non-blocking telemetry readout that gets out of the growing map's
+   way. */
 
 .first-run-panel {
   padding: 28px 26px;
@@ -3351,14 +3280,15 @@ code {
 }
 
 /* ---- AI AGENTS ---------------------------------------------------------
-   Checkbox rows reuse `.engine-dot` (App.css, shared with EnginePicker)
-   directly for the identity dot rather than a second near-identical rule —
-   same color token, same job. The checkbox itself is a plain native
-   `<input type="checkbox">` tinted via `accent-color` rather than a
-   hand-rolled custom control — modern WebKit (Tauri's webview) already
-   renders that as a filled rounded square with a checkmark in the accent
-   color, which is exactly the reference's look, for near-zero code and
-   full native accessibility/keyboard behavior for free. */
+   Checkbox rows reuse `.engine-dot` (App.css, shared with CommandPalette/
+   PaneMenu) directly for the identity dot rather than a second
+   near-identical rule — same color token, same job. The checkbox itself is
+   a plain native `<input type="checkbox">` tinted via `accent-color`
+   rather than a hand-rolled custom control — modern WebKit (Tauri's
+   webview) already renders that as a filled rounded square with a
+   checkmark in the accent color, which is exactly the reference's look,
+   for near-zero code and full native accessibility/keyboard behavior for
+   free. */
 
 .new-workspace-agents-header {
   display: flex;
@@ -3572,7 +3502,6 @@ code {
    `accent-color` for the same "free, fully accessible" reasons documented
    there. */
 
-.engine-picker,
 .command-palette,
 .about-panel,
 .first-run-panel,
@@ -5886,50 +5815,6 @@ code {
   color: var(--ink-faint);
 }
 
-/* --------------------------------------------------- the ⌘N chooser
-   Same selectable-card language as NewWorkspaceModal's LAYOUT row (the
-   founder asked for "a similar style of the layout options"), just two
-   wider cards. Everything visual is inherited from
-   `.new-workspace-layout-card`; only the proportions differ. */
-
-.new-chooser-panel {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-  width: 400px;
-  max-width: 90vw;
-  padding: 20px 22px 16px;
-}
-
-.new-chooser-card {
-  position: relative;
-  padding: 18px 10px 14px;
-  gap: 10px;
-}
-
-.new-chooser-card-key {
-  position: absolute;
-  top: 6px;
-  right: 8px;
-  font-family: var(--mono);
-  font-size: 9px;
-  color: var(--ink-faint);
-}
-
-.new-workspace-layout-glyph.is-folder {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 22px;
-  color: var(--ink-faint);
-}
-
-.new-workspace-layout-card.is-selected .new-workspace-layout-glyph.is-folder {
-  color: var(--accent-select);
-}
-
 /* The session dialog's old scope hint / "use the project folder" reset went
    with the pre-redesign markup (Task 10 replaced the whole dialog — its
    styles now live with the other modal primitives near the end of this
@@ -6158,11 +6043,12 @@ code {
 }
 
 /* ------------------------------------------------- close-pane confirm */
-/* ⌘W's confirmation (founder bug, 2026-07-26). Deliberately built from
-   `.new-chooser-panel`'s exact surface treatment — same panel, border,
-   radius and shadow — so it reads as one of this app's dialogs rather than
-   a system alert dropped into it. Only the confirm button departs, because
-   this is the one dialog here whose primary action destroys something. */
+/* ⌘W's confirmation (founder bug, 2026-07-26). Deliberately shares this
+   app's compact dialog-panel treatment — same panel, border, radius and
+   shadow, at the same 400px width — so it reads as one of this app's
+   dialogs rather than a system alert dropped into it. Only the confirm
+   button departs, because this is the one dialog here whose primary action
+   destroys something. */
 
 .close-pane-panel {
   background: var(--panel);
@@ -6810,7 +6696,7 @@ code {
    the width and the two new pieces — the FOUND IN THIS FOLDER strip and the
    toggle rows — are defined here. The old BridgeSpace-era `.new-workspace-*`
    rules above are deliberately untouched: several are still worn by
-   ImportProjectsFlow, NewChooserModal and the onboarding panels. */
+   ImportProjectsFlow and the onboarding panels. */
 .new-workspace-panel-v2 { width: 520px; }
 .stats-strip {
   display: flex; border-radius: 9px; overflow: hidden;
