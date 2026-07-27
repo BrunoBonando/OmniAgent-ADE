@@ -1,0 +1,17 @@
+#!/bin/sh
+# Run sync script to keep AGENTS.md and CLAUDE.md in sync with .github/copilot-instructions.md
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$HOOK_DIR/.." && pwd)
+SYNC_SCRIPT="$REPO_ROOT/scripts/sync-instructions.sh"
+
+if [ -x "$SYNC_SCRIPT" ]; then
+  # avoid recursion
+  FLAG_FILE="$REPO_ROOT/.git/.sync-hooks-running"
+  if [ -f "$FLAG_FILE" ]; then
+    exit 0
+  fi
+  touch "$FLAG_FILE"
+  "$SYNC_SCRIPT" || true
+  rm -f "$FLAG_FILE"
+fi
+exit 0
