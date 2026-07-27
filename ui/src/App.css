@@ -6480,6 +6480,22 @@ code {
 .sidebar-files-body { flex: 1; min-height: 0; overflow: auto; padding: 0 6px 8px; }
 .file-tree.is-embedded { width: 100%; border: 0; background: transparent; }
 
+/* redesign: live git badges in the FILES section (Task 7) — the header's "N
+   changed" chip, per-folder descendant-change counts, and per-file M/A/D/R/U
+   status letters. Colors reuse the existing `--status-ready`/
+   `--status-approval`/`--status-error` tokens (defined in :root) rather than
+   new literals, same convention every other status indicator in this file
+   follows. */
+.sidebar-files-changed { display: flex; gap: 4px; font: 500 9.5px/1 var(--mono); color: var(--status-ready); }
+.sidebar-files-changed span { color: #4a4a53; }
+.file-tree-dir-badge { flex: none; font: 600 9px/1 var(--mono); }
+.file-tree-dir-badge.is-add { color: var(--status-ready); }
+.file-tree-dir-badge.is-mod { color: var(--status-approval); }
+.file-tree-git-letter { flex: none; font: 600 9.5px/1 var(--mono); }
+.file-tree-git-letter.is-modified, .file-tree-git-letter.is-renamed { color: var(--status-approval); }
+.file-tree-git-letter.is-added, .file-tree-git-letter.is-untracked { color: var(--status-ready); }
+.file-tree-git-letter.is-deleted { color: var(--status-error); }
+
 /* The workspace close, re-homed from the project row's hover "×" into
    `ProjectMenu` (left-pane redesign, Task 3). Same shape as
    `.project-menu-recheck` above it, and the same reason it is the only

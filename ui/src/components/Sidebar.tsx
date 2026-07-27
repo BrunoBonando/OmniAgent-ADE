@@ -127,7 +127,7 @@
 // `state/closedWorkspaces.ts` for the full "this is a window close, not a
 // delete" reasoning, and `CloseWorkspaceConfirm` for what the user is told
 // before anything is killed.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { tabsByProject, type Engine, type ProjectInfo, type TabInfo } from "../state/sessions";
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
 import { idColor } from "../state/projectColors";
@@ -140,6 +140,8 @@ import {
   type IngestionStatus,
   type ProjectStaleness,
 } from "../lib/tauri";
+import { useReviewStatus } from "../lib/useReviewStatus";
+import { buildGitBadges } from "../state/fileGitStatus";
 import AboutPanel from "./AboutPanel";
 import ReviewPanel from "./ReviewPanel";
 import ProjectMenu from "./ProjectMenu";
@@ -318,6 +320,12 @@ export default function Sidebar({
   // no projects at all, or a selection pointing at a workspace that was just
   // closed — and the switcher renders its own "No workspace" copy for it.
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
+  // Task 7: the FILES section's live git badges — polled for the selected
+  // workspace's root and folded into per-file/per-dir lookups keyed by
+  // absolute path (`buildGitBadges`'s own doc), which is exactly what
+  // `FileTree` rows carry.
+  const review = useReviewStatus(selectedProject?.path ?? null);
+  const gitBadges = useMemo(() => buildGitBadges(review), [review]);
   // Only the selected workspace's sessions are listed now; the others are a
   // click away in the dropdown, which is where their session *counts* go.
   const selectedSessions =
@@ -526,7 +534,12 @@ export default function Sidebar({
         <div className="sidebar-files-header">
           <span className="sidebar-microlabel">FILES</span>
           <span className="sidebar-spacer" />
-          {/* Task 7 puts the "N changed" chip here */}
+          {gitBadges.total > 0 && (
+            <span className="sidebar-files-changed">
+              {gitBadges.total}
+              <span> changed</span>
+            </span>
+          )}
         </div>
         <input
           className="sidebar-files-filter"
@@ -535,7 +548,14 @@ export default function Sidebar({
           onChange={(e) => setFileFilter(e.target.value)}
         />
         <div className="sidebar-files-body">
-          <FileTree project={selectedProject} activeTabId={activeTabId} onClose={() => {}} embedded filter={fileFilter} />
+          <FileTree
+            project={selectedProject}
+            activeTabId={activeTabId}
+            onClose={() => {}}
+            embedded
+            filter={fileFilter}
+            gitBadges={gitBadges}
+          />
         </div>
       </div>
 

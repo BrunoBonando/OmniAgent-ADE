@@ -107,6 +107,8 @@ import {
   type ExpandedPaths,
 } from "../state/fileTreeState";
 import type { ProjectInfo } from "../state/sessions";
+import { statusGlyph } from "../state/codeReviewState";
+import type { GitBadges } from "../state/fileGitStatus";
 import FileIcon from "./FileIcon";
 import FileTreeContextMenu, { type FileTreeContextMenuTarget } from "./FileTreeContextMenu";
 
@@ -138,6 +140,12 @@ interface FileTreeProps {
    * currently loaded/rendered — see the `// ponytail` note at the filter's
    * one call site for why this deliberately isn't a recursive search. */
   filter?: string;
+  /** Task 7: live git status badges (`Sidebar.tsx`'s `useReviewStatus` +
+   * `buildGitBadges`), keyed by the same absolute paths `entry.path` already
+   * carries — so a row looks itself up directly, no path math here. Optional
+   * (and simply renders no badges) so every existing render site/test that
+   * doesn't pass one keeps working unchanged. */
+  gitBadges?: GitBadges;
 }
 
 const INDENT_PX = 14;
@@ -167,7 +175,7 @@ function resolveHoverAt(x: number, y: number): DragHover {
   return null;
 }
 
-export default function FileTree({ project, activeTabId, onClose, embedded, filter }: FileTreeProps) {
+export default function FileTree({ project, activeTabId, onClose, embedded, filter, gitBadges }: FileTreeProps) {
   const [root, setRoot] = useState<DirState | null>(null); // null = nothing requested yet
   const [expanded, setExpanded] = useState<ExpandedPaths>(new Set());
   const [children, setChildren] = useState<Map<string, DirState>>(new Map());
@@ -850,6 +858,27 @@ export default function FileTree({ project, activeTabId, onClose, embedded, filt
                     <FileIcon kind={iconKindForEntry(entry, open)} color={accentForEntry(entry)} />
                     <span className="file-tree-name">{entry.name}</span>
                   </button>
+                )}
+
+                {/* Task 7: live git badges — a folder shows how many
+                    descendants changed (and whether that's purely additive),
+                    a file shows its own one-letter status via the real
+                    `statusGlyph` (never a forked copy of its letter map). */}
+                {gitBadges && entry.is_dir && gitBadges.byDir.has(entry.path) && (
+                  <span
+                    className={`file-tree-dir-badge is-${gitBadges.byDir.get(entry.path)!.tone}`}
+                    title={`${gitBadges.byDir.get(entry.path)!.count} changed`}
+                  >
+                    {gitBadges.byDir.get(entry.path)!.count}
+                  </span>
+                )}
+                {gitBadges && !entry.is_dir && gitBadges.byFile.has(entry.path) && (
+                  <span
+                    className={`file-tree-git-letter is-${gitBadges.byFile.get(entry.path)!}`}
+                    title={statusGlyph(gitBadges.byFile.get(entry.path)!).label}
+                  >
+                    {statusGlyph(gitBadges.byFile.get(entry.path)!).letter}
+                  </span>
                 )}
 
                 {!entry.is_dir && activeTabId && !isRenaming && (

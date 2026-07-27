@@ -913,4 +913,29 @@ describe("FileTree", () => {
     expect(screen.getByText("main.py")).toBeInTheDocument();
     expect(screen.getByText("notes.md")).toBeInTheDocument();
   });
+
+  // ------------------------------------------------------------- Task 7: git badges
+  it("renders a file's git status letter and its ancestor dir's changed count from a hand-built gitBadges prop", async () => {
+    setup({
+      gitBadges: {
+        byFile: new Map([["/repo/demo/main.py", "modified"]]),
+        byDir: new Map([["/repo/demo/src", { count: 1, tone: "mod" }]]),
+        total: 2,
+      },
+    });
+    expect(await screen.findByText("main.py")).toBeInTheDocument();
+    const letter = screen.getByText("M");
+    expect(letter).toHaveClass("file-tree-git-letter", "is-modified");
+    const dirBadge = screen.getByText("1");
+    expect(dirBadge).toHaveClass("file-tree-dir-badge", "is-mod");
+    // notes.md has no entry in `byFile` — no badge renders for it at all.
+    expect(screen.queryByText("U")).not.toBeInTheDocument();
+  });
+
+  it("renders no git badges when the prop is omitted", async () => {
+    setup();
+    expect(await screen.findByText("main.py")).toBeInTheDocument();
+    expect(document.querySelector(".file-tree-git-letter")).toBeNull();
+    expect(document.querySelector(".file-tree-dir-badge")).toBeNull();
+  });
 });

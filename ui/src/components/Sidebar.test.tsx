@@ -3,7 +3,7 @@
 // SESSIONS header, and what a session row is allowed to show. The workspace
 // close still exists and still confirms — it moved from the project row's
 // hover "×" into `ProjectMenu`, reached through the dropdown's per-row "⋯".
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
@@ -19,7 +19,24 @@ vi.mock("../lib/useGitBranch", () => ({ useGitBranch: useGitBranchMock }));
 // `unwatchDir`/etc., not just the roots/ingestion/import surface Sidebar
 // itself calls. Defaults are the quiet, empty-tree case; tests that care
 // about actual file rows exercise that directly in `FileTree.test.tsx`.
-const { listDirMock } = vi.hoisted(() => ({ listDirMock: vi.fn().mockResolvedValue([]) }));
+const { listDirMock, reviewStatusMock } = vi.hoisted(() => ({
+  listDirMock: vi.fn().mockResolvedValue([]),
+  // Default: a clean repo (no changes) — same "quiet by default" convention
+  // `listDirMock` above already uses. Tests that care about the "N changed"
+  // chip / badges override this with `mockResolvedValueOnce`.
+  reviewStatusMock: vi.fn().mockResolvedValue({
+    repo_root: "/tmp/p1",
+    branch: "main",
+    detached: false,
+    has_head: true,
+    files: [],
+    file_count: 0,
+    added: 0,
+    removed: 0,
+    binary_count: 0,
+    truncated: false,
+  }),
+}));
 
 vi.mock("../lib/tauri", () => ({
   rootsPausedProjects: vi.fn().mockResolvedValue([]),
@@ -49,6 +66,12 @@ vi.mock("../lib/tauri", () => ({
   deleteToTrash: vi.fn(),
   createFile: vi.fn(),
   createDir: vi.fn(),
+  // Task 7: `useReviewStatus` (via Sidebar) polls this on mount for the
+  // selected workspace's root — a hoisted mock (same pattern as `listDirMock`
+  // above) so individual tests can override its resolved value; the default
+  // below is the clean/empty case, so every existing test that never
+  // asserted on git badges keeps passing with no "N changed" chip rendered.
+  reviewStatus: reviewStatusMock,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
@@ -454,5 +477,37 @@ describe("Sidebar — FILES section (Task 6, left-pane redesign: the tree embedd
     expect(await screen.findByText("main.py")).toBeInTheDocument();
     expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
     expect(screen.queryByText("src")).not.toBeInTheDocument();
+  });
+
+  // --------------------------------------------------------- Task 7: git badges
+  it("shows no 'N changed' chip when the workspace has no uncommitted changes", async () => {
+    const { container } = setup();
+    await screen.findByText("main.py");
+    expect(container.querySelector(".sidebar-files-changed")).toBeNull();
+  });
+
+  it("shows the 'N changed' chip and a file's status letter once review_status reports changes", async () => {
+    reviewStatusMock.mockResolvedValueOnce({
+      repo_root: "/tmp/p1",
+      branch: "main",
+      detached: false,
+      has_head: true,
+      files: [{ path: "main.py", status: "modified", old_path: null, added: 3, removed: 1, binary: false }],
+      file_count: 1,
+      added: 3,
+      removed: 1,
+      binary_count: 0,
+      truncated: false,
+    });
+    const { container } = setup();
+    await screen.findByText("main.py");
+    const chip = await waitFor(() => {
+      const el = container.querySelector(".sidebar-files-changed");
+      if (!el) throw new Error("chip not rendered yet");
+      return el;
+    });
+    expect(chip.textContent).toBe("1 changed");
+    const letter = screen.getByText("M");
+    expect(letter).toHaveClass("file-tree-git-letter", "is-modified");
   });
 });
