@@ -296,6 +296,28 @@ code {
   flex-direction: column;
 }
 
+.system-status-bar {
+  flex: 0 0 24px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+  background: rgba(24, 24, 27, 0.9);
+  color: #5c5c66;
+  font: 500 10px/1 var(--mono);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.system-status-item { display: inline-flex; align-items: center; gap: 5px; }
+.system-status-item.is-live { color: #8b8b95; }
+.system-status-item.is-live i, .system-status-item.is-mcp i { width: 5px; height: 5px; border-radius: 50%; background: var(--status-ready); }
+.system-status-item.is-mcp { color: #6d6d78; }
+.system-status-item.is-mcp i { background: var(--signal); }
+.system-status-spacer { flex: 1; }
+.system-status-shortcut { color: #6d6d78; }
+
 /* --------------------------------------------------------------- startup */
 
 .startup-screen {
@@ -876,8 +898,8 @@ code {
   gap: 9px;
   padding: 0 8px;
   border-radius: 6px;
-  border: none;
-  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.05);
   color: var(--ink-dim);
   display: flex;
   align-items: center;
@@ -885,7 +907,8 @@ code {
 }
 
 .account-badge-trigger:hover {
-  background: var(--panel-raised);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.13);
   color: var(--ink);
 }
 
@@ -1431,7 +1454,8 @@ code {
 
 .sidebar-footer {
   padding: 7px 8px;
-  border-top: 1px solid var(--line-soft);
+  background: #111217;
+  border-top: 1px solid var(--line);
 }
 
 /* ------------------------------------------------------------- workspace
@@ -1447,6 +1471,248 @@ code {
   display: flex;
   flex-direction: column;
   position: relative;
+}
+
+/* ------------------------------------------------------ dashboard views */
+
+.dashboard-surface {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0a0a0c;
+  border-left: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.dashboard-surface-header {
+  flex: none;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.dashboard-surface-header h2 {
+  margin: 0;
+  font: 600 13px/1.2 var(--sans);
+  color: #ececf2;
+}
+
+.dashboard-surface-header p {
+  margin: 3px 0 0;
+  font: 400 10.5px/1.3 var(--mono);
+  color: #696972;
+}
+
+.dashboard-empty {
+  margin: auto;
+  color: #8b8b95;
+  font: 500 12px/1.4 var(--sans);
+}
+
+.plan-board-create {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plan-board-create input {
+  height: 30px;
+  width: 240px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e8e8ee;
+  border-radius: 6px;
+  padding: 0 9px;
+  font: 400 11.5px/1 var(--sans);
+}
+
+.plan-board-create button,
+.files-dashboard-actions button {
+  height: 30px;
+  border-radius: 6px;
+  border: 0;
+  background: var(--accent-btn);
+  color: #fff;
+  font: 600 11px/1 var(--sans);
+  padding: 0 10px;
+}
+
+.plan-board-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 10px;
+}
+
+.plan-lane {
+  min-width: 0;
+  min-height: 0;
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+  flex-direction: column;
+}
+
+.plan-lane header {
+  flex: none;
+  height: 34px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font: 600 10.5px/1 var(--mono);
+  color: #a9a9b2;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
+}
+
+.plan-lane-cards {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plan-card {
+  border-radius: 7px;
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 8px;
+}
+
+.plan-card p {
+  margin: 0;
+  color: #dbdbe2;
+  font: 500 11.5px/1.35 var(--sans);
+}
+
+.plan-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.plan-card-actions button {
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  height: 22px;
+  min-width: 24px;
+  color: #c9c9d2;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.plan-card-actions button:disabled {
+  color: #6a6a74;
+  cursor: default;
+}
+
+.files-dashboard {
+  overflow: hidden;
+}
+
+.files-dashboard-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.files-dashboard-actions span {
+  color: #666670;
+  font: 500 10px/1 var(--mono);
+}
+
+.files-dashboard-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.files-dashboard-tabs {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-height: 34px;
+  padding: 5px 8px;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
+  overflow-x: auto;
+}
+
+.files-dashboard-tab {
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: #bdbdc8;
+  border-radius: 6px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  font: 500 11px/1 var(--sans);
+}
+
+.files-dashboard-tab.is-active {
+  color: #ececf2;
+  background: rgba(139, 149, 255, 0.14);
+  border-color: rgba(139, 149, 255, 0.45);
+}
+
+.files-dashboard-tab-close {
+  color: #8d8d97;
+}
+
+.files-dashboard-editor-shell {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  overflow: hidden;
+}
+
+.files-dashboard-gutter {
+  margin: 0;
+  padding: 10px 8px 10px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border-right: 0.5px solid rgba(255, 255, 255, 0.08);
+  color: #65656f;
+  font: 400 11px/1.5 var(--mono);
+  text-align: right;
+  user-select: none;
+  overflow: hidden;
+}
+
+.files-dashboard-editor {
+  width: 100%;
+  height: 100%;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: #0b0b0f;
+  color: #d2d2dc;
+  padding: 10px 12px;
+  font: 400 12px/1.5 var(--mono);
+}
+
+.files-dashboard-notice {
+  flex: none;
+  height: 26px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  color: #9aa4d6;
+  font: 500 10.5px/1 var(--sans);
 }
 
 /* One per project with any open tab (`Workspace.tsx`'s `<ProjectPaneGrid>`)
@@ -1485,7 +1751,10 @@ code {
   min-height: 0;
   min-width: 0;
   position: relative;
-  background: var(--void);
+  background:
+    radial-gradient(60% 55% at 50% 42%, rgba(58, 96, 190, 0.22), transparent 70%),
+    linear-gradient(168deg, #05060a 0%, #070b16 45%, #0b1730 78%, #12233f 100%);
+  background-color: #0b1730;
 }
 
 .pane-grid .mosaic-tile {
@@ -2588,25 +2857,16 @@ code {
   font-size: 12.5px;
 }
 
-/* A grid cell no open session claims (`buildGrid`'s hole padding, paneGrid.ts
-   — founder, 2026-07-26: "if a number of terminals is not even, it's okay to
-   have a hole in the matrix... represented by gradient dark blue, just like
-   the one from when it's without terminals"). Same gradient as
-   `.empty-workspace` above, just sized to one cell instead of the whole
-   grid — and carrying the "Add Terminal" button, since the hole is exactly
-   where the next terminal will land. */
+/* A grid cell no open session claims (`buildGrid`'s hole padding, paneGrid.ts).
+   Fully transparent — the navy blue gradient of `.pane-grid.mosaic` shows
+   through, so the hole feels like an open window into the same background
+   rather than a fake terminal. Carries only the "Add Terminal" button. */
 .pane-hole {
   height: 100%;
   width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--line-soft);
-  background:
-    radial-gradient(60% 55% at 50% 42%, rgba(58, 96, 190, 0.22), transparent 70%),
-    linear-gradient(168deg, #05060a 0%, #070b16 45%, #0b1730 78%, #12233f 100%);
-  background-color: #0b1730;
 }
 
 /* The small square button in the hole: a terminal glyph (same `>_` mark as
@@ -4978,6 +5238,16 @@ code {
      real screenshot pass. */
   color: var(--ink-dim);
   transition: transform 0.1s ease;
+  /* button reset — the chevron is a <button> for directory rows so it gets
+     its own click target; spans (is-file) ignore these harmlessly. */
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.file-tree-chevron:hover {
+  color: var(--ink);
 }
 
 .file-tree-chevron.is-open {
@@ -7093,17 +7363,12 @@ code {
    above) and the old full-gradient `.session-row.is-current` (ditto) are
    both gone; this is what replaced them — a left accent bar for the session
    on screen and an expand/collapse chevron. */
-.session-row-accent {
-  position: absolute;
-  left: 2px;
-  top: 7px;
-  bottom: 7px;
-  width: 2.5px;
-  border-radius: 2px;
-  background: var(--accent);
-}
+/* Selected session: navy-blue gradient + bright left border as the single
+   selection indicator (replaces the old flat accent-tint + floating accent
+   bar, which rendered as two overlapping vertical stripes). */
 .session-row.is-current {
-  background: var(--accent-tint);
+  background: linear-gradient(90deg, #0d2546 0%, #132540 55%, rgba(16, 28, 52, 0.55) 100%);
+  border-left-color: #4a8fff;
 }
 /* Fix-round (2026-07-27): `.session-row` (the `<li>`) itself is plain block
    layout, so the chevron and `.session-row-main` — two block-level siblings
