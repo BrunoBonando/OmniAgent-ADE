@@ -227,6 +227,39 @@ describe("Task 11 — the session prompt reaches the first agent pane", () => {
     expect(tauriMocks.sessionWriteMock).not.toHaveBeenCalled();
   });
 
+  it("targets the first non-shell tab in SLOT order, not the first tab overall", async () => {
+    // Default layout is 2 (side by side), both slots pre-filled with the
+    // default engine (claude) — leave slot 1 alone and switch only slot 0
+    // to Shell, so the spawn order is [shell, claude]. A bug that grabbed
+    // `created[0]` unconditionally, or searched in the wrong order, would
+    // target the shell tab (sess-1) instead of the claude tab (sess-2).
+    await boot();
+    const dialog = await openSessionDialog();
+    fireEvent.click(slotTriggers()[0]);
+    fireEvent.click(screen.getByRole("option", { name: "Shell" }));
+    fireEvent.change(screen.getByLabelText("What are you doing?"), {
+      target: { value: "rotate tokens" },
+    });
+    fireEvent.keyDown(dialog, { key: "Enter" });
+
+    await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(2));
+    const tabs = screen.getAllByTestId("tab");
+    expect(tabs.map((t) => t.dataset.engine)).toEqual(["shell", "claude"]);
+    const shellTabId = tabs[0].textContent!.split(":")[0];
+    const claudeTabId = tabs[1].textContent!.split(":")[0];
+
+    // Status on the shell tab first — it must never receive the prompt.
+    emitSessionStatus(shellTabId, { id: shellTabId, status: "ready", notify: false, engine: "shell" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(tauriMocks.sessionWriteMock).not.toHaveBeenCalled();
+
+    emitSessionStatus(claudeTabId, { id: claudeTabId, status: "ready", notify: false, engine: "claude" });
+    await waitFor(() =>
+      expect(tauriMocks.sessionWriteMock).toHaveBeenCalledWith(claudeTabId, "rotate tokens"),
+    );
+    expect(tauriMocks.sessionWriteMock).not.toHaveBeenCalledWith(shellTabId, expect.anything());
+  });
+
   it("an empty prompt writes nothing", async () => {
     await boot();
     const dialog = await openSessionDialog();
