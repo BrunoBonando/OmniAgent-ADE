@@ -175,6 +175,14 @@
      accent RGB, its own alpha (between --accent-tile-border's 0.5 and
      --accent-tint-strong's 0.18). */
   --accent-row-border: rgba(139, 149, 255, 0.45);
+  /* Task 10: the halo around the selected layout thumbnail — same accent
+     RGB again, the faintest alpha of the set, because it sits *outside* an
+     already-tinted tile and only has to suggest a glow. */
+  --accent-thumb-ring: rgba(139, 149, 255, 0.12);
+  /* Accent-tinted *text*, for a label reading against --accent-tint: far
+     paler than --accent-hi, which is a fill/stroke color and too saturated
+     to read as type. */
+  --accent-ink: #dfe2ff;
 
   color-scheme: dark;
   font-family: var(--sans);
@@ -5922,25 +5930,10 @@ code {
   color: var(--accent-select);
 }
 
-/* ---------------------------------------------------- the session dialog */
-
-.new-session-scope-hint {
-  margin: 0;
-  font-size: 11px;
-  color: var(--ink-faint);
-  font-style: italic;
-}
-
-.new-session-scope-reset {
-  background: transparent;
-  border: none;
-  padding: 0;
-  color: var(--signal);
-  font-family: inherit;
-  font-size: 11px;
-  font-style: italic;
-  text-decoration: underline;
-}
+/* The session dialog's old scope hint / "use the project folder" reset went
+   with the pre-redesign markup (Task 10 replaced the whole dialog — its
+   styles now live with the other modal primitives near the end of this
+   file). */
 
 /* --------------------------------------------- sidebar: workspace -> session
    Founder brief, 2026-07-26: "The menu on the left should not show the
@@ -6335,6 +6328,84 @@ code {
 .engine-row-key { flex: none; font: 500 10px/1 var(--mono); color: #5c5c66; }
 .engine-row.is-selected .engine-row-key { color: var(--accent-hi); }
 
+/* redesign: new-session modal (Task 10). */
+.new-session-panel { width: 560px; overflow: visible; }
+/* `.modal-panel` clips to its own radius; this one can't, because a slot
+   picker's menu hangs past the section it lives in. The footer takes the
+   rounding onto itself so the panel's bottom corners stay round anyway. */
+.new-session-panel .modal-footer { border-radius: 0 0 14px 14px; }
+.modal-field-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 7px; }
+.modal-field-row .modal-field-label { margin-bottom: 0; }
+.modal-field-note { font: 400 10px/1 var(--sans); color: #4a4a53; }
+.modal-field-error { color: var(--danger); }
+.modal-section-last { padding-bottom: 14px; }
+.layout-thumb-row { display: flex; gap: 7px; }
+.layout-thumb {
+  appearance: none; flex: 1; padding: 8px; border-radius: 9px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: center;
+}
+.layout-thumb:hover { background: rgba(255, 255, 255, 0.07); }
+.layout-thumb.is-selected {
+  background: var(--accent-tint);
+  border-color: var(--accent-focus-border);
+  box-shadow: 0 0 0 3px var(--accent-thumb-ring);
+}
+/* The glyph is a fixed-width grid (block-level), so the thumb's
+   `text-align: center` can't centre it — auto margins do. */
+.layout-thumb .new-workspace-layout-glyph { margin: 0 auto; height: 26px; }
+.layout-thumb.is-selected .new-workspace-layout-glyph-cell { background: var(--accent-hi); }
+.layout-thumb-caption { display: block; margin-top: 6px; font: 600 10px/1 var(--mono); color: #8b8b95; }
+.layout-thumb.is-selected .layout-thumb-caption { color: var(--accent-ink); }
+.slot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.slot-picker { position: relative; }
+.slot-picker-trigger {
+  appearance: none; width: 100%;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 9px; border-radius: 9px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.035); border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.slot-picker-trigger:hover { background: rgba(255, 255, 255, 0.07); }
+.slot-picker-index { font: 600 9.5px/1 var(--mono); color: #5c5c66; width: 12px; text-align: left; }
+.slot-picker-icon { flex: none; display: flex; color: #b9b9c4; }
+.slot-picker-name { flex: 1; text-align: left; font: 500 11px/1 var(--sans); color: #d8d8de; }
+.slot-picker-chevron { flex: none; display: flex; color: #8b8b95; }
+.slot-picker-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 10;
+  border-radius: 9px; background: rgba(40, 40, 45, 0.98);
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+  padding: 4px; display: flex; flex-direction: column; gap: 2px;
+}
+.slot-picker-option {
+  appearance: none; width: 100%; border: 0; background: transparent;
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: 6px; cursor: pointer;
+  font: 500 11px/1 var(--sans); color: #d8d8de;
+}
+.slot-picker-option:hover { background: rgba(255, 255, 255, 0.08); }
+.slot-picker-option.is-selected { background: var(--accent-tint); color: var(--ink); }
+.folder-row {
+  display: flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px;
+  border-radius: 8px; background: rgba(255, 255, 255, 0.045);
+  border: 0.5px solid rgba(255, 255, 255, 0.09);
+}
+.folder-row-path {
+  flex: 1; min-width: 0; font: 400 11px/1 var(--mono); color: #c6c6d0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* `text-align: left` so a path that *fits* still starts at the left edge —
+     `direction: rtl` would otherwise right-align it against the Change link. */
+  direction: rtl; text-align: left;
+}
+/* Same recipe, and the same bidi trap, as `.code-review-path` above (see that
+   rule's note): `direction: rtl` truncates the *head* of the path, which is
+   the half nobody needs — but it also sends the leading "/" to the far end
+   (`…/src-tauri/src/`) unless a LEFT-TO-RIGHT MARK gives it a strong-LTR
+   neighbour. Generated content, so the DOM still holds the clean path. */
+.folder-row-path::before { content: "\200E"; }
+.folder-row-change { appearance: none; border: 0; background: transparent; font: 500 10px/1 var(--sans); color: var(--accent); cursor: pointer; }
+.modal-footer-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); display: inline-block; margin-right: 6px; }
+
 .switch {
   appearance: none;
   width: 34px;
@@ -6422,7 +6493,7 @@ code {
 .workspace-menu-new {
   display: flex; align-items: center; gap: 9px;
   padding: 8px 9px; border-radius: 8px; cursor: pointer;
-  font: 600 11.5px/1.3 var(--sans); color: #dfe2ff;
+  font: 600 11.5px/1.3 var(--sans); color: var(--accent-ink);
 }
 .workspace-menu-new:hover { background: var(--accent-tint-strong); }
 .workspace-menu-new-tile {

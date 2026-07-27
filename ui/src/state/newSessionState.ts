@@ -1,18 +1,21 @@
 // Pure, framework-free state for `NewSessionModal.tsx` — the "new session"
-// half of ⌘N (founder brief, 2026-07-26, verbatim: *"Each session can be
-// created with a new layout, agents, etc... but in the same folder or
-// subfolder."*).
+// half of ⌘N.
 //
-// Deliberately the same shape as `newWorkspaceState.ts` (flat state, LAYOUT
-// preset + per-engine checklist + collapse toggle + submit gating), because
-// it IS the same dialog minus one section and plus one constraint:
+// **Redesign (Task 10, 2026-07-27).** The dialog no longer asks for a name,
+// a set of checkboxes and a layout that only previewed itself. It asks one
+// question — *what are you doing?* — and the answer does double duty: it
+// becomes the session's name (`sessionNameFromPrompt`) and the first prompt
+// typed into the session's lead terminal. The rest is one decision per
+// terminal:
 //
-// - LAYOUT and AI AGENTS are identical — a session is created with its own
-//   layout and its own agents.
-// - The DIRECTORY section is replaced by a *scoped* one: the cwd starts at
-//   the already-selected project's folder and can only ever be narrowed to a
-//   folder inside it. There is no `add_project`, no project name, and no way
-//   to leave the project — that's the difference between a session and a
+// - `layout` is the number of terminals, and `slots` is exactly that many
+//   engines, one per pane. They are kept in lockstep by `resizeSlots`, so
+//   there is no state where the grid shows four terminals and the caller
+//   receives three engines.
+// - The DIRECTORY section stays *scoped*: the cwd starts at the already-
+//   selected project's folder and can only ever be narrowed to a folder
+//   inside it. There is no `add_project`, no project name, and no way to
+//   leave the project — that's the difference between a session and a
 //   workspace.
 //
 // `isInsideProjectRoot` below is the guard that makes "or subfolder" real
@@ -28,9 +31,13 @@
 // (the user chose the folder themselves, in their own file system), not a
 // security boundary against hostile input — the boundary that matters lives
 // in Rust, where the file operations happen.
-import { ENGINES, type Engine } from "./sessions";
-import { LAYOUT_PRESETS, type LayoutPreset } from "./paneGrid";
-import { DEFAULT_ENGINE_SELECTION } from "./newWorkspaceState";
+import { getDefaultAgentSelection, type AgentsState } from "./agents";
+import type { Engine, ProjectInfo } from "./sessions";
+import type { LayoutPreset } from "./paneGrid";
+
+/** A session name long enough to read as a sentence fragment in the sidebar
+ * and short enough that the row never has to decide what to drop. */
+const MAX_SESSION_NAME = 60;
 
 export interface NewSessionState {
   /** The project this session is being created in — its folder is both the
@@ -40,37 +47,90 @@ export interface NewSessionState {
    * a session always has somewhere to run, which is exactly why this dialog
    * needs no "choose a folder first" state at all. */
   path: string;
+  /** *What are you doing?* — the session's name and its first prompt. Held
+   * verbatim (untrimmed): trimming is what `sessionNameFromPrompt` does to
+   * the *name*, and doing it here would fight the user's caret mid-word. */
+  prompt: string;
   layout: LayoutPreset;
-  engines: Record<Engine, boolean>;
-  agentsCollapsed: boolean;
+  /** One engine per pane, `slots.length === layout` always. */
+  slots: Engine[];
   submitting: boolean;
   error: string | null;
 }
 
-export function initialNewSessionState(projectRoot: string): NewSessionState {
+/** Layout 2 (a side-by-side split — the shape a session is most often born
+ * in), every slot pre-filled with the project's default engine, so Enter
+ * alone is a complete decision. */
+export function initialNewSessionStateFor(project: ProjectInfo, agents: AgentsState): NewSessionState {
+  const projectRoot = project.path ?? project.id;
+  const fallback = defaultSlotEngine(agents);
   return {
     projectRoot,
     path: projectRoot,
+    prompt: "",
     layout: 2,
-    engines: DEFAULT_ENGINE_SELECTION,
-    agentsCollapsed: false,
+    slots: resizeSlots([], 2, fallback),
     submitting: false,
     error: null,
   };
 }
 
+/** The engine every unpicked slot starts as — the same
+ * "last-selected-else-the-only-one-installed-else-shell" chain
+ * `NewWorkspaceModal` pre-fills from, so the two dialogs can't disagree
+ * about what this machine's default agent is. */
+export function defaultSlotEngine(agents: AgentsState): Engine {
+  return getDefaultAgentSelection(agents)[0] ?? "shell";
+}
+
+/** `slots` re-cut to `layout` panes: the engines already picked keep their
+ * slot, new panes get `fallback`, removed panes are dropped from the end.
+ * Growing back after shrinking deliberately does NOT restore what was
+ * there — a slot the user can no longer see is not a decision they still
+ * hold. */
+export function resizeSlots(slots: Engine[], layout: LayoutPreset, fallback: Engine): Engine[] {
+  return Array.from({ length: layout }, (_, i) => slots[i] ?? fallback);
+}
+
+/** The session's name, from what the user said they're doing: trimmed,
+ * whitespace collapsed (a pasted paragraph is one line in the sidebar), and
+ * capped. `undefined` for an empty prompt — the caller's cue to fall back to
+ * the workspace's own numbering rather than name a session "". */
+export function sessionNameFromPrompt(prompt: string): string | undefined {
+  const clean = prompt.trim().replace(/\s+/g, " ");
+  return clean.length === 0 ? undefined : clean.slice(0, MAX_SESSION_NAME);
+}
+
 export type NewSessionAction =
-  | { type: "folder_picked"; path: string }
-  | { type: "folder_reset" }
-  | { type: "layout_selected"; layout: LayoutPreset }
-  | { type: "engine_toggled"; engine: Engine }
-  | { type: "agents_collapsed_toggled" }
+  | { type: "prompt"; value: string }
+  | { type: "layout"; layout: LayoutPreset }
+  | { type: "slot"; index: number; engine: Engine }
+  | { type: "path"; path: string }
   | { type: "submit_started" }
   | { type: "submit_failed"; error: string };
 
 export function newSessionReducer(state: NewSessionState, action: NewSessionAction): NewSessionState {
   switch (action.type) {
-    case "folder_picked":
+    case "prompt":
+      return { ...state, prompt: action.value };
+
+    case "layout":
+      // The grid and the engine list are the same decision seen twice, so
+      // they move together — never "pick 4, then remember to add engines".
+      return {
+        ...state,
+        layout: action.layout,
+        slots: resizeSlots(state.slots, action.layout, state.slots[0] ?? "shell"),
+      };
+
+    case "slot":
+      if (action.index < 0 || action.index >= state.slots.length) return state;
+      return {
+        ...state,
+        slots: state.slots.map((engine, i) => (i === action.index ? action.engine : engine)),
+      };
+
+    case "path":
       // Rejected in the reducer, not at the call site, so the rule holds for
       // every path in (picker, future drag-and-drop, a test) and the user
       // gets told why instead of the pick silently doing nothing.
@@ -81,18 +141,6 @@ export function newSessionReducer(state: NewSessionState, action: NewSessionActi
         };
       }
       return { ...state, path: normalizePath(action.path), error: null };
-
-    case "folder_reset":
-      return { ...state, path: state.projectRoot, error: null };
-
-    case "layout_selected":
-      return { ...state, layout: action.layout };
-
-    case "engine_toggled":
-      return { ...state, engines: { ...state.engines, [action.engine]: !state.engines[action.engine] } };
-
-    case "agents_collapsed_toggled":
-      return { ...state, agentsCollapsed: !state.agentsCollapsed };
 
     case "submit_started":
       return { ...state, submitting: true, error: null };
@@ -105,19 +153,13 @@ export function newSessionReducer(state: NewSessionState, action: NewSessionActi
   }
 }
 
-/** `ENGINES` order, same as `newWorkspaceState.checkedEngines` — so panes
- * land in a stable left-to-right order in the chosen layout every time. */
-export function checkedEngines(state: NewSessionState): Engine[] {
-  return ENGINES.filter((engine) => state.engines[engine]);
-}
-
-/** At least one agent, not already submitting, and a cwd that still passes
- * the boundary check (belt and braces — the reducer already refuses a bad
- * pick, so this can only fail for a state built by hand). */
+/** At least one terminal, not already submitting, and a cwd that still
+ * passes the boundary check (belt and braces — the reducer already refuses
+ * a bad pick, so this can only fail for a state built by hand). */
 export function canSubmit(state: NewSessionState): boolean {
   return (
     !state.submitting &&
-    checkedEngines(state).length > 0 &&
+    state.slots.length > 0 &&
     isInsideProjectRoot(state.projectRoot, state.path)
   );
 }
@@ -163,24 +205,3 @@ export function isInsideProjectRoot(root: string, candidate: string): boolean {
   if (candidateParts.length <= rootParts.length) return false;
   return rootParts.every((part, i) => part === candidateParts[i]);
 }
-
-/** How the chosen folder is written in the dialog: the project root shows
- * as itself, a subfolder as the path *relative* to it (`ui/src`) — which is
- * the part the user actually chose, and keeps a deep path readable in a
- * narrow row. */
-export function displaySessionPath(state: NewSessionState): string {
-  const root = normalizePath(state.projectRoot);
-  const path = normalizePath(state.path);
-  if (root === path) return root;
-  if (!isInsideProjectRoot(root, path)) return path;
-  return path.slice(root === "/" ? 1 : root.length + 1);
-}
-
-/** True when the session will run somewhere other than the project root —
- * what the dialog's "Use project folder" reset offers to undo. */
-export function isSubfolder(state: NewSessionState): boolean {
-  return normalizePath(state.projectRoot) !== normalizePath(state.path);
-}
-
-export { LAYOUT_PRESETS };
-export type { LayoutPreset };

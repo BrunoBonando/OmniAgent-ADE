@@ -47,6 +47,7 @@ import {
   serializeClosedWorkspaces,
 } from "./state/closedWorkspaces";
 import { isSessionStatus, type SessionStatusEvent } from "./state/sessionStatus";
+import { sessionNameFromPrompt } from "./state/newSessionState";
 import {
   adjacentSessionTab,
   groupTabsBySession,
@@ -935,28 +936,32 @@ function App() {
   // 2. `cwd` is the project folder or a validated subfolder of it, not a
   //    brand-new folder chosen from anywhere on disk.
   //
-  // `name` overrides the derived "Session N" — the goal typed into
-  // `EmptyWorkspace` ("what do you want to achieve today?"), which is the
-  // most useful name a session can have. Empty/absent falls back to the
-  // derived one, so the dialog's own path is unchanged.
+  // `slots` is one engine per terminal, in pane order (Task 10) — the
+  // dialog decided *which pane runs what*, so this loop spawns them in that
+  // exact order rather than deduplicating; two Claude terminals in one
+  // session is a normal thing to ask for.
+  //
+  // `prompt` is the answer to the dialog's only question ("what are you
+  // doing?"). It names the session (`sessionNameFromPrompt` — trimmed,
+  // collapsed, capped) and, from Task 11, is delivered as the first prompt
+  // to the session's lead terminal. `EmptyWorkspace`'s typed goal comes
+  // through the same parameter, which is why that flow needs no naming code
+  // of its own.
   const handleSessionCreated = useCallback(
-    async (
-      project: ProjectInfo,
-      cwd: string,
-      engines: Engine[],
-      // Same as `handleWorkspaceCreated` above: the shape follows the pane
-      // count, so the picked preset has nothing left to do down here.
-      _layout: LayoutPreset,
-      name?: string,
-    ) => {
+    async (project: ProjectInfo, cwd: string, slots: Engine[], prompt: string) => {
       setNewSessionOpen(false);
       setSelectedProjectId(project.id);
 
       const group = newSessionGroupId();
-      const groupLabel = name?.trim() || nextSessionName(state.tabs, project.id);
+      // No prompt still means a named session: `nextSessionName` is the
+      // workspace's own numbering, and it is *stored* on the panes rather
+      // than derived at render time — see `sessionGroups.ts`'s module doc
+      // for why (a positional name renames every session below one that
+      // closes, which is the opposite of a name).
+      const groupLabel = sessionNameFromPrompt(prompt) ?? nextSessionName(state.tabs, project.id);
       const created: TabInfo[] = [];
       const failed: Engine[] = [];
-      for (const engine of engines) {
+      for (const engine of slots) {
         try {
           created.push(await createSessionTab(project, engine, group, groupLabel, cwd));
         } catch (err) {
@@ -970,7 +975,10 @@ function App() {
       }
 
       if (failed.length > 0) {
-        const names = failed.map((e) => ENGINE_LABEL[e]).join(", ");
+        // Deduplicated: with one engine per slot, the same CLI can fail
+        // twice in one batch, and "couldn't run Shell, Shell" reads like a
+        // bug in the message rather than a fact about the machine.
+        const names = [...new Set(failed)].map((e) => ENGINE_LABEL[e]).join(", ");
         setErrorBanner(
           created.length > 0
             ? `Started the session, but couldn't run ${names} — the rest are up.`
@@ -998,7 +1006,6 @@ function App() {
         project,
         project.path ?? project.id,
         Array.from({ length: layout }, () => engine),
-        layout,
         goal,
       );
     },
@@ -1558,9 +1565,8 @@ function App() {
       {newSessionOpen && selectedProject && (
         <NewSessionModal
           project={selectedProject}
-          onCreate={(project, cwd, engines, layout) =>
-            void handleSessionCreated(project, cwd, engines, layout)
-          }
+          agentState={agentState}
+          onCreate={(project, cwd, slots, prompt) => void handleSessionCreated(project, cwd, slots, prompt)}
           onClose={() => setNewSessionOpen(false)}
         />
       )}
