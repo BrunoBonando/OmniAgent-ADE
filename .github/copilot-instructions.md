@@ -1,78 +1,101 @@
 # GitHub Copilot instructions — OmniAgent-ADE
 
-Purpose: give Copilot CLI and future AI sessions immediate, repository-specific guidance for building, testing, running, and reasoning about this project.
+Purpose: provide Copilot CLI and future AI sessions repository-specific guidance for building, testing, running, and reasoning about this project.
 
 ---
 
 ## 1) Build, test, and lint (how to run)
 
-Rust workspace (root):
+Rust workspace (root)
 - Install toolchain: `rustup` (ensure `~/.cargo/bin` on PATH).
-- Build workspace: `cargo build --workspace` (or `cargo build` in a crate dir).
-- Run all tests: `cargo test --workspace`.
-- Run tests for a single crate: `cargo test -p <crate-name>` (e.g. `-p brain-ingest`).
-- Run a single test by name: `cargo test -p <crate-name> -t "test_name_pattern"` (use the test's substring).
-- Format: `cargo fmt --all`.
-- Lint: `cargo clippy --all-targets --all-features`.
+- Build workspace: `cargo build --workspace`
+- Build a single crate: `cd <crate> && cargo build`
+- Run all tests: `cargo test --workspace`
+- Run tests for a single crate: `cargo test -p <crate-name>` (e.g. `-p brain-ingest`)
+- Run a single test by name: `cargo test -p <crate-name> -t "test_name_pattern"`
+- Run mcp-server contract tests after protocol changes: `cargo test -p mcp-server`
+- Format: `cargo fmt --all`
+- Lint: `cargo clippy --all-targets --all-features`
 
-Frontend (ui/):
-- Install deps: `npm --prefix ui install`.
-- Dev server: `npm --prefix ui run dev` (or `cd ui && npm install && npm run dev`).
-- Build: `npm --prefix ui run build`.
-- Tests (Vitest): `npm --prefix ui run test`.
-- Run a single Vitest by name: `npm --prefix ui run test -- -t "test name"` or `npx vitest -t "test name" --run` from repo root.
-- Preview: `npm --prefix ui run preview`.
+Frontend (ui/)
+- Install deps: `npm --prefix ui install`
+- Dev server: `npm --prefix ui run dev`  (or `cd ui && npm install && npm run dev`)
+- Build: `npm --prefix ui run build`
+- Tests (Vitest): `npm --prefix ui run test`
+- Run a single Vitest by name: `npm --prefix ui run test -- -t "test name"` or `npx vitest -t "test name" --run` (from repo root)
+- Preview: `npm --prefix ui run preview`
 
-Tauri (desktop shell):
+Tauri (desktop shell)
 - Dev (from repo root):
   `cd src-tauri && ../ui/node_modules/.bin/tauri dev`
 - Build packaged app:
   `cd src-tauri && ../ui/node_modules/.bin/tauri build`
 
 Notes:
-- Many dev commands assume `cargo` and `node` are on PATH; non-login shells may omit `~/.cargo/bin`.
-- UI tests use `vitest`; TypeScript typechecks are run during `npm run build`.
+- Tauri dev/build must be executed from `src-tauri/` because `tauri.conf.json` and `beforeBuildCommand` expect the repo layout.
+- The Tauri build expects the `omniagent-mcp` binary to be available and copied into app resources during packaging.
+- Many commands assume `cargo` and `node` are on PATH; non-login shells may omit `~/.cargo/bin`.
 
 ---
 
 ## 2) High-level architecture (big picture)
 
-- Mono-repo Rust/Cargo workspace + a TypeScript React UI (Tauri wrapper):
-  - crates/brain-core — SQLite + FTS5 storage and retrieval.
-  - crates/brain-ingest — repository walker, tree-sitter parsing, ingestion, enrichment.
-  - crates/mcp-server — the frozen MCP contract and stdio/local server component.
-  - src-tauri — Tauri Rust core (PTY sessions, session manager, app wiring).
-  - ui/ — React + TypeScript + Vite frontend (brain map, terminals, sidebar).
-- Runtime processes: Tauri app (UI + Rust core), graph daemon/ingest (separate process), and an MCP server process. All share the same retrieval crate and storage.
-- Storage: SQLite brain DB (rebuildable) + durable Markdown memory under
-  `~/Library/Application Support/OmniAgent-ADE/brain/`. Override with `OMNIAGENT_ADE_DATA_DIR`.
+- Monorepo: Rust/Cargo workspace + TypeScript React UI wrapped by Tauri:
+  - `crates/brain-core` — SQLite + FTS5 storage and retrieval
+  - `crates/brain-ingest` — repository walker, tree-sitter parsing, ingestion, enrichment
+  - `crates/mcp-server` — frozen MCP contract, stdio/local server component and contract tests
+  - `src-tauri` — Tauri Rust core (PTY sessions, session manager, app wiring)
+  - `ui/` — React + TypeScript + Vite frontend (brain map, terminals, sidebar)
+- Runtime: Tauri app (UI + Rust core), a graph daemon/ingest process, and an MCP server process; they share retrieval crates and storage layers.
+- Storage: SQLite "brain" DB (rebuildable) + durable Markdown memory under:
+  `~/Library/Application Support/OmniAgent-ADE/brain/` — override with `OMNIAGENT_ADE_DATA_DIR`.
 
-Refer to docs/DESIGN.md and docs/PLAN.md for detailed architecture and product principles.
+See `docs/DESIGN.md` and `docs/PLAN.md` for architecture and product principles.
 
 ---
 
-## 3) Key repository conventions and patterns (what Copilot should know)
+## 3) Key repository conventions and patterns
 
-- Cargo workspace: root Cargo.toml lists members; builds/tests should target the workspace when making cross-crate changes.
-- Packaging rule: every code change is expected to end with a fresh build of the app (the packaged `.app`/`.dmg` under `target/release/bundle/`). CI and local checks should reproduce that build when validating release-affecting changes.
-- MCP server contract is intentionally "frozen" for v1. Do not change public MCP shapes (tools/requests) without updating integrations and contract tests in crates/mcp-server.
-- Memory is authoritative as Markdown. The SQLite DB is rebuildable from source + Markdown; prefer writing/reading durable notes in `brain/<project>/…` rather than treating DB rows as the canonical writable surface.
-- Ingestion tests use `fixtures/sample-project/` as a golden repository. Use it for deterministic graph/ingest tests.
-- Tauri dev/build must be executed from `src-tauri/` because `tauri.conf.json` and the `beforeBuildCommand` expect the repo layout; the Tauri build also relies on the bundled `omniagent-mcp` binary being copied into the app resources.
-- Session IDs: stable, name-based UUIDv5 derivation — sessions map to persistent conversation IDs across restarts.
-- Transcripts & redaction: transcripts are persisted; secret-pattern redaction runs before writing memory. Be cautious when changing transcript or memory-writing code paths.
-- Watcher behavior: file watching is FSEvents (macOS) with debounced incremental re-ingest; large repo changes should be tested for incremental correctness.
+- Cargo workspace: root `Cargo.toml` lists members; prefer workspace-level builds/tests for cross-crate changes.
+- Packaging rule: changes that affect releases should end with a packaged app build (`target/release/bundle/*.app` or `.dmg`).
+- MCP contract: the MCP server protocol is frozen for v1. Changing public MCP shapes (tools/requests) requires updating integrations and running `crates/mcp-server` contract tests.
+- Commit trailer: When creating commits for repository changes, include this trailer unless explicitly requested not to:
+  `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
+- Memory is authoritative as Markdown. The SQLite brain DB is rebuildable from source + Markdown; prefer writing durable notes under `brain/<project>/` rather than treating DB rows as canonical writable surface.
+- Transcripts & redaction: transcripts are persisted; secret-pattern redaction runs before writing memory. Be cautious when modifying transcript or memory-writing code paths.
+- Tests & fixtures: `fixtures/sample-project/` is the golden repo for ingestion tests.
+- Watcher behavior: file watching uses FSEvents on macOS with debounced incremental re-ingest — large repo changes must be validated for incremental correctness.
+- Session IDs: stable, name-based UUIDv5 derivation; sessions map to persistent conversation IDs across restarts.
 
 ---
 
 ## 4) Useful entry points for Copilot suggestions
 
-- README.md (root) — quick start, data dir, high-level commands.
-- docs/DESIGN.md — architecture and principles (must-read before large changes).
-- docs/PLAN.md — phased implementation notes and known rough edges.
-- crates/* and src-tauri/ — code-level APIs for retrieval, MCP, session management.
-- ui/ — Vite+React entry points (brain-map, terminal panes).
+- `README.md` — quick start, data dir, high-level commands
+- `docs/DESIGN.md` — architecture and product constraints (read before large changes)
+- `docs/PLAN.md` — phased implementation notes and rough edges
+- `crates/*` and `src-tauri/*` — core APIs: retrieval, MCP, session management
+- `ui/` — Vite+React entry points (brain-map, terminal panes)
+- `fixtures/sample-project/` — golden repo for ingestion tests
 
 ---
 
-Keep changes minimal and prefer explaining intent when suggesting API/contract alterations (MCP, brain storage, ingestion pipeline). When in doubt, reference docs/DESIGN.md for product-level constraints.
+Keep changes minimal and prefer explaining intent when suggesting API/contract alterations (MCP, brain storage, ingestion pipeline). When in doubt, reference `docs/DESIGN.md`.
+
+Note on file authority and one-shot edits:
+- By default, `.github/copilot-instructions.md` is the authoritative source. The local sync script regenerates agent-specific files from it.
+- To promote an agent-specific file as authoritative (for example, after a direct update to `CLAUDE.md`), run:
+
+  `./scripts/sync-instructions.sh CLAUDE.md`
+
+  This will propagate CLAUDE.md's content into the other agent files and update `.github/copilot-instructions.md` so everything stays in sync.
+
+
+---
+
+Summary of what this file provides:
+- Consolidated build/test/lint commands including single-test commands
+- High-level architecture overview and runtime processes
+- Repository-specific conventions (MCP contract, commit trailer, memory rules)
+
+If you want adjustments (more detail for UI tests, CI hooks, or adding MCP server configs), say which and a branch/PR can be used for review.
