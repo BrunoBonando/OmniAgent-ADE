@@ -402,39 +402,15 @@ code {
   }
 }
 
-/* Founder feedback, 2026-07-25: the file tree panel's show/hide toggle
-   ("nice to have a folder/file navigation on the right panel", but "don't
-   [let chrome] compete for attention" from the same founder, twice over —
-   collapsible rather than a fixed extra column, this is the trigger).
-   Same pill shape as `.pressure-badge` (quiet, textual, not a loud icon)
-   but interactive: `.is-active` picks up the signal accent so it's obvious
-   at a glance whether the panel is currently open. */
-.sidebar-filetree-trigger {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  color: var(--ink-dim);
-  background: var(--panel-raised);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 2px 8px;
-}
-
-.sidebar-filetree-trigger:hover {
-  color: var(--ink);
-  border-color: var(--ink-dim);
-}
-
-.sidebar-filetree-trigger.is-active {
-  color: var(--signal);
-  border-color: var(--signal-dim);
-  background: rgba(77, 141, 255, 0.12);
-}
-
-/* "Import projects from other tools" permanent trigger — same quiet pill
-   shape as `.sidebar-filetree-trigger` (a utility action, not the primary
-   "+" one), reachable any time, not just first-run (see Sidebar.tsx's own
-   module doc for why this isn't folded into NewWorkspaceModal). */
+/* "Import projects from other tools" permanent trigger — a quiet pill shape
+   (same family as `.pressure-badge`: textual, not a loud icon; a utility
+   action, not the primary "+" one), reachable any time, not just first-run
+   (see Sidebar.tsx's own module doc for why this isn't folded into
+   NewWorkspaceModal). Used to share this shape with the file tree's
+   show/hide trigger (`.sidebar-filetree-trigger`) — removed in the left-pane
+   redesign's Task 6 along with the toggle it drove, once the tree it
+   showed/hid became a permanent, always-embedded part of the sidebar
+   instead of a collapsible dock. */
 .sidebar-import-trigger {
   font-family: var(--mono);
   font-size: 10px;
@@ -4419,14 +4395,22 @@ code {
 
 /* ------------------------------------------------------------- file tree
    Founder feedback, 2026-07-25 (verbatim): "nice to have a folder/file
-   navigation on the right panel." Persistent chrome (App.tsx's
-   `app-body`'s 4th flex child, conditionally mounted on `fileTreeVisible`
-   — see App.tsx) rather than an overlay like `.detail-panel`, so it gets a
-   plain fixed-width column instead of that panel's floating/shadowed
-   treatment; the row/action styling below still borrows `.detail-panel`'s
-   quiet, small-type conventions (var(--mono), 11-12px, --ink-dim for
-   secondary text) for visual consistency across the shell's two "small
-   file-ish panel" surfaces. */
+   navigation on the right panel." Originally persistent chrome in its own
+   right — App.tsx's `app-body` 4th flex child, conditionally mounted on a
+   `fileTreeVisible` toggle — styled as a plain fixed-width column (not an
+   overlay like `.detail-panel`), with the row/action styling below
+   borrowing `.detail-panel`'s quiet, small-type conventions (var(--mono),
+   11-12px, --ink-dim for secondary text) for visual consistency across the
+   shell's two "small file-ish panel" surfaces.
+
+   **2026-07-27 left-pane redesign, Task 6**: that standalone dock is gone —
+   `FileTree.tsx` now renders permanently embedded in the sidebar's
+   `.sidebar-files` (Sidebar.tsx), via its `embedded` prop, and
+   `.file-tree.is-embedded` below overrides the sizing/chrome this base rule
+   still describes. The base (non-embedded) rules stay: they're the
+   component's own default mode, still fully exercised by
+   `FileTree.test.tsx`, kept in case a future dock-style use resurfaces
+   rather than duplicated into an embedded-only variant. */
 .file-tree {
   /* `width` no longer comes from here (Task 9, founder follow-up 2026-07-25:
      "make sure that we're able to resize the right panel") — it's an inline
@@ -4504,10 +4488,12 @@ code {
 }
 
 /* New File / New Folder (Task 7) — literal short text triggers rather than a
-   glyph, matching `Sidebar.tsx`'s own `.sidebar-filetree-trigger` ("files")
-   convention; the "+" prefix reuses the "create/add" meaning that glyph
-   already carries everywhere else in this app (Sidebar's add-project/
-   new-terminal-in-project triggers, PaneHeader's split button). */
+   glyph; the "+" prefix reuses the "create/add" meaning that glyph already
+   carries everywhere else in this app (Sidebar's add-project/
+   new-terminal-in-project triggers, PaneHeader's split button). Only
+   rendered in the non-embedded header (see `.file-tree`'s own doc above) —
+   the embedded FILES section reaches the same New File/New Folder actions
+   through the empty-space context menu instead, same as Finder. */
 .file-tree-new {
   background: transparent;
   border: none;
@@ -4783,12 +4769,16 @@ code {
    panel for that session ... as a new column, dedicated on the right").
    Reference: docs/reference/warp-code-review-panel.png.
 
-   Shares the right-hand dock with `.file-tree` and mirrors its structure
-   exactly (absolute left-edge resize handle, flex column, min/max width
-   backstop matching the clamp in `codeReviewState.ts`) — two panels that
-   occupy the same slot should not feel like two different pieces of
-   furniture. What differs is everything inside: this one is dense, mono,
-   and diff-first. */
+   Structurally mirrors `.file-tree`'s own (non-embedded) shape — absolute
+   left-edge resize handle, flex column, min/max width backstop matching the
+   clamp in `codeReviewState.ts` — because it used to share the app's one
+   right-hand dock with that panel and the two were meant to feel like the
+   same piece of furniture. Since the left-pane redesign's Task 6 moved the
+   file tree into the sidebar as permanent, embedded chrome, this panel is
+   now the dock's only occupant — the shared-structure comment stays because
+   the shapes still deliberately match, not because they still compete for
+   the slot. What differs is everything inside: this one is dense, mono, and
+   diff-first. */
 /* ===================================================================== */
 
 .code-review {
@@ -6449,10 +6439,10 @@ code {
 }
 .sidebar-sessions-add:hover { background: rgba(255, 255, 255, 0.1); color: var(--ink); }
 /* `flex: 0 1 auto` + its own scroll rather than the `flex: none` the rest of
-   this skeleton uses: the list is the only part of the panel that grows with
-   what the user opens, and until Task 6's FILES section lands there is
-   nothing below it to absorb a workspace with a dozen sessions — it would
-   push the account footer off the bottom of the window instead. */
+   this skeleton uses: the list is the only part of the panel above the FILES
+   section that grows with what the user opens, but it stays bounded by its
+   own scroll rather than pushing `.sidebar-files` (which absorbs the rest of
+   the panel's height, see below) off the bottom. */
 .sidebar-session-list {
   flex: 0 1 auto;
   min-height: 0;
@@ -6465,10 +6455,30 @@ code {
   gap: 4px;
 }
 /* The old `.sidebar-projects` (flex: 1) is what used to push the footer to
-   the bottom of the panel. Nothing in the new skeleton grows to fill — the
-   FILES section that will (Task 6) isn't built yet — so the footer pins
-   itself. */
+   the bottom of the panel. `.sidebar-files` (below) is the new skeleton's
+   flex-growing element, so the footer still pins itself under it. */
 .sidebar-footer { margin-top: auto; }
+
+/* redesign: FILES section in the sidebar (Task 6). The tree that used to be
+   a separate, toggleable right-hand dock (`FileTree.tsx`'s own `.file-tree`,
+   shown/hidden via `App.tsx`'s old `fileTreeVisible` state) is now always
+   embedded here, below the session list — `FileTree`'s `embedded` prop drops
+   its resize handle and dock header, and `.file-tree.is-embedded` below
+   makes it fill this section instead of carrying its own fixed width. The
+   only genuinely new surface is the filter input; everything below it is
+   still the same lazy `listDir`/watcher-backed tree. */
+.sidebar-files { flex: 1; min-height: 0; display: flex; flex-direction: column; border-top: 0.5px solid rgba(255, 255, 255, 0.06); margin-top: 2px; }
+.sidebar-files-header { flex: none; display: flex; align-items: center; gap: 6px; padding: 8px 14px 5px; }
+.sidebar-files-filter {
+  flex: none; margin: 0 9px 7px; height: 24px; padding: 0 8px;
+  border-radius: 6px; background: rgba(255, 255, 255, 0.05);
+  border: 0.5px solid rgba(255, 255, 255, 0.06);
+  font: 400 11px/1 var(--sans); color: var(--ink); outline: none;
+}
+.sidebar-files-filter::placeholder { color: #5c5c66; }
+.sidebar-files-filter:focus { border-color: var(--accent-focus-border); }
+.sidebar-files-body { flex: 1; min-height: 0; overflow: auto; padding: 0 6px 8px; }
+.file-tree.is-embedded { width: 100%; border: 0; background: transparent; }
 
 /* The workspace close, re-homed from the project row's hover "×" into
    `ProjectMenu` (left-pane redesign, Task 3). Same shape as

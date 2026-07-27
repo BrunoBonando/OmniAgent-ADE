@@ -6,7 +6,6 @@ import "./App.css";
 import Sidebar from "./components/Sidebar";
 import Workspace from "./components/Workspace";
 import CommandPalette from "./components/CommandPalette";
-import FileTree from "./components/FileTree";
 import CodeReviewPanel from "./components/CodeReviewPanel";
 import AppChrome from "./components/AppChrome";
 import NewChooserModal from "./components/NewChooserModal";
@@ -70,7 +69,6 @@ import type { TerminalThemeId } from "./lib/terminalThemes";
 import { ownsCtrlOnlyShortcut } from "./lib/keyboard";
 import { usePerSessionEvent } from "./lib/usePerSessionEvent";
 import {
-  FILE_TREE_VISIBLE_SETTING_KEY,
   agentCheckInstalled,
   agentInstall,
   getBriefing,
@@ -120,14 +118,15 @@ function App() {
   const [view, setView] = useState<View>("workspace");
   const restoredRef = useRef(false);
   // Founder feedback (Bruno, 2026-07-25, verbatim): "nice to have a
-  // folder/file navigation on the right panel" — but the same founder has
-  // twice now been explicit that UI chrome must not compete with the
-  // terminal workspace for attention, so it's collapsible rather than a
-  // fixed extra column. Defaults to visible (it's the feature being asked
-  // for) and is persisted via the same settings-table pattern
-  // `LAYOUT_SETTING_KEY`/`REVIEW_MEMORY_SETTING_KEY` already use, restored
-  // in the boot effect below alongside the tab layout.
-  const [fileTreeVisible, setFileTreeVisible] = useState(true);
+  // folder/file navigation on the right panel" — originally a collapsible
+  // right-hand dock (a `fileTreeVisible` boolean lived here, persisted via
+  // the settings table like `LAYOUT_SETTING_KEY`/`REVIEW_MEMORY_SETTING_KEY`)
+  // because the same founder had twice been explicit that UI chrome must not
+  // compete with the terminal workspace for attention. Left-pane redesign,
+  // Task 6 (2026-07-27): the tree moved into the sidebar as a permanent FILES
+  // section instead — always there, no toggle to lose track of — so that
+  // boolean and its persistence are gone; see `Sidebar.tsx`'s `.sidebar-files`
+  // and `FileTree.tsx`'s `embedded` prop.
   // Workspaces the user has closed (founder ask: "add the possibility to
   // close a workspace, on hover"). Held here rather than derived from the
   // brain because the brain is deliberately not told — closing is a window
@@ -144,15 +143,14 @@ function App() {
   // Opening it from a different pane re-targets it rather than stacking a
   // second column.
   //
-  // COEXISTENCE WITH THE FILE TREE: they share the one right-hand dock and
-  // are mutually exclusive, because at realistic window widths they aren't
-  // both affordable — a 1440px MacBook already spends ~220px on the sidebar,
-  // and a file tree (260) plus a review column (440) would leave the
-  // terminals under 520px, which is where a terminal grid stops being usable.
-  // The review column wins while it's open and the file tree comes back
-  // exactly as the user left it on close: `fileTreeVisible` is deliberately
-  // NOT mutated here, it stays the user's own preference and is only
-  // suppressed from rendering.
+  // THE RIGHT-HAND DOCK: used to be shared with the file tree, mutually
+  // exclusive between the two because at realistic window widths a file tree
+  // (260) plus a review column (440) wouldn't both fit next to a usable
+  // terminal grid on a 1440px MacBook. Left-pane redesign, Task 6
+  // (2026-07-27) moved the file tree into the sidebar as permanent, embedded
+  // chrome — see `fileTreeVisible`'s old declaration above — so this column
+  // is now the dock's only occupant; `reviewTarget` alone decides whether
+  // anything renders there.
   const [reviewTarget, setReviewTarget] = useState<{ id: string; cwd: string; label: string } | null>(null);
 
 
@@ -166,11 +164,10 @@ function App() {
   // or explicitly skipped), so a first-ever launch never shows both
   // overlays layered on top of each other.
   const [needsAuthGate, setNeedsAuthGate] = useState<boolean | null>(null);
-  // Lifted (not read locally by `AccountBadge.tsx` itself) for the same
-  // reason `fileTreeVisible` is lifted rather than let its own consumer
-  // poll settings independently: one read on boot, kept live by the two
-  // mutations below, and handed down as plain props the whole way to the
-  // sidebar-header badge — a persistent piece of chrome, unlike
+  // Lifted (not read locally by `AccountBadge.tsx` itself) so it's a single
+  // read on boot, kept live by the two mutations below, and handed down as
+  // plain props the whole way to the sidebar-header badge — a persistent
+  // piece of chrome, unlike
   // `AboutPanel.tsx`'s own one-shot `settingsGet` (that panel unmounts and
   // remounts every time it opens, so a mount-time fetch is enough for it;
   // the always-mounted badge has no equivalent remount to hang a refetch
@@ -323,17 +320,6 @@ function App() {
       } catch (err) {
         console.error("failed to load project roots", err);
         if (!cancelled) setNeedsOnboarding(false); // fail open — never trap the user behind a broken check
-      }
-
-      try {
-        const storedFileTreeVisible = await settingsGet(FILE_TREE_VISIBLE_SETTING_KEY);
-        // Unset (first run) keeps the `useState(true)` default — only an
-        // explicit "false" ever hides it on boot.
-        if (!cancelled && storedFileTreeVisible !== null) {
-          setFileTreeVisible(storedFileTreeVisible === "true");
-        }
-      } catch (err) {
-        console.error("failed to read file_tree_visible setting, defaulting to visible", err);
       }
 
       // Recent notifications survive a relaunch (see
@@ -1074,22 +1060,12 @@ function App() {
     [],
   );
 
-  // Same optimistic-flip-then-persist shape as `ReviewPanel.tsx`'s
-  // `toggleReviewMode` (its own settings-table boolean toggle) — flip local
-  // state immediately so the panel opens/closes with no round-trip latency,
-  // fire-and-forget the persist. Doubles as both the sidebar trigger's
-  // handler and the panel's own in-place close button.
-  const toggleFileTree = useCallback(() => {
-    const next = !fileTreeVisible;
-    setFileTreeVisible(next);
-    void settingsSet(FILE_TREE_VISIBLE_SETTING_KEY, next ? "true" : "false");
-  }, [fileTreeVisible]);
-
   // `AuthGate`'s `onResolved` — fires exactly once, whichever path the user
   // took (skip-from-login, or personalize's answer/skip). Persists all
   // three settings the gate cares about and dismisses it immediately
-  // (optimistic, same shape as `toggleFileTree` above — the writes are
-  // fire-and-forget, the UI doesn't wait on them).
+  // (optimistic — same fire-and-forget `settingsSet`-after-local-flip shape
+  // `ReviewPanel.tsx`'s own `toggleReviewMode` uses; the writes here don't
+  // block the UI either).
   const handleAuthGateResolved = useCallback((outcome: AuthGateOutcome) => {
     setNeedsAuthGate(false);
     const signedInValue = outcome.signedIn ? "true" : "false";
@@ -1365,8 +1341,6 @@ function App() {
           ingestion={ingestion}
           view={view}
           onSetView={setView}
-          fileTreeVisible={fileTreeVisible}
-          onToggleFileTree={toggleFileTree}
           onNewSessionInProject={(p) => {
             setSelectedProjectId(p.id);
             setNewSessionOpen(true);
@@ -1405,21 +1379,16 @@ function App() {
           hidden={view !== "map"}
           livePollMs={ingestion?.running ? INGESTION_POLL_MS : undefined}
         />
-        {/* One right-hand dock, one panel at a time — see `reviewTarget`'s
-            declaration for why these are mutually exclusive rather than
-            side by side, and why closing the review column restores the
-            file tree to whatever the user had chosen. */}
-        {reviewTarget ? (
+        {/* The one right-hand dock — see `reviewTarget`'s declaration for
+            why the file tree that used to share this slot moved into the
+            sidebar (Task 6) and isn't rendered here any more. */}
+        {reviewTarget && (
           <CodeReviewPanel
             key={reviewTarget.id}
             repoPath={reviewTarget.cwd}
             sessionLabel={reviewTarget.label}
             onClose={() => setReviewTarget(null)}
           />
-        ) : (
-          fileTreeVisible && (
-            <FileTree project={selectedProject} activeTabId={state.activeTabId} onClose={toggleFileTree} />
-          )
         )}
       </div>
 

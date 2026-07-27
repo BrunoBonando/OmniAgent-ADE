@@ -396,9 +396,9 @@ interface WorkspaceProps {
   onNewTabInProject: (project: ProjectInfo) => void;
   onRenameTab: (id: string, label: string) => void;
   /** PaneHeader's 3-dot "Change engine" — see `ProjectPaneGridProps`'s doc.
-   * Optional (defaults to a no-op), same reasoning as `Sidebar.tsx`'s
-   * `view`/`fileTreeVisible` props: existing tests that don't care about
-   * the 3-dot menu don't have to pass it. */
+   * Optional (defaults to a no-op), same reasoning as `Sidebar.tsx`'s own
+   * optional props (e.g. `view`/`onSetView`): existing tests that don't
+   * care about the 3-dot menu don't have to pass it. */
   onChangeEngine?: (tab: TabInfo, engine: Engine) => void;
   /** PaneHeader's 3-dot "Terminal theme" picker. Optional, same reasoning. */
   onChangeTheme?: (id: string, themeId: TerminalThemeId) => void;

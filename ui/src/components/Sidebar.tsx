@@ -150,6 +150,7 @@ import ImportProjectsFlow from "./ImportProjectsFlow";
 import SidebarSessionRow from "./SidebarSessionRow";
 import CloseWorkspaceConfirm from "./CloseWorkspaceConfirm";
 import CloseSessionConfirm from "./CloseSessionConfirm";
+import FileTree from "./FileTree";
 import type { SessionGroup } from "../state/sessionGroups";
 import AccountBadge from "./AccountBadge";
 import type { ImportBatchResult } from "../state/importState";
@@ -214,14 +215,6 @@ interface SidebarProps {
    * still type-checks for any test that doesn't care about it. */
   view?: "workspace" | "map";
   onSetView?: (view: "workspace" | "map") => void;
-  /** Founder feedback, 2026-07-25: the file tree panel's show/hide toggle
-   * (`App.tsx` owns the persisted state — see `FILE_TREE_VISIBLE_SETTING_KEY`).
-   * Its "files" button lived in the sidebar header, which Task 3 removed;
-   * Task 6 pulls the tree itself into this panel as the FILES section and
-   * deletes both of these props with the right-hand dock. Kept until then so
-   * `App.tsx` keeps type-checking unchanged. */
-  fileTreeVisible?: boolean;
-  onToggleFileTree?: () => void;
   /** The SESSIONS header's "+" — opens `NewSessionModal` for the selected
    * workspace (⌘N -> Session reaches the same dialog). Optional, same
    * convention as the props above. */
@@ -248,12 +241,14 @@ interface SidebarProps {
   onInstallAgent: (agent: Agent) => void;
 }
 
-// `onNewTabInProject`, `ingestion`, `fileTreeVisible` and `onToggleFileTree`
-// are deliberately NOT destructured: they are live props `App.tsx` passes,
-// whose render sites either moved out of this file (Task 3) or haven't been
-// built yet (Tasks 6/8) — see each one's doc on `SidebarProps`. Leaving them
-// out of the signature is what keeps `noUnusedLocals` honest without
-// dropping the prop itself.
+// `onNewTabInProject` and `ingestion` are deliberately NOT destructured:
+// they are live props `App.tsx` passes whose render site moved out of this
+// file (Task 3) or hasn't been built yet (Task 8) — see each one's doc on
+// `SidebarProps`. Leaving them out of the signature is what keeps
+// `noUnusedLocals` honest without dropping the prop itself. (`fileTreeVisible`/
+// `onToggleFileTree` used to be here too — Task 6 removed both from
+// `SidebarProps` entirely along with the right-hand dock they toggled; the
+// tree they used to show/hide is now always-embedded below, in `.sidebar-files`.)
 export default function Sidebar({
   projects,
   tabs,
@@ -298,6 +293,11 @@ export default function Sidebar({
    * below) already opens the session holding the focused pane without this
    * set knowing about it. */
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
+  /** Task 6: the FILES section's name filter — local to this component (not
+   * lifted to `App.tsx`, not persisted), same as `menuOpen`/`aboutOpen`
+   * below. It's a per-render UI convenience over whatever `FileTree` already
+   * has loaded, not app state anything else needs to read. */
+  const [fileFilter, setFileFilter] = useState("");
   const toggleSession = useCallback((id: string) => {
     setExpandedSessions((prev) => {
       const next = new Set(prev);
@@ -516,8 +516,28 @@ export default function Sidebar({
           })}
       </ul>
 
-      {/* FILES section arrives in Task 6, between the sessions and the
-          account footer. */}
+      {/* redesign: FILES section (Task 6) — the tree that used to be a
+          separate right-hand dock (`FileTree.tsx`, `App.tsx`'s old
+          `fileTreeVisible` conditional render) is now embedded here, below
+          the sessions and above the account footer. `embedded` drops its
+          resize handle/dock header; `filter` is this component's own local
+          `fileFilter` state, never lifted — see that state's own doc. */}
+      <div className="sidebar-files">
+        <div className="sidebar-files-header">
+          <span className="sidebar-microlabel">FILES</span>
+          <span className="sidebar-spacer" />
+          {/* Task 7 puts the "N changed" chip here */}
+        </div>
+        <input
+          className="sidebar-files-filter"
+          placeholder="Filter files"
+          value={fileFilter}
+          onChange={(e) => setFileFilter(e.target.value)}
+        />
+        <div className="sidebar-files-body">
+          <FileTree project={selectedProject} activeTabId={activeTabId} onClose={() => {}} embedded filter={fileFilter} />
+        </div>
+      </div>
 
       <div className="sidebar-footer">
         <AccountBadge

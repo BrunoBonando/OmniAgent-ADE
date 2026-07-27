@@ -12,6 +12,15 @@ import { initialAgentsState } from "../state/agents";
 const { useGitBranchMock } = vi.hoisted(() => ({ useGitBranchMock: vi.fn() }));
 vi.mock("../lib/useGitBranch", () => ({ useGitBranch: useGitBranchMock }));
 
+// Task 6 (left-pane redesign): Sidebar now renders the real `FileTree` as
+// its embedded FILES section, so its own `../lib/tauri` mock has to cover
+// FileTree's dependencies too (same module, same resolved path, whichever
+// relative specifier each file uses to import it) — `listDir`/`watchDir`/
+// `unwatchDir`/etc., not just the roots/ingestion/import surface Sidebar
+// itself calls. Defaults are the quiet, empty-tree case; tests that care
+// about actual file rows exercise that directly in `FileTree.test.tsx`.
+const { listDirMock } = vi.hoisted(() => ({ listDirMock: vi.fn().mockResolvedValue([]) }));
+
 vi.mock("../lib/tauri", () => ({
   rootsPausedProjects: vi.fn().mockResolvedValue([]),
   rootsStaleness: vi.fn().mockResolvedValue([]),
@@ -29,7 +38,21 @@ vi.mock("../lib/tauri", () => ({
   ingestionStatus: vi.fn().mockResolvedValue({ running: false }),
   REVIEW_MEMORY_SETTING_KEY: "review_memory",
   FILE_TREE_VISIBLE_SETTING_KEY: "file_tree_visible",
+  FILE_TREE_WIDTH_SETTING_KEY: "file_tree_width",
+  listDir: listDirMock,
+  watchDir: vi.fn().mockResolvedValue(undefined),
+  unwatchDir: vi.fn().mockResolvedValue(undefined),
+  sessionWrite: vi.fn().mockResolvedValue(undefined),
+  renamePath: vi.fn(),
+  movePath: vi.fn(),
+  duplicatePath: vi.fn(),
+  deleteToTrash: vi.fn(),
+  createFile: vi.fn(),
+  createDir: vi.fn(),
 }));
+
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: vi.fn(), revealItemInDir: vi.fn() }));
 
 const p1: ProjectInfo = { id: "p1", label: "api", path: "/tmp/p1" };
 const p2: ProjectInfo = { id: "p2", label: "web", path: "/tmp/p2" };
@@ -399,5 +422,37 @@ describe("Sidebar — closing a session (founder ask: 'I must be able to close a
   it("shows no session close control when the app does not pass a handler", () => {
     setup({ onCloseSession: undefined });
     expect(screen.queryByRole("button", { name: /^Close session/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("Sidebar — FILES section (Task 6, left-pane redesign: the tree embedded below the sessions)", () => {
+  beforeEach(() => {
+    useGitBranchMock.mockReset();
+    useGitBranchMock.mockReturnValue("main");
+    listDirMock.mockReset();
+    listDirMock.mockResolvedValue([
+      { name: "src", path: "/tmp/p1/src", is_dir: true },
+      { name: "main.py", path: "/tmp/p1/main.py", is_dir: false },
+      { name: "notes.md", path: "/tmp/p1/notes.md", is_dir: false },
+    ]);
+  });
+
+  it("renders the FILES header, a filter input, and the tree embedded (no standalone dock chrome)", async () => {
+    const { container } = setup();
+    expect(screen.getByText("FILES")).toBeInTheDocument();
+    expect(container.querySelector(".sidebar-files-filter")).toBeInTheDocument();
+    expect(await screen.findByText("main.py")).toBeInTheDocument();
+    expect(container.querySelector(".file-tree.is-embedded")).toBeInTheDocument();
+    expect(container.querySelector(".file-tree-resize-handle")).toBeNull();
+    expect(container.querySelector(".file-tree-header")).toBeNull();
+  });
+
+  it("typing into the filter narrows the embedded tree to matching rows — filter state stays local to Sidebar", async () => {
+    const { container } = setup();
+    await screen.findByText("main.py");
+    fireEvent.change(container.querySelector(".sidebar-files-filter")!, { target: { value: "main" } });
+    expect(await screen.findByText("main.py")).toBeInTheDocument();
+    expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
+    expect(screen.queryByText("src")).not.toBeInTheDocument();
   });
 });
