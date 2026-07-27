@@ -99,7 +99,7 @@ describe("the panel", () => {
     openPanel();
     expect(screen.getByText("wire session restore")).toBeInTheDocument();
     expect(screen.getByText("Task completed.")).toBeInTheDocument();
-    expect(screen.getByText("2 days ago")).toBeInTheDocument();
+    expect(screen.getByText("2 days")).toBeInTheDocument();
   });
 
   it("writes the right sentence for each notifying state", () => {
@@ -195,20 +195,20 @@ describe("dismissing and filtering", () => {
       liveSessionIds: ["sess-1", "s2"],
     });
     openPanel();
-    expect(screen.getByRole("button", { name: "All sessions (2)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All 2" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "OmniAgent ADE (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: "This workspace 1" }));
     const list = document.querySelector(".notifications-list")!;
     expect(within(list as HTMLElement).getByText("wire session restore")).toBeInTheDocument();
     expect(within(list as HTMLElement).queryByText("other work")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "All sessions (2)" }));
+    fireEvent.click(screen.getByRole("button", { name: "All 2" }));
     expect(within(document.querySelector(".notifications-list") as HTMLElement).getByText("other work")).toBeInTheDocument();
   });
 
   it("cannot filter by project when no project is selected", () => {
     setup({ selectedProjectId: null, selectedProjectLabel: null });
     openPanel();
-    expect(screen.getByRole("button", { name: "This project (0)" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "This workspace 0" })).toBeDisabled();
   });
 });

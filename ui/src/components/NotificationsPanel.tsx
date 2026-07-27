@@ -168,8 +168,9 @@ export default function NotificationsPanel({
   const unread = entries.filter((e) => !e.read).length;
   const live = useMemo(() => new Set(liveSessionIds), [liveSessionIds]);
   const projects = useMemo(() => new Set(knownProjectIds), [knownProjectIds]);
-  const visible = filterNotifications(entries, filter, selectedProjectId);
-  const projectCount = filterNotifications(entries, "project", selectedProjectId).length;
+  const awaiting = new Set<string>();
+  const visible = filterNotifications(entries, filter, selectedProjectId, awaiting);
+  const projectCount = filterNotifications(entries, "project", selectedProjectId, awaiting).length;
 
   useEffect(() => {
     if (!open || now !== undefined) return;
