@@ -127,7 +127,7 @@
 // `state/closedWorkspaces.ts` for the full "this is a window close, not a
 // delete" reasoning, and `CloseWorkspaceConfirm` for what the user is told
 // before anything is killed.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { tabsByProject, type Engine, type ProjectInfo, type TabInfo } from "../state/sessions";
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
 import { idColor } from "../state/projectColors";
@@ -155,6 +155,7 @@ import CloseSessionConfirm from "./CloseSessionConfirm";
 import FileTree from "./FileTree";
 import type { SessionGroup } from "../state/sessionGroups";
 import AccountBadge from "./AccountBadge";
+import { brainLine } from "../state/accountBadgeState";
 import type { ImportBatchResult } from "../state/importState";
 import type { AgentsState, Agent } from "../state/agents";
 
@@ -209,7 +210,8 @@ interface SidebarProps {
    * degradation badges / FirstRun / BrainMap) and simply forwarded here — it
    * backed the small "ingesting…" indicator next to the wordmark, which went
    * away with the header (Task 3). Still passed and still wanted: Task 8
-   * re-homes it as the account row's "Brain indexed · 8m ago" sub-line.
+   * re-homes it as the account row's "Brain indexed · 8m ago" sub-line (see
+   * `lastIndexedAt` below, and `state/accountBadgeState.ts`'s `brainLine`).
    * Optional so this component still type-checks for tests that don't care
    * about it. */
   ingestion?: IngestionStatus | null;
@@ -243,14 +245,15 @@ interface SidebarProps {
   onInstallAgent: (agent: Agent) => void;
 }
 
-// `onNewTabInProject` and `ingestion` are deliberately NOT destructured:
-// they are live props `App.tsx` passes whose render site moved out of this
-// file (Task 3) or hasn't been built yet (Task 8) — see each one's doc on
-// `SidebarProps`. Leaving them out of the signature is what keeps
-// `noUnusedLocals` honest without dropping the prop itself. (`fileTreeVisible`/
-// `onToggleFileTree` used to be here too — Task 6 removed both from
-// `SidebarProps` entirely along with the right-hand dock they toggled; the
-// tree they used to show/hide is now always-embedded below, in `.sidebar-files`.)
+// `onNewTabInProject` is deliberately NOT destructured: it's a live prop
+// `App.tsx` passes whose render site moved out of this file (Task 3) — see
+// its own doc on `SidebarProps`. Leaving it out of the signature is what
+// keeps `noUnusedLocals` honest without dropping the prop itself.
+// (`fileTreeVisible`/`onToggleFileTree` used to be here too — Task 6 removed
+// both from `SidebarProps` entirely along with the right-hand dock they
+// toggled; the tree they used to show/hide is now always-embedded below, in
+// `.sidebar-files`. `ingestion` was the third — Task 8 below is what finally
+// destructures and uses it.)
 export default function Sidebar({
   projects,
   tabs,
@@ -264,6 +267,7 @@ export default function Sidebar({
   onCloseNewWorkspace,
   onRenameProject,
   onImportCompleted,
+  ingestion,
   view = "workspace",
   onSetView,
   onNewSessionInProject,
@@ -300,6 +304,24 @@ export default function Sidebar({
    * below. It's a per-render UI convenience over whatever `FileTree` already
    * has loaded, not app state anything else needs to read. */
   const [fileFilter, setFileFilter] = useState("");
+  // Task 8: session-local memory of the last clean ingest completion, feeding
+  // the account row's "Brain indexed · Xm ago" sub-line (`brainLine` below).
+  // Nothing on the backend remembers this across a relaunch, so a rising
+  // edge on `ingestion.running` true -> false with no `error` just stamps
+  // `Date.now()` here — `wasIngestingRef` is what lets the effect tell a
+  // fresh "still running" render apart from an actual completion.
+  // ponytail: lastIndexedAt is session-local, resets on relaunch to "Nothing
+  // indexed yet" until the first ingest completes; persist via settingsSet
+  // if it matters.
+  const [lastIndexedAt, setLastIndexedAt] = useState<number | null>(null);
+  const wasIngestingRef = useRef(false);
+  useEffect(() => {
+    const running = ingestion?.running ?? false;
+    if (wasIngestingRef.current && !running && !ingestion?.error) {
+      setLastIndexedAt(Date.now());
+    }
+    wasIngestingRef.current = running;
+  }, [ingestion]);
   const toggleSession = useCallback((id: string) => {
     setExpandedSessions((prev) => {
       const next = new Set(prev);
@@ -566,6 +588,7 @@ export default function Sidebar({
           onResetAuthGate={onResetAuthGate}
           onOpenReview={() => setReviewOpen(true)}
           onOpenAbout={() => setAboutOpen(true)}
+          brainLine={brainLine(ingestion ?? null, lastIndexedAt, Date.now())}
         />
       </div>
 

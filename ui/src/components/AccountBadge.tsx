@@ -41,6 +41,7 @@ import {
   accountMenuItems,
   deriveAccountBadgeState,
   type AccountMenuItemId,
+  type BrainLine,
 } from "../state/accountBadgeState";
 import KeyboardShortcutsSheet from "./KeyboardShortcutsSheet";
 
@@ -52,6 +53,14 @@ interface AccountBadgeProps {
   onResetAuthGate: () => void;
   onOpenReview?: () => void;
   onOpenAbout?: () => void;
+  /** Task 8: the "Brain indexed · 8m ago" sub-line — `Sidebar.tsx` computes
+   * it every render from `state/accountBadgeState.ts`'s `brainLine` and its
+   * own `lastIndexedAt` tracking, and always passes one once wired. Optional
+   * (and rendered only when set) so callers that don't care about ingestion
+   * status — this component's own tests, mainly — don't have to fabricate
+   * one; the trigger just shows the name alone in that case, same as before
+   * this task. */
+  brainLine?: BrainLine | null;
 }
 
 /** `Store::default_data_dir`'s macOS location, mirrored — see the module
@@ -83,6 +92,7 @@ export default function AccountBadge({
   onResetAuthGate,
   onOpenReview,
   onOpenAbout,
+  brainLine,
 }: AccountBadgeProps) {
   const [open, setOpen] = useState(false);
   // Preferences/Billing have no real surface behind them yet — an honest
@@ -159,7 +169,12 @@ export default function AccountBadge({
         <span className="account-badge-avatar" aria-hidden="true">
           {initial ? <span className="account-badge-initial">{initial}</span> : <PersonGlyph filled={state.signedIn} />}
         </span>
-        <span className="account-badge-name">{name}</span>
+        <span className="account-badge-namestack">
+          <span className="account-badge-name">{name}</span>
+          {brainLine && (
+            <span className={`account-badge-brain is-${brainLine.tone}`}>{brainLine.text}</span>
+          )}
+        </span>
         <span className="account-badge-disclosure" aria-hidden="true">{open ? "▾" : "▴"}</span>
       </button>
 

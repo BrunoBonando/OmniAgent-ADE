@@ -507,9 +507,22 @@ code {
   line-height: 1;
 }
 
-.account-badge-name {
+/* Groups the name with its Task 8 "Brain indexed · Xm ago" sub-line
+   (`.account-badge-brain` below) so the pair stacks as one flex child of
+   `.account-badge-trigger`, between the avatar and the disclosure caret —
+   same "name column, sub-line under it" shape `.session-row-main` already
+   uses for the session rows above. Renders exactly one line, same as
+   before this task, whenever no `brainLine` prop is passed. */
+.account-badge-namestack {
   min-width: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.account-badge-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -517,6 +530,20 @@ code {
   font-size: 12px;
   font-weight: 600;
 }
+
+/* redesign: brain status sub-line in the account row (Task 8). */
+.account-badge-brain {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 9.5px/1.3 var(--sans);
+}
+.account-badge-brain.is-good { color: var(--status-ready); }
+.account-badge-brain.is-busy { color: var(--status-thinking); }
+.account-badge-brain.is-idle { color: #6d6d78; }
+.account-badge-brain.is-error { color: var(--status-error); }
 
 .account-badge-disclosure {
   flex: 0 0 auto;

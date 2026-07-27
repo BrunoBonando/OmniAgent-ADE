@@ -108,6 +108,24 @@ describe("AccountBadge — sidebar destinations", () => {
   });
 });
 
+describe("AccountBadge — brain status sub-line (Task 8)", () => {
+  it("renders the brain line under the account name, toned by its status", () => {
+    setup({ brainLine: { text: "Brain indexed · 8m ago", tone: "good" } });
+    const line = screen.getByText("Brain indexed · 8m ago");
+    expect(line).toHaveClass("account-badge-brain", "is-good");
+  });
+
+  it("shows the busy tone while ingestion is running", () => {
+    setup({ brainLine: { text: "Ingesting · 1 of 4 projects", tone: "busy" } });
+    expect(screen.getByText("Ingesting · 1 of 4 projects")).toHaveClass("is-busy");
+  });
+
+  it("renders nothing extra under the name when no brain line is passed", () => {
+    setup();
+    expect(document.querySelector(".account-badge-brain")).not.toBeInTheDocument();
+  });
+});
+
 describe("AccountBadge — signed out", () => {
   it("falls back to the neutral placeholder trigger and swaps Log out for Sign in", () => {
     setup({ signedInRaw: "false" });
