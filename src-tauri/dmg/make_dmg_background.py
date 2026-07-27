@@ -461,6 +461,25 @@ def draw_chrome(img: Image.Image) -> Image.Image:
     return Image.alpha_composite(img, layer)
 
 
+def draw_finder_label_backplates(img: Image.Image) -> Image.Image:
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    f = font("Inter-Regular", 12.5)
+    for cx, label in ((ICON1_X, "OmniAgent"), (ICON2_X, "Applications")):
+        ty = ICON_Y + ICON_BOX / 2 + 15
+        tw = f.getlength(label) / SS
+        plate = [s(cx - tw / 2 - 12), s(ty - 14.0),
+                 s(cx + tw / 2 + 12), s(ty + 6.0)]
+        d.rounded_rectangle(
+            plate,
+            radius=s(8),
+            fill=rgba((255, 255, 255), 0.96),
+            outline=rgba((220, 226, 238), 1.0),
+            width=max(1, round(s(1.0))),
+        )
+    return Image.alpha_composite(img, layer)
+
+
 # --------------------------------------------------------------------------
 # Compose
 # --------------------------------------------------------------------------
@@ -469,6 +488,7 @@ def render() -> Image.Image:
     img = draw_field(img)
 
     img = draw_vignette(img)
+    img = draw_finder_label_backplates(img)
     img = draw_edge(img)
     img = draw_chrome(img)
     return img
