@@ -475,37 +475,43 @@ export default function Sidebar({
 
       <ul className="sidebar-session-list">
         {selectedProject &&
-          selectedSessions.map((session) => (
-            <SidebarSessionRow
-              key={session.id}
-              session={session}
-              projectLabel={selectedProject.label}
-              tint={idColor(session.id)}
-              // The rail marks what the grid is actually painting, answered
-              // by the same function the grid asks
-              // (`visibleSessionGroupId`) — so "the session it's currently
-              // on the screen" means the same thing in both columns. Every
-              // row here belongs to the selected workspace now, so the
-              // "is this workspace selected" half of the old test is
-              // implied.
-              isCurrent={session.id === onScreenSession}
-              // Auto-expanded for the session holding the focused pane
-              // (`SessionGroup.isCurrent` — not the `isCurrent` prop above,
-              // which answers the different "on screen in the grid"
-              // question), or once the user has toggled it open by hand.
-              expanded={session.isCurrent || expandedSessions.has(session.id)}
-              activeTabId={activeTabId}
-              onActivate={() => onActivateTab(session.tabs[0].id)}
-              onToggleExpanded={() => toggleSession(session.id)}
-              onActivateTab={onActivateTab}
-              onRename={(name) => onRenameSession?.(selectedProject, session.id, name)}
-              onClose={
-                onCloseSession
-                  ? () => setClosingSession({ project: selectedProject, session })
-                  : undefined
-              }
-            />
-          ))}
+          selectedSessions.map((session) => {
+            // What the rail marks: the session the grid is actually
+            // painting, answered by the same function the grid asks
+            // (`visibleSessionGroupId`) — so "the session it's currently on
+            // the screen" means the same thing in both columns. Computed
+            // once and reused below for `expanded`'s default (fix-round,
+            // 2026-07-27: that used to read `session.isCurrent` — the
+            // *different* "holds the focused pane" question `SessionGroup`
+            // itself answers — which could auto-expand a session other than
+            // the one this same row was visually marking as current, since
+            // selecting a workspace doesn't move focus. Confirmed with the
+            // founder: the row should auto-expand exactly the session its
+            // own accent bar marks, so this reuses that one computation
+            // rather than asking the question twice with two different
+            // answers.)
+            const isCurrent = session.id === onScreenSession;
+            return (
+              <SidebarSessionRow
+                key={session.id}
+                session={session}
+                projectLabel={selectedProject.label}
+                tint={idColor(session.id)}
+                isCurrent={isCurrent}
+                expanded={isCurrent || expandedSessions.has(session.id)}
+                activeTabId={activeTabId}
+                onActivate={() => onActivateTab(session.tabs[0].id)}
+                onToggleExpanded={() => toggleSession(session.id)}
+                onActivateTab={onActivateTab}
+                onRename={(name) => onRenameSession?.(selectedProject, session.id, name)}
+                onClose={
+                  onCloseSession
+                    ? () => setClosingSession({ project: selectedProject, session })
+                    : undefined
+                }
+              />
+            );
+          })}
       </ul>
 
       {/* FILES section arrives in Task 6, between the sessions and the

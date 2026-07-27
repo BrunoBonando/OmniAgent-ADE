@@ -195,73 +195,93 @@ export default function SidebarSessionRow({
       onMouseLeave={closeCard}
     >
       {isCurrent && <span className="session-row-accent" />}
-      <button
-        type="button"
-        className={`session-row-chevron${expanded ? " is-expanded" : ""}`}
-        aria-label={expanded ? "Collapse session" : "Expand session"}
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleExpanded();
-        }}
-      >
-        ›
-      </button>
-      {renaming ? (
-        <input
-          className="session-row-rename-input"
-          value={draft}
-          autoFocus
-          aria-label={`Rename ${session.label}`}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commitRename}
-          onKeyDown={(e) => {
+      {/* The chevron and whichever of `.session-row-main`/the rename input is
+          showing share one flex row (fix-round, 2026-07-27): `.session-row`
+          itself is plain block layout, so without this wrapper the chevron
+          — a block-level button — started its own line above the row
+          instead of sitting beside the name. */}
+      <div className="session-row-body">
+        <button
+          type="button"
+          className={`session-row-chevron${expanded ? " is-expanded" : ""}`}
+          aria-label={expanded ? "Collapse session" : "Expand session"}
+          onClick={(e) => {
             e.stopPropagation();
-            if (e.key === "Enter") {
-              e.preventDefault();
-              commitRename();
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              setRenaming(false);
-            }
+            onToggleExpanded();
           }}
-        />
-      ) : (
-        <button className="session-row-main" onClick={onActivate}>
-          <span className="session-row-top">
-            <span className="session-row-name" onDoubleClick={startRename} title="Double-click to rename">
-              {session.label}
-            </span>
-            {branch && (
-              <span className="session-row-branch" aria-label={`Branch ${branch}`}>
-                <Icon name="branch" size={11} className="session-row-branch-glyph" />
-                {/* Its own element so a long branch ellipsizes: an anonymous
-                    text node inside a flex container can't take
-                    `text-overflow`, and `feature/sidebar-sessions` was being
-                    cut mid-word against the panel edge. */}
-                <span className="session-row-branch-name">{branch}</span>
-              </span>
-            )}
-          </span>
-          <span className="session-row-dots" aria-hidden>
-            {session.tabs.map((t) => {
-              const p = statusPresentation(t.status);
-              return (
-                <span
-                  key={t.id}
-                  className="session-row-dot"
-                  data-status={p.key}
-                  data-motion={p.motion}
-                  style={{ background: `var(${p.colorVar})` }}
-                />
-              );
-            })}
-          </span>
-          <span className="session-row-shape">{sessionShapeBadge(session.tabs.length)}</span>
+        >
+          ›
         </button>
-      )}
-      {/* A sibling of `.session-row-main`, not a child — a button can't nest
-          inside a button — revealed on the row's hover like the workspace
-          row's own close. */}
+        {renaming ? (
+          <input
+            className="session-row-rename-input"
+            value={draft}
+            autoFocus
+            aria-label={`Rename ${session.label}`}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitRename();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setRenaming(false);
+              }
+            }}
+          />
+        ) : (
+          <button className="session-row-main" onClick={onActivate}>
+            <span className="session-row-top">
+              <span className="session-row-name" onDoubleClick={startRename} title="Double-click to rename">
+                {session.label}
+              </span>
+              {branch && (
+                <span className="session-row-branch" aria-label={`Branch ${branch}`}>
+                  <Icon name="branch" size={11} className="session-row-branch-glyph" />
+                  {/* Its own element so a long branch ellipsizes: an anonymous
+                      text node inside a flex container can't take
+                      `text-overflow`, and `feature/sidebar-sessions` was being
+                      cut mid-word against the panel edge. */}
+                  <span className="session-row-branch-name">{branch}</span>
+                </span>
+              )}
+            </span>
+            {/* Line two: the dot cluster and the layout badge, wrapped
+                together (fix-round, 2026-07-27) so they read as one line —
+                as two direct children of this column-flex button they were
+                each claiming their own row instead. No `aria-hidden` here:
+                each dot below carries its own `role="img"`/`aria-label`
+                (the same fields `SessionStatusLight` uses), and a hidden
+                ancestor can suppress an accessible name on its children in
+                some AT combinations. */}
+            <span className="session-row-meta">
+              <span className="session-row-dots">
+                {session.tabs.map((t) => {
+                  const p = statusPresentation(t.status);
+                  return (
+                    <span
+                      key={t.id}
+                      className="session-row-dot"
+                      data-status={p.key}
+                      data-motion={p.motion}
+                      style={{ background: `var(${p.colorVar})` }}
+                      role="img"
+                      aria-label={p.ariaLabel}
+                      title={p.ariaLabel}
+                    />
+                  );
+                })}
+              </span>
+              <span className="session-row-shape">{sessionShapeBadge(session.tabs.length)}</span>
+            </span>
+          </button>
+        )}
+      </div>
+      {/* A sibling of `.session-row-body`, not a child of `.session-row-main`
+          — a button can't nest inside a button — revealed on the row's
+          hover like the workspace row's own close. */}
       {onClose && !renaming && (
         <button
           className="session-row-close"

@@ -6002,7 +6002,13 @@ code {
 }
 
 .session-row-main {
-  width: 100%;
+  /* Was `width: 100%` — a leftover from when this button was the row's only
+     flex child. Task 4's fix-round (2026-07-27) made `.session-row-body` the
+     chevron + this button's shared flex row, so this now has to size itself
+     as a flex CHILD (share the row with the chevron) rather than claim the
+     full row width, which was pushing the chevron onto its own line. */
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -6104,8 +6110,12 @@ code {
 }
 
 .session-row-rename-input {
-  width: calc(100% - 10px);
-  margin: 2px 0 2px 8px;
+  /* Same flex-child sizing as `.session-row-main` above, which this replaces
+     while renaming — it sits in the same `.session-row-body` row, beside
+     the chevron rather than under it. */
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 2px 8px 2px 0;
   background: var(--void);
   border: 1px solid var(--signal-dim);
   border-radius: 3px;
@@ -6499,6 +6509,17 @@ code {
 .session-row.is-current {
   background: var(--accent-tint);
 }
+/* Fix-round (2026-07-27): `.session-row` (the `<li>`) itself is plain block
+   layout, so the chevron and `.session-row-main` — two block-level siblings
+   — used to stack as two separate lines instead of sitting side by side.
+   This is their shared flex row: chevron first, then whichever of
+   `.session-row-main`/`.session-row-rename-input` is showing, sized to fill
+   what's left (see their own `flex: 1 1 auto` rules above). */
+.session-row-body {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
 .session-row-chevron {
   appearance: none;
   border: 0;
@@ -6515,6 +6536,16 @@ code {
 .session-row-chevron.is-expanded {
   transform: rotate(90deg);
   color: var(--accent-hi);
+}
+/* Fix-round (2026-07-27): the dot cluster and the layout badge are meant to
+   read as one line ("2×2" beside the dots it's counting), but as two direct
+   children of `.session-row-main` (`flex-direction: column`) they were each
+   claiming their own row instead. This wraps them into one flex row so
+   `.session-row-main` sees a single second line: name/branch, then this. */
+.session-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .session-row-dots {
   flex: none;

@@ -128,6 +128,28 @@ describe("SidebarSessionRow — status dots and the layout badge (Task 4 redesig
     setup({ session: session([tab({ id: "a" })]) });
     expect(screen.getByText("1")).toBeInTheDocument();
   });
+
+  // Fix-round, 2026-07-27: review found the dots had lost the hover
+  // explanation `SessionStatusLight`'s own marks carry ("on hover, it
+  // explains" — the founder's own words for the light this replaced).
+  // These reuse `statusPresentation`'s fields rather than writing new copy.
+  it("gives each dot the same role/label/title SessionStatusLight uses for its mark", () => {
+    const { container } = setup({
+      session: session([tab({ id: "a", status: "awaiting_approval" })]),
+    });
+    const dot = container.querySelector(".session-row-dot")!;
+    expect(dot.getAttribute("role")).toBe("img");
+    expect(dot.getAttribute("aria-label")).toBe("Needs approval — Paused until you approve the action it wants to take.");
+    expect(dot.getAttribute("title")).toBe("Needs approval — Paused until you approve the action it wants to take.");
+  });
+
+  it("does not hide the dot cluster from assistive tech — each dot answers for itself", () => {
+    // A hidden ancestor can suppress an accessible name on its children in
+    // some AT combinations, so the container itself must not be
+    // `aria-hidden` now that the dots inside it carry real labels.
+    const { container } = setup();
+    expect(container.querySelector(".session-row-dots")!.getAttribute("aria-hidden")).toBeNull();
+  });
 });
 
 describe("SidebarSessionRow — accent bar and expand chevron (Task 4 redesign)", () => {
@@ -165,6 +187,42 @@ describe("SidebarSessionRow — accent bar and expand chevron (Task 4 redesign)"
   it("renders no children container at all when collapsed", () => {
     const { container } = setup({ expanded: false });
     expect(container.querySelector(".session-row-children")).toBeNull();
+  });
+});
+
+// Fix-round, 2026-07-27: review found the chevron rendering on its own line
+// above the row (a block-level button before a flex sibling starts its own
+// line), and the dot cluster / layout badge rendering as two stacked lines
+// instead of one. Both are DOM-nesting facts jsdom can assert directly —
+// verified live in the dev server too (see the report's fix-round section).
+describe("SidebarSessionRow — one-line layout (fix-round, 2026-07-27)", () => {
+  beforeEach(() => {
+    useGitBranchMock.mockReset();
+    useGitBranchMock.mockReturnValue("main");
+  });
+
+  it("puts the chevron and the name/branch button in one flex row, not stacked", () => {
+    const { container } = setup();
+    const body = container.querySelector(".session-row-body")!;
+    expect(body).toBeInTheDocument();
+    expect(body.querySelector(":scope > .session-row-chevron")).not.toBeNull();
+    expect(body.querySelector(":scope > .session-row-main")).not.toBeNull();
+  });
+
+  it("puts the rename input in the same flex row as the chevron while renaming", () => {
+    const { container } = setup();
+    fireEvent.doubleClick(screen.getByText("Session 1"));
+    const body = container.querySelector(".session-row-body")!;
+    expect(body.querySelector(":scope > .session-row-chevron")).not.toBeNull();
+    expect(body.querySelector(":scope > .session-row-rename-input")).not.toBeNull();
+  });
+
+  it("puts the status dots and the layout badge in one row, not stacked", () => {
+    const { container } = setup({ session: session([tab({ id: "a" }), tab({ id: "b" })]) });
+    const meta = container.querySelector(".session-row-meta")!;
+    expect(meta).toBeInTheDocument();
+    expect(meta.querySelector(":scope > .session-row-dots")).not.toBeNull();
+    expect(meta.querySelector(":scope > .session-row-shape")).not.toBeNull();
   });
 });
 

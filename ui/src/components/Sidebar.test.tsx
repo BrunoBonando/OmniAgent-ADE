@@ -199,6 +199,46 @@ describe("Sidebar — session and branch, nothing else", () => {
   });
 });
 
+describe("Sidebar — auto-expanding the on-screen session (fix-round, 2026-07-27)", () => {
+  beforeEach(() => {
+    useGitBranchMock.mockReset();
+    useGitBranchMock.mockReturnValue("main");
+  });
+
+  // Review found `expanded` defaulting off `SessionGroup.isCurrent` (holds
+  // the focused pane) instead of the row's own `isCurrent` PROP (the
+  // session the accent rail marks — `visibleSessionGroupId`, same function
+  // the grid paints from). Those two can disagree: selecting a workspace
+  // doesn't move focus, so a project can have a session on screen (rail lit,
+  // `isCurrent` prop true) while nothing in that project holds the focused
+  // pane at all (every `SessionGroup.isCurrent` in it false). Confirmed with
+  // the founder: the row should auto-expand exactly the session its own
+  // accent bar marks.
+  it("auto-expands the session the accent rail marks, even when the focused pane is in a different project", () => {
+    const { container } = setup({
+      tabs: [
+        tab({ id: "s1", project: "p1", group: "g1" }),
+        tab({ id: "s2", project: "p1", group: "g2", groupLabel: "second session" }),
+        tab({ id: "s3", project: "p2", cwd: "/tmp/p2", group: "g3" }),
+      ],
+      // Focus is in p2 — no session in p1 (the selected workspace) holds
+      // the focused pane, so `SessionGroup.isCurrent` is false for both g1
+      // and g2. `visibleSessionGroupId` still falls back to p1's first
+      // session (g1) as the one on screen, which is what `isCurrent` (the
+      // prop) and the accent rail mark.
+      activeTabId: "s3",
+    });
+    const currentRow = container.querySelector(".session-row.is-current")!;
+    expect(currentRow).not.toBeNull();
+    expect(currentRow.querySelector(".session-row-children")).not.toBeNull();
+    // The other session in the same project holds no accent and stays
+    // collapsed — this isn't "every session in the project auto-expands".
+    const rows = [...container.querySelectorAll(".session-row")];
+    const otherRow = rows.find((row) => row !== currentRow)!;
+    expect(otherRow.querySelector(".session-row-children")).toBeNull();
+  });
+});
+
 describe("Sidebar — account menu", () => {
   beforeEach(() => {
     useGitBranchMock.mockReset();
