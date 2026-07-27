@@ -265,6 +265,25 @@ describe("App — approving a notification from the panel", () => {
     );
   });
 
+  it("answering in the pane clears the notification too — the next status event resolves it", async () => {
+    // Founder ask (2026-07-27): "if I approve using the terminal, it has to
+    // update the notification." The pane path never touches the panel — the
+    // backend just reports the session's next status once the prompt is
+    // answered, and that event is what takes the awaiting row down.
+    await bootWithThreeSessions();
+    emit("sess-2", statusEvent("sess-2", "awaiting_approval", true));
+    await waitFor(() => expect(badge()?.textContent).toBe("1"));
+
+    // The user answers in the terminal: the engine goes back to work and the
+    // backend emits the transition (thinking never notifies, so no new row).
+    emit("sess-2", statusEvent("sess-2", "thinking", false));
+
+    fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
+    await waitFor(() => expect(screen.queryByText("Needs your approval.")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /^Approve / })).not.toBeInTheDocument();
+    expect(tauriMocks.sessionWriteMock).not.toHaveBeenCalled();
+  });
+
   it("a double-click only writes the approval once — the in-flight guard, not the not-yet-updated tab status", async () => {
     // `tab.status` only flips on the backend's NEXT status event, so both
     // clicks of a double-click see the same "still awaiting" status and
