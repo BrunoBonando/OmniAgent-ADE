@@ -129,6 +129,52 @@ export function notificationSubtitle(status: SessionStatus): string {
   }
 }
 
+/** The keystroke that answers an engine's pending permission prompt with
+ * "yes", written straight into its PTY (`sessionWrite`) — the same input
+ * path typing in the pane uses, which also clears the Rust-side attention
+ * latch (`sessions.rs`'s `mark_user_input`). Claude Code's dialog is a
+ * numbered select where the digit picks the option outright, so `"1"` is
+ * "Yes" without trusting where the highlight currently sits.
+ *
+ * ponytail: version-coupled to Claude Code's own dialog, exactly like the
+ * `ATTENTION_MARKERS` scrape that detects the prompt in the first place —
+ * one assumption, both sides of it. Other engines return `null` (no known
+ * gesture) and their rows offer "Open pane" only; add an entry here when an
+ * engine's prompt gesture is verified against a real session. */
+const APPROVE_KEYSTROKES: Record<string, string> = { claude: "1" };
+
+export function approveKeystroke(engine: string): string | null {
+  return APPROVE_KEYSTROKES[engine] ?? null;
+}
+
+/** Actionable = this row froze an `awaiting_approval` AND that session is
+ * still awaiting right now (`awaiting` = live status, passed in by the
+ * caller). Both halves matter: without the live check, Approve would type
+ * into whatever replaced the prompt since. */
+export function isActionable(entry: NotificationEntry, awaiting: ReadonlySet<string>): boolean {
+  return entry.status === "awaiting_approval" && awaiting.has(entry.sessionId);
+}
+
+/** The reference panel's three bands: NEEDS YOU (actionable, whatever their
+ * age — a blocked session doesn't stop being blocked at midnight), then
+ * EARLIER TODAY / OLDER by local calendar day. */
+export function groupNotifications(
+  entries: NotificationEntry[],
+  awaiting: ReadonlySet<string>,
+  now: number,
+): { needsYou: NotificationEntry[]; earlierToday: NotificationEntry[]; older: NotificationEntry[] } {
+  const startOfToday = new Date(now).setHours(0, 0, 0, 0);
+  const needsYou: NotificationEntry[] = [];
+  const earlierToday: NotificationEntry[] = [];
+  const older: NotificationEntry[] = [];
+  for (const entry of entries) {
+    if (isActionable(entry, awaiting)) needsYou.push(entry);
+    else if (entry.createdAt >= startOfToday) earlierToday.push(entry);
+    else older.push(entry);
+  }
+  return { needsYou, earlierToday, older };
+}
+
 /** Whether the user is demonstrably looking at this session right now — the
  * four-part rule in this module's header. Exported for its own test and so
  * the rule is nameable in a review, rather than buried in a conditional. */
@@ -223,42 +269,44 @@ export function unreadCount(state: NotificationsState): number {
 // several projects open, "just this workspace" is the question actually
 // worth asking.
 
-export type NotificationFilter = "all" | "project";
+export type NotificationFilter = "all" | "project" | "needs_you";
 
 export function filterNotifications(
   entries: NotificationEntry[],
   filter: NotificationFilter,
   projectId: string | null,
+  awaiting: ReadonlySet<string>,
 ): NotificationEntry[] {
   if (filter === "all") return entries;
+  if (filter === "needs_you") return entries.filter((e) => isActionable(e, awaiting));
   if (projectId === null) return [];
   return entries.filter((e) => e.project === projectId);
 }
 
-/** Chip text, count included — "All sessions (3)". `projectLabel` names the
- * project chip when one is selected, so the chip says which workspace it
- * means rather than the word "project". */
+/** Chip text, count included — "All 3". `projectLabel` names the
+ * project chip when one is selected, so the chip says "This workspace"
+ * rather than the project name (for signature stability, the parameter stays but is unused). */
 export function filterChipLabel(
   filter: NotificationFilter,
   count: number,
-  projectLabel: string | null,
+  _projectLabel: string | null,
 ): string {
-  const name = filter === "all" ? "All sessions" : (projectLabel ?? "This project");
-  return `${name} (${count})`;
+  const name = filter === "all" ? "All" : filter === "needs_you" ? "Needs you" : "This workspace";
+  return `${name} ${count}`;
 }
 
 /** Relative timestamps, in the reference panel's own vocabulary ("Just
- * now", "2 days ago"). Coarse on purpose: a notification list is scanned,
+ * now", "2 days"). Coarse on purpose: a notification list is scanned,
  * not read, and second-level precision would make every row twitch. */
 export function relativeTime(createdAt: number, now: number): string {
   const seconds = Math.max(0, Math.round((now - createdAt) / 1000));
   if (seconds < 60) return "Just now";
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
-  return days === 1 ? "1 day ago" : `${days} days ago`;
+  return days === 1 ? "1 day" : `${days} days`;
 }
 
 // ------------------------------------------------------------ persistence
