@@ -429,6 +429,7 @@ pub fn run() {
             commands::session_status,
             commands::git_branch,
             commands::list_dir,
+            commands::folder_stats,
             commands::rename_path,
             commands::move_path,
             commands::duplicate_path,

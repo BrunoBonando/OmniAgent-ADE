@@ -7,7 +7,6 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
-import { initialAgentsState } from "../state/agents";
 
 const { useGitBranchMock } = vi.hoisted(() => ({ useGitBranchMock: vi.fn() }));
 vi.mock("../lib/useGitBranch", () => ({ useGitBranch: useGitBranchMock }));
@@ -124,8 +123,6 @@ function setup(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
       authSignedIn={null}
       authPersona={null}
       onResetAuthGate={() => {}}
-      agentState={initialAgentsState}
-      onInstallAgent={() => {}}
       {...overrides}
     />,
   );

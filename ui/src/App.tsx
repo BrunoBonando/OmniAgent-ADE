@@ -872,74 +872,36 @@ function App() {
     }
   }
 
-  // ---- NewWorkspaceModal's bulk-create (Sidebar's "+" -> New Workspace) -
-  // `add_project` + the modal's own folder-pick/name UI already ran inside
-  // `NewWorkspaceModal.tsx` by the time this fires (see that component's
-  // module doc for the ownership split) — `project` already exists. This
-  // spins up exactly one session per checked engine, in the order the
-  // caller passed (`newWorkspaceState.ts`'s `checkedEngines` — always
-  // `ENGINES` order), landing every success in ONE `tabs/opened_bulk`
-  // dispatch (never one `tab/opened` per session — see that action's own
-  // doc for why an incremental reveal would both defeat the chosen LAYOUT
-  // arrangement and risk remounting already-open panes mid-batch).
+  // ---- NewWorkspaceModal's create (Sidebar's "+" -> New workspace) ------
+  // `add_project`, the folder pick and the ingest/review toggles all already
+  // ran inside `NewWorkspaceModal.tsx` by the time this fires (see that
+  // component's module doc for the ownership split) — `project` exists.
   //
-  // Partial failure is expected, not exceptional (DESIGN.md's own "bring
-  // your own engine" reality: a checked engine's CLI might genuinely not be
-  // installed) — every engine is attempted independently; one failing
-  // never aborts the rest, and whatever succeeds still lands the user in a
-  // live, populated project rather than nothing at all.
-  //
-  // Deliberately does NOT persist `defaultEngineSettingKey` the way
-  // `confirmNewTab` does — that setting means "the last single engine
-  // chosen for this project's next ⌘T", and a multi-engine batch has no
-  // one answer to write there.
+  // Task 12 removed everything else this used to do. It no longer spawns a
+  // session per checked engine, because the dialog no longer asks for
+  // engines or a layout: adding a workspace and starting terminals are two
+  // separate decisions now. So this only lands the user *in* the new
+  // workspace and hands straight over to `NewSessionModal`, which is the
+  // one place that decides what runs where. The old bulk-create loop (and
+  // its `last_selected_agents` write, and its partial-failure banner) moved
+  // wholesale to `handleSessionCreated` below — one implementation, not
+  // two near-identical ones.
   const handleWorkspaceCreated = useCallback(
-    // `layout` is deliberately absent: the LAYOUT card the dialog offers is a
-    // preview, not an instruction — the grid derives its own approved shape
-    // from how many panes end up open (`paneGrid.ts`'s `GRID_LADDER`).
-    async (project: ProjectInfo, engines: Engine[]) => {
+    (project: ProjectInfo) => {
       void reloadProjects();
       setSelectedProjectId(project.id);
       // `add_project` upserts by folder basename, so re-adding a closed
       // folder returns the id still sitting in the closed set — un-hide it,
       // the same contract every other "opens the workspace" path honours.
       reopenWorkspace(project.id);
-
-      // Save selected agents
-      await settingsSet("last_selected_agents", JSON.stringify(engines));
-      agentDispatch({ type: "agents/selected", agents: engines as Agent[] });
-
-      // A new workspace's first batch of panes is its first session —
-      // "Session 1", the founder's own starting point.
-      const group = newSessionGroupId();
-      const groupLabel = nextSessionName(state.tabs, project.id);
-      const created: TabInfo[] = [];
-      const failed: Engine[] = [];
-      for (const engine of engines) {
-        try {
-          created.push(await createSessionTab(project, engine, group, groupLabel));
-        } catch (err) {
-          console.error(`failed to start ${engine} in ${project.label}`, err);
-          failed.push(engine);
-        }
-      }
-
-      if (created.length > 0) {
-        dispatch({ type: "tabs/opened_bulk", tabs: created });
-      }
-
-      if (failed.length > 0) {
-        const names = failed.map((e) => ENGINE_LABEL[e]).join(", ");
-        setErrorBanner(
-          created.length > 0
-            ? `Created "${project.label}", but couldn't start ${names} — the rest are running.`
-            : `Created "${project.label}", but couldn't start ${names} — no sessions are running yet.`,
-        );
-      }
-
       setView("workspace");
+      // Straight into "what are you doing?" — a brand-new workspace with no
+      // terminals is exactly the state this modal exists to resolve, and
+      // asking immediately is what makes dropping the engine checkboxes an
+      // improvement rather than a missing step.
+      setNewSessionOpen(true);
     },
-    [reloadProjects, createSessionTab, state.tabs, reopenWorkspace],
+    [reloadProjects, reopenWorkspace],
   );
 
   // ---- NewSessionModal's create (⌘N -> "Session") -----------------------
@@ -1496,7 +1458,7 @@ function App() {
             setNewTerminalOpen(true);
           }}
           onActivateTab={activateTab}
-          onWorkspaceCreated={(p, engines) => void handleWorkspaceCreated(p, engines)}
+          onWorkspaceCreated={handleWorkspaceCreated}
           newWorkspaceOpen={newWorkspaceOpen}
           onOpenNewWorkspace={() => setNewWorkspaceOpen(true)}
           onCloseNewWorkspace={() => setNewWorkspaceOpen(false)}
@@ -1515,8 +1477,6 @@ function App() {
           authSignedIn={authSignedIn}
           authPersona={authPersona}
           onResetAuthGate={resetAuthGate}
-          agentState={agentState}
-          onInstallAgent={handleInstallAgent}
         />
         <Workspace
           projects={state.projects}

@@ -313,6 +313,25 @@ export async function pendingNotesDiscard(nodeId: string): Promise<void> {
 
 export const REVIEW_MEMORY_SETTING_KEY = "review_memory";
 
+/** What `folder_stats` reports about a folder — the New Workspace dialog's
+ * "FOUND IN THIS FOLDER" strip (left-pane redesign, Task 12).
+ *
+ * `files` is the count the *ingestion* walker would walk (gitignore-aware,
+ * vendor dirs and oversized files excluded), not a raw `find | wc -l`, so
+ * the number the dialog promises is the work that will actually happen.
+ * `languages` is the top 2 by file count, ties broken alphabetically.
+ * `branches` is only meaningful when `git` is true. */
+export interface FolderStats {
+  files: number;
+  languages: string[];
+  git: boolean;
+  branches: number;
+}
+
+export async function folderStats(path: string): Promise<FolderStats> {
+  return invoke<FolderStats>("folder_stats", { path });
+}
+
 // --------------------------------------------------------------- Task 8.1
 // Onboarding (FirstRun) + degradation surfaces (Sidebar's stale/pause menu,
 // the map pane's enrichment-backlog badge, AboutPanel's "Rebuild brain").

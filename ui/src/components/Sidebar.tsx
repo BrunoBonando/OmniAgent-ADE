@@ -49,11 +49,12 @@
 // 2026-07-25: the "+" now opens `NewWorkspaceModal` (a BridgeSpace "New
 // Workspace" dialog reference — see that component's own module doc),
 // which REPLACED the original `AddProjectModal`. That modal only ever did
-// "pick a folder, optionally rename it, call `add_project`"; the new one is
-// a strict superset — the same folder-pick/rename step, PLUS choosing which
-// engines to boot for the new project's first batch of sessions and how to
-// arrange them — so there is no longer a reason to keep two overlapping
-// "add a project" entry points in the sidebar. `add_project`
+// "pick a folder, optionally rename it, call `add_project`"; the new one
+// picks a folder, shows what is in it (`folder_stats`), and takes the two
+// folder-level toggles (ingest now / review notes) — so there is no longer
+// a reason to keep two overlapping "add a project" entry points in the
+// sidebar. (It used to also choose engines and a layout; Task 12 moved
+// that to `NewSessionModal`, which `App` opens right after.) `add_project`
 // (`src-tauri/src/roots.rs`) is still exactly what gets called; it still
 // creates the sidebar row synchronously and ingests on a background
 // thread — see that command's own doc comment for why.
@@ -62,11 +63,11 @@
 // "detect other dev tools already installed on the user's machine and
 // offer to import their known project lists"): a SEPARATE, permanent
 // header trigger next to "+" — not folded into `NewWorkspaceModal`. That
-// modal creates exactly one project (plus its engines/layout); import
-// bulk-creates however many candidates the user checks across up to three
-// tools, with no engine/layout step at all, so it doesn't fit that dialog's
-// shape without bolting tabs onto a recently-built, reference-matched
-// component for a fundamentally different job. It's deliberately NOT
+// modal creates exactly one project, and shows that one folder's stats;
+// import bulk-creates however many candidates the user checks across up to
+// three tools, with nothing to show per folder, so it doesn't fit that
+// dialog's shape without bolting tabs onto a recently-built,
+// reference-matched component for a different job. It's deliberately NOT
 // first-run-only either (`FirstRun.tsx` also offers it, as an alternative
 // to its folder-pick step) — a user might install a new tool well after
 // their first launch and want to pull from it then, so this lives here,
@@ -128,10 +129,9 @@
 // delete" reasoning, and `CloseWorkspaceConfirm` for what the user is told
 // before anything is killed.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { tabsByProject, type Engine, type ProjectInfo, type TabInfo } from "../state/sessions";
+import { tabsByProject, type ProjectInfo, type TabInfo } from "../state/sessions";
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
 import { idColor } from "../state/projectColors";
-import type { LayoutPreset } from "../state/paneGrid";
 import {
   rootsPausedProjects,
   rootsReingestProject,
@@ -157,7 +157,6 @@ import type { SessionGroup } from "../state/sessionGroups";
 import AccountBadge from "./AccountBadge";
 import { brainLine } from "../state/accountBadgeState";
 import type { ImportBatchResult } from "../state/importState";
-import type { AgentsState, Agent } from "../state/agents";
 
 /** How often to refresh pause/staleness state in the background — cheap
  * settings/`list_projects` reads, not worth a live push mechanism for v1. */
@@ -184,11 +183,12 @@ interface SidebarProps {
   onOpenNewTerminal: () => void;
   onActivateTab: (id: string) => void;
   /** The "+" New Workspace flow: called the instant `add_project` returns
-   * (well before ingestion finishes) with the freshly-created project, the
-   * engines the user checked (ENGINES order, always >= 1), and the LAYOUT
-   * preset chosen for arranging their sessions — `App.tsx` owns the actual
-   * bulk `session_create` orchestration and closes the modal. */
-  onWorkspaceCreated: (project: ProjectInfo, engines: Engine[], layout: LayoutPreset) => void;
+   * (well before ingestion finishes) with the freshly-created project.
+   *
+   * No engines/layout any more (Task 12): adding a workspace no longer
+   * starts terminals. `App.tsx` selects the new workspace and opens
+   * `NewSessionModal`, which is where engines and layout are chosen. */
+  onWorkspaceCreated: (project: ProjectInfo) => void;
   /** Whether the New Workspace modal is open — lifted to `App.tsx` (unlike
    * this component's other overlays, e.g. `aboutOpen`/`reviewOpen`/
    * `importOpen` below, which stay local) so ⌘N (founder ask: "Command + N
@@ -243,8 +243,6 @@ interface SidebarProps {
   authSignedIn: string | null;
   authPersona: string | null;
   onResetAuthGate: () => void;
-  agentState: AgentsState;
-  onInstallAgent: (agent: Agent) => void;
 }
 
 // `onNewTabInProject` is deliberately NOT destructured: it's a live prop
@@ -280,8 +278,6 @@ export default function Sidebar({
   authSignedIn,
   authPersona,
   onResetAuthGate,
-  agentState,
-  onInstallAgent,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -598,13 +594,11 @@ export default function Sidebar({
       {reviewOpen && <ReviewPanel onClose={() => setReviewOpen(false)} />}
       {newWorkspaceOpen && (
         <NewWorkspaceModal
-          onCreate={(project, engines, layout) => {
+          onCreate={(project) => {
             onCloseNewWorkspace();
-            onWorkspaceCreated(project, engines, layout);
+            onWorkspaceCreated(project);
           }}
           onClose={onCloseNewWorkspace}
-          agentState={agentState}
-          onInstallAgent={onInstallAgent}
         />
       )}
       {importOpen && (

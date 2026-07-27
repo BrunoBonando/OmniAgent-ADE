@@ -1,98 +1,66 @@
-// The sidebar's "+" flow, rebuilt from a founder reference (Bruno,
-// 2026-07-25): a screenshot of BridgeSpace's "New Workspace" dialog,
-// described precisely rather than checked in as an image. Structure: a
-// title + close button; a DIRECTORY section (an editable project name,
-// then folder path + Browse — name first since it no longer depends on a
-// folder being picked, Bruno 2026-07-26); a LAYOUT section (four preset
-// cards — 2/4/6/9 — each a small grid glyph with a caption for whichever
-// is selected); a collapsible AI AGENTS section (checkbox tiles, one per
-// agent, plus a separate "Normal Terminal" tile for plain `shell` since
-// it isn't an agent — same founder brief); a footer (Cancel / Create
-// Workspace).
+// The sidebar's "+" flow — "New workspace".
 //
-// The checklist is built directly from the real `ENGINES` array (which is
-// `AVAILABLE_AGENTS` from `state/agents.ts`), with `ENGINE_COLOR`/
-// `ENGINE_LABEL` (theme.ts) supplying each row's dot color and label.
-// When a new agent is added to `AVAILABLE_AGENTS`, it appears here for free.
+// ## Rewritten for the left-pane redesign (Task 12)
 //
-// **This REPLACES `AddProjectModal.tsx`** as the sidebar's "+" trigger
-// (`Sidebar.tsx`'s own doc comment has the reasoning: this flow is a
-// strict superset — folder pick + optional rename, PLUS choosing which
-// engines to boot and how to arrange them). It reuses
-// `addProjectState.ts`'s `basenameOf` (via `newWorkspaceState.ts`) rather
-// than re-deriving that pure folder-picking logic, and follows the exact
-// same pick-folder Tauri-dialog pattern `AddProjectModal.tsx` established.
+// The old BridgeSpace-derived dialog asked four questions (name, folder,
+// LAYOUT, AI AGENTS). This one asks *one* — which folder — and then tells
+// you what is in it.
 //
-// **Ownership split with the caller** (same shape `AddProjectModal.tsx` /
-// `Sidebar.tsx` already used for `onAdded`): this component owns picking a
-// folder and creating the project (`add_project` — a hard failure here
-// surfaces inline and keeps the dialog open, exactly like
-// `AddProjectModal`'s `submit_failed`). Once that succeeds, it hands off
-// to the caller's `onCreate(project, engines, layout)` — bulk session
-// creation (N `session_create` calls, one per checked engine, using the
-// exact same per-engine spawn logic `App.tsx`'s `confirmNewTab` already
-// uses) and closing the modal both live in `App.tsx`/`Sidebar.tsx`, not
-// here, so partial mid-batch failures can land the user in the project
-// with whatever succeeded and use `App.tsx`'s existing `errorBanner`
-// rather than a second error surface inside this already-closed dialog.
-import { useEffect, useRef } from "react";
-import { useReducer } from "react";
+// - The name is the folder's basename (`workspaceNameFromPath`); renaming
+//   lives in the workspace menu's ⋯ → ProjectMenu.
+// - Layout and engines are gone: adding a workspace no longer starts
+//   terminals. `App.handleWorkspaceCreated` opens `NewSessionModal`
+//   immediately after this closes, and that dialog owns which engines run
+//   in which panes — one owner instead of two dialogs that could disagree.
+//
+// What replaces them is the FOUND IN THIS FOLDER strip: a `folder_stats`
+// call (`src-tauri/src/commands/mod.rs`) reporting the file count the
+// *ingestion walker* would actually walk, the top languages, and git
+// status. Adding a folder stops being a leap of faith — you can see you
+// picked `~/code/api` and not `~/code` before committing to a walk.
+//
+// The two toggles are the only real choices left, and both are about the
+// folder rather than about terminals: whether to ingest now, and whether
+// memory notes get reviewed before they commit (the same
+// `REVIEW_MEMORY_SETTING_KEY` `ReviewPanel` owns — this dialog just writes
+// the same "true"/"false" encoding rather than inventing a second one).
+//
+// **Ownership split with the caller** (unchanged in shape from the old
+// dialog, and the same one `NewSessionModal` uses): this component owns
+// picking a folder and creating the project — an `add_project` failure
+// surfaces inline and keeps the dialog open. Once that succeeds it hands
+// off `onCreate(project)`; closing the modal, selecting the workspace and
+// opening the session dialog all live in `Sidebar`/`App`.
+import { useEffect, useReducer, useRef } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   canSubmit,
-  checkedEngines,
-  initialNewWorkspaceStateFor,
+  initialNewWorkspaceState,
   newWorkspaceReducer,
+  workspaceNameFromPath,
 } from "../state/newWorkspaceState";
-import { LAYOUT_PRESETS, layoutCaption, type LayoutPreset } from "../state/paneGrid";
-import { LayoutGlyph } from "./NewSessionModal";
-import { ENGINES, type Engine, type ProjectInfo } from "../state/sessions";
-import { type AgentsState, type Agent, AVAILABLE_AGENTS } from "../state/agents";
-import { AGENT_ICON, ENGINE_COLOR, ENGINE_LABEL } from "../theme";
-import Icon from "./Icon";
-import { addProject } from "../lib/tauri";
+import type { ProjectInfo } from "../state/sessions";
+import {
+  REVIEW_MEMORY_SETTING_KEY,
+  addProject,
+  folderStats,
+  rootsSetPaused,
+  settingsSet,
+} from "../lib/tauri";
 
 interface NewWorkspaceModalProps {
-  onCreate: (project: ProjectInfo, engines: Engine[], layout: LayoutPreset) => void;
+  onCreate: (project: ProjectInfo) => void;
   onClose: () => void;
-  agentState: AgentsState;
-  onInstallAgent: (agent: Agent) => void;
 }
 
-/** Simple inline folder icon — the reference's DIRECTORY section leads with
- * one; a single hand-drawn path rather than an icon library dependency. */
-function FolderIcon() {
-  return (
-    <svg
-      className="new-workspace-folder-icon"
-      viewBox="0 0 20 16"
-      width="16"
-      height="13"
-      fill="none"
-      aria-hidden
-    >
-      <path
-        d="M1 2.5C1 1.67 1.67 1 2.5 1H7l2 2h8.5c.83 0 1.5.67 1.5 1.5v9c0 .83-.67 1.5-1.5 1.5h-15C1.67 15 1 14.33 1 13.5v-11Z"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-export default function NewWorkspaceModal({ onCreate, onClose, agentState, onInstallAgent }: NewWorkspaceModalProps) {
-  // Lazy initializer rather than a mount effect: the checklist has to be
-  // right on the FIRST render (an effect would flash Claude-checked, then
-  // correct itself). `agentState` is only read to seed this — later changes
-  // to it, e.g. an install finishing while the dialog is open, must not
-  // stomp on boxes the user has ticked since.
-  const [state, dispatch] = useReducer(
-    newWorkspaceReducer,
-    agentState,
-    initialNewWorkspaceStateFor,
-  );
+export default function NewWorkspaceModal({ onCreate, onClose }: NewWorkspaceModalProps) {
+  const [state, dispatch] = useReducer(newWorkspaceReducer, undefined, initialNewWorkspaceState);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // Guards against a double submit when Enter both fires the footer
+  // button's own click AND reaches `handleKeyDown` — `state.submitting`
+  // can't do it alone, because a React state update isn't visible to the
+  // second handler running in the same event.
+  const inFlight = useRef(false);
 
   useEffect(() => {
     panelRef.current?.focus();
@@ -100,22 +68,46 @@ export default function NewWorkspaceModal({ onCreate, onClose, agentState, onIns
 
   async function pickFolder() {
     try {
-      const selected = await open({ directory: true, multiple: false, title: "New workspace folder" });
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "New workspace folder",
+      });
       if (!selected || Array.isArray(selected)) return; // user cancelled
-      dispatch({ type: "folder_picked", path: selected });
+      dispatch({ type: "path", path: selected });
+      try {
+        dispatch({ type: "stats", stats: await folderStats(selected) });
+      } catch (err) {
+        // The strip is information, not validation — a folder we can't
+        // summarise still adds fine, so this degrades to placeholders
+        // rather than blocking the flow with an error surface.
+        console.error("folder_stats failed", err);
+        dispatch({ type: "stats", stats: null });
+      }
     } catch (err) {
       console.error("new-workspace folder picker failed", err);
     }
   }
 
   async function confirm() {
-    if (!canSubmit(state) || !state.path) return;
+    if (!canSubmit(state) || !state.path || inFlight.current) return;
+    inFlight.current = true;
     dispatch({ type: "submit_started" });
     try {
-      const project = await addProject(state.path, state.name.trim());
-      onCreate(project, checkedEngines(state), state.layout);
+      const project = await addProject(state.path, workspaceNameFromPath(state.path));
+      // Preferences are deliberately non-fatal: the workspace now exists,
+      // and failing to persist a toggle must not strand the user in a
+      // dialog whose only button would re-add the folder.
+      try {
+        if (!state.ingestNow) await rootsSetPaused(project.id, true);
+        await settingsSet(REVIEW_MEMORY_SETTING_KEY, state.reviewNotes ? "true" : "false");
+      } catch (err) {
+        console.error("new-workspace preferences failed", err);
+      }
+      onCreate(project);
     } catch (err) {
       console.error("add_project failed", err);
+      inFlight.current = false;
       dispatch({ type: "submit_failed", error: String(err) });
     }
   }
@@ -126,178 +118,137 @@ export default function NewWorkspaceModal({ onCreate, onClose, agentState, onIns
       onClose();
       return;
     }
-    if (e.key === "Enter" && (e.target as HTMLElement).tagName === "INPUT") {
-      e.preventDefault();
-      void confirm();
-    }
+    if (e.key !== "Enter") return;
+    // Enter adds the workspace from anywhere in the dialog EXCEPT the
+    // folder row, where it belongs to "Browse…" (opening a native picker
+    // and submitting at once would be two actions from one keypress).
+    //
+    // Stated as one exclusion on purpose — the same lesson
+    // `NewSessionModal` records: the obvious-looking "only confirm when
+    // nothing has focus" spelling makes Enter a DEAD KEY right at the end
+    // of the flow, because clicking a toggle moves focus to that button.
+    // Space still toggles a focused switch; Enter still submits.
+    const active = document.activeElement;
+    if (active instanceof Element && active.closest(".folder-row") !== null) return;
+    e.preventDefault();
+    void confirm();
   }
 
-  /** One AI-AGENTS tile — shared by the 4-agent grid and the standalone
-   * "Normal Terminal" (`shell`) tile below it, so both get the same
-   * install/installing/failed affordances for free. */
-  function renderAgentTile(agent: Agent, label: string) {
-    const isInstalled = agentState.installed.has(agent);
-    const isInstalling = agentState.installing.has(agent);
-    const installStatus = agentState.installing.get(agent);
-
-    return (
-      <div key={agent} className="new-workspace-agent-cell">
-        <button
-          type="button"
-          role="checkbox"
-          aria-checked={state.engines[agent as Engine]}
-          className={`new-workspace-agent-tile${state.engines[agent as Engine] ? " is-selected" : ""}`}
-          onClick={() => dispatch({ type: "engine_toggled", engine: agent as Engine })}
-          disabled={!isInstalled}
-        >
-          <span
-            className="new-workspace-agent-logo"
-            style={{ color: ENGINE_COLOR[agent as Engine] }}
-            aria-hidden
-          >
-            <Icon name={AGENT_ICON[agent as Engine]} size={28} strokeWidth={1.75} />
-          </span>
-          <span className="new-workspace-agent-label">{label}</span>
-        </button>
-        {!isInstalled && !isInstalling && (
-          <button type="button" className="new-workspace-install-btn" onClick={() => onInstallAgent(agent)}>
-            Install
-          </button>
-        )}
-        {isInstalling && (
-          <span className="new-workspace-agent-status">
-            {installStatus === "failed" ? (
-              <>
-                <span className="status-failed">Failed</span>
-                <button type="button" className="new-workspace-retry-btn" onClick={() => onInstallAgent(agent)}>
-                  Retry
-                </button>
-              </>
-            ) : (
-              <span className="status-installing">Installing…</span>
-            )}
-          </span>
-        )}
-      </div>
-    );
-  }
-
-  const checked = checkedEngines(state);
+  const stats = state.stats;
+  const loading = stats === "loading";
 
   return (
     <div className="overlay-backdrop" onMouseDown={onClose}>
+      {/* `tabIndex={-1}` is a keyboard backstop, not a focus target — see
+          `NewSessionModal`'s copy of this note: WKWebView does not hand
+          mouse-click focus to <button> the way Chrome does, so focus needs
+          somewhere in-tree to land for `handleKeyDown` to see anything. */}
       <div
         ref={panelRef}
-        className="new-workspace-panel"
+        className="modal-panel new-workspace-panel-v2"
         role="dialog"
-        aria-label="New Workspace"
+        aria-label="New workspace"
         tabIndex={-1}
-        onKeyDown={handleKeyDown}
         onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={handleKeyDown}
       >
-        <div className="new-workspace-header">
-          <h2 className="new-workspace-title">New Workspace</h2>
-          <button className="new-workspace-close" onClick={onClose} aria-label="Close">
-            &#215;
-          </button>
+        <div className="modal-header">
+          <span>New workspace</span>
         </div>
 
-        <div className="new-workspace-section">
-          <span className="new-workspace-section-label">DIRECTORY</span>
-          <label className="new-workspace-name-label" htmlFor="new-workspace-name">
-            Project name
-          </label>
-          <input
-            id="new-workspace-name"
-            className="new-workspace-name-input"
-            value={state.name}
-            placeholder="My workspace"
-            disabled={state.submitting}
-            onChange={(e) => dispatch({ type: "name_changed", name: e.target.value })}
-          />
-          <div className="new-workspace-directory-row">
-            <FolderIcon />
-            <span className="new-workspace-path" title={state.path ?? undefined}>
+        <div className="modal-section">
+          <div className="modal-field-label">Project folder</div>
+          <div className="folder-row">
+            <span className="folder-row-path" title={state.path ?? undefined}>
               {state.path ?? "No folder chosen yet"}
             </span>
-            <button type="button" className="new-workspace-browse" onClick={() => void pickFolder()}>
-              Browse
+            <button type="button" className="folder-row-change" onClick={() => void pickFolder()}>
+              Browse…
             </button>
           </div>
         </div>
 
-        <div className="new-workspace-section">
-          <span className="new-workspace-section-label">LAYOUT</span>
-          <div className="new-workspace-layout-row">
-            {LAYOUT_PRESETS.map((preset) => (
-              <button
-                key={preset}
-                type="button"
-                className={`new-workspace-layout-card${state.layout === preset ? " is-selected" : ""}`}
-                onClick={() => dispatch({ type: "layout_selected", layout: preset })}
-                aria-pressed={state.layout === preset}
-              >
-                <LayoutGlyph preset={preset} />
-                <span className="new-workspace-layout-number">{preset}</span>
-              </button>
-            ))}
+        {state.path !== null && (
+          <div className="modal-section">
+            <div className="modal-field-label">Found in this folder</div>
+            <div className="stats-strip">
+              <div className="stats-strip-cell">
+                <div className="stats-strip-value">
+                  {loading || !stats ? "…" : stats.files.toLocaleString()}
+                </div>
+                <div className="stats-strip-label">files to walk</div>
+              </div>
+              <div className="stats-strip-cell">
+                <div className="stats-strip-value">
+                  {loading || !stats ? "…" : stats.languages.join(" · ") || "—"}
+                </div>
+                <div className="stats-strip-label">languages</div>
+              </div>
+              <div className="stats-strip-cell">
+                <div className={`stats-strip-value${stats && stats !== "loading" && stats.git ? " is-good" : ""}`}>
+                  {loading || !stats ? "…" : stats.git ? "git ✓" : "no git"}
+                </div>
+                <div className="stats-strip-label">
+                  {loading || !stats ? "…" : stats.git ? `${stats.branches} branches` : "init later"}
+                </div>
+              </div>
+            </div>
           </div>
-          <p className="new-workspace-layout-caption">{layoutCaption(state.layout)}</p>
-        </div>
+        )}
 
-        <div className="new-workspace-section">
-          <div className="new-workspace-agents-header">
-            <span className="new-workspace-section-label">AI AGENTS</span>
-            <span className="new-workspace-agents-count">
-              {checked.length}/{ENGINES.length}
+        <div className="modal-section modal-section-last">
+          <div className="toggle-row">
+            <span className="toggle-row-text">
+              <span className="toggle-row-title">Ingest into the brain now</span>
+              <span className="toggle-row-sub">
+                Walk, parse and link in the background — you can start working immediately.
+              </span>
             </span>
             <button
               type="button"
-              className="new-workspace-agents-toggle"
-              onClick={() => dispatch({ type: "agents_collapsed_toggled" })}
-              aria-expanded={!state.agentsCollapsed}
-            >
-              <span
-                className={`new-workspace-agents-chevron${state.agentsCollapsed ? " is-collapsed" : ""}`}
-                aria-hidden
-              >
-                &#9656;
-              </span>
-              {state.agentsCollapsed ? "Expand" : "Collapse"}
-            </button>
+              role="switch"
+              aria-checked={state.ingestNow}
+              aria-label="Ingest into the brain now"
+              className="switch"
+              onClick={() => dispatch({ type: "ingestNow" })}
+            />
           </div>
-          {!state.agentsCollapsed && (
-            <>
-              {/* Logo tiles in a 3-column grid (Bruno, 2026-07-26: "instead
-                  of a list of options, make it a grid"), wearing the brand
-                  marks the agent-picker work introduced. Each tile keeps
-                  `role="checkbox"` so the toggle semantics (and the
-                  existing tests) carry over from the checkbox rows
-                  unchanged. `shell` isn't an AI agent (theme.ts's own
-                  `ENGINE_COLOR` doc says so), so it renders separately below
-                  as its own "Normal Terminal" tile rather than a 5th agent. */}
-              <div className="new-workspace-agent-grid">
-                {AVAILABLE_AGENTS.filter((agent) => agent !== "shell").map((agent) =>
-                  renderAgentTile(agent, ENGINE_LABEL[agent as Engine]),
-                )}
-              </div>
-              <div className="new-workspace-agent-grid">{renderAgentTile("shell", "Normal Terminal")}</div>
-            </>
+          <div className="toggle-row toggle-row-second">
+            <span className="toggle-row-text">
+              <span className="toggle-row-title">Review memory notes before commit</span>
+              <span className="toggle-row-sub">Off: session notes auto-commit to your repo.</span>
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={state.reviewNotes}
+              aria-label="Review memory notes before commit"
+              className="switch"
+              onClick={() => dispatch({ type: "reviewNotes" })}
+            />
+          </div>
+          {state.error && (
+            <div className="modal-field-help modal-field-error">
+              Couldn't create workspace: {state.error}
+            </div>
           )}
         </div>
 
-        {state.error && <p className="new-workspace-error">Couldn't create workspace: {state.error}</p>}
-
-        <div className="new-workspace-footer">
-          <button className="new-workspace-cancel" onClick={onClose}>
+        <div className="modal-footer">
+          <span className="modal-footer-hint">
+            <span className="modal-footer-dot" />
+            Scoped access — only this folder is readable.
+          </span>
+          <button type="button" className="btn-ghost" onClick={onClose}>
             Cancel
           </button>
           <button
-            className="new-workspace-submit"
+            type="button"
+            className="btn-primary"
             onClick={() => void confirm()}
             disabled={!canSubmit(state)}
           >
-            {state.submitting ? "Creating…" : "Create Workspace"}
+            {state.submitting ? "Adding…" : "Add workspace ⏎"}
           </button>
         </div>
       </div>
