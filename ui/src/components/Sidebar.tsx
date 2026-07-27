@@ -175,10 +175,12 @@ interface SidebarProps {
    * `onOpenNewTerminal` below. Kept because `App.tsx` still passes it and
    * the two are different questions (any project vs. this one). */
   onNewTabInProject: (project: ProjectInfo) => void;
-  /** "New terminal" in the selected workspace — `App.tsx` wires it to the
-   * same `requestNewTab(selectedProject)` ⌘T runs. Rendered as the current
-   * session's "New terminal" row (Task 5); Task 9 swaps App's handler for a
-   * modal without this file changing at all. */
+  /** "New terminal" in the selected workspace. Rendered as the current
+   * session's "New terminal" row (Task 5). Task 9: `App.tsx` used to wire
+   * this to the same direct `requestNewTab(selectedProject)` call ⌘T ran;
+   * both now instead open `NewTerminalModal` (`setNewTerminalOpen(true)`) —
+   * the modal itself calls `requestNewTab` on confirm. This file didn't
+   * need to change either way. */
   onOpenNewTerminal: () => void;
   onActivateTab: (id: string) => void;
   /** The "+" New Workspace flow: called the instant `add_project` returns
