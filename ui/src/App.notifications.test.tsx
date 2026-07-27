@@ -286,7 +286,7 @@ describe("App — notifications outlive the app", () => {
     await waitFor(() => expect(badge()?.textContent).toBe("1"));
     fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
     expect(screen.getByText("yesterday's run")).toBeInTheDocument();
-    expect(screen.getByText("3 days ago")).toBeInTheDocument();
+    expect(screen.getByText("3 days")).toBeInTheDocument();
   });
 
   it("a restored entry whose session is gone still takes the user to its project", async () => {
