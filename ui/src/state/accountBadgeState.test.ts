@@ -137,9 +137,29 @@ describe("brainLine", () => {
       brainLine({ running: true, projects_total: 4, projects_done: 1, total_nodes: 10 }, null, 0),
     ).toEqual({ text: "Ingesting · 1 of 4 projects", tone: "busy" });
   });
+  it("running ingestion wins even over an already-populated lastIndexedAt", () => {
+    // Proves `running` is checked before the "already indexed" branch —
+    // this is the re-ingesting-a-known-brain case, not the first-ever ingest
+    // the "running ingestion wins" case above covers.
+    expect(
+      brainLine({ running: true, projects_total: 4, projects_done: 1, total_nodes: 10 }, 1_000_000, 1_500_000),
+    ).toEqual({ text: "Ingesting · 1 of 4 projects", tone: "busy" });
+  });
   it("error surfaces", () => {
     expect(
       brainLine({ running: false, projects_total: 0, projects_done: 0, total_nodes: 0, error: "boom" }, null, 0),
+    ).toEqual({ text: "Ingest failed — open About to rebuild", tone: "error" });
+  });
+  it("error wins even over an already-populated lastIndexedAt", () => {
+    // Proves `error` is checked before the "already indexed" branch — a
+    // brain that indexed successfully before but just failed a re-ingest
+    // must show the failure, not a stale "indexed Xm ago".
+    expect(
+      brainLine(
+        { running: false, projects_total: 0, projects_done: 0, total_nodes: 0, error: "boom" },
+        1_000_000,
+        1_500_000,
+      ),
     ).toEqual({ text: "Ingest failed — open About to rebuild", tone: "error" });
   });
   it("indexed shows relative minutes", () => {
