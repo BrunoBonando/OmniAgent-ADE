@@ -5717,14 +5717,26 @@ code {
 }
 
 /* Band labels + the NEEDS YOU row treatment — design/OmniAgent ADE.dc.html,
-   NOTIFICATIONS POPOVER. */
+   NOTIFICATIONS POPOVER. The mock gives the very first band label (right
+   under the filter chips) no top hairline and 9px top padding, then every
+   later label (a hairline already separating it from the rows above) gets
+   the .5px border-top and 11px top padding. Which band renders first varies
+   (NEEDS YOU is only there when something is actionable), so this is keyed
+   off DOM position — `:first-of-type` — rather than a specific band's
+   label, and it wins over the base rule below regardless of source order
+   because it is the more specific selector. */
 .notifications-band-label {
-  padding: 9px 12px 5px;
+  padding: 11px 12px 5px;
   border-top: 0.5px solid rgba(255, 255, 255, 0.06);
   font-size: 9.5px;
   font-weight: 600;
   letter-spacing: 0.09em;
   color: var(--ink-faint);
+}
+
+.notifications-band-label:first-of-type {
+  padding: 9px 12px 5px;
+  border-top: none;
 }
 
 .notification-row.is-actionable {

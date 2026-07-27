@@ -284,3 +284,34 @@ describe("engine tag and day bands", () => {
     expect(screen.getByText("OLDER")).toBeInTheDocument();
   });
 });
+
+describe("keyboard activation guard", () => {
+  // Regression: the row wrapper's onKeyDown used to handle Enter/Space
+  // without checking where the event came from, so a keydown bubbling up
+  // from a focused nested Approve/Open-pane button fired the row's onSelect
+  // AND preventDefault()'d the button's own activation — a keyboard user
+  // pressing Enter on "Approve" navigated away instead of approving.
+  it("Enter on the nested Approve button approves, and does not also navigate", () => {
+    const props = setup({
+      entries: [entry({ id: "a1", sessionId: "sess-1", status: "awaiting_approval", title: "stripe webhook retries" })],
+      awaitingSessionIds: ["sess-1"],
+    });
+    openPanel();
+    const approveButton = screen.getByRole("button", { name: /approve stripe webhook retries/i });
+    fireEvent.keyDown(approveButton, { key: "Enter" });
+    // jsdom doesn't synthesize a click from Enter on a <button> the way a
+    // real browser does, so trigger the click a real Enter press would
+    // produce — what matters here is the keyDown itself never reaching the
+    // row's onSelect.
+    fireEvent.click(approveButton);
+    expect(props.onApprove).toHaveBeenCalledWith(expect.objectContaining({ id: "a1" }));
+    expect(props.onSelect).not.toHaveBeenCalled();
+  });
+
+  it("Enter on the row itself still navigates", () => {
+    const props = setup();
+    openPanel();
+    fireEvent.keyDown(screen.getByRole("button", { name: /Go to wire session restore/ }), { key: "Enter" });
+    expect(props.onSelect).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "sess-1" }));
+  });
+});

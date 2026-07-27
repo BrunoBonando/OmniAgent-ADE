@@ -130,6 +130,11 @@ function NotificationRow({
         className="notification-row-main"
         onClick={onSelect}
         onKeyDown={(e) => {
+          // A keydown on the nested Approve/Open-pane buttons bubbles up
+          // here too — without this guard it would preventDefault() the
+          // button's own Enter/Space activation *and* fire onSelect,
+          // navigating away instead of letting the button's own handler run.
+          if (e.target !== e.currentTarget) return;
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
             onSelect();
