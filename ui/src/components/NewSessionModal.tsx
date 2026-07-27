@@ -226,10 +226,20 @@ export default function NewSessionModal({ project, agentState, onCreate, onClose
     }
     const active = document.activeElement;
     if (e.key === "Enter") {
-      // Enter from the prompt (or from nothing) starts the session. Enter
-      // on a slot's trigger belongs to that button — it opens the menu, and
-      // stealing it would submit the session the user was still assembling.
-      if (active === promptRef.current || active === null || active === document.body) {
+      // Enter starts the session from *anywhere* in this dialog except a
+      // slot picker, where it belongs to the trigger (opens the menu) or an
+      // option (picks it) — stealing it there would submit a session the
+      // user was still assembling.
+      //
+      // Stated as one exclusion on purpose. The obvious-looking spelling —
+      // "confirm only when the prompt or nothing has focus" — makes Enter a
+      // DEAD KEY right at the end of the flow, because a real browser moves
+      // focus to a <button> when you click it, and clicking a layout
+      // thumbnail is the dialog's second-most-likely action. The old
+      // checkbox-era dialog shipped that exact bug once already (its
+      // regression test: "still creates on Enter after an agent checkbox
+      // has been clicked"); this is the same lesson, kept.
+      if (!(active instanceof Element) || active.closest(".slot-picker") === null) {
         e.preventDefault();
         confirm();
       }
@@ -249,10 +259,18 @@ export default function NewSessionModal({ project, agentState, onCreate, onClose
 
   return (
     <div className="overlay-backdrop" onMouseDown={onClose}>
+      {/* `tabIndex={-1}` is a keyboard backstop, not a focus target: the
+          prompt below takes focus on mount. A keydown only reaches
+          `handleKeyDown` if the focused element is INSIDE this div, and the
+          app ships on WKWebView, which does not hand mouse-click focus to
+          <button> the way Chrome does — so "the user clicked something and
+          focus ended up outside the dialog" is a real possibility there.
+          A focusable panel gives focus somewhere in-tree to land. */}
       <div
         className="modal-panel new-session-panel"
         role="dialog"
         aria-label="New session"
+        tabIndex={-1}
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >

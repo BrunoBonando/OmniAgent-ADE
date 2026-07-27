@@ -247,12 +247,62 @@ describe("NewSessionModal — keyboard", () => {
     expect(screen.getByRole("button", { name: "2×2" })).toHaveAttribute("aria-pressed", "true");
   });
 
+  // The regression the checkbox-era dialog already shipped once: a real
+  // browser focuses a <button> when you click it, so "confirm only when the
+  // prompt has focus" makes Enter a dead key right after the dialog's most
+  // likely interaction. jsdom does not move focus on click, so these focus
+  // the element explicitly to stand in for the real-browser state.
+  it("still starts the session on Enter after a layout thumbnail has been clicked", () => {
+    const { onCreate, dialog } = setup();
+    fireEvent.change(promptField(), { target: { value: "ship the thing" } });
+    const thumb = screen.getByRole("button", { name: "2×2" });
+    fireEvent.click(thumb);
+    thumb.focus();
+    fireEvent.keyDown(dialog, { key: "Enter" });
+    expect(onCreate).toHaveBeenCalledWith(
+      PROJECT,
+      "/Users/bruno/code/ade",
+      ["claude", "claude", "claude", "claude"],
+      "ship the thing",
+    );
+  });
+
+  it("still starts the session on Enter after the folder button has been clicked", () => {
+    openMock.mockResolvedValue(null);
+    const { onCreate, dialog } = setup();
+    const change = screen.getByRole("button", { name: "Change" });
+    fireEvent.click(change);
+    change.focus();
+    fireEvent.keyDown(dialog, { key: "Enter" });
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
   it("Enter on a slot trigger opens its menu instead of submitting", () => {
     const { onCreate } = setup();
     const slot = slotTriggers()[0];
     slot.focus();
     fireEvent.keyDown(slot, { key: "Enter" });
     expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it("Enter on an open slot menu's option picks it rather than submitting", () => {
+    const { onCreate } = setup();
+    fireEvent.click(slotTriggers()[1]);
+    const option = screen.getByRole("option", { name: "Codex" });
+    option.focus();
+    fireEvent.keyDown(option, { key: "Enter" });
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it("keeps a focusable panel, so a keydown always has somewhere in-dialog to land", () => {
+    // WKWebView (this app's runtime) does not focus a <button> on click the
+    // way Chrome does; a keydown outside this div never reaches its handler.
+    const { dialog, onCreate } = setup();
+    expect(dialog).toHaveAttribute("tabindex", "-1");
+    dialog.focus();
+    expect(dialog).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Enter" });
+    expect(onCreate).toHaveBeenCalledTimes(1);
   });
 
   it("Escape cancels", () => {
