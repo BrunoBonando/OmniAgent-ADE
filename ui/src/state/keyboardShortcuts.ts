@@ -48,10 +48,10 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     title: "In a dialog",
     shortcuts: [
-      { keys: ["↑", "↓", "←", "→"], description: "Move the selection" },
       { keys: ["⏎"], description: "Confirm — the default is already selected" },
-      { keys: ["1", "2"], description: "Pick that card and confirm it" },
       { keys: ["esc"], description: "Cancel" },
+      { keys: ["⌘1", "⌘2", "⌘3", "⌘0"], description: "Pick an engine (New Terminal)" },
+      { keys: ["1", "2", "3", "4", "5"], description: "Pick a layout (New Session)" },
     ],
   },
   {
