@@ -174,8 +174,18 @@ describe("Sidebar — session and branch, nothing else", () => {
     expect(container.querySelector(".pressure-badge")).toBeNull();
   });
 
-  it("no longer lists the terminals inside a session", () => {
-    setup();
+  // Was "no longer lists the terminals inside a session" pre-Task-5, back
+  // when there was no expand/collapse list to have an opinion about. Now
+  // that `SidebarSessionRow` renders one (Task 5), the invariant that
+  // survives is narrower: a session only lists its terminals once it's
+  // expanded — never unconditionally, the way the old always-on "N panes ·
+  // engine, engine" meta line did. `setup()`'s default tabs share one group
+  // (the on-screen session, auto-expanded), so this moves "s2" into its own,
+  // non-current group to keep it collapsed.
+  it("does not list a session's terminals unless that session is expanded", () => {
+    setup({
+      tabs: [tab(), tab({ id: "s2", group: "g2", engine: "shell", label: "shell scratch" })],
+    });
     expect(screen.queryByText("shell scratch")).not.toBeInTheDocument();
   });
 

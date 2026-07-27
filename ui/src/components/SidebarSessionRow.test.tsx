@@ -215,16 +215,45 @@ describe("SidebarSessionRow — accent bar and expand chevron (Task 4 redesign)"
     expect(props.onActivate).not.toHaveBeenCalled();
   });
 
-  it("renders an empty children container when expanded (Task 5 fills it in)", () => {
+  // Was "renders an empty children container when expanded" pre-Task-5, back
+  // when `.session-row-children` had nothing to render yet. Now that it
+  // lists the session's own terminals (Task 5), a *non-current* expanded
+  // session still lists them — expanding any row is meant to be browsable —
+  // it just never gets the "New terminal" row, since spawning only ever
+  // targets the session on screen. `setup()`'s default session has exactly
+  // one tab and `isCurrent: false`.
+  it("lists the session's terminals when expanded, even when it isn't the current session", () => {
     const { container } = setup({ expanded: true });
     const children = container.querySelector(".session-row-children");
     expect(children).toBeInTheDocument();
-    expect(children!.textContent).toBe("");
+    expect(container.querySelectorAll(".terminal-row")).toHaveLength(1);
+    expect(container.querySelector(".terminal-row-new")).toBeNull();
   });
 
   it("renders no children container at all when collapsed", () => {
     const { container } = setup({ expanded: false });
     expect(container.querySelector(".session-row-children")).toBeNull();
+  });
+
+  it("expanded current session lists terminals and the New terminal row", () => {
+    const { container } = setup({
+      isCurrent: true,
+      expanded: true,
+      session: session([tab({ id: "a" }), tab({ id: "b" })]),
+      onOpenNewTerminal: vi.fn(),
+    });
+    expect(container.querySelectorAll(".terminal-row")).toHaveLength(2);
+    expect(screen.getByText("New terminal")).toBeInTheDocument();
+  });
+
+  it("hides the New terminal row at MAX_PANES", () => {
+    const { container } = setup({
+      isCurrent: true,
+      expanded: true,
+      session: session(Array.from({ length: 8 }, (_, i) => tab({ id: `t${i}` }))),
+      onOpenNewTerminal: vi.fn(),
+    });
+    expect(container.querySelector(".terminal-row-new")).toBeNull();
   });
 });
 

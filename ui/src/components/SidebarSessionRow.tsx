@@ -44,7 +44,9 @@ import { deriveSessionCard } from "../state/sessionHoverCard";
 import { sessionShapeBadge, type SessionGroup } from "../state/sessionGroups";
 import { useGitBranch } from "../lib/useGitBranch";
 import { statusPresentation } from "../state/sessionStatus";
+import { MAX_PANES } from "../state/paneGrid";
 import SessionHoverCard from "./SessionHoverCard";
+import { SidebarTerminalRow } from "./SidebarTerminalRow";
 import Icon from "./Icon";
 
 /** How long the pointer must rest on a session row before its card appears.
@@ -94,13 +96,11 @@ interface SidebarSessionRowProps {
   tint: string;
   /** Whether the terminal list under this row is open — either the user
    * toggled it open, or (`Sidebar`'s default) it's the session the founder
-   * brief's mock always shows expanded. Task 5 renders that list; until then
-   * this only controls whether `.session-row-children` mounts (empty). */
+   * brief's mock always shows expanded. Renders one `SidebarTerminalRow` per
+   * `session.tabs` entry, plus the "New terminal" row (Task 5). */
   expanded: boolean;
-  /** The pane currently focused, app-wide — threaded through for Task 5's
-   * terminal rows to mark their own active one. Unused by this task's empty
-   * children div, but part of the shape so Task 5 doesn't need another prop
-   * plumbing pass. */
+  /** The pane currently focused, app-wide — each `SidebarTerminalRow` below
+   * compares its own tab id against this to mark itself active. */
   activeTabId: string | null;
   /** Bring this session on screen — `App.tsx` activates one of its
    * terminals, which also selects its workspace. */
@@ -109,10 +109,10 @@ interface SidebarSessionRowProps {
    * from bubbling into `onActivate` so opening/closing the terminal list
    * never also switches the grid to this session. */
   onToggleExpanded: () => void;
-  /** Activates one specific terminal — Task 5's terminal rows call this per
-   * row. The same function `Sidebar` already has as `onActivateTab` (there
-   * is only ever one "activate this pane" function in the app), passed
-   * straight through. */
+  /** Activates one specific terminal — each `SidebarTerminalRow` calls this
+   * with its own tab id. The same function `Sidebar` already has as
+   * `onActivateTab` (there is only ever one "activate this pane" function in
+   * the app), passed straight through. */
   onActivateTab: (tabId: string) => void;
   /** Commit a new name for the session. Called with the raw draft; the
    * reducer trims it and treats empty as "back to the default name". */
@@ -122,28 +122,24 @@ interface SidebarSessionRowProps {
    * Absent = no close control, same convention as `onCloseWorkspace`. */
   onClose?: () => void;
   /** Renders as the "New terminal" row inside the expanded children, when
-   * this is the current session (Task 5). Absent here for the same reason
-   * `onClose` can be absent — this task doesn't render the children list at
-   * all yet. */
+   * this is the current session and it hasn't hit `MAX_PANES` (Task 5).
+   * Absent = no control shown, same convention as `onClose`. */
   onOpenNewTerminal?: () => void;
 }
 
-// `activeTabId`, `onActivateTab` and `onOpenNewTerminal` are deliberately
-// NOT destructured: they exist on the props type for Task 5's terminal-row
-// list (the one thing `.session-row-children` will actually render), which
-// this task leaves empty. Leaving them off the destructure is what keeps
-// `noUnusedLocals` honest without dropping the prop itself — same
-// convention `Sidebar.tsx` uses for its own not-yet-wired props.
 export default function SidebarSessionRow({
   session,
   projectLabel,
   isCurrent,
   tint,
   expanded,
+  activeTabId,
   onActivate,
   onToggleExpanded,
+  onActivateTab,
   onRename,
   onClose,
+  onOpenNewTerminal,
 }: SidebarSessionRowProps) {
   const branch = useGitBranch(session.cwd);
   const [renaming, setRenaming] = useState(false);
@@ -320,8 +316,38 @@ export default function SidebarSessionRow({
       )}
       {expanded && (
         <div className="session-row-children">
-          {/* Task 5 renders SidebarTerminalRow list + New-terminal row here;
-             until then render nothing. */}
+          {session.tabs.map((t) => (
+            <SidebarTerminalRow
+              key={t.id}
+              tab={t}
+              isActive={t.id === activeTabId}
+              onActivate={() => onActivateTab(t.id)}
+            />
+          ))}
+          {/* Spawning only ever happens into the session on screen — a
+              background session's expanded list is browsable (click a
+              terminal to bring it forward) but isn't where ⌘T lands.
+              `onOpenNewTerminal` is absent for the same reason `onClose`
+              can be: no handler wired, no control shown. `MAX_PANES` mirrors
+              the cap `App.tsx`'s own spawn path already enforces, so this
+              row never promises a terminal the grid would refuse. */}
+          {isCurrent && onOpenNewTerminal && session.tabs.length < MAX_PANES && (
+            <button
+              type="button"
+              className="terminal-row-new"
+              onClick={onOpenNewTerminal}
+              aria-label="New terminal"
+              title="New terminal (⌘T)"
+            >
+              <span aria-hidden>+</span>
+              <span className="terminal-row-new-label" aria-hidden>
+                New terminal
+              </span>
+              <span className="terminal-row-new-key" aria-hidden>
+                ⌘T
+              </span>
+            </button>
+          )}
         </div>
       )}
     </li>

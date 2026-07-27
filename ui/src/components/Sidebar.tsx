@@ -172,9 +172,9 @@ interface SidebarProps {
    * the two are different questions (any project vs. this one). */
   onNewTabInProject: (project: ProjectInfo) => void;
   /** "New terminal" in the selected workspace — `App.tsx` wires it to the
-   * same `requestNewTab(selectedProject)` ⌘T runs. Nothing renders it yet:
-   * Task 5's "New terminal" row inside the current session is its first call
-   * site, and Task 9 swaps App's handler for the modal. */
+   * same `requestNewTab(selectedProject)` ⌘T runs. Rendered as the current
+   * session's "New terminal" row (Task 5); Task 9 swaps App's handler for a
+   * modal without this file changing at all. */
   onOpenNewTerminal: () => void;
   onActivateTab: (id: string) => void;
   /** The "+" New Workspace flow: called the instant `add_project` returns
@@ -248,12 +248,12 @@ interface SidebarProps {
   onInstallAgent: (agent: Agent) => void;
 }
 
-// `onNewTabInProject`, `onOpenNewTerminal`, `ingestion`, `fileTreeVisible`
-// and `onToggleFileTree` are deliberately NOT destructured: they are live
-// props `App.tsx` passes, whose render sites either moved out of this file
-// (Task 3) or haven't been built yet (Tasks 5/6/8) — see each one's doc on
-// `SidebarProps`. Leaving them out of the signature is what keeps
-// `noUnusedLocals` honest without dropping the prop itself.
+// `onNewTabInProject`, `ingestion`, `fileTreeVisible` and `onToggleFileTree`
+// are deliberately NOT destructured: they are live props `App.tsx` passes,
+// whose render sites either moved out of this file (Task 3) or haven't been
+// built yet (Tasks 6/8) — see each one's doc on `SidebarProps`. Leaving them
+// out of the signature is what keeps `noUnusedLocals` honest without
+// dropping the prop itself.
 export default function Sidebar({
   projects,
   tabs,
@@ -273,6 +273,7 @@ export default function Sidebar({
   onRenameSession,
   onCloseWorkspace,
   onCloseSession,
+  onOpenNewTerminal,
   authSignedIn,
   authPersona,
   onResetAuthGate,
@@ -509,6 +510,7 @@ export default function Sidebar({
                     ? () => setClosingSession({ project: selectedProject, session })
                     : undefined
                 }
+                onOpenNewTerminal={onOpenNewTerminal}
               />
             );
           })}

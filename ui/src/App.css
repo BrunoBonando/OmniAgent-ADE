@@ -6581,6 +6581,61 @@ code {
   flex-direction: column;
   gap: 1px;
 }
+/* Terminal rows under an expanded session, and the "New terminal" row that
+   follows them for the current session (Task 5). Both are real `<button>`s
+   (see `SidebarTerminalRow.tsx`'s doc) rather than `role="button"` divs, so
+   they need the usual button reset — full width, no border/background of
+   their own, text-align left — to sit flush in `.session-row-children`. */
+.terminal-row,
+.terminal-row-new {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 7px;
+  padding: 4px 8px 4px 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font: 400 11px/1.3 var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+.terminal-row:hover,
+.terminal-row.is-active {
+  background: rgba(255, 255, 255, 0.045);
+}
+.terminal-row-engine {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  display: flex;
+}
+.terminal-row-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #c2c2cb;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-row.is-active .terminal-row-label {
+  color: #e2e2e8;
+}
+.terminal-row-new {
+  font-weight: 500;
+  color: var(--accent);
+}
+.terminal-row-new:hover {
+  background: var(--accent-tint);
+}
+.terminal-row-new-label {
+  flex: 1 1 auto;
+}
+.terminal-row-new-key {
+  flex: none;
+  font: 500 9.5px/1 var(--mono);
+  color: #5c5c66;
+}
 @keyframes om-dot-pulse {
   0%,
   100% {
