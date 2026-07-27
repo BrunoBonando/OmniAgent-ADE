@@ -8,6 +8,9 @@ import { listen } from "@tauri-apps/api/event";
 import type { Engine, ProjectInfo } from "../state/sessions";
 import type { SessionStatusEvent } from "../state/sessionStatus";
 
+type SessionWriteObserver = (id: string, data: string) => void;
+const sessionWriteObservers = new Set<SessionWriteObserver>();
+
 export interface SessionInfo {
   id: string;
   project: string;
@@ -63,6 +66,18 @@ export async function settingsSet(key: string, value: string): Promise<void> {
   await invoke("settings_set", { key, value });
 }
 
+/** System-level desktop notification (Notification Center on macOS). */
+export async function sendNativeNotification(title: string, body: string): Promise<void> {
+  if (typeof window === "undefined" || !("Notification" in window)) return;
+  if (Notification.permission === "default") {
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") return;
+  } else if (Notification.permission !== "granted") {
+    return;
+  }
+  new Notification(title, { body });
+}
+
 /** Spawns a session — or, with `restoreId`, *reattaches* to one.
  *
  * `restoreId` is the id a previous run of the app got back for this same
@@ -105,7 +120,21 @@ export async function sessionStatus(id: string): Promise<SessionStatusEvent | nu
 }
 
 export async function sessionWrite(id: string, data: string): Promise<void> {
+  for (const observer of sessionWriteObservers) {
+    try {
+      observer(id, data);
+    } catch (err) {
+      console.error("sessionWrite observer failed", err);
+    }
+  }
   await invoke("session_write", { id, data });
+}
+
+export function onSessionWrite(observer: SessionWriteObserver): () => void {
+  sessionWriteObservers.add(observer);
+  return () => {
+    sessionWriteObservers.delete(observer);
+  };
 }
 
 export async function sessionResize(id: string, cols: number, rows: number): Promise<void> {
@@ -131,6 +160,16 @@ export interface DirEntry {
 
 export async function listDir(path: string): Promise<DirEntry[]> {
   return invoke<DirEntry[]>("list_dir", { path });
+}
+
+/** Reads one file's UTF-8 text content, scoped to `projectRoot`. */
+export async function readTextFile(projectRoot: string, path: string): Promise<string> {
+  return invoke<string>("read_text_file", { projectRoot, path });
+}
+
+/** Writes one file's UTF-8 text content, scoped to `projectRoot`. */
+export async function writeTextFile(projectRoot: string, path: string, content: string): Promise<void> {
+  await invoke("write_text_file", { projectRoot, path, content });
 }
 
 /** Settings-table key for the file tree panel's collapsed/expanded state
@@ -422,6 +461,17 @@ export async function renameProject(id: string, newLabel: string): Promise<void>
 /** The map pane's "enrichment queued (N)" degradation badge. */
 export async function enrichQueuePendingCount(): Promise<number> {
   return invoke<number>("enrich_queue_pending_count");
+}
+
+export interface SystemStats {
+  cpuPercent: number | null;
+  ramUsedBytes: number | null;
+  ramTotalBytes: number | null;
+  mcpWired: boolean;
+}
+
+export async function systemStats(): Promise<SystemStats> {
+  return invoke<SystemStats>("system_stats");
 }
 
 // --------------------------------------------------------------- Task: import

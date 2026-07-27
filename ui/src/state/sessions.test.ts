@@ -250,7 +250,9 @@ describe("sessionsReducer — tab/themeChanged", () => {
 
 describe("tabDisplayLabel", () => {
   it("falls back to the engine name when no custom label is set", () => {
-    expect(tabDisplayLabel(tab("a", "p1", "codex"))).toBe("codex");
+    expect(tabDisplayLabel(tab("a", "p1", "codex"))).toBe("Codex");
+    expect(tabDisplayLabel(tab("b", "p1", "antigravity"))).toBe("AntiGravity");
+    expect(tabDisplayLabel(tab("c", "p1", "claude"))).toBe("claude");
   });
 
   it("prefers the custom label once one is set", () => {

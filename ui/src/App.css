@@ -1515,10 +1515,211 @@ code {
   font: 500 12px/1.4 var(--sans);
 }
 
+.dashboard-overview {
+  padding-bottom: 10px;
+}
+
+.dashboard-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 10px;
+}
+
+.dashboard-kpis article {
+  min-height: 78px;
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 10px;
+}
+
+.dashboard-kpis article span {
+  color: #7f7f8a;
+  font: 500 10px/1 var(--mono);
+}
+
+.dashboard-kpis article strong {
+  color: #ececf2;
+  font: 700 26px/1 var(--sans);
+}
+
+.dashboard-quick-actions {
+  padding: 0 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.dashboard-quick-actions button {
+  height: 32px;
+  border-radius: 7px;
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d8d8e1;
+  font: 600 11px/1 var(--sans);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+}
+
+.dashboard-quick-actions button:hover {
+  border-color: rgba(139, 149, 255, 0.5);
+  background: rgba(139, 149, 255, 0.14);
+}
+
+.dashboard-sessions {
+  margin: 10px;
+  margin-top: 12px;
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dashboard-sessions > header {
+  height: 34px;
+  padding: 0 10px;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #9b9ba5;
+  font: 600 10px/1 var(--mono);
+}
+
+.dashboard-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+}
+
+.dashboard-session-row {
+  height: 34px;
+  border-radius: 7px;
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: #ddddE4;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  font: 500 11px/1 var(--sans);
+}
+
+.dashboard-session-row small {
+  color: #7a7a85;
+  font: 500 9.5px/1 var(--mono);
+}
+
+.dashboard-session-row.is-current {
+  border-color: rgba(139, 149, 255, 0.5);
+  background: rgba(139, 149, 255, 0.12);
+}
+
+.dashboard-insights-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 10px 10px;
+}
+
+.dashboard-insight-card {
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 10px;
+  min-height: 122px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dashboard-insight-card > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.dashboard-insight-card > header strong {
+  color: #ececf2;
+  font: 600 11px/1 var(--sans);
+}
+
+.dashboard-insight-card > header small {
+  color: #8f8f9a;
+  font: 500 9.5px/1 var(--mono);
+}
+
+.dashboard-line-chart {
+  height: 36px;
+  border-radius: 6px;
+  border: 0.5px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+  padding: 5px 6px;
+}
+
+.dashboard-line-chart svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.dashboard-line-chart path {
+  fill: none;
+  stroke: #8b95ff;
+  stroke-width: 1.5;
+}
+
+.dashboard-insight-stats {
+  margin-top: auto;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #9b9ba7;
+  font: 500 9.5px/1.3 var(--mono);
+}
+
+.dashboard-hour-bars {
+  margin-top: 2px;
+  height: 52px;
+  display: grid;
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+  align-items: end;
+  gap: 2px;
+}
+
+.dashboard-hour-bar {
+  border-radius: 3px 3px 0 0;
+  background: linear-gradient(180deg, rgba(139, 149, 255, 0.95), rgba(139, 149, 255, 0.35));
+  min-height: 6px;
+}
+
+.dashboard-hour-labels {
+  display: flex;
+  justify-content: space-between;
+  color: #7a7a85;
+  font: 500 9px/1 var(--mono);
+}
+
 .plan-board-create {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.plan-board-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .plan-board-create input {
@@ -1543,6 +1744,21 @@ code {
   padding: 0 10px;
 }
 
+.plan-board-secondary {
+  height: 30px;
+  border-radius: 6px;
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #d6d6df;
+  font: 500 11px/1 var(--sans);
+  padding: 0 10px;
+}
+
+.plan-board-secondary:disabled {
+  color: #6f6f79;
+  cursor: default;
+}
+
 .plan-board-grid {
   flex: 1;
   min-height: 0;
@@ -1560,6 +1776,11 @@ code {
   background: rgba(255, 255, 255, 0.03);
   display: flex;
   flex-direction: column;
+}
+
+.plan-lane.is-drop-target {
+  border-color: rgba(139, 149, 255, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(139, 149, 255, 0.35);
 }
 
 .plan-lane header {
@@ -1595,6 +1816,17 @@ code {
   margin: 0;
   color: #dbdbe2;
   font: 500 11.5px/1.35 var(--sans);
+}
+
+.plan-card-edit {
+  width: 100%;
+  height: 28px;
+  border-radius: 6px;
+  border: 0.5px solid rgba(139, 149, 255, 0.55);
+  background: rgba(255, 255, 255, 0.03);
+  color: #ececf2;
+  font: 500 11.5px/1 var(--sans);
+  padding: 0 8px;
 }
 
 .plan-card-actions {
@@ -2460,6 +2692,39 @@ code {
   color: var(--ink);
 }
 
+.pane-header-review {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.pane-header-review:hover {
+  border-color: var(--ink-dim);
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink);
+}
+
+.pane-header-review-count {
+  color: var(--ink);
+}
+
+.pane-header-review-add {
+  color: var(--diff-add);
+}
+
+.pane-header-review-del {
+  color: var(--diff-del);
+}
+
 /* ----------------------------------------------------- session hover card
    Founder ask: "for each session, have a hover with more info, like warp
    does". Modelled on his reference screenshot,
@@ -2822,6 +3087,79 @@ code {
   min-height: 0;
   overflow: hidden;
   padding: 8px 12px;
+}
+
+/* Design alignment (`design/OmniAgent ADE.dc.html`, awaiting-approval pane):
+   the terminal waiting on permission gets an amber footer strip, and the
+   terminal viewport yields that space so the approval cue never overlaps
+   output. */
+.pane-body.has-approval-banner .terminal-container {
+  bottom: 44px;
+}
+
+.pane-approval-banner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 10px;
+  background: rgba(240, 180, 70, 0.1);
+  border-top: 0.5px solid rgba(240, 180, 70, 0.3);
+}
+
+.pane-approval-banner-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pane-approval-banner-text {
+  font: 600 10.5px/1.35 var(--sans);
+  color: var(--status-approval);
+  flex: 1;
+  min-width: 0;
+}
+
+.pane-approval-banner-meta {
+  font: 500 9.5px/1 var(--mono);
+  color: rgba(240, 180, 70, 0.86);
+}
+
+.pane-approval-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.pane-approval-button {
+  appearance: none;
+  border-radius: 10px;
+  padding: 6px 16px;
+  font: 600 10.5px/1 var(--sans);
+}
+
+.pane-approval-button-approve {
+  border: 0;
+  background: var(--status-approval);
+  color: #1a1400;
+}
+
+.pane-approval-button-approve:hover {
+  filter: brightness(1.08);
+}
+
+.pane-approval-button-deny {
+  border: 0.5px solid rgba(255, 255, 255, 0.2);
+  background: transparent;
+  color: #c9c9d2;
+}
+
+.pane-approval-button-deny:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .terminal-container .xterm {
@@ -5888,7 +6226,8 @@ code {
   font-family: var(--mono);
   font-size: 10.5px;
   line-height: 1.55;
-  overflow-x: auto;
+  max-height: min(52vh, 560px);
+  overflow: auto;
 }
 
 .code-review-diff.is-loading,
@@ -6393,6 +6732,12 @@ code {
   color: var(--ink-dim);
 }
 
+.notification-row-origin {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+
 .notification-row-dismiss {
   flex: 0 0 auto;
   align-self: center;
@@ -6491,6 +6836,83 @@ code {
 
 .notification-open-pane:hover {
   background: rgba(255, 255, 255, 0.1);
+}
+
+@keyframes notification-slide-in {
+  from {
+    opacity: 0;
+    transform: translate3d(18px, -8px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.notification-slide {
+  position: fixed;
+  top: 42px;
+  right: 16px;
+  z-index: 120;
+  width: 340px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: rgba(22, 22, 26, 0.96);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  padding: 10px 11px;
+  animation: notification-slide-in 220ms cubic-bezier(0.17, 0.84, 0.44, 1);
+}
+
+.notification-slide-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.notification-slide-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-slide-close {
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  border-radius: 50%;
+  color: var(--ink-faint);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.notification-slide-close:hover {
+  background: var(--panel-raised);
+  color: var(--ink);
+}
+
+.notification-slide-body {
+  margin: 5px 0 0;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.notification-slide-meta {
+  margin: 4px 0 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+
+.notification-slide-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
 }
 
 /* ------------------------------------------------------- account menu

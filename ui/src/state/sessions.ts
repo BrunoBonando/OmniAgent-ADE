@@ -188,10 +188,10 @@ export type SessionsAction =
   | { type: "tab/status"; id: string; status: SessionStatus }
   | { type: "layout/restored"; tabs: TabInfo[] }
   | { type: "layout/lazyRestored"; tabs: TabInfo[] }
-  // Auto-title from the first prompt (`autoTitle.ts`'s capture, fed from
-  // `Terminal.tsx`'s real onData stream) — unlike `tab/renamed`, only ever
-  // applies when the tab has no label yet (see the reducer case's own
-  // doc): a manual rename or an already-set auto-title always wins.
+  // Auto-title from the engine's terminal title event — unlike
+  // `tab/renamed`, only ever applies when the tab has no label yet (see the
+  // reducer case's own doc): a manual rename or an already-set auto-title
+  // always wins.
   | { type: "tab/autoTitled"; id: string; label: string }
   // PaneHeader's 3-dot "Change engine": the old session (`oldId`) was
   // killed and a brand-new one spawned with a different engine, same
@@ -373,7 +373,10 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
  * actually print: the custom rename if the user set one, else the engine
  * name — the pre-rename default every tab already displayed. */
 export function tabDisplayLabel(tab: TabInfo): string {
-  return tab.label && tab.label.length > 0 ? tab.label : tab.engine;
+  if (tab.label && tab.label.length > 0) return tab.label;
+  if (tab.engine === "codex") return "Codex";
+  if (tab.engine === "antigravity") return "AntiGravity";
+  return tab.engine;
 }
 
 /** Tabs grouped per project, project order = first-seen order (stable, no re-sort on new tabs within a known project). */

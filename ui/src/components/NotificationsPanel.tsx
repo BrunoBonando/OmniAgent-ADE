@@ -53,6 +53,7 @@ import Icon from "./Icon";
  * on a coarse tick rather than per second — the strings themselves are
  * coarse ("45m ago"), so anything finer would just churn. */
 const CLOCK_TICK_MS = 30_000;
+const SLIDE_TOAST_MS = 7_000;
 
 interface NotificationsPanelProps {
   entries: NotificationEntry[];
@@ -126,6 +127,7 @@ function NotificationRow({
     ? `Go to ${entry.title} in ${entry.projectLabel} — ${notificationSubtitle(entry.status)}`
     : `${entry.title} in ${entry.projectLabel} — session closed`;
   const rowTitle = canJump ? `Go to ${entry.title} in ${entry.projectLabel}` : `${entry.projectLabel} — session closed`;
+  const terminalShort = entry.sessionId.slice(0, 8);
 
   return (
     <li
@@ -173,6 +175,10 @@ function NotificationRow({
             </span>
           </span>
           <span className="notification-row-subtitle">{notificationSubtitle(entry.status)}</span>
+          <span className="notification-row-origin">
+            Terminal {terminalShort}
+            {entry.sessionLabel ? ` · ${entry.sessionLabel}` : ""}
+          </span>
           {actionable && (
             <span className="notification-row-actions">
               {approveKeystroke(entry.engine) !== null && (
@@ -292,7 +298,9 @@ export default function NotificationsPanel({
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState<NotificationFilter>("all");
   const [tick, setTick] = useState(() => now ?? Date.now());
+  const [slideIn, setSlideIn] = useState<NotificationEntry | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const lastSlideIdRef = useRef<string | null>(null);
 
   const clock = now ?? tick;
   const unread = entries.filter((e) => !e.read).length;
@@ -314,8 +322,26 @@ export default function NotificationsPanel({
     if (open) panelRef.current?.focus();
   }, [open]);
 
+  useEffect(() => {
+    const latest = entries[0];
+    if (!latest || latest.read || open) return;
+    if (latest.id === lastSlideIdRef.current) return;
+    lastSlideIdRef.current = latest.id;
+    setSlideIn(latest);
+    const timer = window.setTimeout(() => {
+      setSlideIn((current) => (current?.id === latest.id ? null : current));
+    }, SLIDE_TOAST_MS);
+    return () => window.clearTimeout(timer);
+  }, [entries, open]);
+
+  useEffect(() => {
+    if (!slideIn) return;
+    if (!entries.some((e) => e.id === slideIn.id)) setSlideIn(null);
+  }, [entries, slideIn]);
+
   function openPanel() {
     setTick(Date.now());
+    setSlideIn(null);
     setOpen(true);
     onOpened();
   }
@@ -461,6 +487,43 @@ export default function NotificationsPanel({
             )}
           </div>
         </>
+      )}
+      {slideIn && (
+        <div className="notification-slide" role="status" aria-live="polite">
+          <div className="notification-slide-head">
+            <span className="notification-slide-title">{slideIn.title}</span>
+            <button
+              type="button"
+              className="notification-slide-close"
+              onClick={() => setSlideIn(null)}
+              aria-label="Dismiss notification preview"
+            >
+              <Icon name="x" size={13} strokeWidth={2.1} />
+            </button>
+          </div>
+          <p className="notification-slide-body">{notificationSubtitle(slideIn.status)}</p>
+          <p className="notification-slide-meta">
+            Terminal {slideIn.sessionId.slice(0, 8)}
+            {slideIn.sessionLabel ? ` · ${slideIn.sessionLabel}` : ""}
+          </p>
+          <div className="notification-slide-actions">
+            {approveKeystroke(slideIn.engine) !== null && awaiting.has(slideIn.sessionId) && (
+              <button type="button" className="notification-approve" onClick={() => onApprove(slideIn)}>
+                Approve
+              </button>
+            )}
+            <button
+              type="button"
+              className="notification-open-pane"
+              onClick={() => {
+                onSelect(slideIn);
+                setSlideIn(null);
+              }}
+            >
+              Go to terminal
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -94,6 +94,7 @@ import Terminal from "./Terminal";
 import { isPaneHole, paneIds, swapPaneIds, syncPaneTree, type LayoutPreset, type PaneTree } from "../state/paneGrid";
 import { tabDisplayLabel, type Engine, type ProjectInfo, type TabInfo } from "../state/sessions";
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
+import { approveKeystroke, denyKeystroke } from "../state/notifications";
 import { statusPresentation } from "../state/sessionStatus";
 import type { TerminalThemeId } from "../lib/terminalThemes";
 import { ownsCtrlOnlyShortcut } from "../lib/keyboard";
@@ -159,9 +160,11 @@ interface ProjectPaneGridProps {
    * code panel is for session, okay?"). `App.tsx` owns which session the
    * column is currently targeting. */
   onOpenCodeReview: (tab: TabInfo) => void;
-  /** Auto-title from the first prompt — forwarded straight through to each
-   * pane's `<Terminal>` (see that component's own doc). */
-  onFirstInput: (id: string, line: string) => void;
+  /** Awaiting-approval footer actions in this pane. */
+  onResolveApproval: (tab: TabInfo, decision: "approve" | "deny") => void;
+  /** Engine-generated title forwarded straight through to each pane's
+   * `<Terminal>` (see that component's own doc). */
+  onEngineTitle: (id: string, title: string) => void;
   agentState: AgentsState;
 }
 
@@ -184,7 +187,8 @@ function ProjectPaneGrid({
   onChangeEngine,
   onChangeTheme,
   onOpenCodeReview,
-  onFirstInput,
+  onResolveApproval,
+  onEngineTitle,
   agentState,
 }: ProjectPaneGridProps) {
   const [tree, setTree] = useState<PaneTree | null>(null);
@@ -207,6 +211,10 @@ function ProjectPaneGrid({
   }, [idsKey]);
 
   const tabsById = useMemo(() => new Map(tabs.map((t) => [t.id, t])), [tabs]);
+  const sessionLabel = useMemo(
+    () => tabs.find((t) => t.groupLabel && t.groupLabel.trim().length > 0)?.groupLabel?.trim() ?? null,
+    [tabs],
+  );
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -268,6 +276,10 @@ function ProjectPaneGrid({
             }
             const tab = tabsById.get(id);
             if (!tab) return <div />; // transient desync (closed mid-reconcile) — next sync clears it
+            const terminalIndex = tabs.findIndex((t) => t.id === tab.id) + 1;
+            const awaitingApproval = tab.status === "awaiting_approval";
+            const canApprove = approveKeystroke(tab.engine) !== null;
+            const canDeny = denyKeystroke(tab.engine) !== null;
             // The pane border is the session's status display (founder,
             // 2026-07-26: "remove it from there [the title bar] and leave
             // only in the border") — the same statusPresentation pair the
@@ -338,7 +350,7 @@ function ProjectPaneGrid({
                 <div
                   className={`pane-body${tab.id === activeTabId ? " is-focused" : ""}${
                     drag !== null && drag.over === tab.id && drag.from !== tab.id ? " is-swap-target" : ""
-                  }`}
+                  }${awaitingApproval ? " has-approval-banner" : ""}`}
                   onMouseDownCapture={() => onActivateTab(tab.id)}
                   // Only a pane drag from THIS grid opens a drop zone —
                   // without the guard, `preventDefault` here would also claim
@@ -366,10 +378,43 @@ function ProjectPaneGrid({
                     visible={terminalsVisible}
                     focused={terminalsVisible && tab.id === activeTabId}
                     themeId={tab.themeId}
-                    onFirstInput={onFirstInput}
+                    onEngineTitle={onEngineTitle}
                     agentState={agentState}
                     tabEngine={tab.engine}
                   />
+                  {awaitingApproval && (
+                    <div className="pane-approval-banner" role="status" aria-live="polite">
+                      <div className="pane-approval-banner-head">
+                        <span className="pane-approval-banner-text">
+                          Needs approval — {tabDisplayLabel(tab)}
+                        </span>
+                        <div className="pane-approval-banner-actions">
+                          {canApprove && (
+                            <button
+                              type="button"
+                              className="pane-approval-button pane-approval-button-approve"
+                              onClick={() => onResolveApproval(tab, "approve")}
+                            >
+                              Approve
+                            </button>
+                          )}
+                          {canDeny && (
+                            <button
+                              type="button"
+                              className="pane-approval-button pane-approval-button-deny"
+                              onClick={() => onResolveApproval(tab, "deny")}
+                            >
+                              Deny
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <span className="pane-approval-banner-meta">
+                        {sessionLabel ? `${sessionLabel} · ` : ""}
+                        Terminal {terminalIndex} of {tabs.length}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </MosaicWindow>
             );
@@ -398,9 +443,11 @@ interface WorkspaceProps {
   onChangeTheme?: (id: string, themeId: TerminalThemeId) => void;
   /** PaneHeader's 3-dot "Code review". Optional, same reasoning. */
   onOpenCodeReview?: (tab: TabInfo) => void;
-  /** Auto-title from the first prompt, forwarded to every pane's
-   * `<Terminal>`. Optional, same reasoning. */
-  onFirstInput?: (id: string, line: string) => void;
+  /** Awaiting-approval footer actions. Optional/no-op for tests. */
+  onResolveApproval?: (tab: TabInfo, decision: "approve" | "deny") => void;
+  /** Engine-generated title forwarded to every pane's `<Terminal>`.
+   * Optional, same reasoning. */
+  onEngineTitle?: (id: string, title: string) => void;
   /** `EmptyWorkspace`'s "Start session" — a workspace with no terminals in
    * it is a front door, not a hint (see that component's own doc).
    * Optional/no-op, same reasoning as the props above: the layout and
@@ -426,7 +473,8 @@ export default function Workspace({
   onChangeEngine = () => {},
   onChangeTheme = () => {},
   onOpenCodeReview = () => {},
-  onFirstInput = () => {},
+  onResolveApproval = () => {},
+  onEngineTitle = () => {},
   onStartSession = () => {},
   agentState,
   hidden,
@@ -483,7 +531,8 @@ export default function Workspace({
               onChangeEngine={onChangeEngine}
               onChangeTheme={onChangeTheme}
               onOpenCodeReview={onOpenCodeReview}
-              onFirstInput={onFirstInput}
+              onResolveApproval={onResolveApproval}
+              onEngineTitle={onEngineTitle}
               agentState={agentState}
             />
           );

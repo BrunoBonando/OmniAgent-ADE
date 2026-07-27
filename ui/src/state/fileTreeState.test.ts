@@ -242,11 +242,11 @@ describe("fileTreeState — icons", () => {
   });
 
   it("gives an unrecognized extension the default accent, not undefined", () => {
-    expect(accentForEntry({ name: "data.xyz123", is_dir: false })).toBe("var(--ink-dim)");
+    expect(accentForEntry({ name: "data.xyz123", is_dir: false })).toBe("#6a6a78");
   });
 
-  it("folders always get the neutral ink-dim accent regardless of name", () => {
-    expect(accentForEntry({ name: "src.ts", is_dir: true })).toBe("var(--ink-dim)");
+  it("folders get the blue accent regardless of name", () => {
+    expect(accentForEntry({ name: "src.ts", is_dir: true })).toBe("#3b82f6");
   });
 });
 

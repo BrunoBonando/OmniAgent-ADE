@@ -100,7 +100,7 @@ describe("the panel", () => {
     setup({ entries: [entry({ createdAt: NOW - 2 * 86_400_000 })] });
     openPanel();
     expect(screen.getByText("wire session restore")).toBeInTheDocument();
-    expect(screen.getByText("Task completed.")).toBeInTheDocument();
+    expect(screen.getByText("Approved.")).toBeInTheDocument();
     expect(screen.getByText("2 days")).toBeInTheDocument();
   });
 
@@ -113,9 +113,9 @@ describe("the panel", () => {
       ],
     });
     openPanel();
-    expect(screen.getByText("Task completed.")).toBeInTheDocument();
+    expect(screen.getByText("Approved.")).toBeInTheDocument();
     expect(screen.getByText("Needs your approval.")).toBeInTheDocument();
-    expect(screen.getByText("Error occurred.")).toBeInTheDocument();
+    expect(screen.getByText("Rejected.")).toBeInTheDocument();
   });
 
   it("shows the session's git branch once it resolves, and its project until then", async () => {

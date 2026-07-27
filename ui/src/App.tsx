@@ -6,6 +6,9 @@ import "./App.css";
 import Sidebar from "./components/Sidebar";
 import type { DormantSession } from "./components/Sidebar";
 import Workspace from "./components/Workspace";
+import DashboardOverview from "./components/DashboardOverview";
+import PlanBoard from "./components/PlanBoard";
+import FilesDashboard from "./components/FilesDashboard";
 import CommandPalette from "./components/CommandPalette";
 import CodeReviewPanel from "./components/CodeReviewPanel";
 import AppChrome from "./components/AppChrome";
@@ -18,6 +21,7 @@ import ClosePaneConfirm from "./components/ClosePaneConfirm";
 import BrainMap from "./map/BrainMap";
 import FirstRun from "./onboarding/FirstRun";
 import AuthGate from "./onboarding/AuthGate";
+import SystemStatusBar, { type SystemStats } from "./components/SystemStatusBar";
 import {
   AUTH_GATE_RESOLVED_SETTING_KEY,
   AUTH_PERSONA_SETTING_KEY,
@@ -63,10 +67,12 @@ import {
 import {
   NOTIFICATIONS_SETTING_KEY,
   approveKeystroke,
+  denyKeystroke,
   deriveNotification,
   deserializeNotifications,
   initialNotificationsState,
   notificationsReducer,
+  notificationSubtitle,
   serializeNotifications,
   type NotificationEntry,
 } from "./state/notifications";
@@ -76,8 +82,10 @@ import { ownsCtrlOnlyShortcut } from "./lib/keyboard";
 import { usePerSessionEvent } from "./lib/usePerSessionEvent";
 import {
   agentCheckInstalled,
+  enrichQueuePendingCount,
   getBriefing,
   ingestionStatus,
+  onSessionWrite,
   listProjects,
   renameProject,
   rootsList,
@@ -85,13 +93,29 @@ import {
   sessionKill,
   sessionStatus,
   sessionWrite,
+  systemStats,
   settingsGet,
   settingsSet,
+  sendNativeNotification,
   type IngestionStatus,
 } from "./lib/tauri";
 import { agentsReducer, initialAgentsState, type Agent } from "./state/agents";
+import {
+  cloneUsageAnalyticsStore,
+  createUsageAnalyticsStore,
+  parseTokenEstimateMax,
+  parseUsageAnalyticsStore,
+  recordInput,
+  recordOutput,
+  recordSessionOpened,
+  recordStatusDuration,
+  recordTerminalOpened,
+  recordTokens,
+  USAGE_ANALYTICS_SETTING_KEY,
+  type UsageAnalyticsStore,
+} from "./state/usageAnalytics";
 
-type View = "workspace" | "map";
+type View = "dashboard" | "workspace" | "board" | "files" | "map";
 type StartupPhase = "booting" | "choosing-workspace" | "workspace-active";
 const AGENT_INSTALL_COMMAND: Partial<Record<Agent, string>> = {
   claude: "curl -fsSL https://claude.ai/install.sh | bash",
@@ -122,6 +146,23 @@ function errorMessage(err: unknown): string {
     if (typeof message === "string" && message.trim().length > 0) return message;
   }
   return String(err);
+}
+
+function decodeBase64Chunk(payload: string): string {
+  try {
+    return atob(payload);
+  } catch {
+    return "";
+  }
+}
+
+function submittedCommands(data: string): number {
+  const matches = data.match(/\r|\n/g);
+  return matches ? matches.length : 0;
+}
+
+function analyticsSessionKey(tab: TabInfo): string {
+  return `${tab.project}:${tab.group ?? tab.id}`;
 }
 
 /** Task 8.1: how often `App.tsx` polls `ingestion_status` — PLAN.md's own
@@ -188,7 +229,18 @@ function App() {
   // only the happy path grew a naming/engine step.
   const [newTerminalOpen, setNewTerminalOpen] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
-  const [view, setView] = useState<View>("workspace");
+  const [view, setView] = useState<View>("dashboard");
+  const [fileOpenRequest, setFileOpenRequest] = useState<{ path: string; nonce: number } | null>(null);
+  const [usageAnalytics, setUsageAnalytics] = useState<UsageAnalyticsStore>(() => createUsageAnalyticsStore());
+  const analyticsRef = useRef<UsageAnalyticsStore>(createUsageAnalyticsStore());
+  const analyticsReadyRef = useRef(false);
+  const analyticsDirtyRef = useRef(false);
+  const analyticsTerminalSeenRef = useRef<Set<string>>(new Set());
+  const analyticsSessionSeenRef = useRef<Set<string>>(new Set());
+  const analyticsStatusRef = useRef<
+    Map<string, { project: string; status: SessionStatusEvent["status"]; since: number }>
+  >(new Map());
+  const analyticsTokenWatermarkRef = useRef<Map<string, number>>(new Map());
   const restoredRef = useRef(false);
   // Founder feedback (Bruno, 2026-07-25, verbatim): "nice to have a
   // folder/file navigation on the right panel" — originally a collapsible
@@ -268,7 +320,26 @@ function App() {
   const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null); // null = still checking
   const [firstRunDismissed, setFirstRunDismissed] = useState(false);
   const [ingestion, setIngestion] = useState<IngestionStatus | null>(null);
+  const [computerStats, setComputerStats] = useState<SystemStats>({ cpuPercent: null, ramUsedBytes: null, ramTotalBytes: null, mcpWired: false });
+  const [brainQueueCount, setBrainQueueCount] = useState<number | null>(null);
   const wasIngestingRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const [statsResult, queueResult] = await Promise.allSettled([systemStats(), enrichQueuePendingCount()]);
+        if (cancelled) return;
+        if (statsResult.status === "fulfilled") setComputerStats(statsResult.value);
+        if (queueResult.status === "fulfilled") setBrainQueueCount(queueResult.value);
+      } catch (err) {
+        console.error("system stats poll failed", err);
+      }
+    };
+    void tick();
+    const interval = window.setInterval(tick, 2000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, []);
 
   const reloadProjects = useCallback(async () => {
     try {
@@ -438,6 +509,97 @@ function App() {
     void settingsSet(NOTIFICATIONS_SETTING_KEY, serializeNotifications(notifications.entries));
   }, [notifications.entries]);
 
+  // ---- usage analytics: persisted longitudinal usage model ---------------
+  useEffect(() => {
+    let cancelled = false;
+    void settingsGet(USAGE_ANALYTICS_SETTING_KEY)
+      .then((raw) => {
+        if (cancelled) return;
+        const parsed = parseUsageAnalyticsStore(raw);
+        analyticsRef.current = parsed;
+        setUsageAnalytics(parsed);
+        analyticsTerminalSeenRef.current = new Set(state.tabs.map((tab) => tab.id));
+        analyticsSessionSeenRef.current = new Set(state.tabs.map(analyticsSessionKey));
+        analyticsReadyRef.current = true;
+      })
+      .catch((err) => {
+        console.error("usage analytics restore failed", err);
+        if (cancelled) return;
+        analyticsRef.current = createUsageAnalyticsStore();
+        setUsageAnalytics(analyticsRef.current);
+        analyticsTerminalSeenRef.current = new Set(state.tabs.map((tab) => tab.id));
+        analyticsSessionSeenRef.current = new Set(state.tabs.map(analyticsSessionKey));
+        analyticsReadyRef.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!analyticsReadyRef.current) return;
+
+    const seenTerminals = analyticsTerminalSeenRef.current;
+    const seenSessions = analyticsSessionSeenRef.current;
+    const now = Date.now();
+    const live = new Set(state.tabs.map((tab) => tab.id));
+
+    for (const tab of state.tabs) {
+      if (!seenTerminals.has(tab.id)) {
+        seenTerminals.add(tab.id);
+        recordTerminalOpened(analyticsRef.current, tab.project, now);
+        analyticsDirtyRef.current = true;
+      }
+      const sessionKey = analyticsSessionKey(tab);
+      if (!seenSessions.has(sessionKey)) {
+        seenSessions.add(sessionKey);
+        recordSessionOpened(analyticsRef.current, tab.project, now);
+        analyticsDirtyRef.current = true;
+      }
+      if (tab.status && !analyticsStatusRef.current.has(tab.id)) {
+        analyticsStatusRef.current.set(tab.id, { project: tab.project, status: tab.status, since: now });
+      }
+    }
+
+    for (const [id, status] of analyticsStatusRef.current) {
+      if (live.has(id)) continue;
+      recordStatusDuration(analyticsRef.current, status.project, status.status, status.since, now);
+      analyticsStatusRef.current.delete(id);
+      analyticsTokenWatermarkRef.current.delete(id);
+      analyticsDirtyRef.current = true;
+    }
+  }, [state.tabs]);
+
+  useEffect(() => {
+    const stop = onSessionWrite((id, data) => {
+      if (!analyticsReadyRef.current) return;
+      const tab = notifyContextRef.current.tabs.find((entry) => entry.id === id);
+      if (!tab) return;
+      recordInput(analyticsRef.current, tab.project, data.length, submittedCommands(data), Date.now());
+      analyticsDirtyRef.current = true;
+    });
+    return stop;
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      if (!analyticsReadyRef.current) return;
+      const now = Date.now();
+      for (const active of analyticsStatusRef.current.values()) {
+        recordStatusDuration(analyticsRef.current, active.project, active.status, active.since, now);
+        active.since = now;
+      }
+      if (!analyticsDirtyRef.current) return;
+      analyticsDirtyRef.current = false;
+      const snapshot = cloneUsageAnalyticsStore(analyticsRef.current);
+      setUsageAnalytics(snapshot);
+      void settingsSet(USAGE_ANALYTICS_SETTING_KEY, JSON.stringify(snapshot)).catch((err) => {
+        console.error("usage analytics persist failed", err);
+      });
+    }, 15000);
+    return () => window.clearInterval(interval);
+  }, []);
+
   // ---- the per-session event stream -------------------------------------
   // Subscribed here rather than inside the component that renders the
   // session: a light (and a notification) is interesting precisely for the
@@ -504,6 +666,24 @@ function App() {
   // status === "ready" instead of first-event.
   const pendingFirstPrompt = useRef<Map<string, string>>(new Map());
 
+  usePerSessionEvent<string>(tabIds, "session-output:", (id, payload) => {
+    if (!analyticsReadyRef.current || typeof payload !== "string") return;
+    const tab = notifyContextRef.current.tabs.find((entry) => entry.id === id);
+    if (!tab) return;
+    const text = decodeBase64Chunk(payload);
+    if (text.length > 0) {
+      recordOutput(analyticsRef.current, tab.project, text.length, Date.now());
+      analyticsDirtyRef.current = true;
+    }
+    const estimate = parseTokenEstimateMax(text);
+    if (estimate === null) return;
+    const previous = analyticsTokenWatermarkRef.current.get(id) ?? 0;
+    if (estimate <= previous) return;
+    analyticsTokenWatermarkRef.current.set(id, estimate);
+    recordTokens(analyticsRef.current, tab.project, estimate - previous, Date.now());
+    analyticsDirtyRef.current = true;
+  });
+
   // `session-status:{id}` (founder brief, 2026-07-26): the five-state light
   // AND — since this dispatch — the notification feed. Fires only on a
   // genuine transition. `payload.notify` is the backend's precomputed
@@ -514,6 +694,23 @@ function App() {
   usePerSessionEvent<SessionStatusEvent>(tabIds, "session-status:", (id, payload) => {
     if (!payload || !isSessionStatus(payload.status)) return;
     dispatch({ type: "tab/status", id, status: payload.status });
+
+    if (analyticsReadyRef.current) {
+      const tabForStatus = notifyContextRef.current.tabs.find((entry) => entry.id === id);
+      const now = Date.now();
+      const previous = analyticsStatusRef.current.get(id);
+      if (previous) {
+        recordStatusDuration(analyticsRef.current, previous.project, previous.status, previous.since, now);
+        analyticsDirtyRef.current = true;
+      }
+      const projectId = tabForStatus?.project ?? previous?.project;
+      if (projectId) {
+        analyticsStatusRef.current.set(id, { project: projectId, status: payload.status, since: now });
+      }
+      if (payload.status === "ready") {
+        analyticsTokenWatermarkRef.current.set(id, 0);
+      }
+    }
 
     const queuedPrompt = pendingFirstPrompt.current.get(id);
     if (queuedPrompt !== undefined) {
@@ -538,11 +735,24 @@ function App() {
       projectLabel: projects.find((p) => p.id === tab?.project)?.label ?? tab?.project ?? "",
       focusedTabId: activeTabId,
       selectedProjectId: onScreenProject,
-      view: currentView,
+      view: currentView === "map" ? "map" : "workspace",
       windowVisible: typeof document === "undefined" || document.visibilityState !== "hidden",
+      windowFocused: typeof document === "undefined" || document.hasFocus(),
+      previousStatus: tab?.status,
       now: Date.now(),
     });
-    if (entry) notificationsDispatch({ type: "notification/added", entry });
+    if (entry) {
+      notificationsDispatch({ type: "notification/added", entry });
+
+      const appFocused =
+        typeof document === "undefined"
+          ? true
+          : document.visibilityState === "visible" && document.hasFocus();
+      if (!appFocused) {
+        const place = entry.sessionLabel ? `${entry.projectLabel} • ${entry.sessionLabel}` : entry.projectLabel;
+        void sendNativeNotification(`Attention: ${entry.title}`, `${notificationSubtitle(entry.status)} ${place}`);
+      }
+    }
   });
 
   // …and one pull per newly-seen session, because the push side only fires
@@ -912,7 +1122,7 @@ function App() {
   // constraint from this task: "changing engine = kill+respawn using the
   // exact same existing zero-config spawn logic, nothing new invented
   // there" (`createSessionTab`, unchanged). Carries the pane's existing
-  // `label` (a manual rename OR a previously auto-titled first prompt) and
+  // `label` (a manual rename OR a previously auto-titled engine summary) and
   // `themeId` (its terminal-theme override) forward onto the new session —
   // both describe the PANE, not the engine underneath it, so a restart
   // must not reset either. `tab/engineRestarted` (sessions.ts) swaps the
@@ -958,11 +1168,10 @@ function App() {
     [],
   );
 
-  // Auto-title from the first prompt (`Terminal.tsx`'s `onFirstInput` ->
-  // here). The reducer's own guard (never overwrite a tab that already has
-  // a label) means this callback doesn't need to check anything itself.
+  // Agent-generated title (`Terminal.tsx`'s xterm title event -> here).
+  // The reducer's guard preserves any human rename.
   const autoTitleTab = useCallback(
-    (id: string, line: string) => dispatch({ type: "tab/autoTitled", id, label: line }),
+    (id: string, title: string) => dispatch({ type: "tab/autoTitled", id, label: title }),
     [],
   );
 
@@ -1319,25 +1528,41 @@ function App() {
   // approve a prompt the user never even saw. The set is checked and added
   // to synchronously, before any `await`, so the second call in a
   // double-click — however close together — is always the one that bails.
-  const approveInFlightRef = useRef<Set<string>>(new Set());
-  const handleNotificationApprove = useCallback(
-    async (entry: NotificationEntry) => {
-      if (approveInFlightRef.current.has(entry.sessionId)) return;
-      approveInFlightRef.current.add(entry.sessionId);
+  const approvalInFlightRef = useRef<Set<string>>(new Set());
+  const resolveAwaitingApproval = useCallback(
+    async (sessionId: string, engine: string, decision: "approve" | "deny", title: string) => {
+      if (approvalInFlightRef.current.has(sessionId)) return false;
+      approvalInFlightRef.current.add(sessionId);
       try {
-        const keystroke = approveKeystroke(entry.engine);
-        const tab = state.tabs.find((t) => t.id === entry.sessionId);
-        if (!keystroke || !tab || tab.status !== "awaiting_approval") return;
-        await sessionWrite(entry.sessionId, keystroke);
-        notificationsDispatch({ type: "notification/dismissed", id: entry.id });
+        const keystroke = decision === "approve" ? approveKeystroke(engine) : denyKeystroke(engine);
+        const tab = state.tabs.find((t) => t.id === sessionId);
+        if (!keystroke || !tab || tab.status !== "awaiting_approval") return false;
+        await sessionWrite(sessionId, keystroke);
+        return true;
       } catch (err) {
-        console.error("approve from notifications failed", err);
-        setErrorBanner(`Couldn't approve "${entry.title}" — open its pane and answer there.`);
+        console.error(`${decision} from approval banner failed`, err);
+        setErrorBanner(`Couldn't ${decision} "${title}" — open its pane and answer there.`);
+        return false;
       } finally {
-        approveInFlightRef.current.delete(entry.sessionId);
+        approvalInFlightRef.current.delete(sessionId);
       }
     },
     [state.tabs],
+  );
+
+  const handleNotificationApprove = useCallback(
+    async (entry: NotificationEntry) => {
+      const sent = await resolveAwaitingApproval(
+        entry.sessionId,
+        entry.engine,
+        "approve",
+        entry.title,
+      );
+      if (sent) {
+        notificationsDispatch({ type: "notification/dismissed", id: entry.id });
+      }
+    },
+    [resolveAwaitingApproval],
   );
 
   // ---- closing a whole workspace (founder ask: "add the possibility to
@@ -1417,6 +1642,11 @@ function App() {
     // exactly the problem: the panel would keep showing a live-looking review
     // headed by the name of a pane that isn't there any more.
     setReviewTarget((target) => (target?.id === id ? null : target));
+  }, []);
+
+  const openFileInDashboard = useCallback((path: string) => {
+    setFileOpenRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1 }));
+    setView("files");
   }, []);
 
   // The one session this app is "in" for the selected workspace: what the
@@ -1637,6 +1867,7 @@ function App() {
           ingestion={ingestion}
           view={view}
           onSetView={setView}
+          onOpenFile={openFileInDashboard}
           onNewSessionInProject={(p) => {
             setSelectedProjectId(p.id);
             setNewSessionOpen(true);
@@ -1664,11 +1895,37 @@ function App() {
           onOpenCodeReview={(tab) =>
             setReviewTarget({ id: tab.id, cwd: tab.cwd, label: tabDisplayLabel(tab) })
           }
-          onFirstInput={autoTitleTab}
+          onResolveApproval={(tab, decision) =>
+            void resolveAwaitingApproval(tab.id, tab.engine, decision, tabDisplayLabel(tab))
+          }
+          onEngineTitle={autoTitleTab}
           onStartSession={(p, layout, goal) => void handleQuickStart(p, layout, goal)}
           agentState={agentState}
           hidden={view !== "workspace"}
           restoreState={sessionRestoreState}
+        />
+        <DashboardOverview
+          hidden={view !== "dashboard"}
+          project={selectedProject}
+          tabs={state.tabs}
+          activeTabId={state.activeTabId}
+          analytics={usageAnalytics}
+          onOpenTerminals={() => setView("workspace")}
+          onOpenBoard={() => setView("board")}
+          onOpenFiles={() => setView("files")}
+          onOpenSession={(tabId) => {
+            activateTab(tabId);
+            setView("workspace");
+          }}
+        />
+        <PlanBoard
+          project={selectedProject}
+          hidden={view !== "board"}
+        />
+        <FilesDashboard
+          project={selectedProject}
+          hidden={view !== "files"}
+          openRequest={fileOpenRequest}
         />
         <BrainMap
           projects={state.projects}
@@ -1688,6 +1945,12 @@ function App() {
           />
         )}
       </div>
+      <SystemStatusBar
+        liveSessionCount={tabIds.length}
+        brainNodeCount={ingestion?.total_nodes ?? null}
+        brainQueueCount={brainQueueCount}
+        {...computerStats}
+      />
 
       {needsAuthGate === true && <AuthGate onResolved={handleAuthGateResolved} />}
 
@@ -1775,8 +2038,8 @@ export default App;
 // which this followed almost verbatim — kept as a record of what changed
 // and why, for whoever touches this next):
 //
-// - `view: "workspace" | "map"` state lives here, toggled from the Sidebar
-//   (two header buttons next to the OMNIAGENT wordmark).
+// - `view: "workspace" | "board" | "files" | "map"` state lives here,
+//   toggled from the Sidebar's dashboard tabs.
 // - `<Workspace>` (`components/Workspace.tsx`) and `<BrainMap>`
 //   (`map/BrainMap.tsx`) are BOTH always mounted — never `{view === "x" ?
 //   A : B}` — visibility is CSS-only (`hidden` prop -> `display: none`).

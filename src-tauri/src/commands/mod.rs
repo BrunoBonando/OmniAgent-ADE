@@ -36,6 +36,86 @@ pub struct BrainState {
     pub data_dir: PathBuf,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemStats {
+    pub cpu_percent: Option<u8>,
+    pub ram_used_bytes: Option<u64>,
+    pub ram_total_bytes: Option<u64>,
+    pub mcp_wired: bool,
+}
+
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+fn parse_cpu_percent(top: &str) -> Option<u8> {
+    let line = top.lines().find(|line| line.contains("CPU usage:"))?;
+    let user = line
+        .split("CPU usage:")
+        .nth(1)?
+        .split('%')
+        .next()?
+        .trim()
+        .parse::<f32>()
+        .ok()?;
+    let sys = line
+        .split("CPU usage:")
+        .nth(1)?
+        .split("% user,")
+        .nth(1)?
+        .split('%')
+        .next()?
+        .trim()
+        .parse::<f32>()
+        .ok()?;
+    Some((user + sys).round().clamp(0.0, 100.0) as u8)
+}
+
+fn parse_vm_stat(vm_stat: &str, page_size: u64) -> Option<u64> {
+    let pages = vm_stat
+        .lines()
+        .filter(|line| {
+            [
+                "Pages active",
+                "Pages wired down",
+                "Pages occupied by compressor",
+            ]
+            .iter()
+            .any(|label| line.starts_with(label))
+        })
+        .filter_map(|line| {
+            line.split(':')
+                .nth(1)?
+                .trim()
+                .trim_end_matches('.')
+                .parse::<u64>()
+                .ok()
+        })
+        .sum::<u64>();
+    (pages > 0).then_some(pages * page_size)
+}
+
+#[tauri::command]
+pub fn system_stats() -> SystemStats {
+    let cpu_percent =
+        command_output("top", &["-l", "1", "-n", "0"]).and_then(|out| parse_cpu_percent(&out));
+    let ram_total_bytes =
+        command_output("sysctl", &["-n", "hw.memsize"]).and_then(|out| out.trim().parse().ok());
+    let ram_used_bytes = command_output("vm_stat", &[]).and_then(|out| parse_vm_stat(&out, 4096));
+    SystemStats {
+        cpu_percent,
+        ram_used_bytes,
+        ram_total_bytes,
+        mcp_wired: true,
+    }
+}
+
 impl BrainState {
     pub fn open(data_dir: PathBuf) -> anyhow::Result<Self> {
         let store = brain_core::Store::open(&data_dir)?;
@@ -357,6 +437,32 @@ pub fn git_branch(path: String) -> Result<Option<String>, String> {
 #[tauri::command]
 pub fn list_dir(path: String) -> Result<Vec<brain_ingest::walk::DirEntry>, String> {
     brain_ingest::walk::list_dir(std::path::Path::new(&path))
+}
+
+/// Reads one file's UTF-8 text content, scoped to `project_root`.
+///
+/// Used by the dashboard Files screen for in-app viewing/editing instead of
+/// forcing an external app open. The underlying safety and path-containment
+/// checks live in `brain_ingest::fileops::read_text_file`.
+#[tauri::command]
+pub fn read_text_file(project_root: String, path: String) -> Result<String, String> {
+    brain_ingest::fileops::read_text_file(
+        std::path::Path::new(&project_root),
+        std::path::Path::new(&path),
+    )
+}
+
+/// Writes one file's UTF-8 text content, scoped to `project_root`.
+///
+/// Used by the dashboard Files screen's Save action. This intentionally
+/// edits existing files only; creating a file is still `create_file`.
+#[tauri::command]
+pub fn write_text_file(project_root: String, path: String, content: String) -> Result<(), String> {
+    brain_ingest::fileops::write_text_file(
+        std::path::Path::new(&project_root),
+        std::path::Path::new(&path),
+        &content,
+    )
 }
 
 // ------------------------------------------------------------------------
@@ -1185,6 +1291,21 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "one\n"
+        );
+    }
+
+    #[test]
+    fn system_stats_parsers_extract_macos_health_values() {
+        assert_eq!(
+            parse_cpu_percent("CPU usage: 12.50% user, 3.25% sys, 84.25% idle"),
+            Some(16)
+        );
+        assert_eq!(
+            parse_vm_stat(
+                "Pages active: 10.\nPages wired down: 5.\nPages occupied by compressor: 2.",
+                4096
+            ),
+            Some(17 * 4096)
         );
     }
 }

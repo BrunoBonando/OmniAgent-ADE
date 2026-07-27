@@ -75,6 +75,8 @@ export interface NotificationEntry {
    * (`tabDisplayLabel`), captured at notification time so a later rename
    * never rewrites history. */
   title: string;
+  /** Session name (`TabInfo.groupLabel`) when available. */
+  sessionLabel?: string;
   createdAt: number;
   /** False until the panel has been opened since this arrived — what the
    * badge counts. */
@@ -107,6 +109,11 @@ export interface NotificationContext {
    * behind-another-app window means the user is, definitionally, somewhere
    * else. */
   windowVisible: boolean;
+  /** `document.hasFocus()` — visible-but-unfocused should still notify. */
+  windowFocused: boolean;
+  /** The tab status *before* this event. Used to classify approval outcomes
+   * (approved/rejected) and keep this feed focused on attention only. */
+  previousStatus?: SessionStatus;
   now: number;
 }
 
@@ -117,11 +124,11 @@ export interface NotificationContext {
 export function notificationSubtitle(status: SessionStatus): string {
   switch (status) {
     case "ready":
-      return "Task completed.";
+      return "Approved.";
     case "awaiting_approval":
       return "Needs your approval.";
     case "error":
-      return "Error occurred.";
+      return "Rejected.";
     default:
       // Unreachable via `notify` (thinking/tool_execution never notify) —
       // total anyway so a future sixth state can't crash the panel.
@@ -147,9 +154,14 @@ export function notificationSubtitle(status: SessionStatus): string {
  * the same lock before writing, rather than trusting the last status event
  * the frontend saw. */
 const APPROVE_KEYSTROKES: Record<string, string> = { claude: "1" };
+const DENY_KEYSTROKES: Record<string, string> = { claude: "2" };
 
 export function approveKeystroke(engine: string): string | null {
   return APPROVE_KEYSTROKES[engine] ?? null;
+}
+
+export function denyKeystroke(engine: string): string | null {
+  return DENY_KEYSTROKES[engine] ?? null;
 }
 
 /** Actionable = this row froze an `awaiting_approval` AND that session is
@@ -210,7 +222,8 @@ export function isSessionOnScreen(ctx: NotificationContext): boolean {
     ctx.event.id === ctx.focusedTabId &&
     ctx.tab.project === ctx.selectedProjectId &&
     ctx.view === "workspace" &&
-    ctx.windowVisible
+    ctx.windowVisible &&
+    ctx.windowFocused
   );
 }
 
@@ -220,6 +233,14 @@ export function deriveNotification(ctx: NotificationContext): NotificationEntry 
   if (!ctx.event.notify) return null;
   if (!ctx.tab) return null;
   if (isSessionOnScreen(ctx)) return null;
+
+  const isPending = ctx.event.status === "awaiting_approval";
+  const isResolution =
+    ctx.previousStatus === "awaiting_approval" &&
+    (ctx.event.status === "ready" || ctx.event.status === "error");
+  // Attention-only feed: pending approvals + the immediate approved/rejected
+  // outcome of those approvals.
+  if (!isPending && !isResolution) return null;
 
   const tab = ctx.tab;
   const title = tab.label && tab.label.length > 0 ? tab.label : tab.engine;
@@ -232,6 +253,7 @@ export function deriveNotification(ctx: NotificationContext): NotificationEntry 
     engine: ctx.event.engine || tab.engine,
     status: ctx.event.status,
     title,
+    sessionLabel: tab.groupLabel,
     createdAt: ctx.now,
     read: false,
   };
@@ -389,6 +411,7 @@ export function deserializeNotifications(raw: string | null | undefined): Notifi
           typeof entry.cwd === "string" &&
           typeof entry.engine === "string" &&
           typeof entry.title === "string" &&
+          (entry.sessionLabel === undefined || typeof entry.sessionLabel === "string") &&
           typeof entry.createdAt === "number" &&
           Number.isFinite(entry.createdAt) &&
           typeof entry.status === "string" &&

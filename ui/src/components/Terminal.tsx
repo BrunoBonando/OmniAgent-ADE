@@ -12,7 +12,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "@xterm/xterm/css/xterm.css";
 import { sessionResize, sessionWrite } from "../lib/tauri";
-import { feedFirstInputChunk, initialFirstInputCapture } from "../lib/autoTitle";
+import { engineTitleFromTerminalTitle } from "../lib/autoTitle";
 import { resolveTerminalTheme, type TerminalThemeId } from "../lib/terminalThemes";
 import PaneInstallOverlay from "./PaneInstallOverlay";
 import type { AgentsState } from "../state/agents";
@@ -26,14 +26,8 @@ interface TerminalProps {
    * `terminalThemes.ts`'s global default. See `TabInfo.themeId`'s doc
    * (sessions.ts) for the global-default-with-per-pane-override design. */
   themeId?: TerminalThemeId;
-  /** Auto-title from the first prompt (founder ask): fires at most once per
-   * mounted session, the moment the user's own keystrokes (never anything
-   * the app itself writes, e.g. a Claude briefing — this only ever
-   * observes `onData`, which is exclusively real input) complete a first
-   * non-blank input line. `App.tsx` wires this to the `tab/autoTitled`
-   * action, which itself never overwrites a tab that already has a label —
-   * this callback doesn't need to know or care whether the tab has one. */
-  onFirstInput?: (sessionId: string, line: string) => void;
+  /** Agent-generated short title from xterm's OSC title event. */
+  onEngineTitle?: (sessionId: string, title: string) => void;
   agentState: AgentsState;
   tabEngine: Engine;
 }
@@ -54,21 +48,21 @@ function base64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
-export default function Terminal({ sessionId, visible, focused, themeId, onFirstInput, agentState, tabEngine }: TerminalProps) {
+export default function Terminal({ sessionId, visible, focused, themeId, onEngineTitle, agentState, tabEngine }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const retryTimerRef = useRef<number | null>(null);
   // Lets the mount effect (keyed only on `[sessionId]`, see below) always
-  // call the LATEST `onFirstInput` prop without needing it in that effect's
+  // call the LATEST `onEngineTitle` prop without needing it in that effect's
   // deps — the same ref-for-a-callback pattern used throughout this
   // codebase to keep a mount-once effect from re-running on every prop
   // change (see `Workspace.tsx`'s module doc on why `<Terminal>` must stay
   // mounted for a session's whole lifetime).
-  const onFirstInputRef = useRef(onFirstInput);
+  const onEngineTitleRef = useRef(onEngineTitle);
   useEffect(() => {
-    onFirstInputRef.current = onFirstInput;
-  }, [onFirstInput]);
+    onEngineTitleRef.current = onEngineTitle;
+  }, [onEngineTitle]);
 
   const hasUsableSize = (cols: number, rows: number) => cols > 0 && rows > 0;
 
@@ -130,21 +124,17 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
       fitWithRetry(0);
     }
 
-    // Auto-title capture (founder ask): a fresh cycle per mounted session
-    // (this local variable lives inside the `[sessionId]`-keyed effect, so
-    // a new session id — including the one PaneHeader's "change engine"
-    // spawns — always starts watching again). Fed from the exact same
-    // `onData` stream `sessionWrite` already uses, i.e. only ever real user
-    // keystrokes, never anything the app itself writes into the PTY.
-    let firstInputCapture = initialFirstInputCapture();
+    let submittedPrompt = false;
 
     const dataDisposable = term.onData((data) => {
       void sessionWrite(sessionId, data);
-      if (!firstInputCapture.captured) {
-        const { next, title } = feedFirstInputChunk(firstInputCapture, data);
-        firstInputCapture = next;
-        if (title) onFirstInputRef.current?.(sessionId, title);
-      }
+      if (/\r|\n/.test(data)) submittedPrompt = true;
+    });
+
+    const titleDisposable = term.onTitleChange?.((title) => {
+      if (!submittedPrompt) return;
+      const usefulTitle = engineTitleFromTerminalTitle(tabEngine, title);
+      if (usefulTitle) onEngineTitleRef.current?.(sessionId, usefulTitle);
     });
 
     const resizeObserver = new ResizeObserver(() => fitWithRetry(0));
@@ -202,6 +192,7 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
     return () => {
       cancelled = true;
       dataDisposable.dispose();
+      titleDisposable?.dispose();
       resizeObserver.disconnect();
       if (retryTimerRef.current !== null) {
         clearTimeout(retryTimerRef.current);

@@ -4,10 +4,9 @@
 // visualization. It must work exactly like the Finder from Mac OS. It's
 // very important for an agent development environment" — plus a follow-up:
 // "make sure that we're able to resize the right panel where the file view
-// is." Still no code editor / no file preview — double-clicking a file opens
-// it in whatever the OS considers its default app, same as DetailPanel's
-// "Open file" action (DESIGN.md's v1 cut list: file viewer + open-in-
-// external only).
+// is." Double-click still defaults to OS open (`openPath`, same as
+// DetailPanel), but callers can now provide `onOpenFile` to route file opens
+// into an in-app editor surface (dashboard Files screen) instead.
 //
 // **2026-07-27 left-pane redesign, Task 6**: the standalone right-hand dock
 // this component used to own is gone — it now lives embedded in the
@@ -147,6 +146,9 @@ interface FileTreeProps {
    * (and simply renders no badges) so every existing render site/test that
    * doesn't pass one keeps working unchanged. */
   gitBadges?: GitBadges;
+  /** Optional in-app file open handler (dashboard Files screen). When absent,
+   * rows keep the original Finder-like behavior (`openPath` in the OS app). */
+  onOpenFile?: (path: string) => void;
 }
 
 const INDENT_PX = 14;
@@ -176,7 +178,15 @@ function resolveHoverAt(x: number, y: number): DragHover {
   return null;
 }
 
-export default function FileTree({ project, activeTabId, onClose, embedded, filter, gitBadges }: FileTreeProps) {
+export default function FileTree({
+  project,
+  activeTabId,
+  onClose,
+  embedded,
+  filter,
+  gitBadges,
+  onOpenFile,
+}: FileTreeProps) {
   const [root, setRoot] = useState<DirState | null>(null); // null = nothing requested yet
   const [expanded, setExpanded] = useState<ExpandedPaths>(new Set());
   const [children, setChildren] = useState<Map<string, DirState>>(new Map());
@@ -382,6 +392,10 @@ export default function FileTree({ project, activeTabId, onClose, embedded, filt
   );
 
   async function handleOpenFile(path: string) {
+    if (onOpenFile) {
+      onOpenFile(path);
+      return;
+    }
     try {
       await openPath(path);
     } catch (err) {
@@ -821,9 +835,15 @@ export default function FileTree({ project, activeTabId, onClose, embedded, filt
                 onContextMenu={(e) => handleRowContextMenu(e, entry)}
               >
                 {entry.is_dir ? (
-                  <span className={`file-tree-chevron${open ? " is-open" : ""}`} aria-hidden="true">
+                  <button
+                    className={`file-tree-chevron${open ? " is-open" : ""}`}
+                    onClick={(e) => { e.stopPropagation(); handleToggle(entry.path); }}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    aria-label={open ? "Collapse folder" : "Expand folder"}
+                    tabIndex={-1}
+                  >
                     <Icon name="chevron-right" size={12} strokeWidth={2.25} />
-                  </span>
+                  </button>
                 ) : (
                   <span className="file-tree-chevron is-file" aria-hidden="true" />
                 )}

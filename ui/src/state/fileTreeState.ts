@@ -258,32 +258,71 @@ export function iconKindForEntry(entry: Pick<DirEntry, "name" | "is_dir">, expan
 }
 
 /** Per-extension accent color layered on top of the shape from
- * `iconKindForEntry` — CSS custom properties for folders/generic/unknown
- * extensions (so a theme change updates them for free), real hex for the
- * curated "brand" colors (TS blue, JS yellow, Python teal, Rust orange, Go
- * cyan, Markdown neutral, JSON amber, YAML violet) which aren't standard
- * tokens in `App.css`'s palette. */
+ * `iconKindForEntry` — real hex for curated "brand" colors that are
+ * recognizable at a glance; a neutral fallback for everything else. */
 const EXTENSION_ACCENT: Record<string, string> = {
+  // TypeScript
   ts: "#4d8dff",
   tsx: "#4d8dff",
+  // JavaScript
   js: "#e8c34d",
   jsx: "#e8c34d",
   mjs: "#e8c34d",
   cjs: "#e8c34d",
+  // Python
   py: "#5fd4c8",
+  // Rust
   rs: "#e0885f",
+  // Go
   go: "#5fc9e8",
+  // Web
+  html: "#00bcd4",
+  htm: "#00bcd4",
+  css: "#5bc4e8",
+  scss: "#e07cc0",
+  less: "#5e9fd9",
+  // Markup / data
   md: "#9a9ca6",
   mdx: "#9a9ca6",
   json: "#e8a23d",
   yaml: "#a996ff",
   yml: "#a996ff",
+  toml: "#9c6cd9",
+  xml: "#f0a050",
+  // Images / graphics
+  svg: "#e8c24d",
+  png: "#e06070",
+  jpg: "#e06070",
+  jpeg: "#e06070",
+  gif: "#e06070",
+  webp: "#e06070",
+  bmp: "#e06070",
+  ico: "#e06070",
+  avif: "#e06070",
+  // Systems
+  c: "#c0b040",
+  h: "#c0b040",
+  cc: "#659bd2",
+  cpp: "#659bd2",
+  hpp: "#659bd2",
+  // JVM / CLR
+  java: "#e8762d",
+  kt: "#7f52ff",
+  kts: "#7f52ff",
+  cs: "#9b4f96",
+  // Other languages
+  rb: "#cc3a30",
+  php: "#8892be",
+  swift: "#f05138",
+  sh: "#8bc34a",
+  bash: "#8bc34a",
+  zsh: "#8bc34a",
 };
 
-const DEFAULT_ACCENT = "var(--ink-dim)";
+const DEFAULT_ACCENT = "#6a6a78";
 
 export function accentForEntry(entry: Pick<DirEntry, "name" | "is_dir">): string {
-  if (entry.is_dir) return "var(--ink-dim)";
+  if (entry.is_dir) return "#3b82f6";
   return EXTENSION_ACCENT[extensionOf(entry.name)] ?? DEFAULT_ACCENT;
 }
 

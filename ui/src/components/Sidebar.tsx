@@ -218,10 +218,13 @@ interface SidebarProps {
    * Optional so this component still type-checks for tests that don't care
    * about it. */
   ingestion?: IngestionStatus | null;
-  /** Task 6.2: the workspace/map view toggle. Optional so this component
-   * still type-checks for any test that doesn't care about it. */
-  view?: "workspace" | "map";
-  onSetView?: (view: "workspace" | "map") => void;
+  /** Dashboard surfaces toggle (Dashboard / Terminals / Board / Files / Map).
+   * Optional so this component still type-checks for tests that don't care
+   * about view switching. */
+  view?: "dashboard" | "workspace" | "board" | "files" | "map";
+  onSetView?: (view: "dashboard" | "workspace" | "board" | "files" | "map") => void;
+  /** Opens a file in the dashboard Files screen. */
+  onOpenFile?: (path: string) => void;
   /** The SESSIONS header's "+" — opens `NewSessionModal` for the selected
    * workspace (⌘N -> Session reaches the same dialog). Optional, same
    * convention as the props above. */
@@ -279,7 +282,7 @@ export default function Sidebar({
   onRenameProject,
   onImportCompleted,
   ingestion,
-  view = "workspace",
+  view = "dashboard",
   onSetView,
   onNewSessionInProject,
   onRenameSession,
@@ -291,6 +294,7 @@ export default function Sidebar({
   onResetAuthGate,
   dormantSessions = [],
   onSelectDormantSession,
+  onOpenFile,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -479,21 +483,39 @@ export default function Sidebar({
       <div className="sidebar-view-toggle" role="tablist" aria-label="View">
         <button
           role="tab"
-          aria-selected={view === "workspace"}
-          className={view === "workspace" ? "is-active" : ""}
-          onClick={() => onSetView?.("workspace")}
-          title="Terminal workspace"
+          aria-selected={view === "dashboard"}
+          className={view === "dashboard" ? "is-active" : ""}
+          onClick={() => onSetView?.("dashboard")}
+          title="Dashboard"
         >
-          <Icon name="terminal" size={13} /> Workspace
+          <Icon name="info" size={13} /> Dashboard
         </button>
         <button
           role="tab"
-          aria-selected={view === "map"}
-          className={view === "map" ? "is-active" : ""}
-          onClick={() => onSetView?.("map")}
-          title="Brain map"
+          aria-selected={view === "workspace"}
+          className={view === "workspace" ? "is-active" : ""}
+          onClick={() => onSetView?.("workspace")}
+          title="Terminals"
         >
-          <Icon name="sparkle" size={13} /> Map
+          <Icon name="terminal" size={13} /> Terminals
+        </button>
+        <button
+          role="tab"
+          aria-selected={view === "board"}
+          className={view === "board" ? "is-active" : ""}
+          onClick={() => onSetView?.("board")}
+          title="Plan board"
+        >
+          <Icon name="sparkle" size={13} /> Board
+        </button>
+        <button
+          role="tab"
+          aria-selected={view === "files"}
+          className={view === "files" ? "is-active" : ""}
+          onClick={() => onSetView?.("files")}
+          title="Files editor"
+        >
+          <Icon name="files" size={13} /> Files
         </button>
       </div>
 
@@ -609,6 +631,10 @@ export default function Sidebar({
             embedded
             filter={fileFilter}
             gitBadges={gitBadges}
+            onOpenFile={(path) => {
+              onOpenFile?.(path);
+              onSetView?.("files");
+            }}
           />
         </div>
       </div>

@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AUTO_TITLE_MAX_LENGTH,
-  feedFirstInputChunk,
-  initialFirstInputCapture,
+  engineTitleFromTerminalTitle,
   sanitizeForTitle,
   titleFromLine,
   truncateTitle,
@@ -72,78 +71,22 @@ describe("titleFromLine", () => {
   });
 });
 
-describe("first-input capture (feedFirstInputChunk / initialFirstInputCapture)", () => {
-  it("does nothing until a newline arrives", () => {
-    let state = initialFirstInputCapture();
-    const r1 = feedFirstInputChunk(state, "fix the ");
-    expect(r1.title).toBeNull();
-    state = r1.next;
-    const r2 = feedFirstInputChunk(state, "login bug");
-    expect(r2.title).toBeNull();
+describe("engineTitleFromTerminalTitle", () => {
+  it("accepts a generated Claude title", () => {
+    expect(engineTitleFromTerminalTitle("claude", "Fix login flow")).toBe("Fix login flow");
   });
 
-  it("fires with the accumulated line once a carriage return arrives (Enter in a PTY)", () => {
-    let state = initialFirstInputCapture();
-    state = feedFirstInputChunk(state, "fix the ").next;
-    const result = feedFirstInputChunk(state, "login bug\r");
-    expect(result.title).toBe("fix the login bug");
-    expect(result.next.captured).toBe(true);
+  it("accepts a generated Copilot title", () => {
+    expect(engineTitleFromTerminalTitle("copilot", "Add retry handling")).toBe("Add retry handling");
   });
 
-  it("also recognizes a bare \\n as the line terminator", () => {
-    const result = feedFirstInputChunk(initialFirstInputCapture(), "hello\n");
-    expect(result.title).toBe("hello");
+  it("ignores generic engine and version titles", () => {
+    expect(engineTitleFromTerminalTitle("claude", "2.1.220")).toBeNull();
+    expect(engineTitleFromTerminalTitle("copilot", "GitHub Copilot")).toBeNull();
   });
 
-  it("stops capturing after the first real line — further chunks never produce another title", () => {
-    let state = initialFirstInputCapture();
-    const first = feedFirstInputChunk(state, "first prompt\r");
-    expect(first.title).toBe("first prompt");
-    state = first.next;
-
-    const second = feedFirstInputChunk(state, "second prompt\r");
-    expect(second.title).toBeNull();
-    expect(second.next).toBe(state); // no-op once captured, stable reference
-  });
-
-  it("keeps watching if the first line is empty (bare Enter) rather than capturing a blank title", () => {
-    let state = initialFirstInputCapture();
-    const bareEnter = feedFirstInputChunk(state, "\r");
-    expect(bareEnter.title).toBeNull();
-    expect(bareEnter.next.captured).toBe(false);
-
-    const realLine = feedFirstInputChunk(bareEnter.next, "now type something\r");
-    expect(realLine.title).toBe("now type something");
-  });
-
-  it("handles a line arriving split across many small onData chunks (real keystroke-by-keystroke typing)", () => {
-    let state = initialFirstInputCapture();
-    let title: string | null = null;
-    for (const chunk of ["f", "i", "x", " ", "t", "h", "e", " ", "b", "u", "g", "\r"]) {
-      const r = feedFirstInputChunk(state, chunk);
-      state = r.next;
-      if (r.title) title = r.title;
-    }
-    expect(title).toBe("fix the bug");
-  });
-
-  it("handles a full line pasted as a single onData chunk", () => {
-    const r = feedFirstInputChunk(initialFirstInputCapture(), "npm run build\r");
-    expect(r.title).toBe("npm run build");
-  });
-
-  it("truncates a very long first line", () => {
-    const long = "a".repeat(100) + "\r";
-    const r = feedFirstInputChunk(initialFirstInputCapture(), long);
-    expect(r.title).not.toBeNull();
-    expect(r.title!.length).toBe(AUTO_TITLE_MAX_LENGTH);
-  });
-
-  it("bounds unterminated buffer growth so a huge paste with no newline never grows unbounded", () => {
-    let state = initialFirstInputCapture();
-    for (let i = 0; i < 50; i++) {
-      state = feedFirstInputChunk(state, "x".repeat(100)).next;
-    }
-    expect(state.buffer.length).toBeLessThan(1000);
+  it("does not invent titles for engines without a generated title", () => {
+    expect(engineTitleFromTerminalTitle("codex", "Fix login flow")).toBeNull();
+    expect(engineTitleFromTerminalTitle("antigravity", "Fix login flow")).toBeNull();
   });
 });

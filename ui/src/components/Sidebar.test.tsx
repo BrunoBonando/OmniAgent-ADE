@@ -193,6 +193,12 @@ describe("Sidebar — one workspace at a time", () => {
     fireEvent.click(screen.getByRole("button", { name: "New session" }));
     expect(onNewSessionInProject).toHaveBeenCalledWith(p1);
   });
+
+  it("treats Dashboard and Files as separate views", () => {
+    setup();
+    expect(screen.getByRole("tab", { name: /dashboard/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /files/i })).toBeInTheDocument();
+  });
 });
 
 describe("Sidebar — session and branch, nothing else", () => {

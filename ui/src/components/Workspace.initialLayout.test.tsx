@@ -68,7 +68,11 @@ function renderedShape(container: HTMLElement): { rows: number; cols: number; pa
   };
 }
 
-function workspaceWith(tabs: TabInfo[], onNewTabInProject: (p: ProjectInfo) => void = noop) {
+function workspaceWith(
+  tabs: TabInfo[],
+  onNewTabInProject: (p: ProjectInfo) => void = noop,
+  onResolveApproval: (tab: TabInfo, decision: "approve" | "deny") => void = noop,
+) {
   return (
     <Workspace
       projects={[project("p1")]}
@@ -78,6 +82,7 @@ function workspaceWith(tabs: TabInfo[], onNewTabInProject: (p: ProjectInfo) => v
       onActivateTab={noop}
       onCloseTab={noop}
       onNewTabInProject={onNewTabInProject}
+      onResolveApproval={onResolveApproval}
       onRenameTab={noop}
       agentState={initialAgentsState}
       hidden={false}
@@ -108,6 +113,28 @@ describe("Workspace — a session's panes render in their approved shape", () =>
   ])("%i panes render as a real %o grid", (count, shape) => {
     const { container } = render(workspaceWith(panes(count)));
     expect(renderedShape(container)).toEqual({ ...shape, panes: shape.rows * shape.cols });
+  });
+
+  it("shows an amber approval footer only on the terminal awaiting approval", () => {
+    const onResolveApproval = vi.fn();
+    const tabs = [
+      { ...tab("1", "p1"), label: "token rotation", groupLabel: "Session restore" },
+      {
+        ...tab("2", "p1"),
+        label: "webhook retries",
+        groupLabel: "Session restore",
+        status: "awaiting_approval" as const,
+      },
+    ];
+    const { container } = render(workspaceWith(tabs, noop, onResolveApproval));
+    expect(container.querySelectorAll(".pane-approval-banner")).toHaveLength(1);
+    expect(screen.getByText("Needs approval — webhook retries")).toBeInTheDocument();
+    expect(screen.getByText("Session restore · Terminal 2 of 2")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(onResolveApproval).toHaveBeenCalledWith(expect.objectContaining({ id: "2" }), "approve");
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(onResolveApproval).toHaveBeenCalledWith(expect.objectContaining({ id: "2" }), "deny");
+    expect(container.querySelectorAll(".pane-body.has-approval-banner")).toHaveLength(1);
   });
 
   it("opening one more terminal reflows the grid up a rung, live", () => {

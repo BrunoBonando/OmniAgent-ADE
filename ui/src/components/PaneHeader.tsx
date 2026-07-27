@@ -71,9 +71,10 @@
 // header no longer reads git at all (`useGitBranch` left with the branch),
 // and the tag is now unconditional — every pane has an engine, where only a
 // pane inside a repo had a branch.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { tabDisplayLabel, type Engine, type TabInfo } from "../state/sessions";
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeId } from "../lib/terminalThemes";
+import { reviewStatus, type ReviewStatus } from "../lib/tauri";
 import { ENGINE_LABEL } from "../theme";
 import PaneMenu from "./PaneMenu";
 import SessionStatusLight from "./SessionStatusLight";
@@ -125,6 +126,26 @@ export default function PaneHeader({
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [reviewSummary, setReviewSummary] = useState<ReviewStatus | null>(null);
+
+  useEffect(() => {
+    if (!onOpenCodeReview || !tab.cwd) {
+      setReviewSummary(null);
+      return;
+    }
+    let cancelled = false;
+    reviewStatus(tab.cwd)
+      .then((status) => {
+        if (!cancelled) setReviewSummary(status);
+      })
+      .catch(() => {
+        // "Not in a git repo" is common and not worth surfacing here.
+        if (!cancelled) setReviewSummary(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [onOpenCodeReview, tab.cwd]);
 
   function startRename() {
     setDraft(tabDisplayLabel(tab));
@@ -182,6 +203,20 @@ export default function PaneHeader({
       <span className="pane-header-tag" data-engine={tab.engine} aria-label={`Agent ${ENGINE_LABEL[tab.engine]}`}>
         {ENGINE_LABEL[tab.engine]}
       </span>
+      {onOpenCodeReview && reviewSummary && (
+        <button
+          className="pane-header-review"
+          draggable={false}
+          onMouseDown={stopForDrag}
+          onClick={onOpenCodeReview}
+          title={`${reviewSummary.file_count} uncommitted changes (+${reviewSummary.added} -${reviewSummary.removed})`}
+          aria-label={`${reviewSummary.file_count} uncommitted changes (+${reviewSummary.added} -${reviewSummary.removed})`}
+        >
+          <span className="pane-header-review-count">{reviewSummary.file_count}</span>
+          <span className="pane-header-review-add">+{reviewSummary.added}</span>
+          <span className="pane-header-review-del">-{reviewSummary.removed}</span>
+        </button>
+      )}
       {(onChangeEngine || onChangeTheme || onOpenCodeReview) && (
         <span className="pane-header-menu-anchor">
           <button

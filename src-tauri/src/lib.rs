@@ -416,6 +416,8 @@ pub fn run() {
             commands::session_stop_working_tasks,
             commands::git_branch,
             commands::list_dir,
+            commands::read_text_file,
+            commands::write_text_file,
             commands::folder_stats,
             commands::rename_path,
             commands::move_path,
@@ -453,6 +455,7 @@ pub fn run() {
             roots::roots_reingest_project,
             roots::roots_rebuild,
             commands::enrich_queue_pending_count,
+            commands::system_stats,
             commands::agents::agents_check_installed,
             commands::agents::agents_install,
         ])

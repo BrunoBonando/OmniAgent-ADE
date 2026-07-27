@@ -90,15 +90,15 @@ describe("SidebarSessionRow — accent bar and expand chevron (Task 4 redesign)"
     useGitBranchMock.mockReturnValue("main");
   });
 
-  it("current row gets the accent bar and rotated chevron", () => {
+  it("current row has the is-current class and rotated chevron", () => {
     const { container } = setup({ isCurrent: true, expanded: true });
-    expect(container.querySelector(".session-row.is-current .session-row-accent")).toBeInTheDocument();
+    expect(container.querySelector(".session-row.is-current")).toBeInTheDocument();
     expect(container.querySelector(".session-row-chevron.is-expanded")).toBeInTheDocument();
   });
 
-  it("a row that is neither current nor expanded gets neither", () => {
+  it("a row that is neither current nor expanded lacks those markers", () => {
     const { container } = setup({ isCurrent: false, expanded: false });
-    expect(container.querySelector(".session-row-accent")).toBeNull();
+    expect(container.querySelector(".session-row.is-current")).toBeNull();
     expect(container.querySelector(".session-row-chevron.is-expanded")).toBeNull();
   });
 

@@ -34,13 +34,14 @@ function event(status: SessionStatus, notify: boolean, id = "sess-1"): SessionSt
  * should notify. Each test overrides only what it's about. */
 function ctx(over: Partial<NotificationContext> = {}): NotificationContext {
   return {
-    event: event("ready", true),
+    event: event("awaiting_approval", true),
     tab: TAB,
     projectLabel: "Project One",
     focusedTabId: null,
     selectedProjectId: "p1",
     view: "workspace",
     windowVisible: true,
+    windowFocused: true,
     now: 1_000_000,
     ...over,
   };
@@ -56,7 +57,7 @@ describe("deriveNotification — the backend's notify flag is the rule", () => {
       projectLabel: "Project One",
       cwd: "/repo/p1",
       engine: "claude",
-      status: "ready",
+      status: "awaiting_approval",
       title: "claude",
       createdAt: 1_000_000,
       read: false,
@@ -73,7 +74,7 @@ describe("deriveNotification — the backend's notify flag is the rule", () => {
   it("trusts the flag even for a status that usually would notify", () => {
     // If the backend ever says "don't", the UI doesn't argue: one source of
     // truth, no second copy of the rule.
-    expect(deriveNotification(ctx({ event: event("ready", false) }))).toBeNull();
+    expect(deriveNotification(ctx({ event: event("awaiting_approval", false) }))).toBeNull();
   });
 
   it("records nothing for a session this app has no pane for", () => {
@@ -87,10 +88,14 @@ describe("deriveNotification — the backend's notify flag is the rule", () => {
     expect(deriveNotification(ctx({ tab: { ...TAB, label: "" } }))?.title).toBe("claude");
   });
 
-  it("carries all three notifying statuses", () => {
-    for (const status of ["ready", "awaiting_approval", "error"] as SessionStatus[]) {
-      expect(deriveNotification(ctx({ event: event(status, true) }))?.status).toBe(status);
-    }
+  it("adds approval outcomes only when they resolve an awaiting approval", () => {
+    expect(deriveNotification(ctx({ event: event("ready", true), previousStatus: "awaiting_approval" }))?.status).toBe(
+      "ready",
+    );
+    expect(deriveNotification(ctx({ event: event("error", true), previousStatus: "awaiting_approval" }))?.status).toBe(
+      "error",
+    );
+    expect(deriveNotification(ctx({ event: event("ready", true), previousStatus: "thinking" }))).toBeNull();
   });
 });
 
@@ -120,19 +125,24 @@ describe("deriveNotification — the focused-session suppression rule", () => {
     expect(deriveNotification(ctx({ focusedTabId: "sess-1", windowVisible: false }))).not.toBeNull();
   });
 
+  it("notifies when the app is visible but not focused", () => {
+    expect(deriveNotification(ctx({ focusedTabId: "sess-1", windowFocused: false }))).not.toBeNull();
+  });
+
   it("suppresses only when every condition holds at once", () => {
     expect(isSessionOnScreen(ctx({ focusedTabId: "sess-1", view: "map" }))).toBe(false);
     expect(isSessionOnScreen(ctx({ focusedTabId: null }))).toBe(false);
     expect(isSessionOnScreen(ctx({ focusedTabId: "sess-1", selectedProjectId: "p2" }))).toBe(false);
     expect(isSessionOnScreen(ctx({ focusedTabId: "sess-1", windowVisible: false }))).toBe(false);
+    expect(isSessionOnScreen(ctx({ focusedTabId: "sess-1", windowFocused: false }))).toBe(false);
   });
 });
 
 describe("notificationSubtitle", () => {
   it("says what happened, in the panel's own voice", () => {
-    expect(notificationSubtitle("ready")).toBe("Task completed.");
+    expect(notificationSubtitle("ready")).toBe("Approved.");
     expect(notificationSubtitle("awaiting_approval")).toBe("Needs your approval.");
-    expect(notificationSubtitle("error")).toBe("Error occurred.");
+    expect(notificationSubtitle("error")).toBe("Rejected.");
   });
 });
 
@@ -367,6 +377,19 @@ describe("approveKeystroke", () => {
     const { approveKeystroke } = await import("./notifications");
     for (const engine of ["codex", "shell", "copilot", "antigravity", "unknown"]) {
       expect(approveKeystroke(engine)).toBeNull();
+    }
+  });
+});
+
+describe("denyKeystroke", () => {
+  it("knows Claude's numbered permission dialog: '2' selects No", async () => {
+    const { denyKeystroke } = await import("./notifications");
+    expect(denyKeystroke("claude")).toBe("2");
+  });
+  it("returns null for engines without a known deny gesture", async () => {
+    const { denyKeystroke } = await import("./notifications");
+    for (const engine of ["codex", "shell", "copilot", "antigravity", "unknown"]) {
+      expect(denyKeystroke(engine)).toBeNull();
     }
   });
 });

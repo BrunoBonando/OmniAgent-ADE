@@ -1,10 +1,14 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PaneHeader from "./PaneHeader";
 import type { TabInfo } from "../state/sessions";
 
-const { useGitBranchMock } = vi.hoisted(() => ({ useGitBranchMock: vi.fn() }));
+const { useGitBranchMock, reviewStatusMock } = vi.hoisted(() => ({
+  useGitBranchMock: vi.fn(),
+  reviewStatusMock: vi.fn(),
+}));
 vi.mock("../lib/useGitBranch", () => ({ useGitBranch: useGitBranchMock }));
+vi.mock("../lib/tauri", () => ({ reviewStatus: reviewStatusMock }));
 
 function tab(overrides: Partial<TabInfo> = {}): TabInfo {
   return {
@@ -41,6 +45,8 @@ describe("PaneHeader", () => {
   beforeEach(() => {
     useGitBranchMock.mockReset();
     useGitBranchMock.mockReturnValue(null);
+    reviewStatusMock.mockReset();
+    reviewStatusMock.mockRejectedValue("/tmp/not-a-repo isn't inside a git repository");
   });
 
   it("renders the title + agent label, not the project (same in every pane)", () => {
@@ -320,6 +326,32 @@ describe("PaneHeader", () => {
       fireEvent.click(screen.getByText("Amber CRT"));
       expect(onChangeTheme).toHaveBeenCalledWith("amber");
       expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("top-right code review summary badge", () => {
+    it("shows file/line totals in the header for this pane and opens code review on click", async () => {
+      reviewStatusMock.mockResolvedValue({
+        repo_root: "/tmp/p1",
+        branch: "main",
+        detached: false,
+        has_head: true,
+        files: [],
+        file_count: 36,
+        added: 1925,
+        removed: 280,
+        binary_count: 0,
+        truncated: false,
+      });
+      const onOpenCodeReview = vi.fn();
+      setup({ onOpenCodeReview });
+      const badge = await screen.findByLabelText("36 uncommitted changes (+1925 -280)");
+      expect(badge).toHaveTextContent("36");
+      expect(badge).toHaveTextContent("+1925");
+      expect(badge).toHaveTextContent("-280");
+      fireEvent.click(badge);
+      expect(onOpenCodeReview).toHaveBeenCalled();
+      await waitFor(() => expect(reviewStatusMock).toHaveBeenCalledWith("/tmp/p1"));
     });
   });
 });

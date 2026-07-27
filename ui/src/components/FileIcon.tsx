@@ -52,20 +52,20 @@ function FolderGlyph({ open, color }: { open: boolean; color: string }) {
 }
 
 /** The shared "page with a folded corner" silhouette every non-folder icon
- * is built on — always the neutral shape tone, never the accent color, so
- * the accent stays legible as "this is the type marker" rather than
- * competing with the outline. */
-function PageOutline() {
+ * is built on — stroke and a very subtle fill use the accent color so the
+ * whole icon reads as that file type's color, not just the tiny inner glyph. */
+function PageOutline({ color }: { color: string }) {
   return (
     <>
       <path
         d="M4 1.75h4.25l3.25 3.2v8.3c0 .55-.45 1-1 1H4c-.55 0-1-.45-1-1V2.75c0-.55.45-1 1-1z"
-        fill="none"
-        stroke="currentColor"
+        fill={color}
+        fillOpacity="0.08"
+        stroke={color}
         strokeWidth="1.15"
         strokeLinejoin="round"
       />
-      <path d="M8.25 1.75v2.65c0 .55.45 1 1 1h2.25" fill="none" stroke="currentColor" strokeWidth="1.15" strokeLinejoin="round" />
+      <path d="M8.25 1.75v2.65c0 .55.45 1 1 1h2.25" fill="none" stroke={color} strokeWidth="1.15" strokeLinejoin="round" />
     </>
   );
 }
@@ -100,29 +100,28 @@ export default function FileIcon({ kind, color }: FileIconProps) {
       height={VIEWBOX_SIZE}
       viewBox="0 0 16 16"
       aria-hidden="true"
-      style={{ color: "var(--ink-dim)" }}
     >
       {kind === "folder" && <FolderGlyph open={false} color={color} />}
       {kind === "folder-open" && <FolderGlyph open={true} color={color} />}
       {kind === "code" && (
         <>
-          <PageOutline />
+          <PageOutline color={color} />
           <CodeGlyph color={color} />
         </>
       )}
       {kind === "markup" && (
         <>
-          <PageOutline />
+          <PageOutline color={color} />
           <MarkupGlyph color={color} />
         </>
       )}
       {kind === "image" && (
         <>
-          <PageOutline />
+          <PageOutline color={color} />
           <ImageGlyph color={color} />
         </>
       )}
-      {kind === "generic" && <PageOutline />}
+      {kind === "generic" && <PageOutline color={color} />}
     </svg>
   );
 }

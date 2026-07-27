@@ -17,32 +17,42 @@ import { NOTIFICATIONS_SETTING_KEY } from "./state/notifications";
 import type { SessionStatusEvent } from "./state/sessionStatus";
 
 const tauriMocks = vi.hoisted(() => ({
+  agentCheckInstalledMock: vi.fn(),
+  enrichQueuePendingCountMock: vi.fn(),
   getBriefingMock: vi.fn(),
   gitBranchMock: vi.fn(),
   ingestionStatusMock: vi.fn(),
   listProjectsMock: vi.fn(),
+  renameProjectMock: vi.fn(),
   rootsListMock: vi.fn(),
   sessionCreateMock: vi.fn(),
   sessionKillMock: vi.fn(),
   sessionStatusMock: vi.fn(),
   sessionWriteMock: vi.fn(),
+  sendNativeNotificationMock: vi.fn(),
   settingsGetMock: vi.fn(),
   settingsSetMock: vi.fn(),
+  systemStatsMock: vi.fn(),
 }));
 
 vi.mock("./lib/tauri", () => ({
   FILE_TREE_VISIBLE_SETTING_KEY: "file_tree_visible",
+  agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
+  enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   getBriefing: tauriMocks.getBriefingMock,
   gitBranch: tauriMocks.gitBranchMock,
   ingestionStatus: tauriMocks.ingestionStatusMock,
   listProjects: tauriMocks.listProjectsMock,
+  renameProject: tauriMocks.renameProjectMock,
   rootsList: tauriMocks.rootsListMock,
   sessionCreate: tauriMocks.sessionCreateMock,
   sessionKill: tauriMocks.sessionKillMock,
   sessionStatus: tauriMocks.sessionStatusMock,
   sessionWrite: tauriMocks.sessionWriteMock,
+  sendNativeNotification: tauriMocks.sendNativeNotificationMock,
   settingsGet: tauriMocks.settingsGetMock,
   settingsSet: tauriMocks.settingsSetMock,
+  systemStats: tauriMocks.systemStatsMock,
 }));
 
 /** A real listener registry, so a test can deliver a genuine
@@ -75,6 +85,7 @@ vi.mock("./components/Sidebar", () => ({
         {props.projects.map((p) => (
           <button key={p.id} onClick={() => props.onSelectProject(p)}>{`select-${p.id}`}</button>
         ))}
+        <button onClick={() => props.onSetView?.("workspace")}>go-to-workspace</button>
         <button onClick={() => props.onSetView?.("map")}>go-to-map</button>
       </div>
     );
@@ -91,6 +102,25 @@ vi.mock("./components/Workspace", () => ({
           </li>
         ))}
       </ul>
+    );
+  },
+}));
+
+vi.mock("./components/StartupScreen", () => ({
+  default: function StartupScreenStub(props: {
+    loading: boolean;
+    projects: ProjectInfo[];
+    onSelectWorkspace: (project: ProjectInfo) => void;
+  }) {
+    if (props.loading) return <p>startup-loading</p>;
+    return (
+      <div>
+        {props.projects.map((p) => (
+          <button key={p.id} onClick={() => props.onSelectWorkspace(p)}>
+            {`select-workspace-${p.id}`}
+          </button>
+        ))}
+      </div>
     );
   },
 }));
@@ -112,7 +142,7 @@ const LAYOUT = JSON.stringify({
   tabs: [
     { project: "p1", engine: "claude", cwd: "/tmp/p1", id: "sess-1", label: "front end", group: "grp-a" },
     { project: "p1", engine: "claude", cwd: "/tmp/p1", id: "sess-2", label: "back end", group: "grp-a" },
-    { project: "p2", engine: "shell", cwd: "/tmp/p2", id: "sess-3", label: "other work", group: "grp-b" },
+    { project: "p1", engine: "shell", cwd: "/tmp/p1", id: "sess-3", label: "other work", group: "grp-a" },
   ],
 });
 
@@ -128,21 +158,32 @@ function statusEvent(id: string, status: SessionStatusEvent["status"], notify: b
 
 beforeEach(() => {
   listeners.clear();
+  tauriMocks.agentCheckInstalledMock.mockReset().mockResolvedValue(["claude", "codex", "shell"]);
+  tauriMocks.enrichQueuePendingCountMock.mockReset().mockResolvedValue(0);
   tauriMocks.getBriefingMock.mockReset().mockResolvedValue("briefing");
   tauriMocks.gitBranchMock.mockReset().mockResolvedValue("main");
   tauriMocks.ingestionStatusMock.mockReset().mockResolvedValue({ running: false });
   tauriMocks.listProjectsMock.mockReset().mockResolvedValue([P1, P2]);
+  tauriMocks.renameProjectMock.mockReset().mockResolvedValue(undefined);
   tauriMocks.rootsListMock.mockReset().mockResolvedValue(["/tmp"]);
   tauriMocks.sessionKillMock.mockReset().mockResolvedValue(undefined);
   tauriMocks.sessionStatusMock.mockReset().mockResolvedValue(null);
   tauriMocks.sessionWriteMock.mockReset().mockResolvedValue(undefined);
+  tauriMocks.sendNativeNotificationMock.mockReset().mockResolvedValue(undefined);
   tauriMocks.settingsSetMock.mockReset().mockResolvedValue(undefined);
+  tauriMocks.systemStatsMock.mockReset().mockResolvedValue({
+    cpuPercent: null,
+    ramUsedBytes: null,
+    ramTotalBytes: null,
+    mcpWired: false,
+  });
   tauriMocks.sessionCreateMock
     .mockReset()
     .mockImplementation((project: string, engine: string, cwd: string, _b: unknown, restoreId?: string) =>
       Promise.resolve({ id: restoreId ?? `${project}-new`, project, engine, cwd, created: 0, restored: true }),
     );
   tauriMocks.settingsGetMock.mockReset().mockImplementation((key: string) => {
+    if (key === "auth_gate_resolved") return Promise.resolve("true");
     if (key === LAYOUT_SETTING_KEY) return Promise.resolve(LAYOUT);
     if (key === NOTIFICATIONS_SETTING_KEY) return Promise.resolve(null);
     return Promise.resolve(null);
@@ -151,6 +192,9 @@ beforeEach(() => {
 
 async function bootWithThreeSessions() {
   render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "select-workspace-p1" }));
+  fireEvent.click(await screen.findByText("select-p1"));
+  fireEvent.click(await screen.findByText("go-to-workspace"));
   await waitFor(() => expect(screen.getByText("activate-sess-3")).toBeInTheDocument());
   // Wait for the app to have SETTLED into the state every test below starts
   // from — the restore focused sess-1 and its project is the one on screen.
@@ -172,19 +216,22 @@ function badge() {
 describe("App — a background session's notification", () => {
   it("records one for a notifying event on a pane the user isn't looking at", async () => {
     await bootWithThreeSessions();
-    emit("sess-2", statusEvent("sess-2", "ready", true));
+    emit("sess-2", statusEvent("sess-2", "awaiting_approval", true));
     await waitFor(() => expect(badge()?.textContent).toBe("1"));
   });
 
-  it("records one for every notifying state", async () => {
+  it("records pending approval and approval outcomes only", async () => {
     await bootWithThreeSessions();
     emit("sess-2", statusEvent("sess-2", "awaiting_approval", true));
+    emit("sess-2", statusEvent("sess-2", "ready", true));
+    emit("sess-3", statusEvent("sess-3", "error", true)); // ignored: no prior awaiting
+    emit("sess-3", statusEvent("sess-3", "awaiting_approval", true));
     emit("sess-3", statusEvent("sess-3", "error", true));
     await waitFor(() => expect(badge()?.textContent).toBe("2"));
 
     fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
-    expect(screen.getByText("Needs your approval.")).toBeInTheDocument();
-    expect(screen.getByText("Error occurred.")).toBeInTheDocument();
+    expect(screen.getByText("Approved.")).toBeInTheDocument();
+    expect(screen.getByText("Rejected.")).toBeInTheDocument();
     expect(screen.getByText("back end")).toBeInTheDocument();
     expect(screen.getByText("other work")).toBeInTheDocument();
   });
@@ -201,25 +248,22 @@ describe("App — a background session's notification", () => {
 describe("App — the focused-session suppression rule", () => {
   it("stays quiet for the focused pane of the project on screen", async () => {
     await bootWithThreeSessions();
-    emit("sess-1", statusEvent("sess-1", "ready", true));
+    emit("sess-1", statusEvent("sess-1", "awaiting_approval", true));
     await new Promise((r) => setTimeout(r, 0));
     expect(badge()).toBeNull();
   });
 
-  it("notifies for a focused pane whose project isn't the one on screen", async () => {
+  it("notifies for a different pane in the same workspace", async () => {
     await bootWithThreeSessions();
-    // Focus sess-3 (project p2), then select p1 in the sidebar: sess-3 is
-    // still `activeTabId`, but its grid isn't what's displayed.
     fireEvent.click(screen.getByText("activate-sess-3"));
-    fireEvent.click(screen.getByText("select-p1"));
-    emit("sess-3", statusEvent("sess-3", "ready", true));
+    emit("sess-2", statusEvent("sess-2", "awaiting_approval", true));
     await waitFor(() => expect(badge()?.textContent).toBe("1"));
   });
 
   it("notifies for the focused pane while the user is on the brain map", async () => {
     await bootWithThreeSessions();
     fireEvent.click(screen.getByText("go-to-map"));
-    emit("sess-1", statusEvent("sess-1", "ready", true));
+    emit("sess-1", statusEvent("sess-1", "awaiting_approval", true));
     await waitFor(() => expect(badge()?.textContent).toBe("1"));
   });
 });
@@ -227,7 +271,7 @@ describe("App — the focused-session suppression rule", () => {
 describe("App — clicking a notification goes to that session", () => {
   it("selects its project and focuses its pane", async () => {
     await bootWithThreeSessions();
-    emit("sess-3", statusEvent("sess-3", "ready", true));
+    emit("sess-3", statusEvent("sess-3", "awaiting_approval", true));
     await waitFor(() => expect(badge()?.textContent).toBe("1"));
 
     fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
@@ -238,12 +282,12 @@ describe("App — clicking a notification goes to that session", () => {
 
   it("opening the panel clears the badge, and the entries stay in the list", async () => {
     await bootWithThreeSessions();
-    emit("sess-2", statusEvent("sess-2", "ready", true));
+    emit("sess-2", statusEvent("sess-2", "awaiting_approval", true));
     await waitFor(() => expect(badge()?.textContent).toBe("1"));
 
     fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
     await waitFor(() => expect(badge()).toBeNull());
-    expect(screen.getByText("Task completed.")).toBeInTheDocument();
+    expect(screen.getByText("Needs your approval.")).toBeInTheDocument();
   });
 });
 
@@ -313,7 +357,7 @@ describe("App — approving a notification from the panel", () => {
 describe("App — notifications outlive the app", () => {
   it("persists the list through the same settings table the layout uses", async () => {
     await bootWithThreeSessions();
-    emit("sess-2", statusEvent("sess-2", "ready", true));
+    emit("sess-2", statusEvent("sess-2", "awaiting_approval", true));
     await waitFor(() =>
       expect(tauriMocks.settingsSetMock).toHaveBeenCalledWith(
         NOTIFICATIONS_SETTING_KEY,
@@ -324,6 +368,7 @@ describe("App — notifications outlive the app", () => {
 
   it("restores what was persisted on the next launch", async () => {
     tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
       if (key === LAYOUT_SETTING_KEY) return Promise.resolve(LAYOUT);
       if (key === NOTIFICATIONS_SETTING_KEY) {
         return Promise.resolve(
@@ -352,11 +397,13 @@ describe("App — notifications outlive the app", () => {
     await waitFor(() => expect(badge()?.textContent).toBe("1"));
     fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
     expect(screen.getByText("yesterday's run")).toBeInTheDocument();
+    expect(screen.getByText("Approved.")).toBeInTheDocument();
     expect(screen.getByText("3 days")).toBeInTheDocument();
   });
 
   it("a restored entry whose session is gone still takes the user to its project", async () => {
     tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
       if (key === LAYOUT_SETTING_KEY) return Promise.resolve(LAYOUT);
       if (key === NOTIFICATIONS_SETTING_KEY) {
         return Promise.resolve(

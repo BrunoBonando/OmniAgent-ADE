@@ -180,7 +180,6 @@ export default function SidebarSessionRow({
       onMouseEnter={scheduleCard}
       onMouseLeave={closeCard}
     >
-      {isCurrent && <span className="session-row-accent" />}
       {/* The chevron and whichever of `.session-row-main`/the rename input is
           showing share one flex row (fix-round, 2026-07-27): `.session-row`
           itself is plain block layout, so without this wrapper the chevron

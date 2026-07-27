@@ -228,6 +228,15 @@ describe("FileTree", () => {
     await waitFor(() => expect(openPathMock).toHaveBeenCalledWith("/repo/demo/main.py"));
   });
 
+  it("double-clicking a file uses the in-app open callback when provided", async () => {
+    const onOpenFile = vi.fn();
+    setup({ onOpenFile });
+    await screen.findByText("main.py");
+    fireEvent.doubleClick(screen.getByText("main.py"));
+    expect(onOpenFile).toHaveBeenCalledWith("/repo/demo/main.py");
+    expect(openPathMock).not.toHaveBeenCalled();
+  });
+
   it("double-clicking a directory lazily loads and reveals its children exactly once", async () => {
     listDirMock.mockImplementation((path: string) => Promise.resolve(path === "/repo/demo" ? rootEntries() : childEntries()));
     setup();

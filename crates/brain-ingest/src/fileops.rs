@@ -514,6 +514,36 @@ fn prepare_create(
     Ok(dest)
 }
 
+// ---------------------------------------------------------- file editing
+
+/// Reads one file's UTF-8 text content, scoped to `project_root`.
+///
+/// Uses the same containment checks as the other in-place file operations:
+/// the selected path must resolve to an existing child of the project root,
+/// and the project root itself is never a valid leaf target.
+pub fn read_text_file(project_root: &Path, path: &Path) -> Result<String, String> {
+    let root = canonical_root(project_root)?;
+    let source = within_root_as_child(&root, path)?;
+    if source.is_dir() {
+        return Err(format!("{} is a directory", path.display()));
+    }
+    let bytes = std::fs::read(&source).map_err(|e| friendly_io_error(&source, &e))?;
+    String::from_utf8(bytes).map_err(|_| format!("{} is not valid UTF-8 text", path.display()))
+}
+
+/// Replaces one file's content with `content`, scoped to `project_root`.
+///
+/// Only existing files are writable through this entrypoint; it never creates
+/// a missing file implicitly (call [`create_file`] first for that flow).
+pub fn write_text_file(project_root: &Path, path: &Path, content: &str) -> Result<(), String> {
+    let root = canonical_root(project_root)?;
+    let target = within_root_as_child(&root, path)?;
+    if target.is_dir() {
+        return Err(format!("{} is a directory", path.display()));
+    }
+    std::fs::write(&target, content).map_err(|e| friendly_io_error(&target, &e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1084,6 +1114,32 @@ mod tests {
                 std::fs::read_dir(outside.path()).unwrap().next().is_none(),
                 "nothing must have actually landed outside the root"
             );
+        }
+
+        #[test]
+        fn read_text_file_and_write_text_file_round_trip() {
+            let root = tempdir().unwrap();
+            let file = root.path().join("note.txt");
+            fs::write(&file, "hello").unwrap();
+
+            let before = read_text_file(root.path(), &file).unwrap();
+            assert_eq!(before, "hello");
+
+            write_text_file(root.path(), &file, "updated").unwrap();
+            assert_eq!(fs::read_to_string(&file).unwrap(), "updated");
+        }
+
+        #[test]
+        fn read_and_write_text_file_reject_directories() {
+            let root = tempdir().unwrap();
+            let dir = root.path().join("src");
+            fs::create_dir(&dir).unwrap();
+
+            let read_err = read_text_file(root.path(), &dir).unwrap_err();
+            assert!(read_err.contains("directory"), "{read_err}");
+
+            let write_err = write_text_file(root.path(), &dir, "x").unwrap_err();
+            assert!(write_err.contains("directory"), "{write_err}");
         }
     }
 
