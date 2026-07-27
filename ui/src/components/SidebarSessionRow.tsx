@@ -8,9 +8,7 @@
 // > branch. On hover, it shows full details."
 //
 // So the row is the session's **name**, the **branch** its root folder is on,
-// and — under both, since 2026-07-26 — a picture of its panes' live status
-// (first a mini map of OmniAgent marks, since Task 4 below a dot cluster +
-// layout badge; either way, never their names or count as prose). The
+// and nothing else. The
 // "2 panes · Claude Code, Shell" meta line and the nested list of every
 // terminal in the session are still gone from here — both moved into the
 // hover card, which is the surface that asked for detail.
@@ -28,22 +26,14 @@
 // row answers for the session, not for whichever terminal happens to be
 // focused.
 //
-// ## The mini pane grid became a dot cluster + layout badge (Task 4, 2026-07-27)
-//
-// The left-pane redesign traded the row's "one OmniAgent mark per terminal"
-// map for something that reads at a glance without doing any counting: a
-// tight row of plain status dots (`statusPresentation`'s colour/motion, same
-// vocabulary the marks used) plus the layout badge text (`sessionShapeBadge`
-// — "1", "1×2", "2×2"…) that used to be implicit in how many marks/holes were
-// drawn. The row also gained a left accent bar and an expand/collapse chevron
-// for the session that's on screen, since the redesign now lets a session's
+// The row also gained a left accent bar and an expand/collapse chevron for
+// the session that's on screen, since the redesign now lets a session's
 // terminals be listed and reached inline (Task 5) instead of only through the
 // hover card.
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { deriveSessionCard } from "../state/sessionHoverCard";
-import { sessionShapeBadge, type SessionGroup } from "../state/sessionGroups";
+import { type SessionGroup } from "../state/sessionGroups";
 import { useGitBranch } from "../lib/useGitBranch";
-import { statusPresentation } from "../state/sessionStatus";
 import { MAX_PANES } from "../state/paneGrid";
 import SessionHoverCard from "./SessionHoverCard";
 import { SidebarTerminalRow } from "./SidebarTerminalRow";
@@ -231,18 +221,8 @@ export default function SidebarSessionRow({
           <button
             className="session-row-main"
             onClick={onActivate}
-            // Explicit, so the button's accessible name is THIS rather than
-            // computed from its text content (fix-round, 2026-07-27, round
-            // 2): without it, removing `aria-hidden` from `.session-row-dots`
-            // (below — needed so each dot's own tooltip actually reaches
-            // assistive tech) let every dot's `aria-label` flow upward into
-            // this button's name too, so focusing/activating a session
-            // announced a multi-sentence dump of every pane's status on top
-            // of the name and branch. Mirrors exactly what was visually
-            // read before that dot work: the name, plus "Branch <branch>"
-            // (the same string `.session-row-branch` below labels itself
-            // with) when there is one — never the layout badge, which is
-            // redundant with "how many dots did you just count".
+            // Explicit, so the button's accessible name is the same short
+            // phrase shown visually: the session name + branch (when present).
             aria-label={branch ? `${session.label} Branch ${branch}` : session.label}
           >
             <span className="session-row-top">
@@ -259,34 +239,6 @@ export default function SidebarSessionRow({
                   <span className="session-row-branch-name">{branch}</span>
                 </span>
               )}
-            </span>
-            {/* Line two: the dot cluster and the layout badge, wrapped
-                together (fix-round, 2026-07-27) so they read as one line —
-                as two direct children of this column-flex button they were
-                each claiming their own row instead. No `aria-hidden` here:
-                each dot below carries its own `role="img"`/`aria-label`
-                (the same fields `SessionStatusLight` uses); the button's own
-                explicit `aria-label` above (round 2 of this fix) is what
-                keeps that from also becoming part of THIS button's name. */}
-            <span className="session-row-meta">
-              <span className="session-row-dots">
-                {session.tabs.map((t) => {
-                  const p = statusPresentation(t.status);
-                  return (
-                    <span
-                      key={t.id}
-                      className="session-row-dot"
-                      data-status={p.key}
-                      data-motion={p.motion}
-                      style={{ background: `var(${p.colorVar})` }}
-                      role="img"
-                      aria-label={p.ariaLabel}
-                      title={p.ariaLabel}
-                    />
-                  );
-                })}
-              </span>
-              <span className="session-row-shape">{sessionShapeBadge(session.tabs.length)}</span>
             </span>
           </button>
         )}

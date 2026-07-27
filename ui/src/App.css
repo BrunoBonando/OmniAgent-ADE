@@ -1069,15 +1069,6 @@ code {
   position: relative;
 }
 
-.pressure-warning {
-  background: rgba(232, 162, 61, 0.12);
-  color: var(--warning);
-  font-family: var(--mono);
-  font-size: 11px;
-  padding: 5px 14px;
-  border-bottom: 1px solid rgba(232, 162, 61, 0.3);
-}
-
 @keyframes pulse {
   0%,
   100% {
@@ -1901,14 +1892,6 @@ code {
   text-transform: uppercase;
   letter-spacing: 0.12em;
   color: var(--ink-faint);
-}
-
-.session-card-explain {
-  margin: 8px 0 10px;
-  font-family: var(--sans);
-  font-size: 11.5px;
-  line-height: 1.45;
-  color: var(--ink-dim);
 }
 
 .session-card-facts {
@@ -6620,9 +6603,7 @@ code {
    (`.session-row-panes`/`.session-row-pane-hole`, see their removal note
    above) and the old full-gradient `.session-row.is-current` (ditto) are
    both gone; this is what replaced them — a left accent bar for the session
-   on screen, an expand/collapse chevron, a row of plain status dots (one per
-   terminal, `statusPresentation`'s own colour/motion) and the layout badge
-   text (`sessionShapeBadge`). */
+   on screen and an expand/collapse chevron. */
 .session-row-accent {
   position: absolute;
   left: 2px;
@@ -6662,45 +6643,6 @@ code {
 .session-row-chevron.is-expanded {
   transform: rotate(90deg);
   color: var(--accent-hi);
-}
-/* Fix-round (2026-07-27): the dot cluster and the layout badge are meant to
-   read as one line ("2×2" beside the dots it's counting), but as two direct
-   children of `.session-row-main` (`flex-direction: column`) they were each
-   claiming their own row instead. This wraps them into one flex row so
-   `.session-row-main` sees a single second line: name/branch, then this. */
-.session-row-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.session-row-dots {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-.session-row-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-}
-.session-row-dot[data-motion="sweep"],
-.session-row-dot[data-motion="chase"] {
-  animation: om-dot-pulse 1.8s ease-in-out infinite;
-}
-.session-row-dot[data-motion="breathe"] {
-  animation: om-dot-pulse 2.2s ease-in-out infinite;
-}
-.session-row-dot[data-motion="flash"] {
-  animation: om-dot-pulse 1.1s ease-in-out infinite;
-}
-.session-row-shape {
-  flex: none;
-  font: 500 9.5px/1 var(--mono);
-  color: var(--accent);
-}
-.session-row:not(.is-current) .session-row-shape {
-  color: #5c5c66;
 }
 .session-row-children {
   display: flex;
@@ -6762,21 +6704,6 @@ code {
   font: 500 9.5px/1 var(--mono);
   color: #5c5c66;
 }
-@keyframes om-dot-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .session-row-dot {
-    animation: none !important;
-  }
-}
-
 /* redesign: new-workspace modal stats strip + toggle rows (Task 12).
    Sits on the shared `.modal-panel` shell (Task 10's primitives), so only
    the width and the two new pieces — the FOUND IN THIS FOLDER strip and the
