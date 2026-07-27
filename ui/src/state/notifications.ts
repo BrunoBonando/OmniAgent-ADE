@@ -240,6 +240,13 @@ export function deriveNotification(ctx: NotificationContext): NotificationEntry 
 export type NotificationsAction =
   | { type: "notification/added"; entry: NotificationEntry }
   | { type: "notification/dismissed"; id: string }
+  /** This session's pending yes/no prompt was answered — from the pane, the
+   * panel's Approve, anywhere. Its `awaiting_approval` rows are obsolete the
+   * moment the session reports any other status (founder ask, 2026-07-27:
+   * "if I approve using the terminal, it has to update the notification"),
+   * so they're removed outright, exactly like the panel's own Approve does.
+   * Other statuses' rows are untouched — they're history, not a pending ask. */
+  | { type: "notifications/approval_resolved"; sessionId: string }
   | { type: "notifications/cleared" }
   /** The panel was opened — everything in it has now been seen. */
   | { type: "notifications/read" }
@@ -266,6 +273,13 @@ export function notificationsReducer(
 
     case "notification/dismissed":
       return { entries: state.entries.filter((e) => e.id !== action.id) };
+
+    case "notifications/approval_resolved": {
+      const entries = state.entries.filter(
+        (e) => !(e.sessionId === action.sessionId && e.status === "awaiting_approval"),
+      );
+      return entries.length === state.entries.length ? state : { entries }; // no churn
+    }
 
     case "notifications/cleared":
       return { entries: [] };

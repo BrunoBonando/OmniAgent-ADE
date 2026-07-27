@@ -196,6 +196,36 @@ describe("notificationsReducer", () => {
     expect(notificationsReducer(state, { type: "notifications/cleared" }).entries).toEqual([]);
   });
 
+  it("approval_resolved removes only that session's awaiting rows — pane and panel stay in sync", () => {
+    let state = notificationsReducer(initialNotificationsState, {
+      type: "notification/added",
+      entry: entry("a", "sess-1", "awaiting_approval"),
+    });
+    state = notificationsReducer(state, { type: "notification/added", entry: entry("b", "sess-1", "ready") });
+    state = notificationsReducer(state, {
+      type: "notification/added",
+      entry: entry("c", "sess-2", "awaiting_approval"),
+    });
+
+    const resolved = notificationsReducer(state, {
+      type: "notifications/approval_resolved",
+      sessionId: "sess-1",
+    });
+    // sess-1's awaiting row is gone; its ready row (history) and the other
+    // session's pending ask both survive.
+    expect(resolved.entries.map((e) => e.id)).toEqual(["c", "b"]);
+  });
+
+  it("approval_resolved with nothing to remove returns the same state — no churn", () => {
+    const state = notificationsReducer(initialNotificationsState, {
+      type: "notification/added",
+      entry: entry("a", "sess-1", "ready"),
+    });
+    expect(
+      notificationsReducer(state, { type: "notifications/approval_resolved", sessionId: "sess-1" }),
+    ).toBe(state);
+  });
+
   it("marks everything read, and doesn't churn when nothing is unread", () => {
     const state = notificationsReducer(initialNotificationsState, { type: "notification/added", entry: entry("a") });
     const read = notificationsReducer(state, { type: "notifications/read" });

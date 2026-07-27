@@ -536,6 +536,14 @@ function App() {
       void sessionWrite(id, queuedPrompt);
     }
 
+    // Any non-awaiting status means this session's pending prompt (if any)
+    // was answered — in the pane, via the panel's Approve, either way — so
+    // its awaiting rows come down before the new status' own row goes up.
+    // The reducer no-ops when there's nothing to remove.
+    if (payload.status !== "awaiting_approval") {
+      notificationsDispatch({ type: "notifications/approval_resolved", sessionId: id });
+    }
+
     const { tabs, projects, activeTabId, selectedProjectId: onScreenProject, view: currentView } =
       notifyContextRef.current;
     const tab = tabs.find((t) => t.id === id);
