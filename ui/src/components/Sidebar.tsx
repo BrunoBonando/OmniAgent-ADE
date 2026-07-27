@@ -243,6 +243,16 @@ interface SidebarProps {
   authSignedIn: string | null;
   authPersona: string | null;
   onResetAuthGate: () => void;
+  dormantSessions?: DormantSession[];
+  onSelectDormantSession?: (session: DormantSession) => void;
+}
+
+export interface DormantSession {
+  project: string;
+  group: string;
+  label: string;
+  cwd: string;
+  paneCount: number;
 }
 
 // `onNewTabInProject` is deliberately NOT destructured: it's a live prop
@@ -278,6 +288,8 @@ export default function Sidebar({
   authSignedIn,
   authPersona,
   onResetAuthGate,
+  dormantSessions = [],
+  onSelectDormantSession,
 }: SidebarProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -490,7 +502,7 @@ export default function Sidebar({
           once more for the one on screen. */}
       <div className="sidebar-sessions-header">
         <span className="sidebar-microlabel">SESSIONS</span>
-        <span className="sidebar-microcount">{selectedSessions.length}</span>
+        <span className="sidebar-microcount">{selectedSessions.length + dormantSessions.length}</span>
         <span className="sidebar-spacer" />
         <button
           className="sidebar-sessions-add"
@@ -503,6 +515,21 @@ export default function Sidebar({
       </div>
 
       <ul className="sidebar-session-list">
+        {dormantSessions.map((session) => (
+          <li key={session.group} className="sidebar-dormant-session">
+            <button type="button" onClick={() => onSelectDormantSession?.(session)}>
+              <span
+                className="sidebar-dormant-session-mark"
+                style={{ backgroundColor: idColor(session.group) }}
+                aria-hidden
+              />
+              <span>
+                <strong>{session.label}</strong>
+                <small>{session.paneCount} terminal{session.paneCount === 1 ? "" : "s"} · load on open</small>
+              </span>
+            </button>
+          </li>
+        ))}
         {selectedProject &&
           selectedSessions.map((session) => {
             // What the rail marks: the session the grid is actually

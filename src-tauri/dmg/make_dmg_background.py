@@ -96,6 +96,9 @@ INK_DIM = (0x8B, 0x8D, 0x97)  # --ink-dim
 INK_FAINT = (0x5C, 0x5E, 0x66)  # --ink-faint
 SIGNAL = (0x9A, 0xA7, 0xE6)  # --signal
 BLUE = (0x4B, 0x86, 0xFF)  # --status-thinking-lo
+NAVY_BASE = (0x0F, 0x2A, 0x57)
+NAVY_MID = (0x1A, 0x3F, 0x76)
+NAVY_LIT = (0x2B, 0x58, 0x98)
 BRAND_BLUE = (0x30, 0x74, 0xB6)  # sampled: logo mid
 BRAND_BLUE_DEEP = (0x24, 0x57, 0x9E)  # sampled: logo bottom
 BRAND_BLUE_LIT = (0x3F, 0x91, 0xCE)  # sampled: logo top
@@ -119,13 +122,16 @@ HEADER_H = 26
 PLATE1 = (ICON1_X - PLATE_W // 2, PLATE_TOP, ICON1_X + PLATE_W // 2, PLATE_BOT)
 PLATE2 = (ICON2_X - PLATE_W // 2, PLATE_TOP, ICON2_X + PLATE_W // 2, PLATE_BOT)
 
-MARK_C = (34, 44)  # logo mark centre in the wordmark lockup
-MARK_D = 26
-FOOTER_XY = (PLATE1[0], 352)  # aligned to the left pane's edge
+MARK_D = 28
+BRAND_Y = 82
+LOCKUP_H = 60
+LOCKUP_X_OFFSET = -10
 
 REPO = Path(__file__).resolve().parents[2]
 OUT_DIR = Path(__file__).resolve().parent
-LOGO = REPO / "docs" / "reference" / "omniagent-logo-1024.png"
+LOGO_COMPLETE = REPO / "design" / "docs" / "reference" / "omniagent-logo-complete.png"
+LOGO_FALLBACK = REPO / "docs" / "reference" / "omniagent-logo-1024.png"
+LOGO_WORKFORCE = REPO / "design" / "docs" / "reference" / "omniagent-logo--workforce-complete-2.png"
 
 FONT_DIRS = [Path("/Library/Fonts"), Path.home() / "Library/Fonts", Path("/System/Library/Fonts")]
 
@@ -246,16 +252,16 @@ def draw_field(img: Image.Image) -> Image.Image:
 
     # One broad wash across the whole field, so the canvas reads as lit rather
     # than as black with two spotlights stuck on it.
-    img = bloom(img, W * 0.34, H * 0.46, 560, 400, BRAND_BLUE_DEEP, 0.30, 1.9)
+    img = bloom(img, W * 0.34, H * 0.46, 560, 400, NAVY_BASE, 0.34, 1.9)
     # ambient from the top-left, in the logo's own lit blue
-    img = bloom(img, 60, 0, 400, 260, BRAND_BLUE_LIT, 0.16, 2.4)
+    img = bloom(img, 60, 0, 400, 260, NAVY_MID, 0.22, 2.4)
     # the two drop zones are lit from behind — pane 01 brighter (it is the
     # thing you act on), pane 02 cooler and dimmer (the destination)
-    img = bloom(img, ICON1_X, ICON_Y - 4, 250, 215, BRAND_BLUE, 0.42, 2.1)
-    img = bloom(img, ICON1_X, ICON_Y - 4, 130, 120, BRAND_BLUE_LIT, 0.16, 2.0)
-    img = bloom(img, ICON2_X, ICON_Y - 4, 235, 200, BLUE, 0.20, 2.4)
+    img = bloom(img, ICON1_X, ICON_Y - 4, 250, 215, NAVY_MID, 0.46, 2.1)
+    img = bloom(img, ICON1_X, ICON_Y - 4, 130, 120, NAVY_LIT, 0.18, 2.0)
+    img = bloom(img, ICON2_X, ICON_Y - 4, 235, 200, NAVY_LIT, 0.22, 2.4)
     # one low, wide bed of light under the whole install row
-    img = bloom(img, W // 2, 320, 420, 150, BRAND_BLUE_DEEP, 0.16, 2.0)
+    img = bloom(img, W // 2, 320, 420, 150, NAVY_BASE, 0.20, 2.0)
     return img
 
 
@@ -422,10 +428,10 @@ def draw_edge(img: Image.Image) -> Image.Image:
                (back[0] - nx * Wd, back[1] - ny * Wd)],
               fill=rgba(BLUE, 1.0))
 
-    # instruction, riding above the apex of the curve
-    f = font("JetBrainsMono-Bold", 9.0)
-    tracked_text(d, ((x_start + x_end) / 2, apex - 11), "DRAG TO INSTALL", f,
-                 rgba(INK, 0.95), tracking=1.5, align="center")
+    # instruction below the arrow path
+    f = font("JetBrainsMono-Bold", 11.0)
+    tracked_text(d, ((x_start + x_end) / 2, y + 28), "DRAG TO INSTALL", f,
+                 rgba(INK, 0.95), tracking=1.7, align="center")
     return Image.alpha_composite(img, layer)
 
 
@@ -434,27 +440,24 @@ def draw_edge(img: Image.Image) -> Image.Image:
 # --------------------------------------------------------------------------
 def draw_chrome(img: Image.Image) -> Image.Image:
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-
-    if LOGO.exists():
-        px = round(s(MARK_D))
-        mark = Image.open(LOGO).convert("RGBA").resize((px, px), Image.LANCZOS)
+    logo_path = LOGO_WORKFORCE if LOGO_WORKFORCE.exists() else (
+        LOGO_COMPLETE if LOGO_COMPLETE.exists() else LOGO_FALLBACK
+    )
+    center_x = (ICON1_X + ICON2_X) / 2 + LOCKUP_X_OFFSET
+    if logo_path.exists():
+        mark = Image.open(logo_path).convert("RGBA")
+        bb = mark.split()[-1].getbbox()
+        if bb:
+            mark = mark.crop(bb)
+        px_h = round(s(LOCKUP_H))
+        px_w = round(px_h * (mark.width / mark.height))
+        mark = mark.resize((px_w, px_h), Image.LANCZOS)
+        lx = round(s(center_x) - px_w / 2)
+        ly = round(s(BRAND_Y) - px_h / 2)
         halo = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        halo.paste(mark, (round(s(MARK_C[0]) - px / 2), round(s(MARK_C[1]) - px / 2)), mark)
+        halo.paste(mark, (lx, ly), mark)
         img = Image.alpha_composite(img, halo.filter(ImageFilter.GaussianBlur(s(4))))
-        layer.paste(mark, (round(s(MARK_C[0]) - px / 2), round(s(MARK_C[1]) - px / 2)), mark)
-
-    x = MARK_C[0] + MARK_D / 2 + 12
-    f_name = font("JetBrainsMono-Bold", 13.5)
-    w = tracked_text(d, (x, 49), "OMNIAGENT", f_name, rgba(INK, 1.0), tracking=2.6)
-    x += w / SS + 13
-    d.line([(s(x), s(37)), (s(x), s(51))], fill=rgba(LINE, 1.0), width=max(1, round(s(1))))
-    f_sub = font("JetBrainsMono-Medium", 10.0)
-    tracked_text(d, (x + 13, 49), "ADE", f_sub, rgba(SIGNAL, 1.0), tracking=3.0)
-
-    f_foot = font("JetBrainsMono-Medium", 8.5)
-    tracked_text(d, FOOTER_XY, "LOCAL-FIRST  ·  YOUR GRAPH NEVER LEAVES THIS MACHINE",
-                 f_foot, rgba(INK_DIM, 0.72), tracking=1.1)
+        layer.paste(mark, (lx, ly), mark)
     return Image.alpha_composite(img, layer)
 
 
@@ -465,13 +468,7 @@ def render() -> Image.Image:
     img = Image.new("RGBA", (W * SS, H * SS), VOID_DEEP + (255,))
     img = draw_field(img)
 
-    g = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw_graph(ImageDraw.Draw(g), graph_nodes())
-    img = Image.alpha_composite(img, g)
-
     img = draw_vignette(img)
-    img = draw_pane(img, PLATE1, "01", "OMNIAGENT.APP", focused=True)
-    img = draw_pane(img, PLATE2, "02", "APPLICATIONS", focused=False)
     img = draw_edge(img)
     img = draw_chrome(img)
     return img
@@ -505,7 +502,7 @@ def load_icon(path: Path | str, size: int) -> Image.Image | None:
 def render_preview(bg: Image.Image) -> Image.Image:
     img = bg.copy()
     d = ImageDraw.Draw(img)
-    f = font("Inter-Regular", 11.5)
+    f = font("Inter-Regular", 12.5)
 
     app_icon = load_icon(REPO / "src-tauri/icons/128x128@2x.png", round(s(ICON_BOX)))
     apps_icon = load_icon(APPLICATIONS_ICNS, round(s(ICON_BOX)))
@@ -521,16 +518,12 @@ def render_preview(bg: Image.Image) -> Image.Image:
         # Finder's own label placement: centred, just under the icon box
         ty = ICON_Y + ICON_BOX / 2 + 15
         tw = f.getlength(label)
-        d.rounded_rectangle([s(cx) - tw / 2 - s(5), s(ty) - s(11.5),
-                             s(cx) + tw / 2 + s(5), s(ty) + s(3.5)],
-                            radius=s(4), fill=rgba(BLUE, 0.85))
-        d.text((s(cx), s(ty)), label, font=f, fill=rgba(INK, 1.0), anchor="ms")
+        pill = [s(cx) - tw / 2 - s(12), s(ty) - s(14.0),
+                s(cx) + tw / 2 + s(12), s(ty) + s(6.0)]
+        d.rounded_rectangle(pill, radius=s(8), fill=rgba((255, 255, 255), 0.96), outline=rgba((220, 226, 238), 1.0),
+                            width=max(1, round(s(1.0))))
+        d.text((s(cx), s(ty) + s(0.2)), label, font=f, fill=rgba((20, 22, 28), 1.0), anchor="ms")
 
-    # the icon footprint Finder reserves, so collisions are obvious
-    for cx in (ICON1_X, ICON2_X):
-        b = [s(cx - ICON_BOX / 2), s(ICON_Y - ICON_BOX / 2),
-             s(cx + ICON_BOX / 2), s(ICON_Y + ICON_BOX / 2)]
-        d.rectangle(b, outline=(255, 0, 128, 110), width=max(1, round(s(0.75))))
     return img
 
 

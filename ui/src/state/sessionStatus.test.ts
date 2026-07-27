@@ -23,6 +23,10 @@ describe("isSessionStatus — the wire contract's five strings, nothing else", (
 });
 
 describe("statusPresentation — status -> colour / motion / label", () => {
+  it("labels the thinking state as Working...", () => {
+    expect(statusPresentation("thinking").label).toBe("Working...");
+  });
+
   it("maps every one of the five states to a distinct colour token", () => {
     const colors = SESSION_STATUSES.map((s) => statusPresentation(s).colorVar);
     expect(new Set(colors).size).toBe(SESSION_STATUSES.length);

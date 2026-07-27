@@ -1,13 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   GLOBAL_DEFAULT_ENGINE_KEY,
-  PRESSURE_THRESHOLD,
   UNGROUPED_SESSION_ID,
   cycleEngine,
   defaultEngineSettingKey,
   deserializeLayout,
   initialSessionsState,
-  isUnderPressure,
   resolveDefaultEngine,
   serializeLayout,
   sessionsReducer,
@@ -309,6 +307,19 @@ describe("sessionsReducer — layout/restored", () => {
   });
 });
 
+describe("sessionsReducer — layout/lazyRestored", () => {
+  it("appends a later session in persisted order without stealing focus", () => {
+    const first = { ...tab("first", "p1"), group: "g1" };
+    const second = { ...tab("second", "p1"), group: "g2" };
+    const before = { ...initialSessionsState, tabs: [first], activeTabId: first.id };
+
+    const next = sessionsReducer(before, { type: "layout/lazyRestored", tabs: [second] });
+
+    expect(next.tabs.map((item) => item.id)).toEqual(["first", "second"]);
+    expect(next.activeTabId).toBe("first");
+  });
+});
+
 describe("tabsByProject", () => {
   it("groups tabs by project preserving first-seen project order", () => {
     const tabs = [tab("a", "p1"), tab("b", "p2"), tab("c", "p1")];
@@ -316,18 +327,6 @@ describe("tabsByProject", () => {
     expect(groups.map((g) => g.project)).toEqual(["p1", "p2"]);
     expect(groups[0].tabs.map((t) => t.id)).toEqual(["a", "c"]);
     expect(groups[1].tabs.map((t) => t.id)).toEqual(["b"]);
-  });
-});
-
-describe("isUnderPressure", () => {
-  it("is false at and below the threshold", () => {
-    const tabs = Array.from({ length: PRESSURE_THRESHOLD }, (_, i) => tab(String(i), "p1"));
-    expect(isUnderPressure(tabs)).toBe(false);
-  });
-
-  it("is true once past the threshold", () => {
-    const tabs = Array.from({ length: PRESSURE_THRESHOLD + 1 }, (_, i) => tab(String(i), "p1"));
-    expect(isUnderPressure(tabs)).toBe(true);
   });
 });
 

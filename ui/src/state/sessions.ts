@@ -187,6 +187,7 @@ export type SessionsAction =
   // one-shot `session_status` pull for a pane that just appeared.
   | { type: "tab/status"; id: string; status: SessionStatus }
   | { type: "layout/restored"; tabs: TabInfo[] }
+  | { type: "layout/lazyRestored"; tabs: TabInfo[] }
   // Auto-title from the first prompt (`autoTitle.ts`'s capture, fed from
   // `Terminal.tsx`'s real onData stream) — unlike `tab/renamed`, only ever
   // applies when the tab has no label yet (see the reducer case's own
@@ -356,6 +357,13 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
         activeTabId: state.activeTabId ?? action.tabs[0]?.id ?? null,
       };
 
+    case "layout/lazyRestored":
+      return {
+        ...state,
+        tabs: [...state.tabs, ...action.tabs],
+        activeTabId: state.activeTabId ?? action.tabs[0]?.id ?? null,
+      };
+
     default:
       return state;
   }
@@ -380,12 +388,6 @@ export function tabsByProject(tabs: TabInfo[]): Array<{ project: string; tabs: T
     map.get(tab.project)!.push(tab);
   }
   return order.map((project) => ({ project, tabs: map.get(project)! }));
-}
-
-/** DESIGN 3.2 / PLAN.md Task 5.2: machine-pressure badge past 6 live sessions. */
-export const PRESSURE_THRESHOLD = 6;
-export function isUnderPressure(tabs: TabInfo[]): boolean {
-  return tabs.length > PRESSURE_THRESHOLD;
 }
 
 /** Settings-table keys (Task 5.2's "your call on key scheme"). */

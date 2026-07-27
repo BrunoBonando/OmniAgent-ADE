@@ -27,9 +27,6 @@
 // travelling through. High z-index because the sidebar is its own stacking
 // context.
 //
-// Type is split on purpose: machine facts (path, branch, name, engines) in
-// the app's mono face, the human sentence in the sans face. It's the same
-// split the terminal itself makes — what the computer says vs what we say.
 import { ENGINE_COLOR } from "../theme";
 import type { SessionCardModel } from "../state/sessionHoverCard";
 import SessionStatusLight from "./SessionStatusLight";
@@ -81,8 +78,6 @@ export default function SessionHoverCard({ model, anchor }: SessionHoverCardProp
           </span>
         )}
       </div>
-
-      <p className="session-card-explain">{model.status.explanation}</p>
 
       {/* Unlabelled rows, like the reference: a `~/` path, a `⑂` branch and
           a session name each say what they are, and field labels would eat

@@ -4,11 +4,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import "./App.css";
 import Sidebar from "./components/Sidebar";
+import type { DormantSession } from "./components/Sidebar";
 import Workspace from "./components/Workspace";
 import CommandPalette from "./components/CommandPalette";
 import CodeReviewPanel from "./components/CodeReviewPanel";
 import AppChrome from "./components/AppChrome";
 import NewSessionModal from "./components/NewSessionModal";
+import NewWorkspaceModal from "./components/NewWorkspaceModal";
+import StartupScreen from "./components/StartupScreen";
 import { NewTerminalModal } from "./components/NewTerminalModal";
 import ClosePaneConfirm from "./components/ClosePaneConfirm";
 import BrainMap from "./map/BrainMap";
@@ -33,6 +36,7 @@ import {
   sessionsReducer,
   tabDisplayLabel,
   type Engine,
+  type PersistedTab,
   type ProjectInfo,
   type TabInfo,
 } from "./state/sessions";
@@ -89,6 +93,20 @@ import {
 import { agentsReducer, initialAgentsState, type Agent } from "./state/agents";
 
 type View = "workspace" | "map";
+type StartupPhase = "booting" | "choosing-workspace" | "workspace-active";
+
+function persistedGroup(tab: PersistedTab): string {
+  return tab.group ?? UNGROUPED_SESSION_ID;
+}
+
+function persistedSessionKey(project: string, group: string): string {
+  return `${project}:${group}`;
+}
+
+function serializeLiveAndDormantTabs(live: TabInfo[], dormant: PersistedTab[]): string {
+  const liveLayout = JSON.parse(serializeLayout(live)) as { tabs: PersistedTab[] };
+  return JSON.stringify({ tabs: [...liveLayout.tabs, ...dormant] });
+}
 
 /** Task 8.1: how often `App.tsx` polls `ingestion_status` — PLAN.md's own
  * cadence ("called every ~2s from the frontend while ingestion runs"). This
@@ -119,6 +137,13 @@ function findSessionGroup(
 
 function App() {
   const [state, dispatch] = useReducer(sessionsReducer, initialSessionsState);
+  const [startupPhase, setStartupPhase] = useState<StartupPhase>("booting");
+  const [persistedTabs, setPersistedTabs] = useState<PersistedTab[]>([]);
+  const [restoringGroupKey, setRestoringGroupKey] = useState<string | null>(null);
+  const [requestedGroupKey, setRequestedGroupKey] = useState<string | null>(null);
+  const [restoreErrors, setRestoreErrors] = useState<Record<string, string>>({});
+  const restoredGroupsRef = useRef(new Set<string>());
+  const restoringGroupRef = useRef<string | null>(null);
   const [agentState, agentDispatch] = useReducer(agentsReducer, initialAgentsState);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -321,7 +346,7 @@ function App() {
     })();
   }, []);
 
-  // ---- boot: load the sidebar's project list + restore the last layout --
+  // ---- boot: load metadata only; terminals wait for workspace selection --
   useEffect(() => {
     let cancelled = false;
 
@@ -353,85 +378,26 @@ function App() {
       // `state/notifications.ts`'s persistence note — "somewhere else"
       // includes "quit for the night", and the reference panel's own rows
       // read "3 days ago"). Best effort: a failed read just starts empty.
-      try {
-        const rawNotifications = await settingsGet(NOTIFICATIONS_SETTING_KEY);
-        const entries = deserializeNotifications(rawNotifications);
-        if (!cancelled && entries.length > 0) {
-          notificationsDispatch({ type: "notifications/restored", entries });
-        }
-      } catch (err) {
-        console.error("failed to restore notifications", err);
-      } finally {
-        notificationsRestoredRef.current = true;
-      }
+      void settingsGet(NOTIFICATIONS_SETTING_KEY)
+        .then((rawNotifications) => {
+          const entries = deserializeNotifications(rawNotifications);
+          if (!cancelled && entries.length > 0) {
+            notificationsDispatch({ type: "notifications/restored", entries });
+          }
+        })
+        .catch((err) => console.error("failed to restore notifications", err))
+        .finally(() => {
+          notificationsRestoredRef.current = true;
+        });
 
       try {
         const raw = await settingsGet(LAYOUT_SETTING_KEY);
-        const persisted = deserializeLayout(raw);
-        const restored: TabInfo[] = [];
-        for (const t of persisted) {
-          try {
-            const briefing = t.engine === "claude" ? await getBriefing(t.project) : undefined;
-            // THE session-restore wiring (2026-07-26). `t.id` is the id this
-            // pane's session had before the app closed; handing it back as
-            // `restoreId` is what lets the backend reattach to the engine
-            // still running inside its tmux session — the same live Claude
-            // conversation / shell, scrollback and all — instead of spawning
-            // a new one. Absent (a layout written before ids were persisted,
-            // or an id `deserializeLayout` rejected) it is simply not sent,
-            // which is exactly the old fresh-spawn behaviour.
-            //
-            // `info.restored` is what actually happened, and it is NOT
-            // assumed: a `restoreId` whose tmux session is gone (first
-            // launch after a reboot, tmux uninstalled) comes back
-            // `restored: false` with a perfectly good fresh session, and the
-            // pane must look and behave identically either way.
-            let info;
-            try {
-              info = await sessionCreate(t.project, t.engine, t.cwd, briefing, t.id);
-            } catch (restoreErr) {
-              // A rejected restore must never cost the user the pane. The
-              // only ways `session_create` fails *because of* the id are an
-              // id this build considers valid but the backend doesn't, or
-              // one naming a session already live in this app — both mean
-              // "you can't reattach", never "you can't have a terminal". Try
-              // once more as a plain fresh spawn before giving up.
-              if (t.id === undefined) throw restoreErr;
-              console.error(`failed to reattach session ${t.id}, starting it fresh instead`, restoreErr);
-              info = await sessionCreate(t.project, t.engine, t.cwd, briefing);
-            }
-            restored.push({
-              id: info.id,
-              project: info.project,
-              engine: t.engine,
-              cwd: info.cwd,
-              createdAt: info.created,
-              label: t.label,
-              themeId: t.themeId,
-              // The pane's session (pane group) — restored alongside its
-              // label/theme so the sidebar's project -> session -> pane tree
-              // comes back exactly as the user left it. Absent for layouts
-              // written before groups existed, which is handled by
-              // `sessionGroups.ts`'s implicit group rather than by inventing
-              // one here.
-              group: t.group,
-              // …and its NAME, so a relaunch comes back with the sessions
-              // the user named rather than a fresh "Session 1, 2, 3…".
-              groupLabel: t.groupLabel,
-              restored: info.restored === true,
-            });
-          } catch (err) {
-            // If a session can't be started at all (e.g. that CLI got
-            // uninstalled), skip it rather than blocking the rest of the
-            // layout from restoring.
-            console.error("failed to restore tab", t, err);
-          }
-        }
-        if (!cancelled) dispatch({ type: "layout/restored", tabs: restored });
+        if (!cancelled) setPersistedTabs(deserializeLayout(raw));
       } catch (err) {
-        console.error("failed to restore layout", err);
+        console.error("failed to load saved layout metadata", err);
       } finally {
         restoredRef.current = true;
+        if (!cancelled) setStartupPhase("choosing-workspace");
       }
     })();
 
@@ -444,8 +410,8 @@ function App() {
   // ---- persist layout whenever the open tabs change (post-restore only) -
   useEffect(() => {
     if (!restoredRef.current) return;
-    void settingsSet(LAYOUT_SETTING_KEY, serializeLayout(state.tabs));
-  }, [state.tabs]);
+    void settingsSet(LAYOUT_SETTING_KEY, serializeLiveAndDormantTabs(state.tabs, persistedTabs));
+  }, [state.tabs, persistedTabs]);
 
   // ---- …and the notification list, same shape, same guard ---------------
   useEffect(() => {
@@ -599,17 +565,130 @@ function App() {
     [state.projects, closedProjectIds],
   );
 
-  // ---- default the sidebar's "current project" once projects arrive -----
-  useEffect(() => {
-    if (selectedProjectId === null && visibleProjects.length > 0) {
-      setSelectedProjectId(visibleProjects[0].id);
-    }
-  }, [visibleProjects, selectedProjectId]);
-
   const selectedProject = useMemo(
     () => state.projects.find((p) => p.id === selectedProjectId) ?? null,
     [state.projects, selectedProjectId],
   );
+
+  const restoreSession = useCallback(
+    async (projectId: string, group: string) => {
+      const key = persistedSessionKey(projectId, group);
+      if (restoredGroupsRef.current.has(key) || restoringGroupRef.current !== null) return;
+      const saved = persistedTabs.filter(
+        (tab) => tab.project === projectId && persistedGroup(tab) === group,
+      );
+      if (saved.length === 0) return;
+
+      restoredGroupsRef.current.add(key);
+      restoringGroupRef.current = key;
+      setRequestedGroupKey(key);
+      setRestoringGroupKey(key);
+      setRestoreErrors((errors) => {
+        const next = { ...errors };
+        delete next[key];
+        return next;
+      });
+
+      const restored: TabInfo[] = [];
+      try {
+        for (const tab of saved) {
+          const briefing = tab.engine === "claude" ? await getBriefing(tab.project) : undefined;
+          let info;
+          try {
+            info = await sessionCreate(tab.project, tab.engine, tab.cwd, briefing, tab.id);
+          } catch (restoreErr) {
+            if (tab.id === undefined) throw restoreErr;
+            info = await sessionCreate(tab.project, tab.engine, tab.cwd, briefing);
+          }
+          restored.push({
+            id: info.id,
+            project: info.project,
+            engine: tab.engine,
+            cwd: info.cwd,
+            createdAt: info.created,
+            label: tab.label,
+            themeId: tab.themeId,
+            group: tab.group,
+            groupLabel: tab.groupLabel,
+            restored: info.restored === true,
+          });
+        }
+        dispatch({ type: "layout/lazyRestored", tabs: restored });
+        dispatch({ type: "tab/activated", id: restored[0].id });
+        setPersistedTabs((tabs) =>
+          tabs.filter((tab) => !(tab.project === projectId && persistedGroup(tab) === group)),
+        );
+      } catch (err) {
+        restoredGroupsRef.current.delete(key);
+        if (restored.length > 0) {
+          const completed = saved.slice(0, restored.length);
+          dispatch({ type: "layout/lazyRestored", tabs: restored });
+          dispatch({ type: "tab/activated", id: restored[0].id });
+          setPersistedTabs((tabs) => tabs.filter((tab) => !completed.includes(tab)));
+        }
+        setRestoreErrors((errors) => ({ ...errors, [key]: String(err) }));
+      } finally {
+        restoringGroupRef.current = null;
+        setRestoringGroupKey((current) => (current === key ? null : current));
+      }
+    },
+    [persistedTabs],
+  );
+
+  const selectStartupWorkspace = useCallback(
+    (project: ProjectInfo) => {
+      setSelectedProjectId(project.id);
+      setStartupPhase("workspace-active");
+      const first = persistedTabs.find((tab) => tab.project === project.id);
+      if (first) void restoreSession(project.id, persistedGroup(first));
+    },
+    [persistedTabs, restoreSession],
+  );
+
+  const selectWorkspace = useCallback(
+    (project: ProjectInfo) => {
+      setSelectedProjectId(project.id);
+      if (state.tabs.some((tab) => tab.project === project.id)) return;
+      const first = persistedTabs.find((tab) => tab.project === project.id);
+      if (first) void restoreSession(project.id, persistedGroup(first));
+    },
+    [persistedTabs, restoreSession, state.tabs],
+  );
+
+  const dormantSessions = useMemo<DormantSession[]>(() => {
+    if (selectedProjectId === null) return [];
+    const sessions = new Map<string, DormantSession>();
+    for (const tab of persistedTabs) {
+      if (tab.project !== selectedProjectId) continue;
+      const group = persistedGroup(tab);
+      const existing = sessions.get(group);
+      if (existing) {
+        existing.paneCount += 1;
+      } else {
+        sessions.set(group, {
+          project: tab.project,
+          group,
+          label: tab.groupLabel?.trim() || `Session ${sessions.size + 1}`,
+          cwd: tab.cwd,
+          paneCount: 1,
+        });
+      }
+    }
+    return [...sessions.values()];
+  }, [persistedTabs, selectedProjectId]);
+
+  const requestedDormantSession = dormantSessions.find(
+    (session) => persistedSessionKey(session.project, session.group) === requestedGroupKey,
+  );
+  const sessionRestoreState =
+    requestedGroupKey &&
+    requestedDormantSession &&
+    (restoringGroupKey === requestedGroupKey || restoreErrors[requestedGroupKey])
+      ? {
+          status: (restoringGroupKey === requestedGroupKey ? "loading" : "error") as "loading" | "error",
+          onRetry: () => void restoreSession(requestedDormantSession.project, requestedDormantSession.group),
+        }
+      : null;
 
   // The one place a session actually gets spawned: `engine === "claude"`
   // fetches its briefing first (the zero-config MCP/briefing wiring
@@ -743,8 +822,7 @@ function App() {
       // available"), so refuse the 9th pane instead of spawning a live
       // session the grid has no approved shape for. Per SESSION, not per
       // project or per app: a workspace can hold as many 8-pane sessions as
-      // the machine will take (`isUnderPressure` is the softer, advisory
-      // warning about that).
+      // the machine will take.
       const inSession = state.tabs.filter(
         (t) => t.project === project.id && (t.group ?? UNGROUPED_SESSION_ID) === existingGroup,
       ).length;
@@ -917,6 +995,8 @@ function App() {
     (project: ProjectInfo) => {
       void reloadProjects();
       setSelectedProjectId(project.id);
+      setStartupPhase("workspace-active");
+      setNewWorkspaceOpen(false);
       // `add_project` upserts by folder basename, so re-adding a closed
       // folder returns the id still sitting in the closed set — un-hide it,
       // the same contract every other "opens the workspace" path honours.
@@ -1467,6 +1547,26 @@ function App() {
   // its tree from, so the two can never disagree.
   const closingTab = closingTabId ? (state.tabs.find((t) => t.id === closingTabId) ?? null) : null;
 
+  if (startupPhase !== "workspace-active") {
+    return (
+      <>
+        <StartupScreen
+          loading={startupPhase === "booting" || needsAuthGate !== false}
+          projects={visibleProjects}
+          onSelectWorkspace={selectStartupWorkspace}
+          onStartFromScratch={() => setNewWorkspaceOpen(true)}
+        />
+        {needsAuthGate === true && <AuthGate onResolved={handleAuthGateResolved} />}
+        {newWorkspaceOpen && (
+          <NewWorkspaceModal
+            onCreate={handleWorkspaceCreated}
+            onClose={() => setNewWorkspaceOpen(false)}
+          />
+        )}
+      </>
+    );
+  }
+
   return (
     <div className="app-shell">
       <AppChrome
@@ -1496,7 +1596,7 @@ function App() {
           tabs={state.tabs}
           activeTabId={state.activeTabId}
           selectedProjectId={selectedProjectId}
-          onSelectProject={(p) => setSelectedProjectId(p.id)}
+          onSelectProject={selectWorkspace}
           onNewTabInProject={(p) => void requestNewTab(p)}
           onOpenNewTerminal={() => {
             // "New terminal" in the workspace the sidebar is showing — the
@@ -1527,6 +1627,8 @@ function App() {
           authSignedIn={authSignedIn}
           authPersona={authPersona}
           onResetAuthGate={resetAuthGate}
+          dormantSessions={dormantSessions}
+          onSelectDormantSession={(session) => void restoreSession(session.project, session.group)}
         />
         <Workspace
           projects={state.projects}
@@ -1546,6 +1648,7 @@ function App() {
           onStartSession={(p, layout, goal) => void handleQuickStart(p, layout, goal)}
           agentState={agentState}
           hidden={view !== "workspace"}
+          restoreState={sessionRestoreState}
         />
         <BrainMap
           projects={state.projects}

@@ -91,14 +91,7 @@ import EmptyWorkspace from "./EmptyWorkspace";
 import PaneHeader from "./PaneHeader";
 import Terminal from "./Terminal";
 import { isPaneHole, paneIds, swapPaneIds, syncPaneTree, type LayoutPreset, type PaneTree } from "../state/paneGrid";
-import {
-  isUnderPressure,
-  PRESSURE_THRESHOLD,
-  tabDisplayLabel,
-  type Engine,
-  type ProjectInfo,
-  type TabInfo,
-} from "../state/sessions";
+import { tabDisplayLabel, type Engine, type ProjectInfo, type TabInfo } from "../state/sessions";
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
 import { statusPresentation } from "../state/sessionStatus";
 import type { TerminalThemeId } from "../lib/terminalThemes";
@@ -414,6 +407,10 @@ interface WorkspaceProps {
   onStartSession?: (project: ProjectInfo, layout: LayoutPreset, goal: string) => void;
   agentState: AgentsState;
   hidden: boolean;
+  restoreState?: {
+    status: "loading" | "error";
+    onRetry: () => void;
+  } | null;
 }
 
 export default function Workspace({
@@ -432,6 +429,7 @@ export default function Workspace({
   onStartSession = () => {},
   agentState,
   hidden,
+  restoreState = null,
 }: WorkspaceProps) {
   const projectLabel = useCallback(
     (id: string) => projects.find((p) => p.id === id)?.label ?? id,
@@ -443,7 +441,6 @@ export default function Workspace({
   // below, and exactly one of them is displayed.
   const grouped = groupTabsBySession(tabs, activeTabId);
   const selectedHasTabs = grouped.some((g) => g.project === selectedProjectId);
-  const underPressure = isUnderPressure(tabs);
   // Which session is on screen for the project the sidebar has selected.
   // Derived, never stored: it follows the focused pane, and falls back to
   // the project's first session when focus is elsewhere (selecting a
@@ -453,13 +450,6 @@ export default function Workspace({
 
   return (
     <div className="workspace" style={{ display: hidden ? "none" : "flex" }}>
-      {underPressure && (
-        <div className="pressure-warning" role="status">
-          {tabs.length} live sessions open — past the {PRESSURE_THRESHOLD}-session comfort line. Consider
-          closing a few before opening more.
-        </div>
-      )}
-
       {grouped.flatMap((p) =>
         p.sessions.map((session) => {
           // Two conditions, both required: this is the selected workspace,
@@ -499,7 +489,19 @@ export default function Workspace({
         }),
       )}
 
-      {!selectedHasTabs && (
+      {restoreState && (
+        <div className="session-restore-state" role={restoreState.status === "error" ? "alert" : "status"}>
+          <span className="session-restore-logo" aria-hidden />
+          <p>{restoreState.status === "loading" ? "Loading session…" : "Couldn’t restore this terminal"}</p>
+          {restoreState.status === "error" && (
+            <button type="button" onClick={restoreState.onRetry}>
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+
+      {!selectedHasTabs && !restoreState && (
         <EmptyWorkspace
           project={projects.find((p) => p.id === selectedProjectId) ?? null}
           onStart={onStartSession}

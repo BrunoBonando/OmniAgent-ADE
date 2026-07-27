@@ -132,6 +132,29 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
     tauriMocks.sessionWriteMock.mockClear();
   });
 
+  it("does not show a pressure warning when more than six terminals are open", async () => {
+    const p1 = project("p1");
+    const tabs = Array.from({ length: 7 }, (_, index) => tab(String(index), "p1"));
+
+    const { container } = render(
+      <Workspace
+        projects={[p1]}
+        tabs={tabs}
+        activeTabId="0"
+        selectedProjectId="p1"
+        onActivateTab={noop}
+        onCloseTab={noop}
+        onNewTabInProject={noop}
+        onRenameTab={noop}
+        agentState={initialAgentsState}
+        hidden={false}
+      />,
+    );
+
+    await waitFor(() => expect(container.querySelectorAll(".pane-window")).toHaveLength(7));
+    expect(container.querySelector(".pressure-warning")).toBeNull();
+  });
+
   it("re-fits and refocuses a project's terminal after switching the selected project away and back", async () => {
     const p1 = project("p1");
     const p2 = project("p2");

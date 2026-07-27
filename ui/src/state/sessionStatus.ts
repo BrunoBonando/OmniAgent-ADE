@@ -135,7 +135,7 @@ export const STATUS_PRESENTATION: Record<SessionStatus, StatusPresentation> = {
   ),
   thinking: presentation(
     "thinking",
-    "Thinking",
+    "Working...",
     "Working on it — reasoning and writing a reply.",
     "--status-thinking",
     "sweep",
