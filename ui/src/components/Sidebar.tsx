@@ -427,6 +427,18 @@ export default function Sidebar({
     [reloadDegradationState],
   );
 
+  // Nav card counts and subtitles for the view toggle.
+  const allProjectTabs = selectedSessions.flatMap((s) => s.tabs);
+  const terminalCount = allProjectTabs.length;
+  const awaitingCount = allProjectTabs.filter((t) => t.status === "awaiting_approval").length;
+  const fileCount = gitBadges.total;
+  const totalSessionCount = selectedSessions.length + dormantSessions.length;
+  const terminalSubtitle =
+    totalSessionCount === 0
+      ? "session restore"
+      : `${totalSessionCount} session${totalSessionCount !== 1 ? "s" : ""} · ${terminalCount} terminal${terminalCount !== 1 ? "s" : ""}`;
+  const fileSubtitle = fileCount > 0 ? `${fileCount} changed on main` : "git diff, editor, review";
+
   return (
     <aside className="sidebar">
       {/* The switcher and both popovers it can raise share one relatively
@@ -488,16 +500,14 @@ export default function Sidebar({
           onClick={() => onSetView?.("dashboard")}
           title="Dashboard"
         >
-          <Icon name="info" size={13} /> Dashboard
-        </button>
-        <button
-          role="tab"
-          aria-selected={view === "workspace"}
-          className={view === "workspace" ? "is-active" : ""}
-          onClick={() => onSetView?.("workspace")}
-          title="Terminals"
-        >
-          <Icon name="terminal" size={13} /> Terminals
+          <div className="sidebar-nav-icon-box">
+            <Icon name="chart" size={16} />
+          </div>
+          <div className="sidebar-nav-text">
+            <span className="sidebar-nav-title">Dashboard</span>
+            <span className="sidebar-nav-subtitle">activity, tokens, approvals</span>
+          </div>
+          {awaitingCount > 0 && <span className="sidebar-nav-count">{awaitingCount}</span>}
         </button>
         <button
           role="tab"
@@ -506,7 +516,29 @@ export default function Sidebar({
           onClick={() => onSetView?.("board")}
           title="Plan board"
         >
-          <Icon name="sparkle" size={13} /> Board
+          <div className="sidebar-nav-icon-box">
+            <Icon name="sparkle" size={16} />
+          </div>
+          <div className="sidebar-nav-text">
+            <span className="sidebar-nav-title">Board</span>
+            <span className="sidebar-nav-subtitle">backlog, sprint, timeline</span>
+          </div>
+        </button>
+        <button
+          role="tab"
+          aria-selected={view === "workspace"}
+          className={view === "workspace" ? "is-active" : ""}
+          onClick={() => onSetView?.("workspace")}
+          title="Terminals"
+        >
+          <div className="sidebar-nav-icon-box">
+            <Icon name="terminal" size={16} />
+          </div>
+          <div className="sidebar-nav-text">
+            <span className="sidebar-nav-title">Terminals</span>
+            <span className="sidebar-nav-subtitle">{terminalSubtitle}</span>
+          </div>
+          {terminalCount > 0 && <span className="sidebar-nav-count">{terminalCount}</span>}
         </button>
         <button
           role="tab"
@@ -515,7 +547,14 @@ export default function Sidebar({
           onClick={() => onSetView?.("files")}
           title="Files editor"
         >
-          <Icon name="files" size={13} /> Files
+          <div className="sidebar-nav-icon-box">
+            <Icon name="folder" size={16} />
+          </div>
+          <div className="sidebar-nav-text">
+            <span className="sidebar-nav-title">Files</span>
+            <span className="sidebar-nav-subtitle">{fileSubtitle}</span>
+          </div>
+          {fileCount > 0 && <span className="sidebar-nav-count">{fileCount}</span>}
         </button>
       </div>
 

@@ -1910,6 +1910,7 @@ function App() {
           tabs={state.tabs}
           activeTabId={state.activeTabId}
           analytics={usageAnalytics}
+          notifications={notifications}
           onOpenTerminals={() => setView("workspace")}
           onOpenBoard={() => setView("board")}
           onOpenFiles={() => setView("files")}

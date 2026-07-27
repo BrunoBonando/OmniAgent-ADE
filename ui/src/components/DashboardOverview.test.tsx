@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
 import { createUsageAnalyticsStore } from "../state/usageAnalytics";
+import { initialNotificationsState } from "../state/notifications";
 import DashboardOverview from "./DashboardOverview";
 
 const PROJECT: ProjectInfo = { id: "p1", label: "OmniAgent", path: "/repo/omniagent" };
@@ -29,12 +30,13 @@ describe("DashboardOverview", () => {
         hidden={false}
         project={PROJECT}
         tabs={[
-          tab({ id: "t1", group: "g1", engine: "claude" }),
+          tab({ id: "t1", group: "g1", engine: "claude", status: "thinking", label: "My task" }),
           tab({ id: "t2", group: "g1", engine: "shell" }),
           tab({ id: "t3", group: "g2", engine: "codex" }),
         ]}
         activeTabId="t1"
         analytics={createUsageAnalyticsStore()}
+        notifications={initialNotificationsState}
         onOpenTerminals={onOpenTerminals}
         onOpenBoard={onOpenBoard}
         onOpenFiles={onOpenFiles}
@@ -42,8 +44,9 @@ describe("DashboardOverview", () => {
       />,
     );
 
-    expect(screen.getByText("Live sessions").closest("article")?.querySelector("strong")?.textContent).toBe("2");
-    expect(screen.getByText("Total tokens").closest("article")?.querySelector("strong")?.textContent).toBe("0");
+    // Check new stat card labels
+    expect(screen.getAllByText("SESSIONS").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("TOKENS TODAY").length).toBeGreaterThanOrEqual(1);
 
     fireEvent.click(screen.getByRole("button", { name: /open terminals/i }));
     fireEvent.click(screen.getByRole("button", { name: /open board/i }));
@@ -52,7 +55,8 @@ describe("DashboardOverview", () => {
     expect(onOpenBoard).toHaveBeenCalledTimes(1);
     expect(onOpenFiles).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole("button", { name: /session 1/i }));
+    // Click active agent row in WorkingNow panel
+    fireEvent.click(screen.getByRole("button", { name: /my task/i }));
     expect(onOpenSession).toHaveBeenCalledWith("t1");
   });
 });

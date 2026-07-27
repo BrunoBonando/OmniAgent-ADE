@@ -14,6 +14,8 @@
 export type IconName =
   | "branch"
   | "files"
+  | "chart"
+  | "folder"
   | "compare"
   | "copy"
   | "undo"
@@ -52,6 +54,16 @@ const PATHS: Record<IconName, React.ReactNode> = {
       <path d="M15 2v4h4" />
       <path d="M3 7v13a2 2 0 0 0 2 2h9" />
     </>
+  ),
+  chart: (
+    <>
+      <rect x="3" y="12" width="4" height="8" rx="1" />
+      <rect x="10" y="7" width="4" height="13" rx="1" />
+      <rect x="17" y="3" width="4" height="17" rx="1" />
+    </>
+  ),
+  folder: (
+    <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
   ),
   compare: (
     <>
