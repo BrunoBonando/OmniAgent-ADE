@@ -1,19 +1,51 @@
 #!/bin/sh
 set -euo pipefail
 
-AUTH_FILE=".github/copilot-instructions.md"
+# Usage:
+#  scripts/sync-instructions.sh            # regenerate AGENTS/CLAUDE/CODEX/ANTIGRAVITY from .github/copilot-instructions.md
+#  scripts/sync-instructions.sh CLAUDE.md  # promote CLAUDE.md as authoritative and propagate to others (and update .github/copilot-instructions.md)
 
-if [ ! -f "$AUTH_FILE" ]; then
-  echo "Error: $AUTH_FILE not found" >&2
+DEFAULT_AUTH=".github/copilot-instructions.md"
+ALLOWED=("$DEFAULT_AUTH" AGENTS.md CLAUDE.md CODEX.md ANTIGRAVITY.md)
+
+src="$DEFAULT_AUTH"
+if [ $# -ge 1 ] && [ -n "$1" ]; then
+  src="$1"
+fi
+
+# validate source
+valid=false
+for a in "${ALLOWED[@]}"; do
+  if [ "$a" = "$src" ]; then
+    valid=true
+    break
+  fi
+done
+
+if [ "$valid" = false ]; then
+  echo "Error: source must be one of: ${ALLOWED[*]}" >&2
   exit 1
 fi
 
-for dst in AGENTS.md CLAUDE.md CODEX.md ANTIGRAVITY.md; do
-  echo "Generating $dst from $AUTH_FILE"
+if [ ! -f "$src" ]; then
+  echo "Error: source file $src not found" >&2
+  exit 1
+fi
+
+# read source content
+SRC_CONTENT=$(cat "$src")
+
+for dst in "${ALLOWED[@]}"; do
+  # skip writing the source file to itself
+  if [ "$dst" = "$src" ]; then
+    continue
+  fi
+
+  echo "Generating $dst from $src"
   {
-    echo "<!-- GENERATED from $AUTH_FILE — do not edit directly. Update $AUTH_FILE instead. -->"
+    echo "<!-- GENERATED from $src — do not edit directly. To change this content, edit $src or run: scripts/sync-instructions.sh $src -->"
     echo
-    cat "$AUTH_FILE"
+    echo "$SRC_CONTENT"
   } > "/tmp/generated_$dst"
 
   if [ ! -f "$dst" ] || ! cmp -s "/tmp/generated_$dst" "$dst"; then
@@ -24,3 +56,23 @@ for dst in AGENTS.md CLAUDE.md CODEX.md ANTIGRAVITY.md; do
     rm "/tmp/generated_$dst"
   fi
 done
+
+# If an agent file was used as source (not the default), also update the authoritative file
+if [ "$src" != "$DEFAULT_AUTH" ]; then
+  echo "Updating authoritative file $DEFAULT_AUTH from $src"
+  {
+    echo "<!-- GENERATED from $src — promoted as authoritative by sync script. Edit $src to change. -->"
+    echo
+    echo "$SRC_CONTENT"
+  } > "/tmp/generated_auth.md"
+
+  if [ ! -f "$DEFAULT_AUTH" ] || ! cmp -s "/tmp/generated_auth.md" "$DEFAULT_AUTH"; then
+    mv "/tmp/generated_auth.md" "$DEFAULT_AUTH"
+    git add "$DEFAULT_AUTH" || true
+    echo "$DEFAULT_AUTH updated and staged"
+  else
+    rm "/tmp/generated_auth.md"
+  fi
+fi
+
+# done
