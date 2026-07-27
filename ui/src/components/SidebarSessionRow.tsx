@@ -232,7 +232,23 @@ export default function SidebarSessionRow({
             }}
           />
         ) : (
-          <button className="session-row-main" onClick={onActivate}>
+          <button
+            className="session-row-main"
+            onClick={onActivate}
+            // Explicit, so the button's accessible name is THIS rather than
+            // computed from its text content (fix-round, 2026-07-27, round
+            // 2): without it, removing `aria-hidden` from `.session-row-dots`
+            // (below — needed so each dot's own tooltip actually reaches
+            // assistive tech) let every dot's `aria-label` flow upward into
+            // this button's name too, so focusing/activating a session
+            // announced a multi-sentence dump of every pane's status on top
+            // of the name and branch. Mirrors exactly what was visually
+            // read before that dot work: the name, plus "Branch <branch>"
+            // (the same string `.session-row-branch` below labels itself
+            // with) when there is one — never the layout badge, which is
+            // redundant with "how many dots did you just count".
+            aria-label={branch ? `${session.label} Branch ${branch}` : session.label}
+          >
             <span className="session-row-top">
               <span className="session-row-name" onDoubleClick={startRename} title="Double-click to rename">
                 {session.label}
@@ -253,9 +269,9 @@ export default function SidebarSessionRow({
                 as two direct children of this column-flex button they were
                 each claiming their own row instead. No `aria-hidden` here:
                 each dot below carries its own `role="img"`/`aria-label`
-                (the same fields `SessionStatusLight` uses), and a hidden
-                ancestor can suppress an accessible name on its children in
-                some AT combinations. */}
+                (the same fields `SessionStatusLight` uses); the button's own
+                explicit `aria-label` above (round 2 of this fix) is what
+                keeps that from also becoming part of THIS button's name. */}
             <span className="session-row-meta">
               <span className="session-row-dots">
                 {session.tabs.map((t) => {

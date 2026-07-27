@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SidebarSessionRow, { SESSION_CARD_DELAY_MS } from "./SidebarSessionRow";
 import { groupTabsBySession } from "../state/sessionGroups";
@@ -149,6 +149,44 @@ describe("SidebarSessionRow — status dots and the layout badge (Task 4 redesig
     // `aria-hidden` now that the dots inside it carry real labels.
     const { container } = setup();
     expect(container.querySelector(".session-row-dots")!.getAttribute("aria-hidden")).toBeNull();
+  });
+
+  // Fix-round, 2026-07-27, round 2: removing `aria-hidden` from
+  // `.session-row-dots` (above) let each dot's own `aria-label` flow UP into
+  // `.session-row-main`'s accessible name too, since that button had no
+  // `aria-label` of its own to stop the browser computing one from its text
+  // content — so activating/focusing a session announced a multi-sentence
+  // dump of every pane's status. `getByRole`'s `name` option matches the
+  // computed accessible name via the same accname algorithm a screen reader
+  // uses, so an EXACT match on just "Session 1 Branch main" — with four
+  // panes disagreeing on status behind it — is itself the proof nothing
+  // leaked through: if any dot's text had joined the name, this exact
+  // string wouldn't match at all.
+  it("keeps the activate button's accessible name free of any dot's status text", () => {
+    const { container } = setup({
+      session: session([
+        tab({ id: "a", status: "thinking" }),
+        tab({ id: "b", status: "awaiting_approval" }),
+        tab({ id: "c", status: "ready" }),
+        tab({ id: "d", status: undefined }),
+      ]),
+    });
+    expect(within(container).getByRole("button", { name: "Session 1 Branch main" })).toHaveClass(
+      "session-row-main",
+    );
+    // Belt and suspenders: no button anywhere in the row has a status
+    // sentence anywhere in its name, exact match or not.
+    expect(
+      within(container).queryByRole("button", { name: /Thinking|Needs approval|Ready|Starting/ }),
+    ).toBeNull();
+  });
+
+  it("falls back to the session name alone when there is no branch to append", () => {
+    useGitBranchMock.mockReturnValue(null);
+    const { container } = setup({
+      session: session([tab({ id: "a", status: "error" })]),
+    });
+    expect(within(container).getByRole("button", { name: "Session 1" })).toHaveClass("session-row-main");
   });
 });
 
