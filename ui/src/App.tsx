@@ -83,6 +83,7 @@ import {
   sessionCreate,
   sessionKill,
   sessionStatus,
+  sessionWrite,
   settingsGet,
   settingsSet,
   type IngestionStatus,
@@ -502,6 +503,17 @@ function App() {
     };
   });
 
+  // Session prompt (design §3 New session): delivered to the first agent
+  // pane after its first status event — the engine's CLI is accepting input
+  // by the time it starts reporting status. Written WITHOUT a trailing
+  // newline so nothing auto-executes; the user reviews and presses Enter.
+  // `handleSessionCreated` queues tabId -> prompt here; the status-event
+  // callback below delivers and deletes it, so a second status event for the
+  // same tab finds nothing queued and writes nothing twice.
+  // ponytail: if an engine ever swallows early stdin, gate this on
+  // status === "ready" instead of first-event.
+  const pendingFirstPrompt = useRef<Map<string, string>>(new Map());
+
   // `session-status:{id}` (founder brief, 2026-07-26): the five-state light
   // AND — since this dispatch — the notification feed. Fires only on a
   // genuine transition. `payload.notify` is the backend's precomputed
@@ -512,6 +524,12 @@ function App() {
   usePerSessionEvent<SessionStatusEvent>(tabIds, "session-status:", (id, payload) => {
     if (!payload || !isSessionStatus(payload.status)) return;
     dispatch({ type: "tab/status", id, status: payload.status });
+
+    const queuedPrompt = pendingFirstPrompt.current.get(id);
+    if (queuedPrompt !== undefined) {
+      pendingFirstPrompt.current.delete(id);
+      void sessionWrite(id, queuedPrompt);
+    }
 
     const { tabs, projects, activeTabId, selectedProjectId: onScreenProject, view: currentView } =
       notifyContextRef.current;
@@ -972,6 +990,17 @@ function App() {
 
       if (created.length > 0) {
         dispatch({ type: "tabs/opened_bulk", tabs: created });
+      }
+
+      // Task 11: the dialog's "what are you doing?" answer becomes the
+      // first thing typed into the session's lead terminal — the first
+      // spawned pane that isn't a bare shell, since a shell has no agent CLI
+      // to hand a prompt to. Queued here, delivered by the status-event
+      // callback above once that pane reports its first status.
+      const promptText = prompt.trim();
+      if (promptText.length > 0) {
+        const target = created.find((t) => t.engine !== "shell");
+        if (target) pendingFirstPrompt.current.set(target.id, promptText);
       }
 
       if (failed.length > 0) {
