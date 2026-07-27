@@ -336,25 +336,10 @@ pub fn run() {
                     let _ = status_handle.emit(&format!("session-status:{}", event.id), event);
                 });
 
-            // Founder brief (same day): "Every new claude or terminal or
-            // codex session, must be stored, if not properly closed… Maybe
-            // it's nice to keep the session as tmux, regardless of agent."
-            // `default_tmux` resolves tmux once (against the user's real
-            // shell PATH — a GUI-launched .app has no Homebrew on its own
-            // PATH) and writes this app's private tmux config. `None` here
-            // means tmux simply isn't installed, which `SessionManager`
-            // handles by spawning engines directly, exactly as it did before
-            // persistence existed — never an error, never a blocked session.
-            let tmux = sessions::default_tmux(&data_dir);
-            if tmux.is_none() {
-                eprintln!(
-                    "omniagent-ade: PTY daemon not found — sessions will run directly and will \
-                     NOT survive the app closing"
-                );
-            }
             app.manage(
+                // Sessions are deliberately direct: one OS PTY per pane,
+                // with no daemon, attach client, or screen snapshot layer.
                 SessionManager::new(data_dir.clone(), sink)
-                    .with_tmux(tmux)
                     .with_end_hook(end_hook)
                     .with_attention_sink(attention_sink)
                     .with_status_sink(status_sink),
@@ -426,7 +411,6 @@ pub fn run() {
             commands::session_write,
             commands::session_resize,
             commands::session_kill,
-            commands::pty_daemon_status,
             commands::session_status,
             commands::session_has_working_tasks,
             commands::session_stop_working_tasks,

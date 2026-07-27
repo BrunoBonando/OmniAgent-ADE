@@ -162,6 +162,19 @@ vi.mock("./map/BrainMap", () => ({
 }));
 vi.mock("./onboarding/FirstRun", () => ({ default: () => null }));
 vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
+vi.mock("./components/StartupScreen", () => ({
+  default: function StartupScreenStub(props: {
+    onSelectWorkspace: (project: ProjectInfo) => void;
+    onStartFromScratch: () => void;
+  }) {
+    return (
+      <div>
+        <button onClick={() => props.onSelectWorkspace(NEW_PROJECT)}>select-workspace</button>
+        <button onClick={props.onStartFromScratch}>start-from-scratch</button>
+      </div>
+    );
+  },
+}));
 
 const { default: App } = await import("./App");
 
@@ -293,6 +306,7 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
     tauriMocks.agentCheckInstalledMock.mockResolvedValue(["claude", "shell"]);
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "select-workspace" }));
     fireEvent.click(await screen.findByRole("button", { name: "create-workspace" }));
 
     await waitFor(() => expect(screen.getByTestId("new-session-modal")).toBeInTheDocument());
@@ -316,6 +330,7 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
     );
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "select-workspace" }));
     fireEvent.click(await screen.findByRole("button", { name: "create-workspace" }));
     fireEvent.click(await screen.findByRole("button", { name: "create-session" }));
 
@@ -340,6 +355,7 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
     tauriMocks.agentCheckInstalledMock.mockResolvedValue(["claude", "shell"]);
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "select-workspace" }));
     fireEvent.click(await screen.findByRole("button", { name: "new-tab" }));
     await waitFor(() => expect(tauriMocks.sessionCreateMock).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "open-new-terminal" }));
@@ -347,11 +363,12 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
     expect(await screen.findByTestId("last-selected-agents")).toHaveTextContent("claude,shell");
   });
 
-  it("triggers agent installation and handles progress callback", async () => {
+  it("opens a shell pane and runs the install command when Install is clicked", async () => {
     // Set up: copilot is not installed
     tauriMocks.agentCheckInstalledMock.mockResolvedValue(["claude", "shell"]);
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "select-workspace" }));
 
     // Wait for initial agent check
     await waitFor(() => {
@@ -365,46 +382,32 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
     await waitFor(() => expect(tauriMocks.sessionCreateMock).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "open-new-terminal" }));
 
-    // Trigger agent installation
+    // Trigger install flow
     fireEvent.click(await screen.findByRole("button", { name: "install-agent" }));
 
-    // Verify agentInstall was called with the agent
+    // Installs now run inside a shell pane in-session.
     await waitFor(() => {
-      expect(tauriMocks.agentInstallMock).toHaveBeenCalledWith("copilot");
-    });
-
-    // The listener has to be in place BEFORE the install can report anything.
-    await waitFor(() => {
-      expect(tauriMocks.onAgentInstallProgressMock).toHaveBeenCalledWith(
-        "copilot",
-        expect.any(Function)
+      expect(tauriMocks.sessionCreateMock).toHaveBeenCalledWith(
+        "fresh",
+        "shell",
+        expect.any(String),
+        undefined,
       );
     });
 
-    // What actually matters: the "completed" event (fired by the agentInstall
-    // mock, the way the backend fires it) moves copilot out of `installing`
-    // and into `installed`. That transition is what un-dims the pane, so
-    // assert it rather than asserting that a mock was called.
     await waitFor(() => {
-      expect(screen.getByTestId("installed-agents")).toHaveTextContent(
-        "claude,copilot,shell"
+      expect(tauriMocks.sessionWriteMock).toHaveBeenCalledWith(
+        "shell-session",
+        expect.stringContaining("npm install -g @github/copilot"),
       );
     });
-    expect(screen.getByTestId("installing-agents")).toHaveTextContent("");
-
-    // ...and the listener unsubscribed itself on that event. Without this,
-    // every later install of any agent would also be handled by this stale
-    // listener. The mock's unlisten drops it from `progressCallbacks`.
-    expect(tauriMocks.progressCallbacks.has("copilot")).toBe(false);
   });
 
-  it("a failed install leaves the agent uninstalled and marked failed, ready to retry", async () => {
+  it("does not call backend agents_install or progress listeners anymore", async () => {
     tauriMocks.agentCheckInstalledMock.mockResolvedValue(["claude", "shell"]);
-    // The backend rejects rather than emitting — e.g. Antigravity, which has
-    // no scriptable install, or a network failure mid-download.
-    tauriMocks.agentInstallMock.mockRejectedValue(new Error("no install channel"));
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "select-workspace" }));
     await waitFor(() => expect(tauriMocks.agentCheckInstalledMock).toHaveBeenCalled());
 
     // NewTerminalModal is where an install can be triggered from now, and it
@@ -416,10 +419,7 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "install-agent" }));
 
-    await waitFor(() => {
-      expect(screen.getByTestId("installing-agents")).toHaveTextContent("copilot");
-    });
-    // Still not installed — a failed install must never look like a success.
-    expect(screen.getByTestId("installed-agents")).toHaveTextContent("claude,shell");
+    expect(tauriMocks.agentInstallMock).not.toHaveBeenCalled();
+    expect(tauriMocks.onAgentInstallProgressMock).not.toHaveBeenCalled();
   });
 });

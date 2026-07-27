@@ -23,6 +23,7 @@
 //! matching entry in `ui/src/state/agents.ts`, which `agents_match_frontend`
 //! pins).
 
+use std::path::{Path, PathBuf};
 use tauri::Emitter;
 
 /// How an agent gets onto the machine.
@@ -90,6 +91,32 @@ fn spec(name: &str) -> Option<&'static AgentSpec> {
     AGENTS.iter().find(|a| a.name == name)
 }
 
+fn agent_marker_dir(data_dir: &Path, name: &str) -> PathBuf {
+    data_dir.join("agents").join(name)
+}
+
+fn mark_agent_installed(data_dir: &Path, name: &str) -> Result<(), String> {
+    std::fs::create_dir_all(agent_marker_dir(data_dir, name))
+        .map_err(|e| format!("failed to create install marker for {name}: {e}"))
+}
+
+fn installed_agents_in(data_dir: &Path) -> Result<Vec<String>, String> {
+    let mut installed = Vec::new();
+
+    for agent in AGENTS {
+        let is_installed = match agent.install {
+            Install::BuiltIn => true,
+            _ => agent_marker_dir(data_dir, agent.name).exists(),
+        };
+
+        if is_installed {
+            installed.push(agent.name.to_string());
+        }
+    }
+
+    Ok(installed)
+}
+
 /// The executable for an agent, for callers that need to spawn it.
 /// `None` means built-in (or unknown) — the caller decides what that means.
 pub fn binary_for(name: &str) -> Option<&'static str> {
@@ -98,18 +125,11 @@ pub fn binary_for(name: &str) -> Option<&'static str> {
 
 /// Which agents are installed right now.
 ///
-/// Built-ins always count. Everything else is a PATH lookup on its *binary*,
-/// never its name.
+/// Built-ins always count. Everything else is a single marker-folder check
+/// under the app data dir: `.../agents/<agent>`.
 #[tauri::command]
 pub async fn agents_check_installed() -> Result<Vec<String>, String> {
-    Ok(AGENTS
-        .iter()
-        .filter(|a| match a.binary {
-            None => true,
-            Some(bin) => which::which(bin).is_ok(),
-        })
-        .map(|a| a.name.to_string())
-        .collect())
+    installed_agents_in(&brain_core::Store::default_data_dir())
 }
 
 /// Install an agent, emitting `agent-install-progress:{agent}` as it goes
@@ -135,6 +155,10 @@ pub async fn agents_install(agent: String, window: tauri::Window) -> Result<(), 
 
     match result {
         Ok(()) => {
+            if let Err(e) = mark_agent_installed(&brain_core::Store::default_data_dir(), &agent) {
+                let _ = window.emit(&format!("agent-install-progress:{agent}"), "failed");
+                return Err(format!("Failed to install {agent}: {e}"));
+            }
             let _ = window.emit(&format!("agent-install-progress:{agent}"), "completed");
             Ok(())
         }
@@ -214,5 +238,24 @@ mod tests {
                 (_, None) => panic!("{}: installable but no binary to detect", a.name),
             }
         }
+    }
+
+    #[test]
+    fn installed_agents_are_detected_by_marker_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(agent_marker_dir(dir.path(), "claude")).unwrap();
+        std::fs::create_dir_all(agent_marker_dir(dir.path(), "copilot")).unwrap();
+
+        let installed = installed_agents_in(dir.path()).unwrap();
+
+        assert_eq!(installed, vec!["claude", "shell", "copilot"]);
+    }
+
+    #[test]
+    fn marking_an_agent_installed_creates_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        mark_agent_installed(dir.path(), "antigravity").unwrap();
+
+        assert!(agent_marker_dir(dir.path(), "antigravity").exists());
     }
 }

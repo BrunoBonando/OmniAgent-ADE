@@ -76,16 +76,13 @@ import { ownsCtrlOnlyShortcut } from "./lib/keyboard";
 import { usePerSessionEvent } from "./lib/usePerSessionEvent";
 import {
   agentCheckInstalled,
-  agentInstall,
   getBriefing,
   ingestionStatus,
   listProjects,
-  onAgentInstallProgress,
   renameProject,
   rootsList,
   sessionCreate,
   sessionKill,
-  ptyDaemonStatus,
   sessionStatus,
   sessionWrite,
   settingsGet,
@@ -96,6 +93,13 @@ import { agentsReducer, initialAgentsState, type Agent } from "./state/agents";
 
 type View = "workspace" | "map";
 type StartupPhase = "booting" | "choosing-workspace" | "workspace-active";
+const AGENT_INSTALL_COMMAND: Partial<Record<Agent, string>> = {
+  claude: "curl -fsSL https://claude.ai/install.sh | bash",
+  codex: "npm install -g @openai/codex",
+  copilot: "npm install -g @github/copilot",
+  antigravity:
+    "echo 'Antigravity has no scriptable installer yet. Opening download page...' && open https://antigravity.google/download",
+};
 
 function persistedGroup(tab: PersistedTab): string {
   return tab.group ?? UNGROUPED_SESSION_ID;
@@ -361,22 +365,6 @@ function App() {
         console.error("Failed to load agent state", err);
       }
     })();
-  }, []);
-
-  // ---- boot: load metadata only; terminals wait for workspace selection --
-  useEffect(() => {
-    if (typeof ptyDaemonStatus !== "function") return;
-    void ptyDaemonStatus()
-      .then((status) => {
-        if (status.available) return;
-        setErrorBanner((current) =>
-          current ??
-          "Session persistence is unavailable: PTY daemon is missing. New terminals run in direct mode and won't restore after app restart.",
-        );
-      })
-      .catch(() => {
-        // Best effort informational check; startup must not fail on it.
-      });
   }, []);
 
   useEffect(() => {
@@ -870,7 +858,7 @@ function App() {
         setErrorBanner(
           `This session already has ${MAX_PANES} terminals — the most one grid holds. Close one, or start a new session (⌘N).`,
         );
-        return;
+        return null;
       }
 
       // `opts.engine` (NewTerminalModal's chosen engine, Task 9) overrides
@@ -907,9 +895,11 @@ function App() {
         // below), so landing back in the workspace here covers both
         // origins — a no-op when we were already there.
         setView("workspace");
+        return tab;
       } catch (err) {
         console.error("failed to create session", err);
         setErrorBanner(`Couldn't start ${engine} in ${project.label}: ${err}`);
+        return null;
       }
     },
     [createSessionTab, reopenWorkspace, defaultEngineFor, state.tabs, state.activeTabId],
@@ -977,45 +967,33 @@ function App() {
   );
 
   // ---- Agent installation handler ----
-  async function handleInstallAgent(agent: Agent) {
-    agentDispatch({ type: "agents/install_started", agent });
+  // Clicking Install opens a shell pane and runs that agent's install command
+  // there, so users can watch and control installation directly.
+  const handleInstallAgent = useCallback(
+    async (agent: Agent) => {
+      if (!selectedProject) return;
 
-    // The listener drops ITSELF on the terminal event, rather than being
-    // dropped in a `finally` once `agentInstall` resolves. The backend emits
-    // "completed" and *then* returns, and event delivery to the webview is
-    // async IPC — so unsubscribing the moment the await resolves can race the
-    // very event this is waiting for, and losing it leaves the agent stuck in
-    // `installing` with its pane dimmed forever. Unsubscribing only once the
-    // event is in hand cannot lose it.
-    //
-    // It still has to be dropped: each Install/Retry click registers its own
-    // listener, and one that outlived its install would keep dispatching for
-    // every later install of any agent.
-    let unlisten: (() => void) | undefined;
-    let settled = false;
+      const installCommand = AGENT_INSTALL_COMMAND[agent];
+      if (!installCommand) {
+        setErrorBanner(`No install command is available for ${ENGINE_LABEL[agent]}.`);
+        return;
+      }
 
-    const finish = (action: Parameters<typeof agentDispatch>[0]) => {
-      if (settled) return; // first terminal signal wins
-      settled = true;
-      agentDispatch(action);
-      unlisten?.();
-    };
-
-    try {
-      unlisten = await onAgentInstallProgress(agent, (status) => {
-        if (status === "completed") finish({ type: "agents/install_completed", agent });
-        else if (status === "failed") finish({ type: "agents/install_failed", agent });
+      const tab = await requestNewTab(selectedProject, {
+        engine: "shell",
+        label: `Install ${ENGINE_LABEL[agent]}`,
       });
-      // A fast install can settle before the line above assigned `unlisten`,
-      // leaving `finish`'s own call a no-op — so drop it here instead.
-      if (settled) unlisten();
+      if (!tab) return;
 
-      await agentInstall(agent);
-    } catch (err) {
-      console.error(`Failed to install ${agent}:`, err);
-      finish({ type: "agents/install_failed", agent });
-    }
-  }
+      try {
+        await sessionWrite(tab.id, `${installCommand}\n`);
+      } catch (err) {
+        console.error(`failed to start install command for ${agent}`, err);
+        setErrorBanner(`Couldn't run the install command for ${ENGINE_LABEL[agent]}: ${err}`);
+      }
+    },
+    [requestNewTab, selectedProject],
+  );
 
   // ---- NewWorkspaceModal's create (Sidebar's "+" -> New workspace) ------
   // `add_project`, the folder pick and the ingest/review toggles all already

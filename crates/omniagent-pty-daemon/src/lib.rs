@@ -90,6 +90,22 @@ pub struct ManagedSession {
     pub child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
 }
 
+fn resize_virtual_terminal(parser: &mut vt100::Parser, cols: u16, rows: u16) {
+    parser.set_size(rows, cols);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn virtual_terminal_resize_tracks_the_pty_size() {
+        let mut parser = vt100::Parser::new(24, 80, 1000);
+
+        super::resize_virtual_terminal(&mut parser, 140, 42);
+
+        assert_eq!(parser.screen().size(), (42, 140));
+    }
+}
+
 impl ManagedSession {
     pub fn write_input(&self, data: &[u8]) -> Result<()> {
         let mut writer = self
@@ -119,6 +135,11 @@ impl ManagedSession {
                 pixel_height: 0,
             })
             .context("resize PTY")?;
+        let mut parser = self
+            .vt_parser
+            .lock()
+            .map_err(|e| anyhow!("mutex poison: {e}"))?;
+        resize_virtual_terminal(&mut parser, cols, rows);
         Ok(())
     }
 

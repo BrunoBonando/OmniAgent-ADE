@@ -70,13 +70,6 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
     onFirstInputRef.current = onFirstInput;
   }, [onFirstInput]);
 
-  const reportSizeWithRedrawNudge = (cols: number, rows: number) => {
-    const nudgedRows = Math.max(1, rows - 1);
-    void sessionResize(sessionId, cols, nudgedRows).then(() => {
-      void sessionResize(sessionId, cols, rows);
-    });
-  };
-
   const hasUsableSize = (cols: number, rows: number) => cols > 0 && rows > 0;
 
   // Mount once per session id — see module doc comment for why this must
@@ -115,7 +108,7 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
     termRef.current = term;
     fitRef.current = fit;
 
-    const fitAndReportSize = (withNudge: boolean) => {
+    const fitAndReportSize = () => {
       try {
         fit.fit();
       } catch {
@@ -124,24 +117,17 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
       if (!hasUsableSize(term.cols, term.rows)) {
         return false;
       }
-      if (withNudge) {
-        reportSizeWithRedrawNudge(term.cols, term.rows);
-      } else {
-        void sessionResize(sessionId, term.cols, term.rows);
-      }
+      void sessionResize(sessionId, term.cols, term.rows);
       return true;
     };
 
-    const fitWithRetry = (attempt: number, withNudge: boolean) => {
-      if (fitAndReportSize(withNudge)) return;
+    const fitWithRetry = (attempt: number) => {
+      if (fitAndReportSize()) return;
       if (attempt >= 8) return;
-      retryTimerRef.current = window.setTimeout(
-        () => fitWithRetry(attempt + 1, withNudge),
-        16 * (attempt + 1),
-      );
+      retryTimerRef.current = window.setTimeout(() => fitWithRetry(attempt + 1), 16 * (attempt + 1));
     };
     if (visible) {
-      fitWithRetry(0, true);
+      fitWithRetry(0);
     }
 
     // Auto-title capture (founder ask): a fresh cycle per mounted session
@@ -161,7 +147,7 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
       }
     });
 
-    const resizeObserver = new ResizeObserver(() => fitWithRetry(0, false));
+    const resizeObserver = new ResizeObserver(() => fitWithRetry(0));
     resizeObserver.observe(container);
 
     let cancelled = false;
@@ -259,7 +245,7 @@ export default function Terminal({ sessionId, visible, focused, themeId, onFirst
         if (!hasUsableSize(term.cols, term.rows)) {
           return false;
         }
-        reportSizeWithRedrawNudge(term.cols, term.rows);
+        void sessionResize(sessionId, term.cols, term.rows);
         return true;
       };
       if (fitOnce()) return;

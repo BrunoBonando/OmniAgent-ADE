@@ -29,13 +29,6 @@ export interface SessionInfo {
   persistent?: boolean;
 }
 
-export interface PtyDaemonStatus {
-  available: boolean;
-  running: boolean;
-  socket_path: string;
-  session_count: number;
-}
-
 export interface BrainSearchHit {
   id: string;
   kind: string;
@@ -121,10 +114,6 @@ export async function sessionResize(id: string, cols: number, rows: number): Pro
 
 export async function sessionKill(id: string): Promise<void> {
   await invoke("session_kill", { id });
-}
-
-export async function ptyDaemonStatus(): Promise<PtyDaemonStatus> {
-  return invoke<PtyDaemonStatus>("pty_daemon_status");
 }
 
 // ------------------------------------------------------------- file tree

@@ -41,6 +41,7 @@ describe("NewTerminalModal", () => {
     expect(row).toBeInTheDocument();
     fireEvent.click(row!);
     expect(props.onInstallAgent).toHaveBeenCalled();
+    expect(row).toHaveAttribute("aria-selected", "true");
     expect(props.onCreate).not.toHaveBeenCalled();
   });
 

@@ -27,14 +27,6 @@ use tauri::State;
 
 use crate::sessions::{CreateSessionRequest, SessionInfo, SessionManager, SessionStatusEvent};
 
-#[derive(Debug, serde::Serialize)]
-pub struct DaemonStatusInfo {
-    pub available: bool,
-    pub running: bool,
-    pub socket_path: String,
-    pub session_count: usize,
-}
-
 /// Shared handle to the local brain DB, managed as Tauri state alongside
 /// [`SessionManager`]. `Store` wraps a plain `rusqlite::Connection` (`Send`
 /// but not `Sync`), hence the `Mutex` — Tauri commands run on a thread pool,
@@ -324,17 +316,6 @@ pub fn session_kill(id: String, manager: State<'_, SessionManager>) -> Result<()
     manager.kill(&id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn pty_daemon_status(manager: State<'_, SessionManager>) -> Result<DaemonStatusInfo, String> {
-    let (available, running, socket_path, session_count) = manager.pty_daemon_status();
-    Ok(DaemonStatusInfo {
-        available,
-        running,
-        socket_path,
-        session_count,
-    })
-}
-
 /// The pane header's git-branch pill (BridgeSpace pane-grid rebuild — see
 /// docs/DESIGN.md and docs/reference/bridgespace-pane-grid-reference.png):
 /// `git -C <path> rev-parse --abbrev-ref HEAD`, shelled out directly rather
@@ -532,10 +513,7 @@ mod folder_stats_tests {
         assert_eq!(stats.files, 2);
         assert!(stats.git);
         // alphabetical tiebreak — both languages have exactly one file.
-        assert_eq!(
-            stats.languages,
-            vec!["Rust".to_string(), "TS".to_string()]
-        );
+        assert_eq!(stats.languages, vec!["Rust".to_string(), "TS".to_string()]);
     }
 
     /// The walker is the ingestion walker, so the strip's count already

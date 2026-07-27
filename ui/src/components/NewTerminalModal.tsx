@@ -90,8 +90,10 @@ export function NewTerminalModal({ session, agentState, onCreate, onInstallAgent
             {AVAILABLE_AGENTS.map((engine) => {
               const available = agentState.installed.has(engine) || engine === "shell";
               const selected = state.engine === engine;
-              const activate = () =>
-                available ? setState((s) => ({ ...s, engine })) : onInstallAgent(engine);
+              const activate = () => {
+                setState((s) => ({ ...s, engine }));
+                if (!available) onInstallAgent(engine);
+              };
               return (
                 <div
                   key={engine}

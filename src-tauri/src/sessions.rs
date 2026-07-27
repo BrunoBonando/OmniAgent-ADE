@@ -1415,15 +1415,12 @@ impl SessionManager {
             } else {
                 format!("direct-engine binary={}", engine_cmd.argv[0])
             };
-            let mut child = pair
-                .slave
-                .spawn_command(cmd)
-                .with_context(|| {
-                    format!(
-                        "spawn engine process (engine={}, cwd={}, mode={spawn_mode})",
-                        req.engine, req.cwd
-                    )
-                })?;
+            let mut child = pair.slave.spawn_command(cmd).with_context(|| {
+                format!(
+                    "spawn engine process (engine={}, cwd={}, mode={spawn_mode})",
+                    req.engine, req.cwd
+                )
+            })?;
             // Crucial: drop our own handle to the slave side. If we keep it
             // open, the kernel won't deliver EOF/EIO to the master reader
             // when the child exits (our fd would still be holding the slave
@@ -1575,15 +1572,12 @@ impl SessionManager {
             .context("open pty")?;
         let reader = pair.master.try_clone_reader().context("clone pty reader")?;
         let writer = pair.master.take_writer().context("take pty writer")?;
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .with_context(|| {
-                format!(
-                    "spawn engine process (engine={}, cwd={}, mode=direct-notice-wrapper binary={})",
-                    req.engine, req.cwd, engine_cmd.argv[0]
-                )
-            })?;
+        let child = pair.slave.spawn_command(cmd).with_context(|| {
+            format!(
+                "spawn engine process (engine={}, cwd={}, mode=direct-notice-wrapper binary={})",
+                req.engine, req.cwd, engine_cmd.argv[0]
+            )
+        })?;
         drop(pair.slave);
 
         let activity = Arc::new(SessionActivity::new(
