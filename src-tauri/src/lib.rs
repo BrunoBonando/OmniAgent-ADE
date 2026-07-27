@@ -1,9 +1,11 @@
 pub mod commands;
 pub mod feedback;
 pub mod map_feed;
+pub mod pty_daemon_client;
 pub mod roots;
 pub mod sessions;
 pub mod tmux;
+
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tauri::{Emitter, Manager};
@@ -427,6 +429,8 @@ pub fn run() {
             commands::session_resize,
             commands::session_kill,
             commands::session_status,
+            commands::session_has_working_tasks,
+            commands::session_stop_working_tasks,
             commands::git_branch,
             commands::list_dir,
             commands::folder_stats,

@@ -40,6 +40,7 @@ mcp-server = { path = "../crates/mcp-server" }
 # (see lib.rs's background thread) — previously only a dev-dependency for
 # map_feed.rs's tests, which ingested the fixture to exercise the map feed.
 brain-ingest = { path = "../crates/brain-ingest" }
+omniagent-pty-daemon = { path = "../crates/omniagent-pty-daemon" }
 which = "6.0"
 
 [dev-dependencies]
