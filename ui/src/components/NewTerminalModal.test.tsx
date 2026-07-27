@@ -60,3 +60,73 @@ describe("NewTerminalModal", () => {
     expect(props.onCreate).toHaveBeenCalledWith(expect.any(String), "codex");
   });
 });
+
+// Same bug class Task 10 fixed in `NewSessionModal`: every keystroke this
+// dialog understands hangs off ONE `onKeyDown` on the panel, which only sees
+// events raised inside the panel's own subtree. Nothing in here was
+// focusable except the name input and the two footer buttons, so a click on
+// an engine row (a plain div) dropped focus on <body> and killed
+// Enter/Escape/⌘1/⌘2/⌘3/⌘0 for the rest of the dialog's life — with the
+// modal's PRIMARY flow, ⌘T -> click an engine -> Enter, being exactly the
+// sequence that triggered it.
+describe("NewTerminalModal — focus and keyboard reachability", () => {
+  it("focuses (not merely selects) the name input on mount", () => {
+    setup();
+    expect(screen.getByRole("textbox")).toHaveFocus();
+  });
+
+  it("gives the panel a focus backstop so a click can never strand focus outside it", () => {
+    const { container } = setup();
+    expect(container.querySelector(".modal-panel")).toHaveAttribute("tabindex", "-1");
+  });
+
+  it("engine rows are focusable and sit in a listbox", () => {
+    const { container } = setup();
+    expect(container.querySelector(".engine-row-list")).toHaveAttribute("role", "listbox");
+    for (const row of container.querySelectorAll(".engine-row")) {
+      expect(row).toHaveAttribute("tabindex", "0");
+    }
+  });
+
+  it("Enter still creates after focus lands on an engine row — the ⌘T -> click engine -> Enter flow", () => {
+    const { container, props } = setup();
+    // jsdom's `fireEvent.click` doesn't move focus the way a real browser
+    // does, so the browser's click-to-focus is simulated explicitly: with
+    // `tabIndex={0}` the row itself takes focus, which is where the Enter
+    // then has to be handled.
+    const row = container.querySelectorAll<HTMLElement>(".engine-row")[0];
+    fireEvent.click(row);
+    row.focus();
+    expect(row).toHaveFocus();
+
+    fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+
+    expect(props.onCreate).toHaveBeenCalledWith("Terminal #5", "claude");
+  });
+
+  it("Space on a focused engine row picks that engine without creating anything", () => {
+    const { container, props } = setup({
+      agentState: { ...initialAgentsState, installed: new Set(["claude", "codex"] as const) },
+    });
+    const rows = container.querySelectorAll<HTMLElement>(".engine-row");
+    const codex = [...rows].find((r) => r.textContent?.includes("Codex"))!;
+    codex.focus();
+    fireEvent.keyDown(codex, { key: " " });
+
+    expect(props.onCreate).not.toHaveBeenCalled();
+    expect(codex).toHaveAttribute("aria-selected", "true");
+    // …and the footer button then opens the engine Space just picked.
+    fireEvent.click(screen.getByText("Open terminal ⏎"));
+    expect(props.onCreate).toHaveBeenCalledWith("Terminal #5", "codex");
+  });
+
+  it("Enter on a focused uninstalled engine row routes to install, never to create", () => {
+    const { container, props } = setup();
+    const row = container.querySelector<HTMLElement>(".engine-row.is-unavailable")!;
+    row.focus();
+    fireEvent.keyDown(row, { key: "Enter" });
+
+    expect(props.onInstallAgent).toHaveBeenCalled();
+    expect(props.onCreate).not.toHaveBeenCalled();
+  });
+});

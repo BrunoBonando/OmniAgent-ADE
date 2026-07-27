@@ -23,16 +23,35 @@ interface NewTerminalModalProps {
 export function NewTerminalModal({ session, agentState, onCreate, onInstallAgent, onClose }: NewTerminalModalProps) {
   const [state, setState] = useState(() => initialNewTerminalState(session.tabs.length, agentState));
   const inputRef = useRef<HTMLInputElement>(null);
-  useEffect(() => { inputRef.current?.select(); }, []);
+  // `.focus()` explicitly, then `.select()`: focusing is a *convention* of
+  // `select()` on most engines, not a guarantee, and this dialog's whole
+  // keyboard surface (Enter/Escape/⌘1-⌘3/⌘0) hangs off a keydown handler that
+  // only sees events raised inside the panel — see the panel's own
+  // `tabIndex` note. The other two modals (`NewSessionModal`,
+  // `NewWorkspaceModal`) both focus explicitly on mount; this one used to be
+  // the odd one out.
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
 
-  const confirm = () => onCreate(state.name.trim() || state.name, state.engine);
+  const confirmWith = (chosen: Engine) => onCreate(state.name.trim() || state.name, chosen);
+  const confirm = () => confirmWith(state.engine);
 
   return (
     <div className="overlay-backdrop" onMouseDown={onClose}>
+      {/* `tabIndex={-1}` is a keyboard backstop, not a focus target — the
+          name input takes focus on mount. Verbatim the reason
+          `NewSessionModal`/`NewWorkspaceModal` carry it: a keydown only
+          reaches `onKeyDown` below if the focused element is INSIDE this
+          div, and clicking something non-focusable (the header, a hint line)
+          otherwise drops focus on <body>, which would silently kill
+          Enter/Escape/⌘1/⌘2/⌘3/⌘0 for the rest of the dialog's life. */}
       <div
         className="modal-panel new-terminal-panel"
         role="dialog"
         aria-label="New terminal"
+        tabIndex={-1}
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           const action = terminalKeyAction(e);
@@ -64,19 +83,39 @@ export function NewTerminalModal({ session, agentState, onCreate, onInstallAgent
         </div>
         <div className="modal-section">
           <div className="modal-field-label">Engine</div>
-          <div className="engine-row-list">
+          {/* `role="listbox"` wrapping the `role="option"` rows: an option
+              outside a listbox is an ARIA orphan, and the same structure
+              `NewSessionModal`'s `SlotPicker` already ships. */}
+          <div className="engine-row-list" role="listbox" aria-label="Engine">
             {AVAILABLE_AGENTS.map((engine) => {
               const available = agentState.installed.has(engine) || engine === "shell";
               const selected = state.engine === engine;
+              const activate = () =>
+                available ? setState((s) => ({ ...s, engine })) : onInstallAgent(engine);
               return (
                 <div
                   key={engine}
                   className={`engine-row${selected ? " is-selected" : ""}${available ? "" : " is-unavailable"}`}
                   role="option"
                   aria-selected={selected}
-                  onClick={() =>
-                    available ? setState((s) => ({ ...s, engine })) : onInstallAgent(engine)
-                  }
+                  tabIndex={0}
+                  onClick={activate}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" && e.key !== " ") return;
+                    e.preventDefault();
+                    // Deliberately does NOT bubble to the panel handler
+                    // above. A focusable row is where a click leaves focus,
+                    // so Enter here is the modal's ordinary "Open terminal
+                    // ⏎" — but the panel's `confirm()` would read
+                    // `state.engine` from a closure that predates this
+                    // keystroke's own selection and open the PREVIOUS
+                    // engine. So Enter does the whole gesture itself, with
+                    // the engine it is actually sitting on; Space only
+                    // picks, which is what a listbox option's Space means.
+                    e.stopPropagation();
+                    activate();
+                    if (e.key === "Enter" && available) confirmWith(engine);
+                  }}
                 >
                   <span className="engine-row-icon"><Icon name={AGENT_ICON[engine]} /></span>
                   <span className="engine-row-text">
