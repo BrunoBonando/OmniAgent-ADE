@@ -40,6 +40,8 @@ function setup(over: Partial<Parameters<typeof NotificationsPanel>[0]> = {}) {
     onSelect: vi.fn(),
     onDismiss: vi.fn(),
     onClearAll: vi.fn(),
+    awaitingSessionIds: [],
+    onApprove: vi.fn(),
     now: NOW,
     ...over,
   };
@@ -210,5 +212,75 @@ describe("dismissing and filtering", () => {
     setup({ selectedProjectId: null, selectedProjectLabel: null });
     openPanel();
     expect(screen.getByRole("button", { name: "This workspace 0" })).toBeDisabled();
+  });
+});
+
+describe("needs-you band and approval", () => {
+  const awaitingEntry = () =>
+    entry({ id: "a1", sessionId: "sess-1", status: "awaiting_approval", title: "stripe webhook retries" });
+
+  it("an actionable row sits under NEEDS YOU with Approve and Open pane", () => {
+    setup({ entries: [awaitingEntry()], awaitingSessionIds: ["sess-1"] });
+    openPanel();
+    expect(screen.getByText("NEEDS YOU")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /approve stripe webhook retries/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /open pane/i })).toBeInTheDocument();
+  });
+
+  it("Approve fires onApprove with the entry and keeps the panel open", () => {
+    const props = setup({ entries: [awaitingEntry()], awaitingSessionIds: ["sess-1"] });
+    openPanel();
+    fireEvent.click(screen.getByRole("button", { name: /approve stripe webhook retries/i }));
+    expect(props.onApprove).toHaveBeenCalledWith(expect.objectContaining({ id: "a1" }));
+    expect(screen.getByText("NEEDS YOU")).toBeInTheDocument(); // still open
+  });
+
+  it("a session that stopped awaiting renders as a plain row — no Approve, no NEEDS YOU", () => {
+    setup({ entries: [awaitingEntry()], awaitingSessionIds: [] });
+    openPanel();
+    expect(screen.queryByText("NEEDS YOU")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+  });
+
+  it("an engine with no approve keystroke gets Open pane only", () => {
+    setup({
+      entries: [entry({ id: "a2", sessionId: "sess-1", status: "awaiting_approval", engine: "codex" })],
+      awaitingSessionIds: ["sess-1"],
+    });
+    openPanel();
+    expect(screen.getByText("NEEDS YOU")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /open pane/i })).toBeInTheDocument();
+  });
+
+  it("the Needs you chip filters to actionable rows", () => {
+    setup({
+      entries: [awaitingEntry(), entry({ id: "n2", sessionId: "s2", status: "ready" })],
+      awaitingSessionIds: ["sess-1"],
+    });
+    openPanel();
+    fireEvent.click(screen.getByRole("button", { name: /needs you 1/i }));
+    expect(screen.getByText("stripe webhook retries")).toBeInTheDocument();
+    expect(screen.queryByText("wire session restore")).not.toBeInTheDocument();
+  });
+});
+
+describe("engine tag and day bands", () => {
+  it("rows carry the engine's short caps tag", () => {
+    setup({ entries: [entry({ engine: "codex" })] });
+    openPanel();
+    expect(screen.getByText("CODEX")).toBeInTheDocument();
+  });
+
+  it("today's rows sit under EARLIER TODAY, yesterday's under OLDER", () => {
+    setup({
+      entries: [
+        entry({ id: "n1", sessionId: "s1" }),
+        entry({ id: "n2", sessionId: "s2", createdAt: NOW - 26 * 3600_000 }),
+      ],
+    });
+    openPanel();
+    expect(screen.getByText("EARLIER TODAY")).toBeInTheDocument();
+    expect(screen.getByText("OLDER")).toBeInTheDocument();
   });
 });

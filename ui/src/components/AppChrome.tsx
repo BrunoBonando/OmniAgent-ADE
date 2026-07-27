@@ -67,6 +67,9 @@ interface AppChromeProps {
   onSelectNotification: (entry: NotificationEntry) => void;
   onDismissNotification: (id: string) => void;
   onClearNotifications: () => void;
+  /** Session ids whose **current** status is `awaiting_approval`. */
+  awaitingSessionIds: string[];
+  onApproveNotification: (entry: NotificationEntry) => void;
 }
 
 export default function AppChrome({
@@ -81,6 +84,8 @@ export default function AppChrome({
   onSelectNotification,
   onDismissNotification,
   onClearNotifications,
+  awaitingSessionIds,
+  onApproveNotification,
 }: AppChromeProps) {
   return (
     // `deep`: drag from anywhere in here that isn't a control — see this
@@ -113,6 +118,8 @@ export default function AppChrome({
           onSelect={onSelectNotification}
           onDismiss={onDismissNotification}
           onClearAll={onClearNotifications}
+          awaitingSessionIds={awaitingSessionIds}
+          onApprove={onApproveNotification}
         />
       </div>
     </header>

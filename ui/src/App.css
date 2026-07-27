@@ -5716,6 +5716,69 @@ code {
   background: var(--panel-raised);
 }
 
+/* Band labels + the NEEDS YOU row treatment — design/OmniAgent ADE.dc.html,
+   NOTIFICATIONS POPOVER. */
+.notifications-band-label {
+  padding: 9px 12px 5px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.06);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  color: var(--ink-faint);
+}
+
+.notification-row.is-actionable {
+  background: rgba(240, 180, 70, 0.07);
+  border-left: 2px solid var(--status-approval);
+}
+
+.notification-row.is-actionable:hover {
+  background: rgba(240, 180, 70, 0.11);
+}
+
+.notification-row-engine {
+  margin-left: 7px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.notification-row-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.notification-approve {
+  appearance: none;
+  border: 0;
+  background: var(--status-approval);
+  color: #1a1400;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 6px 11px;
+  border-radius: 6px;
+}
+
+.notification-approve:hover {
+  filter: brightness(1.1);
+}
+
+.notification-open-pane {
+  appearance: none;
+  border: 0.5px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+  color: #c2c2cb;
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.notification-open-pane:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
 /* ------------------------------------------------------- account menu
    Grew a name header and grouped rows on 2026-07-26 (the founder's
    user-menu reference). The trigger/menu shell above is unchanged. */

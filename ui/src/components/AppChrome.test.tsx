@@ -45,6 +45,8 @@ function setup(overrides: Partial<Parameters<typeof AppChrome>[0]> = {}) {
     onSelectNotification: vi.fn(),
     onDismissNotification: vi.fn(),
     onClearNotifications: vi.fn(),
+    awaitingSessionIds: [] as string[],
+    onApproveNotification: vi.fn(),
     ...overrides,
   };
   const { container } = render(<AppChrome {...props} />);

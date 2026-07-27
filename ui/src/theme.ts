@@ -13,6 +13,16 @@ export const ENGINE_LABEL: Record<Engine, string> = {
   antigravity: "AntiGravity",
 };
 
+/** The notification row's short caps tag — the reference design abbreviates
+ * where the full label would crowd the title ("AG", not "ANTIGRAVITY"). */
+export const ENGINE_TAG: Record<Engine, string> = {
+  claude: "CLAUDE",
+  codex: "CODEX",
+  shell: "SHELL",
+  copilot: "COPILOT",
+  antigravity: "AG",
+};
+
 // Sampled directly from the founder's reference screenshot (BridgeSpace),
 // docs/reference/bridgespace-pane-grid-reference.png — the per-engine dot
 // color in each pane header. claude-code's dot ~(0.217, 0.128) is a violet

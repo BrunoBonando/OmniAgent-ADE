@@ -1425,6 +1425,9 @@ function App() {
         onSelectNotification={handleNotificationSelect}
         onDismissNotification={(id) => notificationsDispatch({ type: "notification/dismissed", id })}
         onClearNotifications={() => notificationsDispatch({ type: "notifications/cleared" })}
+        // Task 3 wires these for real
+        awaitingSessionIds={[]}
+        onApproveNotification={() => {}}
       />
       {errorBanner && (
         <div className="error-banner">
