@@ -8,7 +8,7 @@ if [ ! -f "$AUTH_FILE" ]; then
   exit 1
 fi
 
-for dst in AGENTS.md CLAUDE.md; do
+for dst in AGENTS.md CLAUDE.md CODEX.md ANTIGRAVITY.md; do
   echo "Generating $dst from $AUTH_FILE"
   {
     echo "<!-- GENERATED from $AUTH_FILE — do not edit directly. Update $AUTH_FILE instead. -->"
