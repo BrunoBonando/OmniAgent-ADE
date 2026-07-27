@@ -17,8 +17,30 @@ describe("SystemStatusBar", () => {
     );
 
     expect(screen.getByText("4 sessions live")).toBeInTheDocument();
-    expect(screen.getByText("brain 41,208 nodes · queue 0")).toBeInTheDocument();
-    expect(screen.getByText("CPU 34% · RAM 6.1G / 16G")).toBeInTheDocument();
+    // CPU 34% is in the green range (25–50 %)
+    expect(screen.getByText("CPU 34%")).toBeInTheDocument();
+    expect(screen.getByText("CPU 34%").className).toContain("is-usage-ok");
+    // 6.1 / 16 ≈ 38 % — green range
+    expect(screen.getByText("RAM 38%")).toBeInTheDocument();
+    expect(screen.getByText("RAM 38%").className).toContain("is-usage-ok");
     expect(screen.getByText("MCP wired")).toBeInTheDocument();
+  });
+
+  it("shows critical color when CPU or RAM exceeds 75 %", () => {
+    render(
+      <SystemStatusBar
+        liveSessionCount={1}
+        brainNodeCount={null}
+        brainQueueCount={null}
+        cpuPercent={80}
+        ramUsedBytes={52 * 1024 ** 3}
+        ramTotalBytes={64 * 1024 ** 3}
+        mcpWired={false}
+      />,
+    );
+
+    expect(screen.getByText("CPU 80%").className).toContain("is-usage-critical");
+    // 52 / 64 = 81 % — critical
+    expect(screen.getByText("RAM 81%").className).toContain("is-usage-critical");
   });
 });

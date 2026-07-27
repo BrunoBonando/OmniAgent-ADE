@@ -315,6 +315,10 @@ code {
 .system-status-item.is-live i, .system-status-item.is-mcp i { width: 5px; height: 5px; border-radius: 50%; background: var(--status-ready); }
 .system-status-item.is-mcp { color: #6d6d78; }
 .system-status-item.is-mcp i { background: var(--signal); }
+.system-status-item.is-usage-low      { color: #4da6ff; }
+.system-status-item.is-usage-ok       { color: #4caf50; }
+.system-status-item.is-usage-warn     { color: #f5a623; }
+.system-status-item.is-usage-critical { color: #e05252; }
 .system-status-spacer { flex: 1; }
 .system-status-shortcut { color: #6d6d78; }
 

@@ -77,7 +77,20 @@ fn parse_cpu_percent(top: &str) -> Option<u8> {
     Some((user + sys).round().clamp(0.0, 100.0) as u8)
 }
 
-fn parse_vm_stat(vm_stat: &str, page_size: u64) -> Option<u64> {
+fn parse_vm_stat(vm_stat: &str) -> Option<u64> {
+    // The first line reports the real page size, e.g.
+    // "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
+    // On Apple Silicon this is 16 384; on Intel it is 4 096.  Hardcoding 4096
+    // produces a ×4 undercount on M-series machines.
+    let page_size: u64 = vm_stat
+        .lines()
+        .next()
+        .and_then(|line| {
+            let s = line.split("page size of ").nth(1)?;
+            s.split_whitespace().next()?.parse().ok()
+        })
+        .unwrap_or(4096);
+
     let pages = vm_stat
         .lines()
         .filter(|line| {
@@ -102,12 +115,20 @@ fn parse_vm_stat(vm_stat: &str, page_size: u64) -> Option<u64> {
 }
 
 #[tauri::command]
-pub fn system_stats() -> SystemStats {
-    let cpu_percent =
-        command_output("top", &["-l", "1", "-n", "0"]).and_then(|out| parse_cpu_percent(&out));
+pub async fn system_stats() -> SystemStats {
+    // `top -l 1` blocks for ~1 s on macOS while it collects a CPU sample.
+    // Running it on a dedicated blocking thread keeps the IPC handler free to
+    // serve other commands during that wait; without this the whole UI stalls
+    // for every poll cycle.
+    let cpu_percent = tokio::task::spawn_blocking(|| {
+        command_output("top", &["-l", "1", "-n", "0"]).and_then(|out| parse_cpu_percent(&out))
+    })
+    .await
+    .ok()
+    .flatten();
     let ram_total_bytes =
         command_output("sysctl", &["-n", "hw.memsize"]).and_then(|out| out.trim().parse().ok());
-    let ram_used_bytes = command_output("vm_stat", &[]).and_then(|out| parse_vm_stat(&out, 4096));
+    let ram_used_bytes = command_output("vm_stat", &[]).and_then(|out| parse_vm_stat(&out));
     SystemStats {
         cpu_percent,
         ram_used_bytes,
@@ -1302,10 +1323,16 @@ mod tests {
         );
         assert_eq!(
             parse_vm_stat(
-                "Pages active: 10.\nPages wired down: 5.\nPages occupied by compressor: 2.",
-                4096
+                "Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages active: 10.\nPages wired down: 5.\nPages occupied by compressor: 2.",
             ),
             Some(17 * 4096)
+        );
+        // Apple Silicon uses a 16 384-byte page size reported in the header.
+        assert_eq!(
+            parse_vm_stat(
+                "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages active: 10.\nPages wired down: 5.\nPages occupied by compressor: 2.",
+            ),
+            Some(17 * 16384)
         );
     }
 }
