@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { searchBrain, type BrainSearchHit } from "../lib/tauri";
 import { tabDisplayLabel, type ProjectInfo, type TabInfo } from "../state/sessions";
 import { ENGINE_COLOR } from "../theme";
+import Icon from "./Icon";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -168,7 +169,7 @@ export default function CommandPalette({
                     aria-hidden
                   />
                 )}
-                {action.kind === "new-tab" && <span className="command-palette-plus">+</span>}
+                {action.kind === "new-tab" && <span className="command-palette-plus"><Icon name="plus" size={13} /></span>}
                 <span>{action.label}</span>
               </li>
             ))}

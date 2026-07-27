@@ -89,6 +89,7 @@ import { Mosaic, MosaicWindow, type MosaicNode } from "react-mosaic-component";
 import "react-mosaic-component/react-mosaic-component.css";
 import EmptyWorkspace from "./EmptyWorkspace";
 import PaneHeader from "./PaneHeader";
+import Icon from "./Icon";
 import Terminal from "./Terminal";
 import { isPaneHole, paneIds, swapPaneIds, syncPaneTree, type LayoutPreset, type PaneTree } from "../state/paneGrid";
 import { tabDisplayLabel, type Engine, type ProjectInfo, type TabInfo } from "../state/sessions";
@@ -229,7 +230,7 @@ function ProjectPaneGrid({
     >
       {tree === null ? (
         <div className="empty-workspace">
-          <div className="empty-workspace-prompt">&gt;_</div>
+          <div className="empty-workspace-prompt"><Icon name="terminal" size={28} strokeWidth={1.7} /></div>
           <p>No terminal open.</p>
           <p className="empty-workspace-hint">⌘T to start one in {projectLabel}.</p>
         </div>

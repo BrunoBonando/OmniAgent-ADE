@@ -20,7 +20,11 @@ export type IconName =
   | "external"
   | "chevron-right"
   | "chevron-down"
+  | "chevron-up"
   | "more"
+  | "menu"
+  | "sparkle"
+  | "import"
   | "check"
   | "checklist"
   | "info"
@@ -30,6 +34,7 @@ export type IconName =
   | "agent-copilot"
   | "agent-antigravity"
   | "agent-shell"
+  | "terminal"
   | "x";
 
 const PATHS: Record<IconName, React.ReactNode> = {
@@ -77,6 +82,27 @@ const PATHS: Record<IconName, React.ReactNode> = {
   ),
   "chevron-right": <path d="m9 18 6-6-6-6" />,
   "chevron-down": <path d="m6 9 6 6 6-6" />,
+  "chevron-up": <path d="m6 15 6-6 6 6" />,
+  menu: (
+    <>
+      <path d="M4 6h16" />
+      <path d="M4 12h16" />
+      <path d="M4 18h16" />
+    </>
+  ),
+  sparkle: (
+    <>
+      <path d="m12 3-1.5 6.5L4 11l6.5 1.5L12 19l1.5-6.5L20 11l-6.5-1.5z" />
+      <path d="m19 3-.5 2.5L16 6l2.5.5L19 9l.5-2.5L22 6l-2.5-.5z" />
+    </>
+  ),
+  import: (
+    <>
+      <path d="M12 3v11" />
+      <path d="m7 9 5 5 5-5" />
+      <path d="M5 20h14" />
+    </>
+  ),
   more: (
     <>
       <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
@@ -143,6 +169,12 @@ const PATHS: Record<IconName, React.ReactNode> = {
     <>
       <path d="m4 17 6-6-6-6" />
       <path d="M12 19h8" />
+    </>
+  ),
+  terminal: (
+    <>
+      <path d="m4 7 4 4-4 4" />
+      <path d="M11 15h5" />
     </>
   ),
   x: (

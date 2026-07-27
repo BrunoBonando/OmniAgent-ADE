@@ -9,6 +9,7 @@
 // binding that doesn't exist.
 import { useEffect, useRef } from "react";
 import { SHORTCUT_GROUPS } from "../state/keyboardShortcuts";
+import Icon from "./Icon";
 
 interface KeyboardShortcutsSheetProps {
   onClose: () => void;
@@ -40,7 +41,7 @@ export default function KeyboardShortcutsSheet({ onClose }: KeyboardShortcutsShe
         <div className="shortcuts-header">
           <h2 className="shortcuts-title">Keyboard shortcuts</h2>
           <button className="new-workspace-close" onClick={onClose} aria-label="Close">
-            &#215;
+            <Icon name="x" size={15} strokeWidth={2.1} />
           </button>
         </div>
 

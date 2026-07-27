@@ -160,7 +160,7 @@ export default function ImportProjectsFlow({ existingProjects, onImported, onClo
           <h2 className="import-flow-title">Import projects</h2>
           {state.phase !== "importing" && (
             <button className="import-flow-close" onClick={onClose} aria-label="Close">
-              &#215;
+              <Icon name="x" size={15} strokeWidth={2.1} />
             </button>
           )}
         </div>

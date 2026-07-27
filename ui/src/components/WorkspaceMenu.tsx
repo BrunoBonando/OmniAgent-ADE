@@ -5,6 +5,7 @@
 import { useEffect, useRef, type KeyboardEvent } from "react";
 import type { ProjectInfo } from "../state/sessions";
 import { idColor } from "../state/projectColors";
+import Icon from "./Icon";
 
 export function sessionCountLabel(n: number): string {
   if (n === 0) return "no sessions";
@@ -99,10 +100,10 @@ export function WorkspaceMenu({
                 title="Workspace settings"
                 onClick={(e) => { e.stopPropagation(); onManage(p); }}
               >
-                ⋯
+                <Icon name="more" size={15} />
               </button>
               {active ? (
-                <span className="workspace-menu-check" aria-label="Active workspace">✓</span>
+                <span className="workspace-menu-check" aria-label="Active workspace"><Icon name="check" size={13} strokeWidth={2.4} /></span>
               ) : (
                 <span className="workspace-menu-check-slot" />
               )}
@@ -117,7 +118,7 @@ export function WorkspaceMenu({
           onClick={newWorkspace}
           onKeyDown={(e) => activateOnKey(e, newWorkspace)}
         >
-          <span className="workspace-menu-new-tile">+</span>
+          <span className="workspace-menu-new-tile"><Icon name="plus" size={14} /></span>
           <span>New workspace</span>
         </div>
         <div
@@ -127,7 +128,7 @@ export function WorkspaceMenu({
           onClick={importProjects}
           onKeyDown={(e) => activateOnKey(e, importProjects)}
         >
-          <span className="workspace-menu-new-tile">⇥</span>
+          <span className="workspace-menu-new-tile"><Icon name="import" size={14} /></span>
           <span>Import projects…</span>
         </div>
       </div>

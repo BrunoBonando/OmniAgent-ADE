@@ -12,6 +12,7 @@ import {
   settingsSet,
   type PendingNote,
 } from "../lib/tauri";
+import Icon from "./Icon";
 
 export default function ReviewPanel({ onClose }: { onClose: () => void }) {
   const [reviewMode, setReviewMode] = useState<boolean | null>(null); // null = still loading
@@ -87,7 +88,7 @@ export default function ReviewPanel({ onClose }: { onClose: () => void }) {
         <div className="review-panel-header">
           <h2>Session summaries</h2>
           <button className="review-panel-close" onClick={onClose} aria-label="Close review panel">
-            ×
+            <Icon name="x" size={15} strokeWidth={2.1} />
           </button>
         </div>
 

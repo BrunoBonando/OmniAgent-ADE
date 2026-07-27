@@ -33,6 +33,7 @@
 //   with `OMNIAGENT_ADE_DATA_DIR` overridden, which surfaces as an honest
 //   "couldn't open" line rather than a silent no-op.
 import { useState } from "react";
+import Icon from "./Icon";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -175,7 +176,7 @@ export default function AccountBadge({
             <span className={`account-badge-brain is-${brainLine.tone}`}>{brainLine.text}</span>
           )}
         </span>
-        <span className="account-badge-disclosure" aria-hidden="true">{open ? "▾" : "▴"}</span>
+        <span className="account-badge-disclosure" aria-hidden="true"><Icon name={open ? "chevron-up" : "chevron-down"} size={13} strokeWidth={2.2} /></span>
       </button>
 
       {open && (

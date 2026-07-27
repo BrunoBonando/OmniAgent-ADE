@@ -214,7 +214,7 @@ function NotificationRow({
         aria-label={`Dismiss notification from ${entry.title}`}
         title="Dismiss"
       >
-        &#215;
+        <Icon name="x" size={14} strokeWidth={2.1} />
       </button>
     </li>
   );
@@ -374,7 +374,7 @@ export default function NotificationsPanel({
                 onClick={() => setOpen(false)}
                 aria-label="Close notifications"
               >
-                &#215;
+                <Icon name="x" size={15} strokeWidth={2.1} />
               </button>
             </div>
 

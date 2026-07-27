@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { ProjectInfo } from "../state/sessions";
 import { idColor } from "../state/projectColors";
 import SessionStatusLight from "./SessionStatusLight";
+import Icon from "./Icon";
 
 interface StartupScreenProps {
   loading: boolean;
@@ -68,7 +69,7 @@ export default function StartupScreen({
                 onKeyDown={(event) => moveFocus(event, 0)}
               >
                 <span className="startup-new-mark" aria-hidden>
-                  +
+                  <Icon name="plus" size={20} />
                 </span>
                 <span>
                   <strong>Start from scratch</strong>

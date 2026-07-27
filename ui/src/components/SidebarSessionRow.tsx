@@ -291,7 +291,7 @@ export default function SidebarSessionRow({
               aria-label="New terminal"
               title="New terminal (⌘T)"
             >
-              <span aria-hidden>+</span>
+              <Icon name="plus" size={13} />
               <span className="terminal-row-new-label" aria-hidden>
                 New terminal
               </span>

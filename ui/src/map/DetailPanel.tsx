@@ -23,6 +23,7 @@
 import { useEffect, useState } from "react";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { mapNodeDetail, type MapNodeDetail } from "../lib/tauri";
+import Icon from "../components/Icon";
 import type { ProjectInfo } from "../state/sessions";
 import { colorForKind, labelForKind } from "./palette";
 
@@ -110,7 +111,7 @@ export default function DetailPanel({
     <div className="detail-panel" role="dialog" aria-label="Node detail">
       <div className="detail-panel-header">
         <button className="detail-panel-close" onClick={onClose} aria-label="Close detail panel">
-          ×
+          <Icon name="x" size={15} strokeWidth={2.1} />
         </button>
       </div>
 

@@ -178,7 +178,7 @@ export default function PaneMenu({
                   </span>
                   {isCurrent && (
                     <span className="pane-menu-check" aria-hidden>
-                      &#10003;
+                      <Icon name="check" size={13} strokeWidth={2.4} />
                     </span>
                   )}
                 </button>

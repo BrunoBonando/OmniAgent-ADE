@@ -201,6 +201,7 @@ describe("FileTree", () => {
     await screen.findByText("src");
     const icons = document.querySelectorAll(".file-tree-icon");
     expect(icons.length).toBe(rootEntries().length);
+    expect(document.querySelectorAll(".file-tree-chevron svg").length).toBe(1);
   });
 
   // ------------------------------------------- click = select, dblclick = open (Task 2)

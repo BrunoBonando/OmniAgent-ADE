@@ -155,6 +155,7 @@ import CloseSessionConfirm from "./CloseSessionConfirm";
 import FileTree from "./FileTree";
 import type { SessionGroup } from "../state/sessionGroups";
 import AccountBadge from "./AccountBadge";
+import Icon from "./Icon";
 import { brainLine } from "../state/accountBadgeState";
 import type { ImportBatchResult } from "../state/importState";
 
@@ -483,7 +484,7 @@ export default function Sidebar({
           onClick={() => onSetView?.("workspace")}
           title="Terminal workspace"
         >
-          &gt;_ Workspace
+          <Icon name="terminal" size={13} /> Workspace
         </button>
         <button
           role="tab"
@@ -492,7 +493,7 @@ export default function Sidebar({
           onClick={() => onSetView?.("map")}
           title="Brain map"
         >
-          &#10022; Map
+          <Icon name="sparkle" size={13} /> Map
         </button>
       </div>
 
@@ -510,7 +511,7 @@ export default function Sidebar({
           title="New session (⌘N)"
           onClick={() => selectedProject && onNewSessionInProject?.(selectedProject)}
         >
-          +
+          <Icon name="plus" size={14} />
         </button>
       </div>
 

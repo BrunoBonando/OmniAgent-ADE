@@ -110,6 +110,7 @@ import type { ProjectInfo } from "../state/sessions";
 import { statusGlyph } from "../state/codeReviewState";
 import type { GitBadges } from "../state/fileGitStatus";
 import FileIcon from "./FileIcon";
+import Icon from "./Icon";
 import FileTreeContextMenu, { type FileTreeContextMenuTarget } from "./FileTreeContextMenu";
 
 /** One directory level's fetch state — `undefined`/absent from the cache
@@ -821,7 +822,7 @@ export default function FileTree({ project, activeTabId, onClose, embedded, filt
               >
                 {entry.is_dir ? (
                   <span className={`file-tree-chevron${open ? " is-open" : ""}`} aria-hidden="true">
-                    &#9656;
+                    <Icon name="chevron-right" size={12} strokeWidth={2.25} />
                   </span>
                 ) : (
                   <span className="file-tree-chevron is-file" aria-hidden="true" />
@@ -892,7 +893,7 @@ export default function FileTree({ project, activeTabId, onClose, embedded, filt
                     aria-label={`Paste ${entry.name}'s path into the active terminal`}
                     title="Paste path into the active terminal"
                   >
-                    &#8618;
+                    <Icon name="terminal" size={13} strokeWidth={2} />
                   </button>
                 )}
               </div>
@@ -967,12 +968,12 @@ export default function FileTree({ project, activeTabId, onClose, embedded, filt
                   aria-label={`Reveal ${project.label} in Finder`}
                   title="Reveal in Finder"
                 >
-                  &#8689;
+                  <Icon name="external" size={14} strokeWidth={2} />
                 </button>
               </>
             )}
             <button className="file-tree-close" onClick={onClose} aria-label="Hide file tree" title="Hide file tree">
-              &times;
+              <Icon name="x" size={14} strokeWidth={2.1} />
             </button>
           </div>
         </div>

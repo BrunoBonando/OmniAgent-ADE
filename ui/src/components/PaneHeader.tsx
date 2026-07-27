@@ -77,6 +77,7 @@ import { DEFAULT_TERMINAL_THEME, type TerminalThemeId } from "../lib/terminalThe
 import { ENGINE_LABEL } from "../theme";
 import PaneMenu from "./PaneMenu";
 import SessionStatusLight from "./SessionStatusLight";
+import Icon from "./Icon";
 
 interface PaneHeaderProps {
   tab: TabInfo;
@@ -193,7 +194,7 @@ export default function PaneHeader({
             aria-expanded={menuOpen}
             title="Terminal options"
           >
-            &#8942;
+            <Icon name="more" size={16} />
           </button>
           {menuOpen && (
             <PaneMenu
@@ -216,7 +217,7 @@ export default function PaneHeader({
         aria-label={`New terminal in ${projectLabel}`}
         title="New terminal in this project"
       >
-        +
+        <Icon name="plus" size={15} />
       </button>
       <button
         className="pane-header-btn pane-header-btn-close"
@@ -226,7 +227,7 @@ export default function PaneHeader({
         aria-label={`Close ${tabDisplayLabel(tab)}`}
         title="Close"
       >
-        ×
+        <Icon name="x" size={14} strokeWidth={2.1} />
       </button>
     </div>
   );

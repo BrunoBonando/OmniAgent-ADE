@@ -27,24 +27,25 @@ interface FileIconProps {
   color: string;
 }
 
-const VIEWBOX_SIZE = 14;
+const VIEWBOX_SIZE = 16;
 
 function FolderGlyph({ open, color }: { open: boolean; color: string }) {
   return open ? (
     <path
-      d="M1.5 4.3c0-.6.4-1 1-1h3l1.2 1.3h5.8c.6 0 1.05.5 1 1.1l-.9 5.4c-.1.5-.55.9-1 .9H2.5c-.6 0-1-.4-1-1z"
+      d="M1.75 5c0-.7.55-1.25 1.25-1.25h3.25l1.5 1.6h5.25c.7 0 1.2.55 1.08 1.24l-.85 5.05c-.1.62-.65 1.11-1.28 1.11H3c-.7 0-1.25-.55-1.25-1.25z"
       fill={color}
       fillOpacity="0.16"
       stroke={color}
-      strokeWidth="1.1"
+      strokeWidth="1.2"
       strokeLinejoin="round"
     />
   ) : (
     <path
-      d="M1.5 3.6c0-.6.4-1 1-1h3l1.2 1.4h5.8c.6 0 1 .4 1 1v6.4c0 .6-.4 1-1 1h-10c-.6 0-1-.4-1-1z"
-      fill="none"
+      d="M1.75 4.5c0-.7.55-1.25 1.25-1.25h3.25l1.5 1.6h5.25c.7 0 1.25.55 1.25 1.25v5.5c0 .7-.55 1.25-1.25 1.25H3c-.7 0-1.25-.55-1.25-1.25z"
+      fill={color}
+      fillOpacity="0.12"
       stroke={color}
-      strokeWidth="1.1"
+      strokeWidth="1.2"
       strokeLinejoin="round"
     />
   );
@@ -58,13 +59,13 @@ function PageOutline() {
   return (
     <>
       <path
-        d="M3.6 1.4h4.3l3 3v8c0 .6-.45 1-1 1H3.6c-.55 0-1-.4-1-1V2.4c0-.55.45-1 1-1z"
+        d="M4 1.75h4.25l3.25 3.2v8.3c0 .55-.45 1-1 1H4c-.55 0-1-.45-1-1V2.75c0-.55.45-1 1-1z"
         fill="none"
         stroke="currentColor"
-        strokeWidth="1.1"
+        strokeWidth="1.15"
         strokeLinejoin="round"
       />
-      <path d="M7.9 1.4v2.7c0 .5.4.9.9.9h2.6" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+      <path d="M8.25 1.75v2.65c0 .55.45 1 1 1h2.25" fill="none" stroke="currentColor" strokeWidth="1.15" strokeLinejoin="round" />
     </>
   );
 }
@@ -97,7 +98,7 @@ export default function FileIcon({ kind, color }: FileIconProps) {
       className="file-tree-icon"
       width={VIEWBOX_SIZE}
       height={VIEWBOX_SIZE}
-      viewBox="0 0 14 14"
+      viewBox="0 0 16 16"
       aria-hidden="true"
       style={{ color: "var(--ink-dim)" }}
     >
