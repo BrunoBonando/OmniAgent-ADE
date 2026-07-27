@@ -386,6 +386,27 @@ fn top_languages(counts: &std::collections::HashMap<&'static str, u64>) -> Vec<S
 
 /// Summarises `path` for the New Workspace dialog's stats strip.
 ///
+/// **On a blocking thread, not inline** — the same reasoning (and the same
+/// `tauri::async_runtime::spawn_blocking`, Tauri's own re-export, so no new
+/// dependency) as `agents.rs`'s `run_install`. This is an unbounded
+/// recursive walk with a `metadata()` stat per file over a folder the user
+/// just pointed at, which is *precisely* the "you picked something huge"
+/// case the strip exists to warn about. Run inline it would park a runtime
+/// worker and stall unrelated IPC — freezing the whole app while the modal
+/// displays a "…" placeholder implying it is not blocked.
+///
+/// The real work is [`folder_stats_inner`], which stays synchronous and
+/// dependency-free so the unit tests can call it directly without standing
+/// up an async runtime.
+#[tauri::command]
+pub async fn folder_stats(path: String) -> Result<FolderStats, String> {
+    tauri::async_runtime::spawn_blocking(move || folder_stats_inner(&path))
+        .await
+        .map_err(|e| format!("folder scan failed to run: {e}"))?
+}
+
+/// The actual walk behind [`folder_stats`].
+///
 /// Counts via `brain_ingest::walk::walk_files` — the *same* recursive,
 /// gitignore-aware walker ingestion itself uses (it also honours
 /// `SKIP_DIRS` and the 1 MB size cap), so "N files to walk" is the number
@@ -397,9 +418,8 @@ fn top_languages(counts: &std::collections::HashMap<&'static str, u64>) -> Vec<S
 /// the same `std::process::Command` approach `gitreview` already takes, and
 /// a folder with a `.git` that isn't a usable repo simply reports 0 rather
 /// than failing the whole call.
-#[tauri::command]
-pub fn folder_stats(path: String) -> Result<FolderStats, String> {
-    let root = std::path::Path::new(&path);
+fn folder_stats_inner(path: &str) -> Result<FolderStats, String> {
+    let root = std::path::Path::new(path);
     if !root.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
@@ -416,7 +436,7 @@ pub fn folder_stats(path: String) -> Result<FolderStats, String> {
     let git = root.join(".git").exists();
     let branches = if git {
         std::process::Command::new("git")
-            .args(["-C", &path, "branch", "--format=%(refname:short)"])
+            .args(["-C", path, "branch", "--format=%(refname:short)"])
             .output()
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).lines().count() as u32)
@@ -458,7 +478,7 @@ mod folder_stats_tests {
         std::fs::write(dir.path().join("a.ts"), "x").unwrap();
         std::fs::write(dir.path().join("b.rs"), "x").unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
-        let stats = super::folder_stats(dir.path().to_string_lossy().into()).unwrap();
+        let stats = super::folder_stats_inner(&dir.path().to_string_lossy()).unwrap();
         assert_eq!(stats.files, 2);
         assert!(stats.git);
         // alphabetical tiebreak — both languages have exactly one file.
@@ -481,7 +501,7 @@ mod folder_stats_tests {
         std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
         std::fs::write(dir.path().join("node_modules/pkg/index.js"), "x").unwrap();
 
-        let stats = super::folder_stats(dir.path().to_string_lossy().into()).unwrap();
+        let stats = super::folder_stats_inner(&dir.path().to_string_lossy()).unwrap();
         // Just keep.ts: `ignored.ts` is gitignored, `node_modules` is an
         // always-skip dir, and `.gitignore` itself is a dotfile (the
         // `ignore` crate's default `hidden(true)` drops it).
@@ -496,8 +516,8 @@ mod folder_stats_tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("f.txt");
         std::fs::write(&file, "x").unwrap();
-        assert!(super::folder_stats(file.to_string_lossy().into()).is_err());
-        assert!(super::folder_stats("/no/such/omniagent-folder-stats".into()).is_err());
+        assert!(super::folder_stats_inner(&file.to_string_lossy()).is_err());
+        assert!(super::folder_stats_inner("/no/such/omniagent-folder-stats").is_err());
     }
 }
 

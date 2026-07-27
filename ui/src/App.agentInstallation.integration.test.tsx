@@ -106,16 +106,32 @@ vi.mock("./components/NewTerminalModal", () => ({
         <div data-testid="installing-agents">
           {[...props.agentState.installing.keys()].sort().join(",")}
         </div>
+        <div data-testid="last-selected-agents">{props.agentState.lastSelected.join(",")}</div>
       </div>
     );
   },
 }));
 
-// Workspace creation hands straight over to this dialog now (Task 12) —
-// stubbed so it never renders for real in these tests.
+// Workspace creation hands straight over to this dialog now (Task 12), and
+// it is also where engines are chosen — so it owns the `last_selected_agents`
+// write. `create-session` fires with a duplicate slot on purpose: `slots` is
+// one engine PER PANE, and what gets remembered must be the deduplicated set.
 vi.mock("./components/NewSessionModal", () => ({
-  default: function NewSessionModalStub() {
-    return <div data-testid="new-session-modal" />;
+  default: function NewSessionModalStub(props: {
+    project: ProjectInfo;
+    onCreate: (project: ProjectInfo, cwd: string, slots: Engine[], prompt: string) => void;
+  }) {
+    return (
+      <div data-testid="new-session-modal">
+        <button
+          onClick={() =>
+            props.onCreate(props.project, "/tmp/fresh", ["claude", "claude", "shell"], "")
+          }
+        >
+          create-session
+        </button>
+      </div>
+    );
   },
 }));
 
@@ -283,6 +299,51 @@ describe("App — Agent Installation + Workspace Creation Integration", () => {
     expect(
       tauriMocks.settingsSetMock.mock.calls.filter(([key]) => key === "last_selected_agents"),
     ).toHaveLength(0);
+  });
+
+  it("persists last-selected agent choices to settings when a session is created", async () => {
+    // The founder rule ("the last one that they created should be
+    // pre-selected", `getDefaultAgentSelection`) needs a writer, or
+    // `lastSelected` stays `[]` forever and every dialog falls through to
+    // `["shell"]`. That writer used to live in the workspace-creation
+    // engine loop; since Task 12 removed it, the session dialog — which is
+    // what actually chooses engines now — owns it.
+    tauriMocks.agentCheckInstalledMock.mockResolvedValue(["claude", "shell"]);
+    let n = 0;
+    tauriMocks.sessionCreateMock.mockImplementation((_project: string, engine: Engine) =>
+      Promise.resolve({ ...sessionInfoFor(engine), id: `s${n++}` }),
+    );
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "create-workspace" }));
+    fireEvent.click(await screen.findByRole("button", { name: "create-session" }));
+
+    // Deduplicated, in slot order — not ["claude", "claude", "shell"].
+    await waitFor(() =>
+      expect(tauriMocks.settingsSetMock).toHaveBeenCalledWith(
+        "last_selected_agents",
+        JSON.stringify(["claude", "shell"]),
+      ),
+    );
+
+    // ...and it reached the reducer too, so the pre-fill is right for the
+    // rest of this run and not only after a relaunch.
+    fireEvent.click(screen.getByRole("button", { name: "open-new-terminal" }));
+    expect(await screen.findByTestId("last-selected-agents")).toHaveTextContent("claude,shell");
+  });
+
+  it("restores those choices on the next boot", async () => {
+    // The other half of the round trip: what the session dialog wrote is
+    // what App reads back at startup.
+    await settingsStore.set("last_selected_agents", JSON.stringify(["claude", "shell"]));
+    tauriMocks.agentCheckInstalledMock.mockResolvedValue(["claude", "shell"]);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "new-tab" }));
+    await waitFor(() => expect(tauriMocks.sessionCreateMock).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "open-new-terminal" }));
+
+    expect(await screen.findByTestId("last-selected-agents")).toHaveTextContent("claude,shell");
   });
 
   it("triggers agent installation and handles progress callback", async () => {

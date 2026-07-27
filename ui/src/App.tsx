@@ -954,6 +954,25 @@ function App() {
         dispatch({ type: "tabs/opened_bulk", tabs: created });
       }
 
+      // "The last one that they created should be pre-selected" (founder
+      // rule, encoded in `getDefaultAgentSelection`) — this is the write
+      // that makes `lastSelected` mean anything. It used to live in
+      // `handleWorkspaceCreated`'s engine-spawn loop; when Task 12 removed
+      // that loop it came here, because choosing engines is now this
+      // dialog's job, and without a writer `lastSelected` would stay `[]`
+      // forever and every future dialog would fall through to `["shell"]`.
+      //
+      // Deduplicated (`slots` is one engine PER PANE, so two Claude
+      // terminals is a normal ask) and recorded as the user's *choice*,
+      // not as whatever happened to boot — an engine that failed to start
+      // is still the engine they asked for. Same key and JSON-array
+      // encoding the boot-time reader at the top of this file parses.
+      const chosen = [...new Set(slots)] as Agent[];
+      if (chosen.length > 0) {
+        void settingsSet("last_selected_agents", JSON.stringify(chosen));
+        agentDispatch({ type: "agents/selected", agents: chosen });
+      }
+
       // Task 11: the dialog's "what are you doing?" answer becomes the
       // first thing typed into the session's lead terminal — the first
       // spawned pane that isn't a bare shell, since a shell has no agent CLI
