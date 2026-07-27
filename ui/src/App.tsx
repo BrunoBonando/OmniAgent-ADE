@@ -52,7 +52,6 @@ import {
   groupTabsBySession,
   newSessionGroupId,
   nextSessionName,
-  sessionGroupForNewPane,
   visibleSessionGroupId,
   type SessionGroup,
 } from "./state/sessionGroups";
@@ -99,12 +98,10 @@ type View = "workspace" | "map";
  * threaded through three different triggers. */
 const INGESTION_POLL_MS = 2000;
 
-/** Resolves a group id (from `visibleSessionGroupId`/`sessionGroupForNewPane`
- * — both only ever return an id, `string | null`) to the full `SessionGroup`
- * object. Shared by `visibleSession`/`joinTargetSession` below: same
- * `groupTabsBySession` lookup, two different id inputs answering two
- * different questions — see those consts' own docs for why the two must
- * stay separate rather than collapsing into one shared derivation. */
+/** Resolves a group id (from `visibleSessionGroupId`, which only ever
+ * returns an id, `string | null`) to the full `SessionGroup` object the
+ * chrome breadcrumb and `NewTerminalModal` both need — see `visibleSession`
+ * below, its only caller. */
 function findSessionGroup(
   tabs: TabInfo[],
   activeTabId: string | null,
@@ -703,11 +700,25 @@ function App() {
       setSelectedProjectId(project.id);
       reopenWorkspace(project.id);
 
-      // A single new pane joins the session you're already in for that
-      // project (`sessionGroupForNewPane`) — ⌘T, the sidebar "+" and the
+      // A single new pane joins the session that project is currently
+      // SHOWING (`visibleSessionGroupId`) — ⌘T, the sidebar "+" and the
       // pane header's split all mean "one more terminal here", not "a new
       // session". A project with no panes at all starts one, named.
-      const existingGroup = sessionGroupForNewPane(state.tabs, project.id, state.activeTabId);
+      //
+      // This used to ask `sessionGroupForNewPane`, a near-twin that differed
+      // in exactly one case — no focused pane in this project — where it
+      // picked the project's MOST-RECENTLY-CREATED session while
+      // `visibleSessionGroupId` picks its FIRST-SEEN one, i.e. the session
+      // actually on screen. That case is not exotic: selecting a workspace
+      // in the sidebar deliberately doesn't move focus, so any project with
+      // 2+ sessions hit it. The sidebar's "New terminal" row is gated and
+      // drawn off the on-screen session, so the row could sit under Session
+      // 1 and spawn into Session 2. Unified on the on-screen answer, which
+      // is also what this function's own `setView("workspace")` below is
+      // about to paint. Whenever the focused pane IS in this project the two
+      // functions returned the same group anyway, so the focused ⌘T and
+      // pane-split paths are untouched; `sessionGroupForNewPane` is gone.
+      const existingGroup = visibleSessionGroupId(state.tabs, project.id, state.activeTabId);
 
       // The approved-shape ladder tops out at 2x4 (`paneGrid.ts`'s
       // `GRID_LADDER` — founder: "and then no more terminals are
@@ -1253,35 +1264,29 @@ function App() {
     setReviewTarget((target) => (target?.id === id ? null : target));
   }, []);
 
-  // The same question the sidebar's accent rail and the pane grid answer,
-  // asked once more here for the chrome breadcrumb: which session is ON
-  // SCREEN. All three go through `visibleSessionGroupId` so they can never
-  // name different sessions — see that function's doc for why it isn't just
-  // `currentSessionGroupId` (selecting a workspace doesn't move focus).
+  // The one session this app is "in" for the selected workspace: what the
+  // sidebar's accent rail marks, what the pane grid paints, what the chrome
+  // breadcrumb names — and what a new terminal joins. All of them go through
+  // `visibleSessionGroupId` so they can never name different sessions; see
+  // that function's doc for why it isn't just `currentSessionGroupId`
+  // (selecting a workspace doesn't move focus).
   //
-  // Fix round (2026-07-27): this used to ALSO back `NewTerminalModal`'s
-  // `session` prop and the ⌘T MAX_PANES precheck below, on the (wrong)
-  // assumption that "on screen" and "the session a new pane joins" always
-  // agree. They don't — `sessionGroups.ts`'s own docs draw this distinction
-  // on purpose: `visibleSessionGroupId` falls back to the project's
-  // FIRST-SEEN session when nothing in that project has focus, while
-  // `sessionGroupForNewPane` (what `requestNewTab` itself calls to pick a
-  // join target) falls back to the MOST-RECENTLY-CREATED one in that same
-  // case. They diverge exactly when the user switches to a different
-  // project via the sidebar (which only touches `selectedProjectId`, never
-  // `activeTabId`) and that project has 2+ sessions — an ordinary flow, not
-  // an edge case. So this const now backs ONLY the breadcrumb, which
-  // genuinely wants "on screen"; `joinTargetSession` right below is the
-  // separate derivation for anything that's about to actually receive a
-  // new pane.
+  // There were briefly TWO consts here — this one for "on screen" and a
+  // `joinTargetSession` for "which session receives a new pane" — because
+  // `requestNewTab` resolved its own target through `sessionGroupForNewPane`,
+  // whose only difference was the no-focus-in-this-project fallback
+  // (most-recently-created vs first-seen/on-screen). Keeping the modal
+  // honest about that divergence just moved the bug: the sidebar's "New
+  // terminal" row is drawn and gated off the ON-SCREEN session, so the row
+  // could sit under Session 1 and spawn into Session 2. `requestNewTab` now
+  // resolves through `visibleSessionGroupId` too (see its body), the two
+  // questions have one answer again, and this is it.
   //
   // `useMemo`d (unlike the rest of this file's plain-const derivations) for
-  // referential stability: `joinTargetSession` below is a dependency of the
-  // ⌘T `useEffect` further down, and a fresh object on every render would
-  // re-subscribe that effect's window listeners on every render instead of
-  // only when the tabs/focus/selected-project actually change. Kept
-  // `useMemo` here too for the same shape/symmetry, even though nothing
-  // downstream of `visibleSession` itself is effect-dependency-sensitive.
+  // referential stability: this is a dependency of the ⌘T `useEffect`
+  // further down, and a fresh object on every render would re-subscribe that
+  // effect's window listeners on every render instead of only when the
+  // tabs/focus/selected-project actually change.
   const visibleSession = useMemo(
     () =>
       findSessionGroup(
@@ -1295,28 +1300,6 @@ function App() {
     [state.tabs, state.activeTabId, selectedProjectId],
   );
   const currentSessionLabel = visibleSession?.label ?? null;
-
-  // The session a NEW pane in the selected project actually joins:
-  // `sessionGroupForNewPane`, called with the exact same arguments (tabs,
-  // project id, activeTabId) `requestNewTab` itself passes internally to
-  // resolve `existingGroup` — see that function's body. This is what ⌘T's
-  // MAX_PANES precheck and `NewTerminalModal`'s `session` prop must read,
-  // NEVER `visibleSession` above: the modal has to show — and precheck
-  // against — the session `requestNewTab` is actually about to drop the new
-  // pane into, which is not always "the one on screen" (see that const's
-  // own doc for exactly when the two disagree).
-  const joinTargetSession = useMemo(
-    () =>
-      findSessionGroup(
-        state.tabs,
-        state.activeTabId,
-        selectedProjectId,
-        selectedProjectId === null
-          ? null
-          : sessionGroupForNewPane(state.tabs, selectedProjectId, state.activeTabId),
-      ),
-    [state.tabs, state.activeTabId, selectedProjectId],
-  );
 
   // ---- ⌘T new tab / ⌘K palette / ⌘N new session or workspace / ⌘W close
   // pane. The established place for app-level shortcuts that need live UI
@@ -1371,16 +1354,15 @@ function App() {
         // — silently does nothing, exactly like the old direct-spawn
         // handler's own `if (selectedProject)` guard did. `NewTerminalModal`
         // joins an existing session (its whole `session` prop, resolved via
-        // `joinTargetSession` — the SAME session `requestNewTab` will
-        // actually use, not necessarily the one on screen, see that const's
-        // own doc); starting a project's FIRST session is ⌘N/
-        // `EmptyWorkspace`'s job, not ⌘T's — and setting `newTerminalOpen`
-        // with no `joinTargetSession` to hand the modal would leave that
-        // state stuck true with nothing rendered (the render guard below
-        // requires `joinTargetSession` too), ready to pop the modal open
-        // later the moment a session appears.
-        if (!selectedProject || !joinTargetSession) return;
-        if (joinTargetSession.tabs.length >= MAX_PANES) {
+        // `visibleSession` — the SAME session `requestNewTab` will actually
+        // use, see that const's own doc); starting a project's FIRST session
+        // is ⌘N/`EmptyWorkspace`'s job, not ⌘T's — and setting
+        // `newTerminalOpen` with no `visibleSession` to hand the modal would
+        // leave that state stuck true with nothing rendered (the render
+        // guard below requires `visibleSession` too), ready to pop the modal
+        // open later the moment a session appears.
+        if (!selectedProject || !visibleSession) return;
+        if (visibleSession.tabs.length >= MAX_PANES) {
           setErrorBanner(
             `This session already has ${MAX_PANES} terminals — the most one grid holds. Close one, or start a new session (⌘N).`,
           );
@@ -1422,7 +1404,7 @@ function App() {
       window.removeEventListener("keydown", onNavigationKeyDown, true);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [activateTab, selectedProject, selectedProjectId, joinTargetSession, state.activeTabId, state.tabs]);
+  }, [activateTab, selectedProject, selectedProjectId, visibleSession, state.activeTabId, state.tabs]);
 
   // The chrome's breadcrumb — "which workspace, which session am I in" —
   // built from the same `groupTabsBySession` derivation the sidebar renders
@@ -1564,19 +1546,20 @@ function App() {
       )}
 
       {/* ⌘T / the sidebar's "New terminal" row (Task 9). `session` is
-          `joinTargetSession` — deliberately NOT `visibleSession` — so the
-          modal always shows, and precheck against, the exact session
-          `requestNewTab` below is about to drop the new pane into (see
-          `joinTargetSession`'s own doc for why "on screen" and "join
-          target" can legitimately be two different sessions). Both openers
-          already only fire `setNewTerminalOpen(true)` when a join target
-          genuinely exists (⌘T's own explicit `!joinTargetSession` bail
-          above; the sidebar row is simply never rendered without a current
-          session — `SidebarSessionRow`'s own doc), so this guard is just
-          the type-narrowing echo of that, not a second decision. */}
-      {newTerminalOpen && selectedProject && joinTargetSession && (
+          `visibleSession` — the session on screen, which is also the exact
+          session `requestNewTab` below will drop the new pane into: both
+          resolve through `visibleSessionGroupId` (see that const's own doc
+          for the fix that made those one answer instead of two). So the
+          modal's header names the session the row was rendered under, and
+          the MAX_PANES precheck counts that same session's panes. Both
+          openers already only fire `setNewTerminalOpen(true)` when a session
+          genuinely exists (⌘T's own explicit `!visibleSession` bail above;
+          the sidebar row is simply never rendered without a current session
+          — `SidebarSessionRow`'s own doc), so this guard is just the
+          type-narrowing echo of that, not a second decision. */}
+      {newTerminalOpen && selectedProject && visibleSession && (
         <NewTerminalModal
-          session={joinTargetSession}
+          session={visibleSession}
           agentState={agentState}
           onCreate={(name, engine) => {
             setNewTerminalOpen(false);

@@ -45,8 +45,8 @@ vi.mock("@tauri-apps/api/event", () => ({
 // `onOpenNewTerminal` — the sidebar's "New terminal" row, Task 5 — alongside
 // ⌘T, both landing on the exact same `setNewTerminalOpen`) AND a
 // "select-project-<id>" button per project, wired straight to
-// `onSelectProject`. That second one exists only for the
-// visibleSession-vs-joinTargetSession regression test below: `onSelectProject`
+// `onSelectProject`. That second one exists only for the on-screen-session
+// regression tests below: `onSelectProject`
 // is the ONE App.tsx call that moves `selectedProjectId` without touching
 // `activeTabId` (`onSelectProject={(p) => setSelectedProjectId(p.id)}` — see
 // `App.tsx`), which is exactly the real-world sequence ("switch projects via
@@ -76,10 +76,10 @@ vi.mock("./components/Sidebar", () => ({
 // `data-group` (never asserted on by App.requestNewTab.test.tsx's own copy
 // of this stub) and the "activate-<id>" button both exist for the same
 // regression test as `select-project-<id>` above: `data-group` is how the
-// test tells apart a pane that landed in the RIGHT session (the actual
-// `sessionGroupForNewPane` join target) from one that landed in the
-// on-screen-but-wrong session (`visibleSessionGroupId`) without depending on
-// an opaque, `Date.now()`-derived generated group id; `onActivateTab` is
+// test tells apart a pane that landed in the session on screen (the join
+// target, `visibleSessionGroupId`) from one that landed in the workspace's
+// most-recently-created session instead, without depending on an opaque,
+// `Date.now()`-derived generated group id; `onActivateTab` is
 // what moves `activeTabId` to a specific tab (the real
 // `activateTab={activateTab}` App.tsx wires to `Workspace`), which is the
 // other half of setting up "focused pane is in a different project than the
@@ -221,33 +221,48 @@ describe("App — ⌘T opens the New Terminal modal (Task 9)", () => {
   });
 });
 
-describe("App — ⌘T targets the JOIN session, not just the on-screen one (fix round)", () => {
-  // Regression for the bug the first review round caught: `visibleSession`
-  // (`visibleSessionGroupId` — "which session is on screen") and
-  // `joinTargetSession` (`sessionGroupForNewPane` — "which session does a
-  // new pane join", the function `requestNewTab` itself actually calls) can
-  // legitimately disagree. Per `state/sessionGroups.ts`'s own docs, both
-  // fall back differently when the focused pane isn't in the target
-  // project: `visibleSessionGroupId` picks that project's FIRST-SEEN
-  // session, `sessionGroupForNewPane` picks its MOST-RECENTLY-CREATED one.
+describe("App — ⌘T and the sidebar row spawn into the session that is ON SCREEN (final fix round)", () => {
+  // Regression for the bug the FINAL review round caught, and the rewrite of
+  // the tests the first round left behind. History, because the expectations
+  // below are the exact inverse of what this block used to assert:
   //
-  // Reproduced with an ordinary flow, not a contrived one: project A has
-  // two sessions (Session 1, created first, 2 panes; Session 2, created
-  // after, 1 pane). The user is focused on a pane in project B, then clicks
-  // project A's row in the sidebar — `onSelectProject` (`App.tsx`:
+  //   Round 1 found the ⌘T modal showing a different session than
+  //   `requestNewTab` would join, and fixed it by pointing the modal at
+  //   `sessionGroupForNewPane` — "which session does a new pane join",
+  //   whose no-focus-in-this-project fallback is the project's
+  //   MOST-RECENTLY-CREATED session — instead of `visibleSessionGroupId`,
+  //   whose fallback is the FIRST-SEEN (on-screen) one.
+  //
+  //   Round 2 found that this made the modal agree with `requestNewTab` and
+  //   disagree with the SIDEBAR: the "New terminal" row is rendered under,
+  //   and gated by, the on-screen session (`Sidebar.tsx` computes its
+  //   `isCurrent` from `visibleSessionGroupId`). So the row could sit under
+  //   Session 1 and spawn into Session 2 — and the grid, which paints from
+  //   `visibleSessionGroupId` too, would jump.
+  //
+  // The fix unified the two: `requestNewTab` resolves its join target
+  // through `visibleSessionGroupId`, `sessionGroupForNewPane` is deleted,
+  // and `App.tsx` has ONE `visibleSession`. So everything below now expects
+  // Session 1 — the session on screen, under which the sidebar draws the
+  // row — where it used to expect Session 2.
+  //
+  // The fixture is unchanged, because it is exactly what exercises the
+  // fallback path. An ordinary flow, not a contrived one: project A has two
+  // sessions (Session 1, created first, 2 panes; Session 2, created after,
+  // 1 pane). The user is focused on a pane in project B, then clicks project
+  // A's row in the sidebar — `onSelectProject` (`App.tsx`:
   // `(p) => setSelectedProjectId(p.id)`) moves `selectedProjectId` WITHOUT
   // touching `activeTabId`, so the focused pane stays B's even though A is
-  // now the selected/on-screen workspace. `visibleSessionGroupId` then
-  // falls back to A's Session 1 (first-seen); `sessionGroupForNewPane`
-  // falls back to A's Session 2 (most recent) — the exact divergence.
+  // the selected workspace. No session in A holds focus, so the fallback is
+  // what answers: A's Session 1.
   const a: ProjectInfo = { id: "A", label: "Project A", path: "/tmp/a" };
   const b: ProjectInfo = { id: "B", label: "Project B", path: "/tmp/b" };
 
   // A pre-restored layout (rather than clicking "new-tab-A" repeatedly) is
   // the only way to get TWO sessions in one project through this stub
-  // harness: `sessionGroupForNewPane` (what every real "add a pane" path
-  // goes through) never mints a second session for a project that already
-  // has one — only `NewSessionModal`/`EmptyWorkspace`'s `handleSessionCreated`
+  // harness: `visibleSessionGroupId` (what every real "add a pane" path goes
+  // through now) never mints a second session for a project that already has
+  // one — only `NewSessionModal`/`EmptyWorkspace`'s `handleSessionCreated`
   // does that, and both render real Tauri-backed dialogs this file doesn't
   // stub out.
   const layout = JSON.stringify({
@@ -303,19 +318,20 @@ describe("App — ⌘T targets the JOIN session, not just the on-screen one (fix
     tauriMocks.sessionCreateMock.mockClear();
   }
 
-  it("⌘T's modal shows the JOIN session (Session 2, sessionGroupForNewPane's pick), not the on-screen one (Session 1)", async () => {
+  it("⌘T's modal shows the session on screen (Session 1) — the same one it will join", async () => {
     await setUpDivergentFocus();
 
     fireEvent.keyDown(window, { key: "t", metaKey: true });
 
-    // Session 2 (the join target: A's most-recently-created session) — NOT
-    // Session 1 (A's first-seen session, what `visibleSessionGroupId` would
-    // have shown, and what the pre-fix code actually rendered here).
-    expect(await screen.findByText("in Session 2 · 1 of 8 used")).toBeInTheDocument();
-    expect(screen.queryByText("in Session 1 · 2 of 8 used")).not.toBeInTheDocument();
+    // Session 1: A's first-seen session, what the grid paints and what the
+    // sidebar marks current. Pre-fix this read "in Session 2 · 1 of 8 used"
+    // (A's most-recently-created session, the old `sessionGroupForNewPane`
+    // join target) — a header naming a session other than the one on screen.
+    expect(await screen.findByText("in Session 1 · 2 of 8 used")).toBeInTheDocument();
+    expect(screen.queryByText("in Session 2 · 1 of 8 used")).not.toBeInTheDocument();
   });
 
-  it("confirming joins Session 2 (the real requestNewTab target) — Session 1 stays untouched", async () => {
+  it("confirming joins Session 1 — the session on screen, which is now also the real requestNewTab target", async () => {
     await setUpDivergentFocus();
 
     fireEvent.keyDown(window, { key: "t", metaKey: true });
@@ -323,26 +339,46 @@ describe("App — ⌘T targets the JOIN session, not just the on-screen one (fix
     fireEvent.click(screen.getByText("Open terminal ⏎"));
 
     await waitFor(() => expect(tauriMocks.sessionCreateMock).toHaveBeenCalledTimes(1));
-    // The new pane's cwd/session both come from project A regardless of
-    // which of A's two sessions it joined, so the group is the only thing
-    // that can tell them apart — grp-a2 (Session 2) must have gained the
-    // pane, grp-a1 (Session 1) must still have exactly its original two.
+    // The new pane's cwd/project are the same whichever of A's two sessions
+    // it joined, so the group is the only thing that can tell them apart —
+    // grp-a1 (Session 1, on screen) must have gained the pane, grp-a2
+    // (Session 2) must still hold exactly its original one.
     await waitFor(() => {
-      expect(document.querySelectorAll('[data-group="grp-a2"]')).toHaveLength(2);
+      expect(document.querySelectorAll('[data-group="grp-a1"]')).toHaveLength(3);
     });
-    expect(document.querySelectorAll('[data-group="grp-a1"]')).toHaveLength(2);
+    expect(document.querySelectorAll('[data-group="grp-a2"]')).toHaveLength(1);
   });
 
-  it(`refuses ⌘T using the JOIN session's count (Session 2, at ${MAX_PANES}) even while the on-screen session (Session 1) has room — the "false negative" shape`, async () => {
-    // Overrides the shared layout: Session 1 (on-screen, first-seen) has 1
-    // pane — plenty of room — while Session 2 (the actual join target,
-    // most-recently-created) is already full. Pre-fix, the precheck read
-    // `visibleSession` (Session 1, not full) and would have let the
-    // keystroke through, opening the modal for a session that's actually
-    // full — only failing once the user filled in a name/engine and hit
-    // confirm, inside `requestNewTab`'s OWN (always-correct)
-    // `sessionGroupForNewPane`-based check. Post-fix, the SAME precheck the
-    // modal would need is what refuses up front.
+  it("the sidebar's New terminal row spawns into the session it is rendered under (Session 1), not the newest one", async () => {
+    // THE bug this fix round is about, covered directly rather than as a
+    // side effect of the ⌘T tests above. `Sidebar.tsx` renders (and gates)
+    // the "New terminal" row inside the session whose `isCurrent` prop is
+    // true, which it computes with `visibleSessionGroupId` — Session 1 here
+    // (see `Sidebar.test.tsx`, "auto-expands the session the accent rail
+    // marks…", for that half). Pre-fix, clicking it opened a modal headed
+    // "in Session 2" and dropped the pane into grp-a2, then `setView`'d the
+    // grid over to a session the user never pointed at.
+    await setUpDivergentFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: "open-new-terminal-row" }));
+
+    expect(await screen.findByText("in Session 1 · 2 of 8 used")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Open terminal ⏎"));
+
+    await waitFor(() => expect(tauriMocks.sessionCreateMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(document.querySelectorAll('[data-group="grp-a1"]')).toHaveLength(3);
+    });
+    expect(document.querySelectorAll('[data-group="grp-a2"]')).toHaveLength(1);
+  });
+
+  it(`opens ⌘T's modal when the on-screen session (Session 1) has room, even though ANOTHER session in the same workspace is at ${MAX_PANES}`, async () => {
+    // Session 1 (on screen, first-seen) has 1 pane — plenty of room — while
+    // Session 2 is already full. The precheck must count the session ⌘T is
+    // actually about to join, which is now unambiguously the on-screen one,
+    // so a full session the user isn't even looking at can't veto the
+    // keystroke. (This test used to assert the exact opposite: that ⌘T was
+    // refused here, because the join target was Session 2.)
     const fullLayout = JSON.stringify({
       tabs: [
         { project: "A", engine: "shell", cwd: "/tmp/a", id: "a1", group: "grp-a1", groupLabel: "Session 1" },
@@ -369,18 +405,18 @@ describe("App — ⌘T targets the JOIN session, not just the on-screen one (fix
 
     fireEvent.keyDown(window, { key: "t", metaKey: true });
 
-    expect(await screen.findByText(new RegExp(`already has ${MAX_PANES} terminals`))).toBeInTheDocument();
-    expect(screen.queryByText("New terminal")).not.toBeInTheDocument();
-    expect(tauriMocks.sessionCreateMock).not.toHaveBeenCalled();
+    expect(await screen.findByText("in Session 1 · 1 of 8 used")).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(`already has ${MAX_PANES} terminals`))).not.toBeInTheDocument();
   });
 
-  it(`still opens ⌘T's modal when the JOIN session (Session 2) has room, even though the on-screen session (Session 1) is at ${MAX_PANES} — the "false positive" shape`, async () => {
-    // The mirror image of the previous test: Session 1 (on-screen,
-    // first-seen) is already full, Session 2 (the actual join target,
-    // most-recently-created) has room. Pre-fix, the precheck read
-    // `visibleSession` (Session 1, full) and would have refused the
-    // keystroke outright — blocking a perfectly valid ⌘T, since the session
-    // it's actually about to join has room.
+  it(`refuses ⌘T when the on-screen session (Session 1) is at ${MAX_PANES}, even though another session in the workspace has room`, async () => {
+    // The mirror image of the previous test: Session 1 (on screen) is
+    // already full, Session 2 has room. The keystroke is refused with the
+    // full-session banner rather than opening a modal for a session that
+    // cannot take the pane — and it refuses up front, not after the user has
+    // typed a name and hit confirm, because the precheck and
+    // `requestNewTab`'s own check now count the same session. (This test
+    // used to assert the opposite: that the modal opened, on Session 2.)
     const roomyLayout = JSON.stringify({
       tabs: [
         ...Array.from({ length: MAX_PANES }, (_, i) => ({
@@ -407,7 +443,8 @@ describe("App — ⌘T targets the JOIN session, not just the on-screen one (fix
 
     fireEvent.keyDown(window, { key: "t", metaKey: true });
 
-    expect(await screen.findByText("in Session 2 · 1 of 8 used")).toBeInTheDocument();
-    expect(screen.queryByText(new RegExp(`already has ${MAX_PANES} terminals`))).not.toBeInTheDocument();
+    expect(await screen.findByText(new RegExp(`already has ${MAX_PANES} terminals`))).toBeInTheDocument();
+    expect(screen.queryByText("New terminal")).not.toBeInTheDocument();
+    expect(tauriMocks.sessionCreateMock).not.toHaveBeenCalled();
   });
 });

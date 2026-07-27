@@ -7,7 +7,6 @@ import {
   newSessionGroupId,
   nextSessionName,
   sessionEngineBreakdown,
-  sessionGroupForNewPane,
   sessionShapeBadge,
   tabsInSession,
   visibleSessionGroupId,
@@ -102,24 +101,6 @@ describe("currentSessionGroupId", () => {
   it("is null with nothing focused, or a focus id that isn't a live tab", () => {
     expect(currentSessionGroupId([tab("a", "p1", "g1")], null)).toBeNull();
     expect(currentSessionGroupId([tab("a", "p1", "g1")], "ghost")).toBeNull();
-  });
-});
-
-describe("sessionGroupForNewPane", () => {
-  it("joins the session the focused pane is in", () => {
-    const tabs = [tab("a", "p1", "g1"), tab("b", "p1", "g2")];
-    expect(sessionGroupForNewPane(tabs, "p1", "a")).toBe("g1");
-    expect(sessionGroupForNewPane(tabs, "p1", "b")).toBe("g2");
-  });
-
-  it("falls back to the project's newest session when focus is in another project", () => {
-    const tabs = [tab("a", "p1", "g1"), tab("b", "p1", "g2"), tab("z", "p2", "g9")];
-    expect(sessionGroupForNewPane(tabs, "p1", "z")).toBe("g2");
-  });
-
-  it("returns null for a project with no panes at all — the caller mints a session", () => {
-    expect(sessionGroupForNewPane([tab("z", "p2", "g9")], "p1", "z")).toBeNull();
-    expect(sessionGroupForNewPane([], "p1", null)).toBeNull();
   });
 });
 
@@ -280,6 +261,15 @@ describe("visibleSessionGroupId — which session the pane grid puts on screen",
 
   it("is null for a workspace with no panes — there is no session to show", () => {
     expect(visibleSessionGroupId([tab("a", "p1", "g1")], "p2", "a")).toBeNull();
+  });
+
+  it("is also the JOIN target for a new pane: null on an empty workspace, so the caller mints a session", () => {
+    // Absorbed from the retired `sessionGroupForNewPane` (fix round,
+    // 2026-07-27) — `requestNewTab` resolves `existingGroup` through this
+    // function now, and its `existingGroup ?? newSessionGroupId()` branch
+    // rests on `null` meaning "this workspace has no panes at all".
+    expect(visibleSessionGroupId([tab("z", "p2", "g9")], "p1", "z")).toBeNull();
+    expect(visibleSessionGroupId([], "p1", null)).toBeNull();
   });
 
   it("answers with the implicit session for pre-grouping panes", () => {

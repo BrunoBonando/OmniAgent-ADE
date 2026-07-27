@@ -212,8 +212,9 @@ export function nextSessionName(tabs: TabInfo[], project: string): string {
 
 /** The session the user is currently on — the group holding the focused
  * pane. `null` when nothing is focused (or the focused id isn't a live
- * tab). Used for the sidebar's "current session" mark and to decide which
- * session a plain ⌘T pane should join. */
+ * tab). The strict "who has focus" answer; what's on screen (and what a new
+ * pane joins) is `visibleSessionGroupId`, which falls back where this
+ * returns `null`. */
 export function currentSessionGroupId(tabs: TabInfo[], activeTabId: string | null): string | null {
   if (activeTabId === null) return null;
   const tab = tabs.find((t) => t.id === activeTabId);
@@ -248,6 +249,18 @@ export function currentSessionGroupId(tabs: TabInfo[], activeTabId: string | nul
  *
  * A stale `activeTabId` (its pane closed underneath) falls through to the
  * same first-session fallback rather than blanking the grid.
+ *
+ * It is also the answer to "which session does a newly opened single pane
+ * JOIN" — ⌘T, the sidebar's "New terminal" row, the "+" and the pane
+ * header's split, all of which mean "one more terminal here". That used to
+ * be a second function, `sessionGroupForNewPane`, identical except that its
+ * no-focus-in-this-project fallback picked the project's most-recently-
+ * created session instead of the first-seen/on-screen one. The two diverged
+ * exactly when the user selected a workspace in the sidebar (which doesn't
+ * move focus) and it had 2+ sessions, which is how the "New terminal" row
+ * could be drawn under Session 1 and spawn into Session 2. One question, one
+ * answer: a new pane joins the session you are looking at. `null` still
+ * means "this project has no panes" — the caller mints a fresh group.
  */
 export function visibleSessionGroupId(
   tabs: TabInfo[],
@@ -258,29 +271,6 @@ export function visibleSessionGroupId(
   if (focused && focused.project === project) return focused.group ?? UNGROUPED_SESSION_ID;
   const first = tabs.find((t) => t.project === project);
   return first === undefined ? null : (first.group ?? UNGROUPED_SESSION_ID);
-}
-
-/**
- * Which session a *newly opened single pane* in `project` should join —
- * the ⌘T / "+" / pane-split path, which says nothing about sessions.
- *
- * The answer is "whichever session you're already looking at in that
- * project": the focused pane's group when the focused pane is in this
- * project, else the project's most recently created session, else `null`
- * (the project has no panes at all — the caller mints a new group).
- * `undefined` is never returned for a real group; `null` means "start a new
- * one", which keeps the caller's branch trivial.
- */
-export function sessionGroupForNewPane(
-  tabs: TabInfo[],
-  project: string,
-  activeTabId: string | null,
-): string | null {
-  const focused = activeTabId === null ? undefined : tabs.find((t) => t.id === activeTabId);
-  if (focused && focused.project === project) return focused.group ?? UNGROUPED_SESSION_ID;
-  const inProject = tabs.filter((t) => t.project === project);
-  if (inProject.length === 0) return null;
-  return inProject[inProject.length - 1].group ?? UNGROUPED_SESSION_ID;
 }
 
 /** Every pane in one session, in tab order — what "close this session"
