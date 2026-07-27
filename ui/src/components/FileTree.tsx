@@ -9,6 +9,15 @@
 // "Open file" action (DESIGN.md's v1 cut list: file viewer + open-in-
 // external only).
 //
+// **2026-07-27 left-pane redesign, Task 6**: the standalone right-hand dock
+// this component used to own is gone — it now lives embedded in the
+// sidebar's FILES section (`Sidebar.tsx`, below the session list), rendered
+// with the new `embedded` prop (no resize handle, no dock header) and an
+// optional `filter` substring typed into the sidebar's own filter input.
+// Every data-fetching/mutation path below (lazy `listDir`, the watcher,
+// rename/move/trash) is unchanged and shared by both modes — only chrome and
+// a client-side name filter differ.
+//
 // Lazy, expand-on-toggle: `listDir` (src-tauri/src/commands.rs, thin wrapper
 // over brain_ingest::walk::list_dir) is called once per directory the user
 // actually opens, never eagerly for the whole project up front — DESIGN.md
@@ -98,6 +107,8 @@ import {
   type ExpandedPaths,
 } from "../state/fileTreeState";
 import type { ProjectInfo } from "../state/sessions";
+import { statusGlyph } from "../state/codeReviewState";
+import type { GitBadges } from "../state/fileGitStatus";
 import FileIcon from "./FileIcon";
 import FileTreeContextMenu, { type FileTreeContextMenuTarget } from "./FileTreeContextMenu";
 
@@ -115,6 +126,26 @@ interface FileTreeProps {
   activeTabId: string | null;
   /** Collapses the panel — same shape as `DetailPanel`'s `onClose`. */
   onClose: () => void;
+  /** Task 6 (left-pane redesign): `true` when rendered as the sidebar's
+   * FILES section (`Sidebar.tsx`) rather than the old standalone right-hand
+   * dock. Suppresses the resize handle and the dock header (title, New
+   * File/New Folder, Reveal, Close) — the sidebar supplies its own header
+   * (label + Task 7's future "N changed" chip) and the tree fills whatever
+   * width the sidebar itself has, no independent resize. Everything else
+   * (lazy loading, the watcher, selection, context menu, rename, drag-move)
+   * is identical in both modes — this prop only toggles chrome. */
+  embedded?: boolean;
+  /** Task 6: case-insensitive substring filter typed into the sidebar's
+   * `.sidebar-files-filter` input, applied here to whatever rows are
+   * currently loaded/rendered — see the `// ponytail` note at the filter's
+   * one call site for why this deliberately isn't a recursive search. */
+  filter?: string;
+  /** Task 7: live git status badges (`Sidebar.tsx`'s `useReviewStatus` +
+   * `buildGitBadges`), keyed by the same absolute paths `entry.path` already
+   * carries — so a row looks itself up directly, no path math here. Optional
+   * (and simply renders no badges) so every existing render site/test that
+   * doesn't pass one keeps working unchanged. */
+  gitBadges?: GitBadges;
 }
 
 const INDENT_PX = 14;
@@ -144,7 +175,7 @@ function resolveHoverAt(x: number, y: number): DragHover {
   return null;
 }
 
-export default function FileTree({ project, activeTabId, onClose }: FileTreeProps) {
+export default function FileTree({ project, activeTabId, onClose, embedded, filter, gitBadges }: FileTreeProps) {
   const [root, setRoot] = useState<DirState | null>(null); // null = nothing requested yet
   const [expanded, setExpanded] = useState<ExpandedPaths>(new Set());
   const [children, setChildren] = useState<Map<string, DirState>>(new Map());
@@ -756,9 +787,15 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
   }
 
   function renderEntries(entries: DirEntry[], depth: number) {
+    // Task 6: name-only filter over whatever's already loaded — dirs filter
+    // by their own name exactly like files (no recursing into collapsed/
+    // unfetched children to look for a match).
+    // ponytail: name-only filter on loaded rows; deep search needs a walk command — add if asked
+    const q = (filter ?? "").trim().toLowerCase();
+    const visible = q.length === 0 ? entries : entries.filter((e) => e.name.toLowerCase().includes(q));
     return (
       <ul className="file-tree-list" role="group">
-        {entries.map((entry) => {
+        {visible.map((entry) => {
           const open = entry.is_dir && isExpanded(expanded, entry.path);
           const isSelected = selected.has(entry.path);
           const isDragSource = draggedPaths?.includes(entry.path) ?? false;
@@ -823,6 +860,27 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
                   </button>
                 )}
 
+                {/* Task 7: live git badges — a folder shows how many
+                    descendants changed (and whether that's purely additive),
+                    a file shows its own one-letter status via the real
+                    `statusGlyph` (never a forked copy of its letter map). */}
+                {gitBadges && entry.is_dir && gitBadges.byDir.has(entry.path) && (
+                  <span
+                    className={`file-tree-dir-badge is-${gitBadges.byDir.get(entry.path)!.tone}`}
+                    title={`${gitBadges.byDir.get(entry.path)!.count} changed`}
+                  >
+                    {gitBadges.byDir.get(entry.path)!.count}
+                  </span>
+                )}
+                {gitBadges && !entry.is_dir && gitBadges.byFile.has(entry.path) && (
+                  <span
+                    className={`file-tree-git-letter is-${gitBadges.byFile.get(entry.path)!}`}
+                    title={statusGlyph(gitBadges.byFile.get(entry.path)!).label}
+                  >
+                    {statusGlyph(gitBadges.byFile.get(entry.path)!).letter}
+                  </span>
+                )}
+
                 {!entry.is_dir && activeTabId && !isRenaming && (
                   <button
                     className="file-tree-row-insert"
@@ -866,45 +924,59 @@ export default function FileTree({ project, activeTabId, onClose }: FileTreeProp
   }
 
   return (
-    <aside className="file-tree" aria-label="Project files" style={{ width }}>
-      <div className="file-tree-resize-handle" onPointerDown={beginResize} role="separator" aria-orientation="vertical" aria-label="Resize file browser panel" />
+    <aside
+      className={`file-tree${embedded ? " is-embedded" : ""}`}
+      aria-label="Project files"
+      style={embedded ? undefined : { width }}
+    >
+      {!embedded && (
+        <div
+          className="file-tree-resize-handle"
+          onPointerDown={beginResize}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize file browser panel"
+        />
+      )}
 
-      <div className="file-tree-header">
-        <span className="file-tree-title">FILES</span>
-        <div className="file-tree-header-actions">
-          {project?.path && (
-            <>
-              <button
-                className="file-tree-new"
-                onClick={() => void handleCreate("file")}
-                aria-label="New file"
-                title="New file"
-              >
-                + file
-              </button>
-              <button
-                className="file-tree-new"
-                onClick={() => void handleCreate("folder")}
-                aria-label="New folder"
-                title="New folder"
-              >
-                + folder
-              </button>
-              <button
-                className="file-tree-reveal"
-                onClick={() => void handleReveal(project.path as string)}
-                aria-label={`Reveal ${project.label} in Finder`}
-                title="Reveal in Finder"
-              >
-                &#8689;
-              </button>
-            </>
-          )}
-          <button className="file-tree-close" onClick={onClose} aria-label="Hide file tree" title="Hide file tree">
-            &times;
-          </button>
+      {!embedded && (
+        <div className="file-tree-header">
+          <span className="file-tree-title">FILES</span>
+          <div className="file-tree-header-actions">
+            {project?.path && (
+              <>
+                <button
+                  className="file-tree-new"
+                  onClick={() => void handleCreate("file")}
+                  aria-label="New file"
+                  title="New file"
+                >
+                  + file
+                </button>
+                <button
+                  className="file-tree-new"
+                  onClick={() => void handleCreate("folder")}
+                  aria-label="New folder"
+                  title="New folder"
+                >
+                  + folder
+                </button>
+                <button
+                  className="file-tree-reveal"
+                  onClick={() => void handleReveal(project.path as string)}
+                  aria-label={`Reveal ${project.label} in Finder`}
+                  title="Reveal in Finder"
+                >
+                  &#8689;
+                </button>
+              </>
+            )}
+            <button className="file-tree-close" onClick={onClose} aria-label="Hide file tree" title="Hide file tree">
+              &times;
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       <div
         className={`file-tree-body${isRootDropTarget ? " is-drop-target" : ""}`}

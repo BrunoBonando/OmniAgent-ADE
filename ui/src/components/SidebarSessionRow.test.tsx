@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SidebarSessionRow, { SESSION_CARD_DELAY_MS } from "./SidebarSessionRow";
 import { groupTabsBySession } from "../state/sessionGroups";
@@ -24,20 +24,21 @@ function session(tabs: TabInfo[] = [tab()], activeTabId: string | null = null) {
 }
 
 function setup(overrides: Partial<Parameters<typeof SidebarSessionRow>[0]> = {}) {
-  const onActivate = vi.fn();
-  const onRename = vi.fn();
-  render(
-    <SidebarSessionRow
-      session={session()}
-      projectLabel="api"
-      isCurrent={false}
-      tint="#78a9ff"
-      onActivate={onActivate}
-      onRename={onRename}
-      {...overrides}
-    />,
-  );
-  return { onActivate, onRename };
+  const props = {
+    session: session(),
+    projectLabel: "api",
+    isCurrent: false,
+    tint: "#78a9ff",
+    expanded: false,
+    activeTabId: null as string | null,
+    onActivate: vi.fn(),
+    onToggleExpanded: vi.fn(),
+    onActivateTab: vi.fn(),
+    onRename: vi.fn(),
+    ...overrides,
+  };
+  const { container } = render(<SidebarSessionRow {...props} />);
+  return { container, props, onActivate: props.onActivate, onRename: props.onRename };
 }
 
 describe("SidebarSessionRow — the session and its branch, nothing else", () => {
@@ -64,26 +65,16 @@ describe("SidebarSessionRow — the session and its branch, nothing else", () =>
 
   it("shows no branch tag at all outside a git repo, rather than an empty one", () => {
     useGitBranchMock.mockReturnValue(null);
-    const { container } = render(
-      <SidebarSessionRow session={session()} projectLabel="api" isCurrent={false} tint="#78a9ff" onActivate={() => {}} onRename={() => {}} />,
-    );
+    const { container } = setup();
     expect(container.querySelector(".session-row-branch")).toBeNull();
   });
 
   it("never prints the terminal count or the terminals' names — that is what the founder asked to remove", () => {
-    const { container } = render(
-      <SidebarSessionRow
-        session={session([tab({ id: "s1", label: "backend fix" }), tab({ id: "s2", engine: "shell" })])}
-        projectLabel="api"
-        isCurrent={false}
-        tint="#78a9ff"
-        onActivate={() => {}}
-        onRename={() => {}}
-      />,
-    );
+    const { container } = setup({
+      session: session([tab({ id: "s1", label: "backend fix" }), tab({ id: "s2", engine: "shell" })]),
+    });
     expect(container.textContent).not.toContain("backend fix");
     expect(container.textContent).not.toContain("shell");
-    expect(container.textContent).not.toContain("2");
   });
 
   it("activates the session when clicked", () => {
@@ -91,82 +82,214 @@ describe("SidebarSessionRow — the session and its branch, nothing else", () =>
     fireEvent.click(screen.getByRole("button", { name: /Session 1/ }));
     expect(onActivate).toHaveBeenCalled();
   });
-
 });
 
-describe("SidebarSessionRow — the pane map under the name", () => {
-  // Founder ask, 2026-07-26, verbatim: "under it, it must be all the
-  // omniagent logos that each represent their order in the layout and their
-  // current status, with the same effect, meaning it also stays in 1, 1x2,
-  // 2x2, 2x3, 2x4 layout."
+describe("SidebarSessionRow — status dots and the layout badge (Task 4 redesign)", () => {
   beforeEach(() => {
     useGitBranchMock.mockReset();
     useGitBranchMock.mockReturnValue("main");
   });
 
-  function rowFor(tabs: TabInfo[]) {
-    const { container } = render(
-      <SidebarSessionRow
-        session={session(tabs)}
-        projectLabel="api"
-        isCurrent={false}
-        tint="#78a9ff"
-        onActivate={() => {}}
-        onRename={() => {}}
-      />,
-    );
-    return container;
-  }
-
-  function panes(count: number) {
-    return Array.from({ length: count }, (_, i) => tab({ id: `s${i}` }));
-  }
-
-  it("draws one mark per terminal, each carrying that terminal's own status", () => {
-    const container = rowFor([
-      tab({ id: "s1", status: "ready" }),
-      tab({ id: "s2", status: "awaiting_approval" }),
-    ]);
-    const marks = [...container.querySelectorAll(".session-light")];
-    expect(marks.map((m) => m.getAttribute("data-status"))).toEqual(["ready", "awaiting_approval"]);
-    // "with the same effect" — the light still explains itself on hover.
-    expect(marks[1].getAttribute("title")).toContain("approve");
+  it("renders one status dot per pane, colored by status", () => {
+    const { container } = setup({
+      session: session([
+        tab({ id: "a", status: "thinking" }),
+        tab({ id: "b", status: "awaiting_approval" }),
+        tab({ id: "c", status: "ready" }),
+        tab({ id: "d", status: undefined }),
+      ]),
+    });
+    const dots = container.querySelectorAll(".session-row-dot");
+    expect(dots).toHaveLength(4);
+    expect(dots[0].getAttribute("data-status")).toBe("thinking");
+    expect(dots[1].getAttribute("data-status")).toBe("awaiting_approval");
+    expect(dots[3].getAttribute("data-status")).toBe("unknown");
   });
 
-  it("keeps the marks in the panes' layout order", () => {
-    const container = rowFor([
-      tab({ id: "s1", status: "error" }),
-      tab({ id: "s2", status: "thinking" }),
-      tab({ id: "s3", status: "ready" }),
-    ]);
+  it("keeps the dots in the panes' own order", () => {
+    const { container } = setup({
+      session: session([
+        tab({ id: "a", status: "error" }),
+        tab({ id: "b", status: "thinking" }),
+        tab({ id: "c", status: "ready" }),
+      ]),
+    });
     expect(
-      [...container.querySelectorAll(".session-light")].map((m) => m.getAttribute("data-status")),
+      [...container.querySelectorAll(".session-row-dot")].map((d) => d.getAttribute("data-status")),
     ).toEqual(["error", "thinking", "ready"]);
   });
 
-  it.each([
-    [1, 1],
-    [2, 2],
-    [3, 2],
-    [4, 2],
-    [5, 3],
-    [6, 3],
-    [7, 4],
-    [8, 4],
-  ])("lays %i terminals out in the same approved grid the pane grid uses (%i columns)", (count, cols) => {
-    const grid = rowFor(panes(count)).querySelector<HTMLElement>(".session-row-panes")!;
-    expect(grid.style.getPropertyValue("--pane-cols")).toBe(String(cols));
+  it("shows the layout badge", () => {
+    setup({ session: session([tab({ id: "a" }), tab({ id: "b" }), tab({ id: "c" }), tab({ id: "d" })]) });
+    expect(screen.getByText("2×2")).toBeInTheDocument();
   });
 
-  it("pads a partly-filled rung with holes, exactly like the real grid does", () => {
-    // 3 panes is a 2x2 with one cell empty — never a lopsided 2 + 1.
-    const container = rowFor(panes(3));
-    expect(container.querySelectorAll(".session-light")).toHaveLength(3);
-    expect(container.querySelectorAll(".session-row-pane-hole")).toHaveLength(1);
+  it("shows a bare '1' for a single-pane session, not '1×1'", () => {
+    setup({ session: session([tab({ id: "a" })]) });
+    expect(screen.getByText("1")).toBeInTheDocument();
   });
 
-  it("leaves no holes when the rung is full", () => {
-    expect(rowFor(panes(4)).querySelectorAll(".session-row-pane-hole")).toHaveLength(0);
+  // Fix-round, 2026-07-27: review found the dots had lost the hover
+  // explanation `SessionStatusLight`'s own marks carry ("on hover, it
+  // explains" — the founder's own words for the light this replaced).
+  // These reuse `statusPresentation`'s fields rather than writing new copy.
+  it("gives each dot the same role/label/title SessionStatusLight uses for its mark", () => {
+    const { container } = setup({
+      session: session([tab({ id: "a", status: "awaiting_approval" })]),
+    });
+    const dot = container.querySelector(".session-row-dot")!;
+    expect(dot.getAttribute("role")).toBe("img");
+    expect(dot.getAttribute("aria-label")).toBe("Needs approval — Paused until you approve the action it wants to take.");
+    expect(dot.getAttribute("title")).toBe("Needs approval — Paused until you approve the action it wants to take.");
+  });
+
+  it("does not hide the dot cluster from assistive tech — each dot answers for itself", () => {
+    // A hidden ancestor can suppress an accessible name on its children in
+    // some AT combinations, so the container itself must not be
+    // `aria-hidden` now that the dots inside it carry real labels.
+    const { container } = setup();
+    expect(container.querySelector(".session-row-dots")!.getAttribute("aria-hidden")).toBeNull();
+  });
+
+  // Fix-round, 2026-07-27, round 2: removing `aria-hidden` from
+  // `.session-row-dots` (above) let each dot's own `aria-label` flow UP into
+  // `.session-row-main`'s accessible name too, since that button had no
+  // `aria-label` of its own to stop the browser computing one from its text
+  // content — so activating/focusing a session announced a multi-sentence
+  // dump of every pane's status. `getByRole`'s `name` option matches the
+  // computed accessible name via the same accname algorithm a screen reader
+  // uses, so an EXACT match on just "Session 1 Branch main" — with four
+  // panes disagreeing on status behind it — is itself the proof nothing
+  // leaked through: if any dot's text had joined the name, this exact
+  // string wouldn't match at all.
+  it("keeps the activate button's accessible name free of any dot's status text", () => {
+    const { container } = setup({
+      session: session([
+        tab({ id: "a", status: "thinking" }),
+        tab({ id: "b", status: "awaiting_approval" }),
+        tab({ id: "c", status: "ready" }),
+        tab({ id: "d", status: undefined }),
+      ]),
+    });
+    expect(within(container).getByRole("button", { name: "Session 1 Branch main" })).toHaveClass(
+      "session-row-main",
+    );
+    // Belt and suspenders: no button anywhere in the row has a status
+    // sentence anywhere in its name, exact match or not.
+    expect(
+      within(container).queryByRole("button", { name: /Thinking|Needs approval|Ready|Starting/ }),
+    ).toBeNull();
+  });
+
+  it("falls back to the session name alone when there is no branch to append", () => {
+    useGitBranchMock.mockReturnValue(null);
+    const { container } = setup({
+      session: session([tab({ id: "a", status: "error" })]),
+    });
+    expect(within(container).getByRole("button", { name: "Session 1" })).toHaveClass("session-row-main");
+  });
+});
+
+describe("SidebarSessionRow — accent bar and expand chevron (Task 4 redesign)", () => {
+  beforeEach(() => {
+    useGitBranchMock.mockReset();
+    useGitBranchMock.mockReturnValue("main");
+  });
+
+  it("current row gets the accent bar and rotated chevron", () => {
+    const { container } = setup({ isCurrent: true, expanded: true });
+    expect(container.querySelector(".session-row.is-current .session-row-accent")).toBeInTheDocument();
+    expect(container.querySelector(".session-row-chevron.is-expanded")).toBeInTheDocument();
+  });
+
+  it("a row that is neither current nor expanded gets neither", () => {
+    const { container } = setup({ isCurrent: false, expanded: false });
+    expect(container.querySelector(".session-row-accent")).toBeNull();
+    expect(container.querySelector(".session-row-chevron.is-expanded")).toBeNull();
+  });
+
+  it("chevron toggles expansion without activating", () => {
+    const { container, props } = setup({ expanded: false });
+    fireEvent.click(container.querySelector(".session-row-chevron")!);
+    expect(props.onToggleExpanded).toHaveBeenCalled();
+    expect(props.onActivate).not.toHaveBeenCalled();
+  });
+
+  // Was "renders an empty children container when expanded" pre-Task-5, back
+  // when `.session-row-children` had nothing to render yet. Now that it
+  // lists the session's own terminals (Task 5), a *non-current* expanded
+  // session still lists them — expanding any row is meant to be browsable —
+  // it just never gets the "New terminal" row, since spawning only ever
+  // targets the session on screen. `setup()`'s default session has exactly
+  // one tab and `isCurrent: false`.
+  it("lists the session's terminals when expanded, even when it isn't the current session", () => {
+    const { container } = setup({ expanded: true });
+    const children = container.querySelector(".session-row-children");
+    expect(children).toBeInTheDocument();
+    expect(container.querySelectorAll(".terminal-row")).toHaveLength(1);
+    expect(container.querySelector(".terminal-row-new")).toBeNull();
+  });
+
+  it("renders no children container at all when collapsed", () => {
+    const { container } = setup({ expanded: false });
+    expect(container.querySelector(".session-row-children")).toBeNull();
+  });
+
+  it("expanded current session lists terminals and the New terminal row", () => {
+    const { container } = setup({
+      isCurrent: true,
+      expanded: true,
+      session: session([tab({ id: "a" }), tab({ id: "b" })]),
+      onOpenNewTerminal: vi.fn(),
+    });
+    expect(container.querySelectorAll(".terminal-row")).toHaveLength(2);
+    expect(screen.getByText("New terminal")).toBeInTheDocument();
+  });
+
+  it("hides the New terminal row at MAX_PANES", () => {
+    const { container } = setup({
+      isCurrent: true,
+      expanded: true,
+      session: session(Array.from({ length: 8 }, (_, i) => tab({ id: `t${i}` }))),
+      onOpenNewTerminal: vi.fn(),
+    });
+    expect(container.querySelector(".terminal-row-new")).toBeNull();
+  });
+});
+
+// Fix-round, 2026-07-27: review found the chevron rendering on its own line
+// above the row (a block-level button before a flex sibling starts its own
+// line), and the dot cluster / layout badge rendering as two stacked lines
+// instead of one. Both are DOM-nesting facts jsdom can assert directly —
+// verified live in the dev server too (see the report's fix-round section).
+describe("SidebarSessionRow — one-line layout (fix-round, 2026-07-27)", () => {
+  beforeEach(() => {
+    useGitBranchMock.mockReset();
+    useGitBranchMock.mockReturnValue("main");
+  });
+
+  it("puts the chevron and the name/branch button in one flex row, not stacked", () => {
+    const { container } = setup();
+    const body = container.querySelector(".session-row-body")!;
+    expect(body).toBeInTheDocument();
+    expect(body.querySelector(":scope > .session-row-chevron")).not.toBeNull();
+    expect(body.querySelector(":scope > .session-row-main")).not.toBeNull();
+  });
+
+  it("puts the rename input in the same flex row as the chevron while renaming", () => {
+    const { container } = setup();
+    fireEvent.doubleClick(screen.getByText("Session 1"));
+    const body = container.querySelector(".session-row-body")!;
+    expect(body.querySelector(":scope > .session-row-chevron")).not.toBeNull();
+    expect(body.querySelector(":scope > .session-row-rename-input")).not.toBeNull();
+  });
+
+  it("puts the status dots and the layout badge in one row, not stacked", () => {
+    const { container } = setup({ session: session([tab({ id: "a" }), tab({ id: "b" })]) });
+    const meta = container.querySelector(".session-row-meta")!;
+    expect(meta).toBeInTheDocument();
+    expect(meta.querySelector(":scope > .session-row-dots")).not.toBeNull();
+    expect(meta.querySelector(":scope > .session-row-shape")).not.toBeNull();
   });
 });
 

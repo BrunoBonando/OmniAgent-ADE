@@ -3,6 +3,7 @@ import {
   accountBadgeInitial,
   accountBadgeSubtitle,
   accountMenuItems,
+  brainLine,
   deriveAccountBadgeState,
 } from "./accountBadgeState";
 import { FAKE_ACCOUNT_NAME } from "../onboarding/authGateState";
@@ -126,5 +127,48 @@ describe("accountMenuItems", () => {
     }
     const wired = accountMenuItems(true).filter((i) => i.kind === "action").map((i) => i.id);
     expect(wired).toEqual(["keyboard-shortcuts", "view-logs", "review", "about"]);
+  });
+});
+
+describe("brainLine", () => {
+  const MIN = 60_000;
+  it("running ingestion wins", () => {
+    expect(
+      brainLine({ running: true, projects_total: 4, projects_done: 1, total_nodes: 10 }, null, 0),
+    ).toEqual({ text: "Ingesting · 1 of 4 projects", tone: "busy" });
+  });
+  it("running ingestion wins even over an already-populated lastIndexedAt", () => {
+    // Proves `running` is checked before the "already indexed" branch —
+    // this is the re-ingesting-a-known-brain case, not the first-ever ingest
+    // the "running ingestion wins" case above covers.
+    expect(
+      brainLine({ running: true, projects_total: 4, projects_done: 1, total_nodes: 10 }, 1_000_000, 1_500_000),
+    ).toEqual({ text: "Ingesting · 1 of 4 projects", tone: "busy" });
+  });
+  it("error surfaces", () => {
+    expect(
+      brainLine({ running: false, projects_total: 0, projects_done: 0, total_nodes: 0, error: "boom" }, null, 0),
+    ).toEqual({ text: "Ingest failed — open About to rebuild", tone: "error" });
+  });
+  it("error wins even over an already-populated lastIndexedAt", () => {
+    // Proves `error` is checked before the "already indexed" branch — a
+    // brain that indexed successfully before but just failed a re-ingest
+    // must show the failure, not a stale "indexed Xm ago".
+    expect(
+      brainLine(
+        { running: false, projects_total: 0, projects_done: 0, total_nodes: 0, error: "boom" },
+        1_000_000,
+        1_500_000,
+      ),
+    ).toEqual({ text: "Ingest failed — open About to rebuild", tone: "error" });
+  });
+  it("indexed shows relative minutes", () => {
+    expect(brainLine(null, 1_000_000, 1_000_000 + 8 * MIN)).toEqual({ text: "Brain indexed · 8m ago", tone: "good" });
+  });
+  it("indexed over an hour ago shows hours", () => {
+    expect(brainLine(null, 0, 90 * MIN).text).toBe("Brain indexed · 1h ago");
+  });
+  it("never indexed", () => {
+    expect(brainLine(null, null, 0)).toEqual({ text: "Nothing indexed yet", tone: "idle" });
   });
 });

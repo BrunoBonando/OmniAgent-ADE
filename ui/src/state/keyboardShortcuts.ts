@@ -10,9 +10,14 @@
 // this honest:
 //
 // - Global (⌘T/⌘K/⌘N): `App.tsx`'s window keydown handler.
-// - Dialogs (arrows/Enter/Escape/digits): `state/newChooserState.ts`'s
-//   `chooserKeyAction` and `EnginePicker.tsx`, which share one interaction
-//   model on purpose.
+// - Dialogs: no single interaction model any more — the two-card ⌘N
+//   chooser and `EnginePicker.tsx` that used to define one were both
+//   retired (Task 13, 2026-07-27). Each dialog now owns its own key
+//   handling: `NewSessionModal.tsx` picks a layout on a bare digit,
+//   `NewTerminalModal.tsx`/`state/newTerminalState.ts`'s
+//   `terminalKeyAction` picks an engine on ⌘+digit, and
+//   `NewWorkspaceModal.tsx`/the `Close*Confirm.tsx` family take only
+//   Enter/Escape.
 // - Panes: `PaneHeader.tsx` (double-click rename, its Enter/Escape) and
 //   `Workspace.tsx`'s mosaic grid.
 //
@@ -37,16 +42,16 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     shortcuts: [
       { keys: ["⌘T"], description: "New terminal in the selected project" },
       { keys: ["⌘K"], description: "Command palette — switch session, search the brain" },
-      { keys: ["⌘N"], description: "New session or workspace" },
+      { keys: ["⌘N"], description: "New session — or new workspace, with none selected" },
     ],
   },
   {
     title: "In a dialog",
     shortcuts: [
-      { keys: ["↑", "↓", "←", "→"], description: "Move the selection" },
       { keys: ["⏎"], description: "Confirm — the default is already selected" },
-      { keys: ["1", "2"], description: "Pick that card and confirm it" },
       { keys: ["esc"], description: "Cancel" },
+      { keys: ["⌘1", "⌘2", "⌘3", "⌘0"], description: "Pick an engine (New Terminal)" },
+      { keys: ["1", "2", "3", "4", "5"], description: "Pick a layout (New Session)" },
     ],
   },
   {

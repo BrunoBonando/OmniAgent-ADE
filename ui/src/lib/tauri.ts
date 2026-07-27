@@ -136,7 +136,13 @@ export async function listDir(path: string): Promise<DirEntry[]> {
 /** Settings-table key for the file tree panel's collapsed/expanded state
  * (same "true"/"false" string convention `REVIEW_MEMORY_SETTING_KEY`
  * already uses) — persisted so a hidden/shown choice survives relaunch,
- * same pattern as `LAYOUT_SETTING_KEY`. */
+ * same pattern as `LAYOUT_SETTING_KEY`.
+ *
+ * Unused since the left-pane redesign's Task 6 (2026-07-27): the file tree
+ * is now permanently embedded in the sidebar's FILES section instead of a
+ * collapsible dock, so there's no visibility to persist any more. Left in
+ * place rather than deleted — dead but harmless, and removing it buys
+ * nothing (no in-flight settings-table migration reads it either). */
 export const FILE_TREE_VISIBLE_SETTING_KEY = "file_tree_visible";
 
 /** Settings-table key for the file tree panel's resized width (px, stored as
@@ -306,6 +312,25 @@ export async function pendingNotesDiscard(nodeId: string): Promise<void> {
 }
 
 export const REVIEW_MEMORY_SETTING_KEY = "review_memory";
+
+/** What `folder_stats` reports about a folder — the New Workspace dialog's
+ * "FOUND IN THIS FOLDER" strip (left-pane redesign, Task 12).
+ *
+ * `files` is the count the *ingestion* walker would walk (gitignore-aware,
+ * vendor dirs and oversized files excluded), not a raw `find | wc -l`, so
+ * the number the dialog promises is the work that will actually happen.
+ * `languages` is the top 2 by file count, ties broken alphabetically.
+ * `branches` is only meaningful when `git` is true. */
+export interface FolderStats {
+  files: number;
+  languages: string[];
+  git: boolean;
+  branches: number;
+}
+
+export async function folderStats(path: string): Promise<FolderStats> {
+  return invoke<FolderStats>("folder_stats", { path });
+}
 
 // --------------------------------------------------------------- Task 8.1
 // Onboarding (FirstRun) + degradation surfaces (Sidebar's stale/pause menu,

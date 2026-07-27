@@ -25,6 +25,7 @@ const tauriMocks = vi.hoisted(() => ({
   sessionCreateMock: vi.fn(),
   sessionKillMock: vi.fn(),
   sessionStatusMock: vi.fn(),
+  sessionWriteMock: vi.fn(),
   settingsGetMock: vi.fn(),
   settingsSetMock: vi.fn(),
 }));
@@ -39,6 +40,7 @@ vi.mock("./lib/tauri", () => ({
   sessionCreate: tauriMocks.sessionCreateMock,
   sessionKill: tauriMocks.sessionKillMock,
   sessionStatus: tauriMocks.sessionStatusMock,
+  sessionWrite: tauriMocks.sessionWriteMock,
   settingsGet: tauriMocks.settingsGetMock,
   settingsSet: tauriMocks.settingsSetMock,
 }));
@@ -133,6 +135,7 @@ beforeEach(() => {
   tauriMocks.rootsListMock.mockReset().mockResolvedValue(["/tmp"]);
   tauriMocks.sessionKillMock.mockReset().mockResolvedValue(undefined);
   tauriMocks.sessionStatusMock.mockReset().mockResolvedValue(null);
+  tauriMocks.sessionWriteMock.mockReset().mockResolvedValue(undefined);
   tauriMocks.settingsSetMock.mockReset().mockResolvedValue(undefined);
   tauriMocks.sessionCreateMock
     .mockReset()
@@ -244,6 +247,69 @@ describe("App — clicking a notification goes to that session", () => {
   });
 });
 
+describe("App — approving a notification from the panel", () => {
+  it("Approve writes the engine's yes-keystroke to the session and clears the row", async () => {
+    await bootWithThreeSessions();
+    // Drive sess-2 (a pane the user isn't focused on — sess-1 is active) to
+    // awaiting_approval: a notification is recorded AND the tab's live
+    // status is awaiting, which is what makes the row actionable.
+    emit("sess-2", statusEvent("sess-2", "awaiting_approval", true));
+    await waitFor(() => expect(badge()?.textContent).toBe("1"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Approve / }));
+
+    await waitFor(() => expect(tauriMocks.sessionWriteMock).toHaveBeenCalledWith("sess-2", "1"));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /^Approve / })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("answering in the pane clears the notification too — the next status event resolves it", async () => {
+    // Founder ask (2026-07-27): "if I approve using the terminal, it has to
+    // update the notification." The pane path never touches the panel — the
+    // backend just reports the session's next status once the prompt is
+    // answered, and that event is what takes the awaiting row down.
+    await bootWithThreeSessions();
+    emit("sess-2", statusEvent("sess-2", "awaiting_approval", true));
+    await waitFor(() => expect(badge()?.textContent).toBe("1"));
+
+    // The user answers in the terminal: the engine goes back to work and the
+    // backend emits the transition (thinking never notifies, so no new row).
+    emit("sess-2", statusEvent("sess-2", "thinking", false));
+
+    fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
+    await waitFor(() => expect(screen.queryByText("Needs your approval.")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /^Approve / })).not.toBeInTheDocument();
+    expect(tauriMocks.sessionWriteMock).not.toHaveBeenCalled();
+  });
+
+  it("a double-click only writes the approval once — the in-flight guard, not the not-yet-updated tab status", async () => {
+    // `tab.status` only flips on the backend's NEXT status event, so both
+    // clicks of a double-click see the same "still awaiting" status and
+    // pass that guard. Without a synchronous in-flight guard, both clicks
+    // would each call sessionWrite("sess-2", "1") — and Claude often raises
+    // a follow-up permission prompt immediately, so the second "1" can
+    // approve a prompt the user never saw.
+    await bootWithThreeSessions();
+    emit("sess-2", statusEvent("sess-2", "awaiting_approval", true));
+    await waitFor(() => expect(badge()?.textContent).toBe("1"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
+    const approveButton = await screen.findByRole("button", { name: /^Approve / });
+    // Two rapid clicks before anything is awaited — the same shape a real
+    // double-click produces, since `sessionWriteMock` resolves on a later
+    // microtask than these two synchronous `fireEvent.click` calls.
+    fireEvent.click(approveButton);
+    fireEvent.click(approveButton);
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /^Approve / })).not.toBeInTheDocument(),
+    );
+    expect(tauriMocks.sessionWriteMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("App — notifications outlive the app", () => {
   it("persists the list through the same settings table the layout uses", async () => {
     await bootWithThreeSessions();
@@ -286,7 +352,7 @@ describe("App — notifications outlive the app", () => {
     await waitFor(() => expect(badge()?.textContent).toBe("1"));
     fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
     expect(screen.getByText("yesterday's run")).toBeInTheDocument();
-    expect(screen.getByText("3 days ago")).toBeInTheDocument();
+    expect(screen.getByText("3 days")).toBeInTheDocument();
   });
 
   it("a restored entry whose session is gone still takes the user to its project", async () => {

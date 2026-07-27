@@ -91,7 +91,7 @@ function childEntries(): DirEntry[] {
 function setup(overrides: Partial<Parameters<typeof FileTree>[0]> = {}) {
   const onClose = vi.fn();
   const result = render(<FileTree project={PROJECT} activeTabId={null} onClose={onClose} {...overrides} />);
-  return { onClose, unmount: result.unmount };
+  return { onClose, unmount: result.unmount, container: result.container };
 }
 
 describe("FileTree", () => {
@@ -861,5 +861,81 @@ describe("FileTree", () => {
     fireEvent.pointerUp(document.body, { pointerId: 1 });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(movePathMock).not.toHaveBeenCalled();
+  });
+
+  // ------------------------------------------- embedded mode (Task 6, left-pane redesign)
+  // The standalone right-hand dock is gone — `Sidebar.tsx`'s FILES section
+  // renders this same component with `embedded`. Only chrome differs; the
+  // lazy `listDir` path, watcher, selection, context menu, etc. are shared.
+  it("embedded mode renders no resize handle and no dock header, and carries the is-embedded class", async () => {
+    const { container } = setup({ embedded: true });
+    await screen.findByText("main.py");
+    expect(container.querySelector(".file-tree-resize-handle")).toBeNull();
+    expect(container.querySelector(".file-tree-header")).toBeNull();
+    expect(container.querySelector(".file-tree.is-embedded")).toBeInTheDocument();
+  });
+
+  it("embedded mode still loads through the exact same listDir path as the standalone dock — no forked fetch", async () => {
+    setup({ embedded: true });
+    expect(listDirMock).toHaveBeenCalledWith("/repo/demo");
+    expect(await screen.findByText("src")).toBeInTheDocument();
+  });
+
+  it("embedded mode has no header New File/New Folder/Close buttons, but the same actions stay reachable through the context menu", async () => {
+    setup({ embedded: true });
+    await screen.findByText("main.py");
+    expect(screen.queryByRole("button", { name: "New file" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New folder" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Hide file tree" })).not.toBeInTheDocument();
+    fireEvent.contextMenu(document.querySelector(".file-tree-body")!);
+    expect(screen.getByRole("menuitem", { name: "New File" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "New Folder" })).toBeInTheDocument();
+  });
+
+  // --------------------------------------------------- name filter (Task 6)
+  it("filter hides non-matching loaded rows by name substring — directories filter by their own name exactly like files", async () => {
+    setup({ filter: "main" });
+    expect(await screen.findByText("main.py")).toBeInTheDocument();
+    expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
+    expect(screen.queryByText("src")).not.toBeInTheDocument();
+  });
+
+  it("filter matches case-insensitively", async () => {
+    setup({ filter: "SRC" });
+    expect(await screen.findByText("src")).toBeInTheDocument();
+    expect(screen.queryByText("main.py")).not.toBeInTheDocument();
+    expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
+  });
+
+  it("an empty/whitespace-only filter shows every loaded row", async () => {
+    setup({ filter: "   " });
+    expect(await screen.findByText("src")).toBeInTheDocument();
+    expect(screen.getByText("main.py")).toBeInTheDocument();
+    expect(screen.getByText("notes.md")).toBeInTheDocument();
+  });
+
+  // ------------------------------------------------------------- Task 7: git badges
+  it("renders a file's git status letter and its ancestor dir's changed count from a hand-built gitBadges prop", async () => {
+    setup({
+      gitBadges: {
+        byFile: new Map([["/repo/demo/main.py", "modified"]]),
+        byDir: new Map([["/repo/demo/src", { count: 1, tone: "mod" }]]),
+        total: 2,
+      },
+    });
+    expect(await screen.findByText("main.py")).toBeInTheDocument();
+    const letter = screen.getByText("M");
+    expect(letter).toHaveClass("file-tree-git-letter", "is-modified");
+    const dirBadge = screen.getByText("1");
+    expect(dirBadge).toHaveClass("file-tree-dir-badge", "is-mod");
+    // notes.md has no entry in `byFile` — no badge renders for it at all.
+    expect(screen.queryByText("U")).not.toBeInTheDocument();
+  });
+
+  it("renders no git badges when the prop is omitted", async () => {
+    setup();
+    expect(await screen.findByText("main.py")).toBeInTheDocument();
+    expect(document.querySelector(".file-tree-git-letter")).toBeNull();
+    expect(document.querySelector(".file-tree-dir-badge")).toBeNull();
   });
 });

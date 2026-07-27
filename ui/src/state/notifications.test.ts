@@ -196,6 +196,36 @@ describe("notificationsReducer", () => {
     expect(notificationsReducer(state, { type: "notifications/cleared" }).entries).toEqual([]);
   });
 
+  it("approval_resolved removes only that session's awaiting rows — pane and panel stay in sync", () => {
+    let state = notificationsReducer(initialNotificationsState, {
+      type: "notification/added",
+      entry: entry("a", "sess-1", "awaiting_approval"),
+    });
+    state = notificationsReducer(state, { type: "notification/added", entry: entry("b", "sess-1", "ready") });
+    state = notificationsReducer(state, {
+      type: "notification/added",
+      entry: entry("c", "sess-2", "awaiting_approval"),
+    });
+
+    const resolved = notificationsReducer(state, {
+      type: "notifications/approval_resolved",
+      sessionId: "sess-1",
+    });
+    // sess-1's awaiting row is gone; its ready row (history) and the other
+    // session's pending ask both survive.
+    expect(resolved.entries.map((e) => e.id)).toEqual(["c", "b"]);
+  });
+
+  it("approval_resolved with nothing to remove returns the same state — no churn", () => {
+    const state = notificationsReducer(initialNotificationsState, {
+      type: "notification/added",
+      entry: entry("a", "sess-1", "ready"),
+    });
+    expect(
+      notificationsReducer(state, { type: "notifications/approval_resolved", sessionId: "sess-1" }),
+    ).toBe(state);
+  });
+
   it("marks everything read, and doesn't churn when nothing is unread", () => {
     const state = notificationsReducer(initialNotificationsState, { type: "notification/added", entry: entry("a") });
     const read = notificationsReducer(state, { type: "notifications/read" });
@@ -216,11 +246,11 @@ describe("relativeTime", () => {
   it("reads the way the reference panel reads", () => {
     expect(relativeTime(now, now)).toBe("Just now");
     expect(relativeTime(now - 59_000, now)).toBe("Just now");
-    expect(relativeTime(now - 60_000, now)).toBe("1m ago");
-    expect(relativeTime(now - 45 * 60_000, now)).toBe("45m ago");
-    expect(relativeTime(now - 3 * 3_600_000, now)).toBe("3h ago");
-    expect(relativeTime(now - 26 * 3_600_000, now)).toBe("1 day ago");
-    expect(relativeTime(now - 3 * 86_400_000, now)).toBe("3 days ago");
+    expect(relativeTime(now - 60_000, now)).toBe("1m");
+    expect(relativeTime(now - 45 * 60_000, now)).toBe("45m");
+    expect(relativeTime(now - 3 * 3_600_000, now)).toBe("3h");
+    expect(relativeTime(now - 26 * 3_600_000, now)).toBe("1 day");
+    expect(relativeTime(now - 3 * 86_400_000, now)).toBe("3 days");
   });
 
   it("never reads negative for a clock that jumped", () => {
@@ -292,20 +322,129 @@ describe("filterNotifications", () => {
   const entries = [entry("a", "p1"), entry("b", "p2"), entry("c", "p1")];
 
   it("passes everything through for the all filter", () => {
-    expect(filterNotifications(entries, "all", "p1")).toBe(entries);
+    expect(filterNotifications(entries, "all", "p1", new Set())).toBe(entries);
   });
 
   it("keeps only the selected project's entries", () => {
-    expect(filterNotifications(entries, "project", "p1").map((e) => e.id)).toEqual(["a", "c"]);
+    expect(filterNotifications(entries, "project", "p1", new Set()).map((e) => e.id)).toEqual(["a", "c"]);
   });
 
   it("shows nothing rather than everything when no project is selected", () => {
-    expect(filterNotifications(entries, "project", null)).toEqual([]);
+    expect(filterNotifications(entries, "project", null, new Set())).toEqual([]);
   });
 
   it("labels each chip with its own count", () => {
-    expect(filterChipLabel("all", 3, "OmniAgent ADE")).toBe("All sessions (3)");
-    expect(filterChipLabel("project", 2, "OmniAgent ADE")).toBe("OmniAgent ADE (2)");
-    expect(filterChipLabel("project", 0, null)).toBe("This project (0)");
+    expect(filterChipLabel("all", 3, "OmniAgent ADE")).toBe("All 3");
+    expect(filterChipLabel("project", 2, "OmniAgent ADE")).toBe("This workspace 2");
+    expect(filterChipLabel("project", 0, null)).toBe("This workspace 0");
+  });
+});
+
+const T0 = new Date(2026, 6, 27, 14, 0, 0).getTime(); // local 2pm
+
+function n(over: Partial<NotificationEntry> = {}): NotificationEntry {
+  return {
+    id: "n1",
+    sessionId: "s1",
+    project: "p1",
+    projectLabel: "Demo",
+    cwd: "/tmp/p1",
+    engine: "claude",
+    status: "awaiting_approval",
+    title: "stripe webhook retries",
+    createdAt: T0,
+    read: false,
+    ...over,
+  };
+}
+
+describe("approveKeystroke", () => {
+  it("knows Claude's numbered permission dialog: '1' selects Yes", async () => {
+    const { approveKeystroke } = await import("./notifications");
+    expect(approveKeystroke("claude")).toBe("1");
+  });
+  it("returns null for every engine without a known approve gesture", async () => {
+    const { approveKeystroke } = await import("./notifications");
+    for (const engine of ["codex", "shell", "copilot", "antigravity", "unknown"]) {
+      expect(approveKeystroke(engine)).toBeNull();
+    }
+  });
+});
+
+describe("isActionable", () => {
+  it("true only for an awaiting_approval entry whose session still awaits right now", async () => {
+    const { isActionable } = await import("./notifications");
+    const awaiting = new Set(["s1"]);
+    expect(isActionable(n(), awaiting)).toBe(true);
+    expect(isActionable(n({ status: "ready" }), awaiting)).toBe(false); // frozen status wasn't approval
+    expect(isActionable(n(), new Set())).toBe(false); // prompt already answered in the pane
+  });
+});
+
+describe("groupNotifications", () => {
+  it("splits actionable / today / older", async () => {
+    const { groupNotifications } = await import("./notifications");
+    const awaiting = new Set(["s1"]);
+    const needsYou = n();
+    const today = n({ id: "n2", sessionId: "s2", status: "ready", createdAt: T0 - 60_000 });
+    const older = n({ id: "n3", sessionId: "s3", status: "error", createdAt: T0 - 24 * 3600_000 });
+    const groups = groupNotifications([needsYou, today, older], awaiting, T0);
+    expect(groups.needsYou.map((e) => e.id)).toEqual(["n1"]);
+    expect(groups.earlierToday.map((e) => e.id)).toEqual(["n2"]);
+    expect(groups.older.map((e) => e.id)).toEqual(["n3"]);
+  });
+
+  it("an awaiting entry whose session no longer awaits is a plain row, not NEEDS YOU", async () => {
+    const { groupNotifications } = await import("./notifications");
+    const groups = groupNotifications([n()], new Set(), T0);
+    expect(groups.needsYou).toEqual([]);
+    expect(groups.earlierToday.map((e) => e.id)).toEqual(["n1"]);
+  });
+
+  it("dedupes NEEDS YOU by session id, keeping only the newest — the loser falls to its own day band", async () => {
+    const { groupNotifications } = await import("./notifications");
+    const awaiting = new Set(["s1"]);
+    // Same session (default sessionId "s1"), two actionable entries: an
+    // older one and the current newest. Only the newest may sit under
+    // NEEDS YOU; the reducer only collapses an *immediate* repeat, and a
+    // restored persisted entry can reuse a session id from a previous run,
+    // so this is reachable without the reducer's own dedupe catching it.
+    const older = n({ id: "n1", createdAt: T0 - 5 * 60_000 });
+    const newer = n({ id: "n2", createdAt: T0 });
+    const groups = groupNotifications([older, newer], awaiting, T0);
+    expect(groups.needsYou.map((e) => e.id)).toEqual(["n2"]);
+    expect(groups.earlierToday.map((e) => e.id)).toEqual(["n1"]);
+    expect(groups.older).toEqual([]);
+  });
+
+  it("a lone actionable entry lands in NEEDS YOU regardless of its own age", async () => {
+    const { groupNotifications } = await import("./notifications");
+    const awaiting = new Set(["s1"]);
+    const groups = groupNotifications([n({ createdAt: T0 - 26 * 3600_000 })], awaiting, T0);
+    expect(groups.needsYou.map((e) => e.id)).toEqual(["n1"]);
+    expect(groups.older).toEqual([]);
+  });
+});
+
+describe("needs_you filter", () => {
+  it("keeps only actionable entries", async () => {
+    const entries = [n(), n({ id: "n2", sessionId: "s2", status: "ready" })];
+    const { filterNotifications } = await import("./notifications");
+    expect(filterNotifications(entries, "needs_you", null, new Set(["s1"])).map((e) => e.id)).toEqual(["n1"]);
+  });
+  it("chip labels use the design file's copy — no parens, 'This workspace' for the project chip", async () => {
+    const { filterChipLabel } = await import("./notifications");
+    expect(filterChipLabel("needs_you", 1, null)).toBe("Needs you 1");
+    expect(filterChipLabel("all", 3, null)).toBe("All 3");
+    expect(filterChipLabel("project", 2, "Demo")).toBe("This workspace 2");
+  });
+});
+
+describe("relativeTime — design file drops the ' ago' suffix", () => {
+  it("bare durations", () => {
+    expect(relativeTime(T0 - 30_000, T0)).toBe("Just now");
+    expect(relativeTime(T0 - 14 * 60_000, T0)).toBe("14m");
+    expect(relativeTime(T0 - 2 * 3600_000, T0)).toBe("2h");
+    expect(relativeTime(T0 - 26 * 3600_000, T0)).toBe("1 day");
   });
 });

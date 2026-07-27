@@ -4,7 +4,7 @@
 // anchored under the triggering row instead of centered — a project menu is
 // a utility, not a modal moment, so its backdrop is transparent (click-away
 // to dismiss) rather than the dimmed/blurred `.overlay-backdrop` used for
-// AboutPanel/ReviewPanel/EnginePicker.
+// AboutPanel/ReviewPanel/NewSessionModal.
 //
 // Rename (founder ask: closing the root cause of "OmniAgent-ADE" — a
 // project's real folder-basename-derived label — showing up in every pane
@@ -42,6 +42,15 @@ interface ProjectMenuProps {
    * afterward (see this file's module doc). Called only with a non-empty,
    * actually-changed, trimmed value. */
   onRename: (newLabel: string) => void;
+  /** Close the workspace (founder ask, 2026-07-26: "add the possibility to
+   * close a workspace"). It used to be a "×" in the project row's hover
+   * cluster; the left-pane redesign (Task 3) replaced that row list with one
+   * workspace switcher, so the per-workspace actions all arrive through this
+   * menu now — this is where closing one had to land with it. Optional, same
+   * convention as `Sidebar`'s own `onCloseWorkspace`: absent means no
+   * control at all. `Sidebar` still confirms (`CloseWorkspaceConfirm`)
+   * before a single terminal is killed. */
+  onCloseWorkspace?: () => void;
   onClose: () => void;
 }
 
@@ -53,6 +62,7 @@ export default function ProjectMenu({
   onTogglePause,
   onReingest,
   onRename,
+  onCloseWorkspace,
   onClose,
 }: ProjectMenuProps) {
   const [renaming, setRenaming] = useState(false);
@@ -120,6 +130,22 @@ export default function ProjectMenu({
         <button className="project-menu-recheck" disabled={busy} onClick={onReingest}>
           {busy ? "Re-checking…" : "Re-check now"}
         </button>
+
+        {/* Last, and the only item here that ends something — same placement
+            and the same "asks first, deletes nothing" contract the row's "×"
+            had. The label carries the workspace name so it stays
+            distinguishable from `CloseWorkspaceConfirm`'s own confirm
+            button. */}
+        {onCloseWorkspace && (
+          <button
+            className="project-menu-close-workspace"
+            onClick={onCloseWorkspace}
+            aria-label={`Close workspace ${project.label}`}
+            title="Ends every terminal in this workspace — nothing is deleted"
+          >
+            Close workspace
+          </button>
+        )}
       </div>
     </>
   );

@@ -21,6 +21,7 @@ const tauriMocks = vi.hoisted(() => ({
   sessionCreateMock: vi.fn(),
   sessionKillMock: vi.fn(),
   sessionStatusMock: vi.fn(),
+  sessionWriteMock: vi.fn(),
   settingsGetMock: vi.fn(),
   settingsSetMock: vi.fn(),
 }));
@@ -34,6 +35,7 @@ vi.mock("./lib/tauri", () => ({
   sessionCreate: tauriMocks.sessionCreateMock,
   sessionKill: tauriMocks.sessionKillMock,
   sessionStatus: tauriMocks.sessionStatusMock,
+  sessionWrite: tauriMocks.sessionWriteMock,
   settingsGet: tauriMocks.settingsGetMock,
   settingsSet: tauriMocks.settingsSetMock,
 }));
@@ -99,14 +101,16 @@ vi.mock("./components/Workspace", () => ({
 }));
 
 // ⌘N -> "Session" without the dialog: one click creates a session with one
-// claude terminal in the project folder.
+// claude terminal in the project folder and **no prompt**, which is the
+// case this file is about — a session with nothing typed still gets a name,
+// from the workspace's own numbering.
 vi.mock("./components/NewSessionModal", () => ({
   default: function NewSessionModalStub(props: {
     project: ProjectInfo;
-    onCreate: (p: ProjectInfo, cwd: string, engines: string[], layout: string) => void;
+    onCreate: (p: ProjectInfo, cwd: string, slots: string[], prompt: string) => void;
   }) {
     return (
-      <button onClick={() => props.onCreate(props.project, props.project.path!, ["claude"], "single")}>
+      <button onClick={() => props.onCreate(props.project, props.project.path!, ["claude"], "")}>
         create-session
       </button>
     );

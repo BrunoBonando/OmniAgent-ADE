@@ -8,14 +8,12 @@
 // > branch. On hover, it shows full details."
 //
 // So the row is the session's **name**, the **branch** its root folder is on,
-// and — under both, since 2026-07-26 — a **mini map of its panes**: one
-// OmniAgent mark per terminal, in the same approved grid shape the real pane
-// grid uses, each tinted and animated by that terminal's own live status.
-// The "2 panes · Claude Code, Shell" meta line and the nested list of every
+// and — under both, since 2026-07-26 — a picture of its panes' live status
+// (first a mini map of OmniAgent marks, since Task 4 below a dot cluster +
+// layout badge; either way, never their names or count as prose). The
+// "2 panes · Claude Code, Shell" meta line and the nested list of every
 // terminal in the session are still gone from here — both moved into the
-// hover card, which is the surface that asked for detail. The mini map is
-// not that list coming back: it is a picture of the layout with no names in
-// it, which is the one thing the hover card can't answer at a glance.
+// hover card, which is the surface that asked for detail.
 //
 // Its own component (rather than more JSX inside `Sidebar.tsx`) for one
 // concrete reason: the branch comes from `useGitBranch`, a hook, and a
@@ -29,13 +27,26 @@
 // validated subfolder), so its terminals normally agree; when they drift, the
 // row answers for the session, not for whichever terminal happens to be
 // focused.
+//
+// ## The mini pane grid became a dot cluster + layout badge (Task 4, 2026-07-27)
+//
+// The left-pane redesign traded the row's "one OmniAgent mark per terminal"
+// map for something that reads at a glance without doing any counting: a
+// tight row of plain status dots (`statusPresentation`'s colour/motion, same
+// vocabulary the marks used) plus the layout badge text (`sessionShapeBadge`
+// — "1", "1×2", "2×2"…) that used to be implicit in how many marks/holes were
+// drawn. The row also gained a left accent bar and an expand/collapse chevron
+// for the session that's on screen, since the redesign now lets a session's
+// terminals be listed and reached inline (Task 5) instead of only through the
+// hover card.
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { deriveSessionCard } from "../state/sessionHoverCard";
-import type { SessionGroup } from "../state/sessionGroups";
-import { gridShape } from "../state/paneGrid";
+import { sessionShapeBadge, type SessionGroup } from "../state/sessionGroups";
 import { useGitBranch } from "../lib/useGitBranch";
+import { statusPresentation } from "../state/sessionStatus";
+import { MAX_PANES } from "../state/paneGrid";
 import SessionHoverCard from "./SessionHoverCard";
-import SessionStatusLight from "./SessionStatusLight";
+import { SidebarTerminalRow } from "./SidebarTerminalRow";
 import Icon from "./Icon";
 
 /** How long the pointer must rest on a session row before its card appears.
@@ -83,9 +94,26 @@ interface SidebarSessionRowProps {
    * columns of the sidebar cycle one palette and this file doesn't need a
    * second copy of the hash. */
   tint: string;
+  /** Whether the terminal list under this row is open — either the user
+   * toggled it open, or (`Sidebar`'s default) it's the session the founder
+   * brief's mock always shows expanded. Renders one `SidebarTerminalRow` per
+   * `session.tabs` entry, plus the "New terminal" row (Task 5). */
+  expanded: boolean;
+  /** The pane currently focused, app-wide — each `SidebarTerminalRow` below
+   * compares its own tab id against this to mark itself active. */
+  activeTabId: string | null;
   /** Bring this session on screen — `App.tsx` activates one of its
    * terminals, which also selects its workspace. */
   onActivate: () => void;
+  /** Toggles `expanded` for this session — the chevron's own click, kept
+   * from bubbling into `onActivate` so opening/closing the terminal list
+   * never also switches the grid to this session. */
+  onToggleExpanded: () => void;
+  /** Activates one specific terminal — each `SidebarTerminalRow` calls this
+   * with its own tab id. The same function `Sidebar` already has as
+   * `onActivateTab` (there is only ever one "activate this pane" function in
+   * the app), passed straight through. */
+  onActivateTab: (tabId: string) => void;
   /** Commit a new name for the session. Called with the raw draft; the
    * reducer trims it and treats empty as "back to the default name". */
   onRename: (name: string) => void;
@@ -93,6 +121,10 @@ interface SidebarSessionRowProps {
    * close a session") — `Sidebar` confirms before anything is killed.
    * Absent = no close control, same convention as `onCloseWorkspace`. */
   onClose?: () => void;
+  /** Renders as the "New terminal" row inside the expanded children, when
+   * this is the current session and it hasn't hit `MAX_PANES` (Task 5).
+   * Absent = no control shown, same convention as `onClose`. */
+  onOpenNewTerminal?: () => void;
 }
 
 export default function SidebarSessionRow({
@@ -100,9 +132,14 @@ export default function SidebarSessionRow({
   projectLabel,
   isCurrent,
   tint,
+  expanded,
+  activeTabId,
   onActivate,
+  onToggleExpanded,
+  onActivateTab,
   onRename,
   onClose,
+  onOpenNewTerminal,
 }: SidebarSessionRowProps) {
   const branch = useGitBranch(session.cwd);
   const [renaming, setRenaming] = useState(false);
@@ -145,18 +182,6 @@ export default function SidebarSessionRow({
     if (draft.trim() !== session.label) onRename(draft);
   }
 
-  // The row's mini pane-map (founder ask, 2026-07-26): one OmniAgent mark
-  // per terminal, "in their order in the layout and their current status,
-  // with the same effect, meaning it also stays in 1, 1x2, 2x2, 2x3, 2x4
-  // layout". So the shape comes from `gridShape` — the SAME function the
-  // real grid derives its arrangement from — and the leftover cells are
-  // drawn as holes exactly like `buildGrid` pads them, which is what keeps
-  // this a map of the layout rather than a row of dots that happens to have
-  // the right count. It also replaces the row's single aggregate light:
-  // eight marks that each say their own state say strictly more than one
-  // that says the most significant of them.
-  const shape = gridShape(session.tabs.length);
-
   return (
     <li
       ref={rowRef}
@@ -165,60 +190,110 @@ export default function SidebarSessionRow({
       onMouseEnter={scheduleCard}
       onMouseLeave={closeCard}
     >
-      {renaming ? (
-        <input
-          className="session-row-rename-input"
-          value={draft}
-          autoFocus
-          aria-label={`Rename ${session.label}`}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commitRename}
-          onKeyDown={(e) => {
+      {isCurrent && <span className="session-row-accent" />}
+      {/* The chevron and whichever of `.session-row-main`/the rename input is
+          showing share one flex row (fix-round, 2026-07-27): `.session-row`
+          itself is plain block layout, so without this wrapper the chevron
+          — a block-level button — started its own line above the row
+          instead of sitting beside the name. */}
+      <div className="session-row-body">
+        <button
+          type="button"
+          className={`session-row-chevron${expanded ? " is-expanded" : ""}`}
+          aria-label={expanded ? "Collapse session" : "Expand session"}
+          onClick={(e) => {
             e.stopPropagation();
-            if (e.key === "Enter") {
-              e.preventDefault();
-              commitRename();
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              setRenaming(false);
-            }
+            onToggleExpanded();
           }}
-        />
-      ) : (
-        <button className="session-row-main" onClick={onActivate}>
-          <span className="session-row-top">
-            <span className="session-row-name" onDoubleClick={startRename} title="Double-click to rename">
-              {session.label}
-            </span>
-            {branch && (
-              <span className="session-row-branch" aria-label={`Branch ${branch}`}>
-                <Icon name="branch" size={11} className="session-row-branch-glyph" />
-                {/* Its own element so a long branch ellipsizes: an anonymous
-                    text node inside a flex container can't take
-                    `text-overflow`, and `feature/sidebar-sessions` was being
-                    cut mid-word against the panel edge. */}
-                <span className="session-row-branch-name">{branch}</span>
-              </span>
-            )}
-          </span>
-          <span
-            className="session-row-panes"
-            style={{ "--pane-cols": shape.cols } as CSSProperties}
-          >
-            {Array.from({ length: shape.cols * shape.rows }, (_, i) => {
-              const pane = session.tabs[i];
-              return pane ? (
-                <SessionStatusLight key={pane.id} status={pane.status} size={13} />
-              ) : (
-                <span key={`hole-${i}`} className="session-row-pane-hole" aria-hidden="true" />
-              );
-            })}
-          </span>
+        >
+          ›
         </button>
-      )}
-      {/* A sibling of `.session-row-main`, not a child — a button can't nest
-          inside a button — revealed on the row's hover like the workspace
-          row's own close. */}
+        {renaming ? (
+          <input
+            className="session-row-rename-input"
+            value={draft}
+            autoFocus
+            aria-label={`Rename ${session.label}`}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitRename();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setRenaming(false);
+              }
+            }}
+          />
+        ) : (
+          <button
+            className="session-row-main"
+            onClick={onActivate}
+            // Explicit, so the button's accessible name is THIS rather than
+            // computed from its text content (fix-round, 2026-07-27, round
+            // 2): without it, removing `aria-hidden` from `.session-row-dots`
+            // (below — needed so each dot's own tooltip actually reaches
+            // assistive tech) let every dot's `aria-label` flow upward into
+            // this button's name too, so focusing/activating a session
+            // announced a multi-sentence dump of every pane's status on top
+            // of the name and branch. Mirrors exactly what was visually
+            // read before that dot work: the name, plus "Branch <branch>"
+            // (the same string `.session-row-branch` below labels itself
+            // with) when there is one — never the layout badge, which is
+            // redundant with "how many dots did you just count".
+            aria-label={branch ? `${session.label} Branch ${branch}` : session.label}
+          >
+            <span className="session-row-top">
+              <span className="session-row-name" onDoubleClick={startRename} title="Double-click to rename">
+                {session.label}
+              </span>
+              {branch && (
+                <span className="session-row-branch" aria-label={`Branch ${branch}`}>
+                  <Icon name="branch" size={11} className="session-row-branch-glyph" />
+                  {/* Its own element so a long branch ellipsizes: an anonymous
+                      text node inside a flex container can't take
+                      `text-overflow`, and `feature/sidebar-sessions` was being
+                      cut mid-word against the panel edge. */}
+                  <span className="session-row-branch-name">{branch}</span>
+                </span>
+              )}
+            </span>
+            {/* Line two: the dot cluster and the layout badge, wrapped
+                together (fix-round, 2026-07-27) so they read as one line —
+                as two direct children of this column-flex button they were
+                each claiming their own row instead. No `aria-hidden` here:
+                each dot below carries its own `role="img"`/`aria-label`
+                (the same fields `SessionStatusLight` uses); the button's own
+                explicit `aria-label` above (round 2 of this fix) is what
+                keeps that from also becoming part of THIS button's name. */}
+            <span className="session-row-meta">
+              <span className="session-row-dots">
+                {session.tabs.map((t) => {
+                  const p = statusPresentation(t.status);
+                  return (
+                    <span
+                      key={t.id}
+                      className="session-row-dot"
+                      data-status={p.key}
+                      data-motion={p.motion}
+                      style={{ background: `var(${p.colorVar})` }}
+                      role="img"
+                      aria-label={p.ariaLabel}
+                      title={p.ariaLabel}
+                    />
+                  );
+                })}
+              </span>
+              <span className="session-row-shape">{sessionShapeBadge(session.tabs.length)}</span>
+            </span>
+          </button>
+        )}
+      </div>
+      {/* A sibling of `.session-row-body`, not a child of `.session-row-main`
+          — a button can't nest inside a button — revealed on the row's
+          hover like the workspace row's own close. */}
       {onClose && !renaming && (
         <button
           className="session-row-close"
@@ -238,6 +313,42 @@ export default function SidebarSessionRow({
           model={deriveSessionCard({ session, projectLabel, branch })}
           anchor={cardAnchor}
         />
+      )}
+      {expanded && (
+        <div className="session-row-children">
+          {session.tabs.map((t) => (
+            <SidebarTerminalRow
+              key={t.id}
+              tab={t}
+              isActive={t.id === activeTabId}
+              onActivate={() => onActivateTab(t.id)}
+            />
+          ))}
+          {/* Spawning only ever happens into the session on screen — a
+              background session's expanded list is browsable (click a
+              terminal to bring it forward) but isn't where ⌘T lands.
+              `onOpenNewTerminal` is absent for the same reason `onClose`
+              can be: no handler wired, no control shown. `MAX_PANES` mirrors
+              the cap `App.tsx`'s own spawn path already enforces, so this
+              row never promises a terminal the grid would refuse. */}
+          {isCurrent && onOpenNewTerminal && session.tabs.length < MAX_PANES && (
+            <button
+              type="button"
+              className="terminal-row-new"
+              onClick={onOpenNewTerminal}
+              aria-label="New terminal"
+              title="New terminal (⌘T)"
+            >
+              <span aria-hidden>+</span>
+              <span className="terminal-row-new-label" aria-hidden>
+                New terminal
+              </span>
+              <span className="terminal-row-new-key" aria-hidden>
+                ⌘T
+              </span>
+            </button>
+          )}
+        </div>
       )}
     </li>
   );

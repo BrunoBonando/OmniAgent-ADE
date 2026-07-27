@@ -81,12 +81,12 @@
 //!    even though it's a genuinely interesting integration to know about.
 //!
 //! **What's actually implemented**: plain-text pattern matching on the raw
-//! PTY stream for the literal marker `"Do you want to proceed?"` /
-//! `"Do you want to"` ([`ATTENTION_MARKERS`]) — the exact copy stock
-//! `claude` prints in its tool-permission confirmation dialog (verified
-//! against both a Bash-tool and a Write-tool prompt; the two use different
-//! trailing wording — "...proceed?" vs "...create notes.txt?" — but share
-//! the "Do you want to" opening, which is what's actually matched). This is
+//! PTY stream for the literal markers `"Do you want to"` /
+//! `"Would you like to"` ([`ATTENTION_MARKERS`]) — the exact copy stock
+//! `claude` prints in its yes/no dialogs (the tool-permission confirmation,
+//! verified against both a Bash-tool and a Write-tool prompt — different
+//! trailing wording, shared "Do you want to" opening — and the plan-approval
+//! dialog's "Would you like to proceed?"). This is
 //! honestly the fragile, version-coupled fallback the founder brief itself
 //! anticipated ("don't force a solution that doesn't reflect reality") —
 //! it requires zero configuration and zero engine spoofing, which is the
@@ -3103,15 +3103,24 @@ fn write_redacted(file: &mut Option<std::fs::File>, text: &str) {
 // investigation this came out of).
 // -------------------------------------------------------------------------
 
-/// Text stock `claude` prints when it genuinely needs the user — currently
-/// just the shared opening of its tool-permission confirmation dialog
-/// (verified against both a Bash-tool prompt, "Do you want to proceed?",
-/// and a Write-tool prompt, "Do you want to create notes.txt?" — the
-/// trailing wording differs per tool, the opening doesn't). A list, not a
-/// single `&str`, so a future marker (a different dialog's wording, if one
-/// turns out not to share this opening) is a one-line addition, not a
-/// matching-logic change.
-const ATTENTION_MARKERS: &[&str] = &["Do you want to"];
+/// Text stock `claude` prints when it genuinely needs the user:
+///
+/// - `"Do you want to"` — the shared opening of its tool-permission
+///   confirmation dialog (verified against both a Bash-tool prompt, "Do you
+///   want to proceed?", and a Write-tool prompt, "Do you want to create
+///   notes.txt?" — the trailing wording differs per tool, the opening
+///   doesn't).
+/// - `"Would you like to"` — the plan-approval dialog's opening ("Would you
+///   like to proceed?" after ExitPlanMode), added 2026-07-27 (founder:
+///   "every yes or no question must be handled the same way"). Same numbered
+///   select, so the panel's Approve ("1") answers it too — note that plan
+///   mode's option 1 is "Yes, and auto-accept edits".
+///
+/// The startup trust prompt ("Quick safety check: Is this a project you
+/// trust?") stays deliberately unmatched: it appears the moment the user
+/// opens the session — they're looking at it — and blind-approving a trust
+/// gate from a notification is exactly the wrong affordance.
+const ATTENTION_MARKERS: &[&str] = &["Do you want to", "Would you like to"];
 
 /// How much of the raw (un-redacted) output stream is kept around purely to
 /// catch an `ATTENTION_MARKERS` entry split across two PTY `read()` calls.
@@ -4578,6 +4587,14 @@ mod tests {
         assert!(contains_attention_marker(
             "\u{2502} Bash command \u{2502}\nDo you want to proceed?\n\u{2570}\u{2500}\u{256f}"
         ));
+    }
+
+    #[test]
+    fn attention_marker_matches_the_plan_approval_dialog() {
+        // ExitPlanMode's dialog uses different copy from the tool-permission
+        // one ("Would you like to proceed?") — founder ask, 2026-07-27:
+        // every yes/no question notifies and approves the same way.
+        assert!(contains_attention_marker("Would you like to proceed?"));
     }
 
     #[test]

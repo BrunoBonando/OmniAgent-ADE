@@ -129,6 +129,78 @@ export function notificationSubtitle(status: SessionStatus): string {
   }
 }
 
+/** The keystroke that answers an engine's pending permission prompt with
+ * "yes", written straight into its PTY (`sessionWrite`) — the same input
+ * path typing in the pane uses, which also clears the Rust-side attention
+ * latch (`sessions.rs`'s `mark_user_input`). Claude Code's dialog is a
+ * numbered select where the digit picks the option outright, so `"1"` is
+ * "Yes" without trusting where the highlight currently sits.
+ *
+ * ponytail: version-coupled to Claude Code's own dialog, exactly like the
+ * `ATTENTION_MARKERS` scrape that detects the prompt in the first place —
+ * one assumption, both sides of it. Other engines return `null` (no known
+ * gesture) and their rows offer "Go to terminal" only; add an entry here when an
+ * engine's prompt gesture is verified against a real session. The write
+ * itself has an inherent race window too, being frontend-only (App.tsx's
+ * in-flight guard narrows it, but doesn't close it): the durable fix is a
+ * Rust-side `session_approve(id)` that re-checks the prompt scrape inside
+ * the same lock before writing, rather than trusting the last status event
+ * the frontend saw. */
+const APPROVE_KEYSTROKES: Record<string, string> = { claude: "1" };
+
+export function approveKeystroke(engine: string): string | null {
+  return APPROVE_KEYSTROKES[engine] ?? null;
+}
+
+/** Actionable = this row froze an `awaiting_approval` AND that session is
+ * still awaiting right now (`awaiting` = live status, passed in by the
+ * caller). Both halves matter: without the live check, Approve would type
+ * into whatever replaced the prompt since. */
+export function isActionable(entry: NotificationEntry, awaiting: ReadonlySet<string>): boolean {
+  return entry.status === "awaiting_approval" && awaiting.has(entry.sessionId);
+}
+
+/** The reference panel's three bands: NEEDS YOU (actionable, whatever their
+ * age — a blocked session doesn't stop being blocked at midnight), then
+ * EARLIER TODAY / OLDER by local calendar day.
+ *
+ * A session can carry more than one still-awaiting entry: the reducer only
+ * collapses an *immediate* repeat (same session, same status, nothing else
+ * in between), and a restored persisted entry reuses a session id from a
+ * previous run, so two `awaiting_approval` rows for one session is reachable
+ * without either of those catching it. Two rows means two Approve buttons
+ * for a single prompt, so before banding, only the newest actionable entry
+ * per session id is allowed into NEEDS YOU — the rest are not actionable for
+ * banding purposes and fall through to the ordinary day-band logic below,
+ * same as any other non-actionable row. */
+export function groupNotifications(
+  entries: NotificationEntry[],
+  awaiting: ReadonlySet<string>,
+  now: number,
+): { needsYou: NotificationEntry[]; earlierToday: NotificationEntry[]; older: NotificationEntry[] } {
+  const startOfToday = new Date(now).setHours(0, 0, 0, 0);
+
+  const newestActionableBySession = new Map<string, NotificationEntry>();
+  for (const entry of entries) {
+    if (!isActionable(entry, awaiting)) continue;
+    const current = newestActionableBySession.get(entry.sessionId);
+    if (!current || entry.createdAt > current.createdAt) {
+      newestActionableBySession.set(entry.sessionId, entry);
+    }
+  }
+
+  const needsYou: NotificationEntry[] = [];
+  const earlierToday: NotificationEntry[] = [];
+  const older: NotificationEntry[] = [];
+  for (const entry of entries) {
+    const isNeedsYouWinner = newestActionableBySession.get(entry.sessionId) === entry;
+    if (isNeedsYouWinner) needsYou.push(entry);
+    else if (entry.createdAt >= startOfToday) earlierToday.push(entry);
+    else older.push(entry);
+  }
+  return { needsYou, earlierToday, older };
+}
+
 /** Whether the user is demonstrably looking at this session right now — the
  * four-part rule in this module's header. Exported for its own test and so
  * the rule is nameable in a review, rather than buried in a conditional. */
@@ -168,6 +240,13 @@ export function deriveNotification(ctx: NotificationContext): NotificationEntry 
 export type NotificationsAction =
   | { type: "notification/added"; entry: NotificationEntry }
   | { type: "notification/dismissed"; id: string }
+  /** This session's pending yes/no prompt was answered — from the pane, the
+   * panel's Approve, anywhere. Its `awaiting_approval` rows are obsolete the
+   * moment the session reports any other status (founder ask, 2026-07-27:
+   * "if I approve using the terminal, it has to update the notification"),
+   * so they're removed outright, exactly like the panel's own Approve does.
+   * Other statuses' rows are untouched — they're history, not a pending ask. */
+  | { type: "notifications/approval_resolved"; sessionId: string }
   | { type: "notifications/cleared" }
   /** The panel was opened — everything in it has now been seen. */
   | { type: "notifications/read" }
@@ -194,6 +273,13 @@ export function notificationsReducer(
 
     case "notification/dismissed":
       return { entries: state.entries.filter((e) => e.id !== action.id) };
+
+    case "notifications/approval_resolved": {
+      const entries = state.entries.filter(
+        (e) => !(e.sessionId === action.sessionId && e.status === "awaiting_approval"),
+      );
+      return entries.length === state.entries.length ? state : { entries }; // no churn
+    }
 
     case "notifications/cleared":
       return { entries: [] };
@@ -223,42 +309,45 @@ export function unreadCount(state: NotificationsState): number {
 // several projects open, "just this workspace" is the question actually
 // worth asking.
 
-export type NotificationFilter = "all" | "project";
+export type NotificationFilter = "all" | "project" | "needs_you";
 
 export function filterNotifications(
   entries: NotificationEntry[],
   filter: NotificationFilter,
   projectId: string | null,
+  awaiting: ReadonlySet<string>,
 ): NotificationEntry[] {
   if (filter === "all") return entries;
+  if (filter === "needs_you") return entries.filter((e) => isActionable(e, awaiting));
   if (projectId === null) return [];
   return entries.filter((e) => e.project === projectId);
 }
 
-/** Chip text, count included — "All sessions (3)". `projectLabel` names the
- * project chip when one is selected, so the chip says which workspace it
- * means rather than the word "project". */
+/** Chip text, count included — "All 3". The chip copy is fixed per the
+ * design file ("All" / "This workspace" / "Needs you") regardless of the
+ * actual project name; `_projectLabel` is vestigial — kept only so the
+ * signature doesn't need to change at every call site — and unused. */
 export function filterChipLabel(
   filter: NotificationFilter,
   count: number,
-  projectLabel: string | null,
+  _projectLabel: string | null,
 ): string {
-  const name = filter === "all" ? "All sessions" : (projectLabel ?? "This project");
-  return `${name} (${count})`;
+  const name = filter === "all" ? "All" : filter === "needs_you" ? "Needs you" : "This workspace";
+  return `${name} ${count}`;
 }
 
 /** Relative timestamps, in the reference panel's own vocabulary ("Just
- * now", "2 days ago"). Coarse on purpose: a notification list is scanned,
+ * now", "2 days"). Coarse on purpose: a notification list is scanned,
  * not read, and second-level precision would make every row twitch. */
 export function relativeTime(createdAt: number, now: number): string {
   const seconds = Math.max(0, Math.round((now - createdAt) / 1000));
   if (seconds < 60) return "Just now";
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
-  return days === 1 ? "1 day ago" : `${days} days ago`;
+  return days === 1 ? "1 day" : `${days} days`;
 }
 
 // ------------------------------------------------------------ persistence

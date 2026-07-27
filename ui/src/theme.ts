@@ -1,5 +1,5 @@
 // Shared design tokens for the workspace shell (Task 5.2). One place so
-// Sidebar/PaneHeader/Terminal/EnginePicker/CommandPalette agree on what an
+// Sidebar/PaneHeader/Terminal/CommandPalette agree on what an
 // "engine" looks like — see App.css for the rest of the HUD token system
 // (color/type/spacing custom properties).
 import type { Engine } from "./state/sessions";
@@ -11,6 +11,16 @@ export const ENGINE_LABEL: Record<Engine, string> = {
   shell: "Shell",
   copilot: "GitHub Copilot",
   antigravity: "AntiGravity",
+};
+
+/** The notification row's short caps tag — the reference design abbreviates
+ * where the full label would crowd the title ("AG", not "ANTIGRAVITY"). */
+export const ENGINE_TAG: Record<Engine, string> = {
+  claude: "CLAUDE",
+  codex: "CODEX",
+  shell: "SHELL",
+  copilot: "COPILOT",
+  antigravity: "AG",
 };
 
 // Sampled directly from the founder's reference screenshot (BridgeSpace),

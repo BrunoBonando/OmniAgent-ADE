@@ -8,8 +8,8 @@
 // Claude conversation with no undo. Hence the same shape `AboutPanel` uses for
 // "Rebuild brain" — state the consequence, then two buttons.
 //
-// Keyboard-first, like every other dialog here (`NewChooserModal`,
-// `EnginePicker`): the panel takes focus on mount, Enter confirms, Esc
+// Keyboard-first, like every other dialog here (`NewSessionModal`,
+// `NewWorkspaceModal`): the panel takes focus on mount, Enter confirms, Esc
 // cancels, so ⌘W-Enter closes a pane without touching the mouse.
 import { useEffect, useRef } from "react";
 

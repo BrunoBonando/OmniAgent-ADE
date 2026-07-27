@@ -1,75 +1,176 @@
-// ⌘N -> "Session": the same dialog as New Workspace, scoped to the project
-// you're already in. Mocks `@tauri-apps/plugin-dialog`'s `open()` the same
-// way `NewWorkspaceModal.test.tsx` does.
+// ⌘N -> "Session" (Task 10): one prompt that becomes the session's name,
+// a layout picked as a thumbnail, and one engine per terminal. Mocks
+// `@tauri-apps/plugin-dialog`'s `open()` the same way
+// `NewWorkspaceModal.test.tsx` does, and `lib/tauri` for the footer's brain
+// count.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentsState } from "../state/agents";
 import type { ProjectInfo } from "../state/sessions";
 
 const { openMock } = vi.hoisted(() => ({ openMock: vi.fn() }));
+const { ingestionStatusMock } = vi.hoisted(() => ({ ingestionStatusMock: vi.fn() }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: openMock }));
+vi.mock("../lib/tauri", () => ({ ingestionStatus: ingestionStatusMock }));
 
 const { default: NewSessionModal } = await import("./NewSessionModal");
 
 const PROJECT: ProjectInfo = { id: "ade", label: "OmniAgent ADE", path: "/Users/bruno/code/ade" };
 
-function setup(project: ProjectInfo = PROJECT) {
+const AGENTS: AgentsState = {
+  installed: new Set(["claude", "codex"] as const),
+  lastSelected: ["claude"],
+  installing: new Map(),
+};
+
+function setup(project: ProjectInfo = PROJECT, agentState: AgentsState = AGENTS) {
   const onCreate = vi.fn();
   const onClose = vi.fn();
-  render(<NewSessionModal project={project} onCreate={onCreate} onClose={onClose} />);
-  return { onCreate, onClose, dialog: screen.getByRole("dialog", { name: "New Session" }) };
+  render(<NewSessionModal project={project} agentState={agentState} onCreate={onCreate} onClose={onClose} />);
+  return { onCreate, onClose, dialog: screen.getByRole("dialog", { name: "New session" }) };
+}
+
+/** The dialog's terminal count, read off the engine pickers themselves —
+ * the thing the layout is actually for. */
+function slotTriggers(): HTMLElement[] {
+  return screen.getAllByRole("button", { name: /^Terminal \d+ engine:/ });
+}
+
+function promptField(): HTMLInputElement {
+  return screen.getByLabelText("What are you doing?") as HTMLInputElement;
 }
 
 beforeEach(() => {
   openMock.mockReset();
+  ingestionStatusMock.mockReset().mockResolvedValue({
+    running: false,
+    projects_total: 0,
+    projects_done: 0,
+    total_nodes: 41208,
+  });
 });
 
-describe("NewSessionModal — rendering", () => {
-  it("keeps New Workspace's LAYOUT and AI AGENTS sections, and scopes the folder to this project", () => {
+describe("NewSessionModal — the prompt", () => {
+  it("asks what you're doing, and says what the answer is used for", () => {
     setup();
-    expect(screen.getByText("LAYOUT")).toBeInTheDocument();
-    expect(screen.getByText("AI AGENTS")).toBeInTheDocument();
-    expect(screen.getByText("FOLDER — OMNIAGENT ADE")).toBeInTheDocument();
-    // No project-name field and no "choose a folder first" state: a session
-    // always already has somewhere to run.
-    expect(screen.queryByLabelText(/project name/i)).not.toBeInTheDocument();
+    expect(screen.getByText("What are you doing?")).toBeInTheDocument();
+    expect(
+      screen.getByText("Becomes the session name and the first prompt. Leave empty for a bare terminal."),
+    ).toBeInTheDocument();
   });
 
-  it("starts in the project's own folder", () => {
+  it("focuses the prompt, so the dialog opens ready to be typed into", () => {
     setup();
-    expect(screen.getByText("/Users/bruno/code/ade")).toBeInTheDocument();
-    expect(screen.getByText(/Runs in the project folder/)).toBeInTheDocument();
+    expect(promptField()).toHaveFocus();
   });
 
-  it("offers all five layout presets, side-by-side selected by default", () => {
+  it("says how many terminals boot, and on how much brain", async () => {
+    const { dialog } = setup();
+    await waitFor(() => expect(dialog.textContent).toContain("2 terminals boot briefed on 41,208 brain nodes"));
+  });
+});
+
+describe("NewSessionModal — layout", () => {
+  it("offers every preset as a shaped thumbnail", () => {
     setup();
-    for (const preset of [1, 2, 4, 6, 8]) {
-      expect(screen.getByRole("button", { name: new RegExp(`^${preset}$`) })).toBeInTheDocument();
+    for (const badge of ["1", "1×2", "2×2", "2×3", "2×4"]) {
+      expect(screen.getByRole("button", { name: badge })).toBeInTheDocument();
     }
-    expect(screen.getByText("Side-by-side split")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "1×2" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("max 8 terminals per session")).toBeInTheDocument();
   });
 
-  it("checks only Claude by default, and can create immediately", () => {
+  it("layout picks resize the slot grid", () => {
     setup();
-    expect(screen.getByRole("checkbox", { name: /Claude Code/ })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: /Codex/ })).not.toBeChecked();
-    expect(screen.getByRole("button", { name: "Create Session" })).toBeEnabled();
+    expect(slotTriggers()).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "2×2" }));
+    expect(slotTriggers()).toHaveLength(4);
+    fireEvent.click(screen.getByRole("button", { name: "1" }));
+    expect(slotTriggers()).toHaveLength(1);
+  });
+
+  it("keeps the engines already picked when the grid grows", () => {
+    setup();
+    fireEvent.click(slotTriggers()[1]);
+    fireEvent.click(screen.getByRole("option", { name: "Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "2×2" }));
+    expect(slotTriggers().map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Terminal 1 engine: Claude Code",
+      "Terminal 2 engine: Codex",
+      "Terminal 3 engine: Claude Code",
+      "Terminal 4 engine: Claude Code",
+    ]);
+  });
+});
+
+describe("NewSessionModal — engine per terminal", () => {
+  it("starts every terminal on the default engine", () => {
+    setup();
+    expect(slotTriggers().map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Terminal 1 engine: Claude Code",
+      "Terminal 2 engine: Claude Code",
+    ]);
+  });
+
+  it("slot picker swaps one terminal's engine", () => {
+    setup();
+    fireEvent.click(slotTriggers()[1]);
+    fireEvent.click(screen.getByRole("option", { name: "Codex" }));
+    expect(slotTriggers().map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Terminal 1 engine: Claude Code",
+      "Terminal 2 engine: Codex",
+    ]);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument(); // picking closes it
+  });
+
+  it("only offers engines this machine can actually run, plus shell", () => {
+    setup();
+    fireEvent.click(slotTriggers()[0]);
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["Claude Code", "Codex", "Shell"]);
+  });
+
+  it("falls back to shell alone when nothing is installed", () => {
+    setup(PROJECT, { installed: new Set(), lastSelected: [], installing: new Map() });
+    expect(slotTriggers()[0]).toHaveAttribute("aria-label", "Terminal 1 engine: Shell");
+    fireEvent.click(slotTriggers()[0]);
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["Shell"]);
+  });
+
+  it("Escape closes the open menu without closing the dialog", () => {
+    const { onClose } = setup();
+    fireEvent.click(slotTriggers()[0]);
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "Escape" });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("a click elsewhere in the dialog closes the menu", () => {
+    setup();
+    fireEvent.click(slotTriggers()[0]);
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    fireEvent.mouseDown(promptField());
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 });
 
 describe("NewSessionModal — the folder stays inside the project", () => {
-  it("accepts a subfolder and shows it relative to the project", async () => {
+  it("starts in the project's own folder", () => {
+    setup();
+    expect(screen.getByText("/Users/bruno/code/ade")).toBeInTheDocument();
+  });
+
+  it("accepts a subfolder", async () => {
     openMock.mockResolvedValue("/Users/bruno/code/ade/ui/src");
     setup();
-    fireEvent.click(screen.getByRole("button", { name: "Browse" }));
-    await waitFor(() => expect(screen.getByText("ui/src")).toBeInTheDocument());
-    expect(screen.getByText(/Runs in this subfolder/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Change" }));
+    await waitFor(() => expect(screen.getByText("/Users/bruno/code/ade/ui/src")).toBeInTheDocument());
   });
 
   it("opens the picker inside the project rather than anywhere on disk", async () => {
     openMock.mockResolvedValue(null);
     setup();
-    fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    fireEvent.click(screen.getByRole("button", { name: "Change" }));
     await waitFor(() =>
       expect(openMock).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: "/Users/bruno/code/ade" })),
     );
@@ -78,25 +179,9 @@ describe("NewSessionModal — the folder stays inside the project", () => {
   it("refuses a folder outside the project, and says why", async () => {
     openMock.mockResolvedValue("/etc");
     setup();
-    fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    fireEvent.click(screen.getByRole("button", { name: "Change" }));
     expect(await screen.findByText(/outside this project/)).toBeInTheDocument();
     expect(screen.getByText("/Users/bruno/code/ade")).toBeInTheDocument(); // unchanged
-  });
-
-  it("refuses a sibling folder whose path merely starts the same way", async () => {
-    openMock.mockResolvedValue("/Users/bruno/code/ade-scratch");
-    setup();
-    fireEvent.click(screen.getByRole("button", { name: "Browse" }));
-    expect(await screen.findByText(/outside this project/)).toBeInTheDocument();
-  });
-
-  it("goes back to the project folder in one click", async () => {
-    openMock.mockResolvedValue("/Users/bruno/code/ade/ui");
-    setup();
-    fireEvent.click(screen.getByRole("button", { name: "Browse" }));
-    await waitFor(() => expect(screen.getByText("ui")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Use the project folder" }));
-    expect(screen.getByText("/Users/bruno/code/ade")).toBeInTheDocument();
   });
 
   it("falls back to the project id when it has no path on disk", () => {
@@ -106,76 +191,124 @@ describe("NewSessionModal — the folder stays inside the project", () => {
 });
 
 describe("NewSessionModal — creating", () => {
-  it("hands back the project, the cwd, the checked engines in ENGINES order, and the layout", () => {
+  it("confirm passes (project, cwd, slots, prompt)", () => {
     const { onCreate } = setup();
-    fireEvent.click(screen.getByRole("checkbox", { name: /Shell/ }));
-    fireEvent.click(screen.getByRole("button", { name: "6" }));
-    fireEvent.click(screen.getByRole("button", { name: "Create Session" }));
-    expect(onCreate).toHaveBeenCalledWith(PROJECT, "/Users/bruno/code/ade", ["claude", "shell"], 6);
+    fireEvent.change(promptField(), { target: { value: "coalesce refresh-token rotation" } });
+    fireEvent.click(slotTriggers()[1]);
+    fireEvent.click(screen.getByRole("option", { name: "Shell" }));
+    fireEvent.click(screen.getByRole("button", { name: /Start session/ }));
+    expect(onCreate).toHaveBeenCalledWith(
+      PROJECT,
+      "/Users/bruno/code/ade",
+      ["claude", "shell"],
+      "coalesce refresh-token rotation",
+    );
+  });
+
+  it("an empty prompt is still a session — a bare pair of terminals", () => {
+    const { onCreate } = setup();
+    fireEvent.click(screen.getByRole("button", { name: /Start session/ }));
+    expect(onCreate).toHaveBeenCalledWith(PROJECT, "/Users/bruno/code/ade", ["claude", "claude"], "");
   });
 
   it("creates in the chosen subfolder", async () => {
     openMock.mockResolvedValue("/Users/bruno/code/ade/crates");
     const { onCreate } = setup();
-    fireEvent.click(screen.getByRole("button", { name: "Browse" }));
-    await waitFor(() => expect(screen.getByText("crates")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Create Session" }));
-    expect(onCreate).toHaveBeenCalledWith(PROJECT, "/Users/bruno/code/ade/crates", ["claude"], 2);
-  });
-
-  it("cannot create with no agent checked", () => {
-    const { onCreate } = setup();
-    fireEvent.click(screen.getByRole("checkbox", { name: /Claude Code/ }));
-    expect(screen.getByRole("button", { name: "Create Session" })).toBeDisabled();
-    expect(onCreate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Change" }));
+    await waitFor(() => expect(screen.getByText("/Users/bruno/code/ade/crates")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Start session/ }));
+    expect(onCreate).toHaveBeenCalledWith(PROJECT, "/Users/bruno/code/ade/crates", ["claude", "claude"], "");
   });
 });
 
 describe("NewSessionModal — keyboard", () => {
-  it("focuses itself and creates on Enter", () => {
+  it("Enter from the prompt starts the session", () => {
+    const { onCreate } = setup();
+    fireEvent.change(promptField(), { target: { value: "ship the thing" } });
+    fireEvent.keyDown(promptField(), { key: "Enter" });
+    expect(onCreate).toHaveBeenCalledWith(PROJECT, "/Users/bruno/code/ade", ["claude", "claude"], "ship the thing");
+  });
+
+  it("typing digits into the prompt does not change layout", () => {
+    setup();
+    fireEvent.keyDown(promptField(), { key: "3" });
+    fireEvent.change(promptField(), { target: { value: "fix issue 2" } });
+    fireEvent.keyDown(promptField(), { key: "2" });
+    expect(slotTriggers()).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "1×2" })).toHaveAttribute("aria-pressed", "true");
+    expect(promptField().value).toBe("fix issue 2");
+  });
+
+  it("picks a layout by number once the prompt isn't focused", () => {
+    const { dialog } = setup();
+    promptField().blur();
+    fireEvent.keyDown(dialog, { key: "3" }); // the third preset — 4 terminals
+    expect(slotTriggers()).toHaveLength(4);
+    expect(screen.getByRole("button", { name: "2×2" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  // The regression the checkbox-era dialog already shipped once: a real
+  // browser focuses a <button> when you click it, so "confirm only when the
+  // prompt has focus" makes Enter a dead key right after the dialog's most
+  // likely interaction. jsdom does not move focus on click, so these focus
+  // the element explicitly to stand in for the real-browser state.
+  it("still starts the session on Enter after a layout thumbnail has been clicked", () => {
     const { onCreate, dialog } = setup();
+    fireEvent.change(promptField(), { target: { value: "ship the thing" } });
+    const thumb = screen.getByRole("button", { name: "2×2" });
+    fireEvent.click(thumb);
+    thumb.focus();
+    fireEvent.keyDown(dialog, { key: "Enter" });
+    expect(onCreate).toHaveBeenCalledWith(
+      PROJECT,
+      "/Users/bruno/code/ade",
+      ["claude", "claude", "claude", "claude"],
+      "ship the thing",
+    );
+  });
+
+  it("still starts the session on Enter after the folder button has been clicked", () => {
+    openMock.mockResolvedValue(null);
+    const { onCreate, dialog } = setup();
+    const change = screen.getByRole("button", { name: "Change" });
+    fireEvent.click(change);
+    change.focus();
+    fireEvent.keyDown(dialog, { key: "Enter" });
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("Enter on a slot trigger opens its menu instead of submitting", () => {
+    const { onCreate } = setup();
+    const slot = slotTriggers()[0];
+    slot.focus();
+    fireEvent.keyDown(slot, { key: "Enter" });
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it("Enter on an open slot menu's option picks it rather than submitting", () => {
+    const { onCreate } = setup();
+    fireEvent.click(slotTriggers()[1]);
+    const option = screen.getByRole("option", { name: "Codex" });
+    option.focus();
+    fireEvent.keyDown(option, { key: "Enter" });
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it("keeps a focusable panel, so a keydown always has somewhere in-dialog to land", () => {
+    // WKWebView (this app's runtime) does not focus a <button> on click the
+    // way Chrome does; a keydown outside this div never reaches its handler.
+    const { dialog, onCreate } = setup();
+    expect(dialog).toHaveAttribute("tabindex", "-1");
+    dialog.focus();
     expect(dialog).toHaveFocus();
     fireEvent.keyDown(dialog, { key: "Enter" });
-    expect(onCreate).toHaveBeenCalledWith(PROJECT, "/Users/bruno/code/ade", ["claude"], 2);
-  });
-
-  it("picks a layout by number", () => {
-    const { onCreate, dialog } = setup();
-    fireEvent.keyDown(dialog, { key: "4" }); // the fourth preset — 6
-    expect(screen.getByText("2×3 grid layout")).toBeInTheDocument();
-    fireEvent.keyDown(dialog, { key: "Enter" });
-    expect(onCreate).toHaveBeenCalledWith(PROJECT, "/Users/bruno/code/ade", ["claude"], 6);
-  });
-
-  it("picks the single-terminal layout", () => {
-    const { onCreate, dialog } = setup();
-    fireEvent.keyDown(dialog, { key: "1" });
-    expect(screen.getByText("Single terminal")).toBeInTheDocument();
-    fireEvent.keyDown(dialog, { key: "Enter" });
-    expect(onCreate).toHaveBeenCalledWith(PROJECT, "/Users/bruno/code/ade", ["claude"], 1);
+    expect(onCreate).toHaveBeenCalledTimes(1);
   });
 
   it("Escape cancels", () => {
     const { onClose, onCreate, dialog } = setup();
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
-    expect(onCreate).not.toHaveBeenCalled();
-  });
-
-  it("still creates on Enter after an agent checkbox has been clicked", () => {
-    // Caught in a real browser: focus sits on the checkbox after clicking
-    // it, and blanket-ignoring keys from an <input> made Enter a dead key
-    // right at the end of the flow.
-    const { onCreate } = setup();
-    const codex = screen.getByRole("checkbox", { name: /Codex/ });
-    fireEvent.click(codex);
-    fireEvent.keyDown(codex, { key: "Enter" });
-    expect(onCreate).toHaveBeenCalledWith(PROJECT, "/Users/bruno/code/ade", ["claude", "codex"], 2);
-  });
-
-  it("leaves Space to the checkbox it belongs to", () => {
-    const { onCreate } = setup();
-    fireEvent.keyDown(screen.getByRole("checkbox", { name: /Codex/ }), { key: " " });
     expect(onCreate).not.toHaveBeenCalled();
   });
 });

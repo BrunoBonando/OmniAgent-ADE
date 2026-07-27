@@ -377,6 +377,199 @@ pub fn list_dir(path: String) -> Result<Vec<brain_ingest::walk::DirEntry>, Strin
 }
 
 // ------------------------------------------------------------------------
+// `folder_stats` — the New Workspace dialog's "FOUND IN THIS FOLDER" strip
+// (left-pane redesign, Task 12). The dialog dropped its old name/engines/
+// layout fields in favour of showing what is actually *in* the folder the
+// user just picked, so "Add workspace" is an informed click rather than a
+// leap of faith.
+
+/// One folder's at-a-glance summary, as the New Workspace dialog's stats
+/// strip renders it: how many files ingestion would walk, the two most
+/// common languages among them, and whether the folder is a git repo (plus
+/// its branch count, which is only meaningful when it is).
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct FolderStats {
+    pub files: u64,
+    /// Top 2 languages by file count, e.g. `["TS", "Rust"]`. Ties break
+    /// alphabetically so the strip never flickers between two equal-count
+    /// languages on re-run.
+    pub languages: Vec<String>,
+    pub git: bool,
+    pub branches: u32,
+}
+
+/// Extension -> display language. Deliberately a short, curated list rather
+/// than an exhaustive linguist-style database: the strip shows at most two
+/// entries, so anything past the languages this app's users actually write
+/// would only ever be counted and then dropped. Unknown extensions
+/// (`lock`, `json`, `md`, …) map to `None` and are counted in `files` but
+/// never in a language bucket.
+const LANGUAGES: &[(&str, &str)] = &[
+    ("ts", "TS"),
+    ("tsx", "TS"),
+    ("js", "JS"),
+    ("jsx", "JS"),
+    ("rs", "Rust"),
+    ("py", "Python"),
+    ("go", "Go"),
+    ("swift", "Swift"),
+    ("css", "CSS"),
+    ("html", "HTML"),
+    ("java", "Java"),
+    ("rb", "Ruby"),
+];
+
+fn language_for(ext: &str) -> Option<&'static str> {
+    LANGUAGES.iter().find(|(e, _)| *e == ext).map(|(_, l)| *l)
+}
+
+/// The two most common languages, descending by count, ties broken
+/// alphabetically (so the answer is a pure function of the counts — no
+/// HashMap iteration order leaking into the UI).
+fn top_languages(counts: &std::collections::HashMap<&'static str, u64>) -> Vec<String> {
+    let mut v: Vec<_> = counts.iter().collect();
+    v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    v.into_iter().take(2).map(|(l, _)| l.to_string()).collect()
+}
+
+/// Summarises `path` for the New Workspace dialog's stats strip.
+///
+/// **On a blocking thread, not inline** — the same reasoning (and the same
+/// `tauri::async_runtime::spawn_blocking`, Tauri's own re-export, so no new
+/// dependency) as `agents.rs`'s `run_install`. This is an unbounded
+/// recursive walk with a `metadata()` stat per file over a folder the user
+/// just pointed at, which is *precisely* the "you picked something huge"
+/// case the strip exists to warn about. Run inline it would park a runtime
+/// worker and stall unrelated IPC — freezing the whole app while the modal
+/// displays a "…" placeholder implying it is not blocked.
+///
+/// The real work is [`folder_stats_inner`], which stays synchronous and
+/// dependency-free so the unit tests can call it directly without standing
+/// up an async runtime.
+#[tauri::command]
+pub async fn folder_stats(path: String) -> Result<FolderStats, String> {
+    tauri::async_runtime::spawn_blocking(move || folder_stats_inner(&path))
+        .await
+        .map_err(|e| format!("folder scan failed to run: {e}"))?
+}
+
+/// The actual walk behind [`folder_stats`].
+///
+/// Counts via `brain_ingest::walk::walk_files` — the *same* recursive,
+/// gitignore-aware walker ingestion itself uses (it also honours
+/// `SKIP_DIRS` and the 1 MB size cap), so "N files to walk" is the number
+/// ingestion will genuinely walk rather than a second, divergent notion of
+/// what counts as a file. Note that walker returns a plain `Vec<PathBuf>`,
+/// not a `Result` — per-entry IO errors are dropped inside it.
+///
+/// `branches` shells out to `git branch` rather than linking a git library:
+/// the same `std::process::Command` approach `gitreview` already takes, and
+/// a folder with a `.git` that isn't a usable repo simply reports 0 rather
+/// than failing the whole call.
+fn folder_stats_inner(path: &str) -> Result<FolderStats, String> {
+    let root = std::path::Path::new(path);
+    if !root.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    let mut files = 0u64;
+    let mut counts: std::collections::HashMap<&'static str, u64> = Default::default();
+    for entry in brain_ingest::walk::walk_files(root) {
+        files += 1;
+        if let Some(ext) = entry.extension().and_then(|e| e.to_str()) {
+            if let Some(lang) = language_for(&ext.to_ascii_lowercase()) {
+                *counts.entry(lang).or_insert(0) += 1;
+            }
+        }
+    }
+    let git = root.join(".git").exists();
+    let branches = if git {
+        std::process::Command::new("git")
+            .args(["-C", path, "branch", "--format=%(refname:short)"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().count() as u32)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    Ok(FolderStats {
+        files,
+        languages: top_languages(&counts),
+        git,
+        branches,
+    })
+}
+
+#[cfg(test)]
+mod folder_stats_tests {
+    #[test]
+    fn language_mapping_and_top2() {
+        use super::{language_for, top_languages};
+        assert_eq!(language_for("ts"), Some("TS"));
+        assert_eq!(language_for("tsx"), Some("TS"));
+        assert_eq!(language_for("rs"), Some("Rust"));
+        assert_eq!(language_for("py"), Some("Python"));
+        assert_eq!(language_for("lock"), None);
+        let mut counts = std::collections::HashMap::new();
+        counts.insert("TS", 120u64);
+        counts.insert("Rust", 40);
+        counts.insert("Python", 2);
+        assert_eq!(
+            top_languages(&counts),
+            vec!["TS".to_string(), "Rust".to_string()]
+        );
+    }
+
+    #[test]
+    fn stats_walk_counts_files_and_detects_git() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.ts"), "x").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "x").unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let stats = super::folder_stats_inner(&dir.path().to_string_lossy()).unwrap();
+        assert_eq!(stats.files, 2);
+        assert!(stats.git);
+        // alphabetical tiebreak — both languages have exactly one file.
+        assert_eq!(
+            stats.languages,
+            vec!["Rust".to_string(), "TS".to_string()]
+        );
+    }
+
+    /// The walker is the ingestion walker, so the strip's count already
+    /// excludes what ingestion would skip — `.gitignore`d files and the
+    /// always-skip vendor dirs — rather than promising a walk of 40k
+    /// `node_modules` files the brain will never look at.
+    #[test]
+    fn stats_respect_gitignore_and_skip_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keep.ts"), "x").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.ts\n").unwrap();
+        std::fs::write(dir.path().join("ignored.ts"), "x").unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.path().join("node_modules/pkg/index.js"), "x").unwrap();
+
+        let stats = super::folder_stats_inner(&dir.path().to_string_lossy()).unwrap();
+        // Just keep.ts: `ignored.ts` is gitignored, `node_modules` is an
+        // always-skip dir, and `.gitignore` itself is a dotfile (the
+        // `ignore` crate's default `hidden(true)` drops it).
+        assert_eq!(stats.files, 1);
+        assert_eq!(stats.languages, vec!["TS".to_string()]);
+        assert!(!stats.git);
+        assert_eq!(stats.branches, 0);
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_directory_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, "x").unwrap();
+        assert!(super::folder_stats_inner(&file.to_string_lossy()).is_err());
+        assert!(super::folder_stats_inner("/no/such/omniagent-folder-stats").is_err());
+    }
+}
+
+// ------------------------------------------------------------------------
 // File tree write side (Part A — backend only; the Finder-like UI on top of
 // these is a follow-up task). Founder feedback, 2026-07-25, verbatim: "make
 // sure the file view works correctly, with it's own file visualization. It

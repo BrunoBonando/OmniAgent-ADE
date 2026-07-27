@@ -33,6 +33,7 @@
 //   monetization: none"). A row that opened nothing, or worse a fabricated
 //   page, would be exactly the fake functionality this project refuses.
 import { FAKE_ACCOUNT_NAME, personaLabel, resolveSignedIn } from "../onboarding/authGateState";
+import type { IngestionStatus } from "../lib/tauri";
 
 /** The badge's display-relevant slice of auth state, derived from the same
  * two raw settings values `describeAuthSummary` reads
@@ -70,6 +71,38 @@ export function accountBadgeInitial(state: AccountBadgeState): string | null {
 export function accountBadgeSubtitle(state: AccountBadgeState): string {
   if (!state.signedIn) return "Not signed in (dev mode).";
   return state.personaLabel ?? "Signed in (dev mode).";
+}
+
+// -------------------------------------------------------------- brain line
+
+/** The account row's other sub-line (design §2 "Brain indexed · 8m ago") —
+ * a SECOND, independent status under the name, alongside `accountBadgeSubtitle`
+ * above. Reads `IngestionStatus` (`lib/tauri.ts`, polled by `App.tsx`) plus
+ * `lastIndexedAt`, which `Sidebar.tsx` tracks itself (session-local, see its
+ * own comment) since no backend surface persists "when did ingestion last
+ * finish cleanly" today. */
+export interface BrainLine {
+  text: string;
+  tone: "good" | "busy" | "idle" | "error";
+}
+
+/** `lastIndexedAt`/`now` are epoch ms; `now` is injected rather than read
+ * from `Date.now()` here so this stays a pure, deterministic function to
+ * test. Precedence: a running ingest or a surfaced error always wins over
+ * whatever `lastIndexedAt` says, since those are the current truth. */
+export function brainLine(
+  ingestion: IngestionStatus | null,
+  lastIndexedAt: number | null,
+  now: number,
+): BrainLine {
+  if (ingestion?.error) return { text: "Ingest failed — open About to rebuild", tone: "error" };
+  if (ingestion?.running) {
+    return { text: `Ingesting · ${ingestion.projects_done} of ${ingestion.projects_total} projects`, tone: "busy" };
+  }
+  if (lastIndexedAt == null) return { text: "Nothing indexed yet", tone: "idle" };
+  const mins = Math.max(0, Math.floor((now - lastIndexedAt) / 60_000));
+  const rel = mins < 1 ? "just now" : mins < 60 ? `${mins}m ago` : `${Math.floor(mins / 60)}h ago`;
+  return { text: `Brain indexed · ${rel}`, tone: "good" };
 }
 
 // ------------------------------------------------------------ menu items

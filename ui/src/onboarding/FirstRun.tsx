@@ -9,7 +9,7 @@
 //
 // Three phases (see `onboardingState.ts`'s pure reducer for the transition
 // logic this component just renders):
-// - "pick": a blocking modal (matches EnginePicker/AboutPanel's frame) —
+// - "pick": a blocking modal (matches NewSessionModal/AboutPanel's frame) —
 //   the only moment onboarding takes over the screen.
 // - "ingesting": a small fixed HUD readout, non-blocking, while the map
 //   (already switched into view) visibly grows behind it.

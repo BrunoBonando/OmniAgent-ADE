@@ -40,6 +40,8 @@ function setup(over: Partial<Parameters<typeof NotificationsPanel>[0]> = {}) {
     onSelect: vi.fn(),
     onDismiss: vi.fn(),
     onClearAll: vi.fn(),
+    awaitingSessionIds: [],
+    onApprove: vi.fn(),
     now: NOW,
     ...over,
   };
@@ -99,7 +101,7 @@ describe("the panel", () => {
     openPanel();
     expect(screen.getByText("wire session restore")).toBeInTheDocument();
     expect(screen.getByText("Task completed.")).toBeInTheDocument();
-    expect(screen.getByText("2 days ago")).toBeInTheDocument();
+    expect(screen.getByText("2 days")).toBeInTheDocument();
   });
 
   it("writes the right sentence for each notifying state", () => {
@@ -195,20 +197,132 @@ describe("dismissing and filtering", () => {
       liveSessionIds: ["sess-1", "s2"],
     });
     openPanel();
-    expect(screen.getByRole("button", { name: "All sessions (2)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All 2" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "OmniAgent ADE (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: "This workspace 1" }));
     const list = document.querySelector(".notifications-list")!;
     expect(within(list as HTMLElement).getByText("wire session restore")).toBeInTheDocument();
     expect(within(list as HTMLElement).queryByText("other work")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "All sessions (2)" }));
+    fireEvent.click(screen.getByRole("button", { name: "All 2" }));
     expect(within(document.querySelector(".notifications-list") as HTMLElement).getByText("other work")).toBeInTheDocument();
   });
 
   it("cannot filter by project when no project is selected", () => {
     setup({ selectedProjectId: null, selectedProjectLabel: null });
     openPanel();
-    expect(screen.getByRole("button", { name: "This project (0)" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "This workspace 0" })).toBeDisabled();
+  });
+});
+
+describe("needs-you band and approval", () => {
+  const awaitingEntry = () =>
+    entry({ id: "a1", sessionId: "sess-1", status: "awaiting_approval", title: "stripe webhook retries" });
+
+  it("an actionable row sits under NEEDS YOU with Approve and Go to terminal", () => {
+    setup({ entries: [awaitingEntry()], awaitingSessionIds: ["sess-1"] });
+    openPanel();
+    expect(screen.getByText("NEEDS YOU")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /approve stripe webhook retries/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /go to terminal/i })).toBeInTheDocument();
+  });
+
+  it("Approve fires onApprove with the entry and keeps the panel open", () => {
+    const props = setup({ entries: [awaitingEntry()], awaitingSessionIds: ["sess-1"] });
+    openPanel();
+    fireEvent.click(screen.getByRole("button", { name: /approve stripe webhook retries/i }));
+    expect(props.onApprove).toHaveBeenCalledWith(expect.objectContaining({ id: "a1" }));
+    expect(screen.getByText("NEEDS YOU")).toBeInTheDocument(); // still open
+  });
+
+  it("a session that stopped awaiting renders as a plain row — no Approve, no NEEDS YOU", () => {
+    setup({ entries: [awaitingEntry()], awaitingSessionIds: [] });
+    openPanel();
+    expect(screen.queryByText("NEEDS YOU")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+  });
+
+  it("an engine with no approve keystroke gets Go to terminal only", () => {
+    setup({
+      entries: [entry({ id: "a2", sessionId: "sess-1", status: "awaiting_approval", engine: "codex" })],
+      awaitingSessionIds: ["sess-1"],
+    });
+    openPanel();
+    expect(screen.getByText("NEEDS YOU")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /go to terminal/i })).toBeInTheDocument();
+  });
+
+  it("the Needs you chip filters to actionable rows", () => {
+    setup({
+      entries: [awaitingEntry(), entry({ id: "n2", sessionId: "s2", status: "ready" })],
+      awaitingSessionIds: ["sess-1"],
+    });
+    openPanel();
+    fireEvent.click(screen.getByRole("button", { name: /needs you 1/i }));
+    expect(screen.getByText("stripe webhook retries")).toBeInTheDocument();
+    expect(screen.queryByText("wire session restore")).not.toBeInTheDocument();
+  });
+
+  it("says nothing needs you right now, not the generic project empty-state copy", () => {
+    // Entries exist (so this isn't the "nothing yet" empty state), but none
+    // is actionable — filtering to Needs you must not fall back to "Nothing
+    // from this project," which is the wrong sentence for this filter.
+    setup({ entries: [entry({ id: "n2", sessionId: "s2", status: "ready" })], awaitingSessionIds: [] });
+    openPanel();
+    fireEvent.click(screen.getByRole("button", { name: /needs you 0/i }));
+    expect(screen.getByText("Nothing needs you right now.")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing from this project.")).not.toBeInTheDocument();
+  });
+});
+
+describe("engine tag and day bands", () => {
+  it("rows carry the engine's short caps tag", () => {
+    setup({ entries: [entry({ engine: "codex" })] });
+    openPanel();
+    expect(screen.getByText("CODEX")).toBeInTheDocument();
+  });
+
+  it("today's rows sit under EARLIER TODAY, yesterday's under OLDER", () => {
+    setup({
+      entries: [
+        entry({ id: "n1", sessionId: "s1" }),
+        entry({ id: "n2", sessionId: "s2", createdAt: NOW - 26 * 3600_000 }),
+      ],
+    });
+    openPanel();
+    expect(screen.getByText("EARLIER TODAY")).toBeInTheDocument();
+    expect(screen.getByText("OLDER")).toBeInTheDocument();
+  });
+});
+
+describe("keyboard activation guard", () => {
+  // Regression: the row wrapper's onKeyDown used to handle Enter/Space
+  // without checking where the event came from, so a keydown bubbling up
+  // from a focused nested Approve/Open-pane button fired the row's onSelect
+  // AND preventDefault()'d the button's own activation — a keyboard user
+  // pressing Enter on "Approve" navigated away instead of approving.
+  it("Enter on the nested Approve button approves, and does not also navigate", () => {
+    const props = setup({
+      entries: [entry({ id: "a1", sessionId: "sess-1", status: "awaiting_approval", title: "stripe webhook retries" })],
+      awaitingSessionIds: ["sess-1"],
+    });
+    openPanel();
+    const approveButton = screen.getByRole("button", { name: /approve stripe webhook retries/i });
+    fireEvent.keyDown(approveButton, { key: "Enter" });
+    // jsdom doesn't synthesize a click from Enter on a <button> the way a
+    // real browser does, so trigger the click a real Enter press would
+    // produce — what matters here is the keyDown itself never reaching the
+    // row's onSelect.
+    fireEvent.click(approveButton);
+    expect(props.onApprove).toHaveBeenCalledWith(expect.objectContaining({ id: "a1" }));
+    expect(props.onSelect).not.toHaveBeenCalled();
+  });
+
+  it("Enter on the row itself still navigates", () => {
+    const props = setup();
+    openPanel();
+    fireEvent.keyDown(screen.getByRole("button", { name: /Go to wire session restore/ }), { key: "Enter" });
+    expect(props.onSelect).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "sess-1" }));
   });
 });

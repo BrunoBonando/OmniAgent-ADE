@@ -6,11 +6,10 @@ import "./App.css";
 import Sidebar from "./components/Sidebar";
 import Workspace from "./components/Workspace";
 import CommandPalette from "./components/CommandPalette";
-import FileTree from "./components/FileTree";
 import CodeReviewPanel from "./components/CodeReviewPanel";
 import AppChrome from "./components/AppChrome";
-import NewChooserModal from "./components/NewChooserModal";
 import NewSessionModal from "./components/NewSessionModal";
+import { NewTerminalModal } from "./components/NewTerminalModal";
 import ClosePaneConfirm from "./components/ClosePaneConfirm";
 import BrainMap from "./map/BrainMap";
 import FirstRun from "./onboarding/FirstRun";
@@ -47,16 +46,18 @@ import {
   serializeClosedWorkspaces,
 } from "./state/closedWorkspaces";
 import { isSessionStatus, type SessionStatusEvent } from "./state/sessionStatus";
+import { sessionNameFromPrompt } from "./state/newSessionState";
 import {
   adjacentSessionTab,
   groupTabsBySession,
   newSessionGroupId,
   nextSessionName,
-  sessionGroupForNewPane,
   visibleSessionGroupId,
+  type SessionGroup,
 } from "./state/sessionGroups";
 import {
   NOTIFICATIONS_SETTING_KEY,
+  approveKeystroke,
   deriveNotification,
   deserializeNotifications,
   initialNotificationsState,
@@ -64,13 +65,11 @@ import {
   serializeNotifications,
   type NotificationEntry,
 } from "./state/notifications";
-import type { CreateChoice } from "./state/newChooserState";
 import { ENGINE_LABEL } from "./theme";
 import type { TerminalThemeId } from "./lib/terminalThemes";
 import { ownsCtrlOnlyShortcut } from "./lib/keyboard";
 import { usePerSessionEvent } from "./lib/usePerSessionEvent";
 import {
-  FILE_TREE_VISIBLE_SETTING_KEY,
   agentCheckInstalled,
   agentInstall,
   getBriefing,
@@ -82,6 +81,7 @@ import {
   sessionCreate,
   sessionKill,
   sessionStatus,
+  sessionWrite,
   settingsGet,
   settingsSet,
   type IngestionStatus,
@@ -99,35 +99,61 @@ type View = "workspace" | "map";
  * threaded through three different triggers. */
 const INGESTION_POLL_MS = 2000;
 
+/** Resolves a group id (from `visibleSessionGroupId`, which only ever
+ * returns an id, `string | null`) to the full `SessionGroup` object the
+ * chrome breadcrumb and `NewTerminalModal` both need — see `visibleSession`
+ * below, its only caller. */
+function findSessionGroup(
+  tabs: TabInfo[],
+  activeTabId: string | null,
+  project: string | null,
+  groupId: string | null,
+): SessionGroup | null {
+  if (groupId === null) return null;
+  return (
+    groupTabsBySession(tabs, activeTabId)
+      .find((g) => g.project === project)
+      ?.sessions.find((s) => s.id === groupId) ?? null
+  );
+}
+
 function App() {
   const [state, dispatch] = useReducer(sessionsReducer, initialSessionsState);
   const [agentState, agentDispatch] = useReducer(agentsReducer, initialAgentsState);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  // ⌘N — since 2026-07-26 it no longer opens the workspace dialog directly
-  // (Bruno: "cmd + N now has a new meaning. Either a new session or a new
-  // workspace"). It opens `NewChooserModal` first; that hands back
-  // "session" or "workspace" and exactly one of the two dialogs below
-  // opens. `newWorkspaceOpen` stays lifted out of `Sidebar.tsx` (which
-  // still owns its OTHER overlays locally, e.g. aboutOpen/reviewOpen/
-  // importOpen) because the sidebar's "+" opens it too.
-  const [newChooserOpen, setNewChooserOpen] = useState(false);
   /** The pane ⌘W is asking about, if any — see the ⌘W handler below. */
   const [closingTabId, setClosingTabId] = useState<string | null>(null);
+  // ⌘N (Task 13, 2026-07-27, retiring the 2026-07-26 chooser step): direct
+  // again — opens `NewSessionModal` when a workspace is selected,
+  // `NewWorkspaceModal` otherwise (see the ⌘N handler below). The
+  // intermediate "session or workspace?" step (`NewChooserModal`/
+  // `state/newChooserState.ts`) is gone; see git history if you need it.
+  // `newWorkspaceOpen` stays lifted out of `Sidebar.tsx` (which still owns
+  // its OTHER overlays locally, e.g. aboutOpen/reviewOpen/importOpen)
+  // because the sidebar's "+" opens it too.
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
+  // ⌘T (Task 9, 2026-07-27): used to spawn the default engine directly
+  // (`requestNewTab(selectedProject)`, no UI in between — see that
+  // function's own doc). Now opens `NewTerminalModal` instead, same
+  // "session already has MAX_PANES terminals" refusal still guarding the
+  // keystroke BEFORE the modal opens (see the keydown handler below) —
+  // only the happy path grew a naming/engine step.
+  const [newTerminalOpen, setNewTerminalOpen] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [view, setView] = useState<View>("workspace");
   const restoredRef = useRef(false);
   // Founder feedback (Bruno, 2026-07-25, verbatim): "nice to have a
-  // folder/file navigation on the right panel" — but the same founder has
-  // twice now been explicit that UI chrome must not compete with the
-  // terminal workspace for attention, so it's collapsible rather than a
-  // fixed extra column. Defaults to visible (it's the feature being asked
-  // for) and is persisted via the same settings-table pattern
-  // `LAYOUT_SETTING_KEY`/`REVIEW_MEMORY_SETTING_KEY` already use, restored
-  // in the boot effect below alongside the tab layout.
-  const [fileTreeVisible, setFileTreeVisible] = useState(true);
+  // folder/file navigation on the right panel" — originally a collapsible
+  // right-hand dock (a `fileTreeVisible` boolean lived here, persisted via
+  // the settings table like `LAYOUT_SETTING_KEY`/`REVIEW_MEMORY_SETTING_KEY`)
+  // because the same founder had twice been explicit that UI chrome must not
+  // compete with the terminal workspace for attention. Left-pane redesign,
+  // Task 6 (2026-07-27): the tree moved into the sidebar as a permanent FILES
+  // section instead — always there, no toggle to lose track of — so that
+  // boolean and its persistence are gone; see `Sidebar.tsx`'s `.sidebar-files`
+  // and `FileTree.tsx`'s `embedded` prop.
   // Workspaces the user has closed (founder ask: "add the possibility to
   // close a workspace, on hover"). Held here rather than derived from the
   // brain because the brain is deliberately not told — closing is a window
@@ -144,15 +170,14 @@ function App() {
   // Opening it from a different pane re-targets it rather than stacking a
   // second column.
   //
-  // COEXISTENCE WITH THE FILE TREE: they share the one right-hand dock and
-  // are mutually exclusive, because at realistic window widths they aren't
-  // both affordable — a 1440px MacBook already spends ~220px on the sidebar,
-  // and a file tree (260) plus a review column (440) would leave the
-  // terminals under 520px, which is where a terminal grid stops being usable.
-  // The review column wins while it's open and the file tree comes back
-  // exactly as the user left it on close: `fileTreeVisible` is deliberately
-  // NOT mutated here, it stays the user's own preference and is only
-  // suppressed from rendering.
+  // THE RIGHT-HAND DOCK: used to be shared with the file tree, mutually
+  // exclusive between the two because at realistic window widths a file tree
+  // (260) plus a review column (440) wouldn't both fit next to a usable
+  // terminal grid on a 1440px MacBook. Left-pane redesign, Task 6
+  // (2026-07-27) moved the file tree into the sidebar as permanent, embedded
+  // chrome — see `fileTreeVisible`'s old declaration above — so this column
+  // is now the dock's only occupant; `reviewTarget` alone decides whether
+  // anything renders there.
   const [reviewTarget, setReviewTarget] = useState<{ id: string; cwd: string; label: string } | null>(null);
 
 
@@ -166,11 +191,10 @@ function App() {
   // or explicitly skipped), so a first-ever launch never shows both
   // overlays layered on top of each other.
   const [needsAuthGate, setNeedsAuthGate] = useState<boolean | null>(null);
-  // Lifted (not read locally by `AccountBadge.tsx` itself) for the same
-  // reason `fileTreeVisible` is lifted rather than let its own consumer
-  // poll settings independently: one read on boot, kept live by the two
-  // mutations below, and handed down as plain props the whole way to the
-  // sidebar-header badge — a persistent piece of chrome, unlike
+  // Lifted (not read locally by `AccountBadge.tsx` itself) so it's a single
+  // read on boot, kept live by the two mutations below, and handed down as
+  // plain props the whole way to the sidebar-header badge — a persistent
+  // piece of chrome, unlike
   // `AboutPanel.tsx`'s own one-shot `settingsGet` (that panel unmounts and
   // remounts every time it opens, so a mount-time fetch is enough for it;
   // the always-mounted badge has no equivalent remount to hang a refetch
@@ -325,17 +349,6 @@ function App() {
         if (!cancelled) setNeedsOnboarding(false); // fail open — never trap the user behind a broken check
       }
 
-      try {
-        const storedFileTreeVisible = await settingsGet(FILE_TREE_VISIBLE_SETTING_KEY);
-        // Unset (first run) keeps the `useState(true)` default — only an
-        // explicit "false" ever hides it on boot.
-        if (!cancelled && storedFileTreeVisible !== null) {
-          setFileTreeVisible(storedFileTreeVisible === "true");
-        }
-      } catch (err) {
-        console.error("failed to read file_tree_visible setting, defaulting to visible", err);
-      }
-
       // Recent notifications survive a relaunch (see
       // `state/notifications.ts`'s persistence note — "somewhere else"
       // includes "quit for the night", and the reference panel's own rows
@@ -455,6 +468,15 @@ function App() {
   // the full reconciliation.
   const tabIds = useMemo(() => state.tabs.map((t) => t.id), [state.tabs]);
 
+  // Session ids whose CURRENT status is `awaiting_approval` — what decides
+  // which NEEDS YOU rows in the notifications panel are actionable right
+  // now (`isActionable`/`NotificationsPanel.tsx`'s `awaiting` set), as
+  // opposed to whatever status a row froze at when it was recorded.
+  const awaitingSessionIds = useMemo(
+    () => state.tabs.filter((t) => t.status === "awaiting_approval").map((t) => t.id),
+    [state.tabs],
+  );
+
   // The focus context the notification rule reads, mirrored into a ref in a
   // LAYOUT effect — i.e. synchronously at commit, before anything can be
   // painted or any passive effect runs.
@@ -486,6 +508,17 @@ function App() {
     };
   });
 
+  // Session prompt (design §3 New session): delivered to the first agent
+  // pane after its first status event — the engine's CLI is accepting input
+  // by the time it starts reporting status. Written WITHOUT a trailing
+  // newline so nothing auto-executes; the user reviews and presses Enter.
+  // `handleSessionCreated` queues tabId -> prompt here; the status-event
+  // callback below delivers and deletes it, so a second status event for the
+  // same tab finds nothing queued and writes nothing twice.
+  // ponytail: if an engine ever swallows early stdin, gate this on
+  // status === "ready" instead of first-event.
+  const pendingFirstPrompt = useRef<Map<string, string>>(new Map());
+
   // `session-status:{id}` (founder brief, 2026-07-26): the five-state light
   // AND — since this dispatch — the notification feed. Fires only on a
   // genuine transition. `payload.notify` is the backend's precomputed
@@ -496,6 +529,20 @@ function App() {
   usePerSessionEvent<SessionStatusEvent>(tabIds, "session-status:", (id, payload) => {
     if (!payload || !isSessionStatus(payload.status)) return;
     dispatch({ type: "tab/status", id, status: payload.status });
+
+    const queuedPrompt = pendingFirstPrompt.current.get(id);
+    if (queuedPrompt !== undefined) {
+      pendingFirstPrompt.current.delete(id);
+      void sessionWrite(id, queuedPrompt);
+    }
+
+    // Any non-awaiting status means this session's pending prompt (if any)
+    // was answered — in the pane, via the panel's Approve, either way — so
+    // its awaiting rows come down before the new status' own row goes up.
+    // The reducer no-ops when there's nothing to remove.
+    if (payload.status !== "awaiting_approval") {
+      notificationsDispatch({ type: "notifications/approval_resolved", sessionId: id });
+    }
 
     const { tabs, projects, activeTabId, selectedProjectId: onScreenProject, view: currentView } =
       notifyContextRef.current;
@@ -626,10 +673,13 @@ function App() {
   // exact same per-project-override-else-global-else-claude chain
   // `EnginePicker`'s old `defaultEngine` resolution used
   // (`resolveDefaultEngine`), then spawns the session directly. Every
-  // "new tab in project X" entry point (⌘T, the sidebar's per-project "+",
+  // "new tab in project X" entry point (the sidebar's per-project "+",
   // the pane header's split "+", the map's "Open terminal here") already
   // funnels through this one function via `onNewTabInProject`/
-  // `onOpenTerminal`, so none of them need their own wiring.
+  // `onOpenTerminal`, so none of them need their own wiring. ⌘T itself
+  // moved to `NewTerminalModal` (Task 9) — its confirm handler is the one
+  // caller that passes `opts` below, so this function's engine-resolution
+  // path stays a plain fallback for every OTHER entry point, unchanged.
   //
   // No out-of-order-response guard needed here (unlike the old
   // picker-based flow, which had one — see git history / `App.
@@ -664,15 +714,29 @@ function App() {
   }, []);
 
   const requestNewTab = useCallback(
-    async (project: ProjectInfo) => {
+    async (project: ProjectInfo, opts?: { engine?: Engine; label?: string }) => {
       setSelectedProjectId(project.id);
       reopenWorkspace(project.id);
 
-      // A single new pane joins the session you're already in for that
-      // project (`sessionGroupForNewPane`) — ⌘T, the sidebar "+" and the
+      // A single new pane joins the session that project is currently
+      // SHOWING (`visibleSessionGroupId`) — ⌘T, the sidebar "+" and the
       // pane header's split all mean "one more terminal here", not "a new
       // session". A project with no panes at all starts one, named.
-      const existingGroup = sessionGroupForNewPane(state.tabs, project.id, state.activeTabId);
+      //
+      // This used to ask `sessionGroupForNewPane`, a near-twin that differed
+      // in exactly one case — no focused pane in this project — where it
+      // picked the project's MOST-RECENTLY-CREATED session while
+      // `visibleSessionGroupId` picks its FIRST-SEEN one, i.e. the session
+      // actually on screen. That case is not exotic: selecting a workspace
+      // in the sidebar deliberately doesn't move focus, so any project with
+      // 2+ sessions hit it. The sidebar's "New terminal" row is gated and
+      // drawn off the on-screen session, so the row could sit under Session
+      // 1 and spawn into Session 2. Unified on the on-screen answer, which
+      // is also what this function's own `setView("workspace")` below is
+      // about to paint. Whenever the focused pane IS in this project the two
+      // functions returned the same group anyway, so the focused ⌘T and
+      // pane-split paths are untouched; `sessionGroupForNewPane` is gone.
+      const existingGroup = visibleSessionGroupId(state.tabs, project.id, state.activeTabId);
 
       // The approved-shape ladder tops out at 2x4 (`paneGrid.ts`'s
       // `GRID_LADDER` — founder: "and then no more terminals are
@@ -691,7 +755,11 @@ function App() {
         return;
       }
 
-      const engine = await defaultEngineFor(project.id);
+      // `opts.engine` (NewTerminalModal's chosen engine, Task 9) overrides
+      // the usual per-project/global default resolution — skip the
+      // `settingsGet` round-trip entirely when the caller already picked
+      // one explicitly.
+      const engine = opts?.engine ?? (await defaultEngineFor(project.id));
 
       try {
         // Joining an existing session means inheriting its name from the
@@ -707,6 +775,15 @@ function App() {
               )?.groupLabel;
         const tab = await createSessionTab(project, engine, group, groupLabel);
         dispatch({ type: "tab/opened", tab });
+        // `opts.label` (NewTerminalModal's name field) renames the pane
+        // right after it opens — a second, tiny dispatch rather than
+        // threading a label through `createSessionTab`/`sessionCreate`,
+        // which every OTHER caller of this function has no use for.
+        // `tab/renamed` trims and no-ops on empty, so this is safe to fire
+        // unconditionally whenever the caller passed one.
+        if (opts?.label !== undefined) {
+          dispatch({ type: "tab/renamed", id: tab.id, label: opts.label });
+        }
         // Cross-view integration point (Task 6.2): the map's "Open terminal
         // here" action calls `requestNewTab` too (via `onOpenTerminal`
         // below), so landing back in the workspace here covers both
@@ -822,74 +899,36 @@ function App() {
     }
   }
 
-  // ---- NewWorkspaceModal's bulk-create (Sidebar's "+" -> New Workspace) -
-  // `add_project` + the modal's own folder-pick/name UI already ran inside
-  // `NewWorkspaceModal.tsx` by the time this fires (see that component's
-  // module doc for the ownership split) — `project` already exists. This
-  // spins up exactly one session per checked engine, in the order the
-  // caller passed (`newWorkspaceState.ts`'s `checkedEngines` — always
-  // `ENGINES` order), landing every success in ONE `tabs/opened_bulk`
-  // dispatch (never one `tab/opened` per session — see that action's own
-  // doc for why an incremental reveal would both defeat the chosen LAYOUT
-  // arrangement and risk remounting already-open panes mid-batch).
+  // ---- NewWorkspaceModal's create (Sidebar's "+" -> New workspace) ------
+  // `add_project`, the folder pick and the ingest/review toggles all already
+  // ran inside `NewWorkspaceModal.tsx` by the time this fires (see that
+  // component's module doc for the ownership split) — `project` exists.
   //
-  // Partial failure is expected, not exceptional (DESIGN.md's own "bring
-  // your own engine" reality: a checked engine's CLI might genuinely not be
-  // installed) — every engine is attempted independently; one failing
-  // never aborts the rest, and whatever succeeds still lands the user in a
-  // live, populated project rather than nothing at all.
-  //
-  // Deliberately does NOT persist `defaultEngineSettingKey` the way
-  // `confirmNewTab` does — that setting means "the last single engine
-  // chosen for this project's next ⌘T", and a multi-engine batch has no
-  // one answer to write there.
+  // Task 12 removed everything else this used to do. It no longer spawns a
+  // session per checked engine, because the dialog no longer asks for
+  // engines or a layout: adding a workspace and starting terminals are two
+  // separate decisions now. So this only lands the user *in* the new
+  // workspace and hands straight over to `NewSessionModal`, which is the
+  // one place that decides what runs where. The old bulk-create loop (and
+  // its `last_selected_agents` write, and its partial-failure banner) moved
+  // wholesale to `handleSessionCreated` below — one implementation, not
+  // two near-identical ones.
   const handleWorkspaceCreated = useCallback(
-    // `layout` is deliberately absent: the LAYOUT card the dialog offers is a
-    // preview, not an instruction — the grid derives its own approved shape
-    // from how many panes end up open (`paneGrid.ts`'s `GRID_LADDER`).
-    async (project: ProjectInfo, engines: Engine[]) => {
+    (project: ProjectInfo) => {
       void reloadProjects();
       setSelectedProjectId(project.id);
       // `add_project` upserts by folder basename, so re-adding a closed
       // folder returns the id still sitting in the closed set — un-hide it,
       // the same contract every other "opens the workspace" path honours.
       reopenWorkspace(project.id);
-
-      // Save selected agents
-      await settingsSet("last_selected_agents", JSON.stringify(engines));
-      agentDispatch({ type: "agents/selected", agents: engines as Agent[] });
-
-      // A new workspace's first batch of panes is its first session —
-      // "Session 1", the founder's own starting point.
-      const group = newSessionGroupId();
-      const groupLabel = nextSessionName(state.tabs, project.id);
-      const created: TabInfo[] = [];
-      const failed: Engine[] = [];
-      for (const engine of engines) {
-        try {
-          created.push(await createSessionTab(project, engine, group, groupLabel));
-        } catch (err) {
-          console.error(`failed to start ${engine} in ${project.label}`, err);
-          failed.push(engine);
-        }
-      }
-
-      if (created.length > 0) {
-        dispatch({ type: "tabs/opened_bulk", tabs: created });
-      }
-
-      if (failed.length > 0) {
-        const names = failed.map((e) => ENGINE_LABEL[e]).join(", ");
-        setErrorBanner(
-          created.length > 0
-            ? `Created "${project.label}", but couldn't start ${names} — the rest are running.`
-            : `Created "${project.label}", but couldn't start ${names} — no sessions are running yet.`,
-        );
-      }
-
       setView("workspace");
+      // Straight into "what are you doing?" — a brand-new workspace with no
+      // terminals is exactly the state this modal exists to resolve, and
+      // asking immediately is what makes dropping the engine checkboxes an
+      // improvement rather than a missing step.
+      setNewSessionOpen(true);
     },
-    [reloadProjects, createSessionTab, state.tabs, reopenWorkspace],
+    [reloadProjects, reopenWorkspace],
   );
 
   // ---- NewSessionModal's create (⌘N -> "Session") -----------------------
@@ -904,28 +943,32 @@ function App() {
   // 2. `cwd` is the project folder or a validated subfolder of it, not a
   //    brand-new folder chosen from anywhere on disk.
   //
-  // `name` overrides the derived "Session N" — the goal typed into
-  // `EmptyWorkspace` ("what do you want to achieve today?"), which is the
-  // most useful name a session can have. Empty/absent falls back to the
-  // derived one, so the dialog's own path is unchanged.
+  // `slots` is one engine per terminal, in pane order (Task 10) — the
+  // dialog decided *which pane runs what*, so this loop spawns them in that
+  // exact order rather than deduplicating; two Claude terminals in one
+  // session is a normal thing to ask for.
+  //
+  // `prompt` is the answer to the dialog's only question ("what are you
+  // doing?"). It names the session (`sessionNameFromPrompt` — trimmed,
+  // collapsed, capped) and, from Task 11, is delivered as the first prompt
+  // to the session's lead terminal. `EmptyWorkspace`'s typed goal comes
+  // through the same parameter, which is why that flow needs no naming code
+  // of its own.
   const handleSessionCreated = useCallback(
-    async (
-      project: ProjectInfo,
-      cwd: string,
-      engines: Engine[],
-      // Same as `handleWorkspaceCreated` above: the shape follows the pane
-      // count, so the picked preset has nothing left to do down here.
-      _layout: LayoutPreset,
-      name?: string,
-    ) => {
+    async (project: ProjectInfo, cwd: string, slots: Engine[], prompt: string) => {
       setNewSessionOpen(false);
       setSelectedProjectId(project.id);
 
       const group = newSessionGroupId();
-      const groupLabel = name?.trim() || nextSessionName(state.tabs, project.id);
+      // No prompt still means a named session: `nextSessionName` is the
+      // workspace's own numbering, and it is *stored* on the panes rather
+      // than derived at render time — see `sessionGroups.ts`'s module doc
+      // for why (a positional name renames every session below one that
+      // closes, which is the opposite of a name).
+      const groupLabel = sessionNameFromPrompt(prompt) ?? nextSessionName(state.tabs, project.id);
       const created: TabInfo[] = [];
       const failed: Engine[] = [];
-      for (const engine of engines) {
+      for (const engine of slots) {
         try {
           created.push(await createSessionTab(project, engine, group, groupLabel, cwd));
         } catch (err) {
@@ -938,8 +981,41 @@ function App() {
         dispatch({ type: "tabs/opened_bulk", tabs: created });
       }
 
+      // "The last one that they created should be pre-selected" (founder
+      // rule, encoded in `getDefaultAgentSelection`) — this is the write
+      // that makes `lastSelected` mean anything. It used to live in
+      // `handleWorkspaceCreated`'s engine-spawn loop; when Task 12 removed
+      // that loop it came here, because choosing engines is now this
+      // dialog's job, and without a writer `lastSelected` would stay `[]`
+      // forever and every future dialog would fall through to `["shell"]`.
+      //
+      // Deduplicated (`slots` is one engine PER PANE, so two Claude
+      // terminals is a normal ask) and recorded as the user's *choice*,
+      // not as whatever happened to boot — an engine that failed to start
+      // is still the engine they asked for. Same key and JSON-array
+      // encoding the boot-time reader at the top of this file parses.
+      const chosen = [...new Set(slots)] as Agent[];
+      if (chosen.length > 0) {
+        void settingsSet("last_selected_agents", JSON.stringify(chosen));
+        agentDispatch({ type: "agents/selected", agents: chosen });
+      }
+
+      // Task 11: the dialog's "what are you doing?" answer becomes the
+      // first thing typed into the session's lead terminal — the first
+      // spawned pane that isn't a bare shell, since a shell has no agent CLI
+      // to hand a prompt to. Queued here, delivered by the status-event
+      // callback above once that pane reports its first status.
+      const promptText = prompt.trim();
+      if (promptText.length > 0) {
+        const target = created.find((t) => t.engine !== "shell");
+        if (target) pendingFirstPrompt.current.set(target.id, promptText);
+      }
+
       if (failed.length > 0) {
-        const names = failed.map((e) => ENGINE_LABEL[e]).join(", ");
+        // Deduplicated: with one engine per slot, the same CLI can fail
+        // twice in one batch, and "couldn't run Shell, Shell" reads like a
+        // bug in the message rather than a fact about the machine.
+        const names = [...new Set(failed)].map((e) => ENGINE_LABEL[e]).join(", ");
         setErrorBanner(
           created.length > 0
             ? `Started the session, but couldn't run ${names} — the rest are up.`
@@ -967,24 +1043,10 @@ function App() {
         project,
         project.path ?? project.id,
         Array.from({ length: layout }, () => engine),
-        layout,
         goal,
       );
     },
     [defaultEngineFor, handleSessionCreated, reopenWorkspace],
-  );
-
-  // ⌘N's chooser resolved. "Session" needs a project to run in — with none
-  // selected (a brand-new install with no projects at all) the only
-  // meaningful thing to create is a workspace, so it falls through to that
-  // rather than opening a dialog with nowhere to put its panes.
-  const handleCreateChoice = useCallback(
-    (choice: CreateChoice) => {
-      setNewChooserOpen(false);
-      if (choice === "workspace" || !selectedProject) setNewWorkspaceOpen(true);
-      else setNewSessionOpen(true);
-    },
-    [selectedProject],
   );
 
   // ---- ImportProjectsFlow's bulk-import ("import from other tools") -----
@@ -1074,22 +1136,12 @@ function App() {
     [],
   );
 
-  // Same optimistic-flip-then-persist shape as `ReviewPanel.tsx`'s
-  // `toggleReviewMode` (its own settings-table boolean toggle) — flip local
-  // state immediately so the panel opens/closes with no round-trip latency,
-  // fire-and-forget the persist. Doubles as both the sidebar trigger's
-  // handler and the panel's own in-place close button.
-  const toggleFileTree = useCallback(() => {
-    const next = !fileTreeVisible;
-    setFileTreeVisible(next);
-    void settingsSet(FILE_TREE_VISIBLE_SETTING_KEY, next ? "true" : "false");
-  }, [fileTreeVisible]);
-
   // `AuthGate`'s `onResolved` — fires exactly once, whichever path the user
   // took (skip-from-login, or personalize's answer/skip). Persists all
   // three settings the gate cares about and dismisses it immediately
-  // (optimistic, same shape as `toggleFileTree` above — the writes are
-  // fire-and-forget, the UI doesn't wait on them).
+  // (optimistic — same fire-and-forget `settingsSet`-after-local-flip shape
+  // `ReviewPanel.tsx`'s own `toggleReviewMode` uses; the writes here don't
+  // block the UI either).
   const handleAuthGateResolved = useCallback((outcome: AuthGateOutcome) => {
     setNeedsAuthGate(false);
     const signedInValue = outcome.signedIn ? "true" : "false";
@@ -1149,6 +1201,44 @@ function App() {
       setErrorBanner(`"${entry.title}" is gone: ${entry.projectLabel} isn't in your projects any more.`);
     },
     [state.tabs, state.projects],
+  );
+
+  // Approve-from-the-panel (founder ask, 2026-07-27: the notification row's
+  // own Approve button, so a pending tool-permission prompt never forces a
+  // trip to the pane). One write of the engine's yes-keystroke down the same
+  // PTY path typing uses — which also clears the Rust attention latch, so the
+  // amber state resolves exactly as if the user had answered in the pane.
+  // Re-checked against the CURRENT status at click time: a prompt already
+  // answered in the pane must not get a stray "1" typed into whatever
+  // replaced it.
+  //
+  // `approveInFlightRef` guards a double-click: `tab.status` only flips on
+  // the backend's NEXT status event, so a second click before that event
+  // arrives sees the very same "still awaiting" status the first click did
+  // and would sail past the check above too. Claude often raises a
+  // follow-up permission prompt immediately, so a second unguarded write can
+  // approve a prompt the user never even saw. The set is checked and added
+  // to synchronously, before any `await`, so the second call in a
+  // double-click — however close together — is always the one that bails.
+  const approveInFlightRef = useRef<Set<string>>(new Set());
+  const handleNotificationApprove = useCallback(
+    async (entry: NotificationEntry) => {
+      if (approveInFlightRef.current.has(entry.sessionId)) return;
+      approveInFlightRef.current.add(entry.sessionId);
+      try {
+        const keystroke = approveKeystroke(entry.engine);
+        const tab = state.tabs.find((t) => t.id === entry.sessionId);
+        if (!keystroke || !tab || tab.status !== "awaiting_approval") return;
+        await sessionWrite(entry.sessionId, keystroke);
+        notificationsDispatch({ type: "notification/dismissed", id: entry.id });
+      } catch (err) {
+        console.error("approve from notifications failed", err);
+        setErrorBanner(`Couldn't approve "${entry.title}" — open its pane and answer there.`);
+      } finally {
+        approveInFlightRef.current.delete(entry.sessionId);
+      }
+    },
+    [state.tabs],
   );
 
   // ---- closing a whole workspace (founder ask: "add the possibility to
@@ -1230,9 +1320,46 @@ function App() {
     setReviewTarget((target) => (target?.id === id ? null : target));
   }, []);
 
-  // ---- ⌘T new tab / ⌘K palette / ⌘N new workspace / ⌘W close pane. The
-  // established place for app-level shortcuts that need live UI state (which
-  // tab, which project) rather than a static native-menu event.
+  // The one session this app is "in" for the selected workspace: what the
+  // sidebar's accent rail marks, what the pane grid paints, what the chrome
+  // breadcrumb names — and what a new terminal joins. All of them go through
+  // `visibleSessionGroupId` so they can never name different sessions; see
+  // that function's doc for why it isn't just `currentSessionGroupId`
+  // (selecting a workspace doesn't move focus).
+  //
+  // There were briefly TWO consts here — this one for "on screen" and a
+  // `joinTargetSession` for "which session receives a new pane" — because
+  // `requestNewTab` resolved its own target through `sessionGroupForNewPane`,
+  // whose only difference was the no-focus-in-this-project fallback
+  // (most-recently-created vs first-seen/on-screen). Keeping the modal
+  // honest about that divergence just moved the bug: the sidebar's "New
+  // terminal" row is drawn and gated off the ON-SCREEN session, so the row
+  // could sit under Session 1 and spawn into Session 2. `requestNewTab` now
+  // resolves through `visibleSessionGroupId` too (see its body), the two
+  // questions have one answer again, and this is it.
+  //
+  // `useMemo`d (unlike the rest of this file's plain-const derivations) for
+  // referential stability: this is a dependency of the ⌘T `useEffect`
+  // further down, and a fresh object on every render would re-subscribe that
+  // effect's window listeners on every render instead of only when the
+  // tabs/focus/selected-project actually change.
+  const visibleSession = useMemo(
+    () =>
+      findSessionGroup(
+        state.tabs,
+        state.activeTabId,
+        selectedProjectId,
+        selectedProjectId === null
+          ? null
+          : visibleSessionGroupId(state.tabs, selectedProjectId, state.activeTabId),
+      ),
+    [state.tabs, state.activeTabId, selectedProjectId],
+  );
+  const currentSessionLabel = visibleSession?.label ?? null;
+
+  // ---- ⌘T new tab / ⌘K palette / ⌘N new session or workspace / ⌘W close
+  // pane. The established place for app-level shortcuts that need live UI
+  // state (which tab, which project) rather than a static native-menu event.
   //
   // ⌘W joined them on 2026-07-26 (founder bug: *"cmd+w is closing the full
   // app instead of confirming closing the current terminal"*). It could not
@@ -1242,6 +1369,16 @@ function App() {
   // entered, and `preventDefault` had nothing to prevent. `lib.rs`'s
   // `build_menu` now omits both, which is what lets the keystroke fall
   // through to here like ⌘T and ⌘K always did.
+  //
+  // ⌘T itself (Task 9, 2026-07-27): used to call `requestNewTab` directly,
+  // spawning the default engine with no UI in between. Now it opens
+  // `NewTerminalModal` — but the two guards that used to live inside
+  // `requestNewTab` still have to run BEFORE that modal ever shows: no
+  // project selected (existing "no workspace" silence — there's nothing to
+  // name a terminal in), and the on-screen session already sitting at
+  // MAX_PANES (existing full-session error banner, `requestNewTab`'s own
+  // message reused verbatim so the two entry points never disagree). Only
+  // once neither guard fires does the keystroke open the modal.
   // -------------------------------------------------------------------
   useEffect(() => {
     function onNavigationKeyDown(e: KeyboardEvent) {
@@ -1268,15 +1405,40 @@ function App() {
       if (!e.metaKey) return;
       if (e.key.toLowerCase() === "t") {
         e.preventDefault();
-        if (selectedProject) void requestNewTab(selectedProject);
+        // No selected project, or a selected project with no session to
+        // join yet (every pane closed, or a brand-new workspace mid-boot)
+        // — silently does nothing, exactly like the old direct-spawn
+        // handler's own `if (selectedProject)` guard did. `NewTerminalModal`
+        // joins an existing session (its whole `session` prop, resolved via
+        // `visibleSession` — the SAME session `requestNewTab` will actually
+        // use, see that const's own doc); starting a project's FIRST session
+        // is ⌘N/`EmptyWorkspace`'s job, not ⌘T's — and setting
+        // `newTerminalOpen` with no `visibleSession` to hand the modal would
+        // leave that state stuck true with nothing rendered (the render
+        // guard below requires `visibleSession` too), ready to pop the modal
+        // open later the moment a session appears.
+        if (!selectedProject || !visibleSession) return;
+        if (visibleSession.tabs.length >= MAX_PANES) {
+          setErrorBanner(
+            `This session already has ${MAX_PANES} terminals — the most one grid holds. Close one, or start a new session (⌘N).`,
+          );
+          return;
+        }
+        setNewTerminalOpen(true);
       } else if (e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPaletteOpen((open) => !open);
       } else if (e.key.toLowerCase() === "n") {
         e.preventDefault();
-        // Since 2026-07-26 this asks first (session or workspace) instead
-        // of opening the workspace dialog outright — see `newChooserOpen`.
-        setNewChooserOpen(true);
+        // Task 13 (2026-07-27): direct again, no "session or workspace?"
+        // chooser in between. A session needs a project to run in — with
+        // none selected (a brand-new install with no projects at all) the
+        // only meaningful thing to create is a workspace, so it falls
+        // through to that rather than opening a dialog with nowhere to put
+        // its panes (the same fallback `handleCreateChoice` used to encode
+        // for the now-retired chooser).
+        if (selectedProject) setNewSessionOpen(true);
+        else setNewWorkspaceOpen(true);
       } else if (e.key.toLowerCase() === "w") {
         // Always prevented, focused pane or not: with the native item gone
         // the default would be nothing at all, and letting it through is how
@@ -1298,26 +1460,12 @@ function App() {
       window.removeEventListener("keydown", onNavigationKeyDown, true);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [activateTab, selectedProject, selectedProjectId, requestNewTab, state.activeTabId, state.tabs]);
+  }, [activateTab, selectedProject, selectedProjectId, visibleSession, state.activeTabId, state.tabs]);
 
   // The chrome's breadcrumb — "which workspace, which session am I in" —
   // built from the same `groupTabsBySession` derivation the sidebar renders
   // its tree from, so the two can never disagree.
   const closingTab = closingTabId ? (state.tabs.find((t) => t.id === closingTabId) ?? null) : null;
-
-  // The same question the sidebar's accent rail and the pane grid answer,
-  // asked once more for the chrome: which session is on screen. All three
-  // go through `visibleSessionGroupId` so they can never name different
-  // sessions — see that function's doc for why it isn't just
-  // `currentSessionGroupId` (selecting a workspace doesn't move focus).
-  const currentGroupId =
-    selectedProjectId === null
-      ? null
-      : visibleSessionGroupId(state.tabs, selectedProjectId, state.activeTabId);
-  const currentSessionLabel =
-    groupTabsBySession(state.tabs, state.activeTabId)
-      .find((g) => g.project === selectedProjectId)
-      ?.sessions.find((s) => s.id === currentGroupId)?.label ?? null;
 
   return (
     <div className="app-shell">
@@ -1333,6 +1481,8 @@ function App() {
         onSelectNotification={handleNotificationSelect}
         onDismissNotification={(id) => notificationsDispatch({ type: "notification/dismissed", id })}
         onClearNotifications={() => notificationsDispatch({ type: "notifications/cleared" })}
+        awaitingSessionIds={awaitingSessionIds}
+        onApproveNotification={(entry) => void handleNotificationApprove(entry)}
       />
       {errorBanner && (
         <div className="error-banner">
@@ -1348,8 +1498,17 @@ function App() {
           selectedProjectId={selectedProjectId}
           onSelectProject={(p) => setSelectedProjectId(p.id)}
           onNewTabInProject={(p) => void requestNewTab(p)}
+          onOpenNewTerminal={() => {
+            // "New terminal" in the workspace the sidebar is showing — the
+            // same modal ⌘T opens (Task 9). `SidebarSessionRow` only ever
+            // renders this row for the current session and only while it's
+            // under `MAX_PANES` (see that component's own doc), so no
+            // "session is full" guard is needed here the way ⌘T's handler
+            // needs one — the row simply isn't clickable once full.
+            setNewTerminalOpen(true);
+          }}
           onActivateTab={activateTab}
-          onWorkspaceCreated={(p, engines) => void handleWorkspaceCreated(p, engines)}
+          onWorkspaceCreated={handleWorkspaceCreated}
           newWorkspaceOpen={newWorkspaceOpen}
           onOpenNewWorkspace={() => setNewWorkspaceOpen(true)}
           onCloseNewWorkspace={() => setNewWorkspaceOpen(false)}
@@ -1358,8 +1517,6 @@ function App() {
           ingestion={ingestion}
           view={view}
           onSetView={setView}
-          fileTreeVisible={fileTreeVisible}
-          onToggleFileTree={toggleFileTree}
           onNewSessionInProject={(p) => {
             setSelectedProjectId(p.id);
             setNewSessionOpen(true);
@@ -1370,8 +1527,6 @@ function App() {
           authSignedIn={authSignedIn}
           authPersona={authPersona}
           onResetAuthGate={resetAuthGate}
-          agentState={agentState}
-          onInstallAgent={handleInstallAgent}
         />
         <Workspace
           projects={state.projects}
@@ -1398,21 +1553,16 @@ function App() {
           hidden={view !== "map"}
           livePollMs={ingestion?.running ? INGESTION_POLL_MS : undefined}
         />
-        {/* One right-hand dock, one panel at a time — see `reviewTarget`'s
-            declaration for why these are mutually exclusive rather than
-            side by side, and why closing the review column restores the
-            file tree to whatever the user had chosen. */}
-        {reviewTarget ? (
+        {/* The one right-hand dock — see `reviewTarget`'s declaration for
+            why the file tree that used to share this slot moved into the
+            sidebar (Task 6) and isn't rendered here any more. */}
+        {reviewTarget && (
           <CodeReviewPanel
             key={reviewTarget.id}
             repoPath={reviewTarget.cwd}
             sessionLabel={reviewTarget.label}
             onClose={() => setReviewTarget(null)}
           />
-        ) : (
-          fileTreeVisible && (
-            <FileTree project={selectedProject} activeTabId={state.activeTabId} onClose={toggleFileTree} />
-          )
         )}
       </div>
 
@@ -1427,13 +1577,6 @@ function App() {
           onImportCompleted={handleImportCompleted}
           onDismiss={() => setFirstRunDismissed(true)}
         />
-      )}
-
-      {/* ⌘N's two steps: the chooser, then whichever dialog it picked.
-          `NewWorkspaceModal` itself still lives inside `Sidebar` (its "+"
-          opens it too) — see `newWorkspaceOpen`'s declaration. */}
-      {newChooserOpen && (
-        <NewChooserModal onChoose={handleCreateChoice} onClose={() => setNewChooserOpen(false)} />
       )}
 
       {/* ⌘W's confirmation. Resolved from live state rather than captured at
@@ -1454,10 +1597,34 @@ function App() {
       {newSessionOpen && selectedProject && (
         <NewSessionModal
           project={selectedProject}
-          onCreate={(project, cwd, engines, layout) =>
-            void handleSessionCreated(project, cwd, engines, layout)
-          }
+          agentState={agentState}
+          onCreate={(project, cwd, slots, prompt) => void handleSessionCreated(project, cwd, slots, prompt)}
           onClose={() => setNewSessionOpen(false)}
+        />
+      )}
+
+      {/* ⌘T / the sidebar's "New terminal" row (Task 9). `session` is
+          `visibleSession` — the session on screen, which is also the exact
+          session `requestNewTab` below will drop the new pane into: both
+          resolve through `visibleSessionGroupId` (see that const's own doc
+          for the fix that made those one answer instead of two). So the
+          modal's header names the session the row was rendered under, and
+          the MAX_PANES precheck counts that same session's panes. Both
+          openers already only fire `setNewTerminalOpen(true)` when a session
+          genuinely exists (⌘T's own explicit `!visibleSession` bail above;
+          the sidebar row is simply never rendered without a current session
+          — `SidebarSessionRow`'s own doc), so this guard is just the
+          type-narrowing echo of that, not a second decision. */}
+      {newTerminalOpen && selectedProject && visibleSession && (
+        <NewTerminalModal
+          session={visibleSession}
+          agentState={agentState}
+          onCreate={(name, engine) => {
+            setNewTerminalOpen(false);
+            void requestNewTab(selectedProject, { engine, label: name });
+          }}
+          onInstallAgent={handleInstallAgent}
+          onClose={() => setNewTerminalOpen(false)}
         />
       )}
 

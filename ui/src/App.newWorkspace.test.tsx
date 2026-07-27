@@ -1,30 +1,25 @@
-// Coverage for App.tsx's bulk-create orchestration behind NewWorkspaceModal
-// (`Sidebar`'s "+"): on `onWorkspaceCreated(project, engines, layout)`, App
-// creates one session per checked engine — reusing the exact same
-// per-engine spawn logic (`getBriefing` for claude only, `sessionCreate`
-// with the project's cwd) `confirmNewTab` already used for the single-tab
-// ⌘T flow — dispatches them as ONE bulk batch (see `sessions.ts`'s
-// `tabs/opened_bulk`'s doc for why: a brand-new project's grid must mount with
-// its final tab set already present, so it lands in one approved shape instead
-// of reflowing once per pane as the batch trickles in), selects the project,
-// and switches to the workspace view — surfacing any per-engine failure via
-// the existing `errorBanner` without aborting the rest of the batch. The
-// resulting arrangement itself is no longer App's business at all: the grid
-// derives it from the pane count (`paneGrid.ts`'s `GRID_LADDER`), covered in
-// `Workspace.initialLayout.test.tsx`.
+// Coverage for App.tsx's `handleWorkspaceCreated` — what happens after
+// `NewWorkspaceModal` (`Sidebar`'s "+") returns a freshly-added project.
+//
+// **Rewritten for Task 12.** This used to assert a bulk-create: one
+// `session_create` per checked engine, landing as a single
+// `tabs/opened_bulk` batch. The dialog no longer asks for engines or a
+// layout, so App no longer spawns anything here — it selects the new
+// workspace, shows it, and opens `NewSessionModal`, which is now the one
+// place that decides what runs where. The spawn loop itself (including its
+// partial-failure banner) lives in `handleSessionCreated` and is covered by
+// `App.newSession.test.tsx`.
 //
 // Same stubbing approach as `App.requestNewTab.test.tsx`/
 // `App.bootRestore.test.tsx`: heavy children stubbed to minimal probes.
-// `Sidebar`'s stub exposes a single button that fires `onWorkspaceCreated`
-// with fixture args (the modal's own UI is covered by
+// `Sidebar`'s stub exposes a button that fires `onWorkspaceCreated` with a
+// fixture project (the modal's own UI is covered by
 // `NewWorkspaceModal.test.tsx`) plus a "go to map" button to exercise the
-// view-switch-back assertion. `Workspace`/`BrainMap` stubs expose just
-// enough (`hidden`, `tabs`, `sessionLayouts`) to assert on.
+// view-switch-back assertion.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CLOSED_WORKSPACES_SETTING_KEY } from "./state/closedWorkspaces";
-import type { Engine, ProjectInfo, TabInfo } from "./state/sessions";
-import type { LayoutPreset } from "./state/paneGrid";
+import type { ProjectInfo, TabInfo } from "./state/sessions";
 
 const tauriMocks = vi.hoisted(() => ({
   getBriefingMock: vi.fn(),
@@ -34,6 +29,7 @@ const tauriMocks = vi.hoisted(() => ({
   sessionCreateMock: vi.fn(),
   sessionKillMock: vi.fn(),
   sessionStatusMock: vi.fn(),
+  sessionWriteMock: vi.fn(),
   settingsGetMock: vi.fn(),
   settingsSetMock: vi.fn(),
 }));
@@ -47,6 +43,7 @@ vi.mock("./lib/tauri", () => ({
   sessionCreate: tauriMocks.sessionCreateMock,
   sessionKill: tauriMocks.sessionKillMock,
   sessionStatus: tauriMocks.sessionStatusMock,
+  sessionWrite: tauriMocks.sessionWriteMock,
   settingsGet: tauriMocks.settingsGetMock,
   settingsSet: tauriMocks.settingsSetMock,
 }));
@@ -59,27 +56,23 @@ const NEW_PROJECT: ProjectInfo = { id: "fresh", label: "fresh", path: "/tmp/fres
 
 vi.mock("./components/Sidebar", () => ({
   default: function SidebarStub(props: {
-    onWorkspaceCreated: (project: ProjectInfo, engines: Engine[], layout: LayoutPreset) => void;
+    onWorkspaceCreated: (project: ProjectInfo) => void;
     onSetView?: (view: "workspace" | "map") => void;
   }) {
     return (
       <div>
         <button onClick={() => props.onSetView?.("map")}>go-to-map</button>
-        <button
-          onClick={() => props.onWorkspaceCreated(NEW_PROJECT, ["claude", "codex"], 4)}
-        >
-          create-workspace-claude-codex
-        </button>
-        <button
-          onClick={() => props.onWorkspaceCreated(NEW_PROJECT, ["claude", "codex", "shell"], 6)}
-        >
-          create-workspace-all-three
-        </button>
-        <button onClick={() => props.onWorkspaceCreated(NEW_PROJECT, ["codex"], 2)}>
-          create-workspace-codex-only
-        </button>
+        <button onClick={() => props.onWorkspaceCreated(NEW_PROJECT)}>create-workspace</button>
       </div>
     );
+  },
+}));
+
+// The handoff target. Only a probe — the dialog's own behaviour is covered
+// by `NewSessionModal.test.tsx` and `App.newSession.test.tsx`.
+vi.mock("./components/NewSessionModal", () => ({
+  default: function NewSessionModalStub(props: { project: ProjectInfo }) {
+    return <div data-testid="new-session-modal">{props.project.label}</div>;
   },
 }));
 
@@ -99,7 +92,6 @@ vi.mock("./components/Workspace", () => ({
   },
 }));
 
-vi.mock("./components/EnginePicker", () => ({ default: () => null }));
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({
@@ -112,11 +104,7 @@ vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
 
 const { default: App } = await import("./App");
 
-function sessionInfoFor(engine: string) {
-  return { id: `${engine}-session`, project: "fresh", engine, cwd: "/tmp/fresh", created: 0 };
-}
-
-describe("App — NewWorkspaceModal bulk-create orchestration", () => {
+describe("App — what happens after a workspace is added", () => {
   beforeEach(() => {
     for (const mock of Object.values(tauriMocks)) mock.mockReset();
     tauriMocks.sessionStatusMock.mockResolvedValue(null);
@@ -133,31 +121,35 @@ describe("App — NewWorkspaceModal bulk-create orchestration", () => {
     tauriMocks.getBriefingMock.mockResolvedValue("briefing text");
   });
 
-  it("creates one session per checked engine (claude gets a briefing, others don't), lands all tabs in one batch, and switches back to the workspace view", async () => {
-    tauriMocks.sessionCreateMock.mockImplementation((_project: string, engine: string) =>
-      Promise.resolve(sessionInfoFor(engine)),
-    );
-
+  it("selects the new workspace, shows it, and opens the New Session modal scoped to it", async () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "go-to-map" }));
     await waitFor(() => expect(screen.getByTestId("brainmap-stub").dataset.hidden).toBe("false"));
 
-    fireEvent.click(screen.getByRole("button", { name: "create-workspace-claude-codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "create-workspace" }));
 
-    await waitFor(() => {
-      const ids = screen.getAllByTestId("tab").map((el) => el.textContent);
-      expect(ids).toEqual(["claude-session:claude", "codex-session:codex"]);
-    });
-
-    expect(tauriMocks.sessionCreateMock).toHaveBeenCalledTimes(2);
-    expect(tauriMocks.sessionCreateMock).toHaveBeenNthCalledWith(1, "fresh", "claude", "/tmp/fresh", "briefing text");
-    expect(tauriMocks.sessionCreateMock).toHaveBeenNthCalledWith(2, "fresh", "codex", "/tmp/fresh", undefined);
-    expect(tauriMocks.getBriefingMock).toHaveBeenCalledTimes(1);
-    expect(tauriMocks.getBriefingMock).toHaveBeenCalledWith("fresh");
+    // The handoff: a brand-new workspace has no terminals, and this is the
+    // dialog that resolves that — scoped to the workspace just added.
+    await waitFor(() => expect(screen.getByTestId("new-session-modal")).toBeInTheDocument());
+    expect(screen.getByTestId("new-session-modal")).toHaveTextContent("fresh");
 
     // View flips back from map to workspace once the workspace is created.
     expect(screen.getByTestId("workspace-stub").dataset.hidden).toBe("false");
     expect(screen.getByTestId("brainmap-stub").dataset.hidden).toBe("true");
+  });
+
+  it("starts no terminals itself — that decision now belongs to the session dialog", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "create-workspace" }));
+
+    await waitFor(() => expect(screen.getByTestId("new-session-modal")).toBeInTheDocument());
+    expect(tauriMocks.sessionCreateMock).not.toHaveBeenCalled();
+    expect(tauriMocks.getBriefingMock).not.toHaveBeenCalled();
+    expect(screen.queryAllByTestId("tab")).toHaveLength(0);
+    // The old flow wrote the checked engines here; there are none to write.
+    expect(
+      tauriMocks.settingsSetMock.mock.calls.filter(([key]) => key === "last_selected_agents"),
+    ).toHaveLength(0);
   });
 
   it("re-creating a previously closed workspace takes it back out of the closed set", async () => {
@@ -167,16 +159,13 @@ describe("App — NewWorkspaceModal bulk-create orchestration", () => {
     tauriMocks.settingsGetMock.mockImplementation((key: string) =>
       Promise.resolve(key === CLOSED_WORKSPACES_SETTING_KEY ? JSON.stringify(["fresh"]) : null),
     );
-    tauriMocks.sessionCreateMock.mockImplementation((_project: string, engine: string) =>
-      Promise.resolve(sessionInfoFor(engine)),
-    );
 
     render(<App />);
     await waitFor(() =>
       expect(tauriMocks.settingsGetMock).toHaveBeenCalledWith(CLOSED_WORKSPACES_SETTING_KEY),
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "create-workspace-claude-codex" }));
+    fireEvent.click(await screen.findByRole("button", { name: "create-workspace" }));
 
     await waitFor(() => {
       const writes = tauriMocks.settingsSetMock.mock.calls.filter(
@@ -184,39 +173,5 @@ describe("App — NewWorkspaceModal bulk-create orchestration", () => {
       );
       expect(writes[writes.length - 1]?.[1]).toBe(JSON.stringify([]));
     });
-  });
-
-  it("partial failure: one engine's session_create rejects — the rest still land, and an error banner names the failure", async () => {
-    tauriMocks.sessionCreateMock.mockImplementation((_project: string, engine: string) => {
-      if (engine === "codex") return Promise.reject(new Error("codex not installed"));
-      return Promise.resolve(sessionInfoFor(engine));
-    });
-
-    render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "create-workspace-all-three" }));
-
-    await waitFor(() => {
-      const ids = screen.getAllByTestId("tab").map((el) => el.textContent);
-      expect(ids.sort()).toEqual(["claude-session:claude", "shell-session:shell"]);
-    });
-
-    // Still lands the user in the workspace view with whatever succeeded.
-    expect(screen.getByTestId("workspace-stub").dataset.hidden).toBe("false");
-    expect(screen.getByText(/couldn.t start codex/i)).toBeInTheDocument();
-  });
-
-  it("every engine fails: no tabs are created, but the project is still shown and an error banner appears", async () => {
-    tauriMocks.sessionCreateMock.mockRejectedValue(new Error("codex not installed"));
-
-    render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "create-workspace-codex-only" }));
-
-    await waitFor(() => {
-      expect(screen.getByText(/couldn.t start codex/i)).toBeInTheDocument();
-    });
-    expect(screen.queryAllByTestId("tab")).toHaveLength(0);
-    // Still switched into the workspace view for the (now session-less)
-    // project rather than leaving the user stranded on the map.
-    expect(screen.getByTestId("workspace-stub").dataset.hidden).toBe("false");
   });
 });

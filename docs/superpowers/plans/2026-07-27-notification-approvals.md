@@ -17,7 +17,18 @@
 - Conventional commits (`feat:`, `test:`), one per task.
 - Every task ends with `npx vitest run <file>` green; final task runs the whole suite + `npx tsc --noEmit`.
 
-## The reference design (founder screenshot, 2026-07-27, described precisely — not checked in; same convention as `NewWorkspaceModal.tsx`'s module doc)
+## The reference design
+
+**Authoritative source (checked in): `design/OmniAgent ADE.dc.html`, the "NOTIFICATIONS POPOVER" section (~lines 590–668).** Read it before Task 2 — every color, font size, padding and copy string below comes from there. Deltas it settles beyond the screenshot description:
+
+- Chip copy has **no parentheses** and the project chip says **"This workspace"**, not the project's name: `All 3` · `This workspace 2` · `Needs you 1`.
+- Timestamps are bare: `1m`, `14m`, `2h` — no " ago" suffix.
+- The needs-you row: `background: rgba(240,180,70,.07)`, `border-left: 2px solid` amber; the app's amber token is `--status-approval` (used by `.session-light[data-status="awaiting_approval"]`, `App.css:1525`) — use the token, not the mock's raw `#f0b446`.
+- Approve button: amber fill, near-black text `#1a1400`, `font 600 10.5px`, `padding 6px 11px`, `border-radius 6px`. Open pane: `border .5px solid rgba(255,255,255,.16)`, `background rgba(255,255,255,.05)`, color `#c2c2cb`, same radius.
+- Band labels: `font 600 9.5px`, `letter-spacing .09em`, muted (use `--ink-faint`), with a `.5px` hairline `border-top` separating bands.
+- Engine tags: `font 600 9.5px`, colored per engine. The mock's per-engine hexes are approximations — use `ENGINE_COLOR` (theme.ts), the product's single source for engine hues.
+
+(Founder screenshot description kept below for the row anatomy; where the two disagree, the checked-in design file wins.)
 
 A dark popover panel:
 
@@ -137,8 +148,19 @@ describe("needs_you filter", () => {
     const entries = [n(), n({ id: "n2", sessionId: "s2", status: "ready" })];
     expect(filterNotifications(entries, "needs_you", null, new Set(["s1"])).map((e) => e.id)).toEqual(["n1"]);
   });
-  it("chip label", () => {
-    expect(filterChipLabel("needs_you", 1, null)).toBe("Needs you (1)");
+  it("chip labels use the design file's copy — no parens, 'This workspace' for the project chip", () => {
+    expect(filterChipLabel("needs_you", 1, null)).toBe("Needs you 1");
+    expect(filterChipLabel("all", 3, null)).toBe("All 3");
+    expect(filterChipLabel("project", 2, "Demo")).toBe("This workspace 2");
+  });
+});
+
+describe("relativeTime — design file drops the ' ago' suffix", () => {
+  it("bare durations", () => {
+    expect(relativeTime(T0 - 30_000, T0)).toBe("Just now");
+    expect(relativeTime(T0 - 14 * 60_000, T0)).toBe("14m");
+    expect(relativeTime(T0 - 2 * 3600_000, T0)).toBe("2h");
+    expect(relativeTime(T0 - 26 * 3600_000, T0)).toBe("1 day");
   });
 });
 ```
@@ -218,12 +240,20 @@ export function filterNotifications(
 }
 ```
 
-In `filterChipLabel`, replace the `name` line:
+Rewrite `filterChipLabel` to the design file's copy (no parentheses; the project chip reads "This workspace" regardless of `projectLabel` — the parameter stays for signature stability but is no longer rendered):
 
 ```ts
-  const name =
-    filter === "all" ? "All sessions" : filter === "needs_you" ? "Needs you" : (projectLabel ?? "This project");
+export function filterChipLabel(
+  filter: NotificationFilter,
+  count: number,
+  _projectLabel: string | null,
+): string {
+  const name = filter === "all" ? "All" : filter === "needs_you" ? "Needs you" : "This workspace";
+  return `${name} ${count}`;
+}
 ```
+
+And in `relativeTime`, drop the " ago" suffixes (design file: `14m`, `2h`): `` `${minutes}m` ``, `` `${hours}h` ``, `"1 day"` / `` `${days} days` ``. Existing tests in this file and `NotificationsPanel.test.tsx` that pin the old copy ("All sessions (3)", "14m ago") must be updated to the new strings as part of this task.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -318,7 +348,7 @@ describe("needs-you band and approval", () => {
       awaitingSessionIds: ["sess-1"],
     });
     openPanel();
-    fireEvent.click(screen.getByRole("button", { name: /needs you \(1\)/i }));
+    fireEvent.click(screen.getByRole("button", { name: /needs you 1/i }));
     expect(screen.getByText("stripe webhook retries")).toBeInTheDocument();
     expect(screen.queryByText("wire session restore")).not.toBeInTheDocument();
   });
@@ -456,51 +486,70 @@ used as:
 
 Add `is-actionable` to the row's className when `actionable`, driving the amber left edge. Because these buttons now nest conceptually inside a clickable row, change `notification-row-main` from a `<button>` wrapper to a `<div role="button" tabIndex={0}` with `onClick`/`onKeyDown`(Enter/Space) — nested real buttons inside a button are invalid HTML and jsdom/screen-reader hostile. Keep its existing `aria-label`.
 
-7. CSS in `App.css`, next to the other `notification-` rules (reuse existing tokens — `--ink-faint`, `--line`, `--radius-pill`; the amber is the same warm hue `SessionStatusLight` uses for `awaiting_approval`, look up its custom property, e.g. `--status-awaiting`, and reuse it):
+7. CSS in `App.css`, next to the other `notification-` rules — values from `design/OmniAgent ADE.dc.html`'s NOTIFICATIONS POPOVER section; the amber token is `--status-approval` (already used at `App.css:1525`):
 
 ```css
+/* Band labels + the NEEDS YOU row treatment — design/OmniAgent ADE.dc.html,
+   NOTIFICATIONS POPOVER. */
 .notifications-band-label {
-  margin: 10px 2px 4px;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
+  padding: 9px 12px 5px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.06);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
   color: var(--ink-faint);
 }
 
 .notification-row.is-actionable {
-  border-left: 2px solid var(--status-awaiting, #e2b34c);
+  background: rgba(240, 180, 70, 0.07);
+  border-left: 2px solid var(--status-approval);
+}
+
+.notification-row.is-actionable:hover {
+  background: rgba(240, 180, 70, 0.11);
 }
 
 .notification-row-engine {
-  margin-left: 6px;
-  font-family: var(--mono);
+  margin-left: 7px;
   font-size: 9.5px;
-  letter-spacing: 0.06em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .notification-row-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 6px;
+  margin-top: 7px;
 }
 
 .notification-approve {
-  padding: 4px 14px;
-  border: none;
-  border-radius: var(--radius-pill);
-  background: var(--status-awaiting, #e2b34c);
-  color: #1a1408;
-  font-size: 12px;
+  appearance: none;
+  border: 0;
+  background: var(--status-approval);
+  color: #1a1400;
+  font-size: 10.5px;
   font-weight: 600;
+  padding: 6px 11px;
+  border-radius: 6px;
+}
+
+.notification-approve:hover {
+  filter: brightness(1.1);
 }
 
 .notification-open-pane {
-  padding: 4px 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-pill);
-  background: transparent;
-  color: var(--ink);
-  font-size: 12px;
+  appearance: none;
+  border: 0.5px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+  color: #c2c2cb;
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.notification-open-pane:hover {
+  background: rgba(255, 255, 255, 0.1);
 }
 ```
 

@@ -1,194 +1,149 @@
-// Component-level coverage for NewWorkspaceModal.tsx — the BridgeSpace
-// "New Workspace" dialog rebuild (see this component's own module doc for
-// the available agents). Mocks `@tauri-apps/plugin-dialog`'s `open()` and
-// `../lib/tauri`'s `addProject` the same way `FileTree.test.tsx` mocks its
-// own Tauri surfaces.
+// Component-level coverage for NewWorkspaceModal.tsx — the left-pane
+// redesign's "New workspace" dialog (Task 12): folder + stats strip + two
+// toggles, no name/layout/engines. Mocks `@tauri-apps/plugin-dialog`'s
+// `open()` and every `../lib/tauri` surface the dialog touches, the same
+// vi.hoisted + vi.mock shape `FileTree.test.tsx` established.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Engine } from "../state/sessions";
-import type { LayoutPreset } from "../state/paneGrid";
 import type { ProjectInfo } from "../state/sessions";
-import type { AgentsState } from "../state/agents";
+import type { FolderStats } from "../lib/tauri";
 
-const { openMock, addProjectMock } = vi.hoisted(() => ({
-  openMock: vi.fn(),
-  addProjectMock: vi.fn(),
-}));
+const { openMock, addProjectMock, folderStatsMock, rootsSetPausedMock, settingsSetMock } =
+  vi.hoisted(() => ({
+    openMock: vi.fn(),
+    addProjectMock: vi.fn(),
+    folderStatsMock: vi.fn(),
+    rootsSetPausedMock: vi.fn(),
+    settingsSetMock: vi.fn(),
+  }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: openMock,
 }));
 
 vi.mock("../lib/tauri", () => ({
+  REVIEW_MEMORY_SETTING_KEY: "review_memory",
   addProject: addProjectMock,
+  folderStats: folderStatsMock,
+  rootsSetPaused: rootsSetPausedMock,
+  settingsSet: settingsSetMock,
 }));
 
 const { default: NewWorkspaceModal } = await import("./NewWorkspaceModal");
 
-const PROJECT: ProjectInfo = { id: "demo-workspace", label: "demo-workspace", path: "/tmp/demo-workspace" };
-
-const DEFAULT_AGENT_STATE: AgentsState = {
-  installed: new Set(["claude", "shell"]),
-  lastSelected: [],
-  installing: new Map(),
+const PROJECT: ProjectInfo = {
+  id: "demo-workspace",
+  label: "demo-workspace",
+  path: "/tmp/demo-workspace",
 };
 
-function setup(agents: Partial<AgentsState> = {}) {
+const STATS: FolderStats = { files: 12480, languages: ["TS", "Rust"], git: true, branches: 4 };
+
+function setup() {
   const onCreate = vi.fn();
   const onClose = vi.fn();
-  const onInstallAgent = vi.fn();
-  const agentState = { ...DEFAULT_AGENT_STATE, ...agents };
-  render(
-    <NewWorkspaceModal
-      onCreate={onCreate}
-      onClose={onClose}
-      agentState={agentState}
-      onInstallAgent={onInstallAgent}
-    />
-  );
-  return { onCreate, onClose, onInstallAgent };
+  render(<NewWorkspaceModal onCreate={onCreate} onClose={onClose} />);
+  return { onCreate, onClose };
+}
+
+/** Picks `/tmp/demo-workspace` and waits for the stats strip to settle. */
+async function pickFolder(path = "/tmp/demo-workspace") {
+  openMock.mockResolvedValue(path);
+  fireEvent.click(screen.getByRole("button", { name: /browse/i }));
+  await screen.findByText(path);
 }
 
 beforeEach(() => {
   openMock.mockReset();
   addProjectMock.mockReset();
+  folderStatsMock.mockReset();
+  rootsSetPausedMock.mockReset();
+  settingsSetMock.mockReset();
+  folderStatsMock.mockResolvedValue(STATS);
+  addProjectMock.mockResolvedValue(PROJECT);
+  rootsSetPausedMock.mockResolvedValue(undefined);
+  settingsSetMock.mockResolvedValue(undefined);
 });
 
 describe("NewWorkspaceModal — rendering", () => {
-  it("shows the title and all three sections", () => {
+  it("shows the dialog, the folder row and both toggles", () => {
     setup();
     expect(screen.getByRole("dialog", { name: /new workspace/i })).toBeInTheDocument();
-    expect(screen.getByText("LAYOUT")).toBeInTheDocument();
-    expect(screen.getByText("DIRECTORY")).toBeInTheDocument();
-    expect(screen.getByText("AI AGENTS")).toBeInTheDocument();
+    expect(screen.getByText("Project folder")).toBeInTheDocument();
+    expect(screen.getByText("No folder chosen yet")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: /ingest into the brain now/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: /review memory notes before commit/i }),
+    ).toBeInTheDocument();
   });
 
-  it("shows all five layout presets, 4 selected by default with its caption", () => {
+  it("defaults: ingest on, review notes off", () => {
     setup();
-    for (const preset of [1, 2, 4, 6, 8]) {
-      expect(screen.getByRole("button", { name: new RegExp(`^${preset}\\b`) })).toBeInTheDocument();
-    }
-    expect(screen.getByText("2×2 grid layout")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: /ingest/i })).toBeChecked();
+    expect(screen.getByRole("switch", { name: /review memory/i })).not.toBeChecked();
   });
 
-  // The pre-fill rule itself (last-selected -> single-installed -> shell) is
-  // unit-tested in `state/agents.test.ts`. These two prove the MODAL actually
-  // consults it — it previously hardcoded "Claude checked", which made
-  // `getDefaultAgentSelection` dead code that every unit test passed against
-  // while the dialog ignored it.
-
-  it("with no history, defaults to shell — not to whichever agent is listed first", () => {
+  it("hides the stats strip until a folder is picked, and shows the scoped-access hint", () => {
     setup();
-    // Founder rule, verbatim: "if it's a brand new installation, it should be
-    // shell selected". Two agents installed and nothing used before, so
-    // neither the last-selected nor the only-one-installed branch applies.
-    // "shell" renders as its own "Normal Terminal" tile, not a 5th AI agent.
-    expect(screen.getByRole("checkbox", { name: /normal terminal/i })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: /claude code/i })).not.toBeChecked();
-    // Exactly 5 checkboxes — claude, codex, copilot, antigravity + Normal Terminal
-    expect(screen.getAllByRole("checkbox")).toHaveLength(5);
+    expect(screen.queryByText("files to walk")).not.toBeInTheDocument();
+    expect(screen.getByText(/scoped access/i)).toBeInTheDocument();
   });
 
-  it("pre-selects the agents used for the last workspace", () => {
-    // "the last one that they created, should be pre-selected."
-    setup({ installed: new Set(["claude", "shell"]), lastSelected: ["claude"] });
-    expect(screen.getByRole("checkbox", { name: /claude code/i })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: /normal terminal/i })).not.toBeChecked();
-  });
-
-  it("never pre-checks an agent that is no longer installed", () => {
-    // Its row renders disabled, so a checked box would be one the user can
-    // neither clear nor submit with.
-    setup({ installed: new Set(["shell"]), lastSelected: ["codex"] });
-    expect(screen.getByRole("checkbox", { name: /codex/i })).not.toBeChecked();
-    expect(screen.getByRole("checkbox", { name: /codex/i })).toBeDisabled();
-    expect(screen.getByRole("checkbox", { name: /normal terminal/i })).toBeChecked();
-  });
-
-  it("Create Workspace starts disabled — no folder chosen yet", () => {
+  it("Add workspace starts disabled — no folder chosen yet", () => {
     setup();
-    expect(screen.getByRole("button", { name: /create workspace/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /add workspace/i })).toBeDisabled();
   });
 });
 
-describe("NewWorkspaceModal — layout preset selection", () => {
-  it("clicking a different preset updates the selection and caption", () => {
+describe("NewWorkspaceModal — folder picking and the stats strip", () => {
+  it("Browse opens the native folder picker and renders the stats for that folder", async () => {
     setup();
-    fireEvent.click(screen.getByRole("button", { name: /^6\b/ }));
-    expect(screen.getByText("2×3 grid layout")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^6\b/ })).toHaveClass("is-selected");
-    expect(screen.getByRole("button", { name: /^4\b/ })).not.toHaveClass("is-selected");
-  });
-});
+    await pickFolder("/Users/bruno/code/my-workspace");
 
-describe("NewWorkspaceModal — AI Agents checklist", () => {
-  it("toggling engines updates checked state and re-disables submit once none are checked", async () => {
-    setup();
-    openMock.mockResolvedValue("/tmp/demo-workspace");
-    fireEvent.click(screen.getByRole("button", { name: /browse/i }));
-    await waitFor(() => expect(screen.getByDisplayValue("demo-workspace")).toBeInTheDocument());
-
-    const submit = screen.getByRole("button", { name: /create workspace/i });
-    expect(submit).toBeEnabled(); // shell (Normal Terminal) checked by default
-
-    fireEvent.click(screen.getByRole("checkbox", { name: /normal terminal/i }));
-    expect(submit).toBeDisabled(); // nothing checked now
-
-    // Claude rather than Codex: only installed agents have an enabled
-    // checkbox, and this fixture installs claude + shell.
-    fireEvent.click(screen.getByRole("checkbox", { name: /claude code/i }));
-    expect(submit).toBeEnabled();
+    expect(openMock).toHaveBeenCalledWith(
+      expect.objectContaining({ directory: true, multiple: false }),
+    );
+    expect(folderStatsMock).toHaveBeenCalledWith("/Users/bruno/code/my-workspace");
+    await waitFor(() => expect(screen.getByText("12,480")).toBeInTheDocument());
+    expect(screen.getByText("files to walk")).toBeInTheDocument();
+    expect(screen.getByText("TS · Rust")).toBeInTheDocument();
+    expect(screen.getByText("git ✓")).toBeInTheDocument();
+    expect(screen.getByText("4 branches")).toBeInTheDocument();
   });
 
-  it("collapsing the AI AGENTS section hides the checklist and the toggle label flips", () => {
+  it("shows placeholders while folder_stats is in flight", async () => {
     setup();
-    expect(screen.getByRole("checkbox", { name: /claude code/i })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /collapse/i }));
-    expect(screen.queryByRole("checkbox", { name: /claude code/i })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /expand/i }));
-    expect(screen.getByRole("checkbox", { name: /claude code/i })).toBeInTheDocument();
+    let resolve: (s: FolderStats) => void = () => {};
+    folderStatsMock.mockReturnValue(new Promise<FolderStats>((r) => (resolve = r)));
+    await pickFolder();
+
+    // Strip is up (the folder is known) but every cell is still a placeholder.
+    expect(screen.getByText("files to walk")).toBeInTheDocument();
+    expect(screen.getAllByText("…").length).toBeGreaterThan(0);
+
+    resolve(STATS);
+    await waitFor(() => expect(screen.getByText("12,480")).toBeInTheDocument());
   });
 
-  it("shows a checked/total count badge", () => {
+  it("a folder with no git shows 'no git' / 'init later' instead of a branch count", async () => {
     setup();
-    expect(screen.getByText("1/5")).toBeInTheDocument();
-    // Claude rather than Codex: only installed agents have an enabled tile,
-    // and the default fixture installs claude + shell. (The old checkbox
-    // list let jsdom click straight through a disabled <input>; the tile is
-    // a real disabled <button>, which correctly swallows the click.)
-    fireEvent.click(screen.getByRole("checkbox", { name: /claude code/i }));
-    expect(screen.getByText("2/5")).toBeInTheDocument();
-  });
-});
+    folderStatsMock.mockResolvedValue({ files: 3, languages: [], git: false, branches: 0 });
+    await pickFolder();
 
-describe("NewWorkspaceModal — directory picking", () => {
-  it("Browse opens the native folder picker and fills the path + name fields", async () => {
-    setup();
-    openMock.mockResolvedValue("/Users/bruno/code/my-workspace");
-    fireEvent.click(screen.getByRole("button", { name: /browse/i }));
-    expect(openMock).toHaveBeenCalledWith(expect.objectContaining({ directory: true, multiple: false }));
-    await waitFor(() => expect(screen.getByDisplayValue("my-workspace")).toBeInTheDocument());
-    expect(screen.getByText("/Users/bruno/code/my-workspace")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("no git")).toBeInTheDocument());
+    expect(screen.getByText("init later")).toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument(); // no languages detected
   });
 
-  it("lets the user override the auto-filled project name", async () => {
+  it("a failed folder_stats leaves placeholders and still allows the add", async () => {
     setup();
-    openMock.mockResolvedValue("/tmp/demo-workspace");
-    fireEvent.click(screen.getByRole("button", { name: /browse/i }));
-    const nameInput = await screen.findByDisplayValue("demo-workspace");
-    fireEvent.change(nameInput, { target: { value: "renamed-workspace" } });
-    expect(screen.getByDisplayValue("renamed-workspace")).toBeInTheDocument();
-  });
+    folderStatsMock.mockRejectedValue(new Error("permission denied"));
+    await pickFolder();
 
-  it("typing a name before picking a folder survives the folder pick", async () => {
-    // The dialog now asks for the name first — picking a folder afterward
-    // must not clobber it with the folder's basename.
-    setup();
-    fireEvent.change(screen.getByLabelText(/project name/i), { target: { value: "my custom name" } });
-    openMock.mockResolvedValue("/tmp/demo-workspace");
-    fireEvent.click(screen.getByRole("button", { name: /browse/i }));
-    await waitFor(() => expect(screen.getByText("/tmp/demo-workspace")).toBeInTheDocument());
-    expect(screen.getByDisplayValue("my custom name")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /add workspace/i })).toBeEnabled(),
+    );
+    expect(screen.queryByText(/permission denied/)).not.toBeInTheDocument();
   });
 
   it("cancelling the native picker (null result) leaves the form untouched", async () => {
@@ -196,41 +151,82 @@ describe("NewWorkspaceModal — directory picking", () => {
     openMock.mockResolvedValue(null);
     fireEvent.click(screen.getByRole("button", { name: /browse/i }));
     await waitFor(() => expect(openMock).toHaveBeenCalled());
-    expect(screen.getByRole("button", { name: /create workspace/i })).toBeDisabled();
+    expect(folderStatsMock).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /add workspace/i })).toBeDisabled();
+  });
+});
+
+describe("NewWorkspaceModal — toggles", () => {
+  it("clicking a switch flips its aria-checked", async () => {
+    setup();
+    const ingest = screen.getByRole("switch", { name: /ingest/i });
+    fireEvent.click(ingest);
+    expect(ingest).not.toBeChecked();
+    fireEvent.click(ingest);
+    expect(ingest).toBeChecked();
   });
 });
 
 describe("NewWorkspaceModal — submit", () => {
-  async function pickFolder() {
-    openMock.mockResolvedValue("/tmp/demo-workspace");
-    fireEvent.click(screen.getByRole("button", { name: /browse/i }));
-    await screen.findByDisplayValue("demo-workspace");
-  }
-
-  it("calls add_project then onCreate with the project, checked engines (ENGINES order), and chosen layout", async () => {
+  it("adds the project under the folder's basename and hands it to onCreate", async () => {
     const { onCreate } = setup();
-    addProjectMock.mockResolvedValue(PROJECT);
     await pickFolder();
-    // Shell starts checked (the default), so this ticks claude as well —
-    // clicked second, but it must still come back FIRST, in ENGINES order.
-    fireEvent.click(screen.getByRole("checkbox", { name: /claude code/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^8\b/ })); // pick the "8" layout
-
-    fireEvent.click(screen.getByRole("button", { name: /create workspace/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
 
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
     expect(addProjectMock).toHaveBeenCalledWith("/tmp/demo-workspace", "demo-workspace");
-    const [project, engines, layout] = onCreate.mock.calls[0] as [ProjectInfo, Engine[], LayoutPreset];
-    expect(project).toEqual(PROJECT);
-    expect(engines).toEqual(["claude", "shell"]); // ENGINES order, not click order
-    expect(layout).toBe(8);
+    expect(onCreate).toHaveBeenCalledWith(PROJECT);
   });
 
-  it("does not call onClose itself on success — the caller closes the modal (same split as AddProjectModal/Sidebar)", async () => {
-    const { onClose } = setup();
-    addProjectMock.mockResolvedValue(PROJECT);
+  it("with ingest ON (the default), never pauses the new root", async () => {
+    setup();
     await pickFolder();
-    fireEvent.click(screen.getByRole("button", { name: /create workspace/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+
+    await waitFor(() => expect(addProjectMock).toHaveBeenCalled());
+    expect(rootsSetPausedMock).not.toHaveBeenCalled();
+  });
+
+  it("with ingest OFF, pauses the new root so no walk starts", async () => {
+    setup();
+    await pickFolder();
+    fireEvent.click(screen.getByRole("switch", { name: /ingest/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+
+    await waitFor(() => expect(rootsSetPausedMock).toHaveBeenCalledWith("demo-workspace", true));
+  });
+
+  // The encoding is `ReviewPanel`'s, copied verbatim rather than reinvented
+  // — it writes `next ? "true" : "false"` to the same key, so a workspace
+  // added with the toggle on and the Review panel must agree.
+  it("review notes off writes review_memory=\"false\"", async () => {
+    setup();
+    await pickFolder();
+    fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+    await waitFor(() => expect(settingsSetMock).toHaveBeenCalledWith("review_memory", "false"));
+  });
+
+  it("review notes on writes review_memory=\"true\"", async () => {
+    setup();
+    await pickFolder();
+    fireEvent.click(screen.getByRole("switch", { name: /review memory/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+    await waitFor(() => expect(settingsSetMock).toHaveBeenCalledWith("review_memory", "true"));
+  });
+
+  it("a second click while the add is in flight never double-adds", async () => {
+    setup();
+    await pickFolder();
+    const submit = screen.getByRole("button", { name: /add workspace/i });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+    await waitFor(() => expect(addProjectMock).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not call onClose itself on success — the caller closes the modal", async () => {
+    const { onClose } = setup();
+    await pickFolder();
+    fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
     await waitFor(() => expect(addProjectMock).toHaveBeenCalled());
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -239,12 +235,59 @@ describe("NewWorkspaceModal — submit", () => {
     const { onCreate, onClose } = setup();
     addProjectMock.mockRejectedValue(new Error("disk full"));
     await pickFolder();
-    fireEvent.click(screen.getByRole("button", { name: /create workspace/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
 
     await waitFor(() => expect(screen.getByText(/disk full/)).toBeInTheDocument());
     expect(onCreate).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: /create workspace/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /add workspace/i })).toBeEnabled();
+  });
+
+  it("a failed preference write is not fatal — the workspace still lands", async () => {
+    const { onCreate } = setup();
+    settingsSetMock.mockRejectedValue(new Error("settings locked"));
+    await pickFolder();
+    fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledWith(PROJECT));
+  });
+});
+
+describe("NewWorkspaceModal — keyboard", () => {
+  it("Enter adds the workspace", async () => {
+    const { onCreate } = setup();
+    await pickFolder();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Enter" });
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
+  });
+
+  it("Enter still works after a toggle has been clicked — it must never go dead", async () => {
+    // The Task 10 lesson, kept: a real browser moves focus to a <button> on
+    // click, so gating Enter on "nothing/only-the-panel has focus" would
+    // make it a dead key right at the end of the flow.
+    const { onCreate } = setup();
+    await pickFolder();
+    const ingest = screen.getByRole("switch", { name: /ingest/i });
+    fireEvent.click(ingest);
+    ingest.focus();
+    fireEvent.keyDown(ingest, { key: "Enter" });
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
+  });
+
+  it("Enter inside the folder row belongs to Browse, not to the submit", async () => {
+    const { onCreate } = setup();
+    await pickFolder();
+    const browse = screen.getByRole("button", { name: /browse/i });
+    browse.focus();
+    fireEvent.keyDown(browse, { key: "Enter" });
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it("Enter does nothing before a folder is picked", () => {
+    const { onCreate } = setup();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Enter" });
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(addProjectMock).not.toHaveBeenCalled();
   });
 });
 
@@ -255,15 +298,15 @@ describe("NewWorkspaceModal — dismissal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("the × close button calls onClose", () => {
-    const { onClose } = setup();
-    fireEvent.click(screen.getByRole("button", { name: /close/i }));
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
   it("Cancel calls onClose", () => {
     const { onClose } = setup();
     fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("clicking the backdrop calls onClose, clicking the panel does not", () => {
+    const { onClose } = setup();
+    fireEvent.mouseDown(screen.getByRole("dialog"));
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
