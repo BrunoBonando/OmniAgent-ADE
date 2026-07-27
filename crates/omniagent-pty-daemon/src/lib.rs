@@ -10,7 +10,9 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader as StdBufReader, Read, Write};
+use std::os::unix::net::UnixStream as StdUnixStream;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -248,16 +250,36 @@ impl SessionRegistry {
 
 /// Runs the IPC listener loop on a Unix domain socket
 pub async fn run_daemon(socket_path: PathBuf) -> Result<()> {
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(&socket_path);
-    }
-
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let listener = UnixListener::bind(&socket_path)
-        .with_context(|| format!("Failed to bind socket at {}", socket_path.display()))?;
+    if socket_path.exists() {
+        if socket_responds_to_list_sessions(&socket_path) {
+            info!(
+                "OmniAgent PTY Daemon already running at {}; reusing existing instance",
+                socket_path.display()
+            );
+            return Ok(());
+        }
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    let listener = match UnixListener::bind(&socket_path) {
+        Ok(listener) => listener,
+        Err(_bind_err) if socket_responds_to_list_sessions(&socket_path) => {
+            info!(
+                "OmniAgent PTY Daemon raced with another starter at {}; reusing existing \
+                 instance",
+                socket_path.display()
+            );
+            return Ok(());
+        }
+        Err(bind_err) => {
+            return Err(bind_err)
+                .with_context(|| format!("Failed to bind socket at {}", socket_path.display()));
+        }
+    };
 
     info!(
         "OmniAgent PTY Daemon listening on {}",
@@ -280,6 +302,30 @@ pub async fn run_daemon(socket_path: PathBuf) -> Result<()> {
             }
         }
     }
+}
+
+fn socket_responds_to_list_sessions(socket_path: &Path) -> bool {
+    let mut stream = match StdUnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let mut payload = match serde_json::to_vec(&DaemonRequest::ListSessions) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    payload.push(b'\n');
+    if stream.write_all(&payload).is_err() || stream.flush().is_err() {
+        return false;
+    }
+
+    let mut line = String::new();
+    let mut reader = StdBufReader::new(stream);
+    if reader.read_line(&mut line).is_err() {
+        return false;
+    }
+    serde_json::from_str::<DaemonResponse>(&line)
+        .map(|resp| resp.success)
+        .unwrap_or(false)
 }
 
 async fn handle_client(stream: UnixStream, registry: SessionRegistry) -> Result<()> {

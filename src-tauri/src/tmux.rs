@@ -16,6 +16,7 @@ pub const SESSION_NAME_PREFIX: &str = "omniagent-";
 const MAX_SESSION_NAME_LEN: usize = 128;
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(3);
 const DAEMON_START_POLL: Duration = Duration::from_millis(50);
+const DAEMON_HEALTH_RETRY_WINDOW: Duration = Duration::from_millis(200);
 
 /// Kept for compatibility with existing references.
 pub const CONFIG_BODY: &str = "";
@@ -191,13 +192,11 @@ impl Tmux {
     }
 
     fn ensure_daemon_running(&self) -> Result<(), String> {
-        if self.is_alive() {
+        if self.wait_until_alive(DAEMON_HEALTH_RETRY_WINDOW) {
             return Ok(());
         }
 
-        if self.socket_path.exists() {
-            let _ = std::fs::remove_file(&self.socket_path);
-        }
+        self.remove_stale_socket_if_unreachable();
         if let Some(parent) = self.socket_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -209,12 +208,8 @@ impl Tmux {
             .spawn()
             .map_err(|e| format!("spawn daemon: {e}"))?;
 
-        let start = Instant::now();
-        while start.elapsed() < DAEMON_START_TIMEOUT {
-            if self.is_alive() {
-                return Ok(());
-            }
-            thread::sleep(DAEMON_START_POLL);
+        if self.wait_until_alive(DAEMON_START_TIMEOUT) {
+            return Ok(());
         }
 
         Err(format!(
@@ -251,6 +246,26 @@ impl Tmux {
             Err(response
                 .error
                 .unwrap_or_else(|| "daemon request failed".to_string()))
+        }
+    }
+
+    fn wait_until_alive(&self, timeout: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if self.is_alive() {
+                return true;
+            }
+            thread::sleep(DAEMON_START_POLL);
+        }
+        false
+    }
+
+    fn remove_stale_socket_if_unreachable(&self) {
+        if !self.socket_path.exists() {
+            return;
+        }
+        if UnixStream::connect(&self.socket_path).is_err() {
+            let _ = std::fs::remove_file(&self.socket_path);
         }
     }
 }

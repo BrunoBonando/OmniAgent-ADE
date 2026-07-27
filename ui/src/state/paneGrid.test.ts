@@ -144,13 +144,13 @@ describe("syncPaneTree", () => {
     expect(syncPaneTree(null, ["a", "b"])).toEqual(row(["a", "b"]));
   });
 
-  it("a new terminal moves the grid up a rung, landing TOP-RIGHT (2x1 -> 2x2)", () => {
-    // The pair restacks into the first column; "c" tops the new right column,
-    // the hole (the next Add Terminal spot) below it.
+  it("a new terminal moves the grid up a rung, landing LOWER-LEFT (2x1 -> 2x2)", () => {
+    // Keep the original side-by-side pair on the top row; the new terminal
+    // takes lower-left and the hole (the next Add Terminal spot) is lower-right.
     const tree = syncPaneTree(row(["a", "b"]), ["a", "b", "c"]);
     const hole = allLeaves(tree)[3];
     expect(isPaneHole(hole)).toBe(true);
-    expect(tree).toEqual(row([column(["a", "b"]), column(["c", hole])]));
+    expect(tree).toEqual(row([column(["a", "c"]), column(["b", hole])]));
   });
 
   it("growing a full 2x2 to 5 panes adds a column on the right — nobody already open moves", () => {

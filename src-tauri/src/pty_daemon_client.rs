@@ -14,6 +14,10 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(3);
+const DAEMON_START_POLL: Duration = Duration::from_millis(50);
+const DAEMON_HEALTH_RETRY_WINDOW: Duration = Duration::from_millis(200);
+
 pub struct PtyDaemonClient {
     socket_path: PathBuf,
 }
@@ -70,24 +74,16 @@ impl PtyDaemonClient {
 
     /// Verifies socket liveness and auto-launches daemon if absent.
     pub fn ensure_daemon_running(&self) -> Result<()> {
-        if self.is_alive() {
+        if self.wait_until_alive(DAEMON_HEALTH_RETRY_WINDOW) {
             return Ok(());
         }
 
-        // Clean up stale socket file if it exists but connection failed
-        if self.socket_path.exists() {
-            let _ = std::fs::remove_file(&self.socket_path);
-        }
+        self.remove_stale_socket_if_unreachable();
 
         self.spawn_daemon_process()?;
 
-        // Wait up to 3 seconds for socket creation
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(3) {
-            if self.is_alive() {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(50));
+        if self.wait_until_alive(DAEMON_START_TIMEOUT) {
+            return Ok(());
         }
 
         Err(anyhow!(
@@ -117,6 +113,11 @@ impl PtyDaemonClient {
 
     fn spawn_daemon_process(&self) -> Result<()> {
         let exe = resolve_daemon_binary()?;
+        if let Some(parent) = self.socket_path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create daemon socket parent {}", parent.display())
+            })?;
+        }
         let mut cmd = Command::new(&exe);
         cmd.env("OMNIAGENT_PTY_SOCKET", &self.socket_path)
             .stdout(Stdio::null())
@@ -130,6 +131,26 @@ impl PtyDaemonClient {
         })?;
 
         Ok(())
+    }
+
+    fn wait_until_alive(&self, timeout: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if self.is_alive() {
+                return true;
+            }
+            thread::sleep(DAEMON_START_POLL);
+        }
+        false
+    }
+
+    fn remove_stale_socket_if_unreachable(&self) {
+        if !self.socket_path.exists() {
+            return;
+        }
+        if UnixStream::connect(&self.socket_path).is_err() {
+            let _ = std::fs::remove_file(&self.socket_path);
+        }
     }
 
     // High-level RPC operations

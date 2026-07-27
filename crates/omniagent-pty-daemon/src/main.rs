@@ -185,10 +185,11 @@ fn send_request(socket_path: &PathBuf, req: &DaemonRequest) -> Result<DaemonResp
 }
 
 fn ensure_daemon_for_socket(socket_path: &PathBuf) -> Result<()> {
-    if send_request(socket_path, &DaemonRequest::ListSessions).is_ok() {
+    if wait_until_alive(socket_path, Duration::from_millis(200)) {
         return Ok(());
     }
-    if socket_path.exists() {
+
+    if socket_path.exists() && UnixStream::connect(socket_path).is_err() {
         let _ = std::fs::remove_file(socket_path);
     }
     if let Some(parent) = socket_path.parent() {
@@ -200,17 +201,24 @@ fn ensure_daemon_for_socket(socket_path: &PathBuf) -> Result<()> {
         .stderr(std::process::Stdio::null())
         .spawn()?;
 
-    let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(3) {
-        if send_request(socket_path, &DaemonRequest::ListSessions).is_ok() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(50));
+    if wait_until_alive(socket_path, Duration::from_secs(3)) {
+        return Ok(());
     }
     Err(anyhow::anyhow!(
         "daemon not ready at {}",
         socket_path.display()
     ))
+}
+
+fn wait_until_alive(socket_path: &PathBuf, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if send_request(socket_path, &DaemonRequest::ListSessions).is_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    false
 }
 
 fn compat_socket_path(socket_name: &str, config: Option<&std::path::Path>) -> PathBuf {

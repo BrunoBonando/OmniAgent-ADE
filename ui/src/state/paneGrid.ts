@@ -87,11 +87,11 @@ export function gridShape(count: number): { cols: number; rows: number } {
  * column split), any leftover cells padded with holes — always the complete
  * rung's rectangle, never a short row.
  *
- * The column-major fill is the founder's placement rule (2026-07-26): a new
- * terminal lands at the TOP of a brand-new right-hand column when the grid
- * was full, or drops into the bottom hole when it wasn't — and every
- * already-open terminal stays exactly where it was. The hole itself doubles
- * as the "Add Terminal" affordance (`Workspace.tsx`'s hole tile).
+ * The column-major fill is the default placement rule: a new terminal lands
+ * at the TOP of a brand-new right-hand column when the grid was full, or
+ * drops into the bottom hole when it wasn't — and every already-open terminal
+ * stays exactly where it was. The hole itself doubles as the "Add Terminal"
+ * affordance (`Workspace.tsx`'s hole tile).
  *
  * This is the ONLY function in this file that decides a shape — `syncPaneTree`
  * below routes every add and every close through it, so no caller can produce
@@ -160,14 +160,18 @@ export function swapPaneIds(tree: PaneTree | null, a: string, b: string): PaneTr
 /**
  * Reconciles a grid tree against the desired set of open session ids for a
  * session — the one entry point `Workspace.tsx` uses. Any change to the set
- * re-lays the whole grid out through `buildGrid`, i.e. into the approved shape
- * for the new pane count: opening the 3rd terminal in a 2x1 gives a 2x2,
- * closing back down to 2 gives the 2x1 again. Surviving panes keep their
- * left-to-right order (including one the user drag-rearranged into); new ids
- * land at the end. Returns the *same* tree reference when the set hasn't
- * moved, so `Workspace.tsx` can skip a `setState` — and so a manual resize
- * (split percentages Mosaic attached) survives every render that isn't an
- * actual open or close.
+ * re-lays the whole grid out into the approved shape for the new pane count:
+ * opening the 3rd terminal in a 2x1 gives a 2x2, closing back down to 2 gives
+ * the 2x1 again. Surviving panes keep their left-to-right order (including
+ * one the user drag-rearranged into); new ids land at the end. Returns the
+ * *same* tree reference when the set hasn't moved, so `Workspace.tsx` can skip
+ * a `setState` — and so a manual resize (split percentages Mosaic attached)
+ * survives every render that isn't an actual open or close.
+ *
+ * **2 -> 3 special case**: adding one pane to the side-by-side split now
+ * lands the new terminal in the LOWER-LEFT cell of the 2x2 rung. Existing
+ * panes stay on the top row (left then right), and the lone hole becomes the
+ * lower-right cell.
  *
  * **1-for-1 swap special case**: when the diff between `tree`'s current ids
  * and `desiredIds` is *exactly* one id removed and one different id added,
@@ -191,6 +195,16 @@ export function syncPaneTree(tree: PaneTree | null, desiredIds: string[]): PaneT
   const added = desiredIds.filter((id) => !presentSet.has(id));
 
   if (removed.length === 0 && added.length === 0) return tree;
+  if (removed.length === 0 && added.length === 1 && present.length === 2) {
+    return {
+      type: "split",
+      direction: "row",
+      children: [
+        { type: "split", direction: "column", children: [present[0], added[0]] },
+        { type: "split", direction: "column", children: [present[1], holeId(0)] },
+      ],
+    };
+  }
   if (removed.length === 1 && added.length === 1) {
     return replacePaneId(tree, removed[0], added[0]);
   }
