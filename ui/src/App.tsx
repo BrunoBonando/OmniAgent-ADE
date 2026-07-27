@@ -57,6 +57,7 @@ import {
 } from "./state/sessionGroups";
 import {
   NOTIFICATIONS_SETTING_KEY,
+  approveKeystroke,
   deriveNotification,
   deserializeNotifications,
   initialNotificationsState,
@@ -466,6 +467,15 @@ function App() {
   // a different lifetime. See `TabInfo`'s doc in `state/sessions.ts` for
   // the full reconciliation.
   const tabIds = useMemo(() => state.tabs.map((t) => t.id), [state.tabs]);
+
+  // Session ids whose CURRENT status is `awaiting_approval` — what decides
+  // which NEEDS YOU rows in the notifications panel are actionable right
+  // now (`isActionable`/`NotificationsPanel.tsx`'s `awaiting` set), as
+  // opposed to whatever status a row froze at when it was recorded.
+  const awaitingSessionIds = useMemo(
+    () => state.tabs.filter((t) => t.status === "awaiting_approval").map((t) => t.id),
+    [state.tabs],
+  );
 
   // The focus context the notification rule reads, mirrored into a ref in a
   // LAYOUT effect — i.e. synchronously at commit, before anything can be
@@ -1185,6 +1195,30 @@ function App() {
     [state.tabs, state.projects],
   );
 
+  // Approve-from-the-panel (founder ask, 2026-07-27: the notification row's
+  // own Approve button, so a pending tool-permission prompt never forces a
+  // trip to the pane). One write of the engine's yes-keystroke down the same
+  // PTY path typing uses — which also clears the Rust attention latch, so the
+  // amber state resolves exactly as if the user had answered in the pane.
+  // Re-checked against the CURRENT status at click time: a prompt already
+  // answered in the pane must not get a stray "1" typed into whatever
+  // replaced it.
+  const handleNotificationApprove = useCallback(
+    async (entry: NotificationEntry) => {
+      const keystroke = approveKeystroke(entry.engine);
+      const tab = state.tabs.find((t) => t.id === entry.sessionId);
+      if (!keystroke || !tab || tab.status !== "awaiting_approval") return;
+      try {
+        await sessionWrite(entry.sessionId, keystroke);
+        notificationsDispatch({ type: "notification/dismissed", id: entry.id });
+      } catch (err) {
+        console.error("approve from notifications failed", err);
+        setErrorBanner(`Couldn't approve "${entry.title}" — open its pane and answer there.`);
+      }
+    },
+    [state.tabs],
+  );
+
   // ---- closing a whole workspace (founder ask: "add the possibility to
   // close a workspace, on hover") --------------------------------------
   //
@@ -1425,9 +1459,8 @@ function App() {
         onSelectNotification={handleNotificationSelect}
         onDismissNotification={(id) => notificationsDispatch({ type: "notification/dismissed", id })}
         onClearNotifications={() => notificationsDispatch({ type: "notifications/cleared" })}
-        // Task 3 wires these for real
-        awaitingSessionIds={[]}
-        onApproveNotification={() => {}}
+        awaitingSessionIds={awaitingSessionIds}
+        onApproveNotification={(entry) => void handleNotificationApprove(entry)}
       />
       {errorBanner && (
         <div className="error-banner">

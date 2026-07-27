@@ -38,6 +38,7 @@ const tauriMocks = vi.hoisted(() => ({
   sessionCreateMock: vi.fn(),
   sessionKillMock: vi.fn(),
   sessionStatusMock: vi.fn(),
+  sessionWriteMock: vi.fn(),
   settingsGetMock: vi.fn(),
   settingsSetMock: vi.fn(),
 }));
@@ -51,6 +52,7 @@ vi.mock("./lib/tauri", () => ({
   sessionCreate: tauriMocks.sessionCreateMock,
   sessionKill: tauriMocks.sessionKillMock,
   sessionStatus: tauriMocks.sessionStatusMock,
+  sessionWrite: tauriMocks.sessionWriteMock,
   settingsGet: tauriMocks.settingsGetMock,
   settingsSet: tauriMocks.settingsSetMock,
 }));

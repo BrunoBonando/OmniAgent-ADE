@@ -25,6 +25,7 @@ const tauriMocks = vi.hoisted(() => ({
   sessionCreateMock: vi.fn(),
   sessionKillMock: vi.fn(),
   sessionStatusMock: vi.fn(),
+  sessionWriteMock: vi.fn(),
   settingsGetMock: vi.fn(),
   settingsSetMock: vi.fn(),
 }));
@@ -39,6 +40,7 @@ vi.mock("./lib/tauri", () => ({
   sessionCreate: tauriMocks.sessionCreateMock,
   sessionKill: tauriMocks.sessionKillMock,
   sessionStatus: tauriMocks.sessionStatusMock,
+  sessionWrite: tauriMocks.sessionWriteMock,
   settingsGet: tauriMocks.settingsGetMock,
   settingsSet: tauriMocks.settingsSetMock,
 }));
@@ -133,6 +135,7 @@ beforeEach(() => {
   tauriMocks.rootsListMock.mockReset().mockResolvedValue(["/tmp"]);
   tauriMocks.sessionKillMock.mockReset().mockResolvedValue(undefined);
   tauriMocks.sessionStatusMock.mockReset().mockResolvedValue(null);
+  tauriMocks.sessionWriteMock.mockReset().mockResolvedValue(undefined);
   tauriMocks.settingsSetMock.mockReset().mockResolvedValue(undefined);
   tauriMocks.sessionCreateMock
     .mockReset()
@@ -241,6 +244,25 @@ describe("App — clicking a notification goes to that session", () => {
     fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
     await waitFor(() => expect(badge()).toBeNull());
     expect(screen.getByText("Task completed.")).toBeInTheDocument();
+  });
+});
+
+describe("App — approving a notification from the panel", () => {
+  it("Approve writes the engine's yes-keystroke to the session and clears the row", async () => {
+    await bootWithThreeSessions();
+    // Drive sess-2 (a pane the user isn't focused on — sess-1 is active) to
+    // awaiting_approval: a notification is recorded AND the tab's live
+    // status is awaiting, which is what makes the row actionable.
+    emit("sess-2", statusEvent("sess-2", "awaiting_approval", true));
+    await waitFor(() => expect(badge()?.textContent).toBe("1"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Notifications/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Approve / }));
+
+    await waitFor(() => expect(tauriMocks.sessionWriteMock).toHaveBeenCalledWith("sess-2", "1"));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /^Approve / })).not.toBeInTheDocument(),
+    );
   });
 });
 
