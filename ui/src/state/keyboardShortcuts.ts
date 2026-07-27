@@ -10,9 +10,14 @@
 // this honest:
 //
 // - Global (⌘T/⌘K/⌘N): `App.tsx`'s window keydown handler.
-// - Dialogs (arrows/Enter/Escape/digits): `state/newChooserState.ts`'s
-//   `chooserKeyAction` and `EnginePicker.tsx`, which share one interaction
-//   model on purpose.
+// - Dialogs: no single interaction model any more — the two-card ⌘N
+//   chooser and `EnginePicker.tsx` that used to define one were both
+//   retired (Task 13, 2026-07-27). Each dialog now owns its own key
+//   handling: `NewSessionModal.tsx` picks a layout on a bare digit,
+//   `NewTerminalModal.tsx`/`state/newTerminalState.ts`'s
+//   `terminalKeyAction` picks an engine on ⌘+digit, and
+//   `NewWorkspaceModal.tsx`/the `Close*Confirm.tsx` family take only
+//   Enter/Escape.
 // - Panes: `PaneHeader.tsx` (double-click rename, its Enter/Escape) and
 //   `Workspace.tsx`'s mosaic grid.
 //
