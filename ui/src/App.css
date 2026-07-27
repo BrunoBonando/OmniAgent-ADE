@@ -6373,7 +6373,13 @@ code {
   color: #7c7c86; width: 18px; height: 18px; border-radius: 5px;
   cursor: pointer; display: none;
 }
-.workspace-menu-row:hover .workspace-menu-manage { display: block; }
+/* `:focus-within` alongside `:hover` (a11y fix round, 2026-07-27): the rows
+   are keyboard-focusable now, and a row you can reach by Tab whose only
+   action stays `display: none` — i.e. out of the tab order — would be half a
+   fix. The focus RING itself needs nothing here: the global `:focus-visible`
+   rule at the top of this file already draws it for any focusable element. */
+.workspace-menu-row:hover .workspace-menu-manage,
+.workspace-menu-row:focus-within .workspace-menu-manage { display: block; }
 .workspace-menu-manage:hover { background: rgba(255, 255, 255, 0.1); color: var(--ink); }
 .workspace-menu-divider { height: 0.5px; background: rgba(255, 255, 255, 0.09); margin: 5px 9px; }
 .workspace-menu-new {
