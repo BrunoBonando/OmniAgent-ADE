@@ -1493,6 +1493,7 @@ code {
 }
 
 .sidebar-inline-session-row {
+  position: relative;
   display: flex;
   align-items: center;
   padding: 3px 6px 3px 12px;
@@ -1500,14 +1501,13 @@ code {
   border-radius: var(--radius-sm);
 }
 
-/* Icon box — mirrors .sidebar-nav-icon-box sizing so the mark aligns with
-   the terminal icon in the Working Sessions header button */
+/* Icon — no background box, just the status mark centred in the same
+   32×32 footprint as .sidebar-nav-icon-box so the mark aligns with the
+   terminal icon in the Working Sessions header button */
 .sidebar-inline-session-icon {
   width: 32px;
   height: 32px;
   min-width: 32px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.22);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1518,15 +1518,17 @@ code {
   background: rgba(255, 255, 255, 0.04);
 }
 
-/* Inside the active group the row hover should be slightly more visible */
-.sidebar-workspace-tab-group.is-active .sidebar-inline-session-row:hover {
-  background: rgba(255, 255, 255, 0.06);
+/* Active session — blue highlight so it reads as "selected" */
+.sidebar-inline-session-row.is-current {
+  background: rgba(61, 141, 203, 0.15);
 }
 
 .sidebar-inline-session-row.is-current .sidebar-inline-session-name-btn {
   color: var(--ink);
 }
 
+/* Name button fills all available space; right-pad leaves room so the
+   absolutely-positioned close button never overlaps text on hover */
 .sidebar-inline-session-name-btn {
   flex: 1;
   min-width: 0;
@@ -1536,7 +1538,7 @@ code {
   font-family: var(--sans);
   font-size: 12.5px;
   font-weight: 500;
-  padding: 4px 0;
+  padding: 5px 28px 5px 0;
   text-align: left;
   cursor: pointer;
   white-space: nowrap;
@@ -1545,8 +1547,13 @@ code {
   line-height: 1.3;
 }
 
+/* Close button: absolutely pinned to the right so it never shrinks the
+   name — invisible until the row is hovered */
 .sidebar-inline-session-close-btn {
-  flex-shrink: 0;
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
   background: transparent;
   border: none;
   color: var(--ink-faint);
@@ -1554,7 +1561,7 @@ code {
   padding: 3px 4px;
   border-radius: 4px;
   opacity: 0;
-  transition: opacity 0.12s, color 0.12s;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
   display: flex;
   align-items: center;
 }
@@ -1564,8 +1571,8 @@ code {
 }
 
 .sidebar-inline-session-close-btn:hover {
-  color: var(--ink);
-  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  background: var(--status-error);
 }
 
 /* files tab group fills all remaining space in the toggle list */

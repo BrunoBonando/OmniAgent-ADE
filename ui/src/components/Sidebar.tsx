@@ -415,9 +415,6 @@ export default function Sidebar({
   const awaitingCount = allProjectTabs.filter((t) => t.status === "awaiting_approval").length;
   const fileCount = gitBadges.total;
   const totalSessionCount = selectedSessions.length + dormantSessions.length;
-  // Aggregated status for the Working Sessions button icon — the most
-  // significant status across all tabs in all selected sessions.
-  const workingSessionsStatus = mostSignificantStatus(allProjectTabs.map((t) => t.status));
   const gitDiffSummary = review
     ? `${review.file_count} file${review.file_count !== 1 ? "s" : ""} · +${review.added} -${review.removed}`
     : "Git diff unavailable";
@@ -532,7 +529,7 @@ export default function Sidebar({
             title="Working sessions"
           >
             <div className="sidebar-nav-icon-box">
-              <SessionStatusLight status={workingSessionsStatus} size={16} decorative />
+              <Icon name="terminal" size={16} />
             </div>
             <div className="sidebar-nav-text">
               <span className="sidebar-nav-title">Working sessions</span>
