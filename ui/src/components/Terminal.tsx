@@ -66,6 +66,30 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
 
   const hasUsableSize = (cols: number, rows: number) => cols > 0 && rows > 0;
 
+  /** Shared fit-with-retry used by both the mount effect and the visibility
+   * effect. Attempts up to `maxAttempts` times, each `intervalMs` ms apart.
+   * Returns early on first success. The timer id is stored in retryTimerRef
+   * so the cleanup path can cancel it. */
+  const scheduleRetryFit = (
+    fit: FitAddon,
+    term: XTerm,
+    maxAttempts: number,
+    intervalMs: number,
+  ) => {
+    let attempt = 0;
+    const tryFit = () => {
+      try { fit.fit(); } catch { /* ignore — xterm not yet ready */ }
+      if (hasUsableSize(term.cols, term.rows)) {
+        void sessionResize(sessionId, term.cols, term.rows);
+        return;
+      }
+      if (attempt >= maxAttempts) return;
+      attempt += 1;
+      retryTimerRef.current = window.setTimeout(tryFit, intervalMs);
+    };
+    tryFit();
+  };
+
   // Mount once per session id — see module doc comment for why this must
   // not depend on `visible`.
   useEffect(() => {
@@ -102,26 +126,10 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
     termRef.current = term;
     fitRef.current = fit;
 
-    const fitAndReportSize = () => {
-      try {
-        fit.fit();
-      } catch {
-        return false;
-      }
-      if (!hasUsableSize(term.cols, term.rows)) {
-        return false;
-      }
-      void sessionResize(sessionId, term.cols, term.rows);
-      return true;
-    };
-
-    const fitWithRetry = (attempt: number) => {
-      if (fitAndReportSize()) return;
-      if (attempt >= 8) return;
-      retryTimerRef.current = window.setTimeout(() => fitWithRetry(attempt + 1), 16 * (attempt + 1));
-    };
+    // Initial fit — 20 retries at 50ms intervals (1 s window) so the pane
+    // grid's first layout pass has time to resolve before we give up.
     if (visible) {
-      fitWithRetry(0);
+      scheduleRetryFit(fit, term, 20, 50);
     }
 
     let submittedPrompt = false;
@@ -137,15 +145,42 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
       if (usefulTitle) onEngineTitleRef.current?.(sessionId, usefulTitle);
     });
 
-    const resizeObserver = new ResizeObserver(() => fitWithRetry(0));
+    const resizeObserver = new ResizeObserver(() => scheduleRetryFit(fit, term, 20, 50));
     resizeObserver.observe(container);
 
     let cancelled = false;
     let unlistenOutput: UnlistenFn | undefined;
     let unlistenDrop: UnlistenFn | undefined;
 
+    // Rolling text buffer for error pattern detection.
+    // We only keep the last 500 chars — enough to catch any multi-line error
+    // message without unbounded growth.
+    let outputBuf = "";
+    let copilotRestartTimer: number | null = null;
+
     void listen<string>(`session-output:${sessionId}`, (event) => {
-      term.write(base64ToBytes(event.payload));
+      const bytes = base64ToBytes(event.payload);
+      term.write(bytes);
+
+      // Detect the Copilot CLI error "No session, task, or name matched
+      // '<uuid>'." which fires when --resume references a session that no
+      // longer exists.  Buffer the plain text of the last chunk and restart
+      // with a bare `copilot` (no --resume / --session-id) after a short
+      // delay so the shell has time to return to its prompt.
+      if (tabEngine === "copilot") {
+        const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+        outputBuf = (outputBuf + text).slice(-500);
+        if (
+          outputBuf.includes("No session, task, or name matched") &&
+          copilotRestartTimer === null
+        ) {
+          outputBuf = "";
+          copilotRestartTimer = window.setTimeout(() => {
+            copilotRestartTimer = null;
+            void sessionWrite(sessionId, "copilot\r");
+          }, 1200);
+        }
+      }
     }).then((unlisten) => {
       if (cancelled) {
         unlisten();
@@ -198,6 +233,9 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
       }
+      if (copilotRestartTimer !== null) {
+        clearTimeout(copilotRestartTimer);
+      }
       unlistenOutput?.();
       unlistenDrop?.();
       term.dispose();
@@ -219,37 +257,28 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
     term.options.theme = resolveTerminalTheme(themeId);
   }, [themeId]);
 
-  // Re-fit whenever this tab becomes visible (covers both "just switched
-  // to it" and "window resized while it was hidden").
+  // Re-fit whenever this tab becomes visible.
+  // Double-RAF: the first frame schedules a layout pass after display:none→block;
+  // the second frame reads the resolved dimensions. Without the second frame the
+  // container's clientWidth is often still 0 on the first read, producing a
+  // black terminal that only recovers on the next manual resize.
   useEffect(() => {
     if (!visible) return;
-    const frame = requestAnimationFrame(() => {
-      const term = termRef.current;
-      const fit = fitRef.current;
-      if (!term || !fit) return;
-      const fitOnce = () => {
-        try {
-          fit.fit();
-        } catch {
-          return false;
-        }
-        if (!hasUsableSize(term.cols, term.rows)) {
-          return false;
-        }
-        void sessionResize(sessionId, term.cols, term.rows);
-        return true;
-      };
-      if (fitOnce()) return;
-      let attempt = 0;
-      const retry = () => {
-        attempt += 1;
-        if (fitOnce() || attempt >= 8) return;
-        retryTimerRef.current = window.setTimeout(retry, 16 * attempt);
-      };
-      retry();
+    let raf1: number;
+    let raf2: number;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        const term = termRef.current;
+        const fit = fitRef.current;
+        if (!term || !fit) return;
+        scheduleRetryFit(fit, term, 20, 50);
+      });
     });
-    return () => cancelAnimationFrame(frame);
-  }, [visible, sessionId]);
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, [visible, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (focused) termRef.current?.focus();
