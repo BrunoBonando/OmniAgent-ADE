@@ -252,12 +252,16 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
 
     const { rerender } = render(<Workspace {...props} selectedProjectId="p2" />);
 
-    await waitFor(() => expect(xtermMocks.ctorMock).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(xtermMocks.ctorMock).not.toHaveBeenCalled();
     expect(tauriMocks.sessionResizeMock).not.toHaveBeenCalled();
 
     rerender(<Workspace {...props} selectedProjectId="p1" />);
 
-    await waitFor(() => expect(tauriMocks.sessionResizeMock).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(xtermMocks.ctorMock).toHaveBeenCalledTimes(1);
+      expect(tauriMocks.sessionResizeMock).toHaveBeenCalled();
+    });
   });
 
   it("stamps each pane window with its status/motion classes — the border IS the status display", async () => {

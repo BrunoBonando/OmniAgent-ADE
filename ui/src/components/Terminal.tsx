@@ -14,6 +14,7 @@ import "@xterm/xterm/css/xterm.css";
 import { sessionResize, sessionWrite } from "../lib/tauri";
 import { engineTitleFromTerminalTitle } from "../lib/autoTitle";
 import { resolveTerminalTheme, type TerminalThemeId } from "../lib/terminalThemes";
+import { scheduleTerminalJob } from "../lib/terminalScheduler";
 import PaneInstallOverlay from "./PaneInstallOverlay";
 import type { AgentsState } from "../state/agents";
 import type { Engine } from "../state/sessions";
@@ -54,6 +55,12 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const retryTimerRef = useRef<number | null>(null);
+  const startTerminalRef = useRef<(() => void) | null>(null);
+  const webglCancelRef = useRef<(() => void) | null>(null);
+  const focusedRef = useRef(focused);
+  const visibleRef = useRef(visible);
+  focusedRef.current = focused;
+  visibleRef.current = visible;
   // Lets the mount effect (keyed only on `[sessionId]`, see below) always
   // call the LATEST `onEngineTitle` prop without needing it in that effect's
   // deps — the same ref-for-a-callback pattern used throughout this
@@ -106,100 +113,34 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
     tryFit();
   };
 
-  // Mount once per session id — see module doc comment for why this must
-  // not depend on `visible`.
+  // Subscribe immediately so no PTY output is lost while this pane waits its
+  // turn in the shared startup queue. The renderer itself is started below
+  // only when the pane is visible.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    const term = new XTerm({
-      convertEol: true,
-      fontFamily:
-        '"JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
-      lineHeight: 1.35,
-      theme: resolveTerminalTheme(themeId),
-      cursorBlink: true,
-      cursorStyle: "bar",
-      scrollback: 3000,
-      allowProposedApi: true,
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(container);
-
-    termRef.current = term;
-    fitRef.current = fit;
-
-    // Defer WebGL initialisation so it doesn't block multiple terminals'
-    // first paint.  xterm renders fine with its Canvas/DOM fallback while
-    // the GPU context spins up in the background; `setTimeout 0` yields
-    // to the browser's layout and paint tasks first.
-    const webglTimer = window.setTimeout(() => {
-      if (cancelled) return;
-      try {
-        const webgl = new WebglAddon();
-        webgl.onContextLoss(() => webgl.dispose());
-        term.loadAddon(webgl);
-      } catch (err) {
-        // WebGL unavailable (headless/CI, unsupported GPU path, jsdom in
-        // tests) — xterm's DOM renderer still works, just without the GPU
-        // fast path. Never fatal (DESIGN: terminals must always work).
-        console.warn("omniagent-ade: WebGL addon unavailable, falling back to DOM renderer", err);
-      }
-    }, 0);
-
-    // Initial fit — 60 retries at 100 ms intervals (6 s window) so that when
-    // several panes open simultaneously the browser has enough time to settle
-    // every container's layout before we give up.  The wider window directly
-    // fixes the "some terminals stay blank on multi-pane open" symptom: the
-    // previous 20×50 ms window (1 s) was too tight when 4–8 terminals all
-    // competed for the layout pass at once.
-    if (visible) {
-      scheduleRetryFit(fit, term, 60, 100, dismissLoading);
-    }
-
-    let submittedPrompt = false;
-
-    const dataDisposable = term.onData((data) => {
-      void sessionWrite(sessionId, data);
-      if (/\r|\n/.test(data)) submittedPrompt = true;
-    });
-
-    const titleDisposable = term.onTitleChange?.((title) => {
-      if (!submittedPrompt) return;
-      const usefulTitle = engineTitleFromTerminalTitle(tabEngine, title);
-      if (usefulTitle) onEngineTitleRef.current?.(sessionId, usefulTitle);
-    });
-
-    // Debounced resize handler: when multiple terminals open simultaneously
-    // the mosaic grid fires a ResizeObserver notification on every pane at
-    // once.  Without the debounce each terminal would immediately kick off its
-    // own 20-attempt retry loop, hammering the main thread.  50 ms is enough
-    // to batch the burst into one callback per pane.
-    let resizeDebounceTick: number | null = null;
-    const resizeObserver = new ResizeObserver(() => {
-      if (resizeDebounceTick !== null) clearTimeout(resizeDebounceTick);
-      resizeDebounceTick = window.setTimeout(() => {
-        resizeDebounceTick = null;
-        scheduleRetryFit(fit, term, 20, 50);
-      }, 50);
-    });
-    resizeObserver.observe(container);
-
     let cancelled = false;
+    let resizeDebounceTick: number | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+    let dataDisposable: { dispose: () => void } | undefined;
+    let titleDisposable: { dispose: () => void } | undefined;
     let unlistenOutput: UnlistenFn | undefined;
     let unlistenDrop: UnlistenFn | undefined;
+    let copilotRestartTimer: number | null = null;
+    const pendingOutput: Uint8Array[] = [];
+    let submittedPrompt = false;
 
     // Rolling text buffer for error pattern detection.
     // We only keep the last 500 chars — enough to catch any multi-line error
     // message without unbounded growth.
     let outputBuf = "";
-    let copilotRestartTimer: number | null = null;
 
     void listen<string>(`session-output:${sessionId}`, (event) => {
       const bytes = base64ToBytes(event.payload);
-      term.write(bytes);
+      const term = termRef.current;
+      if (term) term.write(bytes);
+      else pendingOutput.push(bytes);
 
       // Detect the Copilot CLI error "No session, task, or name matched
       // '<uuid>'." which fires when --resume references a session that no
@@ -228,46 +169,95 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
       unlistenOutput = unlisten;
     });
 
-    // Drag-and-drop: a file dropped from Finder onto *this* terminal pastes
-    // its quoted path into that terminal's input (DESIGN 3.1). The event is
-    // window-global in Tauri v2 (there's no per-element HTML5 drop target),
-    // so every mounted Terminal listens and self-selects by checking
-    // whether the drop's physical position lands inside its own (visible)
-    // bounding box.
-    void getCurrentWebview()
-      .onDragDropEvent((event) => {
-        if (event.payload.type !== "drop") return;
-        const el = containerRef.current;
-        if (!el || el.offsetParent === null) return; // not the visible tab
-        const logical = event.payload.position.toLogical(window.devicePixelRatio || 1);
-        const rect = el.getBoundingClientRect();
-        if (
-          logical.x < rect.left ||
-          logical.x > rect.right ||
-          logical.y < rect.top ||
-          logical.y > rect.bottom
-        ) {
-          return;
-        }
-        const paths = event.payload.paths;
-        if (!paths || paths.length === 0) return;
-        const quoted = paths.map((p) => `"${p}"`).join(" ");
-        void sessionWrite(sessionId, `${quoted} `);
-        term.focus();
-      })
-      .then((unlisten) => {
-        if (cancelled) {
-          unlisten();
-          return;
-        }
-        unlistenDrop = unlisten;
+    startTerminalRef.current = () => {
+      if (cancelled || termRef.current) return;
+
+      const term = new XTerm({
+        convertEol: true,
+        fontFamily:
+          '"JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontSize: 13,
+        lineHeight: 1.35,
+        theme: resolveTerminalTheme(themeId),
+        cursorBlink: true,
+        cursorStyle: "bar",
+        scrollback: 3000,
+        allowProposedApi: true,
       });
+      const fit = new FitAddon();
+      term.loadAddon(fit);
+      term.open(container);
+      termRef.current = term;
+      fitRef.current = fit;
+      for (const bytes of pendingOutput) term.write(bytes);
+      pendingOutput.length = 0;
+
+      const cancelWebgl = scheduleTerminalJob(() => {
+        if (cancelled || termRef.current !== term) return;
+        try {
+          const webgl = new WebglAddon();
+          webgl.onContextLoss(() => webgl.dispose());
+          term.loadAddon(webgl);
+        } catch (err) {
+          console.warn("omniagent-ade: WebGL addon unavailable, falling back to DOM renderer", err);
+        }
+      });
+
+      dataDisposable = term.onData((data) => {
+        void sessionWrite(sessionId, data);
+        if (/\r|\n/.test(data)) submittedPrompt = true;
+      });
+      titleDisposable = term.onTitleChange?.((title) => {
+        if (!submittedPrompt) return;
+        const usefulTitle = engineTitleFromTerminalTitle(tabEngine, title);
+        if (usefulTitle) onEngineTitleRef.current?.(sessionId, usefulTitle);
+      });
+
+      resizeObserver = new ResizeObserver(() => {
+        if (resizeDebounceTick !== null) clearTimeout(resizeDebounceTick);
+        resizeDebounceTick = window.setTimeout(() => {
+          resizeDebounceTick = null;
+          if (visibleRef.current) {
+            scheduleTerminalJob(() => scheduleRetryFit(fit, term, 3, 50));
+          }
+        }, 50);
+      });
+      resizeObserver.observe(container);
+      scheduleRetryFit(fit, term, 3, 50, dismissLoading);
+      if (focusedRef.current) term.focus();
+
+      void getCurrentWebview()
+        .onDragDropEvent((event) => {
+          if (event.payload.type !== "drop") return;
+          const el = containerRef.current;
+          if (!el || el.offsetParent === null) return;
+          const logical = event.payload.position.toLogical(window.devicePixelRatio || 1);
+          const rect = el.getBoundingClientRect();
+          if (
+            logical.x < rect.left || logical.x > rect.right ||
+            logical.y < rect.top || logical.y > rect.bottom
+          ) return;
+          const paths = event.payload.paths;
+          if (!paths || paths.length === 0) return;
+          const quoted = paths.map((p) => `"${p}"`).join(" ");
+          void sessionWrite(sessionId, `${quoted} `);
+          term.focus();
+        })
+        .then((unlisten) => {
+          if (cancelled) unlisten();
+          else unlistenDrop = unlisten;
+        });
+
+      // The WebGL job is cancellable if this pane closes before its turn.
+      webglCancelRef.current = cancelWebgl;
+    };
 
     return () => {
       cancelled = true;
-      dataDisposable.dispose();
+      startTerminalRef.current = null;
+      dataDisposable?.dispose();
       titleDisposable?.dispose();
-      resizeObserver.disconnect();
+      resizeObserver?.disconnect();
       if (resizeDebounceTick !== null) clearTimeout(resizeDebounceTick);
       if (retryTimerRef.current !== null) {
         clearTimeout(retryTimerRef.current);
@@ -276,11 +266,14 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
       if (copilotRestartTimer !== null) {
         clearTimeout(copilotRestartTimer);
       }
+      webglCancelRef.current?.();
+      webglCancelRef.current = null;
       unlistenOutput?.();
       unlistenDrop?.();
-      term.dispose();
+      termRef.current?.dispose();
       termRef.current = null;
       fitRef.current = null;
+      pendingOutput.length = 0;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
@@ -298,26 +291,20 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
   }, [themeId]);
 
   // Re-fit whenever this tab becomes visible.
-  // Double-RAF: the first frame schedules a layout pass after display:none→block;
-  // the second frame reads the resolved dimensions. Without the second frame the
-  // container's clientWidth is often still 0 on the first read, producing a
-  // black terminal that only recovers on the next manual resize.
+  // The same queue also starts terminals lazily. One pane gets its expensive
+  // xterm construction per frame, so opening a full grid cannot monopolise the
+  // browser event loop.
   useEffect(() => {
     if (!visible) return;
-    let raf1: number;
-    let raf2: number;
-    raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
-        const term = termRef.current;
-        const fit = fitRef.current;
-        if (!term || !fit) return;
-        scheduleRetryFit(fit, term, 40, 100, dismissLoading);
-      });
+    return scheduleTerminalJob(() => {
+      if (!termRef.current) {
+        startTerminalRef.current?.();
+        return;
+      }
+      const term = termRef.current;
+      const fit = fitRef.current;
+      if (term && fit) scheduleRetryFit(fit, term, 3, 50, dismissLoading);
     });
-    return () => {
-      cancelAnimationFrame(raf1);
-      cancelAnimationFrame(raf2);
-    };
   }, [visible, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
