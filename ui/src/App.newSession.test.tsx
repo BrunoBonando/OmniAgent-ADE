@@ -185,13 +185,6 @@ async function boot() {
 
 /** Boot after restoreThreeSessions() — auto-restore fires (auth_gate +
  * last_selected_project + persistedTabs all set), skipping startup screen. */
-async function bootAfterRestore() {
-  render(<App />);
-  await screen.findByText("select-p1");
-  await waitFor(() => expect(tauriMocks.rootsListMock).toHaveBeenCalled());
-  await screen.findByText("Project One");
-}
-
 /** Same boot, but with zero projects — `selectedProject` can never resolve,
  * which is exactly the "no workspace selected" branch ⌘N has to fall
  * through to `NewWorkspaceModal` for. */

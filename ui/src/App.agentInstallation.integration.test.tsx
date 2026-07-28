@@ -37,7 +37,7 @@ const tauriMocks = vi.hoisted(() => {
     sessionCreateMock: vi.fn(),
     sessionKillMock: vi.fn(),
     sessionStatusMock: vi.fn(),
-  sessionWriteMock: vi.fn(),
+    sessionWriteMock: vi.fn(),
     settingsGetMock: vi.fn(),
     settingsSetMock: vi.fn(),
 
@@ -72,7 +72,6 @@ vi.mock("./lib/tauri", () => ({
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   reviewStatus: vi.fn().mockResolvedValue(null),
-  gitBranch: vi.fn().mockResolvedValue(null),
   sendNativeNotification: vi.fn().mockResolvedValue(undefined),
   renameProject: vi.fn().mockResolvedValue(undefined),
 }));

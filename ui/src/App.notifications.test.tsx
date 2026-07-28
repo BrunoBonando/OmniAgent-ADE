@@ -11,7 +11,7 @@
 // addition: `listen` is a real registry here, so a test can fire an event at
 // a specific session.
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LAYOUT_SETTING_KEY, type ProjectInfo, type TabInfo } from "./state/sessions";
 import { NOTIFICATIONS_SETTING_KEY } from "./state/notifications";
 import type { SessionStatusEvent } from "./state/sessionStatus";
