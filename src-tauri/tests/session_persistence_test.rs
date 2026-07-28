@@ -1,5 +1,5 @@
-//! Session persistence + traffic-light status, against **real tmux** and
-//! **real PTYs** — no mocks anywhere in the persistence path.
+//! Session persistence + traffic-light status, against the **real PTY daemon**
+//! and **real PTYs** — no mocks anywhere in the persistence path.
 //!
 //! Founder brief (Bruno, 2026-07-26): *"Every new claude or terminal or codex
 //! session, must be stored, if not properly closed… if the user closes the
@@ -7,13 +7,13 @@
 //! (whatever) session must be restored"*, and *"Green means ready for any new
 //! command, yellow means executing, red means requires attention or input."*
 //!
-//! Every test that needs tmux is guarded by [`test_tmux`] and **skips
-//! cleanly** when it isn't installed, so the suite still passes on a machine
-//! without it (which is also the machine the no-tmux fallback tests below
-//! exist for). Each test gets its own tmux **socket**, so tests never see each
-//! other's sessions, never race, and can never touch the user's own tmux
-//! server or OmniAgent's real `omniagent-ade` one. A [`ServerGuard`] kills
-//! each test's server on the way out, including on panic.
+//! Every test that needs the daemon is guarded by [`test_daemon`] and **skips
+//! cleanly** when it isn't available, so the suite still passes on a machine
+//! without it (which is also the machine the no-daemon fallback tests below
+//! exist for). Each test gets its own **socket**, so tests never see each
+//! other's sessions, never race, and can never touch OmniAgent's real
+//! `omniagent-ade` server. A [`ServerGuard`] kills each test's server on the
+//! way out, including on panic.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use omniagent_ade_lib::sessions::{
     CreateSessionRequest, OutputSink, SessionManager, SessionStatus, SessionStatusEvent, StatusSink,
 };
-use omniagent_ade_lib::tmux::{self, Tmux};
+use omniagent_ade_lib::daemon::{self, DaemonSessions};
 
 // ---------------------------------------------------------------------------
 // harness
@@ -40,16 +40,15 @@ fn unique_socket(label: &str) -> String {
     format!("omniagent-test-{label}-{pid}-{n}")
 }
 
-/// Kills the test's private tmux server when the test ends — including on a
+/// Kills the test's private daemon server when the test ends — including on a
 /// failed assertion, which would otherwise leave a real shell (or `claude`)
 /// process running forever after `cargo test` exits.
 ///
-/// `kill-server`, not a loop of `kill-session`, **and** an explicit unlink of
-/// the socket file: tmux does not remove the socket inode when its server
-/// exits, and since each run's sockets are pid-stamped, every `cargo test`
-/// left another set behind — 150+ dead socket files had piled up in
-/// `/tmp/tmux-<uid>/` before this was noticed.
-struct ServerGuard(Option<Tmux>);
+/// `kill_server`, **and** an explicit unlink of the socket file: the server
+/// does not remove the socket inode when it exits, and since each run's
+/// sockets are pid-stamped, every `cargo test` would otherwise leave another
+/// set behind.
+struct ServerGuard(Option<DaemonSessions>);
 
 impl Drop for ServerGuard {
     fn drop(&mut self) {
@@ -62,25 +61,24 @@ impl Drop for ServerGuard {
     }
 }
 
-/// Where `tmux -L <name>` puts its socket: `$TMUX_TMPDIR` (or `/tmp`) +
-/// `tmux-<uid>/<name>`. Mirrors tmux's own rule; only used to clean up after
-/// tests, so being wrong costs a leftover file, never a failure.
+/// Where the daemon puts a named socket. Only used to clean up after tests, so
+/// being wrong costs a leftover file, never a failure.
 fn default_socket_path(socket_name: &str) -> Option<std::path::PathBuf> {
-    let base = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
     let uid = unsafe { libc::getuid() };
     Some(
         std::path::PathBuf::from(base)
-            .join(format!("tmux-{uid}"))
+            .join(format!("daemon-{uid}"))
             .join(socket_name),
     )
 }
 
-/// Real tmux on a private socket + this app's real config, or `None` when
-/// tmux isn't installed (in which case the caller skips).
-fn test_tmux(label: &str, data_dir: &std::path::Path) -> Option<Tmux> {
+/// Real daemon on a private socket + this app's real config, or `None` when
+/// the daemon isn't available (in which case the caller skips).
+fn test_daemon(label: &str, data_dir: &std::path::Path) -> Option<DaemonSessions> {
     let socket = unique_socket(label);
-    let resolved = Tmux::resolve(&socket, std::env::var("PATH").ok().as_deref())?;
-    Some(match tmux::write_config(data_dir) {
+    let resolved = DaemonSessions::resolve(&socket, std::env::var("PATH").ok().as_deref())?;
+    Some(match daemon::write_config(data_dir) {
         Some(cfg) => resolved.with_config(cfg),
         None => resolved,
     })
@@ -127,14 +125,14 @@ fn wait_for_output(
 /// status test below needs.
 fn manager_with_status(
     data_dir: &std::path::Path,
-    tmux: Option<Tmux>,
+    daemon_sessions: Option<DaemonSessions>,
 ) -> (SessionManager, mpsc::Receiver<SessionStatusEvent>) {
     let (tx, rx) = mpsc::channel::<SessionStatusEvent>();
     let status_sink: StatusSink = Arc::new(move |event: &SessionStatusEvent| {
         let _ = tx.send(event.clone());
     });
     let manager = SessionManager::new(data_dir.to_path_buf(), silent_sink())
-        .with_tmux(tmux)
+        .with_daemon_sessions(daemon_sessions)
         .with_status_sink(status_sink);
     (manager, rx)
 }
@@ -176,38 +174,38 @@ fn status_of(manager: &SessionManager, id: &str) -> Option<SessionStatus> {
 }
 
 // ---------------------------------------------------------------------------
-// 1. lifecycle: a session really is a tmux session, and closing the tab
+// 1. lifecycle: a session really is a daemon session, and closing the tab
 //    really deletes it
 // ---------------------------------------------------------------------------
 
-/// The base claim of the whole feature: an ADE session *is* a tmux session
-/// named `omniagent-<id>`, asserted against real `tmux list-sessions` output
+/// The base claim of the whole feature: an ADE session *is* a daemon session
+/// named `omniagent-<id>`, asserted against the real daemon session list
 /// rather than against our own bookkeeping — and Bruno's deletion rule ("If
-/// the user closes the terminal, tmux or claude session can be deleted")
+/// the user closes the terminal, the session can be deleted")
 /// holds: `kill()` removes it from the server.
 #[test]
-fn a_session_creates_a_real_tmux_session_and_kill_deletes_it() {
+fn a_session_creates_a_real_daemon_session_and_kill_deletes_it() {
     let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_tmux("lifecycle", tmp.path()) else {
-        eprintln!("tmux not installed — skipping");
+    let Some(t) = test_daemon("lifecycle", tmp.path()) else {
+        eprintln!("the pty daemon is unavailable — skipping");
         return;
     };
     let _guard = ServerGuard(Some(t.clone()));
 
     let manager =
-        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_tmux(Some(t.clone()));
+        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_daemon_sessions(Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
-    let expected_name = tmux::session_name(&info.id);
+    let expected_name = daemon::session_name(&info.id);
     assert!(
         info.persistent,
-        "a tmux-backed session must report persistent"
+        "a daemon-backed session must report persistent"
     );
     assert!(!info.restored, "a brand-new session was not restored");
     assert_eq!(
         t.list_sessions(),
         vec![expected_name.clone()],
-        "real `tmux list-sessions` must show exactly this session"
+        "the real daemon session list must show exactly this session"
     );
     assert!(t.has_session(&expected_name));
 
@@ -215,7 +213,7 @@ fn a_session_creates_a_real_tmux_session_and_kill_deletes_it() {
 
     assert!(
         t.list_sessions().is_empty(),
-        "closing the tab must delete the tmux session, got: {:?}",
+        "closing the tab must delete the daemon session, got: {:?}",
         t.list_sessions()
     );
 }
@@ -231,23 +229,23 @@ fn a_session_creates_a_real_tmux_session_and_kill_deletes_it() {
 ///    — something only *that* process could still know);
 /// 2. simulate the app closing by dropping the `SessionManager` without ever
 ///    calling `kill()` (no tab was closed, the app just went away);
-/// 3. assert against real `tmux list-sessions` that the session survived;
+/// 3. assert against the real daemon session list that the session survived;
 /// 4. create again with the **same id** and assert it *attached* rather than
-///    spawning a second engine — proven three ways: `restored == true`, real
-///    `tmux list-sessions` still showing exactly one session (not two), and
+///    spawning a second engine — proven three ways: `restored == true`, the
+///    real daemon session list still showing exactly one session (not two), and
 ///    the shell variable from step 1 still being readable, which no freshly
 ///    spawned shell could possibly reproduce.
 #[test]
 fn closing_the_app_and_returning_reattaches_the_same_live_session() {
     let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_tmux("restore", tmp.path()) else {
-        eprintln!("tmux not installed — skipping");
+    let Some(t) = test_daemon("restore", tmp.path()) else {
+        eprintln!("the pty daemon is unavailable — skipping");
         return;
     };
     let _guard = ServerGuard(Some(t.clone()));
 
     let stable_id = "sess-restore-probe";
-    let expected_name = tmux::session_name(stable_id);
+    let expected_name = daemon::session_name(stable_id);
 
     // ---- app run #1 -------------------------------------------------------
     {
@@ -256,7 +254,7 @@ fn closing_the_app_and_returning_reattaches_the_same_live_session() {
             let _ = tx.send((id.to_string(), chunk.to_vec()));
         });
         let manager =
-            SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(Some(t.clone()));
+            SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(t.clone()));
 
         let info = manager
             .create(CreateSessionRequest {
@@ -289,7 +287,7 @@ fn closing_the_app_and_returning_reattaches_the_same_live_session() {
     // ---- the app is gone; the engine is not --------------------------------
     assert!(
         t.has_session(&expected_name),
-        "the tmux session must outlive the app closing — real list-sessions: {:?}",
+        "the daemon session must outlive the app closing — real session list: {:?}",
         t.list_sessions()
     );
 
@@ -298,7 +296,7 @@ fn closing_the_app_and_returning_reattaches_the_same_live_session() {
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(Some(t.clone()));
+    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(t.clone()));
 
     let info = manager
         .create(CreateSessionRequest {
@@ -314,7 +312,7 @@ fn closing_the_app_and_returning_reattaches_the_same_live_session() {
     assert_eq!(
         t.list_sessions(),
         vec![expected_name.clone()],
-        "attaching must NOT have spawned a second tmux session"
+        "attaching must NOT have spawned a second daemon session"
     );
 
     // The real proof: the variable set in run #1 is still there, so this is
@@ -338,20 +336,20 @@ fn closing_the_app_and_returning_reattaches_the_same_live_session() {
     assert!(t.list_sessions().is_empty());
 }
 
-/// A restore for an id whose tmux session is *gone* (server restarted,
+/// A restore for an id whose daemon session is *gone* (server restarted,
 /// machine rebooted) must not fail — it starts a fresh engine under the same
 /// id and says so (`restored == false`), which is the honest answer.
 #[test]
-fn restoring_an_id_whose_tmux_session_is_gone_starts_fresh_without_failing() {
+fn restoring_an_id_whose_daemon_session_is_gone_starts_fresh_without_failing() {
     let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_tmux("gone", tmp.path()) else {
-        eprintln!("tmux not installed — skipping");
+    let Some(t) = test_daemon("gone", tmp.path()) else {
+        eprintln!("the pty daemon is unavailable — skipping");
         return;
     };
     let _guard = ServerGuard(Some(t.clone()));
 
     let manager =
-        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_tmux(Some(t.clone()));
+        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_daemon_sessions(Some(t.clone()));
     let info = manager
         .create(CreateSessionRequest {
             restore_id: Some("sess-never-existed".to_string()),
@@ -376,7 +374,7 @@ fn restoring_an_id_whose_tmux_session_is_gone_starts_fresh_without_failing() {
 #[test]
 fn opening_a_shell_never_waits_out_claudes_liveness_probe() {
     let tmp = tempfile::tempdir().unwrap();
-    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_tmux(None);
+    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_daemon_sessions(None);
 
     let started = Instant::now();
     let info = manager
@@ -395,20 +393,20 @@ fn opening_a_shell_never_waits_out_claudes_liveness_probe() {
     );
 }
 
-/// Two live tabs must never collide onto one tmux session, and a `restore_id`
+/// Two live tabs must never collide onto one daemon session, and a `restore_id`
 /// naming a tab that's already open is a frontend bug worth surfacing rather
 /// than silently hijacking the running session.
 #[test]
 fn restoring_an_id_that_is_already_live_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_tmux("dup", tmp.path()) else {
-        eprintln!("tmux not installed — skipping");
+    let Some(t) = test_daemon("dup", tmp.path()) else {
+        eprintln!("the pty daemon is unavailable — skipping");
         return;
     };
     let _guard = ServerGuard(Some(t.clone()));
 
     let manager =
-        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_tmux(Some(t.clone()));
+        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_daemon_sessions(Some(t.clone()));
     let info = manager
         .create(CreateSessionRequest {
             restore_id: Some("sess-already-open".to_string()),
@@ -427,7 +425,7 @@ fn restoring_an_id_that_is_already_live_is_rejected() {
     manager.kill(&info.id).unwrap();
 }
 
-/// `restore_id` reaches the filesystem (`<id>.log`) and a tmux target, so a
+/// `restore_id` reaches the filesystem (`<id>.log`) and a daemon target, so a
 /// hostile/garbled value must be rejected, never sanitized into some other
 /// session's name.
 #[test]
@@ -460,18 +458,18 @@ fn a_malformed_restore_id_is_rejected_rather_than_sanitized() {
 // 3. traffic-light status
 // ---------------------------------------------------------------------------
 
-/// Bruno's cyan, driven by a real long-running command in a real tmux-backed
+/// Bruno's cyan, driven by a real long-running command in a real daemon-backed
 /// shell: **green → cyan → green** around `sleep 2`.
 ///
 /// `sleep` is chosen deliberately — it produces *no output at all*, so this
-/// only passes because the shell path uses tmux's `#{pane_current_command}`
-/// (which reports the pane's foreground process group) rather than an
+/// only passes because the shell path uses the daemon's foreground-process
+/// reporting rather than an
 /// output-activity guess, which would call a silent command "idle".
 #[test]
 fn shell_status_goes_ready_then_tool_execution_then_ready_around_a_real_command() {
     let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_tmux("status", tmp.path()) else {
-        eprintln!("tmux not installed — skipping");
+    let Some(t) = test_daemon("status", tmp.path()) else {
+        eprintln!("the pty daemon is unavailable — skipping");
         return;
     };
     let _guard = ServerGuard(Some(t.clone()));
@@ -539,8 +537,8 @@ fn shell_status_goes_ready_then_tool_execution_then_ready_around_a_real_command(
 #[test]
 fn approval_marker_turns_the_light_amber_and_writing_clears_it() {
     let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_tmux("attention", tmp.path()) else {
-        eprintln!("tmux not installed — skipping");
+    let Some(t) = test_daemon("attention", tmp.path()) else {
+        eprintln!("the pty daemon is unavailable — skipping");
         return;
     };
     let _guard = ServerGuard(Some(t.clone()));
@@ -584,7 +582,7 @@ fn approval_marker_turns_the_light_amber_and_writing_clears_it() {
 
     // Then let the terminal settle before judging. This wait is the honest
     // shape of the feature, not a fudge: the signal is *screen text*, and
-    // under parallel load tmux's repaint of the pre-clear screen (marker
+    // under parallel load the daemon's repaint of the pre-clear screen (marker
     // still on it) can arrive well over a second after the keystroke —
     // outside `ATTENTION_INPUT_GRACE`, which re-latches red. That is the
     // documented limitation (see `sessions.rs` module docs), and asserting
@@ -621,8 +619,8 @@ fn approval_marker_turns_the_light_amber_and_writing_clears_it() {
 #[test]
 fn a_failed_tool_exit_turns_the_light_red_and_writing_clears_it() {
     let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_tmux("error", tmp.path()) else {
-        eprintln!("tmux not installed — skipping");
+    let Some(t) = test_daemon("error", tmp.path()) else {
+        eprintln!("the pty daemon is unavailable — skipping");
         return;
     };
     let _guard = ServerGuard(Some(t.clone()));
@@ -706,8 +704,8 @@ fn a_failed_tool_exit_turns_the_light_red_and_writing_clears_it() {
 #[test]
 fn an_idle_session_settles_on_one_state_and_stops_emitting() {
     let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_tmux("idle", tmp.path()) else {
-        eprintln!("tmux not installed — skipping");
+    let Some(t) = test_daemon("idle", tmp.path()) else {
+        eprintln!("the pty daemon is unavailable — skipping");
         return;
     };
     let _guard = ServerGuard(Some(t.clone()));
@@ -753,8 +751,8 @@ fn an_idle_session_settles_on_one_state_and_stops_emitting() {
     manager.kill(&info.id).unwrap();
 }
 
-/// The plumbing behind claude/codex cyan: `capture-pane` must return the
-/// pane's *live screen* through this app's real tmux config.
+/// The plumbing behind claude/codex cyan: the daemon's screen capture must
+/// return the pane's *live screen* through this app's real daemon config.
 ///
 /// This is the one half of that path an automated test can reach without a
 /// live `claude` — the marker matching itself is unit-tested against the real
@@ -762,18 +760,18 @@ fn an_idle_session_settles_on_one_state_and_stops_emitting() {
 /// tool_execution`), and the two together are what the manual verification
 /// exercises end to end.
 #[test]
-fn capture_pane_reads_the_live_screen_through_the_apps_tmux_config() {
+fn capture_pane_reads_the_live_screen_through_the_apps_daemon_config() {
     let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_tmux("capture", tmp.path()) else {
-        eprintln!("tmux not installed — skipping");
+    let Some(t) = test_daemon("capture", tmp.path()) else {
+        eprintln!("the pty daemon is unavailable — skipping");
         return;
     };
     let _guard = ServerGuard(Some(t.clone()));
 
     let manager =
-        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_tmux(Some(t.clone()));
+        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_daemon_sessions(Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
-    let name = tmux::session_name(&info.id);
+    let name = daemon::session_name(&info.id);
 
     manager.write(&info.id, "echo ON_THE_SCREEN_NOW\n").unwrap();
 
@@ -813,24 +811,24 @@ fn capture_pane_reads_the_live_screen_through_the_apps_tmux_config() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. graceful degradation — no tmux on this machine
+// 4. graceful degradation — no daemon on this machine
 // ---------------------------------------------------------------------------
 
-/// tmux missing must cost persistence and nothing else: the session still
+/// A missing daemon must cost persistence and nothing else: the session still
 /// creates, still runs, still streams output, and honestly reports
-/// `persistent: false`. Injected by pointing the tmux binary at a path that
-/// doesn't exist, so this proves the fallback *on a machine where tmux is
-/// installed* — no uninstall required.
+/// `persistent: false`. Injected by pointing the daemon binary at a path that
+/// doesn't exist, so this proves the fallback *on a machine where the daemon
+/// is available* — no uninstall required.
 #[test]
-fn a_missing_tmux_binary_falls_back_to_a_working_direct_spawn() {
+fn a_missing_daemon_binary_falls_back_to_a_working_direct_spawn() {
     let tmp = tempfile::tempdir().unwrap();
     let (tx, rx) = mpsc::channel::<(String, Vec<u8>)>();
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
 
-    let broken = Tmux::with_binary("/no/such/tmux/binary/anywhere", "unused-socket");
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(Some(broken));
+    let broken = DaemonSessions::with_binary("/no/such/daemon/binary/anywhere", "unused-socket");
+    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(broken));
 
     let info = manager.create(shell_request(tmp.path())).unwrap();
     assert!(!info.persistent, "a fallback spawn is not persistent");
@@ -846,36 +844,36 @@ fn a_missing_tmux_binary_falls_back_to_a_working_direct_spawn() {
     manager.kill(&info.id).unwrap();
 }
 
-/// The same degradation via the other door: no tmux configured at all (what
+/// The same degradation via the other door: no daemon configured at all (what
 /// `SessionManager::new` gives you, and what `lib.rs` ends up with when
-/// `default_tmux` resolves to `None`).
+/// `default_daemon_sessions` resolves to `None`).
 #[test]
-fn no_tmux_configured_at_all_still_creates_a_working_session() {
+fn no_daemon_configured_at_all_still_creates_a_working_session() {
     let tmp = tempfile::tempdir().unwrap();
     let (tx, rx) = mpsc::channel::<(String, Vec<u8>)>();
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
 
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(None);
+    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(None);
     let info = manager.create(shell_request(tmp.path())).unwrap();
     assert!(!info.persistent);
 
-    manager.write(&info.id, "echo NO_TMUX_WORKS\n").unwrap();
-    let (found, seen) = wait_for_output(&rx, &info.id, "NO_TMUX_WORKS", Duration::from_secs(10));
+    manager.write(&info.id, "echo NO_DAEMON_WORKS\n").unwrap();
+    let (found, seen) = wait_for_output(&rx, &info.id, "NO_DAEMON_WORKS", Duration::from_secs(10));
     assert!(found, "saw {seen:?}");
 
     manager.kill(&info.id).unwrap();
 }
 
-/// Without tmux there's no `#{pane_current_command}`, so status falls back to
-/// output activity for every engine — including `shell`. This asserts the
-/// fallback is *live and honest*, not that it's as good: an `echo` (which
+/// Without the daemon there's no foreground-process reporting, so status falls
+/// back to output activity for every engine — including `shell`. This asserts
+/// the fallback is *live and honest*, not that it's as good: an `echo` (which
 /// does produce output) is visible as executing and then settles to ready.
 /// The documented blind spot — a silent long-running command like `sleep`
-/// looking idle — is exactly why tmux is the default.
+/// looking idle — is exactly why the daemon is the default.
 #[test]
-fn without_tmux_status_still_works_via_the_output_activity_fallback() {
+fn without_daemon_status_still_works_via_the_output_activity_fallback() {
     let tmp = tempfile::tempdir().unwrap();
     let (manager, rx) = manager_with_status(tmp.path(), None);
     let info = manager.create(shell_request(tmp.path())).unwrap();
@@ -888,7 +886,7 @@ fn without_tmux_status_still_works_via_the_output_activity_fallback() {
             SessionStatus::Ready,
             Duration::from_secs(10)
         ),
-        "an idle shell must reach ready even without tmux; saw {seen:?}"
+        "an idle shell must reach ready even without the daemon; saw {seen:?}"
     );
 
     // A *sustained* run of output — output every 200 ms for ~4 s. Both
@@ -929,15 +927,16 @@ fn without_tmux_status_still_works_via_the_output_activity_fallback() {
 // 5. the wrapped engine still behaves exactly as it did
 // ---------------------------------------------------------------------------
 
-/// Wrapping in tmux must not break the transcript contract: output still
-/// lands on disk, still redacted. (`sessions.rs`'s redaction is line-buffered
-/// with a guaranteed final flush on `kill()`, which is what makes this hold
-/// even though tmux redraws with cursor escapes rather than newlines.)
+/// Wrapping in a daemon session must not break the transcript contract: output
+/// still lands on disk, still redacted. (`sessions.rs`'s redaction is
+/// line-buffered with a guaranteed final flush on `kill()`, which is what
+/// makes this hold even though the engine redraws with cursor escapes rather
+/// than newlines.)
 #[test]
-fn a_tmux_backed_session_still_writes_a_redacted_transcript() {
+fn a_daemon_backed_session_still_writes_a_redacted_transcript() {
     let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_tmux("transcript", tmp.path()) else {
-        eprintln!("tmux not installed — skipping");
+    let Some(t) = test_daemon("transcript", tmp.path()) else {
+        eprintln!("the pty daemon is unavailable — skipping");
         return;
     };
     let _guard = ServerGuard(Some(t.clone()));
@@ -946,7 +945,7 @@ fn a_tmux_backed_session_still_writes_a_redacted_transcript() {
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(Some(t.clone()));
+    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     manager.write(&info.id, "echo API_KEY=abc123\n").unwrap();
@@ -973,14 +972,14 @@ fn a_tmux_backed_session_still_writes_a_redacted_transcript() {
     );
 }
 
-/// `resize` must reach the engine through tmux, not just the client — a
-/// tmux window follows its attached client's size, so this proves the whole
-/// chain (PTY ioctl → SIGWINCH → tmux client → window → pane) still works.
+/// `resize` must reach the engine through the daemon, not just the client — a
+/// daemon window follows its attached client's size, so this proves the whole
+/// chain (PTY ioctl → SIGWINCH → daemon client → window → pane) still works.
 #[test]
-fn resize_reaches_the_engine_through_tmux() {
+fn resize_reaches_the_engine_through_the_daemon() {
     let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_tmux("resize", tmp.path()) else {
-        eprintln!("tmux not installed — skipping");
+    let Some(t) = test_daemon("resize", tmp.path()) else {
+        eprintln!("the pty daemon is unavailable — skipping");
         return;
     };
     let _guard = ServerGuard(Some(t.clone()));
@@ -989,11 +988,11 @@ fn resize_reaches_the_engine_through_tmux() {
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(Some(t.clone()));
+    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     manager.resize(&info.id, 132, 43).unwrap();
-    // Let tmux propagate the SIGWINCH to the pane before asking.
+    // Let the daemon propagate the SIGWINCH to the pane before asking.
     std::thread::sleep(Duration::from_millis(600));
 
     manager

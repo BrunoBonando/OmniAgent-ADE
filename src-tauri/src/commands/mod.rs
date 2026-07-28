@@ -316,7 +316,7 @@ fn render_node_list(out: &mut String, heading: &str, items: Option<&Value>) {
 ///
 /// Omit `restoreId` and behavior is byte-for-byte what it was: a fresh id, a
 /// fresh engine. Pass the `id` a previous run returned and the session is
-/// *reconnected* — if its tmux session is still alive (the app was closed
+/// *reconnected* — if its daemon session is still alive (the app was closed
 /// without that tab being closed), the same live `claude`/`codex`/shell
 /// process comes back with its scrollback, and the returned `restored` is
 /// `true`.

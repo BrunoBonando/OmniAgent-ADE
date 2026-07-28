@@ -1,6 +1,6 @@
 //! Native PTY Daemon for OmniAgent-ADE.
 //!
-//! Provides process decoupling across app restarts without external dependencies like tmux.
+//! Provides process decoupling across app restarts without external dependencies.
 //! Spawns master PTY instances via `portable_pty`, tracks virtual terminal state via `vt100`,
 //! and listens on a local Unix socket (`omniagent-pty.sock`) for client connections.
 

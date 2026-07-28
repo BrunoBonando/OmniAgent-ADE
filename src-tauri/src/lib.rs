@@ -4,7 +4,7 @@ pub mod map_feed;
 pub mod pty_daemon_client;
 pub mod roots;
 pub mod sessions;
-pub mod tmux;
+pub mod daemon;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tauri::{Emitter, Manager};

@@ -16,7 +16,7 @@
 //! It prints a timestamped transition log plus the `notify` flag the
 //! notifications layer will act on, and kills the session on the way out.
 //! Everything goes through the real [`SessionManager`] and the real
-//! [`default_tmux`] wiring — same code path the app runs, not a test-only
+//! [`default_daemon_sessions`] wiring — same code path the app runs, not a test-only
 //! configuration.
 //!
 //! **What each run should show** (and what it actually showed on 2026-07-26 —
@@ -36,7 +36,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use omniagent_ade_lib::sessions::{
-    default_tmux, CreateSessionRequest, OutputSink, SessionManager, SessionStatusEvent, StatusSink,
+    default_daemon_sessions, CreateSessionRequest, OutputSink, SessionManager, SessionStatusEvent,
+    StatusSink,
 };
 
 /// One scripted keystroke: send `text` at `at` seconds from the start.
@@ -56,11 +57,12 @@ fn main() {
     let cwd = std::env::temp_dir().join(format!("omniagent-status-probe-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).expect("scratch cwd");
 
-    let tmux = default_tmux(&data_dir);
+    let daemon_sessions = default_daemon_sessions(&data_dir);
     println!(
-        "engine={engine}  cwd={}  tmux={}",
+        "engine={engine}  cwd={}  daemon={}",
         cwd.display(),
-        tmux.as_ref()
+        daemon_sessions
+            .as_ref()
             .map(|t| t.binary().display().to_string())
             .unwrap_or_else(|| "NOT FOUND (cyan for claude/codex is unreachable)".into())
     );
@@ -72,7 +74,7 @@ fn main() {
     let sink: OutputSink = Arc::new(|_id: &str, _chunk: &[u8]| {});
 
     let manager = SessionManager::new(data_dir, sink)
-        .with_tmux(tmux)
+        .with_daemon_sessions(daemon_sessions)
         .with_status_sink(status_sink);
 
     let info = manager
@@ -152,7 +154,7 @@ fn script_for(engine: &str) -> (Vec<Step>, u64) {
             35,
         ),
         // `\r`, not `\n`: a full-screen TUI in raw mode reads Enter as a
-        // carriage return (see manual_tmux_persistence_verify's note).
+        // carriage return (see manual_daemon_persistence_verify's note).
         _ => (
             vec![
                 Step {

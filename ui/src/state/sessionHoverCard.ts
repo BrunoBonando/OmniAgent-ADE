@@ -83,6 +83,9 @@ export interface SessionCardModel {
    * becomes `{ added, removed }` and only this file and the card's last row
    * change. */
   diff: null;
+  /** Per-terminal statuses in tab order, capped at 8, for the mini pane
+   * grid rendered in the hover card head. */
+  terminalStatuses: Array<{ index: number; status?: StatusPresentation['status'] }>;
 }
 
 export function deriveSessionCard({ session, projectLabel, branch }: SessionCardInput): SessionCardModel {
@@ -100,5 +103,6 @@ export function deriveSessionCard({ session, projectLabel, branch }: SessionCard
     status: statusPresentation(mostSignificantStatus(session.tabs.map((t) => t.status))),
     restored: session.tabs.some((t) => t.restored === true),
     diff: null,
+    terminalStatuses: session.tabs.slice(0, 8).map((t, i) => ({ index: i + 1, status: t.status })),
   };
 }

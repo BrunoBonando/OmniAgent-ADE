@@ -554,7 +554,7 @@ use uuid::Uuid;
 use brain_core::{now_ts, redact::redact};
 
 use crate::pty_daemon_client::PtyDaemonClient;
-use crate::tmux::{self, Tmux};
+use crate::daemon::{self, DaemonSessions};
 
 /// A callback invoked with `(session_id, raw_chunk)` for every chunk read
 /// from a session's PTY, in real time, un-redacted (this is the "live
@@ -801,10 +801,10 @@ struct SessionHandle {
     /// joining, a caller that exits its own process right after `kill()`
     /// could race this detached thread and lose that final flush.
     reader_thread: thread::JoinHandle<()>,
-    /// The tmux session this PTY is attached to, when tmux is in play.
-    /// `None` = direct spawn (no tmux available), i.e. nothing to kill on
+    /// The daemon session this PTY is attached to, when the daemon is in play.
+    /// `None` = direct spawn (no daemon available), i.e. nothing to kill on
     /// tab close and nothing that survives the app closing.
-    tmux_session: Option<String>,
+    daemon_session: Option<String>,
     /// Live signals the status poller reads. Shared with the reader thread,
     /// which is what actually writes to them.
     activity: Arc<SessionActivity>,
@@ -823,9 +823,9 @@ struct SessionActivity {
     /// Copied from the request so the poller can pick the right heuristic
     /// without a second lookup.
     engine: String,
-    /// `None` for a direct (non-tmux) spawn — which is also exactly the
+    /// `None` for a direct (non-daemon) spawn — which is also exactly the
     /// condition that forces the output-activity heuristic for every engine.
-    tmux_session: Option<String>,
+    daemon_session: Option<String>,
     /// When the PTY last produced any bytes.
     last_output: Mutex<Instant>,
     /// When the user last typed into this session ([`SessionManager::write`]).
@@ -924,10 +924,10 @@ struct SessionActivity {
 }
 
 impl SessionActivity {
-    fn new(engine: String, tmux_session: Option<String>, status_tracking: bool) -> Self {
+    fn new(engine: String, daemon_session: Option<String>, status_tracking: bool) -> Self {
         Self {
             engine,
-            tmux_session,
+            daemon_session,
             last_output: Mutex::new(Instant::now()),
             last_user_input: Mutex::new(None),
             status_when_typing_began: Mutex::new(None),
@@ -979,7 +979,7 @@ impl SessionActivity {
         }
         self.attention.store(false, Ordering::Relaxed);
         self.clear_marker_window.store(true, Ordering::Relaxed);
-        if self.tmux_session.is_some() {
+        if self.daemon_session.is_some() {
             // Only meaningful when there is a red light to acknowledge. A
             // write with nothing latched must not pre-dismiss a failure that
             // hasn't happened yet — which is exactly what it did in the first
@@ -1062,11 +1062,10 @@ pub struct SessionManager {
     /// [`SessionManager::with_status_sink`]). Registering it also starts the
     /// single background poller.
     on_status: Option<StatusSink>,
-    /// The tmux server sessions are wrapped in, `None` by default (see
-    /// [`SessionManager::with_tmux`]). `None` means today's pre-2026-07-26
-    /// behavior in full: engines spawn straight into the PTY and nothing
-    /// survives the app closing.
-    tmux: Option<Tmux>,
+    /// The daemon-backed session manager, `None` by default (see
+    /// [`SessionManager::with_daemon_sessions`]). `None` means engines spawn
+    /// straight into the PTY and nothing survives the app closing.
+    daemon_sessions: Option<DaemonSessions>,
     pty_daemon: PtyDaemonClient,
     /// Guards the lazy, at-most-once spawn of the status poller (see
     /// [`SessionManager::with_status_sink`] for why it isn't spawned eagerly).
@@ -1084,7 +1083,7 @@ impl SessionManager {
             on_end: None,
             on_attention: None,
             on_status: None,
-            tmux: None,
+            daemon_sessions: None,
             pty_daemon,
             status_poller: OnceLock::new(),
         }
@@ -1095,19 +1094,19 @@ impl SessionManager {
         self
     }
 
-    /// Builder-style setter for tmux-backed persistence — the same additive
+    /// Builder-style setter for daemon-backed persistence — the same additive
     /// shape (and the same reasoning) as [`with_end_hook`](Self::with_end_hook)
-    /// and [`with_attention_sink`](Self::with_attention_sink): tmux is
+    /// and [`with_attention_sink`](Self::with_attention_sink): the daemon is
     /// app-level infrastructure wired once at boot in `lib.rs`
-    /// ([`default_tmux`]), not a required constructor argument. Keeping it opt-in
-    /// also gives tests a clean injection seam — a per-test socket to prove
-    /// the real tmux path in isolation, or `None` to prove the fallback
-    /// without uninstalling tmux from the machine.
+    /// ([`default_daemon_sessions`]), not a required constructor argument.
+    /// Keeping it opt-in also gives tests a clean injection seam — a per-test
+    /// socket to prove the real daemon path in isolation, or `None` to prove
+    /// the fallback without a running daemon.
     ///
-    /// Passing `None` is meaningful and safe: it is exactly the "tmux isn't
-    /// installed" degradation path.
-    pub fn with_tmux(mut self, tmux: Option<Tmux>) -> Self {
-        self.tmux = tmux;
+    /// Passing `None` is meaningful and safe: it is exactly the "daemon isn't
+    /// available" degradation path.
+    pub fn with_daemon_sessions(mut self, daemon_sessions: Option<DaemonSessions>) -> Self {
+        self.daemon_sessions = daemon_sessions;
         self
     }
 
@@ -1117,10 +1116,10 @@ impl SessionManager {
     /// The background poller it implies is started lazily, on the first
     /// [`create`](Self::create), rather than here: that makes the builder
     /// calls order-independent (a poller spawned here would capture whatever
-    /// `tmux` had been configured *so far*, silently degrading every status
-    /// reading to the activity heuristic if a caller happened to write
-    /// `.with_status_sink(…).with_tmux(…)`), and it means a manager that
-    /// never opens a session never spawns a thread at all.
+    /// `daemon_sessions` had been configured *so far*, silently degrading
+    /// every status reading to the activity heuristic if a caller happened to
+    /// write `.with_status_sink(…).with_daemon_sessions(…)`), and it means a
+    /// manager that never opens a session never spawns a thread at all.
     pub fn with_status_sink(mut self, sink: StatusSink) -> Self {
         self.on_status = Some(sink);
         self
@@ -1186,20 +1185,20 @@ impl SessionManager {
         std::fs::create_dir_all(transcripts_dir(&self.data_dir))
             .context("create transcripts dir")?;
 
-        // Is there already a live tmux session for this id (i.e. did the app
+        // Is there already a live daemon session for this id (i.e. did the app
         // close without this tab being closed)? Answered *before* building
         // the engine command, because it decides which conversation-identity
         // flag `claude` gets: a restore that attaches needs none (the
         // conversation never ended, and the flag would only cost a liveness
         // probe), a restore that has to start a fresh engine reopens its own
         // conversation, and a brand-new session claims one.
-        let tmux_name = tmux::session_name(&id);
-        let tmux_session_exists = self
-            .tmux
+        let daemon_name = daemon::session_name(&id);
+        let daemon_session_exists = self
+            .daemon_sessions
             .as_ref()
-            .map(|t| t.has_session(&tmux_name))
+            .map(|t| t.has_session(&daemon_name))
             .unwrap_or(false);
-        let identity = spawn_identity(&req.engine, is_restore, tmux_session_exists);
+        let identity = spawn_identity(&req.engine, is_restore, daemon_session_exists);
 
         let Spawned {
             master,
@@ -1208,8 +1207,8 @@ impl SessionManager {
             reader_thread,
             activity,
             mcp_config_path,
-            tmux_session,
-        } = self.spawn_session_process(&req, &id, &tmux_name, identity)?;
+            daemon_session,
+        } = self.spawn_session_process(&req, &id, &daemon_name, identity)?;
 
         // Armed the instant the file (if any) might exist; disarmed only
         // once the session below has been fully, successfully created --
@@ -1235,8 +1234,8 @@ impl SessionManager {
             created,
             // The distinction the founder brief actually cares about: did the
             // user get their session *back*, or a new one?
-            restored: tmux_session_exists,
-            persistent: tmux_session.is_some(),
+            restored: daemon_session_exists,
+            persistent: daemon_session.is_some(),
         };
 
         let handle = SessionHandle {
@@ -1248,19 +1247,19 @@ impl SessionManager {
             cwd: req.cwd.clone(),
             engine: req.engine.clone(),
             reader_thread,
-            tmux_session,
+            daemon_session,
             activity,
         };
 
         self.sessions.lock().unwrap().insert(id, handle);
 
         // Lazy, at-most-once: by now every builder has run, so the poller
-        // sees the real tmux configuration (see `with_status_sink`).
+        // sees the real daemon configuration (see `with_status_sink`).
         if let Some(status_sink) = &self.on_status {
             self.status_poller.get_or_init(|| {
                 spawn_status_poller(
                     Arc::downgrade(&self.sessions),
-                    self.tmux.clone(),
+                    self.daemon_sessions.clone(),
                     status_sink.clone(),
                 );
             });
@@ -1275,7 +1274,7 @@ impl SessionManager {
     }
 
     /// Opens the PTY, starts whatever the session should actually run — a
-    /// `tmux attach-session` client, or the engine itself when tmux isn't
+    /// daemon attach client, or the engine itself when the daemon isn't
     /// usable — and starts its reader thread, walking down
     /// [`ClaudeIdentity::ladder`] if a conversation-identity flag turns out to
     /// have killed the process (module docs, "The identity flags are booby
@@ -1298,18 +1297,18 @@ impl SessionManager {
         &self,
         req: &CreateSessionRequest,
         id: &str,
-        tmux_name: &str,
+        daemon_name: &str,
         identity: ClaudeIdentity,
     ) -> Result<Spawned> {
-        // One attempt per rung. Under tmux, *every* rung's attach client is
-        // startup-probed, including the last, because an instantly-dead
+        // One attempt per rung. With the daemon, *every* rung's attach client
+        // is startup-probed, including the last, because an instantly-dead
         // attach is the black-screen shape this module's degradation path must
-        // never hand to the user. Without tmux, only non-final identity rungs
-        // are probed (`--resume` / `--session-id`) since the stock last rung
-        // has no lower fallback.
+        // never hand to the user. Without the daemon, only non-final identity
+        // rungs are probed (`--resume` / `--session-id`) since the stock last
+        // rung has no lower fallback.
         let ladder = identity.ladder();
         let last_rung = ladder.len() - 1;
-        let mut tmux_refusal: Option<String> = None;
+        let mut daemon_refusal: Option<String> = None;
 
         for (rung, identity) in ladder.into_iter().enumerate() {
             let engine_cmd = build_engine_command(req, &self.data_dir, id, identity)?;
@@ -1323,13 +1322,13 @@ impl SessionManager {
             let mut mcp_cleanup_guard =
                 McpConfigCleanupGuard::new(engine_cmd.mcp_config_path.clone());
 
-            // What the PTY actually runs: either a tmux client attached to
-            // the (possibly pre-existing) session, or — when tmux is
+            // What the PTY actually runs: either a daemon client attached to
+            // the (possibly pre-existing) session, or — when the daemon is
             // unavailable or fails — the engine itself, exactly as before
-            // tmux existed here.
-            let (cmd, tmux_session) = match &self.tmux {
+            // the daemon existed here.
+            let (cmd, daemon_session) = match &self.daemon_sessions {
                 Some(t) => match t.ensure_session(
-                    tmux_name,
+                    daemon_name,
                     Path::new(&req.cwd),
                     &engine_cmd.env,
                     &engine_cmd.argv,
@@ -1340,19 +1339,19 @@ impl SessionManager {
                     // command inside it actually started — `new-session`
                     // reports on creating the pane, not on the `exec` in it.
                     Ok(true) => (
-                        tmux_attach_command(t, tmux_name, &req.cwd, &engine_cmd.env),
-                        Some(tmux_name.to_string()),
+                        daemon_attach_command(t, daemon_name, &req.cwd, &engine_cmd.env),
+                        Some(daemon_name.to_string()),
                     ),
                     Ok(false)
-                        if !tmux_session_survives_startup(
+                        if !daemon_session_survives_startup(
                             t,
-                            tmux_name,
-                            TMUX_PANE_STARTUP_WINDOW,
+                            daemon_name,
+                            DAEMON_PANE_STARTUP_WINDOW,
                         ) =>
                     {
-                        // The engine died before it rendered a byte, so tmux
-                        // has already destroyed the session. Attaching now is
-                        // exactly the black screen this check exists to
+                        // The engine died before it rendered a byte, so the
+                        // daemon has already destroyed the session. Attaching
+                        // now is exactly the black screen this check exists to
                         // prevent: the client would print `no sessions` and
                         // exit.
                         // The identity hint is only true when an identity
@@ -1363,10 +1362,13 @@ impl SessionManager {
                         // have to debug from.
                         let refusal = match identity {
                             ClaudeIdentity::Stock => {
-                                format!("`{}` exited immediately inside tmux", engine_cmd.argv[0])
+                                format!(
+                                    "`{}` exited immediately inside the daemon session",
+                                    engine_cmd.argv[0]
+                                )
                             }
                             flagged => format!(
-                                "`{}` exited immediately inside tmux ({})",
+                                "`{}` exited immediately inside the daemon session ({})",
                                 engine_cmd.argv[0],
                                 flagged.failure_hint()
                             ),
@@ -1375,23 +1377,23 @@ impl SessionManager {
                             "omniagent-ade: {refusal} for session {id} in {}; falling back",
                             req.cwd
                         );
-                        tmux_refusal = Some(refusal);
+                        daemon_refusal = Some(refusal);
                         // Nothing should be left behind, but a husk here would
                         // make the *next* rung's `ensure_session` short-circuit
                         // onto a dead session — the one shape that turns this
                         // guard into the very bug it prevents.
-                        t.kill_session(tmux_name);
+                        t.kill_session(daemon_name);
                         continue;
                     }
                     Ok(false) => (
-                        tmux_attach_command(t, tmux_name, &req.cwd, &engine_cmd.env),
-                        Some(tmux_name.to_string()),
+                        daemon_attach_command(t, daemon_name, &req.cwd, &engine_cmd.env),
+                        Some(daemon_name.to_string()),
                     ),
                     Err(e) => {
-                        // Never a hard failure: a broken tmux costs
+                        // Never a hard failure: a broken daemon costs
                         // persistence, not the session (module docs).
                         eprintln!(
-                            "omniagent-ade: tmux session setup failed for {id} ({e}); falling \
+                            "omniagent-ade: daemon session setup failed for {id} ({e}); falling \
                              back to a direct, non-persistent spawn"
                         );
                         (engine_cmd.to_command_builder(), None)
@@ -1410,8 +1412,8 @@ impl SessionManager {
                 .context("open pty")?;
             let reader = pair.master.try_clone_reader().context("clone pty reader")?;
             let writer = pair.master.take_writer().context("take pty writer")?;
-            let spawn_mode = if tmux_session.is_some() {
-                format!("daemon-attach session={tmux_name}")
+            let spawn_mode = if daemon_session.is_some() {
+                format!("daemon-attach session={daemon_name}")
             } else {
                 format!("direct-engine binary={}", engine_cmd.argv[0])
             };
@@ -1430,7 +1432,7 @@ impl SessionManager {
 
             let activity = Arc::new(SessionActivity::new(
                 req.engine.clone(),
-                tmux_session.clone(),
+                daemon_session.clone(),
                 self.on_status.is_some(),
             ));
             let reader_thread = spawn_reader_thread(
@@ -1448,16 +1450,16 @@ impl SessionManager {
                 Arc::clone(&activity),
             );
 
-            // Under tmux the PTY child is always the daemon-backed attach
+            // With the daemon the PTY child is always the daemon-backed attach
             // client; probe it on every rung (including the last) so an
             // immediately dead attach can degrade to the direct-spawn fallback
-            // instead of becoming a black pane. Without tmux, only identity
-            // rungs that still have a fallback beneath them are probed.
-            let probe = startup_probe_window(rung, last_rung, identity, tmux_session.is_some());
+            // instead of becoming a black pane. Without the daemon, only
+            // identity rungs that still have a fallback beneath them are probed.
+            let probe = startup_probe_window(rung, last_rung, identity, daemon_session.is_some());
             if matches!(probe, Some(window) if !child_survives_startup(&mut child, window)) {
-                if tmux_session.is_some() {
+                if daemon_session.is_some() {
                     eprintln!(
-                        "omniagent-ade: tmux attach exited immediately for session {id} in {}; \
+                        "omniagent-ade: daemon attach exited immediately for session {id} in {}; \
                          falling back",
                         req.cwd
                     );
@@ -1494,23 +1496,23 @@ impl SessionManager {
                 reader_thread,
                 activity,
                 mcp_config_path: engine_cmd.mcp_config_path,
-                tmux_session,
+                daemon_session,
             });
         }
-        // Every rung's tmux pane died before it rendered anything (the only
-        // way to fall out of that loop — without tmux the last rung is
+        // Every rung's daemon pane died before it rendered anything (the only
+        // way to fall out of that loop — without the daemon the last rung is
         // unprobed and always returns). Attaching would hand over a black
         // rectangle, so don't: run the engine directly, behind an explanation.
-        self.spawn_with_notice(req, id, tmux_refusal)
+        self.spawn_with_notice(req, id, daemon_refusal)
     }
 
     /// Last resort, and the reason a user can no longer end up looking at a
-    /// black pane with no signal: every tmux attempt's engine died at startup,
-    /// so the engine is spawned **directly into the PTY** — no tmux, no
-    /// persistence — behind a printed line saying so.
+    /// black pane with no signal: every daemon attempt's engine died at
+    /// startup, so the engine is spawned **directly into the PTY** — no
+    /// daemon, no persistence — behind a printed line saying so.
     ///
     /// Two outcomes, both strictly better than silence:
-    /// - the direct spawn works (tmux itself was the problem — a wedged
+    /// - the direct spawn works (the daemon itself was the problem — a wedged
     ///   server, a socket the app can't write) and the user gets a working,
     ///   merely non-persistent session plus a note explaining the downgrade;
     /// - it fails too (the engine really isn't installed, or is broken) and
@@ -1529,7 +1531,7 @@ impl SessionManager {
     /// The wrapper passes the message and the engine argv as **separate argv
     /// entries** (`sh -c '…' _ <notice> <program> <args…>`), so nothing is ever
     /// interpolated into a shell string — a briefing full of quotes, `$(…)`
-    /// and newlines rides through untouched, exactly as it does under tmux.
+    /// and newlines rides through untouched, exactly as it does under the daemon.
     fn spawn_with_notice(
         &self,
         req: &CreateSessionRequest,
@@ -1539,7 +1541,8 @@ impl SessionManager {
         let engine_cmd = build_engine_command(req, &self.data_dir, id, ClaudeIdentity::Stock)?;
         let mut mcp_cleanup_guard = McpConfigCleanupGuard::new(engine_cmd.mcp_config_path.clone());
 
-        let reason = reason.unwrap_or_else(|| "the engine did not start inside tmux".to_string());
+        let reason =
+            reason.unwrap_or_else(|| "the engine did not start inside the daemon".to_string());
         let notice = format!(
             "\r\n\x1b[33mOmniAgent:\x1b[0m {reason}.\r\n\
              \x1b[2mStarting \x1b[0m{}\x1b[2m directly instead — this pane will not survive \
@@ -1608,7 +1611,7 @@ impl SessionManager {
             reader_thread,
             activity,
             mcp_config_path: engine_cmd.mcp_config_path,
-            tmux_session: None,
+            daemon_session: None,
         })
     }
 
@@ -1646,7 +1649,7 @@ impl SessionManager {
         let handle = sessions
             .get(id)
             .ok_or_else(|| anyhow!("no such session: {id}"))?;
-        if let (Some(t), Some(name)) = (&self.tmux, &handle.tmux_session) {
+        if let (Some(t), Some(name)) = (&self.daemon_sessions, &handle.daemon_session) {
             let _ = t.resize_session(name, cols, rows);
         }
         handle
@@ -1676,10 +1679,10 @@ impl SessionManager {
                 .ok_or_else(|| anyhow!("no such session: {id}"))?
         };
 
-        // Bruno, 2026-07-26: "If the user closes the terminal, tmux or claude
-        // session can be deleted." Destroy the backing daemon session first
-        // (via the compatibility substrate), so the engine inside it dies too.
-        if let (Some(t), Some(name)) = (&self.tmux, &handle.tmux_session) {
+        // Bruno, 2026-07-26: "If the user closes the terminal, the session
+        // can be deleted." Destroy the backing daemon session first, so the
+        // engine inside it dies too.
+        if let (Some(t), Some(name)) = (&self.daemon_sessions, &handle.daemon_session) {
             if !t.kill_session(name) {
                 // Already gone (the engine exited on its own) is harmless.
                 eprintln!(
@@ -1767,8 +1770,8 @@ impl SessionManager {
             let sessions = self.sessions.lock().unwrap();
             Arc::clone(&sessions.get(id)?.activity)
         };
-        // Computed with the registry lock released: it may shell out to tmux.
-        let status = compute_status(&activity, self.tmux.as_ref(), Instant::now());
+        // Computed with the registry lock released: it may shell out to the daemon.
+        let status = compute_status(&activity, self.daemon_sessions.as_ref(), Instant::now());
         if let Ok(mut last) = activity.last_status.lock() {
             *last = Some(status);
         }
@@ -1818,7 +1821,7 @@ impl SessionManager {
     }
 
     pub fn pty_daemon_status(&self) -> (bool, bool, String, usize) {
-        let available = self.tmux.is_some();
+        let available = self.daemon_sessions.is_some();
         let running = self.pty_daemon.is_alive();
         let sessions = self.pty_daemon.list_sessions().unwrap_or_default();
         (
@@ -1884,23 +1887,23 @@ fn is_valid_session_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Process-wide cache for the resolved tmux ([`default_tmux`]).
-static TMUX: OnceLock<Option<Tmux>> = OnceLock::new();
+/// Process-wide cache for the resolved daemon manager ([`default_daemon_sessions`]).
+static DAEMON_SESSIONS: OnceLock<Option<DaemonSessions>> = OnceLock::new();
 
-/// The tmux OmniAgent should use in production: resolved once per process
-/// against the user's real, shell-resolved `PATH` (a GUI-launched `.app` has
-/// no Homebrew on its inherited `PATH` — the same bug
-/// [`resolve_shell_path`] exists for), pinned to this app's private socket,
-/// and pointed at this app's own config file.
+/// The daemon-backed session manager OmniAgent should use in production:
+/// resolved once per process against the user's real, shell-resolved `PATH`
+/// (a GUI-launched `.app` has no Homebrew on its inherited `PATH` — the same
+/// bug [`resolve_shell_path`] exists for), pinned to this app's private
+/// socket, and pointed at this app's own config file.
 ///
-/// `None` means tmux isn't installed, which every caller treats as "spawn
-/// engines directly" rather than as an error. `lib.rs` calls this once at
-/// boot; `SessionManager::new` does *not* call it implicitly, so a plain
+/// `None` means the daemon isn't available, which every caller treats as
+/// "spawn engines directly" rather than as an error. `lib.rs` calls this once
+/// at boot; `SessionManager::new` does *not* call it implicitly, so a plain
 /// manager (every existing test) keeps its exact previous behavior.
-pub fn default_tmux(data_dir: &Path) -> Option<Tmux> {
-    cached_or_init(&TMUX, || {
-        let resolved = Tmux::resolve(tmux::DEFAULT_SOCKET, cached_shell_path())?;
-        Some(match tmux::write_config(data_dir) {
+pub fn default_daemon_sessions(data_dir: &Path) -> Option<DaemonSessions> {
+    cached_or_init(&DAEMON_SESSIONS, || {
+        let resolved = DaemonSessions::resolve(daemon::DEFAULT_SOCKET, cached_shell_path())?;
+        Some(match daemon::write_config(data_dir) {
             Some(cfg) => resolved.with_config(cfg),
             None => resolved,
         })
@@ -1918,7 +1921,7 @@ struct Spawned {
     reader_thread: thread::JoinHandle<()>,
     activity: Arc<SessionActivity>,
     mcp_config_path: Option<PathBuf>,
-    tmux_session: Option<String>,
+    daemon_session: Option<String>,
 }
 
 /// How long a `--resume <uuid>` spawn is watched before it's declared healthy.
@@ -1986,30 +1989,31 @@ fn child_survives_startup(child: &mut Box<dyn Child + Send + Sync>, window: Dura
 /// [`ClaudeIdentity::liveness_window`] sizes. A session that already existed
 /// is never watched at all: its engine has been running since before the app
 /// restarted, so there is nothing to start.
-const TMUX_PANE_STARTUP_WINDOW: Duration = Duration::from_millis(300);
+const DAEMON_PANE_STARTUP_WINDOW: Duration = Duration::from_millis(300);
 
-/// Poll granularity for [`tmux_session_survives_startup`]. Each poll is a real
-/// `tmux has-session` subprocess (single-digit milliseconds against a local
-/// unix socket), so this trades a handful of cheap spawns for detecting a dead
+/// Poll granularity for [`daemon_session_survives_startup`]. Each poll is a
+/// real daemon has-session request (single-digit milliseconds against a local
+/// unix socket), so this trades a handful of cheap calls for detecting a dead
 /// pane almost the instant it dies.
-const TMUX_PANE_STARTUP_POLL: Duration = Duration::from_millis(25);
+const DAEMON_PANE_STARTUP_POLL: Duration = Duration::from_millis(25);
 
 /// Chooses whether (and for how long) a spawn attempt should be startup-probed.
 ///
-/// Under tmux, the PTY child is always an attach client, and an attach that
-/// exits immediately is a dead pane regardless of which identity rung produced
-/// the underlying tmux session. So tmux-backed attempts are always probed.
+/// With the daemon, the PTY child is always an attach client, and an attach
+/// that exits immediately is a dead pane regardless of which identity rung
+/// produced the underlying daemon session. So daemon-backed attempts are
+/// always probed.
 ///
-/// Without tmux, probes are only for non-final identity rungs where there is a
-/// lower fallback to try.
+/// Without the daemon, probes are only for non-final identity rungs where
+/// there is a lower fallback to try.
 fn startup_probe_window(
     rung: usize,
     last_rung: usize,
     identity: ClaudeIdentity,
-    tmux_attached: bool,
+    daemon_attached: bool,
 ) -> Option<Duration> {
-    if tmux_attached {
-        Some(TMUX_PANE_STARTUP_WINDOW)
+    if daemon_attached {
+        Some(DAEMON_PANE_STARTUP_WINDOW)
     } else if rung < last_rung {
         Some(identity.liveness_window())
     } else {
@@ -2022,13 +2026,13 @@ fn startup_probe_window(
 /// soon as the session is gone, so the failure path is fast; only the healthy
 /// path waits out the window.
 ///
-/// This is the tmux-side twin of [`child_survives_startup`], and it exists
-/// because the PTY-side probe is blind here: under tmux the PTY child is the
-/// `attach-session` client, not the engine, so an engine that dies *before*
-/// the client attaches leaves the client reporting `no sessions` rather than
-/// the engine reporting anything. Asking tmux directly is both earlier and
-/// unambiguous.
-fn tmux_session_survives_startup(t: &Tmux, name: &str, window: Duration) -> bool {
+/// This is the daemon-side twin of [`child_survives_startup`], and it exists
+/// because the PTY-side probe is blind here: with the daemon the PTY child is
+/// the attach client, not the engine, so an engine that dies *before* the
+/// client attaches leaves the client reporting `no sessions` rather than
+/// the engine reporting anything. Asking the daemon directly is both earlier
+/// and unambiguous.
+fn daemon_session_survives_startup(t: &DaemonSessions, name: &str, window: Duration) -> bool {
     let deadline = Instant::now() + window;
     loop {
         if !t.has_session(name) {
@@ -2037,7 +2041,7 @@ fn tmux_session_survives_startup(t: &Tmux, name: &str, window: Duration) -> bool
         if Instant::now() >= deadline {
             return true;
         }
-        thread::sleep(TMUX_PANE_STARTUP_POLL);
+        thread::sleep(DAEMON_PANE_STARTUP_POLL);
     }
 }
 
@@ -2045,12 +2049,12 @@ fn tmux_session_survives_startup(t: &Tmux, name: &str, window: Duration) -> bool
 /// the user's real, shell-resolved `PATH` ([`cached_shell_path`]) with this
 /// process's own `PATH` as a backstop.
 ///
-/// See the module docs' "Why tmux needs an absolute engine path" for the
-/// founder bug behind it. In short: `tmux new-session -- claude …` `exec`s
-/// against the tmux **server's** environment, which for a GUI-launched `.app`
-/// is macOS's minimal default `PATH`, so a bare engine name is simply not
-/// found — and tmux reports that as a session that quietly disappears rather
-/// than as an error.
+/// See the module docs' "Why the daemon needs an absolute engine path" for
+/// the founder bug behind it. In short: launching `claude …` inside a daemon
+/// session `exec`s against the daemon **server's** environment, which for a
+/// GUI-launched `.app` is macOS's minimal default `PATH`, so a bare engine
+/// name is simply not found — and the session quietly disappears rather than
+/// surfacing as an error.
 ///
 /// `None` when the engine genuinely isn't installed anywhere on that `PATH`.
 /// Callers keep the bare name in that case, so the spawn fails with the real
@@ -2060,14 +2064,14 @@ fn resolve_engine_binary(program: &str) -> Option<PathBuf> {
     // Already a path (`$SHELL` is always one): honour it as given, so nothing
     // here can ever redirect a session to a *different* binary than asked for.
     if program.contains(std::path::MAIN_SEPARATOR) {
-        return tmux::is_executable_file(as_path).then(|| as_path.to_path_buf());
+        return daemon::is_executable_file(as_path).then(|| as_path.to_path_buf());
     }
     let search = cached_shell_path()
         .map(str::to_string)
         .or_else(|| std::env::var("PATH").ok())?;
     std::env::split_paths(&search)
         .map(|dir| dir.join(program))
-        .find(|candidate| tmux::is_executable_file(candidate))
+        .find(|candidate| daemon::is_executable_file(candidate))
 }
 
 /// The namespace every OmniAgent-owned Claude conversation UUID is derived
@@ -2410,7 +2414,7 @@ fn preferred_shell_binary(shell_env: Option<&str>) -> String {
     let from_env = shell_env.map(str::trim).filter(|s| !s.is_empty());
     for candidate in from_env.into_iter().chain(["/bin/zsh", "/bin/sh"]) {
         let path = Path::new(candidate);
-        if tmux::is_executable_file(path) {
+        if daemon::is_executable_file(path) {
             return candidate.to_string();
         }
     }
@@ -2497,18 +2501,17 @@ fn utf8_locale_override(
 /// this can't fail the way a `de_DE.UTF-8`-style guess could.
 const UTF8_LOCALE: &str = "en_US.UTF-8";
 
-/// The PTY child that attaches to a tmux session. Gets the same
+/// The PTY child that attaches to a daemon session. Gets the same
 /// `PATH`/`TERM`/`COLORTERM` as an engine would: `TERM` in particular matters
-/// here because it's the *client's* terminal type, which is what tmux matches
-/// against `terminal-features ",xterm-256color:RGB"` to decide whether it can
-/// pass 24-bit color through.
-fn tmux_attach_command(
-    t: &Tmux,
-    tmux_name: &str,
+/// here because it's the *client's* terminal type, which decides whether
+/// 24-bit color can pass through.
+fn daemon_attach_command(
+    t: &DaemonSessions,
+    daemon_name: &str,
     cwd: &str,
     env: &[(String, String)],
 ) -> CommandBuilder {
-    let argv = t.attach_argv(tmux_name);
+    let argv = t.attach_argv(daemon_name);
     let mut cmd = CommandBuilder::new(&argv[0]);
     for arg in &argv[1..] {
         cmd.arg(arg);
@@ -2536,9 +2539,7 @@ const SHELL_PATH_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
 /// CLIs like `claude` fall back to plain, uncolored output). Unlike `PATH`,
 /// this is always asserted rather than resolved: there's no "real" value to
 /// discover from this process's own environment, so the right answer is
-/// simply what this app's own renderer supports. `crate::tmux::CONFIG_BODY`
-/// sets tmux's `default-terminal` to the same value, so an engine sees the
-/// identical `TERM` whether or not tmux is in the middle.
+/// simply what this app's own renderer supports.
 const TERM_VALUE: &str = "xterm-256color";
 /// The de facto signal modern CLIs (including `claude`) check for 24-bit
 /// color.
@@ -3702,12 +3703,16 @@ fn status_from_screen(screen: &str) -> Option<SessionStatus> {
 /// `claude`/`codex` whose busy-state is ambiguous. An idle session with no
 /// error, and every `shell` session, costs exactly what it cost before any of
 /// this existed: one `display-message`.
-fn compute_status(activity: &SessionActivity, tmux: Option<&Tmux>, now: Instant) -> SessionStatus {
+fn compute_status(
+    activity: &SessionActivity,
+    daemon_sessions: Option<&DaemonSessions>,
+    now: Instant,
+) -> SessionStatus {
     if activity.attention.load(Ordering::Relaxed) {
         return SessionStatus::AwaitingApproval;
     }
 
-    let tmux_session = match (tmux, activity.tmux_session.as_deref()) {
+    let daemon_session = match (daemon_sessions, activity.daemon_session.as_deref()) {
         (Some(t), Some(name)) => Some((t, name)),
         _ => None,
     };
@@ -3719,7 +3724,7 @@ fn compute_status(activity: &SessionActivity, tmux: Option<&Tmux>, now: Instant)
     let mut fetched = false;
 
     if activity.error.load(Ordering::Relaxed) {
-        if let Some((t, name)) = tmux_session {
+        if let Some((t, name)) = daemon_session {
             screen = t.capture_pane(name);
             fetched = true;
         }
@@ -3728,7 +3733,7 @@ fn compute_status(activity: &SessionActivity, tmux: Option<&Tmux>, now: Instant)
         }
     }
 
-    if let Some((t, name)) = tmux_session {
+    if let Some((t, name)) = daemon_session {
         if let Some(pane_command) = t.pane_current_command(name) {
             if let Some(status) = status_from_pane_command(&pane_command, &activity.engine) {
                 return status;
@@ -3738,7 +3743,7 @@ fn compute_status(activity: &SessionActivity, tmux: Option<&Tmux>, now: Instant)
 
     let status = status_from_output_activity(activity, now);
     if status == SessionStatus::Thinking {
-        if let Some((t, name)) = tmux_session {
+        if let Some((t, name)) = daemon_session {
             if !fetched {
                 screen = t.capture_pane(name);
             }
@@ -3795,7 +3800,7 @@ fn resolve_error(activity: &SessionActivity, screen: Option<&str>) -> bool {
 /// the natural-exit path was already fixed for.
 fn spawn_status_poller(
     sessions: Weak<Mutex<HashMap<String, SessionHandle>>>,
-    tmux: Option<Tmux>,
+    daemon_sessions: Option<DaemonSessions>,
     sink: StatusSink,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || loop {
@@ -3814,12 +3819,12 @@ fn spawn_status_poller(
                 .map(|(id, handle)| (id.clone(), Arc::clone(&handle.activity)))
                 .collect()
         };
-        // Registry lock released before any tmux call below.
+        // Registry lock released before any daemon call below.
         drop(sessions);
 
         let now = Instant::now();
         for (id, activity) in snapshot {
-            let status = compute_status(&activity, tmux.as_ref(), now);
+            let status = compute_status(&activity, daemon_sessions.as_ref(), now);
             let changed = match activity.last_status.lock() {
                 Ok(mut last) => {
                     let changed = *last != Some(status);
@@ -4062,7 +4067,7 @@ mod tests {
         let shell = preferred_shell_binary(Some("/no/such/shell/binary/on/this/machine"));
         assert_ne!(shell, "/no/such/shell/binary/on/this/machine");
         assert!(
-            tmux::is_executable_file(Path::new(&shell)),
+            daemon::is_executable_file(Path::new(&shell)),
             "fallback shell must be executable, got {shell}"
         );
     }
@@ -4071,7 +4076,7 @@ mod tests {
     fn preferred_shell_binary_returns_an_executable_when_shell_env_is_missing() {
         let shell = preferred_shell_binary(None);
         assert!(
-            tmux::is_executable_file(Path::new(&shell)),
+            daemon::is_executable_file(Path::new(&shell)),
             "missing $SHELL must still resolve to an executable shell, got {shell}"
         );
     }
@@ -4609,7 +4614,7 @@ mod tests {
             cwd: tmp.path().to_string_lossy().into_owned(),
             engine: "shell".to_string(),
             reader_thread,
-            tmux_session: None,
+            daemon_session: None,
             activity: Arc::new(SessionActivity::new("shell".to_string(), None, false)),
         };
         // Insert A into the registry *before* triggering EOF below — the
@@ -4703,7 +4708,7 @@ mod tests {
         assert_eq!(s, "short");
     }
 
-    // -- Session persistence: ids, conversation identity, tmux wrapping
+    // -- Session persistence: ids, conversation identity, daemon wrapping
     // (founder brief + founder bug, 2026-07-26) ------------------------
 
     #[test]
@@ -4711,14 +4716,14 @@ mod tests {
         // The round trip that makes persistence work at all: the frontend
         // gets an id back from `create`, persists it, and hands it to the
         // next `create` as `restore_id` — so every id this module mints must
-        // pass its own validator, and must survive `tmux::session_name`
+        // pass its own validator, and must survive `daemon::session_name`
         // unchanged (no character gets collapsed to `_`).
         for _ in 0..5 {
             let id = generate_session_id();
             assert!(is_valid_session_id(&id), "{id:?}");
             assert_eq!(
-                tmux::session_name(&id),
-                format!("{}{id}", tmux::SESSION_NAME_PREFIX),
+                daemon::session_name(&id),
+                format!("{}{id}", daemon::SESSION_NAME_PREFIX),
                 "a generated id must need no sanitizing"
             );
         }
@@ -4951,17 +4956,17 @@ mod tests {
     }
 
     #[test]
-    fn startup_probe_windows_cover_tmux_attach_and_identity_retries() {
+    fn startup_probe_windows_cover_daemon_attach_and_identity_retries() {
         use ClaudeIdentity::*;
 
-        // tmux-backed attempts are always checked, including the last rung.
+        // daemon-backed attempts are always checked, including the last rung.
         assert_eq!(
             startup_probe_window(0, 0, Stock, true),
-            Some(TMUX_PANE_STARTUP_WINDOW)
+            Some(DAEMON_PANE_STARTUP_WINDOW)
         );
         assert_eq!(
             startup_probe_window(2, 2, Stock, true),
-            Some(TMUX_PANE_STARTUP_WINDOW)
+            Some(DAEMON_PANE_STARTUP_WINDOW)
         );
 
         // direct spawns only probe non-final identity rungs.
@@ -5111,9 +5116,9 @@ mod tests {
         let sink: OutputSink = Arc::new(move |_id: &str, chunk: &[u8]| {
             let _ = tx.send(chunk.to_vec());
         });
-        // No tmux: precisely the degraded path the identity flags exist for
+        // No daemon: precisely the degraded path the identity flags exist for
         // (module docs, degradation ladder step 3).
-        let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(None);
+        let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(None);
 
         let info = manager
             .create(CreateSessionRequest {
@@ -5222,15 +5227,15 @@ mod tests {
     /// shell-resolved `PATH` this module overrides, never through any real
     /// environment, so bare-name resolution provably cannot find it. Against
     /// the pre-fix code the pane therefore comes up running *the machine's
-    /// real `claude`* instead of the fake — proof that the binary tmux
+    /// real `claude`* instead of the fake — proof that the binary the daemon
     /// `exec`s is not the binary OmniAgent resolved. Absolute argv fixes both
     /// symptoms at once, because it removes the resolution step entirely.
-    struct MinimalPathTmuxServer {
-        tmux: Tmux,
+    struct MinimalPathDaemonServer {
+        daemon_sessions: DaemonSessions,
         _dir: tempfile::TempDir,
     }
 
-    impl MinimalPathTmuxServer {
+    impl MinimalPathDaemonServer {
         fn start() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let socket = format!(
@@ -5241,41 +5246,41 @@ mod tests {
                     .unwrap()
                     .as_nanos()
             );
-            let config = tmux::write_config(dir.path()).unwrap();
-            let bin = Tmux::resolve(&socket, cached_shell_path())
-                .expect("tmux must be installed to run this test")
+            let config = daemon::write_config(dir.path()).unwrap();
+            let bin = DaemonSessions::resolve(&socket, cached_shell_path())
+                .expect("the pty daemon must be available to run this test")
                 .binary()
                 .to_path_buf();
 
             Self {
-                tmux: Tmux::with_binary(bin, &socket).with_config(config),
+                daemon_sessions: DaemonSessions::with_binary(bin, &socket).with_config(config),
                 _dir: dir,
             }
         }
     }
 
-    impl Drop for MinimalPathTmuxServer {
+    impl Drop for MinimalPathDaemonServer {
         fn drop(&mut self) {
-            self.tmux.kill_server();
+            self.daemon_sessions.kill_server();
         }
     }
 
     /// Drives one `create` against a [`FakeClaude`] through a
-    /// [`MinimalPathTmuxServer`] and returns everything the pane emitted.
+    /// [`MinimalPathDaemonServer`] and returns everything the pane emitted.
     /// The fake `claude` lives in a temp dir that is reachable **only** via
-    /// the shell-resolved `PATH` this module overrides — never via the tmux
+    /// the shell-resolved `PATH` this module overrides — never via the daemon
     /// server's own minimal `PATH` — which is exactly the founder's setup
     /// (`claude` at `~/.local/bin`, added to `PATH` by `~/.zshrc`).
-    fn pane_output_under_a_minimal_path_tmux(restore_id: Option<&str>, refuse: &[&str]) -> String {
+    fn pane_output_under_a_minimal_path_daemon(restore_id: Option<&str>, refuse: &[&str]) -> String {
         let _fake = FakeClaude::refusing(refuse);
-        let server = MinimalPathTmuxServer::start();
+        let server = MinimalPathDaemonServer::start();
         let tmp = tempfile::tempdir().unwrap();
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let sink: OutputSink = Arc::new(move |_id: &str, chunk: &[u8]| {
             let _ = tx.send(chunk.to_vec());
         });
         let manager = SessionManager::new(tmp.path().to_path_buf(), sink)
-            .with_tmux(Some(server.tmux.clone()));
+            .with_daemon_sessions(Some(server.daemon_sessions.clone()));
 
         let info = manager
             .create(CreateSessionRequest {
@@ -5301,32 +5306,32 @@ mod tests {
     /// **The founder bug itself.** tmux resolves a pane's command against the
     /// asking *client's* environment, not the per-session `-e PATH` — so under
     /// a GUI-launched app the bare name `claude` was never found, the pane
-    /// died before it rendered a byte, tmux destroyed the session, and the
-    /// `attach-session` that followed printed `no sessions` into a black
+    /// died before it rendered a byte, the daemon destroyed the session, and
+    /// the attach that followed printed `no sessions` into a black
     /// rectangle. The pane must come back alive, running the engine OmniAgent
     /// actually resolved.
     #[test]
-    fn a_tmux_server_with_a_gui_apps_minimal_path_still_lands_a_live_engine() {
-        let seen = pane_output_under_a_minimal_path_tmux(Some("sess-minpath-plain"), &[]);
+    fn a_daemon_server_with_a_gui_apps_minimal_path_still_lands_a_live_engine() {
+        let seen = pane_output_under_a_minimal_path_daemon(Some("sess-minpath-plain"), &[]);
         assert!(
             !seen.contains("no sessions"),
-            "the pane attached to a tmux session that no longer existed — this is the \
+            "the pane attached to a daemon session that no longer existed — this is the \
              black screen; saw: {seen:?}"
         );
         assert!(
             seen.contains("FAKE_CLAUDE_ARGV:"),
-            "the engine never started inside tmux; saw: {seen:?}"
+            "the engine never started inside the daemon; saw: {seen:?}"
         );
     }
 
     /// The same minimal-`PATH` server, plus a refused `--resume` (every
     /// session created before the conversation-identity work). Both failure
     /// modes stack, and the pane must still come back alive — the retry ladder
-    /// has to work *through tmux*, not only on the direct-spawn path.
+    /// has to work *through the daemon*, not only on the direct-spawn path.
     #[test]
-    fn under_a_minimal_path_tmux_server_a_refused_resume_still_lands_a_live_engine() {
+    fn under_a_minimal_path_daemon_server_a_refused_resume_still_lands_a_live_engine() {
         let seen =
-            pane_output_under_a_minimal_path_tmux(Some("sess-minpath-resume"), &["--resume"]);
+            pane_output_under_a_minimal_path_daemon(Some("sess-minpath-resume"), &["--resume"]);
         assert!(!seen.contains("no sessions"), "saw: {seen:?}");
         assert!(
             seen.contains(&format!(
@@ -5382,17 +5387,17 @@ mod tests {
         );
     }
 
-    /// The tmux-side liveness check: a pane whose command cannot even be
+    /// The daemon-side liveness check: a pane whose command cannot even be
     /// `exec`'d takes its session down instantly, and that must read as
     /// "this rung failed" rather than as a healthy session to attach to.
     #[test]
-    fn tmux_session_survival_distinguishes_a_dead_pane_from_a_live_one() {
+    fn daemon_session_survival_distinguishes_a_dead_pane_from_a_live_one() {
         let dir = tempfile::tempdir().unwrap();
         let socket = format!("omniagent-survive-{}", std::process::id());
-        let t = Tmux::resolve(&socket, cached_shell_path())
-            .expect("tmux must be installed to run this test");
-        let t = Tmux::with_binary(t.binary(), &socket)
-            .with_config(tmux::write_config(dir.path()).unwrap());
+        let t = DaemonSessions::resolve(&socket, cached_shell_path())
+            .expect("the pty daemon must be available to run this test");
+        let t = DaemonSessions::with_binary(t.binary(), &socket)
+            .with_config(daemon::write_config(dir.path()).unwrap());
 
         // A command that cannot be exec'd at all — the founder bug's shape.
         let dead = t.ensure_session(
@@ -5402,7 +5407,7 @@ mod tests {
             &["/no/such/binary/anywhere".to_string()],
         );
         assert!(
-            !tmux_session_survives_startup(&t, "dead", TMUX_PANE_STARTUP_WINDOW),
+            !daemon_session_survives_startup(&t, "dead", DAEMON_PANE_STARTUP_WINDOW),
             "a pane whose command never started must not read as alive"
         );
         assert!(
@@ -5418,7 +5423,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            tmux_session_survives_startup(&t, "alive", TMUX_PANE_STARTUP_WINDOW),
+            daemon_session_survives_startup(&t, "alive", DAEMON_PANE_STARTUP_WINDOW),
             "a healthy pane must read as alive"
         );
         t.kill_server();
@@ -5942,7 +5947,7 @@ mod tests {
     /// outright made red come back on the next repaint, over and over, until
     /// it was effectively permanent.
     #[test]
-    fn with_tmux_a_user_write_dismisses_the_error_rather_than_clearing_it() {
+    fn with_daemon_a_user_write_dismisses_the_error_rather_than_clearing_it() {
         let activity = SessionActivity::new("claude".into(), Some("omniagent-x".into()), true);
         activity.error.store(true, Ordering::Relaxed);
         activity.mark_user_input();
@@ -6017,7 +6022,7 @@ mod tests {
     fn daemon_status_reports_availability_from_runtime_mode() {
         let tmp = tempfile::tempdir().unwrap();
         let sink: OutputSink = Arc::new(|_, _| {});
-        let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_tmux(None);
+        let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(None);
         let (available, running, _socket_path, session_count) = manager.pty_daemon_status();
         assert!(!available);
         assert!(!running);
@@ -6082,7 +6087,7 @@ mod tests {
         *activity.last_output.lock().unwrap() = now;
         *activity.busy_since.lock().unwrap() = Some(now - Duration::from_secs(3));
 
-        let broken = Tmux::with_binary("/no/such/tmux/binary", "unused");
+        let broken = DaemonSessions::with_binary("/no/such/daemon/binary", "unused");
         // Neither `pane_current_command` nor `capture_pane` can answer ->
         // activity heuristic, not a panic and not a wrong hard answer.
         assert_eq!(

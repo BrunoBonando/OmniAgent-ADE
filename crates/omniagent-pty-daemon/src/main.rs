@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
 
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if !args.is_empty() && args[0] == "-L" {
-        return run_tmux_compat_mode(&args);
+        return run_legacy_new_session_compat(&args);
     }
     if !args.is_empty() && args[0] == "attach" {
         return run_attach_mode(&args[1..]);
@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
     run_daemon(socket_path).await
 }
 
-fn run_tmux_compat_mode(args: &[String]) -> Result<()> {
+fn run_legacy_new_session_compat(args: &[String]) -> Result<()> {
     if args.len() < 2 {
         return Ok(());
     }

@@ -29,6 +29,7 @@
 //
 import { ENGINE_COLOR } from "../theme";
 import type { SessionCardModel } from "../state/sessionHoverCard";
+import { gridShape } from "../state/paneGrid";
 import SessionStatusLight from "./SessionStatusLight";
 import Icon from "./Icon";
 
@@ -38,7 +39,7 @@ export const HOVER_CARD_WIDTH = 300;
 /** Ditto for the vertical clamp: the tallest the card gets (status line,
  * sentence, three facts, engine row). Over-estimating only pushes the card
  * up a few pixels; under-estimating would let it run off the bottom. */
-const HOVER_CARD_MAX_HEIGHT = 200;
+const HOVER_CARD_MAX_HEIGHT = 260;
 const VIEWPORT_MARGIN = 10;
 const ANCHOR_GAP = 8;
 
@@ -68,10 +69,39 @@ export default function SessionHoverCard({ model, anchor }: SessionHoverCardProp
   return (
     <div className="session-card" role="tooltip" style={{ left, top }}>
       <div className="session-card-head">
-        <span className="session-card-badge" data-status={model.status.key}>
-          <SessionStatusLight status={model.status.status} size={13} decorative />
-          {model.status.label}
-        </span>
+        {model.terminalStatuses.length > 0 ? (() => {
+          const n = model.terminalStatuses.length;
+          const { cols, rows } = gridShape(n);
+          const total = cols * rows;
+          return (
+            <div
+              className="session-card-pane-grid"
+              style={{ gridTemplateColumns: `repeat(${cols}, 1fr)`, gridTemplateRows: `repeat(${rows}, 1fr)` }}
+              aria-label={`${n} terminal${n === 1 ? "" : "s"}`}
+            >
+              {Array.from({ length: total }, (_, cellIdx) => {
+                // column-major: cell rendered row-first → map to column-major terminal index
+                const col = cellIdx % cols;
+                const row = Math.floor(cellIdx / cols);
+                const termIdx = col * rows + row;
+                const term = model.terminalStatuses[termIdx];
+                return term ? (
+                  <div key={termIdx} className="session-card-pane-cell">
+                    <SessionStatusLight status={term.status} size={16} decorative />
+                    <span className="session-card-terminal-index">{term.index}</span>
+                  </div>
+                ) : (
+                  <div key={`hole-${cellIdx}`} className="session-card-pane-cell is-hole" aria-hidden />
+                );
+              })}
+            </div>
+          );
+        })() : (
+          <span className="session-card-badge" data-status={model.status.key}>
+            <SessionStatusLight status={model.status.status} size={13} decorative />
+            {model.status.label}
+          </span>
+        )}
         {model.restored && (
           <span className="session-card-chip" title="Reattached to a session that outlived the app closing">
             Restored
