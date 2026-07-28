@@ -55,7 +55,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use omniagent_ade_lib::sessions::{CreateSessionRequest, OutputSink, SessionManager};
-use omniagent_ade_lib::tmux::{self, Tmux};
+use omniagent_ade_lib::daemon::{self, DaemonSessions};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -105,10 +105,10 @@ fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
         _ => std::env::current_dir().unwrap(),
     };
 
-    let tmux = Tmux::resolve(&socket, std::env::var("PATH").ok().as_deref())
-        .expect("tmux must be installed for this harness")
-        .with_config(tmux::write_config(&scratch).expect("write tmux.conf"));
-    println!("tmux: {} on socket {socket}", tmux.binary().display());
+    let tmux = DaemonSessions::resolve(&socket, std::env::var("PATH").ok().as_deref())
+        .expect("the pty daemon must be available for this harness")
+        .with_config(daemon::write_config(&scratch).expect("write daemon.conf"));
+    println!("daemon: {} on socket {socket}", tmux.binary().display());
 
     let buffers: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
     let sink_buffers = Arc::clone(&buffers);
@@ -121,7 +121,7 @@ fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
             .extend_from_slice(chunk);
     });
 
-    let manager = SessionManager::new(scratch.clone(), sink).with_tmux(Some(tmux.clone()));
+    let manager = SessionManager::new(scratch.clone(), sink).with_daemon_sessions(Some(tmux.clone()));
 
     // A per-run unique id, so the derived Claude conversation UUID has
     // provably never existed — exactly a pre-`--resume` session being
@@ -204,7 +204,7 @@ fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
                     .extend_from_slice(chunk);
             })
         })
-        .with_tmux(Some(tmux.clone()));
+        .with_daemon_sessions(Some(tmux.clone()));
 
         let second = relaunched
             .create(CreateSessionRequest {
@@ -253,9 +253,9 @@ fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
         .map(|b| String::from_utf8_lossy(b).into_owned())
         .unwrap_or_default();
     let sessions = tmux.list_sessions();
-    let pane_cmd = tmux.pane_current_command(&tmux::session_name(&info.id));
+    let pane_cmd = tmux.pane_current_command(&daemon::session_name(&info.id));
     let screen = tmux
-        .capture_pane(&tmux::session_name(&info.id))
+        .capture_pane(&daemon::session_name(&info.id))
         .unwrap_or_default();
     let visible: String = strip_ansi(&raw);
 
@@ -296,7 +296,7 @@ fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
     (ok, note)
 }
 
-fn cleanup(tmux: &Tmux, scratch: &std::path::Path) {
+fn cleanup(tmux: &DaemonSessions, scratch: &std::path::Path) {
     tmux.kill_server();
     let _ = std::fs::remove_dir_all(scratch);
 }

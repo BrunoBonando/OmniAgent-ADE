@@ -33,9 +33,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use omniagent_ade_lib::sessions::{
-    default_tmux, CreateSessionRequest, OutputSink, SessionManager, SessionStatusEvent, StatusSink,
+    default_daemon_sessions, CreateSessionRequest, OutputSink, SessionManager, SessionStatusEvent,
+    StatusSink,
 };
-use omniagent_ade_lib::tmux;
+use omniagent_ade_lib::daemon;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -47,14 +48,14 @@ fn main() {
     let data_dir = brain_core::Store::default_data_dir();
     let cwd = std::env::current_dir().unwrap();
 
-    let tmux = default_tmux(&data_dir);
-    match &tmux {
-        Some(t) => println!("tmux: {} on socket {:?}", t.binary().display(), t.socket()),
-        None => println!("tmux: NOT FOUND — sessions will not persist (fallback mode)"),
+    let daemon_sessions = default_daemon_sessions(&data_dir);
+    match &daemon_sessions {
+        Some(t) => println!("daemon: {} on socket {:?}", t.binary().display(), t.socket()),
+        None => println!("daemon: NOT FOUND — sessions will not persist (fallback mode)"),
     }
     println!(
-        "session id: {id}  ->  tmux session: {}",
-        tmux::session_name(&id)
+        "session id: {id}  ->  daemon session: {}",
+        daemon::session_name(&id)
     );
 
     let (tx, rx) = mpsc::channel::<(String, Vec<u8>)>();
@@ -67,7 +68,7 @@ fn main() {
     });
 
     let manager = SessionManager::new(data_dir, sink)
-        .with_tmux(tmux.clone())
+        .with_daemon_sessions(daemon_sessions.clone())
         .with_status_sink(status_sink);
 
     if mode == "kill" {
@@ -76,7 +77,7 @@ fn main() {
             .create(request(engine, &cwd, Some(id.clone())))
             .expect("create/attach");
         manager.kill(&info.id).expect("kill");
-        println!("killed. tmux sessions now: {:?}", live_sessions(&tmux));
+        println!("killed. daemon sessions now: {:?}", live_sessions(&daemon_sessions));
         return;
     }
 
@@ -96,7 +97,7 @@ fn main() {
         "created: id={} restored={} persistent={}",
         info.id, info.restored, info.persistent
     );
-    println!("tmux sessions now: {:?}", live_sessions(&tmux));
+    println!("daemon sessions now: {:?}", live_sessions(&daemon_sessions));
 
     match (mode, engine) {
         ("start", "shell") => {
@@ -156,8 +157,8 @@ fn main() {
     println!("on-demand status: {:?}", manager.status(&info.id));
     println!(
         "\nNOT killing the session — this process is about to exit, which is the \
-         'user closed the app' half of the test.\ntmux sessions still alive: {:?}",
-        live_sessions(&tmux)
+         'user closed the app' half of the test.\ndaemon sessions still alive: {:?}",
+        live_sessions(&daemon_sessions)
     );
 
     // Deliberately leak the manager: exiting without kill() is exactly what a
@@ -179,6 +180,9 @@ fn request(
     }
 }
 
-fn live_sessions(tmux: &Option<omniagent_ade_lib::tmux::Tmux>) -> Vec<String> {
-    tmux.as_ref().map(|t| t.list_sessions()).unwrap_or_default()
+fn live_sessions(daemon_sessions: &Option<omniagent_ade_lib::daemon::DaemonSessions>) -> Vec<String> {
+    daemon_sessions
+        .as_ref()
+        .map(|t| t.list_sessions())
+        .unwrap_or_default()
 }

@@ -2126,16 +2126,18 @@ fn claude_conversation_uuid(session_id: &str) -> String {
 /// whose ladder has a single rung, i.e. the only one that is never
 /// liveness-probed:
 ///
-/// - **not `claude`** — `codex` and `shell` have no conversation concept.
-///   Giving them an identity would be a no-op on their argv but would still
-///   arm the probe, making every new terminal tab wait out a window for a
-///   flag it never carried.
-/// - **a live tmux session** — the engine has been running since before the
-///   app closed; the argv is never used (`Tmux::ensure_session` short-circuits)
+/// - **an engine with no conversation concept** — `codex` and `shell` have
+///   none. Giving them an identity would be a no-op on their argv but would
+///   still arm the probe, making every new terminal tab wait out a window for
+///   a flag it never carried. `claude` and `copilot` both accept the same
+///   `--session-id`/`--resume` conversation flags, so both get an identity.
+/// - **a live daemon session** — the engine has been running since before the
+///   app closed; the argv is never used (`ensure_session` short-circuits)
 ///   and the PTY child is an attach client.
 /// - the last rung of a ladder whose earlier rungs were refused.
-fn spawn_identity(engine: &str, is_restore: bool, tmux_session_exists: bool) -> ClaudeIdentity {
-    if engine != "claude" || tmux_session_exists {
+fn spawn_identity(engine: &str, is_restore: bool, daemon_session_exists: bool) -> ClaudeIdentity {
+    let has_conversation_identity = engine == "claude" || engine == "copilot";
+    if !has_conversation_identity || daemon_session_exists {
         ClaudeIdentity::Stock
     } else if is_restore {
         ClaudeIdentity::Resume
@@ -2144,25 +2146,26 @@ fn spawn_identity(engine: &str, is_restore: bool, tmux_session_exists: bool) -> 
     }
 }
 
-/// Which conversation-identity flag a `claude` spawn carries — the thing that
-/// decides whether a restored pane gets *its own* history back or somebody
-/// else's (module docs, "Every claude pane owns its own conversation").
+/// Which conversation-identity flag a `claude`/`copilot` spawn carries — the
+/// thing that decides whether a restored pane gets *its own* history back or
+/// somebody else's (module docs, "Every pane owns its own conversation").
 ///
-/// Only ever meaningful for `claude`; `codex` and `shell` ignore it entirely
-/// and stay bit-for-bit stock.
+/// Only meaningful for `claude` and `copilot`, which share the same
+/// `--session-id`/`--resume` flag spellings; `codex` and `shell` ignore it
+/// entirely and stay bit-for-bit stock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaudeIdentity {
     /// `--session-id <U>` — a brand-new pane claiming the conversation it
     /// will own for the rest of its life.
     Claim,
     /// `--resume <U>` — a pane reopening the conversation it already owns,
-    /// after the process behind it went away (app closed with no tmux, or
-    /// tmux itself gone because the machine rebooted).
+    /// after the process behind it went away (app closed with no daemon
+    /// session, or the daemon itself gone because the machine rebooted).
     Resume,
     /// No identity flag at all. Two very different situations converge here,
-    /// and both genuinely want stock `claude`: attaching to a still-live tmux
-    /// session (the engine is already running; argv is never used), and the
-    /// last rung of a ladder whose earlier rungs were refused.
+    /// and both genuinely want a stock engine: attaching to a still-live
+    /// daemon session (the engine is already running; argv is never used), and
+    /// the last rung of a ladder whose earlier rungs were refused.
     Stock,
 }
 
@@ -2375,22 +2378,36 @@ fn build_engine_argv(
                 mcp_config_path,
             })
         }
-        // Copilot and Antigravity are spawned bare: neither accepts ADE's MCP
-        // config format, and passing invented flags would fail at launch. They
-        // get a terminal and their own CLI, which is what the founder asked
-        // for ("if the default is Claude, it basically runs Claude" — the same
-        // principle, applied to engines ADE has no wiring for).
-        //
-        // The binary comes from `commands::agents::AGENTS` rather than a
-        // literal, because the engine's name is not always its executable
-        // (Antigravity's CLI is `agy`). That table is also what
-        // `agents_check_installed` reports from, so an agent can never be
-        // detected as installed and then fail to spawn — the exact break this
-        // dispatch shipped with when the frontend's engine list was widened to
-        // five and this match was left at three.
-        name @ ("copilot" | "antigravity") => {
-            let binary = crate::commands::agents::binary_for(name)
-                .ok_or_else(|| anyhow!("no binary registered for engine {name:?}"))?;
+        // Copilot gets ADE's conversation-identity flags (the same
+        // `--session-id`/`--resume` spellings Claude uses — verified against
+        // the real CLI) so a restored Copilot pane reopens *its own*
+        // conversation, exactly like Claude. It is still spawned without an
+        // `--mcp-config`: Copilot does not accept ADE's MCP config format, and
+        // passing it would fail at launch.
+        "copilot" => {
+            let binary = crate::commands::agents::binary_for("copilot")
+                .ok_or_else(|| anyhow!("no binary registered for engine \"copilot\""))?;
+            let mut argv = vec![binary.to_string()];
+            // Empty for `Stock` (a live-session attach or the ladder's last
+            // rung), so an attaching/ stock Copilot stays bit-for-bit bare.
+            argv.extend(identity.argv(session_id));
+            Ok(EngineCommand {
+                argv,
+                env,
+                cwd: req.cwd.clone(),
+                mcp_config_path: None,
+            })
+        }
+        // Antigravity is spawned bare: it accepts neither ADE's MCP config nor
+        // any conversation-identity flags, so passing them would fail at
+        // launch. The binary comes from `commands::agents::AGENTS` rather than
+        // a literal, because the engine's name is not its executable (its CLI
+        // is `agy`). That table is also what `agents_check_installed` reports
+        // from, so an agent can never be detected as installed and then fail
+        // to spawn.
+        "antigravity" => {
+            let binary = crate::commands::agents::binary_for("antigravity")
+                .ok_or_else(|| anyhow!("no binary registered for engine \"antigravity\""))?;
             Ok(EngineCommand {
                 argv: vec![binary.to_string()],
                 env,
@@ -3998,6 +4015,77 @@ mod tests {
         }
     }
 
+    /// Copilot restore parity with Claude: a fresh Copilot pane *claims* its
+    /// conversation with `--session-id <uuid>`, and a restored one *resumes*
+    /// it with `--resume <uuid>` — the same flags, and the same derived UUID,
+    /// Claude uses. This is what lets a Copilot session come back to its own
+    /// history after the daemon session is gone, instead of starting blank.
+    #[test]
+    fn copilot_claims_a_conversation_when_new_and_resumes_its_own_when_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let req = CreateSessionRequest {
+            project: "demo".into(),
+            engine: "copilot".into(),
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            briefing: None,
+            restore_id: None,
+        };
+        let uuid = claude_conversation_uuid("sess-copilot");
+
+        let claim = build_engine_argv(&req, tmp.path(), "sess-copilot", ClaudeIdentity::Claim)
+            .unwrap()
+            .argv;
+        assert_eq!(
+            claim,
+            vec![
+                "copilot".to_string(),
+                "--session-id".to_string(),
+                uuid.clone()
+            ],
+            "a new copilot pane must claim its conversation id"
+        );
+
+        let resume = build_engine_argv(&req, tmp.path(), "sess-copilot", ClaudeIdentity::Resume)
+            .unwrap()
+            .argv;
+        assert_eq!(
+            resume,
+            vec!["copilot".to_string(), "--resume".to_string(), uuid],
+            "a restored copilot pane must resume its own conversation"
+        );
+
+        // Stock (attaching to a live daemon session, or the ladder's last
+        // rung) carries no flag — bit-for-bit the stock CLI.
+        let stock = build_engine_argv(&req, tmp.path(), "sess-copilot", ClaudeIdentity::Stock)
+            .unwrap()
+            .argv;
+        assert_eq!(stock, vec!["copilot".to_string()]);
+    }
+
+    /// Antigravity has no conversation-identity flags, so it must stay bare on
+    /// every rung — the identity mechanism is Claude/Copilot-only.
+    #[test]
+    fn antigravity_never_carries_a_conversation_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let req = CreateSessionRequest {
+            project: "demo".into(),
+            engine: "antigravity".into(),
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            briefing: None,
+            restore_id: None,
+        };
+        for identity in [
+            ClaudeIdentity::Claim,
+            ClaudeIdentity::Resume,
+            ClaudeIdentity::Stock,
+        ] {
+            let argv = build_engine_argv(&req, tmp.path(), "sess-agy", identity)
+                .unwrap()
+                .argv;
+            assert_eq!(argv, vec!["agy".to_string()], "{identity:?}");
+        }
+    }
+
     // -- Shell-PATH resolution (founder bug, 2026-07-25 -- see module docs
     // for the full "Resolving the real PATH for GUI-launched spawns"
     // writeup) --------------------------------------------------------
@@ -4913,24 +5001,28 @@ mod tests {
     /// waiting out a `--resume` window for a flag it was never given would be
     /// a pure latency regression on the most common path there is.
     #[test]
-    fn only_a_claude_spawning_a_fresh_engine_carries_an_identity() {
+    fn only_a_conversation_engine_spawning_a_fresh_engine_carries_an_identity() {
         use ClaudeIdentity::*;
-        assert_eq!(spawn_identity("claude", false, false), Claim);
-        assert_eq!(spawn_identity("claude", true, false), Resume);
-        // Attaching to a live tmux session: the engine never restarts.
-        assert_eq!(spawn_identity("claude", true, true), Stock);
-        assert_eq!(spawn_identity("claude", false, true), Stock);
-        for engine in ["codex", "shell"] {
+        // `claude` and `copilot` share the same `--session-id`/`--resume`
+        // conversation flags, so both restore their own history.
+        for engine in ["claude", "copilot"] {
+            assert_eq!(spawn_identity(engine, false, false), Claim, "{engine}");
+            assert_eq!(spawn_identity(engine, true, false), Resume, "{engine}");
+            // Attaching to a live daemon session: the engine never restarts.
+            assert_eq!(spawn_identity(engine, true, true), Stock, "{engine}");
+            assert_eq!(spawn_identity(engine, false, true), Stock, "{engine}");
+        }
+        for engine in ["codex", "shell", "antigravity"] {
             for is_restore in [false, true] {
-                for tmux_exists in [false, true] {
+                for daemon_exists in [false, true] {
                     assert_eq!(
-                        spawn_identity(engine, is_restore, tmux_exists),
+                        spawn_identity(engine, is_restore, daemon_exists),
                         Stock,
-                        "{engine} restore={is_restore} tmux={tmux_exists}"
+                        "{engine} restore={is_restore} daemon={daemon_exists}"
                     );
                     // Single-rung ladder: no identity fallback work.
                     assert_eq!(
-                        spawn_identity(engine, is_restore, tmux_exists)
+                        spawn_identity(engine, is_restore, daemon_exists)
                             .ladder()
                             .len(),
                         1

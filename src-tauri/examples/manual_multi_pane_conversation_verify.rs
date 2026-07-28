@@ -4,9 +4,9 @@
 //!
 //! Founder bug (Bruno, 2026-07-26): `claude --continue` continues *the most
 //! recent conversation in the current directory*, and this app encourages
-//! several Claude panes per project folder. After a reboot (tmux dies with
-//! the machine, so every pane falls back to a fresh spawn at once) every pane
-//! in a project restored the **same** conversation — panes 2..N silently
+//! several Claude panes per project folder. After a reboot (the daemon dies
+//! with the machine, so every pane falls back to a fresh spawn at once) every
+//! pane in a project restored the **same** conversation — panes 2..N silently
 //! became duplicates of pane 1. A single-session test passes happily against
 //! that behavior, which is why this harness opens two.
 //!
@@ -16,8 +16,8 @@
 //! cd src-tauri
 //! # 1. two claude panes in this folder; A is told PERSIMMON, B is told AUBERGINE
 //! cargo run --example manual_multi_pane_conversation_verify -- start after
-//! # 2. simulate a reboot: tmux is userspace, it does not survive one
-//! tmux -L omniagent-ade kill-server
+//! # 2. simulate a reboot: the daemon is userspace, it does not survive one
+//! pkill -f omniagent-pty-daemon
 //! # 3. restore both by their original OmniAgent ids and ask each what it was told
 //! cargo run --example manual_multi_pane_conversation_verify -- resume after
 //! # 4. clean up
@@ -40,14 +40,16 @@
 //!   cargo run --example manual_multi_pane_conversation_verify -- start after
 //! ```
 //!
-//! Uses the real `omniagent-ade` socket and the real `default_tmux` wiring,
-//! deliberately: what's exercised here is exactly what the app does.
+//! Uses the real `omniagent-ade` socket and the real `default_daemon_sessions`
+//! wiring, deliberately: what's exercised here is exactly what the app does.
 
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use omniagent_ade_lib::sessions::{default_tmux, CreateSessionRequest, OutputSink, SessionManager};
+use omniagent_ade_lib::sessions::{
+    default_daemon_sessions, CreateSessionRequest, OutputSink, SessionManager,
+};
 
 /// The two panes: (id suffix, the word only this pane is ever told).
 const PANES: [(&str, &str); 2] = [("a", "PERSIMMON"), ("b", "AUBERGINE")];
@@ -59,12 +61,12 @@ fn main() {
 
     let data_dir = brain_core::Store::default_data_dir();
     let cwd = std::env::current_dir().unwrap();
-    let tmux = default_tmux(&data_dir);
+    let daemon_sessions = default_daemon_sessions(&data_dir);
 
     println!("cwd (shared by both panes): {}", cwd.display());
-    match &tmux {
-        Some(t) => println!("tmux: {} on socket {:?}", t.binary().display(), t.socket()),
-        None => println!("tmux: NOT FOUND — every pane is a direct spawn"),
+    match &daemon_sessions {
+        Some(t) => println!("daemon: {} on socket {:?}", t.binary().display(), t.socket()),
+        None => println!("daemon: NOT FOUND — every pane is a direct spawn"),
     }
     if std::env::var("CLAUDE_CODE_CHILD_SESSION").is_ok() {
         println!(
@@ -88,7 +90,7 @@ fn main() {
         let _ = tick_tx.send(());
     });
 
-    let manager = SessionManager::new(data_dir, sink).with_tmux(tmux.clone());
+    let manager = SessionManager::new(data_dir, sink).with_daemon_sessions(daemon_sessions.clone());
 
     let ids: Vec<String> = PANES
         .iter()
@@ -105,7 +107,7 @@ fn main() {
                 Err(e) => println!("could not attach {id} to kill it: {e}"),
             }
         }
-        println!("tmux sessions now: {:?}", live_sessions(&tmux));
+        println!("daemon sessions now: {:?}", live_sessions(&daemon_sessions));
         return;
     }
 
@@ -119,7 +121,7 @@ fn main() {
             info.restored, info.persistent
         );
     }
-    println!("tmux sessions now: {:?}", live_sessions(&tmux));
+    println!("daemon sessions now: {:?}", live_sessions(&daemon_sessions));
 
     // Claude's TUI needs to be up before anything typed at it registers, and
     // a restore has to finish replaying the conversation on top of that —
@@ -186,7 +188,7 @@ fn main() {
     if mode == "start" {
         println!(
             "\nNOT killing anything: exiting now is the 'user closed the app' half.\n\
-             Next: `tmux -L omniagent-ade kill-server` (the reboot), then re-run with `resume`."
+             Next: `pkill -f omniagent-pty-daemon` (the reboot), then re-run with `resume`."
         );
     }
 
@@ -205,8 +207,11 @@ fn request(cwd: &std::path::Path, restore_id: &str) -> CreateSessionRequest {
     }
 }
 
-fn live_sessions(tmux: &Option<omniagent_ade_lib::tmux::Tmux>) -> Vec<String> {
-    tmux.as_ref().map(|t| t.list_sessions()).unwrap_or_default()
+fn live_sessions(daemon_sessions: &Option<omniagent_ade_lib::daemon::DaemonSessions>) -> Vec<String> {
+    daemon_sessions
+        .as_ref()
+        .map(|t| t.list_sessions())
+        .unwrap_or_default()
 }
 
 /// The last `n` characters, which is where a TUI's final rendered state is.
