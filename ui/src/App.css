@@ -1911,6 +1911,7 @@ code {
   padding: 12px 16px;
   border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
   background: rgba(16, 22, 44, 0.5);
+  flex-wrap: wrap;
   backdrop-filter: var(--glass-blur, saturate(180%) blur(26px));
   -webkit-backdrop-filter: var(--glass-blur, saturate(180%) blur(26px));
   position: sticky;
@@ -1967,6 +1968,10 @@ code {
   flex-direction: column;
   gap: 10px;
   padding: 10px;
+  /* Establish a size container so the grid rows below reflow to the pane's
+     own width (which changes on resize), not just the viewport. */
+  container-type: inline-size;
+  container-name: dash;
 }
 
 /* stat cards row */
@@ -1988,6 +1993,12 @@ code {
   flex-direction: column;
   gap: 4px;
   min-width: 0;
+  transition:
+    box-shadow 260ms ease,
+    border-radius 300ms cubic-bezier(0.22, 0.61, 0.36, 1),
+    padding 300ms cubic-bezier(0.22, 0.61, 0.36, 1),
+    background 200ms ease,
+    transform 260ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 .dsc-label {
@@ -2058,6 +2069,11 @@ code {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+  transition:
+    box-shadow 260ms ease,
+    border-radius 300ms cubic-bezier(0.22, 0.61, 0.36, 1),
+    background 200ms ease,
+    transform 260ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 .dash-panel-header {
@@ -2352,6 +2368,52 @@ code {
   display: grid;
   grid-template-columns: 1fr 2fr 1fr;
   gap: 8px;
+}
+
+/* ---- responsive dashboard (reflows to the pane's own width) ------------- */
+.dash-stat-row,
+.dash-mid-row,
+.dash-lower-row,
+.dash-bottom-row {
+  transition: gap 240ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* wide → medium: five stat cards wrap to three; keep the multi-column rows */
+@container dash (max-width: 1120px) {
+  .dash-stat-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+/* medium → narrow: the two/three-panel rows stack, stat cards go to two-up */
+@container dash (max-width: 860px) {
+  .dash-stat-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .dash-mid-row,
+  .dash-lower-row,
+  .dash-bottom-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* very narrow: everything is a single column */
+@container dash (max-width: 480px) {
+  .dash-stat-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* honour reduced-motion: keep it responsive, drop the easing */
+@media (prefers-reduced-motion: reduce) {
+  .dash-stat-card,
+  .dash-panel,
+  .dash-stat-row,
+  .dash-mid-row,
+  .dash-lower-row,
+  .dash-bottom-row {
+    transition: none;
+  }
 }
 
 /* approvals */
