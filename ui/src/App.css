@@ -1468,12 +1468,14 @@ code {
 }
 
 /* Suppress the button's own active background and accent bar when the group
-   already provides both — avoids a double-tinted surface */
-.sidebar-workspace-tab-group.is-active > button.is-active {
+   already provides both — avoids a double-tinted surface.
+   Specificity must beat .sidebar-view-toggle button.is-active (0,2,1) so we
+   add .sidebar-view-toggle to the chain (total 0,3,1). */
+.sidebar-view-toggle .sidebar-workspace-tab-group.is-active > button.is-active {
   background: transparent;
   color: var(--ink);
 }
-.sidebar-workspace-tab-group.is-active > button.is-active::before {
+.sidebar-view-toggle .sidebar-workspace-tab-group.is-active > button.is-active::before {
   opacity: 0;
 }
 
@@ -1518,27 +1520,34 @@ code {
   background: rgba(255, 255, 255, 0.04);
 }
 
-/* Active session — blue highlight so it reads as "selected" */
-.sidebar-inline-session-row.is-current {
+/* Active session blue highlight — only when workspace view is active,
+   so it doesn't show as a second "selected" item when Dashboard is open */
+.sidebar-workspace-tab-group.is-active .sidebar-inline-session-row.is-current {
   background: rgba(61, 141, 203, 0.15);
 }
 
-.sidebar-inline-session-row.is-current .sidebar-inline-session-name-btn {
+.sidebar-workspace-tab-group.is-active .sidebar-inline-session-row.is-current
+  .sidebar-inline-session-name-btn {
   color: var(--ink);
 }
 
-/* Name button fills all available space; right-pad leaves room so the
-   absolutely-positioned close button never overlaps text on hover */
+/* Name button — display:block overrides the display:flex that
+   .sidebar-view-toggle button applies to all button descendants;
+   text-overflow:ellipsis only works on block/inline-block containers.
+   padding/font overrides use !important for the same specificity reason
+   (.sidebar-view-toggle button is 0,1,1 vs this class's 0,1,0). */
 .sidebar-inline-session-name-btn {
+  display: block !important;
   flex: 1;
   min-width: 0;
-  background: transparent;
+  width: 100%;
+  background: transparent !important;
   border: none;
   color: var(--ink-dim);
   font-family: var(--sans);
-  font-size: 12.5px;
+  font-size: 12.5px !important;
   font-weight: 500;
-  padding: 5px 0;
+  padding: 5px 0 !important;
   text-align: left;
   cursor: pointer;
   white-space: nowrap;
@@ -1547,22 +1556,23 @@ code {
   line-height: 1.3;
 }
 
-/* Close button: absolutely pinned to the right so it never shrinks the
-   name — invisible until the row is hovered */
+/* Close button — width:auto and padding override the base
+   .sidebar-view-toggle button rule for the same specificity reason */
 .sidebar-inline-session-close-btn {
   position: absolute;
   right: 6px;
   top: 50%;
   transform: translateY(-50%);
-  background: transparent;
+  width: auto !important;
+  background: transparent !important;
   border: none;
   color: var(--ink-faint);
   cursor: pointer;
-  padding: 3px 4px;
+  padding: 3px 4px !important;
   border-radius: 4px;
   opacity: 0;
   transition: opacity 0.12s, background 0.12s, color 0.12s;
-  display: flex;
+  display: flex !important;
   align-items: center;
 }
 
@@ -1571,8 +1581,8 @@ code {
 }
 
 .sidebar-inline-session-close-btn:hover {
-  color: #fff;
-  background: var(--status-error);
+  color: #fff !important;
+  background: var(--status-error) !important;
 }
 
 /* files tab group fills all remaining space in the toggle list */
