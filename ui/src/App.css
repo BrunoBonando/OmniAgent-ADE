@@ -4745,6 +4745,55 @@ code {
   padding: 8px 12px;
 }
 
+/* Per-pane loading overlay — shown while xterm initialises and fits its
+   first layout.  Uses the same blinking logo mark the startup screen and
+   session-restore states already use, so the loading experience is
+   consistent throughout the app.  The overlay is dismissed without a React
+   re-render: Terminal.tsx sets `data-ready` on the element via a DOM ref
+   once the first successful fit fires (`dismissLoading` callback).
+   `pointer-events: none` so it never intercepts mouse/keyboard events even
+   during the 220 ms fade-out. */
+.terminal-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  background: var(--void);
+  opacity: 1;
+  transition: opacity 220ms ease;
+  pointer-events: none;
+}
+
+.terminal-loading[data-ready] {
+  opacity: 0;
+}
+
+.terminal-loading-logo {
+  width: 42px;
+  aspect-ratio: 1;
+  background: var(--brand-blue);
+  filter: drop-shadow(0 0 10px rgba(61, 141, 203, 0.55));
+  -webkit-mask: url("./assets/omniagent-mark-mask.png") center / contain no-repeat;
+  mask: url("./assets/omniagent-mark-mask.png") center / contain no-repeat;
+  animation: startup-logo-blink 1.35s steps(2, end) infinite;
+}
+
+/* Stop animating once dismissed so the fading overlay doesn't flicker. */
+.terminal-loading[data-ready] .terminal-loading-logo {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-loading {
+    transition: none;
+  }
+  .terminal-loading-logo {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
 /* Design alignment (`design/OmniAgent ADE.dc.html`, awaiting-approval pane):
    the terminal waiting on permission gets an amber footer strip, and the
    terminal viewport yields that space so the approval cue never overlaps

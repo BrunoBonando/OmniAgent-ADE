@@ -4,7 +4,7 @@
 // `session-output:{id}` events to whoever is listening right now; unmounting
 // (and re-listening later) would silently drop everything the PTY printed
 // while the tab was in the background. Visibility is CSS-only (`display`).
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -50,6 +50,7 @@ function base64ToBytes(b64: string): Uint8Array {
 
 export default function Terminal({ sessionId, visible, focused, themeId, onEngineTitle, agentState, tabEngine }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const loadingRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const retryTimerRef = useRef<number | null>(null);
@@ -66,21 +67,36 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
 
   const hasUsableSize = (cols: number, rows: number) => cols > 0 && rows > 0;
 
+  // Dismiss the per-pane loading overlay. Stable across renders (empty deps)
+  // so both the mount effect and the visibility effect can reference it in
+  // their closures without needing it in the dependency arrays. Pure DOM
+  // manipulation — no React state, no re-render, no interruption to the PTY
+  // stream.
+  const dismissLoading = useCallback(() => {
+    const el = loadingRef.current;
+    if (!el || el.hasAttribute("data-ready")) return;
+    el.setAttribute("data-ready", "");
+  }, []);
+
   /** Shared fit-with-retry used by both the mount effect and the visibility
    * effect. Attempts up to `maxAttempts` times, each `intervalMs` ms apart.
    * Returns early on first success. The timer id is stored in retryTimerRef
-   * so the cleanup path can cancel it. */
+   * so the cleanup path can cancel it. An optional `onFirstSuccess` callback
+   * fires once after the very first successful fit — used to hide the loading
+   * overlay without triggering a React re-render. */
   const scheduleRetryFit = (
     fit: FitAddon,
     term: XTerm,
     maxAttempts: number,
     intervalMs: number,
+    onFirstSuccess?: () => void,
   ) => {
     let attempt = 0;
     const tryFit = () => {
       try { fit.fit(); } catch { /* ignore — xterm not yet ready */ }
       if (hasUsableSize(term.cols, term.rows)) {
         void sessionResize(sessionId, term.cols, term.rows);
+        onFirstSuccess?.();
         return;
       }
       if (attempt >= maxAttempts) return;
@@ -105,31 +121,42 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
       theme: resolveTerminalTheme(themeId),
       cursorBlink: true,
       cursorStyle: "bar",
-      scrollback: 10000,
+      scrollback: 3000,
       allowProposedApi: true,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
 
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      term.loadAddon(webgl);
-    } catch (err) {
-      // WebGL unavailable (headless/CI, unsupported GPU path, jsdom in
-      // tests) — xterm's DOM renderer still works, just without the GPU
-      // fast path. Never fatal (DESIGN: terminals must always work).
-      console.warn("omniagent-ade: WebGL addon unavailable, falling back to DOM renderer", err);
-    }
-
     termRef.current = term;
     fitRef.current = fit;
 
-    // Initial fit — 20 retries at 50ms intervals (1 s window) so the pane
-    // grid's first layout pass has time to resolve before we give up.
+    // Defer WebGL initialisation so it doesn't block multiple terminals'
+    // first paint.  xterm renders fine with its Canvas/DOM fallback while
+    // the GPU context spins up in the background; `setTimeout 0` yields
+    // to the browser's layout and paint tasks first.
+    const webglTimer = window.setTimeout(() => {
+      if (cancelled) return;
+      try {
+        const webgl = new WebglAddon();
+        webgl.onContextLoss(() => webgl.dispose());
+        term.loadAddon(webgl);
+      } catch (err) {
+        // WebGL unavailable (headless/CI, unsupported GPU path, jsdom in
+        // tests) — xterm's DOM renderer still works, just without the GPU
+        // fast path. Never fatal (DESIGN: terminals must always work).
+        console.warn("omniagent-ade: WebGL addon unavailable, falling back to DOM renderer", err);
+      }
+    }, 0);
+
+    // Initial fit — 60 retries at 100 ms intervals (6 s window) so that when
+    // several panes open simultaneously the browser has enough time to settle
+    // every container's layout before we give up.  The wider window directly
+    // fixes the "some terminals stay blank on multi-pane open" symptom: the
+    // previous 20×50 ms window (1 s) was too tight when 4–8 terminals all
+    // competed for the layout pass at once.
     if (visible) {
-      scheduleRetryFit(fit, term, 20, 50);
+      scheduleRetryFit(fit, term, 60, 100, dismissLoading);
     }
 
     let submittedPrompt = false;
@@ -145,7 +172,19 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
       if (usefulTitle) onEngineTitleRef.current?.(sessionId, usefulTitle);
     });
 
-    const resizeObserver = new ResizeObserver(() => scheduleRetryFit(fit, term, 20, 50));
+    // Debounced resize handler: when multiple terminals open simultaneously
+    // the mosaic grid fires a ResizeObserver notification on every pane at
+    // once.  Without the debounce each terminal would immediately kick off its
+    // own 20-attempt retry loop, hammering the main thread.  50 ms is enough
+    // to batch the burst into one callback per pane.
+    let resizeDebounceTick: number | null = null;
+    const resizeObserver = new ResizeObserver(() => {
+      if (resizeDebounceTick !== null) clearTimeout(resizeDebounceTick);
+      resizeDebounceTick = window.setTimeout(() => {
+        resizeDebounceTick = null;
+        scheduleRetryFit(fit, term, 20, 50);
+      }, 50);
+    });
     resizeObserver.observe(container);
 
     let cancelled = false;
@@ -229,6 +268,7 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
       dataDisposable.dispose();
       titleDisposable?.dispose();
       resizeObserver.disconnect();
+      if (resizeDebounceTick !== null) clearTimeout(resizeDebounceTick);
       if (retryTimerRef.current !== null) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
@@ -271,7 +311,7 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
         const term = termRef.current;
         const fit = fitRef.current;
         if (!term || !fit) return;
-        scheduleRetryFit(fit, term, 20, 50);
+        scheduleRetryFit(fit, term, 40, 100, dismissLoading);
       });
     });
     return () => {
@@ -291,6 +331,12 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
       style={{ display: visible ? "block" : "none" }}
       data-session-id={sessionId}
     >
+      {/* Logo-animation overlay shown while xterm is initialising. Dismissed
+          via DOM attribute (no React state) so it never causes a re-render or
+          interrupts the PTY stream — see `dismissLoading` above. */}
+      <div ref={loadingRef} className="terminal-loading" aria-hidden="true">
+        <div className="terminal-loading-logo" />
+      </div>
       {agentState.installing.has(tabEngine) && (
         <PaneInstallOverlay
           agent={tabEngine}
