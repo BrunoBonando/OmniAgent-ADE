@@ -1442,6 +1442,39 @@ code {
 .sidebar-files-tab-group {
   display: flex;
   flex-direction: column;
+  position: relative;
+  border-radius: var(--radius-sm);
+}
+
+/* When Working Sessions is active: the entire group (button + session list)
+   shares one background surface, so sessions read as belonging to the tab */
+.sidebar-workspace-tab-group.is-active {
+  background: rgba(62, 64, 73, 0.5);
+  color: var(--ink);
+}
+
+/* Left accent bar on the group, not the button, so it spans the header only */
+.sidebar-workspace-tab-group.is-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 17px; /* vertically centred in the ~34px button row */
+  transform: translateY(-50%);
+  width: 3px;
+  height: 26px;
+  border-radius: 0 2px 2px 0;
+  background: var(--brand-blue);
+  pointer-events: none;
+}
+
+/* Suppress the button's own active background and accent bar when the group
+   already provides both — avoids a double-tinted surface */
+.sidebar-workspace-tab-group.is-active > button.is-active {
+  background: transparent;
+  color: var(--ink);
+}
+.sidebar-workspace-tab-group.is-active > button.is-active::before {
+  opacity: 0;
 }
 
 /* sessions inline — bounded scroll, doesn't push the files section off */
@@ -1456,19 +1489,38 @@ code {
 .sidebar-inline-session-list {
   list-style: none;
   margin: 0;
-  padding: 2px 0 4px;
+  padding: 0 0 6px;
 }
 
 .sidebar-inline-session-row {
   display: flex;
   align-items: center;
-  padding: 0 8px 0 55px;
-  gap: 2px;
+  padding: 3px 6px 3px 12px;
+  gap: 11px;
   border-radius: var(--radius-sm);
+}
+
+/* Icon box — mirrors .sidebar-nav-icon-box sizing so the mark aligns with
+   the terminal icon in the Working Sessions header button */
+.sidebar-inline-session-icon {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.22);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
 .sidebar-inline-session-row:hover {
   background: rgba(255, 255, 255, 0.04);
+}
+
+/* Inside the active group the row hover should be slightly more visible */
+.sidebar-workspace-tab-group.is-active .sidebar-inline-session-row:hover {
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .sidebar-inline-session-row.is-current .sidebar-inline-session-name-btn {
@@ -1484,7 +1536,7 @@ code {
   font-family: var(--sans);
   font-size: 12.5px;
   font-weight: 500;
-  padding: 5px 0;
+  padding: 4px 0;
   text-align: left;
   cursor: pointer;
   white-space: nowrap;

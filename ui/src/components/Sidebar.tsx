@@ -153,6 +153,8 @@ import CloseSessionConfirm from "./CloseSessionConfirm";
 import FileTree from "./FileTree";
 import type { SessionGroup } from "../state/sessionGroups";
 import AccountBadge from "./AccountBadge";
+import SessionStatusLight from "./SessionStatusLight";
+import { mostSignificantStatus } from "../state/sessionStatus";
 import Icon from "./Icon";
 import { brainLine } from "../state/accountBadgeState";
 import type { ImportBatchResult } from "../state/importState";
@@ -413,6 +415,9 @@ export default function Sidebar({
   const awaitingCount = allProjectTabs.filter((t) => t.status === "awaiting_approval").length;
   const fileCount = gitBadges.total;
   const totalSessionCount = selectedSessions.length + dormantSessions.length;
+  // Aggregated status for the Working Sessions button icon — the most
+  // significant status across all tabs in all selected sessions.
+  const workingSessionsStatus = mostSignificantStatus(allProjectTabs.map((t) => t.status));
   const gitDiffSummary = review
     ? `${review.file_count} file${review.file_count !== 1 ? "s" : ""} · +${review.added} -${review.removed}`
     : "Git diff unavailable";
@@ -518,7 +523,7 @@ export default function Sidebar({
             <span className="sidebar-nav-subtitle">backlog, sprint, timeline</span>
           </div>
         </button>
-        <div className="sidebar-workspace-tab-group">
+        <div className={`sidebar-workspace-tab-group${view === "workspace" ? " is-active" : ""}`}>
           <button
             role="tab"
             aria-selected={view === "workspace"}
@@ -527,7 +532,7 @@ export default function Sidebar({
             title="Working sessions"
           >
             <div className="sidebar-nav-icon-box">
-              <Icon name="terminal" size={16} />
+              <SessionStatusLight status={workingSessionsStatus} size={16} decorative />
             </div>
             <div className="sidebar-nav-text">
               <span className="sidebar-nav-title">Working sessions</span>
@@ -538,9 +543,15 @@ export default function Sidebar({
             <ul className="sidebar-inline-session-list">
               {dormantSessions.map((dormant) => (
                 <li key={dormant.group} className="sidebar-inline-session-row">
+                  <div className="sidebar-inline-session-icon">
+                    <SessionStatusLight size={14} decorative />
+                  </div>
                   <button
                     className="sidebar-inline-session-name-btn"
-                    onClick={() => onSelectDormantSession?.(dormant)}
+                    onClick={() => {
+                      onSetView?.("workspace");
+                      onSelectDormantSession?.(dormant);
+                    }}
                   >
                     {dormant.label}
                   </button>
@@ -549,14 +560,21 @@ export default function Sidebar({
               {selectedProject &&
                 selectedSessions.map((session) => {
                   const isCurrent = session.id === onScreenSession;
+                  const sessionStatus = mostSignificantStatus(session.tabs.map((t) => t.status));
                   return (
                     <li
                       key={session.id}
                       className={`sidebar-inline-session-row${isCurrent ? " is-current" : ""}`}
                     >
+                      <div className="sidebar-inline-session-icon">
+                        <SessionStatusLight status={sessionStatus} size={14} decorative />
+                      </div>
                       <button
                         className="sidebar-inline-session-name-btn"
-                        onClick={() => onActivateTab(session.tabs[0].id)}
+                        onClick={() => {
+                          onSetView?.("workspace");
+                          onActivateTab(session.tabs[0].id);
+                        }}
                         aria-label={session.label}
                       >
                         {session.label}
