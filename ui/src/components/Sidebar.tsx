@@ -573,6 +573,7 @@ export default function Sidebar({
                           onActivateTab(session.tabs[0].id);
                         }}
                         aria-label={session.label}
+                        title={session.label}
                       >
                         {session.label}
                       </button>

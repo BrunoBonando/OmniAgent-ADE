@@ -1556,12 +1556,14 @@ code {
 }
 
 /* Close button — width:auto and padding override the base
-   .sidebar-view-toggle button rule for the same specificity reason */
+   .sidebar-view-toggle button rule for the same specificity reason.
+   position:absolute !important is required because the base rule sets
+   position:relative (0,1,1) which beats this class (0,1,0). */
 .sidebar-inline-session-close-btn {
-  position: absolute;
+  position: absolute !important;
   right: 6px;
   top: 50%;
-  transform: translateY(-50%);
+  transform: translateY(-50%) !important;
   width: auto !important;
   background: transparent !important;
   border: none;
