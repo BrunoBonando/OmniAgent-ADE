@@ -88,6 +88,7 @@ import {
   onSessionWrite,
   listProjects,
   renameProject,
+  reviewStatus,
   rootsList,
   sessionCreate,
   sessionKill,
@@ -98,6 +99,7 @@ import {
   settingsSet,
   sendNativeNotification,
   type IngestionStatus,
+  type ReviewStatus,
 } from "./lib/tauri";
 import { agentsReducer, initialAgentsState, type Agent } from "./state/agents";
 import {
@@ -893,6 +895,25 @@ function App() {
     [persistedTabs, restoreSession, state.tabs],
   );
 
+  // Auto-restore: when the app restarts with persisted tabs and the auth gate
+  // is resolved, skip the workspace-chooser and immediately restore the
+  // previous session. Guarded by needsAuthGate === false so we never bypass
+  // the auth gate. The one-shot ref prevents re-triggering on subsequent
+  // renders after the workspace transitions to "workspace-active".
+  const autoRestoredRef = useRef(false);
+  useEffect(() => {
+    if (autoRestoredRef.current) return;
+    if (startupPhase !== "choosing-workspace") return;
+    if (needsAuthGate !== false) return;
+    if (state.projects.length === 0) return;
+    if (persistedTabs.length === 0) return;
+    const firstTab = persistedTabs[0];
+    const project = state.projects.find((p) => p.id === firstTab.project);
+    if (!project) return;
+    autoRestoredRef.current = true;
+    selectStartupWorkspace(project);
+  }, [startupPhase, needsAuthGate, state.projects, persistedTabs, selectStartupWorkspace]);
+
   const dormantSessions = useMemo<DormantSession[]>(() => {
     if (selectedProjectId === null) return [];
     const sessions = new Map<string, DormantSession>();
@@ -1686,6 +1707,29 @@ function App() {
   );
   const currentSessionLabel = visibleSession?.label ?? null;
 
+  // Git status for the app title bar — polls the visible session's repo
+  // every 5 s and shows aggregate +N/-N in AppChrome's top-right corner.
+  // Uses the first tab's cwd (all tabs in one session share the same repo
+  // root) with a fallback to the project path for the initial moment before
+  // any tab has spawned. Silently clears when there is no repo.
+  const [appGitStatus, setAppGitStatus] = useState<ReviewStatus | null>(null);
+  useEffect(() => {
+    const repoPath = visibleSession?.tabs[0]?.cwd ?? selectedProject?.path ?? null;
+    if (!repoPath) {
+      setAppGitStatus(null);
+      return;
+    }
+    let cancelled = false;
+    function poll() {
+      reviewStatus(repoPath!)
+        .then((s) => { if (!cancelled) setAppGitStatus(s); })
+        .catch(() => { if (!cancelled) setAppGitStatus(null); });
+    }
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [visibleSession?.tabs, selectedProject?.path]);
+
   // ---- ⌘T new tab / ⌘K palette / ⌘N new session or workspace / ⌘W close
   // pane. The established place for app-level shortcuts that need live UI
   // state (which tab, which project) rather than a static native-menu event.
@@ -1822,6 +1866,7 @@ function App() {
         projectLabel={selectedProject?.label ?? null}
         sessionLabel={currentSessionLabel}
         sessionTerminalCount={visibleSession?.tabs.length ?? null}
+        gitStatus={appGitStatus}
         notifications={notifications.entries}
         liveSessionIds={tabIds}
         knownProjectIds={state.projects.map((p) => p.id)}

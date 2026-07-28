@@ -1645,6 +1645,7 @@ code {
   padding: 0 10px;
   display: flex;
   gap: 8px;
+  align-items: flex-start;
 }
 
 .dashboard-quick-actions button {
@@ -1663,6 +1664,84 @@ code {
 .dashboard-quick-actions button:hover {
   border-color: rgba(139, 149, 255, 0.5);
   background: rgba(139, 149, 255, 0.14);
+}
+
+/* Working sessions button — taller, lists sessions inside */
+.dashboard-sessions-btn {
+  height: auto !important;
+  min-height: 32px;
+  padding: 8px 10px !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  gap: 0 !important;
+}
+
+.dsb-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 600 11px/1 var(--sans);
+  color: #d8d8e1;
+}
+
+.dsb-count {
+  margin-left: auto;
+  background: rgba(139, 149, 255, 0.2);
+  color: #8b95ff;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font: 600 10px/1.4 var(--mono);
+}
+
+.dsb-session-list {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+}
+
+.dsb-session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  border: 0.5px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.dsb-session-row:hover {
+  background: rgba(139, 149, 255, 0.12);
+  border-color: rgba(139, 149, 255, 0.4);
+}
+
+.dsb-session-name {
+  font: 500 10.5px/1 var(--sans);
+  color: #d8d8e1;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsb-session-branch {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: #7a8aff;
+  flex-shrink: 0;
+}
+
+.dsb-session-branch-name {
+  font: 500 10px/1 var(--mono);
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dashboard-sessions {
@@ -7132,6 +7211,41 @@ code {
   flex: 0 0 auto;
 }
 
+/* ---------------------------------------- app-level git status pill */
+
+.app-chrome-git-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 0.5px solid rgba(255, 255, 255, 0.07);
+  cursor: default;
+  user-select: none;
+}
+
+.app-chrome-git-files {
+  color: #9b9ba5;
+  font: 500 10.5px/1 var(--mono);
+}
+
+.app-chrome-git-files::after {
+  content: " ·";
+  color: #4e4e58;
+  margin-left: 2px;
+}
+
+.app-chrome-git-add {
+  color: #57c97e;
+  font: 500 10.5px/1 var(--mono);
+}
+
+.app-chrome-git-del {
+  color: #e05f5f;
+  font: 500 10.5px/1 var(--mono);
+}
+
 /* ------------------------------------------------- notifications badge */
 
 .notifications-anchor {
@@ -8356,6 +8470,32 @@ code {
    still the same lazy `listDir`/watcher-backed tree. */
 .sidebar-files { flex: 1; min-height: 0; display: flex; flex-direction: column; border-top: 0.5px solid rgba(255, 255, 255, 0.06); margin-top: 2px; }
 .sidebar-files-header { flex: none; display: flex; align-items: center; gap: 6px; padding: 8px 14px 5px; }
+.sidebar-files-diff {
+  flex: none;
+  margin: 0 9px 7px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 0.5px solid rgba(255, 255, 255, 0.06);
+}
+.sidebar-files-diff-summary { font: 500 10px/1.2 var(--mono); color: #a9a9b2; }
+.sidebar-files-diff-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.sidebar-files-diff-item { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sidebar-files-diff-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #c2c2cb;
+  font: 400 11px/1 var(--sans);
+}
+.sidebar-files-diff-empty { margin-top: 6px; font: 400 10px/1 var(--sans); color: #777784; }
 .sidebar-files-filter-wrap {
   flex: none;
   margin: 0 9px 7px;

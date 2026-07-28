@@ -38,6 +38,7 @@ vi.mock("./lib/tauri", () => ({
   onSessionWrite: vi.fn().mockReturnValue(() => {}),
   systemStats: mocks.systemStats,
   enrichQueuePendingCount: mocks.enrichQueuePendingCount,
+  reviewStatus: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

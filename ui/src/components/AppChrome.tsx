@@ -54,12 +54,17 @@
 // including the map view.
 import NotificationsPanel from "./NotificationsPanel";
 import type { NotificationEntry } from "../state/notifications";
+import type { ReviewStatus } from "../lib/tauri";
 import omniAgentLogo from "../assets/omniagent-logo.png";
 
 interface AppChromeProps {
   projectLabel: string | null;
   sessionLabel: string | null;
   sessionTerminalCount?: number | null;
+  /** Aggregate git status for the visible project — shown as a compact
+   * `N files +added -removed` pill in the top-right corner, giving the
+   * user a repo-level change count at a glance without opening the panel. */
+  gitStatus?: ReviewStatus | null;
   notifications: NotificationEntry[];
   liveSessionIds: string[];
   knownProjectIds: string[];
@@ -78,6 +83,7 @@ export default function AppChrome({
   projectLabel,
   sessionLabel,
   sessionTerminalCount = null,
+  gitStatus = null,
   notifications,
   liveSessionIds,
   knownProjectIds,
@@ -117,6 +123,16 @@ export default function AppChrome({
 
       <div className="app-chrome-spacer" />
       <div className="app-chrome-actions">
+        {gitStatus && gitStatus.file_count > 0 && (
+          <span
+            className="app-chrome-git-status"
+            title={`${gitStatus.file_count} uncommitted change${gitStatus.file_count === 1 ? "" : "s"} on ${gitStatus.branch ?? "detached HEAD"}`}
+          >
+            <span className="app-chrome-git-files">{gitStatus.file_count}</span>
+            <span className="app-chrome-git-add">+{gitStatus.added}</span>
+            <span className="app-chrome-git-del">-{gitStatus.removed}</span>
+          </span>
+        )}
         <NotificationsPanel
           entries={notifications}
           liveSessionIds={liveSessionIds}
