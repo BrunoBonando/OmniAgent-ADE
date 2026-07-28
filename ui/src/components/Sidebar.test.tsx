@@ -169,12 +169,11 @@ describe("Sidebar — one workspace at a time", () => {
     expect(onOpenNewWorkspace).toHaveBeenCalled();
   });
 
-  it("heads the list with WORKING SESSIONS and shows only the selected workspace's sessions", () => {
+  it("lists only the selected workspace's sessions inline", () => {
     const { container } = setup({
       tabs: [tab(), tab({ id: "s3", project: "p2", cwd: "/tmp/p2", group: "g2", groupLabel: "web work" })],
     });
-    expect(screen.getByText("WORKING SESSIONS")).toBeInTheDocument();
-    expect(container.querySelectorAll(".sidebar-session-list .session-row")).toHaveLength(1);
+    expect(container.querySelectorAll(".sidebar-inline-session-row")).toHaveLength(1);
     expect(screen.getByText("Session 1")).toBeInTheDocument();
     expect(screen.queryByText("web work")).not.toBeInTheDocument();
   });
@@ -185,13 +184,6 @@ describe("Sidebar — one workspace at a time", () => {
     expect(screen.getByText("choose or add one")).toBeInTheDocument();
     fireEvent.click(container.querySelector(".workspace-switcher")!);
     expect(screen.getByText("New workspace")).toBeInTheDocument();
-  });
-
-  it("opens a new session in the selected workspace from the WORKING SESSIONS header", () => {
-    const onNewSessionInProject = vi.fn();
-    setup({ onNewSessionInProject });
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
-    expect(onNewSessionInProject).toHaveBeenCalledWith(p1);
   });
 
   it("treats Dashboard and Files as separate views", () => {
@@ -207,10 +199,9 @@ describe("Sidebar — session and branch, nothing else", () => {
     useGitBranchMock.mockReturnValue("main");
   });
 
-  it("shows each session's name and branch", () => {
+  it("shows each session's name", () => {
     setup();
     expect(screen.getByText("Session 1")).toBeInTheDocument();
-    expect(screen.getByText("main")).toBeInTheDocument();
   });
 
   it("no longer badges a workspace with how many terminals it has", () => {
@@ -243,9 +234,9 @@ describe("Sidebar — session and branch, nothing else", () => {
     expect(container.textContent).not.toContain("panes");
   });
 
-  it("marks the session on screen with the accent rail rather than a text tag", () => {
+  it("marks the session on screen with is-current", () => {
     const { container } = setup();
-    expect(container.querySelector(".session-row.is-current")).not.toBeNull();
+    expect(container.querySelector(".sidebar-inline-session-row.is-current")).not.toBeNull();
     expect(container.textContent).not.toContain("on screen");
   });
 
@@ -273,27 +264,20 @@ describe("Sidebar — working sessions stay clean by default", () => {
   // pane at all (every `SessionGroup.isCurrent` in it false). Confirmed with
   // the founder: the row should auto-expand exactly the session its own
   // accent bar marks.
-  it("marks the on-screen session but keeps terminal rows collapsed by default", () => {
+  it("marks the on-screen session with is-current", () => {
     const { container } = setup({
       tabs: [
         tab({ id: "s1", project: "p1", group: "g1" }),
         tab({ id: "s2", project: "p1", group: "g2", groupLabel: "second session" }),
         tab({ id: "s3", project: "p2", cwd: "/tmp/p2", group: "g3" }),
       ],
-      // Focus is in p2 — no session in p1 (the selected workspace) holds
-      // the focused pane, so `SessionGroup.isCurrent` is false for both g1
-      // and g2. `visibleSessionGroupId` still falls back to p1's first
-      // session (g1) as the one on screen, which is what `isCurrent` (the
-      // prop) and the accent rail mark.
       activeTabId: "s3",
     });
-    const currentRow = container.querySelector(".session-row.is-current")!;
+    const currentRow = container.querySelector(".sidebar-inline-session-row.is-current")!;
     expect(currentRow).not.toBeNull();
-    expect(currentRow.querySelector(".session-row-children")).toBeNull();
-    // The other session in the same project also stays collapsed.
-    const rows = [...container.querySelectorAll(".session-row")];
-    const otherRow = rows.find((row) => row !== currentRow)!;
-    expect(otherRow.querySelector(".session-row-children")).toBeNull();
+    const rows = [...container.querySelectorAll(".sidebar-inline-session-row")];
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => r.classList.contains("is-current"))).toHaveLength(1);
   });
 });
 

@@ -131,7 +131,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { tabsByProject, type ProjectInfo, type TabInfo } from "../state/sessions";
 import { groupTabsBySession, visibleSessionGroupId } from "../state/sessionGroups";
-import { idColor } from "../state/projectColors";
 import {
   rootsPausedProjects,
   rootsReingestProject,
@@ -149,7 +148,6 @@ import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { WorkspaceMenu } from "./WorkspaceMenu";
 import NewWorkspaceModal from "./NewWorkspaceModal";
 import ImportProjectsFlow from "./ImportProjectsFlow";
-import SidebarSessionRow from "./SidebarSessionRow";
 import CloseWorkspaceConfirm from "./CloseWorkspaceConfirm";
 import CloseSessionConfirm from "./CloseSessionConfirm";
 import FileTree from "./FileTree";
@@ -284,11 +282,8 @@ export default function Sidebar({
   ingestion,
   view = "dashboard",
   onSetView,
-  onNewSessionInProject,
-  onRenameSession,
   onCloseWorkspace,
   onCloseSession,
-  onOpenNewTerminal,
   authSignedIn,
   authPersona,
   onResetAuthGate,
@@ -312,11 +307,6 @@ export default function Sidebar({
    * names. Keyed by session id rather than a single "the expanded one"
    * value because nothing stops more than one session's list being open at
    * once. */
-  const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
-  /** Task 6: the FILES section's name filter — local to this component (not
-   * lifted to `App.tsx`, not persisted), same as `menuOpen`/`aboutOpen`
-   * below. It's a per-render UI convenience over whatever `FileTree` already
-   * has loaded, not app state anything else needs to read. */
   const [fileFilter, setFileFilter] = useState("");
   // Task 8: session-local memory of the last clean ingest completion, feeding
   // the account row's "Brain indexed · Xm ago" sub-line (`brainLine` below).
@@ -336,14 +326,6 @@ export default function Sidebar({
     }
     wasIngestingRef.current = running;
   }, [ingestion]);
-  const toggleSession = useCallback((id: string) => {
-    setExpandedSessions((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
   const grouped = tabsByProject(tabs);
   const sessionsByProject = groupTabsBySession(tabs, activeTabId);
   // Which session the pane grid is showing for the selected workspace — the
@@ -431,10 +413,6 @@ export default function Sidebar({
   const awaitingCount = allProjectTabs.filter((t) => t.status === "awaiting_approval").length;
   const fileCount = gitBadges.total;
   const totalSessionCount = selectedSessions.length + dormantSessions.length;
-  const workingSessionSubtitle =
-    totalSessionCount === 0
-      ? "session restore"
-      : `${totalSessionCount} open session${totalSessionCount !== 1 ? "s" : ""}`;
   const gitDiffSummary = review
     ? `${review.file_count} file${review.file_count !== 1 ? "s" : ""} · +${review.added} -${review.removed}`
     : "Git diff unavailable";
@@ -540,22 +518,65 @@ export default function Sidebar({
             <span className="sidebar-nav-subtitle">backlog, sprint, timeline</span>
           </div>
         </button>
-        <button
-          role="tab"
-          aria-selected={view === "workspace"}
-          className={view === "workspace" ? "is-active" : ""}
-          onClick={() => onSetView?.("workspace")}
-          title="Working sessions"
-        >
-          <div className="sidebar-nav-icon-box">
-            <Icon name="terminal" size={16} />
+        <div className="sidebar-workspace-tab-group">
+          <button
+            role="tab"
+            aria-selected={view === "workspace"}
+            className={view === "workspace" ? "is-active" : ""}
+            onClick={() => onSetView?.("workspace")}
+            title="Working sessions"
+          >
+            <div className="sidebar-nav-icon-box">
+              <Icon name="terminal" size={16} />
+            </div>
+            <div className="sidebar-nav-text">
+              <span className="sidebar-nav-title">Working sessions</span>
+            </div>
+            {totalSessionCount > 0 && <span className="sidebar-nav-count">{totalSessionCount}</span>}
+          </button>
+          <div className="sidebar-sessions-inline">
+            <ul className="sidebar-inline-session-list">
+              {dormantSessions.map((dormant) => (
+                <li key={dormant.group} className="sidebar-inline-session-row">
+                  <button
+                    className="sidebar-inline-session-name-btn"
+                    onClick={() => onSelectDormantSession?.(dormant)}
+                  >
+                    {dormant.label}
+                  </button>
+                </li>
+              ))}
+              {selectedProject &&
+                selectedSessions.map((session) => {
+                  const isCurrent = session.id === onScreenSession;
+                  return (
+                    <li
+                      key={session.id}
+                      className={`sidebar-inline-session-row${isCurrent ? " is-current" : ""}`}
+                    >
+                      <button
+                        className="sidebar-inline-session-name-btn"
+                        onClick={() => onActivateTab(session.tabs[0].id)}
+                        aria-label={session.label}
+                      >
+                        {session.label}
+                      </button>
+                      {onCloseSession && (
+                        <button
+                          className="sidebar-inline-session-close-btn"
+                          aria-label={`Close session ${session.label}`}
+                          title="Close session"
+                          onClick={() => setClosingSession({ project: selectedProject, session })}
+                        >
+                          <Icon name="x" size={11} />
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
+            </ul>
           </div>
-          <div className="sidebar-nav-text">
-            <span className="sidebar-nav-title">Working sessions</span>
-            <span className="sidebar-nav-subtitle">{workingSessionSubtitle}</span>
-          </div>
-          {totalSessionCount > 0 && <span className="sidebar-nav-count">{totalSessionCount}</span>}
-        </button>
+        </div>
         <button
           role="tab"
           aria-selected={view === "files"}
@@ -572,81 +593,6 @@ export default function Sidebar({
           {fileCount > 0 && <span className="sidebar-nav-count">{fileCount}</span>}
         </button>
       </div>
-
-      {/* One workspace, so one flat list of ITS sessions — the nesting
-          (project -> sessions) went away with the project rows. The count
-          beside the label is what the dropdown shows per workspace, said
-          once more for the one on screen. */}
-      <div className="sidebar-sessions-header">
-        <span className="sidebar-microlabel">WORKING SESSIONS</span>
-        <span className="sidebar-microcount">{selectedSessions.length + dormantSessions.length}</span>
-        <span className="sidebar-spacer" />
-        <button
-          className="sidebar-sessions-add"
-          aria-label="New session"
-          title="New session (⌘N)"
-          onClick={() => selectedProject && onNewSessionInProject?.(selectedProject)}
-        >
-          <Icon name="plus" size={14} />
-        </button>
-      </div>
-
-      <ul className="sidebar-session-list">
-        {dormantSessions.map((session) => (
-          <li key={session.group} className="sidebar-dormant-session">
-            <button type="button" onClick={() => onSelectDormantSession?.(session)}>
-              <span
-                className="sidebar-dormant-session-mark"
-                style={{ backgroundColor: idColor(session.group) }}
-                aria-hidden
-              />
-              <span>
-                <strong>{session.label}</strong>
-                <small>load on open</small>
-              </span>
-            </button>
-          </li>
-        ))}
-        {selectedProject &&
-          selectedSessions.map((session) => {
-            // What the rail marks: the session the grid is actually
-            // painting, answered by the same function the grid asks
-            // (`visibleSessionGroupId`) — so "the session it's currently on
-            // the screen" means the same thing in both columns. Computed
-            // once and reused below for `expanded`'s default (fix-round,
-            // 2026-07-27: that used to read `session.isCurrent` — the
-            // *different* "holds the focused pane" question `SessionGroup`
-            // itself answers — which could auto-expand a session other than
-            // the one this same row was visually marking as current, since
-            // selecting a workspace doesn't move focus. Confirmed with the
-            // founder: the row should auto-expand exactly the session its
-            // own accent bar marks, so this reuses that one computation
-            // rather than asking the question twice with two different
-            // answers.)
-            const isCurrent = session.id === onScreenSession;
-            return (
-              <SidebarSessionRow
-                key={session.id}
-                session={session}
-                projectLabel={selectedProject.label}
-                tint={idColor(session.id)}
-                isCurrent={isCurrent}
-                expanded={expandedSessions.has(session.id)}
-                activeTabId={activeTabId}
-                onActivate={() => onActivateTab(session.tabs[0].id)}
-                onToggleExpanded={() => toggleSession(session.id)}
-                onActivateTab={onActivateTab}
-                onRename={(name) => onRenameSession?.(selectedProject, session.id, name)}
-                onClose={
-                  onCloseSession
-                    ? () => setClosingSession({ project: selectedProject, session })
-                    : undefined
-                }
-                onOpenNewTerminal={onOpenNewTerminal}
-              />
-            );
-          })}
-      </ul>
 
       {/* redesign: FILES section (Task 6) — the tree that used to be a
           separate right-hand dock (`FileTree.tsx`, `App.tsx`'s old
