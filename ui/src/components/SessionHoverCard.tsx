@@ -145,6 +145,9 @@ export default function SessionHoverCard({ model, anchor }: SessionHoverCardProp
         {/* Warp's `+12891` sits here. Left empty until real git-review data
             exists — see `SessionCardModel.diff`. */}
       </div>
+      {model.status.label !== "Ready" && (
+        <div className="session-card-status">{model.status.label}</div>
+      )}
     </div>
   );
 }

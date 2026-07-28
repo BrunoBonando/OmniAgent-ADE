@@ -104,7 +104,7 @@ describe("NewWorkspaceModal — folder picking and the stats strip", () => {
       expect.objectContaining({ directory: true, multiple: false }),
     );
     expect(folderStatsMock).toHaveBeenCalledWith("/Users/bruno/code/my-workspace");
-    await waitFor(() => expect(screen.getByText("12,480")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/^12[,.]480$/)).toBeInTheDocument());
     expect(screen.getByText("files to walk")).toBeInTheDocument();
     expect(screen.getByText("TS · Rust")).toBeInTheDocument();
     expect(screen.getByText("git ✓")).toBeInTheDocument();
@@ -122,7 +122,7 @@ describe("NewWorkspaceModal — folder picking and the stats strip", () => {
     expect(screen.getAllByText("…").length).toBeGreaterThan(0);
 
     resolve(STATS);
-    await waitFor(() => expect(screen.getByText("12,480")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/^12[,.]480$/)).toBeInTheDocument());
   });
 
   it("a folder with no git shows 'no git' / 'init later' instead of a branch count", async () => {

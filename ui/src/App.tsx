@@ -691,6 +691,9 @@ function App() {
     analyticsTokenWatermarkRef.current.set(id, estimate);
     recordTokens(analyticsRef.current, tab.project, estimate - previous, Date.now());
     analyticsDirtyRef.current = true;
+    // Push immediately so token counters on the dashboard update in
+    // real time rather than waiting for the 15-second persist poll.
+    setUsageAnalytics(cloneUsageAnalyticsStore(analyticsRef.current));
   });
 
   // `session-status:{id}` (founder brief, 2026-07-26): the five-state light

@@ -67,7 +67,7 @@ describe("NewSessionModal — the prompt", () => {
 
   it("says how many terminals boot, and on how much brain", async () => {
     const { dialog } = setup();
-    await waitFor(() => expect(dialog.textContent).toContain("2 terminals boot briefed on 41,208 brain nodes"));
+    await waitFor(() => expect(dialog.textContent).toMatch(/2 terminals boot briefed on 41[,.]208 brain nodes/));
   });
 });
 
