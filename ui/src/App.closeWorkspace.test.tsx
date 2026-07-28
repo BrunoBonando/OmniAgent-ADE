@@ -10,6 +10,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CLOSED_WORKSPACES_SETTING_KEY } from "./state/closedWorkspaces";
 import { LAYOUT_SETTING_KEY, type ProjectInfo, type TabInfo } from "./state/sessions";
+import { AUTH_GATE_RESOLVED_SETTING_KEY } from "./onboarding/authGateState";
 
 const tauriMocks = vi.hoisted(() => ({
   getBriefingMock: vi.fn(),
@@ -43,6 +44,10 @@ vi.mock("./lib/tauri", () => ({
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
+  gitBranch: vi.fn().mockResolvedValue(null),
+  reviewStatus: vi.fn().mockResolvedValue(null),
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
+  renameProject: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
@@ -92,6 +97,7 @@ vi.mock("./components/Workspace", () => ({
 }));
 
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
+vi.mock("./components/DashboardOverview", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 // The map keeps seeing every project the brain knows, closed or not — that
 // is the whole point of "closing a workspace is not unlearning a project" —
@@ -113,6 +119,25 @@ vi.mock("./map/BrainMap", () => ({
 vi.mock("./onboarding/FirstRun", () => ({ default: () => null }));
 vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
 
+vi.mock("./components/StartupScreen", () => ({
+  default: function StartupScreenStub(props: {
+    loading: boolean;
+    projects: { id: string; label: string; path: string }[];
+    onSelectWorkspace: (p: { id: string; label: string; path: string }) => void;
+  }) {
+    if (props.loading) return null;
+    return (
+      <div>
+        {props.projects.map((p) => (
+          <button key={p.id} onClick={() => props.onSelectWorkspace(p)}>
+            {`startup-select-${p.id}`}
+          </button>
+        ))}
+      </div>
+    );
+  },
+}));
+
 const { default: App } = await import("./App");
 
 const p1: ProjectInfo = { id: "p1", label: "Project One", path: "/tmp/p1" };
@@ -133,7 +158,10 @@ function resetMocks() {
   tauriMocks.listProjectsMock.mockResolvedValue([p1, p2]);
   tauriMocks.getBriefingMock.mockResolvedValue(undefined);
   tauriMocks.settingsSetMock.mockResolvedValue(undefined);
-  tauriMocks.settingsGetMock.mockResolvedValue(null);
+  tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+    if (key === AUTH_GATE_RESOLVED_SETTING_KEY) return Promise.resolve("true");
+    return Promise.resolve(null);
+  });
   tauriMocks.sessionStatusMock.mockResolvedValue(null);
   tauriMocks.sessionKillMock.mockResolvedValue(undefined);
   tauriMocks.sessionCreateMock.mockImplementation((project: string, engine: string, cwd: string) => {
@@ -152,6 +180,10 @@ function liveTabs(): string[] {
 
 async function openTerminal(project: string) {
   const before = screen.queryAllByTestId("tab").length;
+  if (before === 0) {
+    const startupBtn = screen.queryByRole("button", { name: `startup-select-${project}` });
+    if (startupBtn) fireEvent.click(startupBtn);
+  }
   fireEvent.click(await screen.findByRole("button", { name: `new-tab-${project}` }));
   await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(before + 1));
 }
@@ -161,11 +193,16 @@ function lastSetting(key: string): string | undefined {
   return calls.length > 0 ? (calls[calls.length - 1][1] as string) : undefined;
 }
 
+async function bootApp() {
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "startup-select-p1" }));
+}
+
 describe("App — closing a workspace", () => {
   beforeEach(resetMocks);
 
   it("kills exactly that workspace's terminals, and leaves the other workspace running", async () => {
-    render(<App />);
+    await bootApp();
     await openTerminal("p1");
     await openTerminal("p1");
     await openTerminal("p2");
@@ -177,7 +214,7 @@ describe("App — closing a workspace", () => {
   });
 
   it("takes the workspace out of the sidebar and remembers it", async () => {
-    render(<App />);
+    await bootApp();
     await openTerminal("p1");
 
     fireEvent.click(screen.getByRole("button", { name: "close-workspace-p1" }));
@@ -187,7 +224,7 @@ describe("App — closing a workspace", () => {
   });
 
   it("moves the selection off the workspace it just closed", async () => {
-    render(<App />);
+    await bootApp();
     await openTerminal("p1");
     expect(screen.getByTestId("selected").textContent).toBe("p1");
 
@@ -196,7 +233,7 @@ describe("App — closing a workspace", () => {
   });
 
   it("leaves the persisted layout with only the surviving workspace's terminals", async () => {
-    render(<App />);
+    await bootApp();
     await openTerminal("p1");
     await openTerminal("p2");
 
@@ -208,7 +245,7 @@ describe("App — closing a workspace", () => {
   });
 
   it("never touches the project in the brain — no rename, no re-ingest, nothing removed", async () => {
-    render(<App />);
+    await bootApp();
     await openTerminal("p1");
     const brainCallsBefore = tauriMocks.listProjectsMock.mock.calls.length;
 
@@ -222,7 +259,7 @@ describe("App — closing a workspace", () => {
   });
 
   it("closes a workspace with nothing running without killing anything", async () => {
-    render(<App />);
+    await bootApp();
     await screen.findByRole("button", { name: "close-workspace-p1" });
 
     fireEvent.click(screen.getByRole("button", { name: "close-workspace-p1" }));
@@ -235,7 +272,7 @@ describe("App — closing a session (founder ask: 'I must be able to close a ses
   beforeEach(resetMocks);
 
   it("kills every terminal in that session, leaves other workspaces running, and keeps the workspace row", async () => {
-    render(<App />);
+    await bootApp();
     await openTerminal("p1");
     await openTerminal("p1"); // ⌘T joins the same session
     await openTerminal("p2");
@@ -253,11 +290,13 @@ describe("App — a closed workspace stays closed, and comes back when reopened"
   beforeEach(resetMocks);
 
   it("is still hidden after a relaunch", async () => {
-    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      Promise.resolve(key === CLOSED_WORKSPACES_SETTING_KEY ? JSON.stringify(["p1"]) : null),
-    );
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === AUTH_GATE_RESOLVED_SETTING_KEY) return Promise.resolve("true");
+      return Promise.resolve(key === CLOSED_WORKSPACES_SETTING_KEY ? JSON.stringify(["p1"]) : null);
+    });
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-p2" }));
     await waitFor(() => expect(workspaceIds()).toEqual(["p2"]));
   });
 
@@ -266,13 +305,14 @@ describe("App — a closed workspace stays closed, and comes back when reopened"
     // later, so the sidebar painted every workspace and then collapsed to
     // the open ones — Bruno saw it as "two different lists" on launch.
     let resolveClosed!: (value: string | null) => void;
-    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      key === CLOSED_WORKSPACES_SETTING_KEY
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === AUTH_GATE_RESOLVED_SETTING_KEY) return Promise.resolve("true");
+      return key === CLOSED_WORKSPACES_SETTING_KEY
         ? new Promise<string | null>((resolve) => {
             resolveClosed = resolve;
           })
-        : Promise.resolve(null),
-    );
+        : Promise.resolve(null);
+    });
 
     render(<App />);
     await waitFor(() =>
@@ -281,11 +321,12 @@ describe("App — a closed workspace stays closed, and comes back when reopened"
     expect(workspaceIds()).toEqual([]);
 
     resolveClosed(JSON.stringify(["p1"]));
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-p2" }));
     await waitFor(() => expect(workspaceIds()).toEqual(["p2"]));
   });
 
   it("comes back the moment a terminal is opened in it (from the map, the palette, anywhere)", async () => {
-    render(<App />);
+    await bootApp();
     await openTerminal("p1");
     fireEvent.click(screen.getByRole("button", { name: "close-workspace-p1" }));
     await waitFor(() => expect(workspaceIds()).toEqual(["p2"]));
@@ -303,6 +344,7 @@ describe("App — a closed workspace stays closed, and comes back when reopened"
     // them), but a hand-edited settings table must not be able to put a
     // closed workspace back on screen.
     tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === AUTH_GATE_RESOLVED_SETTING_KEY) return Promise.resolve("true");
       if (key === CLOSED_WORKSPACES_SETTING_KEY) return Promise.resolve(JSON.stringify(["p1"]));
       if (key === LAYOUT_SETTING_KEY) {
         return Promise.resolve(
@@ -313,6 +355,7 @@ describe("App — a closed workspace stays closed, and comes back when reopened"
     });
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-p2" }));
     await waitFor(() => expect(workspaceIds()).toEqual(["p2"]));
   });
 });

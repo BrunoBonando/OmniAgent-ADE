@@ -51,6 +51,10 @@ vi.mock("./lib/tauri", () => ({
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
+  gitBranch: vi.fn().mockResolvedValue(null),
+  reviewStatus: vi.fn().mockResolvedValue(null),
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
+  renameProject: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -88,10 +92,30 @@ vi.mock("./components/Workspace", () => ({
   },
 }));
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
+vi.mock("./components/DashboardOverview", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({ default: () => null }));
 vi.mock("./onboarding/FirstRun", () => ({ default: () => null }));
 vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
+
+vi.mock("./components/StartupScreen", () => ({
+  default: function StartupScreenStub(props: {
+    loading: boolean;
+    projects: { id: string; label: string; path: string }[];
+    onSelectWorkspace: (p: { id: string; label: string; path: string }) => void;
+  }) {
+    if (props.loading) return null;
+    return (
+      <div>
+        {props.projects.map((p) => (
+          <button key={p.id} onClick={() => props.onSelectWorkspace(p)}>
+            {`startup-select-${p.id}`}
+          </button>
+        ))}
+      </div>
+    );
+  },
+}));
 
 const { default: App } = await import("./App");
 
@@ -104,6 +128,7 @@ function pressCmdW() {
 /** Renders the app with one open pane and returns its session id. */
 async function renderWithOnePane(): Promise<string> {
   render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "startup-select-A" }));
   fireEvent.click(await screen.findByRole("button", { name: "new-tab-A" }));
   await waitFor(() => expect(screen.getByText("A-sess*")).toBeInTheDocument());
   return "A-sess";
@@ -204,6 +229,7 @@ describe("⌘W closes the focused terminal, not the app", () => {
 
   it("with no pane open it says so instead of doing nothing silently", async () => {
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-A" }));
     await screen.findByRole("button", { name: "new-tab-A" });
 
     pressCmdW();
@@ -217,6 +243,7 @@ describe("⌘W closes the focused terminal, not the app", () => {
 
   it("closes the FOCUSED pane when several are open", async () => {
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-A" }));
     tauriMocks.sessionCreateMock.mockResolvedValueOnce({
       id: "first",
       project: "A",

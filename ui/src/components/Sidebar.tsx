@@ -307,12 +307,11 @@ export default function Sidebar({
     session: SessionGroup;
   } | null>(null);
   /** Which sessions the user has manually expanded (Task 4 redesign,
-   * 2026-07-27) — the terminal list under a session row is otherwise closed
-   * by default. Keyed by session id rather than a single "the expanded one"
+   * 2026-07-27) — the terminal list under a session row is closed by
+   * default so the left pane stays focused on working sessions, not terminal
+   * names. Keyed by session id rather than a single "the expanded one"
    * value because nothing stops more than one session's list being open at
-   * once. Starts empty: `session.isCurrent` (see the per-row `expanded`
-   * below) already opens the session holding the focused pane without this
-   * set knowing about it. */
+   * once. */
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
   /** Task 6: the FILES section's name filter — local to this component (not
    * lifted to `App.tsx`, not persisted), same as `menuOpen`/`aboutOpen`
@@ -429,15 +428,32 @@ export default function Sidebar({
 
   // Nav card counts and subtitles for the view toggle.
   const allProjectTabs = selectedSessions.flatMap((s) => s.tabs);
-  const terminalCount = allProjectTabs.length;
   const awaitingCount = allProjectTabs.filter((t) => t.status === "awaiting_approval").length;
   const fileCount = gitBadges.total;
   const totalSessionCount = selectedSessions.length + dormantSessions.length;
-  const terminalSubtitle =
+  const workingSessionSubtitle =
     totalSessionCount === 0
       ? "session restore"
-      : `${totalSessionCount} session${totalSessionCount !== 1 ? "s" : ""} · ${terminalCount} terminal${terminalCount !== 1 ? "s" : ""}`;
-  const fileSubtitle = fileCount > 0 ? `${fileCount} changed on main` : "git diff, editor, review";
+      : `${totalSessionCount} open session${totalSessionCount !== 1 ? "s" : ""}`;
+  const gitDiffSummary = review
+    ? `${review.file_count} file${review.file_count !== 1 ? "s" : ""} · +${review.added} -${review.removed}`
+    : "Git diff unavailable";
+
+  function statusLetter(status: "modified" | "added" | "deleted" | "renamed" | "untracked"): string {
+    switch (status) {
+      case "modified":
+        return "M";
+      case "added":
+      case "untracked":
+        return "A";
+      case "deleted":
+        return "D";
+      case "renamed":
+        return "R";
+      default:
+        return "?";
+    }
+  }
 
   return (
     <aside className="sidebar">
@@ -520,7 +536,7 @@ export default function Sidebar({
             <Icon name="sparkle" size={16} />
           </div>
           <div className="sidebar-nav-text">
-            <span className="sidebar-nav-title">Board</span>
+            <span className="sidebar-nav-title">Plan board</span>
             <span className="sidebar-nav-subtitle">backlog, sprint, timeline</span>
           </div>
         </button>
@@ -529,16 +545,16 @@ export default function Sidebar({
           aria-selected={view === "workspace"}
           className={view === "workspace" ? "is-active" : ""}
           onClick={() => onSetView?.("workspace")}
-          title="Terminals"
+          title="Working sessions"
         >
           <div className="sidebar-nav-icon-box">
             <Icon name="terminal" size={16} />
           </div>
           <div className="sidebar-nav-text">
-            <span className="sidebar-nav-title">Terminals</span>
-            <span className="sidebar-nav-subtitle">{terminalSubtitle}</span>
+            <span className="sidebar-nav-title">Working sessions</span>
+            <span className="sidebar-nav-subtitle">{workingSessionSubtitle}</span>
           </div>
-          {terminalCount > 0 && <span className="sidebar-nav-count">{terminalCount}</span>}
+          {totalSessionCount > 0 && <span className="sidebar-nav-count">{totalSessionCount}</span>}
         </button>
         <button
           role="tab"
@@ -552,7 +568,6 @@ export default function Sidebar({
           </div>
           <div className="sidebar-nav-text">
             <span className="sidebar-nav-title">Files</span>
-            <span className="sidebar-nav-subtitle">{fileSubtitle}</span>
           </div>
           {fileCount > 0 && <span className="sidebar-nav-count">{fileCount}</span>}
         </button>
@@ -563,7 +578,7 @@ export default function Sidebar({
           beside the label is what the dropdown shows per workspace, said
           once more for the one on screen. */}
       <div className="sidebar-sessions-header">
-        <span className="sidebar-microlabel">SESSIONS</span>
+        <span className="sidebar-microlabel">WORKING SESSIONS</span>
         <span className="sidebar-microcount">{selectedSessions.length + dormantSessions.length}</span>
         <span className="sidebar-spacer" />
         <button
@@ -587,7 +602,7 @@ export default function Sidebar({
               />
               <span>
                 <strong>{session.label}</strong>
-                <small>{session.paneCount} terminal{session.paneCount === 1 ? "" : "s"} · load on open</small>
+                <small>load on open</small>
               </span>
             </button>
           </li>
@@ -616,7 +631,7 @@ export default function Sidebar({
                 projectLabel={selectedProject.label}
                 tint={idColor(session.id)}
                 isCurrent={isCurrent}
-                expanded={isCurrent || expandedSessions.has(session.id)}
+                expanded={expandedSessions.has(session.id)}
                 activeTabId={activeTabId}
                 onActivate={() => onActivateTab(session.tabs[0].id)}
                 onToggleExpanded={() => toggleSession(session.id)}
@@ -648,6 +663,21 @@ export default function Sidebar({
               {gitBadges.total}
               <span> changed</span>
             </span>
+          )}
+        </div>
+        <div className="sidebar-files-diff" role="note" aria-label="Git diff summary">
+          <div className="sidebar-files-diff-summary">{gitDiffSummary}</div>
+          {review && review.files.length > 0 ? (
+            <ul className="sidebar-files-diff-list">
+              {review.files.slice(0, 6).map((f) => (
+                <li key={`${f.path}-${f.status}`} className="sidebar-files-diff-item">
+                  <span className={`file-tree-git-letter is-${f.status}`}>{statusLetter(f.status)}</span>
+                  <span className="sidebar-files-diff-path">{f.path}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="sidebar-files-diff-empty">No changed files</div>
           )}
         </div>
         <div className="sidebar-files-filter-wrap">

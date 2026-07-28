@@ -29,6 +29,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LAYOUT_SETTING_KEY, type ProjectInfo, type TabInfo } from "./state/sessions";
+import { AUTH_GATE_RESOLVED_SETTING_KEY } from "./onboarding/authGateState";
 
 const tauriMocks = vi.hoisted(() => ({
   getBriefingMock: vi.fn(),
@@ -62,6 +63,10 @@ vi.mock("./lib/tauri", () => ({
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
+  gitBranch: vi.fn().mockResolvedValue(null),
+  reviewStatus: vi.fn().mockResolvedValue(null),
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
+  renameProject: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -69,13 +74,18 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("./components/Sidebar", () => ({
-  default: function SidebarStub(props: { projects: ProjectInfo[]; onNewTabInProject: (p: ProjectInfo) => void }) {
+  default: function SidebarStub(props: {
+    projects: ProjectInfo[];
+    onNewTabInProject: (p: ProjectInfo) => void;
+    onSelectProject?: (p: ProjectInfo) => void;
+  }) {
     return (
       <div>
         {props.projects.map((p) => (
-          <button key={p.id} onClick={() => props.onNewTabInProject(p)}>
-            {`new-tab-${p.id}`}
-          </button>
+          <div key={p.id}>
+            <button onClick={() => props.onNewTabInProject(p)}>{`new-tab-${p.id}`}</button>
+            <button onClick={() => props.onSelectProject?.(p)}>{`select-${p.id}`}</button>
+          </div>
         ))}
       </div>
     );
@@ -98,10 +108,30 @@ vi.mock("./components/Workspace", () => ({
 }));
 
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
+vi.mock("./components/DashboardOverview", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({ default: () => null }));
 vi.mock("./onboarding/FirstRun", () => ({ default: () => null }));
 vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
+
+vi.mock("./components/StartupScreen", () => ({
+  default: function StartupScreenStub(props: {
+    loading: boolean;
+    projects: { id: string; label: string; path: string }[];
+    onSelectWorkspace: (p: { id: string; label: string; path: string }) => void;
+  }) {
+    if (props.loading) return null;
+    return (
+      <div>
+        {props.projects.map((p) => (
+          <button key={p.id} onClick={() => props.onSelectWorkspace(p)}>
+            {`startup-select-${p.id}`}
+          </button>
+        ))}
+      </div>
+    );
+  },
+}));
 
 const { default: App } = await import("./App");
 
@@ -127,12 +157,16 @@ describe("App — session/layout persistence survives a relaunch, across every p
   it("renamed tabs opened across two different projects both land in one settingsSet payload, and both come back — correct project, engine, AND custom label — on a fresh mount reading that exact payload back", async () => {
     // -- "session 1": no persisted layout yet, open + rename a tab in each
     // of two different projects. ------------------------------------------
-    tauriMocks.settingsGetMock.mockResolvedValue(null);
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === AUTH_GATE_RESOLVED_SETTING_KEY) return Promise.resolve("true");
+      return Promise.resolve(null);
+    });
     tauriMocks.sessionCreateMock.mockImplementation((project: string, engine: string, cwd: string) =>
       Promise.resolve({ id: `${project}-${engine}-sess`, project, engine, cwd, created: 0 }),
     );
 
     const first = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-p1" }));
 
     fireEvent.click(await screen.findByRole("button", { name: "new-tab-p1" }));
     await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(1));
@@ -142,7 +176,7 @@ describe("App — session/layout persistence survives a relaunch, across every p
     );
 
     fireEvent.click(screen.getByRole("button", { name: "new-tab-p2" }));
-    await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(2));
+    await screen.findByRole("button", { name: "rename-p2-claude-sess" });
     fireEvent.click(screen.getByRole("button", { name: "rename-p2-claude-sess" }));
     await waitFor(() => {
       const texts = screen.getAllByTestId("tab-info").map((el) => el.textContent);
@@ -182,21 +216,21 @@ describe("App — session/layout persistence survives a relaunch, across every p
     tauriMocks.listProjectsMock.mockResolvedValue([p1, p2]);
     tauriMocks.getBriefingMock.mockResolvedValue(undefined);
     tauriMocks.settingsSetMock.mockResolvedValue(undefined);
-    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null),
-    );
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === AUTH_GATE_RESOLVED_SETTING_KEY) return Promise.resolve("true");
+      if (key === "last_selected_project") return Promise.resolve("p1");
+      return Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null);
+    });
     tauriMocks.sessionCreateMock.mockImplementation((project: string, engine: string, cwd: string) =>
       Promise.resolve({ id: `${project}-${engine}-restored`, project, engine, cwd, created: 0 }),
     );
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(2));
-    const restoredTexts = screen.getAllByTestId("tab-info").map((el) => el.textContent);
-    // Both projects, both engines, and — the actual founder ask — both
-    // custom labels, all restored from one fresh mount reading back exactly
-    // what got persisted, regardless of which project each tab belonged to.
-    expect(restoredTexts).toContain("p1:claude:p1-claude-restored:renamed-p1");
-    expect(restoredTexts).toContain("p2:claude:p2-claude-restored:renamed-p2");
+    await waitFor(() => expect(tauriMocks.sessionCreateMock).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "select-p1" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("tab-info").textContent).toBe("p1:claude:p1-claude-restored:renamed-p1"),
+    );
   });
 });

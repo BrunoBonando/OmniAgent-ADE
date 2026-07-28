@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
 import type { ProjectInfo, TabInfo } from "../state/sessions";
-import { groupTabsBySession } from "../state/sessionGroups";
+import { groupTabsBySession, type SessionGroup } from "../state/sessionGroups";
 import { deriveUsageInsights, type UsageAnalyticsStore } from "../state/usageAnalytics";
 import type { NotificationsState } from "../state/notifications";
 import { relativeTime } from "../state/notifications";
 import Icon from "./Icon";
 import { ENGINE_COLOR, ENGINE_LABEL } from "../theme";
+import { useGitBranch } from "../lib/useGitBranch";
 
 interface DashboardOverviewProps {
   hidden: boolean;
@@ -459,6 +460,41 @@ function ProgressChart({
   );
 }
 
+function SessionBtnRow({
+  session,
+  onOpenSession,
+}: {
+  session: SessionGroup;
+  onOpenSession: (tabId: string) => void;
+}) {
+  const branch = useGitBranch(session.cwd);
+  return (
+    <div
+      className="dsb-session-row"
+      role="button"
+      tabIndex={0}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (session.tabs[0]) onOpenSession(session.tabs[0].id);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.stopPropagation();
+          if (session.tabs[0]) onOpenSession(session.tabs[0].id);
+        }
+      }}
+    >
+      <span className="dsb-session-name">{session.label}</span>
+      {branch && (
+        <span className="dsb-session-branch">
+          <Icon name="branch" size={10} />
+          <span className="dsb-session-branch-name">{branch}</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function DashboardOverview({
   hidden,
   project,
@@ -634,8 +670,24 @@ export default function DashboardOverview({
 
           {/* Quick actions */}
           <div className="dashboard-quick-actions">
-            <button onClick={onOpenTerminals}>
-              <Icon name="terminal" size={14} /> Open terminals
+            <button
+              className="dashboard-sessions-btn"
+              onClick={onOpenTerminals}
+            >
+              <div className="dsb-header">
+                <Icon name="terminal" size={14} />
+                <span>Working sessions</span>
+                {sessions.length > 0 && (
+                  <span className="dsb-count">{sessions.length}</span>
+                )}
+              </div>
+              {sessions.length > 0 && (
+                <div className="dsb-session-list">
+                  {sessions.map((s) => (
+                    <SessionBtnRow key={s.id} session={s} onOpenSession={onOpenSession} />
+                  ))}
+                </div>
+              )}
             </button>
             <button onClick={onOpenBoard}>
               <Icon name="checklist" size={14} /> Open board

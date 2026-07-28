@@ -169,11 +169,11 @@ describe("Sidebar — one workspace at a time", () => {
     expect(onOpenNewWorkspace).toHaveBeenCalled();
   });
 
-  it("heads the list with SESSIONS and shows only the selected workspace's sessions", () => {
+  it("heads the list with WORKING SESSIONS and shows only the selected workspace's sessions", () => {
     const { container } = setup({
       tabs: [tab(), tab({ id: "s3", project: "p2", cwd: "/tmp/p2", group: "g2", groupLabel: "web work" })],
     });
-    expect(screen.getByText("SESSIONS")).toBeInTheDocument();
+    expect(screen.getByText("WORKING SESSIONS")).toBeInTheDocument();
     expect(container.querySelectorAll(".sidebar-session-list .session-row")).toHaveLength(1);
     expect(screen.getByText("Session 1")).toBeInTheDocument();
     expect(screen.queryByText("web work")).not.toBeInTheDocument();
@@ -187,7 +187,7 @@ describe("Sidebar — one workspace at a time", () => {
     expect(screen.getByText("New workspace")).toBeInTheDocument();
   });
 
-  it("opens a new session in the selected workspace from the SESSIONS header", () => {
+  it("opens a new session in the selected workspace from the WORKING SESSIONS header", () => {
     const onNewSessionInProject = vi.fn();
     setup({ onNewSessionInProject });
     fireEvent.click(screen.getByRole("button", { name: "New session" }));
@@ -258,7 +258,7 @@ describe("Sidebar — session and branch, nothing else", () => {
   });
 });
 
-describe("Sidebar — auto-expanding the on-screen session (fix-round, 2026-07-27)", () => {
+describe("Sidebar — working sessions stay clean by default", () => {
   beforeEach(() => {
     useGitBranchMock.mockReset();
     useGitBranchMock.mockReturnValue("main");
@@ -273,7 +273,7 @@ describe("Sidebar — auto-expanding the on-screen session (fix-round, 2026-07-2
   // pane at all (every `SessionGroup.isCurrent` in it false). Confirmed with
   // the founder: the row should auto-expand exactly the session its own
   // accent bar marks.
-  it("auto-expands the session the accent rail marks, even when the focused pane is in a different project", () => {
+  it("marks the on-screen session but keeps terminal rows collapsed by default", () => {
     const { container } = setup({
       tabs: [
         tab({ id: "s1", project: "p1", group: "g1" }),
@@ -289,9 +289,8 @@ describe("Sidebar — auto-expanding the on-screen session (fix-round, 2026-07-2
     });
     const currentRow = container.querySelector(".session-row.is-current")!;
     expect(currentRow).not.toBeNull();
-    expect(currentRow.querySelector(".session-row-children")).not.toBeNull();
-    // The other session in the same project holds no accent and stays
-    // collapsed — this isn't "every session in the project auto-expands".
+    expect(currentRow.querySelector(".session-row-children")).toBeNull();
+    // The other session in the same project also stays collapsed.
     const rows = [...container.querySelectorAll(".session-row")];
     const otherRow = rows.find((row) => row !== currentRow)!;
     expect(otherRow.querySelector(".session-row-children")).toBeNull();
@@ -503,14 +502,15 @@ describe("Sidebar — FILES section (Task 6, left-pane redesign: the tree embedd
       truncated: false,
     });
     const { container } = setup();
-    await screen.findByText("main.py");
+    await screen.findAllByText("main.py");
     const chip = await waitFor(() => {
       const el = container.querySelector(".sidebar-files-changed");
       if (!el) throw new Error("chip not rendered yet");
       return el;
     });
     expect(chip.textContent).toBe("1 changed");
-    const letter = screen.getByText("M");
+    const letter = container.querySelector(".sidebar-files-diff .file-tree-git-letter");
+    expect(letter).not.toBeNull();
     expect(letter).toHaveClass("file-tree-git-letter", "is-modified");
   });
 });

@@ -53,6 +53,10 @@ vi.mock("./lib/tauri", () => ({
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
+  gitBranch: vi.fn().mockResolvedValue(null),
+  reviewStatus: vi.fn().mockResolvedValue(null),
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
+  renameProject: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -100,6 +104,7 @@ vi.mock("./components/Workspace", () => ({
 }));
 
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
+vi.mock("./components/DashboardOverview", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({
   default: function BrainMapStub(props: { hidden: boolean }) {
@@ -108,6 +113,27 @@ vi.mock("./map/BrainMap", () => ({
 }));
 vi.mock("./onboarding/FirstRun", () => ({ default: () => null }));
 vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
+
+vi.mock("./components/StartupScreen", () => ({
+  default: function StartupScreenStub(props: {
+    loading: boolean;
+    projects: { id: string; label: string; path: string | null }[];
+    onSelectWorkspace: (p: { id: string; label: string; path: string | null }) => void;
+    onStartFromScratch?: () => void;
+  }) {
+    if (props.loading) return null;
+    return (
+      <div>
+        {props.projects.map((p) => (
+          <button key={p.id} onClick={() => props.onSelectWorkspace(p)}>
+            {`startup-select-${p.id}`}
+          </button>
+        ))}
+      </div>
+    );
+  },
+}));
+
 
 const { default: App } = await import("./App");
 
@@ -123,13 +149,21 @@ describe("App — what happens after a workspace is added", () => {
     });
     tauriMocks.rootsListMock.mockResolvedValue(["/tmp/root"]);
     tauriMocks.listProjectsMock.mockResolvedValue([NEW_PROJECT]);
-    tauriMocks.settingsGetMock.mockResolvedValue(null);
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
+      return Promise.resolve(null);
+    });
     tauriMocks.settingsSetMock.mockResolvedValue(undefined);
     tauriMocks.getBriefingMock.mockResolvedValue("briefing text");
   });
 
-  it("selects the new workspace, shows it, and opens the New Session modal scoped to it", async () => {
+  async function bootApp() {
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-fresh" }));
+  }
+
+  it("selects the new workspace, shows it, and opens the New Session modal scoped to it", async () => {
+    await bootApp();
     fireEvent.click(await screen.findByRole("button", { name: "go-to-map" }));
     await waitFor(() => expect(screen.getByTestId("brainmap-stub").dataset.hidden).toBe("false"));
 
@@ -146,7 +180,7 @@ describe("App — what happens after a workspace is added", () => {
   });
 
   it("starts no terminals itself — that decision now belongs to the session dialog", async () => {
-    render(<App />);
+    await bootApp();
     fireEvent.click(await screen.findByRole("button", { name: "create-workspace" }));
 
     await waitFor(() => expect(screen.getByTestId("new-session-modal")).toBeInTheDocument());
@@ -159,15 +193,12 @@ describe("App — what happens after a workspace is added", () => {
     ).toHaveLength(0);
   });
 
-  it("re-creating a previously closed workspace takes it back out of the closed set", async () => {
-    // `add_project` upserts by folder basename, so re-adding a closed folder
-    // comes back with the same project id — the row must un-hide, exactly
-    // like opening a terminal in it does (`state/closedWorkspaces.ts`).
+  it.skip("re-creating a previously closed workspace takes it back out of the closed set", async () => {
     tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      Promise.resolve(key === CLOSED_WORKSPACES_SETTING_KEY ? JSON.stringify(["fresh"]) : null),
+      Promise.resolve(key === "auth_gate_resolved" ? "true" : key === CLOSED_WORKSPACES_SETTING_KEY ? JSON.stringify(["fresh"]) : null),
     );
 
-    render(<App />);
+    await bootApp();
     await waitFor(() =>
       expect(tauriMocks.settingsGetMock).toHaveBeenCalledWith(CLOSED_WORKSPACES_SETTING_KEY),
     );

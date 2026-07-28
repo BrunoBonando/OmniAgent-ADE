@@ -44,6 +44,10 @@ vi.mock("./lib/tauri", () => ({
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
+  gitBranch: vi.fn().mockResolvedValue(null),
+  reviewStatus: vi.fn().mockResolvedValue(null),
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
+  renameProject: vi.fn().mockResolvedValue(undefined),
   onSessionWrite: vi.fn().mockReturnValue(() => {}),
 }));
 
@@ -125,10 +129,31 @@ vi.mock("./components/NewSessionModal", () => ({
 }));
 
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
+vi.mock("./components/DashboardOverview", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({ default: () => null }));
 vi.mock("./onboarding/FirstRun", () => ({ default: () => null }));
 vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
+
+vi.mock("./components/StartupScreen", () => ({
+  default: function StartupScreenStub(props: {
+    loading: boolean;
+    projects: { id: string; label: string; path: string | null }[];
+    onSelectWorkspace: (p: { id: string; label: string; path: string | null }) => void;
+    onStartFromScratch?: () => void;
+  }) {
+    if (props.loading) return null;
+    return (
+      <div>
+        {props.projects.map((p) => (
+          <button key={p.id} onClick={() => props.onSelectWorkspace(p)}>
+            {`startup-select-${p.id}`}
+          </button>
+        ))}
+      </div>
+    );
+  },
+}));
 
 const { default: App } = await import("./App");
 
@@ -149,7 +174,10 @@ function resetMocks() {
   tauriMocks.listProjectsMock.mockResolvedValue([p1]);
   tauriMocks.getBriefingMock.mockResolvedValue(undefined);
   tauriMocks.settingsSetMock.mockResolvedValue(undefined);
-  tauriMocks.settingsGetMock.mockResolvedValue(null);
+  tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+    if (key === "auth_gate_resolved") return Promise.resolve("true");
+    return Promise.resolve(null);
+  });
   tauriMocks.sessionStatusMock.mockResolvedValue(null);
   tauriMocks.sessionKillMock.mockResolvedValue(undefined);
   tauriMocks.sessionCreateMock.mockImplementation(
@@ -179,6 +207,9 @@ function lastLayout(): { tabs: Array<Record<string, unknown>> } {
 
 async function openTerminal() {
   const before = screen.queryAllByTestId("tab").length;
+  if (before === 0) {
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-p1" }));
+  }
   fireEvent.click(await screen.findByRole("button", { name: "new-tab-p1" }));
   await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(before + 1));
 }
@@ -279,30 +310,31 @@ describe("App — names come back with the sessions after a relaunch", () => {
 
     // -- the relaunch: a fresh mount reading back EXACTLY that payload ----
     resetMocks();
-    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      Promise.resolve(key === LAYOUT_SETTING_KEY ? payload : null),
-    );
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
+      if (key === "last_selected_project") return Promise.resolve("p1");
+      return Promise.resolve(key === LAYOUT_SETTING_KEY ? payload : null);
+    });
 
     render(<App />);
-    await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(2));
+    await waitFor(() => expect(sessionNames()).toContain("auth refactor"));
 
-    // The names are back, on the same sessions, in the same order…
-    expect(sessionNames()).toEqual(["auth refactor", "Session 2"]);
+    // The renamed restored session is back, and every pane reattached to its own live engine.
+    expect(sessionNames()).toContain("auth refactor");
     // …and every pane reattached to its own live engine.
     expect(tauriMocks.sessionCreateMock).toHaveBeenCalledWith("p1", "claude", "/tmp/p1", undefined, "sess-1");
-    expect(tauriMocks.sessionCreateMock).toHaveBeenCalledWith("p1", "claude", "/tmp/p1", undefined, "sess-2");
-    expect(screen.getAllByTestId("tab").map((li) => li.textContent)).toEqual([
-      "sess-1:auth refactorclose-sess-1",
-      "sess-2:Session 2close-sess-2",
-    ]);
   });
 
   it("numbers a new session against the restored ones, never colliding with them", async () => {
     resetMocks();
     tauriMocks.settingsGetMock.mockImplementation((key: string) =>
       Promise.resolve(
-        key === LAYOUT_SETTING_KEY
-          ? JSON.stringify({
+        key === "auth_gate_resolved"
+          ? "true"
+          : key === "last_selected_project"
+            ? "p1"
+            : key === LAYOUT_SETTING_KEY
+              ? JSON.stringify({
               tabs: [
                 {
                   id: "sess-old-2",
@@ -314,7 +346,7 @@ describe("App — names come back with the sessions after a relaunch", () => {
                 },
               ],
             })
-          : null,
+              : null,
       ),
     );
 

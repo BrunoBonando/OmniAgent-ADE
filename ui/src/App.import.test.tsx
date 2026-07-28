@@ -50,6 +50,10 @@ vi.mock("./lib/tauri", () => ({
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
+  gitBranch: vi.fn().mockResolvedValue(null),
+  reviewStatus: vi.fn().mockResolvedValue(null),
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
+  renameProject: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -84,9 +88,29 @@ vi.mock("./components/Sidebar", () => ({
 
 vi.mock("./components/Workspace", () => ({ default: () => null }));
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
+vi.mock("./components/DashboardOverview", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({ default: () => null }));
 vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
+
+vi.mock("./components/StartupScreen", () => ({
+  default: function StartupScreenStub(props: {
+    loading: boolean;
+    projects: { id: string; label: string; path: string }[];
+    onSelectWorkspace: (p: { id: string; label: string; path: string }) => void;
+  }) {
+    if (props.loading) return null;
+    return (
+      <div>
+        {props.projects.map((p) => (
+          <button key={p.id} onClick={() => props.onSelectWorkspace(p)}>
+            {`startup-select-${p.id}`}
+          </button>
+        ))}
+      </div>
+    );
+  },
+}));
 
 vi.mock("./onboarding/FirstRun", () => ({
   default: function FirstRunStub(props: {
@@ -124,16 +148,24 @@ describe("App — import-projects orchestration (handleImportCompleted)", () => 
     });
     tauriMocks.rootsListMock.mockResolvedValue(["/tmp/root"]); // onboarding already satisfied by default
     tauriMocks.listProjectsMock.mockResolvedValue([EXISTING_PROJECT]);
-    tauriMocks.settingsGetMock.mockResolvedValue(null);
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
+      return Promise.resolve(null);
+    });
     tauriMocks.settingsSetMock.mockResolvedValue(undefined);
   });
+
+  async function bootApp() {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-existing" }));
+  }
 
   it("Sidebar's import trigger reloads the project list and selects the first newly-created project", async () => {
     tauriMocks.listProjectsMock
       .mockResolvedValueOnce([EXISTING_PROJECT]) // boot
       .mockResolvedValueOnce([EXISTING_PROJECT, IMPORTED_A, IMPORTED_B]); // post-import reload
 
-    render(<App />);
+    await bootApp();
     fireEvent.click(await screen.findByRole("button", { name: "sidebar-import-all-succeeded" }));
 
     await waitFor(() => expect(tauriMocks.listProjectsMock).toHaveBeenCalledTimes(2));
@@ -144,15 +176,18 @@ describe("App — import-projects orchestration (handleImportCompleted)", () => 
   it("importing previously closed folders takes them back out of the closed set", async () => {
     // Same contract as re-adding via "+" (`state/closedWorkspaces.ts`):
     // import is one of the ways a closed workspace comes back.
-    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      Promise.resolve(
-        key === CLOSED_WORKSPACES_SETTING_KEY
-          ? JSON.stringify(["imported-a", "imported-b"])
-          : null,
-      ),
-    );
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
+      return Promise.resolve(
+        key === "auth_gate_resolved"
+          ? "true"
+          : key === CLOSED_WORKSPACES_SETTING_KEY
+            ? JSON.stringify(["imported-a", "imported-b"])
+            : null,
+      );
+    });
 
-    render(<App />);
+    await bootApp();
     await waitFor(() =>
       expect(tauriMocks.settingsGetMock).toHaveBeenCalledWith(CLOSED_WORKSPACES_SETTING_KEY),
     );
@@ -168,7 +203,7 @@ describe("App — import-projects orchestration (handleImportCompleted)", () => 
   });
 
   it("a partial failure reloads the project list AND shows a banner naming the failure, without blocking", async () => {
-    render(<App />);
+    await bootApp();
     fireEvent.click(await screen.findByRole("button", { name: "sidebar-import-partial-failure" }));
 
     await waitFor(() => expect(tauriMocks.listProjectsMock).toHaveBeenCalledTimes(2)); // boot + post-import reload
@@ -176,7 +211,7 @@ describe("App — import-projects orchestration (handleImportCompleted)", () => 
   });
 
   it("every candidate failing still shows a banner but never reloads the (unchanged) project list a second time", async () => {
-    render(<App />);
+    await bootApp();
     fireEvent.click(await screen.findByRole("button", { name: "sidebar-import-all-failed" }));
 
     await waitFor(() => expect(screen.getByText(/couldn.t import imported-a/i)).toBeInTheDocument());
@@ -186,7 +221,7 @@ describe("App — import-projects orchestration (handleImportCompleted)", () => 
   });
 
   it("the error banner can be dismissed like any other App.tsx error banner", async () => {
-    render(<App />);
+    await bootApp();
     fireEvent.click(await screen.findByRole("button", { name: "sidebar-import-all-failed" }));
     await screen.findByText(/couldn.t import imported-a/i);
 
@@ -204,6 +239,7 @@ describe("App — import-projects orchestration (handleImportCompleted)", () => 
     );
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-existing" }));
     expect(await screen.findByTestId("first-run-existing-count")).toHaveTextContent("1");
 
     fireEvent.click(screen.getByRole("button", { name: "first-run-import-all-succeeded" }));

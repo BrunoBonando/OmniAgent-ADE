@@ -39,6 +39,8 @@ vi.mock("./lib/tauri", () => ({
   systemStats: mocks.systemStats,
   enrichQueuePendingCount: mocks.enrichQueuePendingCount,
   reviewStatus: vi.fn().mockResolvedValue(null),
+  gitBranch: vi.fn().mockResolvedValue(null),
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

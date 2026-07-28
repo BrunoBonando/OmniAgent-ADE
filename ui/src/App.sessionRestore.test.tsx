@@ -48,10 +48,33 @@ vi.mock("./lib/tauri", () => ({
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
+  reviewStatus: vi.fn().mockResolvedValue(null),
+  gitBranch: vi.fn().mockResolvedValue(null),
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
+  renameProject: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
+}));
+
+vi.mock("./components/StartupScreen", () => ({
+  default: function StartupScreenStub(props: {
+    loading: boolean;
+    projects: ProjectInfo[];
+    onSelectWorkspace: (p: ProjectInfo) => void;
+  }) {
+    if (props.loading) return null;
+    return (
+      <div>
+        {props.projects.map((p) => (
+          <button key={p.id} onClick={() => props.onSelectWorkspace(p)}>
+            {`startup-select-${p.id}`}
+          </button>
+        ))}
+      </div>
+    );
+  },
 }));
 
 vi.mock("./components/Sidebar", () => ({
@@ -103,13 +126,22 @@ function resetMocks() {
   tauriMocks.getBriefingMock.mockResolvedValue(undefined);
   tauriMocks.settingsSetMock.mockResolvedValue(undefined);
   tauriMocks.sessionStatusMock.mockResolvedValue(null);
+  // Auth gate must be pre-resolved so the startup screen exits loading state.
+  tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+    if (key === "auth_gate_resolved") return Promise.resolve("true");
+    return Promise.resolve(null);
+  });
 }
 
 /** Runs "session 1": opens one tab, returns the exact layout payload the real
  * persist effect wrote. */
 async function captureLayoutFromFirstRun(): Promise<string> {
   resetMocks();
-  tauriMocks.settingsGetMock.mockResolvedValue(null);
+  // No stored layout on first run — auth gate still resolved so loading exits.
+  tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+    if (key === "auth_gate_resolved") return Promise.resolve("true");
+    return Promise.resolve(null);
+  });
   tauriMocks.sessionCreateMock.mockImplementation((project: string, engine: string, cwd: string) =>
     Promise.resolve({
       id: "sess-1753500000-7",
@@ -123,6 +155,9 @@ async function captureLayoutFromFirstRun(): Promise<string> {
   );
 
   const first = render(<App />);
+  // No persisted tabs → app shows startup chooser, not auto-restore. Click
+  // the workspace card to advance to workspace-active where the Sidebar lives.
+  fireEvent.click(await screen.findByRole("button", { name: "startup-select-p1" }));
   fireEvent.click(await screen.findByRole("button", { name: "new-tab-p1" }));
   await waitFor(() => expect(screen.getAllByTestId("tab")).toHaveLength(1));
 
@@ -145,9 +180,11 @@ describe("App — session restore hands the persisted id back as restoreId", () 
 
     // -- "session 2": a fresh mount reading back EXACTLY that payload. -----
     resetMocks();
-    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null),
-    );
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
+      if (key === "last_selected_project") return Promise.resolve("p1");
+      return Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null);
+    });
     tauriMocks.sessionCreateMock.mockImplementation(
       (project: string, engine: string, cwd: string, _briefing: unknown, restoreId?: string) =>
         Promise.resolve({
@@ -182,9 +219,11 @@ describe("App — session restore hands the persisted id back as restoreId", () 
     const capturedPayload = await captureLayoutFromFirstRun();
 
     resetMocks();
-    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null),
-    );
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
+      if (key === "last_selected_project") return Promise.resolve("p1");
+      return Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null);
+    });
     // tmux session gone (reboot, tmux uninstalled): same id, brand-new
     // engine, `restored: false`. Not an error — the normal fallback.
     tauriMocks.sessionCreateMock.mockImplementation(
@@ -201,9 +240,11 @@ describe("App — session restore hands the persisted id back as restoreId", () 
     const capturedPayload = await captureLayoutFromFirstRun();
 
     resetMocks();
-    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null),
-    );
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
+      if (key === "last_selected_project") return Promise.resolve("p1");
+      return Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null);
+    });
     tauriMocks.sessionCreateMock.mockImplementation((project: string, engine: string, cwd: string) =>
       Promise.resolve({ id: "sess-1753500000-7", project, engine, cwd, created: 0 }),
     );
@@ -217,9 +258,11 @@ describe("App — session restore hands the persisted id back as restoreId", () 
     const capturedPayload = await captureLayoutFromFirstRun();
 
     resetMocks();
-    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null),
-    );
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
+      if (key === "last_selected_project") return Promise.resolve("p1");
+      return Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null);
+    });
     tauriMocks.sessionCreateMock.mockImplementation(
       (project: string, engine: string, cwd: string, _briefing: unknown, restoreId?: string) =>
         restoreId !== undefined
@@ -235,13 +278,12 @@ describe("App — session restore hands the persisted id back as restoreId", () 
 
   it("sends no restoreId at all for a layout written before ids were persisted", async () => {
     resetMocks();
-    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      Promise.resolve(
-        key === LAYOUT_SETTING_KEY
-          ? JSON.stringify({ tabs: [{ project: "p1", engine: "claude", cwd: "/tmp/p1" }] })
-          : null,
-      ),
-    );
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
+      if (key === "last_selected_project") return Promise.resolve("p1");
+      if (key === LAYOUT_SETTING_KEY) return Promise.resolve(JSON.stringify({ tabs: [{ project: "p1", engine: "claude", cwd: "/tmp/p1" }] }));
+      return Promise.resolve(null);
+    });
     tauriMocks.sessionCreateMock.mockImplementation((project: string, engine: string, cwd: string) =>
       Promise.resolve({ id: "legacy-restored", project, engine, cwd, created: 0 }),
     );
@@ -255,9 +297,11 @@ describe("App — session restore hands the persisted id back as restoreId", () 
     const capturedPayload = await captureLayoutFromFirstRun();
 
     resetMocks();
-    tauriMocks.settingsGetMock.mockImplementation((key: string) =>
-      Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null),
-    );
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
+      if (key === "last_selected_project") return Promise.resolve("p1");
+      return Promise.resolve(key === LAYOUT_SETTING_KEY ? capturedPayload : null);
+    });
     tauriMocks.sessionCreateMock.mockImplementation(
       (project: string, engine: string, cwd: string, _briefing: unknown, restoreId?: string) =>
         Promise.resolve({ id: restoreId ?? "x", project, engine, cwd, created: 0, restored: true }),

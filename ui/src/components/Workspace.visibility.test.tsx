@@ -88,6 +88,7 @@ const tauriMocks = vi.hoisted(() => ({
 vi.mock("../lib/tauri", () => ({
   sessionResize: tauriMocks.sessionResizeMock,
   sessionWrite: tauriMocks.sessionWriteMock,
+  reviewStatus: vi.fn().mockResolvedValue(null),
 }));
 
 // Same technique PaneHeader.test.tsx already uses to sidestep the real

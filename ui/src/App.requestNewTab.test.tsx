@@ -59,6 +59,10 @@ vi.mock("./lib/tauri", () => ({
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
+  gitBranch: vi.fn().mockResolvedValue(null),
+  reviewStatus: vi.fn().mockResolvedValue(null),
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
+  renameProject: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -93,10 +97,31 @@ vi.mock("./components/Workspace", () => ({
   },
 }));
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
+vi.mock("./components/DashboardOverview", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({ default: () => null }));
 vi.mock("./onboarding/FirstRun", () => ({ default: () => null }));
 vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
+
+vi.mock("./components/StartupScreen", () => ({
+  default: function StartupScreenStub(props: {
+    loading: boolean;
+    projects: { id: string; label: string; path: string | null }[];
+    onSelectWorkspace: (p: { id: string; label: string; path: string | null }) => void;
+    onStartFromScratch?: () => void;
+  }) {
+    if (props.loading) return null;
+    return (
+      <div>
+        {props.projects.map((p) => (
+          <button key={p.id} onClick={() => props.onSelectWorkspace(p)}>
+            {`startup-select-${p.id}`}
+          </button>
+        ))}
+      </div>
+    );
+  },
+}));
 
 const { default: App } = await import("./App");
 
@@ -118,7 +143,10 @@ describe("App — instant-default-engine new tab", () => {
   it("opens the session immediately with no blocking modal in between", async () => {
     const a: ProjectInfo = { id: "A", label: "Project A", path: "/tmp/a" };
     tauriMocks.listProjectsMock.mockResolvedValue([a]);
-    tauriMocks.settingsGetMock.mockResolvedValue(null); // no overrides -> falls back to claude
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === AUTH_GATE_RESOLVED_SETTING_KEY) return Promise.resolve("true");
+      return Promise.resolve(null);
+    }); // no overrides -> falls back to claude
     tauriMocks.sessionCreateMock.mockResolvedValue({
       id: "A-sess",
       project: "A",
@@ -128,6 +156,7 @@ describe("App — instant-default-engine new tab", () => {
     });
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-A" }));
     fireEvent.click(await screen.findByRole("button", { name: "new-tab-A" }));
 
     await waitFor(() => {
@@ -142,13 +171,17 @@ describe("App — instant-default-engine new tab", () => {
     // would be worse than the refusal.
     const a: ProjectInfo = { id: "A", label: "Project A", path: "/tmp/a" };
     tauriMocks.listProjectsMock.mockResolvedValue([a]);
-    tauriMocks.settingsGetMock.mockResolvedValue(null);
+    tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === AUTH_GATE_RESOLVED_SETTING_KEY) return Promise.resolve("true");
+      return Promise.resolve(null);
+    });
     let created = 0;
     tauriMocks.sessionCreateMock.mockImplementation(() =>
       Promise.resolve({ id: `A-sess-${++created}`, project: "A", engine: "claude", cwd: "/tmp/a", created: 0 }),
     );
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-A" }));
     const newTab = await screen.findByRole("button", { name: "new-tab-A" });
     for (let i = 1; i <= MAX_PANES; i++) {
       fireEvent.click(newTab);
@@ -164,10 +197,12 @@ describe("App — instant-default-engine new tab", () => {
     const a: ProjectInfo = { id: "A", label: "Project A", path: "/tmp/a" };
     tauriMocks.listProjectsMock.mockResolvedValue([a]);
     tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === AUTH_GATE_RESOLVED_SETTING_KEY) {
+        return Promise.resolve("true");
+      }
       if (
         key === LAYOUT_SETTING_KEY ||
         key === "file_tree_visible" ||
-        key === AUTH_GATE_RESOLVED_SETTING_KEY ||
         key === AUTH_SIGNED_IN_SETTING_KEY ||
         key === AUTH_PERSONA_SETTING_KEY ||
         key === NOTIFICATIONS_SETTING_KEY ||
@@ -184,6 +219,7 @@ describe("App — instant-default-engine new tab", () => {
     );
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-A" }));
     fireEvent.click(await screen.findByRole("button", { name: "new-tab-A" }));
 
     await waitFor(() => {
@@ -201,15 +237,22 @@ describe("App — instant-default-engine new tab", () => {
 
     const calls: Array<(v: string | null) => void> = [];
     tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === AUTH_GATE_RESOLVED_SETTING_KEY) {
+        return Promise.resolve("true");
+      }
       if (
         key === LAYOUT_SETTING_KEY ||
         key === "file_tree_visible" ||
-        key === AUTH_GATE_RESOLVED_SETTING_KEY ||
         key === AUTH_SIGNED_IN_SETTING_KEY ||
         key === AUTH_PERSONA_SETTING_KEY ||
         key === NOTIFICATIONS_SETTING_KEY ||
-        key === CLOSED_WORKSPACES_SETTING_KEY
+        key === CLOSED_WORKSPACES_SETTING_KEY ||
+        key === "last_selected_project" ||
+        key === "last_selected_agents"
       ) {
+        return Promise.resolve(null);
+      }
+      if (!key.startsWith("default_engine:")) {
         return Promise.resolve(null);
       }
       return new Promise<string | null>((resolve) => {
@@ -218,6 +261,7 @@ describe("App — instant-default-engine new tab", () => {
     });
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "startup-select-A" }));
     const buttonA = await screen.findByRole("button", { name: "new-tab-A" });
     const buttonB = await screen.findByRole("button", { name: "new-tab-B" });
 

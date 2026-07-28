@@ -51,6 +51,10 @@ vi.mock("./lib/tauri", () => ({
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
+  reviewStatus: vi.fn().mockResolvedValue(null),
+  gitBranch: vi.fn().mockResolvedValue(null),
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
+  renameProject: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -139,6 +143,8 @@ describe("App — boot-time layout restore vs. a tab opened mid-restore", () => 
       return Promise.resolve({ id: "live-session-1", project, engine, cwd, created: 0 });
     });
     tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === "auth_gate_resolved") return Promise.resolve("true");
+      if (key === "last_selected_project") return Promise.resolve("p1");
       if (key === LAYOUT_SETTING_KEY) {
         return Promise.resolve(JSON.stringify({ tabs: [{ project: "p1", engine: "claude", cwd: "/tmp/p1" }] }));
       }

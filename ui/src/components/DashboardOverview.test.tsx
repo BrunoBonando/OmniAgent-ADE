@@ -48,7 +48,7 @@ describe("DashboardOverview", () => {
     expect(screen.getAllByText("SESSIONS").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("TOKENS TODAY").length).toBeGreaterThanOrEqual(1);
 
-    fireEvent.click(screen.getByRole("button", { name: /open terminals/i }));
+    fireEvent.click(screen.getByRole("button", { name: /working sessions/i }));
     fireEvent.click(screen.getByRole("button", { name: /open board/i }));
     fireEvent.click(screen.getByRole("button", { name: /open files/i }));
     expect(onOpenTerminals).toHaveBeenCalledTimes(1);

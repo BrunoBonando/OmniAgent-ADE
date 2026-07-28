@@ -55,6 +55,7 @@ const tauriMocks = vi.hoisted(() => {
 vi.mock("./lib/tauri", () => ({
   FILE_TREE_VISIBLE_SETTING_KEY: "file_tree_visible",
   getBriefing: tauriMocks.getBriefingMock,
+  gitBranch: vi.fn().mockResolvedValue(null),
   ingestionStatus: tauriMocks.ingestionStatusMock,
   listProjects: tauriMocks.listProjectsMock,
   rootsList: tauriMocks.rootsListMock,
@@ -71,6 +72,9 @@ vi.mock("./lib/tauri", () => ({
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
   reviewStatus: vi.fn().mockResolvedValue(null),
+  gitBranch: vi.fn().mockResolvedValue(null),
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
+  renameProject: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -161,6 +165,7 @@ vi.mock("./components/Workspace", () => ({
 }));
 
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
+vi.mock("./components/DashboardOverview", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({
   default: function BrainMapStub(props: { hidden: boolean }) {

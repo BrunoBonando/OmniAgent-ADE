@@ -30,6 +30,7 @@ const tauriMocks = vi.hoisted(() => ({
   settingsSetMock: vi.fn(),
   systemStatsMock: vi.fn(),
   enrichQueuePendingCountMock: vi.fn(),
+  reviewStatusMock: vi.fn(),
 }));
 
 vi.mock("./lib/tauri", () => ({
@@ -49,6 +50,9 @@ vi.mock("./lib/tauri", () => ({
   onSessionWrite: vi.fn().mockReturnValue(() => {}),
   systemStats: tauriMocks.systemStatsMock,
   enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
+  reviewStatus: tauriMocks.reviewStatusMock,
+  sendNativeNotification: vi.fn().mockResolvedValue(undefined),
+  renameProject: vi.fn().mockResolvedValue(undefined),
 }));
 
 /** A real listener registry (`App.notifications.test.tsx`'s pattern), so a
@@ -106,10 +110,31 @@ vi.mock("./components/Workspace", () => ({
 }));
 
 vi.mock("./components/CommandPalette", () => ({ default: () => null }));
+vi.mock("./components/DashboardOverview", () => ({ default: () => null }));
 vi.mock("./components/FileTree", () => ({ default: () => null }));
 vi.mock("./map/BrainMap", () => ({ default: () => null }));
 vi.mock("./onboarding/FirstRun", () => ({ default: () => null }));
 vi.mock("./onboarding/AuthGate", () => ({ default: () => null }));
+
+vi.mock("./components/StartupScreen", () => ({
+  default: function StartupScreenStub(props: {
+    loading: boolean;
+    projects: { id: string; label: string; path: string | null }[];
+    onSelectWorkspace: (p: { id: string; label: string; path: string | null }) => void;
+    onStartFromScratch?: () => void;
+  }) {
+    if (props.loading) return null;
+    return (
+      <div>
+        {props.projects.map((p) => (
+          <button key={p.id} onClick={() => props.onSelectWorkspace(p)}>
+            {`startup-select-${p.id}`}
+          </button>
+        ))}
+      </div>
+    );
+  },
+}));
 
 const { default: App } = await import("./App");
 
@@ -128,6 +153,7 @@ beforeEach(() => {
   tauriMocks.getBriefingMock.mockReset().mockResolvedValue("briefing");
   tauriMocks.gitBranchMock.mockReset().mockResolvedValue(null);
   tauriMocks.ingestionStatusMock.mockReset().mockResolvedValue({ running: false, total_nodes: 41208 });
+  tauriMocks.reviewStatusMock.mockReset().mockResolvedValue(null);
   tauriMocks.listProjectsMock.mockReset().mockResolvedValue([P1]);
   tauriMocks.rootsListMock.mockReset().mockResolvedValue(["/tmp"]);
   tauriMocks.sessionKillMock.mockReset().mockResolvedValue(undefined);
@@ -142,6 +168,7 @@ beforeEach(() => {
       return Promise.resolve({ id: `sess-${counter}`, project, engine, cwd, created: 0 });
     });
   tauriMocks.settingsGetMock.mockReset().mockImplementation((key: string) => {
+    if (key === "auth_gate_resolved") return Promise.resolve("true");
     if (key === "last_selected_agents") return Promise.resolve(JSON.stringify(["claude"]));
     if (key === LAYOUT_SETTING_KEY || key === NOTIFICATIONS_SETTING_KEY) return Promise.resolve(null);
     return Promise.resolve(null);
@@ -150,6 +177,7 @@ beforeEach(() => {
 
 async function boot() {
   render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "startup-select-p1" }));
   await screen.findByText("select-p1");
   await waitFor(() => expect(tauriMocks.rootsListMock).toHaveBeenCalled());
   // `selectedProjectId` defaults to the first project via its own effect,

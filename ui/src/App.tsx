@@ -198,6 +198,9 @@ function App() {
   const [state, dispatch] = useReducer(sessionsReducer, initialSessionsState);
   const [startupPhase, setStartupPhase] = useState<StartupPhase>("booting");
   const [persistedTabs, setPersistedTabs] = useState<PersistedTab[]>([]);
+  // The project the user last worked in — persisted via `last_selected_project`
+  // so a relaunch auto-restores without showing the workspace chooser.
+  const [lastSelectedProjectId, setLastSelectedProjectId] = useState<string | null>(null);
   const [restoringGroupKey, setRestoringGroupKey] = useState<string | null>(null);
   const [requestedGroupKey, setRequestedGroupKey] = useState<string | null>(null);
   const [restoreErrors, setRestoreErrors] = useState<Record<string, string>>({});
@@ -484,7 +487,11 @@ function App() {
 
       try {
         const raw = await settingsGet(LAYOUT_SETTING_KEY);
-        if (!cancelled) setPersistedTabs(deserializeLayout(raw));
+        const lastProject = await settingsGet("last_selected_project");
+        if (!cancelled) {
+          setPersistedTabs(deserializeLayout(raw));
+          setLastSelectedProjectId(lastProject);
+        }
       } catch (err) {
         console.error("failed to load saved layout metadata", err);
       } finally {
@@ -845,7 +852,6 @@ function App() {
           });
         }
         dispatch({ type: "layout/lazyRestored", tabs: restored });
-        dispatch({ type: "tab/activated", id: restored[0].id });
         setPersistedTabs((tabs) =>
           tabs.filter((tab) => !(tab.project === projectId && persistedGroup(tab) === group)),
         );
@@ -854,7 +860,6 @@ function App() {
         if (restored.length > 0) {
           const completed = saved.slice(0, restored.length);
           dispatch({ type: "layout/lazyRestored", tabs: restored });
-          dispatch({ type: "tab/activated", id: restored[0].id });
           setPersistedTabs((tabs) => tabs.filter((tab) => !completed.includes(tab)));
         }
         setRestoreErrors((errors) => ({ ...errors, [key]: String(err) }));
@@ -871,6 +876,7 @@ function App() {
     (project: ProjectInfo) => {
       setSelectedProjectId(project.id);
       setStartupPhase("workspace-active");
+      void settingsSet("last_selected_project", project.id);
       const first = persistedTabs.find((tab) => tab.project === project.id);
       if (first) {
         const key = persistedSessionKey(project.id, persistedGroup(first));
@@ -884,6 +890,7 @@ function App() {
   const selectWorkspace = useCallback(
     (project: ProjectInfo) => {
       setSelectedProjectId(project.id);
+      void settingsSet("last_selected_project", project.id);
       if (state.tabs.some((tab) => tab.project === project.id)) return;
       const first = persistedTabs.find((tab) => tab.project === project.id);
       if (first) {
@@ -897,22 +904,25 @@ function App() {
 
   // Auto-restore: when the app restarts with persisted tabs and the auth gate
   // is resolved, skip the workspace-chooser and immediately restore the
-  // previous session. Guarded by needsAuthGate === false so we never bypass
-  // the auth gate. The one-shot ref prevents re-triggering on subsequent
-  // renders after the workspace transitions to "workspace-active".
+  // previous session. Only fires when `last_selected_project` is set — the
+  // user must have previously chosen a workspace for auto-restore to kick in.
+  // Guarded by needsAuthGate === false so we never bypass the auth gate. The
+  // one-shot ref prevents re-triggering on subsequent renders after the
+  // workspace transitions to "workspace-active".
   const autoRestoredRef = useRef(false);
   useEffect(() => {
     if (autoRestoredRef.current) return;
     if (startupPhase !== "choosing-workspace") return;
     if (needsAuthGate !== false) return;
+    if (lastSelectedProjectId === null) return;
     if (state.projects.length === 0) return;
     if (persistedTabs.length === 0) return;
-    const firstTab = persistedTabs[0];
-    const project = state.projects.find((p) => p.id === firstTab.project);
+    const project = state.projects.find((p) => p.id === lastSelectedProjectId)
+      ?? state.projects.find((p) => p.id === persistedTabs[0].project);
     if (!project) return;
     autoRestoredRef.current = true;
     selectStartupWorkspace(project);
-  }, [startupPhase, needsAuthGate, state.projects, persistedTabs, selectStartupWorkspace]);
+  }, [startupPhase, needsAuthGate, lastSelectedProjectId, state.projects, persistedTabs, selectStartupWorkspace]);
 
   const dormantSessions = useMemo<DormantSession[]>(() => {
     if (selectedProjectId === null) return [];
