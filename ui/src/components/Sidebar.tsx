@@ -153,8 +153,7 @@ import CloseSessionConfirm from "./CloseSessionConfirm";
 import FileTree from "./FileTree";
 import type { SessionGroup } from "../state/sessionGroups";
 import AccountBadge from "./AccountBadge";
-import SessionStatusLight from "./SessionStatusLight";
-import { mostSignificantStatus } from "../state/sessionStatus";
+import SidebarInlineSessionRow from "./SidebarInlineSessionRow";
 import Icon from "./Icon";
 import { brainLine } from "../state/accountBadgeState";
 import type { ImportBatchResult } from "../state/importState";
@@ -540,9 +539,7 @@ export default function Sidebar({
             <ul className="sidebar-inline-session-list">
               {dormantSessions.map((dormant) => (
                 <li key={dormant.group} className="sidebar-inline-session-row">
-                  <div className="sidebar-inline-session-icon">
-                    <SessionStatusLight size={14} decorative />
-                  </div>
+                  <div className="sidebar-inline-session-icon" />
                   <button
                     className="sidebar-inline-session-name-btn"
                     onClick={() => {
@@ -555,41 +552,23 @@ export default function Sidebar({
                 </li>
               ))}
               {selectedProject &&
-                selectedSessions.map((session) => {
-                  const isCurrent = session.id === onScreenSession;
-                  const sessionStatus = mostSignificantStatus(session.tabs.map((t) => t.status));
-                  return (
-                    <li
-                      key={session.id}
-                      className={`sidebar-inline-session-row${isCurrent ? " is-current" : ""}`}
-                    >
-                      <div className="sidebar-inline-session-icon">
-                        <SessionStatusLight status={sessionStatus} size={14} decorative />
-                      </div>
-                      <button
-                        className="sidebar-inline-session-name-btn"
-                        onClick={() => {
-                          onSetView?.("workspace");
-                          onActivateTab(session.tabs[0].id);
-                        }}
-                        aria-label={session.label}
-                        title={session.label}
-                      >
-                        {session.label}
-                      </button>
-                      {onCloseSession && (
-                        <button
-                          className="sidebar-inline-session-close-btn"
-                          aria-label={`Close session ${session.label}`}
-                          title="Close session"
-                          onClick={() => setClosingSession({ project: selectedProject, session })}
-                        >
-                          <Icon name="x" size={11} />
-                        </button>
-                      )}
-                    </li>
-                  );
-                })}
+                selectedSessions.map((session) => (
+                  <SidebarInlineSessionRow
+                    key={session.id}
+                    session={session}
+                    projectLabel={selectedProject.label}
+                    isCurrent={session.id === onScreenSession}
+                    onActivate={() => {
+                      onSetView?.("workspace");
+                      onActivateTab(session.tabs[0].id);
+                    }}
+                    onClose={
+                      onCloseSession
+                        ? () => setClosingSession({ project: selectedProject, session })
+                        : undefined
+                    }
+                  />
+                ))}
             </ul>
           </div>
         </div>
