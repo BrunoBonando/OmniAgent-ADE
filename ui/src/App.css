@@ -1453,15 +1453,14 @@ code {
   color: var(--ink);
 }
 
-/* Left accent bar on the group, not the button, so it spans the header only */
+/* Left accent bar spans the entire group (button + all session rows) */
 .sidebar-workspace-tab-group.is-active::before {
   content: '';
   position: absolute;
   left: 0;
-  top: 17px; /* vertically centred in the ~34px button row */
-  transform: translateY(-50%);
+  top: 0;
+  bottom: 0;
   width: 3px;
-  height: 26px;
   border-radius: 0 2px 2px 0;
   background: var(--brand-blue);
   pointer-events: none;
