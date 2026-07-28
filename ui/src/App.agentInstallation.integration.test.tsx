@@ -45,6 +45,9 @@ const tauriMocks = vi.hoisted(() => {
     agentCheckInstalledMock: vi.fn(),
     agentInstallMock: vi.fn(),
     onAgentInstallProgressMock: vi.fn(),
+    onSessionWriteMock: vi.fn(),
+    systemStatsMock: vi.fn(),
+    enrichQueuePendingCountMock: vi.fn(),
     progressCallbacks,
   };
 });
@@ -64,6 +67,9 @@ vi.mock("./lib/tauri", () => ({
   agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
   agentInstall: tauriMocks.agentInstallMock,
   onAgentInstallProgress: tauriMocks.onAgentInstallProgressMock,
+  onSessionWrite: tauriMocks.onSessionWriteMock,
+  systemStats: tauriMocks.systemStatsMock,
+  enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

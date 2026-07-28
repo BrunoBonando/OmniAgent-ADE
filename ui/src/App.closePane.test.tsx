@@ -30,6 +30,9 @@ const tauriMocks = vi.hoisted(() => ({
   sessionWriteMock: vi.fn(),
   settingsGetMock: vi.fn(),
   settingsSetMock: vi.fn(),
+  systemStatsMock: vi.fn(),
+  enrichQueuePendingCountMock: vi.fn(),
+  agentCheckInstalledMock: vi.fn(),
 }));
 
 vi.mock("./lib/tauri", () => ({
@@ -44,6 +47,10 @@ vi.mock("./lib/tauri", () => ({
   sessionWrite: tauriMocks.sessionWriteMock,
   settingsGet: tauriMocks.settingsGetMock,
   settingsSet: tauriMocks.settingsSetMock,
+  onSessionWrite: vi.fn().mockReturnValue(() => {}),
+  systemStats: tauriMocks.systemStatsMock,
+  enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
+  agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -117,10 +124,10 @@ describe("⌘W closes the focused terminal, not the app", () => {
     tauriMocks.getBriefingMock.mockResolvedValue(undefined);
     tauriMocks.listProjectsMock.mockResolvedValue([PROJECT]);
     tauriMocks.settingsGetMock.mockImplementation((key: string) => {
+      if (key === AUTH_GATE_RESOLVED_SETTING_KEY) return Promise.resolve("true");
       if (
         key === LAYOUT_SETTING_KEY ||
         key === "file_tree_visible" ||
-        key === AUTH_GATE_RESOLVED_SETTING_KEY ||
         key === AUTH_SIGNED_IN_SETTING_KEY ||
         key === AUTH_PERSONA_SETTING_KEY ||
         key === NOTIFICATIONS_SETTING_KEY

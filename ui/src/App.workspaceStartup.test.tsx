@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   sessionWrite: vi.fn(),
   settingsGet: vi.fn(),
   settingsSet: vi.fn(),
+  systemStats: vi.fn(),
+  enrichQueuePendingCount: vi.fn(),
 }));
 
 vi.mock("./lib/tauri", () => ({
@@ -33,6 +35,9 @@ vi.mock("./lib/tauri", () => ({
   sessionWrite: mocks.sessionWrite,
   settingsGet: mocks.settingsGet,
   settingsSet: mocks.settingsSet,
+  onSessionWrite: vi.fn().mockReturnValue(() => {}),
+  systemStats: mocks.systemStats,
+  enrichQueuePendingCount: mocks.enrichQueuePendingCount,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

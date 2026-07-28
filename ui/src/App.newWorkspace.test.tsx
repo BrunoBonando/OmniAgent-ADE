@@ -32,6 +32,9 @@ const tauriMocks = vi.hoisted(() => ({
   sessionWriteMock: vi.fn(),
   settingsGetMock: vi.fn(),
   settingsSetMock: vi.fn(),
+  systemStatsMock: vi.fn(),
+  enrichQueuePendingCountMock: vi.fn(),
+  agentCheckInstalledMock: vi.fn(),
 }));
 
 vi.mock("./lib/tauri", () => ({
@@ -46,6 +49,10 @@ vi.mock("./lib/tauri", () => ({
   sessionWrite: tauriMocks.sessionWriteMock,
   settingsGet: tauriMocks.settingsGetMock,
   settingsSet: tauriMocks.settingsSetMock,
+  onSessionWrite: vi.fn().mockReturnValue(() => {}),
+  systemStats: tauriMocks.systemStatsMock,
+  enrichQueuePendingCount: tauriMocks.enrichQueuePendingCountMock,
+  agentCheckInstalled: tauriMocks.agentCheckInstalledMock,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
