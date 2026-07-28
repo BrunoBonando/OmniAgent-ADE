@@ -337,9 +337,13 @@ pub fn run() {
                 });
 
             app.manage(
-                // Sessions are deliberately direct: one OS PTY per pane,
-                // with no daemon, attach client, or screen snapshot layer.
+                // Wire the daemon-backed session manager: `default_daemon_sessions`
+                // resolves the `omniagent-pty-daemon` binary once at boot and
+                // pins sessions to this app's private socket so they survive
+                // app restarts. Passing `None` (daemon not found) is a safe
+                // fallback — sessions still work, just without persistence.
                 SessionManager::new(data_dir.clone(), sink)
+                    .with_daemon_sessions(sessions::default_daemon_sessions(&data_dir))
                     .with_end_hook(end_hook)
                     .with_attention_sink(attention_sink)
                     .with_status_sink(status_sink),
@@ -629,18 +633,18 @@ mod tests {
     }
 
     /// …and that version is the one `tauri.conf.json` declares, not a second
-    /// copy of it living in Rust. `mock_app` is built from this crate's real
-    /// `tauri.conf.json` via `generate_context!`, so this compares the title
-    /// the app will actually show against the config file on disk.
+    /// copy of it living in Rust. Comparing `CARGO_PKG_VERSION` directly is
+    /// the reliable way: `tauri::test::mock_app()` hardcodes `"0.1.0"` in its
+    /// mock `PackageInfo` and would always show a false drift against any other
+    /// version string.
     #[test]
     fn the_titles_version_is_the_one_tauri_conf_json_declares() {
         let config: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let declared = config["version"].as_str().expect("tauri.conf.json version");
 
-        let app = tauri::test::mock_app();
         assert_eq!(
-            window_title(&app.handle().package_info().version.to_string()),
+            window_title(env!("CARGO_PKG_VERSION")),
             window_title(declared),
             "the runtime version and tauri.conf.json have drifted apart"
         );
