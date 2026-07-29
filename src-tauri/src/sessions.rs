@@ -572,7 +572,7 @@ pub type OutputSink = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
 /// gives its callers for the transcript file itself — see the module docs
 /// on `SessionHandle::reader_thread`), so `event.transcript_path` is always
 /// safe to read in full by the time a hook observes it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionEndEvent {
     pub id: String,
     pub project: String,
@@ -753,7 +753,7 @@ pub struct SessionInfo {
 /// `"codex"`, or `"shell"`. `briefing`, when `Some`, is forwarded verbatim
 /// to `claude --append-system-prompt` — this module does not generate or
 /// interpret its contents (that's Task 5.2 / `get_context`'s job).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct CreateSessionRequest {
     pub project: String,
     pub engine: String,

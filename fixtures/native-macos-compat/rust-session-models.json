@@ -1,0 +1,18 @@
+{
+  "create_session_request": {
+    "project": "native-migration",
+    "engine": "claude",
+    "cwd": "/Users/example/native-migration",
+    "briefing": "Use the existing MCP contract.",
+    "restore_id": "sess-native-001"
+  },
+  "session_info": {
+    "id": "sess-native-001",
+    "project": "native-migration",
+    "engine": "claude",
+    "cwd": "/Users/example/native-migration",
+    "created": 1753750000,
+    "restored": true,
+    "persistent": true
+  }
+}

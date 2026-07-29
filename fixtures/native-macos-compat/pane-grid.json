@@ -1,0 +1,18 @@
+{
+  "shapes": [
+    { "count": 1, "cols": 1, "rows": 1, "pane_ids": ["pane-1"], "holes": 0 },
+    { "count": 2, "cols": 2, "rows": 1, "pane_ids": ["pane-1", "pane-2"], "holes": 0 },
+    { "count": 3, "cols": 2, "rows": 2, "pane_ids": ["pane-1", "pane-2", "pane-3"], "holes": 1 },
+    { "count": 4, "cols": 2, "rows": 2, "pane_ids": ["pane-1", "pane-2", "pane-3", "pane-4"], "holes": 0 },
+    { "count": 5, "cols": 3, "rows": 2, "pane_ids": ["pane-1", "pane-2", "pane-3", "pane-4", "pane-5"], "holes": 1 },
+    { "count": 6, "cols": 3, "rows": 2, "pane_ids": ["pane-1", "pane-2", "pane-3", "pane-4", "pane-5", "pane-6"], "holes": 0 },
+    { "count": 7, "cols": 4, "rows": 2, "pane_ids": ["pane-1", "pane-2", "pane-3", "pane-4", "pane-5", "pane-6", "pane-7"], "holes": 1 },
+    { "count": 8, "cols": 4, "rows": 2, "pane_ids": ["pane-1", "pane-2", "pane-3", "pane-4", "pane-5", "pane-6", "pane-7", "pane-8"], "holes": 0 }
+  ],
+  "hole_repair": {
+    "existing_ids": ["pane-1", "pane-2"],
+    "desired_ids": ["pane-1", "pane-2", "pane-3"],
+    "expected_pane_ids": ["pane-1", "pane-3", "pane-2"],
+    "holes": 1
+  }
+}

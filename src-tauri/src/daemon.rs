@@ -336,18 +336,8 @@ fn resolve_daemon_binary() -> Option<PathBuf> {
     }
 
     if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(parent) = current_exe.parent() {
-            let candidates = [
-                parent.join("omniagent-pty-daemon"),
-                parent.join("../Resources/omniagent-pty-daemon"),
-                parent.join("../omniagent-pty-daemon"),
-                parent.join("../../omniagent-pty-daemon"),
-            ];
-            for c in candidates {
-                if is_executable_file(&c) {
-                    return Some(c);
-                }
-            }
+        if let Some(path) = resolve_daemon_binary_from(&current_exe) {
+            return Some(path);
         }
     }
     if let Some(workspace_root) = find_workspace_root() {
@@ -370,6 +360,20 @@ fn resolve_daemon_binary() -> Option<PathBuf> {
         }
     }
     which::which("omniagent-pty-daemon").ok()
+}
+
+/// Finds the daemon next to a development executable or in a packaged app's
+/// resources. The app-bundle path is deliberately checked before any PATH
+/// fallback in [`resolve_daemon_binary`].
+pub fn resolve_daemon_binary_from(exe: &Path) -> Option<PathBuf> {
+    let parent = exe.parent()?;
+    let sibling = parent.join("omniagent-pty-daemon");
+    if is_executable_file(&sibling) {
+        return Some(sibling);
+    }
+
+    let resources = parent.parent()?.join("Resources/omniagent-pty-daemon");
+    is_executable_file(&resources).then_some(resources)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -408,5 +412,25 @@ mod tests {
     fn session_name_is_length_bounded() {
         let long = "x".repeat(500);
         assert!(session_name(&long).len() <= MAX_SESSION_NAME_LEN);
+    }
+
+    #[test]
+    fn resolves_packaged_daemon_from_app_resources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let macos_dir = tmp.path().join("OmniAgent.app/Contents/MacOS");
+        let resources_dir = tmp.path().join("OmniAgent.app/Contents/Resources");
+        std::fs::create_dir_all(&macos_dir).unwrap();
+        std::fs::create_dir_all(&resources_dir).unwrap();
+        let exe = macos_dir.join("omniagent-ade");
+        let daemon = resources_dir.join("omniagent-pty-daemon");
+        std::fs::write(&exe, b"fake").unwrap();
+        std::fs::write(&daemon, b"fake").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&daemon, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        assert_eq!(resolve_daemon_binary_from(&exe), Some(daemon));
     }
 }

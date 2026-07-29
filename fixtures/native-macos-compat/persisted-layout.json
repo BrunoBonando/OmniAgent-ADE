@@ -1,0 +1,66 @@
+{
+  "setting_key": "layout",
+  "layout": {
+    "tabs": [
+      {
+        "id": "sess-native-001",
+        "project": "native-migration",
+        "engine": "claude",
+        "cwd": "/Users/example/native-migration",
+        "label": "Migration",
+        "themeId": "matrix",
+        "group": "group-native-001",
+        "groupLabel": "Native migration"
+      },
+      {
+        "project": "legacy-project",
+        "engine": "shell",
+        "cwd": "/Users/example/legacy-project"
+      }
+    ]
+  },
+  "repaired_layout": {
+    "tabs": [
+      {
+        "id": "sess-native-001",
+        "project": "native-migration",
+        "engine": "claude",
+        "cwd": "/Users/example/native-migration"
+      },
+      {
+        "project": "duplicate-id-project",
+        "engine": "shell",
+        "cwd": "/Users/example/duplicate-id-project"
+      },
+      {
+        "project": "invalid-optional-fields-project",
+        "engine": "codex",
+        "cwd": "/Users/example/invalid-optional-fields-project"
+      }
+    ]
+  },
+  "corrupt_layout": {
+    "tabs": [
+      {
+        "id": "sess-native-001",
+        "project": "native-migration",
+        "engine": "claude",
+        "cwd": "/Users/example/native-migration"
+      },
+      {
+        "id": "sess-native-001",
+        "project": "duplicate-id-project",
+        "engine": "shell",
+        "cwd": "/Users/example/duplicate-id-project"
+      },
+      {
+        "project": "invalid-optional-fields-project",
+        "engine": "codex",
+        "cwd": "/Users/example/invalid-optional-fields-project",
+        "themeId": "not-a-theme",
+        "group": "has spaces",
+        "groupLabel": "   "
+      }
+    ]
+  }
+}

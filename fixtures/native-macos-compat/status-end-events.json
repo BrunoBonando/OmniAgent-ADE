@@ -1,0 +1,16 @@
+{
+  "status_events": [
+    { "id": "sess-native-001", "status": "ready", "notify": true, "engine": "claude" },
+    { "id": "sess-native-001", "status": "thinking", "notify": false, "engine": "claude" },
+    { "id": "sess-native-001", "status": "tool_execution", "notify": false, "engine": "claude" },
+    { "id": "sess-native-001", "status": "awaiting_approval", "notify": true, "engine": "claude" },
+    { "id": "sess-native-001", "status": "error", "notify": true, "engine": "claude" }
+  ],
+  "session_end_event": {
+    "id": "sess-native-001",
+    "project": "native-migration",
+    "cwd": "/Users/example/native-migration",
+    "engine": "claude",
+    "transcript_path": "/Users/example/.omniagent/transcripts/sess-native-001.log"
+  }
+}
