@@ -2756,10 +2756,11 @@ name = "omniagent-pty-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "brain-core",
  "portable-pty",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
