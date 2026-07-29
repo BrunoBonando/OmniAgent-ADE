@@ -68,8 +68,12 @@ vi.mock("@xterm/addon-webgl", () => ({
   }),
 }));
 
+const eventMocks = vi.hoisted(() => ({
+  listenMock: vi.fn().mockResolvedValue(() => {}),
+}));
+
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn().mockResolvedValue(() => {}),
+  listen: eventMocks.listenMock,
 }));
 
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -131,6 +135,8 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
     xtermMocks.focusMock.mockClear();
     tauriMocks.sessionResizeMock.mockClear();
     tauriMocks.sessionWriteMock.mockClear();
+    eventMocks.listenMock.mockReset();
+    eventMocks.listenMock.mockResolvedValue(() => {});
   });
 
   it("does not show a pressure warning when more than six terminals are open", async () => {
@@ -264,6 +270,42 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
     });
   });
 
+  it("does not start or resize until the output listener is registered", async () => {
+    let registerListener: ((unlisten: () => void) => void) | undefined;
+    eventMocks.listenMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          registerListener = resolve;
+        }),
+    );
+    const p1 = project("p1");
+
+    render(
+      <Workspace
+        projects={[p1]}
+        tabs={[tab("listener-race", "p1")]}
+        activeTabId="listener-race"
+        selectedProjectId="p1"
+        onActivateTab={noop}
+        onCloseTab={noop}
+        onNewTabInProject={noop}
+        onRenameTab={noop}
+        agentState={initialAgentsState}
+        hidden={false}
+      />,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(xtermMocks.ctorMock).not.toHaveBeenCalled();
+    expect(tauriMocks.sessionResizeMock).not.toHaveBeenCalled();
+
+    registerListener?.(() => {});
+    await waitFor(() => {
+      expect(xtermMocks.ctorMock).toHaveBeenCalledTimes(1);
+      expect(tauriMocks.sessionResizeMock).toHaveBeenCalled();
+    });
+  });
+
   it("stamps each pane window with its status/motion classes — the border IS the status display", async () => {
     // Founder, 2026-07-26: "The current terminal status is on the title
     // bar, we could remove it from there and leave only in the border."
@@ -316,7 +358,11 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
     expect(container.querySelector(".pane-body.is-focused")).toContainElement(
       container.querySelector('[data-session-id="a"]'),
     );
-    const firstTextarea = container.querySelector<HTMLTextAreaElement>('[data-session-id="a"] textarea')!;
+    const firstTextarea = await waitFor(() => {
+      const textarea = container.querySelector<HTMLTextAreaElement>('[data-session-id="a"] textarea');
+      expect(textarea).not.toBeNull();
+      return textarea!;
+    });
     firstTextarea.focus();
     expect(document.activeElement).toBe(firstTextarea);
     fireEvent.keyDown(firstTextarea, {
@@ -331,7 +377,12 @@ describe("Workspace — real visibility wiring into <Terminal>", () => {
     expect(container.querySelector(".pane-body.is-focused")).toContainElement(
       container.querySelector('[data-session-id="b"]'),
     );
-    fireEvent.keyDown(container.querySelector('[data-session-id="b"] textarea')!, {
+    const secondTextarea = await waitFor(() => {
+      const textarea = container.querySelector<HTMLTextAreaElement>('[data-session-id="b"] textarea');
+      expect(textarea).not.toBeNull();
+      return textarea!;
+    });
+    fireEvent.keyDown(secondTextarea, {
       key: "Tab",
       ctrlKey: true,
     });

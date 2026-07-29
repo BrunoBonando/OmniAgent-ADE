@@ -200,13 +200,8 @@ async fn one_persistent_connection_streams_raw_bytes_and_applies_resize() {
     client
         .send_json(MessageKind::Kill, &serde_json::json!({"id":"raw"}))
         .await;
-    let mut kill_kinds = vec![client.read().await.header.message_kind];
-    kill_kinds.push(client.read().await.header.message_kind);
-    kill_kinds.sort_by_key(|kind| *kind as u8);
-    assert_eq!(
-        kill_kinds,
-        vec![MessageKind::SessionExited, MessageKind::Response]
-    );
+    client.read_kind(MessageKind::SessionExited).await;
+    client.read_kind(MessageKind::Response).await;
     server.stop().await;
 }
 
@@ -274,6 +269,7 @@ async fn malformed_control_json_closes_an_attached_connection() {
         )
         .await;
     client.read_kind(MessageKind::Snapshot).await;
+    client.read_kind(MessageKind::SessionStatus).await;
 
     let request = client.request;
     write_frame(

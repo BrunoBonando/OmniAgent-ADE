@@ -533,7 +533,7 @@
 //!   [`utf8_locale_override`], on the same "assert what the renderer
 //!   supports" principle as `TERM`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -790,9 +790,96 @@ struct SessionHandle {
     attached: bool,
     killing: Arc<AtomicBool>,
     output: Arc<Mutex<SessionOutputProcessor>>,
+    display: Arc<SessionDisplay>,
     /// Live signals the status poller reads. Shared with the reader thread,
     /// which is what actually writes to them.
     activity: Arc<SessionActivity>,
+}
+
+const MAX_PENDING_DISPLAY_BYTES: usize = 1024 * 1024;
+
+struct SessionDisplay {
+    id: String,
+    sink: OutputSink,
+    state: Mutex<SessionDisplayState>,
+}
+
+struct SessionDisplayState {
+    ready: bool,
+    ended: bool,
+    overflowed: bool,
+    pending: VecDeque<Vec<u8>>,
+    pending_bytes: usize,
+}
+
+struct DisplayReady {
+    ended: bool,
+    needs_snapshot: bool,
+}
+
+impl SessionDisplay {
+    fn new(id: String, sink: OutputSink) -> Self {
+        Self {
+            id,
+            sink,
+            state: Mutex::new(SessionDisplayState {
+                ready: false,
+                ended: false,
+                overflowed: false,
+                pending: VecDeque::new(),
+                pending_bytes: 0,
+            }),
+        }
+    }
+
+    fn receive(&self, bytes: &[u8]) {
+        let mut state = self.state.lock().unwrap();
+        if state.ready {
+            drop(state);
+            (self.sink)(&self.id, bytes);
+            return;
+        }
+        state.pending.push_back(bytes.to_vec());
+        state.pending_bytes = state.pending_bytes.saturating_add(bytes.len());
+        while state.pending_bytes > MAX_PENDING_DISPLAY_BYTES {
+            let Some(dropped) = state.pending.pop_front() else {
+                break;
+            };
+            state.pending_bytes = state.pending_bytes.saturating_sub(dropped.len());
+            state.overflowed = true;
+        }
+    }
+
+    fn mark_ready(&self) -> DisplayReady {
+        let (pending, ended, needs_snapshot) = {
+            let mut state = self.state.lock().unwrap();
+            state.ready = true;
+            state.pending_bytes = 0;
+            let ended = state.ended;
+            let needs_snapshot = state.overflowed && !ended;
+            state.overflowed = false;
+            let pending = if needs_snapshot {
+                state.pending.clear();
+                VecDeque::new()
+            } else {
+                std::mem::take(&mut state.pending)
+            };
+            (pending, ended, needs_snapshot)
+        };
+        for bytes in pending {
+            (self.sink)(&self.id, &bytes);
+        }
+        DisplayReady {
+            ended,
+            needs_snapshot,
+        }
+    }
+
+    fn mark_ended(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.ended = true;
+        state.ready
+    }
 }
 
 /// The per-session signals the traffic light is computed from — written by
@@ -1054,6 +1141,11 @@ pub struct SessionManager {
     data_dir: PathBuf,
     sink: OutputSink,
     sessions: Arc<Mutex<HashMap<String, SessionHandle>>>,
+    /// Display bytes are held separately from lifecycle handles so an
+    /// immediately-exiting session can still flush its final snapshot after
+    /// the frontend registers `session-output:{id}` and performs its first
+    /// resize. Lifecycle cleanup never waits for that renderer readiness.
+    displays: Arc<Mutex<HashMap<String, Arc<SessionDisplay>>>>,
     /// Phase 7 feedback-loop hook, `None` by default (see [`SessionEndHook`]
     /// and [`SessionManager::with_end_hook`]).
     on_end: Option<SessionEndHook>,
@@ -1078,6 +1170,7 @@ impl SessionManager {
             data_dir,
             sink,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            displays: Arc::new(Mutex::new(HashMap::new())),
             on_end: None,
             on_attention: None,
             on_status: None,
@@ -1142,10 +1235,11 @@ impl SessionManager {
         self
     }
 
-    /// Creates (or adopts) a daemon-owned session and registers the Tauri-side
-    /// compatibility metadata. Output attachment is lazy: the frontend first
-    /// subscribes to `session-output:{id}`, then its initial resize attaches
-    /// this manager to the daemon snapshot and live byte stream.
+    /// Creates (or adopts) a daemon-owned session, registers the Tauri-side
+    /// compatibility metadata, and immediately subscribes to its daemon event
+    /// stream. Display bytes remain buffered until the frontend's first
+    /// resize/write proves its `session-output:{id}` listener is ready;
+    /// lifecycle, status, attention, and exit processing start here.
     pub fn create(&self, req: CreateSessionRequest) -> Result<SessionInfo> {
         let (id, is_restore) = match req.restore_id.as_deref() {
             Some(rid) => {
@@ -1232,19 +1326,30 @@ impl SessionManager {
             Some(daemon_name.clone()),
             self.on_status.is_some(),
         ));
+        let display = Arc::new(SessionDisplay::new(id.clone(), self.sink.clone()));
         let handle = SessionHandle {
             mcp_config_path,
             project: req.project.clone(),
             cwd: req.cwd.clone(),
             engine: req.engine.clone(),
-            daemon_session: daemon_name,
+            daemon_session: daemon_name.clone(),
             attached: false,
             killing: Arc::new(AtomicBool::new(false)),
             output: Arc::new(Mutex::new(SessionOutputProcessor::new())),
+            display: Arc::clone(&display),
             activity,
         };
 
+        self.displays.lock().unwrap().insert(id.clone(), display);
         self.sessions.lock().unwrap().insert(id, handle);
+        if let Err(error) = self.ensure_attached(&info.id) {
+            self.sessions.lock().unwrap().remove(&info.id);
+            self.displays.lock().unwrap().remove(&info.id);
+            if !restored {
+                let _ = daemon.kill(&daemon_name);
+            }
+            return Err(error);
+        }
 
         // Lazy, at-most-once: by now every builder has run, so the poller
         // sees the real daemon configuration (see `with_status_sink`).
@@ -1259,7 +1364,7 @@ impl SessionManager {
     }
 
     fn ensure_attached(&self, id: &str) -> Result<()> {
-        let (daemon_name, activity, output, killing, project, cwd, engine) = {
+        let (daemon_name, activity, output, display, killing, project, cwd, engine) = {
             let mut sessions = self.sessions.lock().unwrap();
             let handle = sessions
                 .get_mut(id)
@@ -1272,6 +1377,7 @@ impl SessionManager {
                 handle.daemon_session.clone(),
                 Arc::clone(&handle.activity),
                 Arc::clone(&handle.output),
+                Arc::clone(&handle.display),
                 Arc::clone(&handle.killing),
                 handle.project.clone(),
                 handle.cwd.clone(),
@@ -1284,8 +1390,8 @@ impl SessionManager {
             .cloned()
             .ok_or_else(|| anyhow!("PTY daemon is unavailable"))?;
         let sessions = Arc::downgrade(&self.sessions);
+        let displays = Arc::downgrade(&self.displays);
         let data_dir = self.data_dir.clone();
-        let sink = self.sink.clone();
         let on_end = self.on_end.clone();
         let on_attention = self.on_attention.clone();
         let on_status = self.on_status.clone();
@@ -1295,7 +1401,7 @@ impl SessionManager {
         let callback_id = session_id.clone();
         let callback: crate::daemon::DaemonEventSink = Arc::new(move |event| match event {
             DaemonEvent::Snapshot { bytes, .. } | DaemonEvent::Output { bytes, .. } => {
-                sink(&callback_id, &bytes);
+                display.receive(&bytes);
                 activity.mark_output();
                 process_daemon_output(
                     &callback_id,
@@ -1336,17 +1442,26 @@ impl SessionManager {
             DaemonEvent::ResyncRequired { .. } => {
                 let _ = callback_daemon.reattach_session(&callback_daemon_name, None);
             }
-            DaemonEvent::Exited { exit_code, .. } => finish_session(
-                &sessions,
-                &data_dir,
-                &callback_id,
-                exit_code,
-                killing.load(Ordering::Relaxed),
-                on_end.as_ref(),
-                &project,
-                &cwd,
-                &engine,
-            ),
+            DaemonEvent::Exited { exit_code, .. } => {
+                // Intentional kills finalize synchronously in `kill()` after
+                // the daemon's response guarantees transcript flush/reap.
+                // Letting this queued callback win that registry race would
+                // make `kill()` return before lifecycle/feedback hooks finish.
+                if !killing.load(Ordering::Relaxed) {
+                    finish_session(
+                        &sessions,
+                        &displays,
+                        &data_dir,
+                        &callback_id,
+                        exit_code,
+                        false,
+                        on_end.as_ref(),
+                        &project,
+                        &cwd,
+                        &engine,
+                    );
+                }
+            }
         });
         if let Err(error) = daemon.attach_session(&daemon_name, None, callback) {
             if let Some(handle) = self.sessions.lock().unwrap().get_mut(id) {
@@ -1355,6 +1470,37 @@ impl SessionManager {
             return Err(anyhow!(error));
         }
         Ok(())
+    }
+
+    fn mark_display_ready(&self, id: &str) -> Result<DisplayReady> {
+        let display = self
+            .displays
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("no such session: {id}"))?;
+        let ready = display.mark_ready();
+        if ready.ended {
+            self.displays.lock().unwrap().remove(id);
+        }
+        Ok(ready)
+    }
+
+    fn request_fresh_snapshot(&self, id: &str) -> Result<()> {
+        let daemon_name = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(id)
+            .ok_or_else(|| anyhow!("no such session: {id}"))?
+            .daemon_session
+            .clone();
+        self.daemon_sessions
+            .as_ref()
+            .ok_or_else(|| anyhow!("PTY daemon is unavailable"))?
+            .reattach_session(&daemon_name, None)
+            .map_err(|error| anyhow!(error))
     }
 
     /// Writes raw bytes to a session's PTY (keystrokes, pasted text, etc).
@@ -1370,7 +1516,13 @@ impl SessionManager {
     /// second, so a premature clear self-corrects within ~a second rather
     /// than sticking.
     pub fn write(&self, id: &str, data: &str) -> Result<()> {
-        self.ensure_attached(id)?;
+        let display = self.mark_display_ready(id)?;
+        if display.ended {
+            return Err(anyhow!("no such session: {id}"));
+        }
+        if display.needs_snapshot {
+            self.request_fresh_snapshot(id)?;
+        }
         let (daemon_name, activity) = {
             let sessions = self.sessions.lock().unwrap();
             let handle = sessions
@@ -1390,7 +1542,13 @@ impl SessionManager {
 
     /// Resizes the PTY (call on terminal-pane resize / fit-addon changes).
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
-        self.ensure_attached(id)?;
+        let display = self.mark_display_ready(id)?;
+        if display.ended {
+            return Ok(());
+        }
+        if display.needs_snapshot {
+            self.request_fresh_snapshot(id)?;
+        }
         let daemon_name = self
             .sessions
             .lock()
@@ -1430,6 +1588,7 @@ impl SessionManager {
             .map_err(|error| anyhow!(error))?;
         finish_session(
             &Arc::downgrade(&self.sessions),
+            &Arc::downgrade(&self.displays),
             &self.data_dir,
             id,
             None,
@@ -1585,6 +1744,7 @@ fn process_daemon_output(
 #[allow(clippy::too_many_arguments)]
 fn finish_session(
     sessions: &Weak<Mutex<HashMap<String, SessionHandle>>>,
+    displays: &Weak<Mutex<HashMap<String, Arc<SessionDisplay>>>>,
     data_dir: &Path,
     id: &str,
     exit_code: Option<u32>,
@@ -1601,6 +1761,11 @@ fn finish_session(
     let Some(handle) = handle else {
         return;
     };
+    if handle.display.mark_ended() {
+        if let Some(displays) = displays.upgrade() {
+            displays.lock().unwrap().remove(id);
+        }
+    }
     cleanup_mcp_config(&handle.mcp_config_path);
     let _ = append_lifecycle_event(
         &lifecycle_path(data_dir, id),

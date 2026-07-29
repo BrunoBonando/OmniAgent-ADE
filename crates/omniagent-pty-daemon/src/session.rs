@@ -1,3 +1,4 @@
+use crate::protocol::SessionStatus;
 use anyhow::{anyhow, Context, Result};
 use brain_core::redact::redact;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -6,6 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
@@ -77,6 +79,11 @@ pub enum SessionEvent {
     ResyncRequired {
         sequence: u64,
     },
+    Status {
+        sequence: u64,
+        status: SessionStatus,
+        engine: String,
+    },
     Exited {
         sequence: u64,
         exit_code: Option<u32>,
@@ -88,6 +95,7 @@ impl SessionEvent {
         match self {
             Self::Output { sequence, .. }
             | Self::ResyncRequired { sequence }
+            | Self::Status { sequence, .. }
             | Self::Exited { sequence, .. } => *sequence,
         }
     }
@@ -230,6 +238,9 @@ pub struct ManagedSession {
     reader_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     terminal: Mutex<TerminalState>,
     subscribers: Mutex<Vec<Weak<SubscriptionInner>>>,
+    engine: String,
+    status: Mutex<SessionStatus>,
+    shell_command_state: AtomicU8,
 }
 
 impl ManagedSession {
@@ -239,7 +250,11 @@ impl ManagedSession {
             .lock()
             .map_err(|e| anyhow!("PTY writer lock poisoned: {e}"))?;
         writer.write_all(data).context("write to master PTY")?;
-        writer.flush().context("flush master PTY")
+        writer.flush().context("flush master PTY")?;
+        if self.engine == "shell" && data.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
+            self.shell_command_state.store(1, Ordering::Release);
+        }
+        Ok(())
     }
 
     pub fn send_interrupt(&self) -> Result<()> {
@@ -292,13 +307,34 @@ impl ManagedSession {
     ) -> (AttachState, SessionSubscription) {
         let terminal = self.terminal.lock();
         let subscription = self.subscribe_inner(capacity);
-        let state = match terminal {
-            Ok(mut terminal) => Self::attach_from_terminal(&mut terminal, after_sequence),
-            Err(_) => AttachState::Snapshot {
-                sequence: 0,
-                bytes: b"\x1b[H\x1b[2J".to_vec(),
-            },
+        let (state, sequence) = match terminal {
+            Ok(mut terminal) => {
+                let sequence = terminal.sequence;
+                (
+                    Self::attach_from_terminal(&mut terminal, after_sequence),
+                    sequence,
+                )
+            }
+            Err(_) => (
+                AttachState::Snapshot {
+                    sequence: 0,
+                    bytes: b"\x1b[H\x1b[2J".to_vec(),
+                },
+                0,
+            ),
         };
+        if self.engine == "shell" {
+            let status = self
+                .status
+                .lock()
+                .map(|status| *status)
+                .unwrap_or(SessionStatus::Ready);
+            subscription.inner.push(SessionEvent::Status {
+                sequence,
+                status,
+                engine: self.engine.clone(),
+            });
+        }
         (state, subscription)
     }
 
@@ -390,6 +426,58 @@ impl ManagedSession {
         };
         for subscriber in subscribers {
             subscriber.push(event.clone());
+        }
+    }
+
+    fn refresh_shell_status(&self) {
+        if self.engine != "shell" {
+            return;
+        }
+        let foreground = self
+            .master
+            .lock()
+            .ok()
+            .and_then(|master| master.process_group_leader());
+        let shell = self
+            .child
+            .lock()
+            .ok()
+            .and_then(|child| child.process_id())
+            .map(i64::from);
+        let next = match (foreground, shell) {
+            (Some(foreground), Some(shell)) if i64::from(foreground) != shell => {
+                self.shell_command_state.store(2, Ordering::Release);
+                SessionStatus::ToolExecution
+            }
+            _ if self.shell_command_state.load(Ordering::Acquire) == 2 => {
+                self.shell_command_state.store(0, Ordering::Release);
+                SessionStatus::Ready
+            }
+            _ => return,
+        };
+        let changed = self
+            .status
+            .lock()
+            .map(|mut status| {
+                if *status == next {
+                    false
+                } else {
+                    *status = next;
+                    true
+                }
+            })
+            .unwrap_or(false);
+        if changed {
+            let sequence = self
+                .terminal
+                .lock()
+                .map(|terminal| terminal.sequence)
+                .unwrap_or(0);
+            self.broadcast(SessionEvent::Status {
+                sequence,
+                status: next,
+                engine: self.engine.clone(),
+            });
         }
     }
 
@@ -525,6 +613,16 @@ impl SessionRegistry {
         if let Ok(mut handle) = session.reader_thread.lock() {
             *handle = Some(reader_thread);
         }
+        if session.engine == "shell" {
+            let status_session = Arc::downgrade(&session);
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(75));
+                let Some(session) = status_session.upgrade() else {
+                    return;
+                };
+                session.refresh_shell_status();
+            });
+        }
 
         Ok(session)
     }
@@ -574,6 +672,7 @@ type SpawnedSession = (
 );
 
 fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
+    let engine = infer_engine(&request.command);
     let pair = NativePtySystem::default()
         .openpty(PtySize {
             rows: request.rows,
@@ -621,8 +720,23 @@ fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
                 sequence: 0,
             }),
             subscribers: Mutex::new(Vec::new()),
+            engine,
+            status: Mutex::new(SessionStatus::Ready),
+            shell_command_state: AtomicU8::new(0),
         }),
         reader,
         transcript,
     ))
+}
+
+fn infer_engine(command: &[String]) -> String {
+    let binary = command
+        .first()
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    match binary {
+        "claude" | "codex" | "copilot" | "antigravity" => binary.to_string(),
+        _ => "shell".to_string(),
+    }
 }

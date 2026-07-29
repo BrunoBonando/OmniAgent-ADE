@@ -133,7 +133,7 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
     // message without unbounded growth.
     let outputBuf = "";
 
-    void listen<number[]>(`session-output:${sessionId}`, (event) => {
+    const outputListener = listen<number[]>(`session-output:${sessionId}`, (event) => {
       const bytes = Uint8Array.from(event.payload);
       const term = termRef.current;
       if (!term || !visibleRef.current || !outputQueue) pendingOutput.push(bytes);
@@ -158,15 +158,9 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
           }, 1200);
         }
       }
-    }).then((unlisten) => {
-      if (cancelled) {
-        unlisten();
-        return;
-      }
-      unlistenOutput = unlisten;
     });
 
-    startTerminalRef.current = () => {
+    const startTerminal = () => {
       if (cancelled || termRef.current) return;
 
       const term = new XTerm({
@@ -250,6 +244,26 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
       // The WebGL job is cancellable if this pane closes before its turn.
       webglCancelRef.current = cancelWebgl;
     };
+
+    // A first fit sends `session_resize`, which tells the Rust compatibility
+    // layer that renderer delivery is ready and flushes its pending snapshot.
+    // Do not expose the start function until this listener is installed, or a
+    // fast fit can flush those bytes into the gap before registration.
+    void outputListener.then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+      unlistenOutput = unlisten;
+      startTerminalRef.current = startTerminal;
+      if (visibleRef.current) {
+        scheduleTerminalJob(() => {
+          if (visibleRef.current) startTerminalRef.current?.();
+        });
+      }
+    }).catch((error) => {
+      console.error(`omniagent-ade: failed to subscribe to session-output:${sessionId}`, error);
+    });
 
     return () => {
       cancelled = true;

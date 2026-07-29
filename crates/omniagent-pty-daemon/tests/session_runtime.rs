@@ -31,7 +31,50 @@ fn next_output(
         SessionEvent::Output { sequence, bytes } => (sequence, bytes),
         SessionEvent::Exited { .. } => panic!("session exited before expected output"),
         SessionEvent::ResyncRequired { .. } => panic!("unexpected resync"),
+        SessionEvent::Status { .. } => panic!("unexpected status"),
     }
+}
+
+#[test]
+fn shell_status_tracks_a_silent_foreground_command_without_screen_polling() {
+    let registry = SessionRegistry::new();
+    let session = registry
+        .create_session(CreateSession {
+            id: "shell-status".into(),
+            command: vec!["/bin/sh".into()],
+            cwd: None,
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+            transcript_path: None,
+        })
+        .unwrap();
+    let (_, subscription) = session.attach_and_subscribe(None, 32);
+
+    let wait_for = |wanted| {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if matches!(
+                subscription.recv_timeout(Duration::from_millis(200)),
+                Ok(SessionEvent::Status { status, .. }) if status == wanted
+            ) {
+                return true;
+            }
+        }
+        false
+    };
+
+    assert!(wait_for(
+        omniagent_pty_daemon::protocol::SessionStatus::Ready
+    ));
+    session.write_input(b"sleep 1\n").unwrap();
+    assert!(wait_for(
+        omniagent_pty_daemon::protocol::SessionStatus::ToolExecution
+    ));
+    assert!(wait_for(
+        omniagent_pty_daemon::protocol::SessionStatus::Ready
+    ));
+    registry.kill("shell-status");
 }
 
 #[test]

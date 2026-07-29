@@ -1,16 +1,21 @@
 use omniagent_ade_lib::daemon::{session_name, DaemonEvent, DaemonSessions};
-use omniagent_ade_lib::sessions::{CreateSessionRequest, OutputSink, SessionManager};
+use omniagent_ade_lib::sessions::{
+    AttentionSink, CreateSessionRequest, OutputSink, SessionEndHook, SessionManager, SessionStatus,
+    StatusSink,
+};
 use omniagent_pty_daemon::protocol::{
-    decode_raw_payload, encode_raw_payload, AttachPayload, Frame, Header, HelloAckPayload,
-    MessageKind, ResizePayload, ResponsePayload, SessionCreatedPayload, SessionExitedPayload,
-    SessionListPayload, HEADER_LEN,
+    decode_raw_payload, encode_raw_payload, AttachPayload, AttentionPayload, Frame, Header,
+    HelloAckPayload, MessageKind, ResizePayload, ResponsePayload, SessionCreatedPayload,
+    SessionExitedPayload, SessionListPayload, SessionStatus as ProtocolSessionStatus,
+    SessionStatusPayload, HEADER_LEN,
 };
 use omniagent_pty_daemon::{CreateSession, DaemonServer};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::{mpsc, Arc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 fn read_frame(stream: &mut UnixStream) -> Frame {
@@ -278,16 +283,6 @@ fn reconnect_reattaches_after_the_last_observed_sequence() {
                 encode_raw_payload("session-reconnect", b"resumed").unwrap(),
             ),
         );
-        let input = read_frame(&mut second);
-        let (id, bytes) = decode_raw_payload(&input.payload).unwrap();
-        assert_eq!(id, "session-reconnect");
-        assert_eq!(bytes, b"input");
-        write_json(
-            &mut second,
-            MessageKind::Response,
-            input.header.request_or_sequence,
-            &ResponsePayload { ok: true },
-        );
     });
 
     let client = DaemonSessions::new(socket);
@@ -308,8 +303,6 @@ fn reconnect_reattaches_after_the_last_observed_sequence() {
         } if bytes == b"snapshot"
     ));
 
-    std::thread::sleep(Duration::from_millis(100));
-    client.send_input("session-reconnect", b"input").unwrap();
     assert!(matches!(
         events_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
         DaemonEvent::Output {
@@ -319,6 +312,302 @@ fn reconnect_reattaches_after_the_last_observed_sequence() {
         } if bytes == b"resumed"
     ));
     drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn slow_event_callback_does_not_block_control_responses() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let hello = read_frame(&mut stream);
+        write_json(
+            &mut stream,
+            MessageKind::HelloAck,
+            hello.header.request_or_sequence,
+            &HelloAckPayload {
+                protocol_version: 1,
+            },
+        );
+        let attach = read_frame(&mut stream);
+        assert_eq!(attach.header.message_kind, MessageKind::Attach);
+        write_frame(
+            &mut stream,
+            Frame::new(
+                MessageKind::Output,
+                1,
+                encode_raw_payload("slow-callback", b"blocked").unwrap(),
+            ),
+        );
+        for sequence in 2..=71 {
+            write_frame(
+                &mut stream,
+                Frame::new(
+                    MessageKind::Output,
+                    sequence,
+                    encode_raw_payload("slow-callback", b"queued").unwrap(),
+                ),
+            );
+        }
+
+        let list = read_frame(&mut stream);
+        assert_eq!(list.header.message_kind, MessageKind::ListSessions);
+        write_json(
+            &mut stream,
+            MessageKind::SessionList,
+            list.header.request_or_sequence,
+            &SessionListPayload {
+                sessions: vec!["slow-callback".into()],
+            },
+        );
+    });
+
+    let client = DaemonSessions::new(socket);
+    let (callback_started_tx, callback_started_rx) = mpsc::channel();
+    let (release_callback_tx, release_callback_rx) = mpsc::channel();
+    let (events_tx, events_rx) = mpsc::channel();
+    let release_callback_rx = Arc::new(Mutex::new(release_callback_rx));
+    let first_callback = Arc::new(AtomicBool::new(true));
+    client
+        .attach_session(
+            "slow-callback",
+            None,
+            Arc::new(move |event| {
+                if first_callback.swap(false, Ordering::Relaxed) {
+                    callback_started_tx.send(()).unwrap();
+                    release_callback_rx.lock().unwrap().recv().unwrap();
+                }
+                events_tx.send(event).unwrap();
+            }),
+        )
+        .unwrap();
+    callback_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+
+    let request_client = client.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    let request = std::thread::spawn(move || {
+        result_tx.send(request_client.list()).unwrap();
+    });
+    let prompt_result = result_rx.recv_timeout(Duration::from_millis(300));
+    let response_was_prompt = prompt_result.is_ok();
+    release_callback_tx.send(()).unwrap();
+    let eventual_result = match prompt_result {
+        Ok(result) => result,
+        Err(_) => result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+    };
+    request.join().unwrap();
+    server.join().unwrap();
+
+    assert!(
+        response_was_prompt,
+        "daemon control response was blocked behind a slow event callback"
+    );
+    assert_eq!(eventual_result.unwrap(), vec!["slow-callback"]);
+    assert!(matches!(
+        events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        DaemonEvent::Output { sequence: 1, .. }
+    ));
+    assert!(matches!(
+        events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        DaemonEvent::ResyncRequired { .. }
+    ));
+}
+
+#[test]
+fn natural_exit_removes_handler_before_reconnect_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let hello = read_frame(&mut stream);
+        write_json(
+            &mut stream,
+            MessageKind::HelloAck,
+            hello.header.request_or_sequence,
+            &HelloAckPayload {
+                protocol_version: 1,
+            },
+        );
+        let attach = read_frame(&mut stream);
+        assert_eq!(attach.header.message_kind, MessageKind::Attach);
+        write_json(
+            &mut stream,
+            MessageKind::SessionExited,
+            1,
+            &SessionExitedPayload {
+                id: "natural-exit".into(),
+                exit_code: Some(0),
+            },
+        );
+        drop(stream);
+
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_millis(400);
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok(_) => panic!("natural exit left a stale handler that reconnected"),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept reconnect probe: {error}"),
+            }
+        }
+    });
+
+    let client = DaemonSessions::new(socket);
+    let (events_tx, events_rx) = mpsc::channel();
+    client
+        .attach_session(
+            "natural-exit",
+            None,
+            Arc::new(move |event| events_tx.send(event).unwrap()),
+        )
+        .unwrap();
+    assert!(matches!(
+        events_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        DaemonEvent::Exited {
+            exit_code: Some(0),
+            ..
+        }
+    ));
+    server.join().unwrap();
+}
+
+#[test]
+fn session_manager_attaches_during_create_so_early_exit_is_observed() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let hello = read_frame(&mut stream);
+        write_json(
+            &mut stream,
+            MessageKind::HelloAck,
+            hello.header.request_or_sequence,
+            &HelloAckPayload {
+                protocol_version: 1,
+            },
+        );
+        let list = read_frame(&mut stream);
+        write_json(
+            &mut stream,
+            MessageKind::SessionList,
+            list.header.request_or_sequence,
+            &SessionListPayload { sessions: vec![] },
+        );
+        let create = read_frame(&mut stream);
+        let create_payload: CreateSession = serde_json::from_slice(&create.payload).unwrap();
+        write_json(
+            &mut stream,
+            MessageKind::SessionCreated,
+            create.header.request_or_sequence,
+            &SessionCreatedPayload {
+                id: create_payload.id.clone(),
+            },
+        );
+
+        let attach = read_frame(&mut stream);
+        assert_eq!(attach.header.message_kind, MessageKind::Attach);
+        write_frame(
+            &mut stream,
+            Frame::new(
+                MessageKind::Snapshot,
+                1,
+                encode_raw_payload(&create_payload.id, b"final output").unwrap(),
+            ),
+        );
+        write_json(
+            &mut stream,
+            MessageKind::SessionStatus,
+            2,
+            &SessionStatusPayload {
+                id: create_payload.id.clone(),
+                status: ProtocolSessionStatus::ToolExecution,
+                engine: "shell".into(),
+                notify: false,
+            },
+        );
+        write_json(
+            &mut stream,
+            MessageKind::Attention,
+            3,
+            &AttentionPayload {
+                id: create_payload.id.clone(),
+            },
+        );
+        write_json(
+            &mut stream,
+            MessageKind::SessionExited,
+            4,
+            &SessionExitedPayload {
+                id: create_payload.id,
+                exit_code: Some(7),
+            },
+        );
+    });
+
+    let (ended_tx, ended_rx) = mpsc::channel();
+    let (output_tx, output_rx) = mpsc::channel();
+    let (status_tx, status_rx) = mpsc::channel();
+    let (attention_tx, attention_rx) = mpsc::channel();
+    let end_hook: SessionEndHook = Arc::new(move |event| {
+        ended_tx.send(event.id.clone()).unwrap();
+    });
+    let output_sink: OutputSink = Arc::new(move |_, bytes| {
+        output_tx.send(bytes.to_vec()).unwrap();
+    });
+    let status_sink: StatusSink = Arc::new(move |event| {
+        status_tx.send(event.status).unwrap();
+    });
+    let attention_sink: AttentionSink = Arc::new(move |id| {
+        attention_tx.send(id.to_string()).unwrap();
+    });
+    let manager = SessionManager::new(temp.path().to_path_buf(), output_sink)
+        .with_daemon_sessions(Some(DaemonSessions::new(socket)))
+        .with_end_hook(end_hook)
+        .with_status_sink(status_sink)
+        .with_attention_sink(attention_sink);
+    let info = manager
+        .create(CreateSessionRequest {
+            project: "early-exit".into(),
+            engine: "shell".into(),
+            cwd: temp.path().display().to_string(),
+            briefing: None,
+            restore_id: None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        ended_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        info.id
+    );
+    assert_eq!(
+        status_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        SessionStatus::ToolExecution
+    );
+    assert_eq!(
+        attention_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        info.id
+    );
+    assert!(
+        manager.status(&info.id).is_none(),
+        "natural exit must remove the Tauri compatibility handle"
+    );
+    assert!(
+        output_rx.try_recv().is_err(),
+        "display bytes must wait until the frontend listener is ready"
+    );
+    manager.resize(&info.id, 80, 24).unwrap();
+    assert_eq!(
+        output_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        b"final output"
+    );
     server.join().unwrap();
 }
 
@@ -378,9 +667,9 @@ fn session_manager_is_a_daemon_compatibility_adapter_not_a_second_pty_owner() {
         "Tauri must not own a proxy child process"
     );
 
-    // Terminal mounts subscribe before their first resize. That resize is the
-    // compatibility layer's attach point, so the initial snapshot cannot race
-    // ahead of the existing `session-output:{id}` frontend listener.
+    // Creation subscribes the compatibility layer immediately. The first
+    // resize only marks renderer delivery ready and flushes the snapshot that
+    // was buffered while the frontend installed `session-output:{id}`.
     manager.resize(&info.id, 132, 43).unwrap();
     manager
         .write(&info.id, "printf 'DAEMON_ONLY:%s\\n' \"$(tput cols)\"\n")

@@ -6,7 +6,7 @@
 - The replacement client keeps one framed Unix-socket connection, performs the v1 hello handshake, correlates concurrent control replies by request ID, and dispatches unsolicited snapshot/output/status/attention/resync/exit frames.
 - Reconnection replays every attachment after its last observed sequence. Failed writes clear the stale connection, and timed-out requests remove their pending entry.
 - `SessionManager` is now a compatibility adapter only. It retains the frozen request/response/event models and lifecycle/feedback hooks, but the daemon alone creates PTYs, owns children, streams bytes, resizes, interrupts, kills, reaps, and writes transcripts.
-- Attachment is lazy on the terminal's first resize/write, after the existing frontend listener is installed, so the initial snapshot cannot race the `session-output:{id}` subscription.
+- Attachment now starts during session creation, so lifecycle/status/attention/output/exit events are observed even before a pane becomes visible. Only display bytes wait in a bounded compatibility buffer for the frontend's first resize/write; ended sessions retain those final bytes until renderer readiness without delaying lifecycle cleanup.
 - Removed the attach-helper argv path, proxy PTY, direct-spawn fallback, second daemon client, per-request socket protocol, full-screen status polling, and production `portable-pty` dependency. `portable-pty` remains dev-only for isolated legacy classifier/startup unit tests.
 - Kept the Tauri command names, `CreateSessionRequest`, `SessionInfo`, `SessionStatus`, `SessionStatusEvent`, `SessionEndEvent`, event channel names, lifecycle files, status/attention behavior, feedback enqueueing, and MCP contract unchanged.
 - Tauri now emits raw terminal bytes as JSON byte arrays. The two frontend consumers use `Uint8Array` directly; base64 encoding/decoding and the direct base64 dependency were removed.
@@ -98,3 +98,61 @@ Intermediate compile failures were not hidden:
 
 - The repository-wide baseline failures above prevent claiming a fully green unfiltered workspace, but none is in Task 3's changed behavior or files.
 - The legacy module documentation in `sessions.rs` still contains historical tmux/status investigation notes; executable screen polling and attach/proxy paths are removed.
+
+## Fix round 1 — lifecycle, listener, reconnect, and callback races
+
+### Changes
+
+- Session creation now installs the daemon handler immediately. Snapshot/output bytes are held separately from the live-session registry until renderer readiness, capped at 1 MiB per session; overflow requests a fresh daemon snapshot. Status, attention, resync, and natural exit processing never wait for a visible pane or resize.
+- An immediately ended session is removed and its lifecycle/end hook runs at once, while its bounded final display bytes remain available for the later first resize. Intentional kills still finalize synchronously after the daemon's flush/reap acknowledgment, preserving feedback-hook ordering.
+- `Terminal.tsx` does not expose its xterm startup function, fit, or initial `sessionResize` until `listen(session-output:...)` resolves successfully. A listener-ready visible pane reschedules startup; cancellation and hidden-pane checks remain in place.
+- EOF now starts a proactive reconnect loop whenever handlers remain, with exponential backoff from 50 ms capped at 1 s. Every reconnect replays handlers after their last received sequence without requiring an input/resize/list call.
+- User callbacks run on one bounded 64-event worker per attached session, preserving per-session order and keeping the socket reader free for correlated control responses. Overflow collapses to `ResyncRequired`; no thread is created per frame.
+- Natural `SessionExited` removes its handler before callback delivery, so reconnect cannot replay a stale attachment.
+- The persistent daemon now owns shell busy/ready transitions too: after a submitted command it watches the PTY foreground process group (not terminal snapshots), emits `tool_execution` while a child command owns the foreground, and emits `ready` when control returns to the shell. The current status is queued on every attach, including hidden/immediately attached sessions.
+
+### TDD evidence
+
+RED, before implementation:
+
+- `cargo test -p omniagent-ade --test daemon_client_protocol reconnect_reattaches_after_the_last_observed_sequence -- --exact --nocapture`
+  - Failed after 2.22 s with an event-channel timeout; EOF did not reconnect until control input.
+- `cargo test -p omniagent-ade --test daemon_client_protocol slow_event_callback_does_not_block_control_responses -- --exact --nocapture`
+  - Failed at the 300 ms prompt-response assertion; the reader was blocked inside the callback.
+- `cargo test -p omniagent-ade --test daemon_client_protocol session_manager_attaches_during_create_so_early_exit_is_observed -- --exact --nocapture`
+  - Failed after 2.97 s with an end-hook timeout; creation had not attached.
+- `npm --prefix ui test -- Workspace.visibility.test.tsx -t "does not start or resize until the output listener is registered"`
+  - Failed because xterm had already constructed once while the mocked listener promise was unresolved.
+- The first broader `feedback_test` run after moving callbacks off-reader exposed an intentional-kill ordering regression: 3 tests failed because the queued exit callback could make `kill()` return before feedback finalization. Intentional kills now finalize synchronously after the daemon acknowledgment.
+- `cargo test -p omniagent-ade --test session_persistence_test shell_status_goes_ready_then_tool_execution_then_ready_around_a_real_command -- --exact --nocapture`
+  - Failed with `a running command must show tool execution (cyan); saw [Ready]`, exposing that the Phase 1 protocol defined status frames but the persistent server did not yet emit them.
+
+GREEN:
+
+- `cargo test -p omniagent-ade --test daemon_client_protocol`
+  - 6 passed, including passive sequence replay, bounded slow-callback dispatch/control response, natural-exit handler removal, and creation-time output/status/attention/exit with final display flush.
+- `cargo test -p omniagent-ade --test feedback_test`
+  - 5 passed; kill/feedback ordering is preserved.
+- `npm --prefix ui test -- Workspace.visibility.test.tsx`
+  - 9 passed, including delayed listener registration.
+- `npm --prefix ui test`
+  - 78 files passed; 1,181 tests passed and 8 skipped.
+- `npm --prefix ui run build`
+  - Passed.
+- `cargo check -p omniagent-ade --all-targets --all-features`
+  - Passed.
+- `cargo clippy -p omniagent-ade --lib --tests --all-features -- -A clippy::doc_lazy_continuation -D warnings`
+  - Passed; the allow covers only the pre-existing untouched `roots.rs` documentation diagnostics recorded above.
+- `cargo test -p omniagent-pty-daemon`
+  - 19 passed, including `shell_status_tracks_a_silent_foreground_command_without_screen_polling`.
+- `cargo test -p omniagent-ade --test session_persistence_test -- --test-threads=1`
+  - 11 passed; the real silent `sleep 2` shell transition is green → cyan → green again.
+- `cargo test -p mcp-server --test contract_test`
+  - 10 passed; frozen MCP shapes remain unchanged.
+- Direct `rustfmt --check` on all changed Rust files and `git diff --check`
+  - Passed.
+
+### Broader-suite observations
+
+- The unfiltered Tauri lib run remains 170/172 with the two baseline branch/version assertions documented above.
+- Persistence-test daemon processes are intentionally persistent and their legacy `ServerGuard` kills sessions but not the server process. The private instances spawned by the failed verification runs were identified by explicit PID/start time, terminated, and a process check confirmed none remained.

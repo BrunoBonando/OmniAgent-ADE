@@ -1,12 +1,12 @@
 //! Persistent framed-protocol client for `omniagent-pty-daemon`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 use omniagent_pty_daemon::protocol::{
@@ -22,6 +22,9 @@ const MAX_SESSION_NAME_LEN: usize = 128;
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(3);
 const DAEMON_START_POLL: Duration = Duration::from_millis(50);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const CALLBACK_QUEUE_CAPACITY: usize = 64;
+const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
+const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Kept for compatibility with existing references.
 pub const CONFIG_BODY: &str = "";
@@ -55,10 +58,83 @@ pub enum DaemonEvent {
 
 pub type DaemonEventSink = Arc<dyn Fn(DaemonEvent) + Send + Sync>;
 
-#[derive(Clone)]
 struct Handler {
     sequence: Option<u64>,
-    sink: DaemonEventSink,
+    dispatcher: CallbackDispatcher,
+}
+
+impl Drop for Handler {
+    fn drop(&mut self) {
+        self.dispatcher.close();
+    }
+}
+
+#[derive(Clone)]
+struct CallbackDispatcher {
+    queue: Arc<CallbackQueue>,
+}
+
+struct CallbackQueue {
+    state: Mutex<CallbackQueueState>,
+    ready: Condvar,
+}
+
+struct CallbackQueueState {
+    events: VecDeque<DaemonEvent>,
+    closed: bool,
+}
+
+impl CallbackDispatcher {
+    fn new(sink: DaemonEventSink) -> Self {
+        let queue = Arc::new(CallbackQueue {
+            state: Mutex::new(CallbackQueueState {
+                events: VecDeque::new(),
+                closed: false,
+            }),
+            ready: Condvar::new(),
+        });
+        let worker_queue = Arc::clone(&queue);
+        std::thread::spawn(move || loop {
+            let event = {
+                let mut state = worker_queue.state.lock().unwrap();
+                while state.events.is_empty() && !state.closed {
+                    state = worker_queue.ready.wait(state).unwrap();
+                }
+                match state.events.pop_front() {
+                    Some(event) => event,
+                    None => return,
+                }
+            };
+            sink(event);
+        });
+        Self { queue }
+    }
+
+    fn enqueue(&self, id: &str, sequence: u64, event: DaemonEvent) {
+        let mut state = self.queue.state.lock().unwrap();
+        if state.closed {
+            return;
+        }
+        if state.events.len() >= CALLBACK_QUEUE_CAPACITY {
+            state.events.clear();
+            state.events.push_back(DaemonEvent::ResyncRequired {
+                id: id.to_string(),
+                sequence,
+            });
+            if matches!(event, DaemonEvent::Exited { .. }) {
+                state.events.push_back(event);
+            }
+        } else {
+            state.events.push_back(event);
+        }
+        self.queue.ready.notify_one();
+    }
+
+    fn close(&self) {
+        let mut state = self.queue.state.lock().unwrap();
+        state.closed = true;
+        self.queue.ready.notify_one();
+    }
 }
 
 struct ClientRuntime {
@@ -68,10 +144,12 @@ struct ClientRuntime {
     next_request: AtomicU64,
     generation: AtomicU64,
     connect: Mutex<()>,
+    reconnecting: AtomicBool,
+    socket_path: PathBuf,
 }
 
-impl Default for ClientRuntime {
-    fn default() -> Self {
+impl ClientRuntime {
+    fn new(socket_path: PathBuf) -> Self {
         Self {
             writer: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
@@ -79,6 +157,8 @@ impl Default for ClientRuntime {
             next_request: AtomicU64::new(1),
             generation: AtomicU64::new(0),
             connect: Mutex::new(()),
+            reconnecting: AtomicBool::new(false),
+            socket_path,
         }
     }
 }
@@ -109,8 +189,8 @@ impl DaemonSessions {
             bin: resolve_daemon_binary().unwrap_or_default(),
             socket: DEFAULT_SOCKET.to_string(),
             config: None,
+            runtime: Arc::new(ClientRuntime::new(socket_path.clone())),
             socket_path,
-            runtime: Arc::new(ClientRuntime::default()),
         }
     }
 
@@ -125,7 +205,7 @@ impl DaemonSessions {
             socket: socket.to_string(),
             config: None,
             socket_path: resolve_socket_path(socket, None),
-            runtime: Arc::new(ClientRuntime::default()),
+            runtime: Arc::new(ClientRuntime::new(resolve_socket_path(socket, None))),
         })
     }
 
@@ -135,7 +215,7 @@ impl DaemonSessions {
             socket: socket.to_string(),
             config: None,
             socket_path: resolve_socket_path(socket, None),
-            runtime: Arc::new(ClientRuntime::default()),
+            runtime: Arc::new(ClientRuntime::new(resolve_socket_path(socket, None))),
         }
     }
 
@@ -143,7 +223,7 @@ impl DaemonSessions {
         let cfg = config.into();
         self.socket_path = resolve_socket_path(&self.socket, Some(&cfg));
         self.config = Some(cfg);
-        self.runtime = Arc::new(ClientRuntime::default());
+        self.runtime = Arc::new(ClientRuntime::new(self.socket_path.clone()));
         self
     }
 
@@ -231,10 +311,14 @@ impl DaemonSessions {
             id.to_string(),
             Handler {
                 sequence: after_sequence,
-                sink,
+                dispatcher: CallbackDispatcher::new(sink),
             },
         );
-        self.send_attach(id, after_sequence)
+        if let Err(error) = self.send_attach(id, after_sequence) {
+            self.runtime.handlers.lock().unwrap().remove(id);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn detach_session(&self, id: &str) -> Result<(), String> {
@@ -297,7 +381,7 @@ impl DaemonSessions {
         }
 
         if let Ok(stream) = self.connect_stream() {
-            return self.install_connection(stream);
+            return install_connection(&self.runtime, stream);
         }
         self.remove_stale_socket_if_unreachable();
         if let Some(parent) = self.socket_path.parent() {
@@ -317,7 +401,7 @@ impl DaemonSessions {
         let deadline = std::time::Instant::now() + DAEMON_START_TIMEOUT;
         while std::time::Instant::now() < deadline {
             if let Ok(stream) = self.connect_stream() {
-                return self.install_connection(stream);
+                return install_connection(&self.runtime, stream);
             }
             std::thread::sleep(DAEMON_START_POLL);
         }
@@ -328,76 +412,7 @@ impl DaemonSessions {
     }
 
     fn connect_stream(&self) -> Result<UnixStream, String> {
-        let mut stream = UnixStream::connect(&self.socket_path)
-            .map_err(|error| format!("connect daemon: {error}"))?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .map_err(|error| format!("set daemon handshake timeout: {error}"))?;
-        let request = self.next_request();
-        write_sync_frame(
-            &mut stream,
-            &Frame::new(
-                MessageKind::Hello,
-                request,
-                serde_json::to_vec(&HelloPayload {
-                    client: "omniagent-ade-tauri".into(),
-                })
-                .map_err(|error| format!("encode daemon hello: {error}"))?,
-            ),
-        )?;
-        let response = read_sync_frame(&mut stream)?;
-        expect_kind(&response, MessageKind::HelloAck)?;
-        if response.header.request_or_sequence != request {
-            return Err("daemon hello response used the wrong request id".into());
-        }
-        let ack: HelloAckPayload = serde_json::from_slice(&response.payload)
-            .map_err(|error| format!("decode daemon hello: {error}"))?;
-        if ack.protocol_version != PROTOCOL_VERSION {
-            return Err(format!(
-                "daemon protocol version {} is unsupported",
-                ack.protocol_version
-            ));
-        }
-        stream
-            .set_read_timeout(None)
-            .map_err(|error| format!("clear daemon handshake timeout: {error}"))?;
-        Ok(stream)
-    }
-
-    fn install_connection(&self, stream: UnixStream) -> Result<(), String> {
-        let reader = stream
-            .try_clone()
-            .map_err(|error| format!("clone daemon socket: {error}"))?;
-        let generation = self.runtime.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let runtime = Arc::downgrade(&self.runtime);
-        std::thread::spawn(move || read_loop(reader, runtime, generation));
-
-        // Publish while holding the writer lock, then replay subscriptions
-        // through that same guard. Other callers cannot interleave a frame
-        // until every restored session has reattached at its last sequence.
-        let mut writer = self.runtime.writer.lock().unwrap();
-        *writer = Some((generation, stream));
-        let handlers = self.runtime.handlers.lock().unwrap().clone();
-        for (id, handler) in handlers {
-            let request = self.next_request();
-            let (_, stream) = writer.as_mut().expect("writer installed above");
-            if let Err(error) = write_sync_frame(
-                stream,
-                &Frame::new(
-                    MessageKind::Attach,
-                    request,
-                    serde_json::to_vec(&AttachPayload {
-                        id,
-                        after_sequence: handler.sequence,
-                    })
-                    .map_err(|error| format!("encode daemon reattach: {error}"))?,
-                ),
-            ) {
-                writer.take();
-                return Err(error);
-            }
-        }
-        Ok(())
+        connect_stream(&self.runtime)
     }
 
     fn request_json(
@@ -469,6 +484,91 @@ impl DaemonSessions {
             let _ = std::fs::remove_file(&self.socket_path);
         }
     }
+}
+
+fn connect_stream(runtime: &ClientRuntime) -> Result<UnixStream, String> {
+    let mut stream = UnixStream::connect(&runtime.socket_path)
+        .map_err(|error| format!("connect daemon: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .map_err(|error| format!("set daemon handshake timeout: {error}"))?;
+    let request = runtime.next_request.fetch_add(1, Ordering::Relaxed);
+    write_sync_frame(
+        &mut stream,
+        &Frame::new(
+            MessageKind::Hello,
+            request,
+            serde_json::to_vec(&HelloPayload {
+                client: "omniagent-ade-tauri".into(),
+            })
+            .map_err(|error| format!("encode daemon hello: {error}"))?,
+        ),
+    )?;
+    let response = read_sync_frame(&mut stream)?;
+    expect_kind(&response, MessageKind::HelloAck)?;
+    if response.header.request_or_sequence != request {
+        return Err("daemon hello response used the wrong request id".into());
+    }
+    let ack: HelloAckPayload = serde_json::from_slice(&response.payload)
+        .map_err(|error| format!("decode daemon hello: {error}"))?;
+    if ack.protocol_version != PROTOCOL_VERSION {
+        return Err(format!(
+            "daemon protocol version {} is unsupported",
+            ack.protocol_version
+        ));
+    }
+    stream
+        .set_read_timeout(None)
+        .map_err(|error| format!("clear daemon handshake timeout: {error}"))?;
+    Ok(stream)
+}
+
+fn install_connection(runtime: &Arc<ClientRuntime>, stream: UnixStream) -> Result<(), String> {
+    let reader = stream
+        .try_clone()
+        .map_err(|error| format!("clone daemon socket: {error}"))?;
+    let generation = runtime.generation.fetch_add(1, Ordering::Relaxed) + 1;
+
+    // Publish while holding the writer lock, then replay subscriptions
+    // through that same guard. Other callers cannot interleave a frame
+    // until every restored session has reattached at its last sequence.
+    let mut writer = runtime.writer.lock().unwrap();
+    *writer = Some((generation, stream));
+    let handlers = runtime
+        .handlers
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, handler)| (id.clone(), handler.sequence))
+        .collect::<Vec<_>>();
+    for (id, sequence) in handlers {
+        let request = runtime.next_request.fetch_add(1, Ordering::Relaxed);
+        let (_, stream) = writer.as_mut().expect("writer installed above");
+        if let Err(error) = write_sync_frame(
+            stream,
+            &Frame::new(
+                MessageKind::Attach,
+                request,
+                serde_json::to_vec(&AttachPayload {
+                    id,
+                    after_sequence: sequence,
+                })
+                .map_err(|error| format!("encode daemon reattach: {error}"))?,
+            ),
+        ) {
+            writer.take();
+            return Err(error);
+        }
+    }
+    drop(writer);
+
+    // Start reading only after this generation is visible in `writer`. If
+    // the peer closes immediately after the handshake/replay, `read_loop`
+    // can now recognize that it owns the current generation and schedule the
+    // next reconnect instead of leaving a dead stream published forever.
+    let reader_runtime = Arc::downgrade(runtime);
+    std::thread::spawn(move || read_loop(reader, reader_runtime, generation));
+    Ok(())
 }
 
 fn expect_kind(frame: &Frame, expected: MessageKind) -> Result<(), String> {
@@ -603,25 +703,91 @@ fn read_loop(mut stream: UnixStream, runtime: Weak<ClientRuntime>, generation: u
     let Some(runtime) = runtime.upgrade() else {
         return;
     };
-    let mut writer = runtime.writer.lock().unwrap();
-    if matches!(writer.as_ref(), Some((current, _)) if *current == generation) {
-        writer.take();
+    let disconnected_current_generation = {
+        let mut writer = runtime.writer.lock().unwrap();
+        if matches!(writer.as_ref(), Some((current, _)) if *current == generation) {
+            writer.take();
+            true
+        } else {
+            false
+        }
+    };
+    if disconnected_current_generation {
         for (_, pending) in runtime.pending.lock().unwrap().drain() {
             let _ = pending.send(Err("daemon connection closed".into()));
+        }
+        if !runtime.handlers.lock().unwrap().is_empty() {
+            start_reconnect(&runtime);
         }
     }
 }
 
 fn dispatch_event(runtime: &ClientRuntime, id: &str, sequence: u64, event: DaemonEvent) {
-    let sink = {
+    let exited = matches!(&event, DaemonEvent::Exited { .. });
+    let dispatcher = {
         let mut handlers = runtime.handlers.lock().unwrap();
-        let Some(handler) = handlers.get_mut(id) else {
+        if exited {
+            let Some(mut handler) = handlers.remove(id) else {
+                return;
+            };
+            handler.sequence = Some(sequence);
+            handler.dispatcher.enqueue(id, sequence, event);
             return;
-        };
-        handler.sequence = Some(sequence);
-        handler.sink.clone()
+        }
+        match handlers.get_mut(id) {
+            Some(handler) => {
+                handler.sequence = Some(sequence);
+                handler.dispatcher.clone()
+            }
+            None => return,
+        }
     };
-    sink(event);
+    dispatcher.enqueue(id, sequence, event);
+}
+
+fn start_reconnect(runtime: &Arc<ClientRuntime>) {
+    if runtime.reconnecting.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let runtime = Arc::downgrade(runtime);
+    std::thread::spawn(move || {
+        let mut backoff = RECONNECT_INITIAL_BACKOFF;
+        loop {
+            let Some(runtime) = runtime.upgrade() else {
+                return;
+            };
+            if runtime.handlers.lock().unwrap().is_empty()
+                || runtime.writer.lock().unwrap().is_some()
+            {
+                finish_reconnect(&runtime);
+                return;
+            }
+            let connected = {
+                let _connect = runtime.connect.lock().unwrap();
+                if runtime.writer.lock().unwrap().is_some() {
+                    true
+                } else {
+                    connect_stream(&runtime)
+                        .and_then(|stream| install_connection(&runtime, stream))
+                        .is_ok()
+                }
+            };
+            if connected {
+                finish_reconnect(&runtime);
+                return;
+            }
+            drop(runtime);
+            std::thread::sleep(backoff);
+            backoff = std::cmp::min(backoff.saturating_mul(2), RECONNECT_MAX_BACKOFF);
+        }
+    });
+}
+
+fn finish_reconnect(runtime: &Arc<ClientRuntime>) {
+    runtime.reconnecting.store(false, Ordering::Release);
+    if runtime.writer.lock().unwrap().is_none() && !runtime.handlers.lock().unwrap().is_empty() {
+        start_reconnect(runtime);
+    }
 }
 
 pub(crate) fn is_executable_file(path: &Path) -> bool {

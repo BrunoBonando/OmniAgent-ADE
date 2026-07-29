@@ -2,7 +2,7 @@ use crate::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, write_frame, AttachPayload, ErrorPayload,
     Frame, HelloAckPayload, HelloPayload, MessageKind, ResizePayload, ResponsePayload,
     ResyncRequiredPayload, SessionCreatedPayload, SessionExitedPayload, SessionIdPayload,
-    SessionListPayload, SettingKey, SettingValue, PROTOCOL_VERSION,
+    SessionListPayload, SessionStatusPayload, SettingKey, SettingValue, PROTOCOL_VERSION,
 };
 use crate::{AttachState, CreateSession, SessionEvent, SessionRegistry, SessionSubscription};
 use anyhow::{anyhow, Context, Result};
@@ -412,6 +412,25 @@ async fn send_event(
             MessageKind::ResyncRequired,
             sequence,
             serde_json::to_vec(&ResyncRequiredPayload { id: id.into() })?,
+        ),
+        SessionEvent::Status {
+            sequence,
+            status,
+            engine,
+        } => Frame::new(
+            MessageKind::SessionStatus,
+            sequence,
+            serde_json::to_vec(&SessionStatusPayload {
+                id: id.into(),
+                status,
+                notify: matches!(
+                    status,
+                    crate::protocol::SessionStatus::Ready
+                        | crate::protocol::SessionStatus::AwaitingApproval
+                        | crate::protocol::SessionStatus::Error
+                ),
+                engine,
+            })?,
         ),
         SessionEvent::Exited {
             sequence,
