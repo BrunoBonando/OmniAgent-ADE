@@ -369,11 +369,17 @@ code {
 .startup-logo {
   width: 144px;
   aspect-ratio: 1;
-  background: var(--brand-blue);
+  background-image: linear-gradient(
+    115deg,
+    var(--status-thinking-lo) 0%,
+    var(--status-thinking-hi) 45%,
+    var(--status-thinking-lo) 90%
+  );
+  background-size: 260% 100%;
   filter: drop-shadow(0 0 16px rgba(61, 141, 203, 0.75));
   -webkit-mask: url("./assets/omniagent-mark-mask.png") center / contain no-repeat;
   mask: url("./assets/omniagent-mark-mask.png") center / contain no-repeat;
-  animation: startup-logo-blink 1.35s steps(2, end) infinite;
+  animation: omni-sweep 1.9s ease-in-out infinite;
   transition: width 520ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
@@ -643,11 +649,17 @@ code {
 .session-restore-logo {
   width: 58px;
   aspect-ratio: 1;
-  background: var(--brand-blue);
+  background-image: linear-gradient(
+    115deg,
+    var(--status-thinking-lo) 0%,
+    var(--status-thinking-hi) 45%,
+    var(--status-thinking-lo) 90%
+  );
+  background-size: 260% 100%;
   filter: drop-shadow(0 0 12px rgba(61, 141, 203, 0.65));
   -webkit-mask: url("./assets/omniagent-mark-mask.png") center / contain no-repeat;
   mask: url("./assets/omniagent-mark-mask.png") center / contain no-repeat;
-  animation: startup-logo-blink 1.35s steps(2, end) infinite;
+  animation: omni-sweep 1.9s ease-in-out infinite;
 }
 
 .session-restore-state button {
@@ -3864,6 +3876,18 @@ code {
   }
 }
 
+/* Status feedback lives on the terminal logo only. Keep the pane's rounded
+   geometry, but do not paint or animate a second status effect around it. */
+.pane-grid .pane-window.mosaic-window::before,
+.pane-grid .pane-window.mosaic-window.is-focused::after {
+  content: none;
+  display: none;
+}
+
+.pane-grid .pane-window.mosaic-window.is-focused {
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
 .pane-grid .pane-window .mosaic-window-toolbar {
   height: auto;
   background: transparent;
@@ -4746,11 +4770,17 @@ code {
 .terminal-loading-logo {
   width: 42px;
   aspect-ratio: 1;
-  background: var(--brand-blue);
+  background-image: linear-gradient(
+    115deg,
+    var(--status-thinking-lo) 0%,
+    var(--status-thinking-hi) 45%,
+    var(--status-thinking-lo) 90%
+  );
+  background-size: 260% 100%;
   filter: drop-shadow(0 0 10px rgba(61, 141, 203, 0.55));
   -webkit-mask: url("./assets/omniagent-mark-mask.png") center / contain no-repeat;
   mask: url("./assets/omniagent-mark-mask.png") center / contain no-repeat;
-  animation: startup-logo-blink 1.35s steps(2, end) infinite;
+  animation: omni-sweep 1.9s ease-in-out infinite;
 }
 
 /* Stop animating once dismissed so the fading overlay doesn't flicker. */

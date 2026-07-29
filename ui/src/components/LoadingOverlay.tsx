@@ -1,9 +1,8 @@
 // Full-window loading overlay — shown whenever the app is restoring a
 // workspace's first session after the workspace shell is already visible
 // (workspace switch from the sidebar, or the startup-screen → workspace
-// transition). Uses the same `tool_execution` chase animation as the pane
-// header's status light, but at 112 px so it reads as an app-level event
-// rather than a per-pane one.
+// transition). Uses the blue-gradient working animation, but at 112 px so it
+// reads as an app-level event rather than a per-pane one.
 //
 // The overlay fades IN when `visible` flips true, and fades OUT over 280 ms
 // when it flips false — `mounted` stays true for exactly that window so the
@@ -38,7 +37,7 @@ export default function LoadingOverlay({ visible }: LoadingOverlayProps) {
       aria-label="Loading workspace"
     >
       <div className="loading-overlay-modal">
-        <SessionStatusLight status="tool_execution" size={112} decorative />
+        <SessionStatusLight status="thinking" size={112} decorative />
         <p className="loading-overlay-label">Loading...</p>
       </div>
     </div>
