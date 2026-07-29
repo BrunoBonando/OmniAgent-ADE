@@ -35,8 +35,8 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     private let connection: SessionConnection
     private let sessionID: String
     private var attemptedMetal = false
-    private var paintMarkerScheduled = false
-    private var pendingPaintSequence: UInt64 = 0
+    private var drawMarkerScheduled = false
+    private var pendingDrawSequence: UInt64 = 0
 
     init(connection: SessionConnection, sessionID: String) {
         self.connection = connection
@@ -118,29 +118,29 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
             bytes.count
         )
         terminalView.feed(byteArray: Array(bytes)[...])
-        pendingPaintSequence = sequence
-        guard !paintMarkerScheduled else { return }
-        paintMarkerScheduled = true
+        pendingDrawSequence = sequence
+        guard !drawMarkerScheduled else { return }
+        drawMarkerScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let usedMetal = submitRendererFrame()
+            let attemptedMetal = requestRendererDraw()
             os_signpost(
                 .event,
                 log: Instrumentation.log,
-                name: "Latency.RendererSubmissionComplete",
+                name: "Latency.RendererDrawAttempted",
                 "sequence=%llu renderer=%{public}s",
-                pendingPaintSequence,
-                usedMetal ? "metal" : "core-graphics"
+                pendingDrawSequence,
+                attemptedMetal ? "metal" : "core-graphics"
             )
-            paintMarkerScheduled = false
+            drawMarkerScheduled = false
         }
     }
 
     @discardableResult
-    func submitRendererFrame() -> Bool {
+    func requestRendererDraw() -> Bool {
         if let metalView = terminalView.firstDescendant(of: MTKView.self) {
-            // MTKView.draw() synchronously enters SwiftTerm's delegate, which commits
-            // its command buffer before returning. GPU completion happens later.
+            // draw() may return without a drawable or while a frame is in flight.
+            // SwiftTerm's optional Metal.Commit signpost is the submit boundary.
             metalView.draw()
             return true
         }
