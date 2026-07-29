@@ -368,6 +368,14 @@ final class SessionConnection {
             do {
                 let raw = try RawPayload.decode(frame.payload)
                 updateSequence(sessionID: raw.sessionID, sequence: frame.requestOrSequence)
+                os_signpost(
+                    .event,
+                    log: Instrumentation.log,
+                    name: "Latency.OutputReceipt",
+                    "sequence=%llu bytes=%lu",
+                    frame.requestOrSequence,
+                    raw.bytes.count
+                )
                 callbackQueue.async {
                     self.onTerminalData?(
                         raw.sessionID,
@@ -499,6 +507,16 @@ final class SessionConnection {
                 }
                 written += count
             }
+        }
+        if frame.kind == .input {
+            os_signpost(
+                .event,
+                log: Instrumentation.log,
+                name: "Latency.IPCSend",
+                "request=%llu bytes=%lu",
+                frame.requestOrSequence,
+                frame.payload.count
+            )
         }
     }
 

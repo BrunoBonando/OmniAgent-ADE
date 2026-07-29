@@ -235,7 +235,16 @@ async fn handle_client(
             MessageKind::Input => match decode_raw_payload(&frame.payload) {
                 Ok((id, bytes)) => match registry.get(id) {
                     Some(session) => match session.write_input(bytes) {
-                        Ok(()) => send_response(&writer, request).await,
+                        Ok(()) => {
+                            tracing::debug!(
+                                target: "omniagent_latency",
+                                stage = "daemon_pty_write",
+                                request,
+                                session_id = id,
+                                bytes = bytes.len()
+                            );
+                            send_response(&writer, request).await
+                        }
                         Err(error) => send_error(&writer, request, error).await,
                     },
                     None => send_error(&writer, request, anyhow!("session {id} not found")).await,

@@ -1,5 +1,21 @@
 import AppKit
 import os.signpost
+import SwiftTerm
+
+final class WorkspaceWindow: NSWindow {
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, firstResponder is TerminalView {
+            os_signpost(
+                .event,
+                log: Instrumentation.log,
+                name: "Latency.KeyboardReceipt",
+                "keyCode=%d",
+                event.keyCode
+            )
+        }
+        super.sendEvent(event)
+    }
+}
 
 final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private let connection: SessionConnection
@@ -13,7 +29,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         self.sessionID = sessionID
         terminalSurface = TerminalSurfaceView(connection: connection, sessionID: sessionID)
 
-        let window = NSWindow(
+        let window = WorkspaceWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1040, height: 680),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -80,13 +96,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 window?.title = "OmniAgent — Reconnecting"
             }
         }
-        connection.onTerminalData = { [weak self] id, bytes, _, isSnapshot in
+        connection.onTerminalData = { [weak self] id, bytes, sequence, isSnapshot in
             guard let self, id == sessionID else { return }
             if !observedFirstOutput {
                 observedFirstOutput = true
                 os_signpost(.event, log: Instrumentation.log, name: "First Terminal Output")
             }
-            terminalSurface.feed(bytes, isSnapshot: isSnapshot)
+            terminalSurface.feed(bytes, isSnapshot: isSnapshot, sequence: sequence)
         }
         connection.onStatus = { [weak self] event in
             guard let self, event.id == sessionID else { return }

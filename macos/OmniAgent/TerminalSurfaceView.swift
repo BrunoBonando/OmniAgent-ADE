@@ -2,8 +2,19 @@ import AppKit
 import os.signpost
 import SwiftTerm
 
+final class NativeTerminalView: TerminalView {
+    override func accessibilityPerformPress() -> Bool {
+        window?.makeFirstResponder(self)
+        return true
+    }
+
+    override func accessibilityValue() -> Any? {
+        String(data: terminal.getBufferAsData(), encoding: .utf8) ?? ""
+    }
+}
+
 final class TerminalSurfaceView: NSView, TerminalViewDelegate {
-    let terminalView = TerminalView(
+    let terminalView = NativeTerminalView(
         frame: .zero,
         font: .monospacedSystemFont(ofSize: 13, weight: .regular)
     )
@@ -13,6 +24,8 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     private let connection: SessionConnection
     private let sessionID: String
     private var attemptedMetal = false
+    private var paintMarkerScheduled = false
+    private var pendingPaintSequence: UInt64 = 0
 
     init(connection: SessionConnection, sessionID: String) {
         self.connection = connection
@@ -46,6 +59,10 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         )
         terminalView.caretColor = omniBlue
         terminalView.selectedTextBackgroundColor = omniBlue.withAlphaComponent(0.72)
+        terminalView.optionAsMetaKey = false
+        terminalView.setAccessibilityElement(true)
+        terminalView.setAccessibilityRole(.textArea)
+        terminalView.setAccessibilityLabel("Terminal")
         terminalView.terminalDelegate = self
         terminalView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(terminalView)
@@ -79,16 +96,34 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         }
     }
 
-    func feed(_ bytes: Data, isSnapshot: Bool) {
+    func feed(_ bytes: Data, isSnapshot: Bool, sequence: UInt64 = 0) {
         os_signpost(
             .event,
             log: Instrumentation.log,
-            name: "Terminal Feed",
-            "%{public}s %lu bytes",
+            name: "Latency.TerminalFeed",
+            "%{public}s sequence=%llu bytes=%lu",
             isSnapshot ? "snapshot" : "output",
+            sequence,
             bytes.count
         )
         terminalView.feed(byteArray: Array(bytes)[...])
+        // This is the end of the application-side AppKit display pass. Metal command
+        // submission is included; WindowServer presentation and physical scanout are not.
+        pendingPaintSequence = sequence
+        guard !paintMarkerScheduled else { return }
+        paintMarkerScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            terminalView.displayIfNeeded()
+            os_signpost(
+                .event,
+                log: Instrumentation.log,
+                name: "Latency.AppKitDisplayPassComplete",
+                "sequence=%llu",
+                pendingPaintSequence
+            )
+            paintMarkerScheduled = false
+        }
     }
 
     func focus() {
