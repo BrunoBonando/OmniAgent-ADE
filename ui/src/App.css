@@ -3722,8 +3722,8 @@ code {
    original focus effect's pulse — while unfocused rings are dimmed via
    filter (NOT opacity, which flash/breathe animate and would override).
 
-   Registered @property so the comet's angle interpolates; without support
-   it degrades to a static gradient ring.
+   The comet rotates as a compositor-friendly transform around a static
+   conic-gradient, so WebKit can keep the motion off the main paint path.
 
    Geometry constraints, all inherited from the library CSS:
    - `.mosaic-window` is `overflow: hidden`, so the ring pseudos sit at
@@ -3735,12 +3735,6 @@ code {
      it is chrome, never a hit target.
    - Ring thickness = the pseudo's padding; the padding-box/content-box
      mask-composite pair cuts everything but that rim away. */
-@property --pane-orbit {
-  syntax: "<angle>";
-  inherits: false;
-  initial-value: 0deg;
-}
-
 /* Same three-class specificity as the base rule above (which sets the
    `unknown` default) — these only win by coming later. */
 .pane-grid .pane-window.pane-status-ready {
@@ -3801,29 +3795,6 @@ code {
     0 0 18px color-mix(in srgb, var(--pane-status) 25%, transparent);
 }
 
-/* On the orbiting motions the focused pane's glow breathes — the pulsing
-   half of the original focus effect, now in the status colour. Kept off the
-   other motions: breathe already pulses its own ring, flash is busy enough,
-   and a steady/ready pane should sit still. */
-.pane-grid .pane-window.mosaic-window.is-focused.pane-motion-sweep,
-.pane-grid .pane-window.mosaic-window.is-focused.pane-motion-chase {
-  animation: pane-status-glow 3.6s ease-in-out infinite;
-}
-
-@keyframes pane-status-glow {
-  0%,
-  100% {
-    box-shadow:
-      0 6px 20px rgba(0, 0, 0, 0.35),
-      0 0 14px color-mix(in srgb, var(--pane-status) 16%, transparent);
-  }
-  50% {
-    box-shadow:
-      0 6px 20px rgba(0, 0, 0, 0.35),
-      0 0 26px color-mix(in srgb, var(--pane-status) 34%, transparent);
-  }
-}
-
 /* sweep + chase — the comet: a dark arc brightening through the status
    colour into a near-white head. One gradient, two colours: thinking blue,
    executing teal — same 3.6s orbit, colour is the only difference.
@@ -3840,13 +3811,16 @@ code {
 .pane-grid .pane-window.pane-motion-chase::before,
 .pane-grid .pane-window.pane-motion-chase.is-focused::after {
   background: conic-gradient(
-    from var(--pane-orbit),
+    from 0deg,
     color-mix(in srgb, var(--pane-status) 30%, var(--void)) 0deg,
     color-mix(in srgb, var(--pane-status) 46%, var(--void)) 165deg,
     var(--pane-status) 285deg,
     var(--pane-status-hi) 349deg,
     color-mix(in srgb, var(--pane-status) 30%, var(--void)) 360deg
   );
+  transform: translateZ(0);
+  transform-origin: center;
+  will-change: transform;
   animation: pane-orbit 3.6s linear infinite;
 }
 
@@ -3870,7 +3844,7 @@ code {
 
 @keyframes pane-orbit {
   to {
-    --pane-orbit: 360deg;
+    transform: translateZ(0) rotate(360deg);
   }
 }
 

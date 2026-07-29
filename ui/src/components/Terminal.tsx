@@ -15,6 +15,7 @@ import { sessionResize, sessionWrite } from "../lib/tauri";
 import { engineTitleFromTerminalTitle } from "../lib/autoTitle";
 import { resolveTerminalTheme, type TerminalThemeId } from "../lib/terminalThemes";
 import { scheduleTerminalJob } from "../lib/terminalScheduler";
+import { createTerminalOutputQueue } from "../lib/terminalOutputQueue";
 import PaneInstallOverlay from "./PaneInstallOverlay";
 import type { AgentsState } from "../state/agents";
 import type { Engine } from "../state/sessions";
@@ -57,6 +58,8 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
   const retryTimerRef = useRef<number | null>(null);
   const startTerminalRef = useRef<(() => void) | null>(null);
   const webglCancelRef = useRef<(() => void) | null>(null);
+  const outputQueueRef = useRef<ReturnType<typeof createTerminalOutputQueue> | null>(null);
+  const pendingOutputRef = useRef<Uint8Array[]>([]);
   const focusedRef = useRef(focused);
   const visibleRef = useRef(visible);
   focusedRef.current = focused;
@@ -128,7 +131,8 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
     let unlistenOutput: UnlistenFn | undefined;
     let unlistenDrop: UnlistenFn | undefined;
     let copilotRestartTimer: number | null = null;
-    const pendingOutput: Uint8Array[] = [];
+    const pendingOutput = pendingOutputRef.current;
+    let outputQueue: ReturnType<typeof createTerminalOutputQueue> | null = null;
     let submittedPrompt = false;
 
     // Rolling text buffer for error pattern detection.
@@ -139,8 +143,8 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
     void listen<string>(`session-output:${sessionId}`, (event) => {
       const bytes = base64ToBytes(event.payload);
       const term = termRef.current;
-      if (term) term.write(bytes);
-      else pendingOutput.push(bytes);
+      if (!term || !visibleRef.current || !outputQueue) pendingOutput.push(bytes);
+      else outputQueue.enqueue(bytes);
 
       // Detect the Copilot CLI error "No session, task, or name matched
       // '<uuid>'." which fires when --resume references a session that no
@@ -189,7 +193,9 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
       term.open(container);
       termRef.current = term;
       fitRef.current = fit;
-      for (const bytes of pendingOutput) term.write(bytes);
+      outputQueue = createTerminalOutputQueue((bytes) => term.write(bytes));
+      outputQueueRef.current = outputQueue;
+      for (const bytes of pendingOutput) outputQueue.enqueue(bytes);
       pendingOutput.length = 0;
 
       const cancelWebgl = scheduleTerminalJob(() => {
@@ -268,6 +274,9 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
       }
       webglCancelRef.current?.();
       webglCancelRef.current = null;
+      outputQueue?.dispose();
+      outputQueue = null;
+      outputQueueRef.current = null;
       unlistenOutput?.();
       unlistenDrop?.();
       termRef.current?.dispose();
@@ -303,6 +312,10 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
       }
       const term = termRef.current;
       const fit = fitRef.current;
+      if (outputQueueRef.current) {
+        for (const bytes of pendingOutputRef.current) outputQueueRef.current.enqueue(bytes);
+        pendingOutputRef.current.length = 0;
+      }
       if (term && fit) scheduleRetryFit(fit, term, 3, 50, dismissLoading);
     });
   }, [visible, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
