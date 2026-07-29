@@ -57,3 +57,37 @@
 
 - The existing full-workspace Rust baseline failure remains intentionally untouched: `crates/brain-ingest/tests/ingest_test.rs::ingest_fixture_mines_git_cochange_between_auth_and_util` requires `fixtures/sample-project/.git`, which is absent in this worktree.
 - Tauri continues to warn that `com.omniagent.app` ends with `.app`, and Vite continues to warn about an existing large production chunk. Neither warning was changed in this phase.
+
+## Review fix: packaged MCP v1 smoke
+
+### Implementation
+
+- `scripts/native-macos-pty-harness.py` now starts the installed `Contents/Resources/omniagent-mcp` binary with an isolated data directory and sends its existing JSON-RPC `initialize`, `notifications/initialized`, and `tools/list` requests over stdio.
+- The smoke requires the existing `omniagent-mcp` server identity and the frozen v1 tool names: `get_context`, `list_projects`, `record_decision`, `record_note`, `related`, and `search_brain`.
+- No MCP request or response shape changed.
+
+### Covering test
+
+- `scripts/test_native_macos_pty_harness.py` first installs an executable shell stub as `omniagent-mcp` and asserts that `smoke` fails. It then replaces the stub with the real built MCP binary and asserts that the smoke and short benchmark pass.
+
+### RED
+
+```sh
+cargo build -p mcp-server --bin omniagent-mcp && python3 scripts/test_native_macos_pty_harness.py
+```
+
+Output: failed with `AssertionError: a non-MCP resource must fail the smoke harness`, proving the previous executable-presence check accepted a shell stub.
+
+### GREEN
+
+```sh
+python3 scripts/test_native_macos_pty_harness.py
+```
+
+Output: passed (stub rejected; real MCP passes initialize/tools/list, then smoke and 1/4/8 benchmark checks pass).
+
+```sh
+python3 scripts/native-macos-pty-harness.py smoke target/release/bundle/macos/OmniAgent.app
+```
+
+Output: `packaged PTY smoke passed`.

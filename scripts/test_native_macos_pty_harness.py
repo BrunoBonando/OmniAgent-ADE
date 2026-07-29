@@ -11,11 +11,12 @@ import json
 ROOT = Path(__file__).resolve().parent.parent
 HARNESS = ROOT / "scripts" / "native-macos-pty-harness.py"
 DAEMON = ROOT / "target" / "debug" / "omniagent-pty-daemon"
+MCP = ROOT / "target" / "debug" / "omniagent-mcp"
 
 
 def main() -> None:
-    if not DAEMON.is_file():
-        raise SystemExit(f"build {DAEMON.relative_to(ROOT)} before running this test")
+    if not DAEMON.is_file() or not MCP.is_file():
+        raise SystemExit("build the debug daemon and MCP binaries before running this test")
 
     with tempfile.TemporaryDirectory() as tmp:
         resources = Path(tmp) / "OmniAgent.app" / "Contents" / "Resources"
@@ -25,6 +26,15 @@ def main() -> None:
         mcp.write_text("#!/bin/sh\nexit 0\n")
         mcp.chmod(0o755)
 
+        result = subprocess.run(
+            ["python3", str(HARNESS), "smoke", str(resources.parents[1])],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert result.returncode != 0, "a non-MCP resource must fail the smoke harness"
+
+        shutil.copy2(MCP, mcp)
         result = subprocess.run(
             ["python3", str(HARNESS), "smoke", str(resources.parents[1])],
             capture_output=True,

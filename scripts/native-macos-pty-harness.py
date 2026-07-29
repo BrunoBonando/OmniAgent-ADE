@@ -111,8 +111,46 @@ def input_bytes(socket_path: Path, session_id: str, data: bytes) -> None:
     )
 
 
+def smoke_mcp(binary: Path, data_dir: Path) -> None:
+    requests = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "packaged-smoke", "version": "1"},
+            },
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    ]
+    env = os.environ.copy()
+    env["OMNIAGENT_ADE_DATA_DIR"] = str(data_dir)
+    process = subprocess.run(
+        [str(binary)],
+        input="\n".join(json.dumps(request) for request in requests) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env=env,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(f"packaged MCP exited {process.returncode}: {process.stderr.strip()}")
+    responses = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+    if len(responses) != 2:
+        raise RuntimeError(f"packaged MCP returned {len(responses)} responses, expected initialize and tools/list")
+    if responses[0].get("result", {}).get("serverInfo", {}).get("name") != "omniagent-mcp":
+        raise RuntimeError("packaged MCP initialize response is not omniagent-mcp")
+    names = sorted(tool.get("name") for tool in responses[1].get("result", {}).get("tools", []))
+    if names != ["get_context", "list_projects", "record_decision", "record_note", "related", "search_brain"]:
+        raise RuntimeError("packaged MCP tools/list response does not match the frozen v1 tools")
+
+
 def smoke(app: Path) -> None:
     with InstalledDaemon(app) as daemon:
+        smoke_mcp(daemon.mcp, Path(daemon.temp.name) / "mcp-data")
         session_id = "phase0-smoke"
         create_shell(daemon.socket_path, session_id)
         input_bytes(daemon.socket_path, session_id, b"printf 'OMNIAGENT_PHASE0_INPUT\\n'\n")
