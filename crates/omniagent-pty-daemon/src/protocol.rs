@@ -43,6 +43,10 @@ pub struct ResizePayload {
     pub id: String,
     pub cols: u16,
     pub rows: u16,
+    #[serde(default)]
+    pub pixel_width: u16,
+    #[serde(default)]
+    pub pixel_height: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

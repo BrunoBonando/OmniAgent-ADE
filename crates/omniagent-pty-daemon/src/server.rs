@@ -245,7 +245,12 @@ async fn handle_client(
             MessageKind::Resize => {
                 let resize = parse_json::<ResizePayload>(&frame.payload)?;
                 match registry.get(&resize.id) {
-                    Some(session) => match session.resize(resize.cols, resize.rows) {
+                    Some(session) => match session.resize(
+                        resize.cols,
+                        resize.rows,
+                        resize.pixel_width,
+                        resize.pixel_height,
+                    ) {
                         Ok(()) => send_response(&writer, request).await,
                         Err(error) => send_error(&writer, request, error).await,
                     },

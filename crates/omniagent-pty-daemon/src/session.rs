@@ -264,15 +264,15 @@ impl ManagedSession {
         self.write_input(b"\x03")
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+    pub fn resize(&self, cols: u16, rows: u16, pixel_width: u16, pixel_height: u16) -> Result<()> {
         self.master
             .lock()
             .map_err(|e| anyhow!("PTY master lock poisoned: {e}"))?
             .resize(PtySize {
                 rows,
                 cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width,
+                pixel_height,
             })
             .context("resize PTY")?;
         self.terminal

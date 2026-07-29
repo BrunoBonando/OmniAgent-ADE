@@ -129,6 +129,8 @@ fn fake_daemon(socket: &Path) -> std::thread::JoinHandle<()> {
                 id: "persistent".into(),
                 cols: 132,
                 rows: 43,
+                pixel_width: 0,
+                pixel_height: 0,
             }
         );
         write_json(

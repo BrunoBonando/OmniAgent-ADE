@@ -358,6 +358,8 @@ impl DaemonSessions {
                 id: id.into(),
                 cols,
                 rows,
+                pixel_width: 0,
+                pixel_height: 0,
             },
         )?;
         expect_kind(&response, MessageKind::Response)

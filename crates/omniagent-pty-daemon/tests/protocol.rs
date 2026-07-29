@@ -1,8 +1,8 @@
 use omniagent_pty_daemon::protocol::{
     decode_raw_payload, encode_raw_payload, AttentionPayload, ErrorPayload, Frame, FrameError,
-    Header, MessageKind, ResponsePayload, ResyncRequiredPayload, SessionExitedPayload,
-    SessionStatus, SessionStatusPayload, SettingKey, SettingValue, MAX_PAYLOAD_LEN,
-    PROTOCOL_VERSION,
+    Header, MessageKind, ResizePayload, ResponsePayload, ResyncRequiredPayload,
+    SessionExitedPayload, SessionStatus, SessionStatusPayload, SettingKey, SettingValue,
+    MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
 };
 
 #[test]
@@ -110,6 +110,32 @@ fn terminal_payload_preserves_arbitrary_session_bytes() {
 
     assert_eq!(session, "sess-raw");
     assert_eq!(decoded, raw);
+}
+
+#[test]
+fn resize_payload_accepts_legacy_shape_and_preserves_pixels() {
+    let legacy: ResizePayload =
+        serde_json::from_value(serde_json::json!({"id":"sess-1","cols":80,"rows":24})).unwrap();
+    assert_eq!(legacy.pixel_width, 0);
+    assert_eq!(legacy.pixel_height, 0);
+
+    assert_eq!(
+        serde_json::to_value(ResizePayload {
+            id: "sess-1".into(),
+            cols: 132,
+            rows: 43,
+            pixel_width: 2640,
+            pixel_height: 1720,
+        })
+        .unwrap(),
+        serde_json::json!({
+            "id":"sess-1",
+            "cols":132,
+            "rows":43,
+            "pixel_width":2640,
+            "pixel_height":1720
+        })
+    );
 }
 
 #[test]
