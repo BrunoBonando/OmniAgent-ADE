@@ -52,7 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-private enum ApplicationMenus {
+enum ApplicationMenus {
     static func install() {
         let main = NSMenu(title: "Main")
         NSApp.mainMenu = main
@@ -98,6 +98,15 @@ private enum ApplicationMenus {
         )
         session.addItem(item("Reattach", Selector(("reattachSession:")), "r"))
         session.addItem(item("Focus Terminal", Selector(("focusTerminal:")), "l"))
+        session.addItem(.separator())
+        session.addItem(
+            item(
+                "Use Option as Meta",
+                Selector(("toggleOptionAsMeta:")),
+                "o",
+                [.command, .option]
+            )
+        )
 
         let window = NSMenu(title: "Window")
         main.addItem(withSubmenu: window)

@@ -67,9 +67,10 @@
   3. `omniagent_latency` / `daemon_pty_write` after the daemon has written and flushed input to the PTY.
   4. `Latency.OutputReceipt` after a raw output frame is decoded.
   5. `Latency.TerminalFeed` at the SwiftTerm byte feed.
-  6. `Latency.AppKitDisplayPassComplete` after the next application-side AppKit display pass.
-- The final marker is intentionally precise: it means `displayIfNeeded()` returned. With Metal, that includes application-side draw/command submission; it does **not** claim GPU command-buffer completion, WindowServer presentation, or physical scanout. `SWIFTTERM_PROFILE=1` additionally enables the pinned renderer's native `Metal.Draw` and `Metal.Commit` signposts, which likewise measure renderer work/submission rather than scanout.
-- Paint markers are coalesced to one pending main-runloop callback per terminal so output bursts do not enqueue one display pass per frame.
+  6. `Latency.RendererSubmissionComplete` after the next renderer submission boundary.
+- On SwiftTerm's Metal path, the surface locates the descendant `MTKView` and calls `draw()`; SwiftTerm's delegate submits the command buffer before the marker is emitted. The CoreGraphics fallback calls `displayIfNeeded()`. The marker does **not** claim GPU completion, WindowServer presentation, or physical scanout. `SWIFTTERM_PROFILE=1` additionally enables the pinned renderer's native `Metal.Draw` and `Metal.Commit` signposts, which likewise measure renderer work/submission rather than scanout.
+- Renderer markers are coalesced to one pending main-runloop callback per terminal so output bursts do not enqueue one renderer submission per frame.
+- Exposed SwiftTerm's Option-as-Meta toggle as the visible `Use Option as Meta` Session menu command with Command-Option-O. It uses a nil target, publishes its checked state through native menu validation, and remains off by default so AppKit retains Option dead-key and composed-input behavior.
 - Added `macos/check-latency-markers.sh` as a runnable static boundary audit.
 
 ### TDD evidence
@@ -78,23 +79,25 @@ RED:
 
 - The focused controller tests first reported six failures: `optionAsMetaKey` remained `true`, the view was not an accessibility element, its role was `AXUnknown`, and label/value/action behavior was absent.
 - The first attempted keyboard marker compile correctly failed because pinned SwiftTerm declares `keyDown` public but not open. The marker moved to the owning `NSWindow` event boundary without intercepting or transforming the event.
+- The rereview tests then failed to compile because the Session menu was not test-visible and the terminal exposed neither the Option-as-Meta action nor a renderer-submission method.
 
 GREEN:
 
 - The composed-input test sends `é` through SwiftTerm's real `NSTextInputClient` path and observes the exact UTF-8 bytes with `optionAsMetaKey == false`.
 - The accessibility test observes the text-area role, label, lazy value containing real fed terminal content, and working focus action.
-- Full native suite: 9 tests passed, 0 failed.
+- The menu test verifies the visible nil-target Command-Option-O command, default-off state, toggle behavior, and checked state. The attached-window renderer test verifies that a Metal-capable SwiftTerm hierarchy contains an `MTKView` and traverses the Metal submission path.
+- Full native suite: 11 tests passed, 0 failed.
 
 ### Automated benchmark and runtime evidence
 
-- The runnable XCTest benchmark decodes and raw-decodes 100 output frames, feeds SwiftTerm, and requests the AppKit display pass. Five samples averaged approximately 0.003 seconds per 100-frame batch (5.607% relative standard deviation). This is a repeatable application-side microbenchmark, not a claim about end-to-end display hardware latency.
+- The runnable XCTest benchmark attaches SwiftTerm to a real window, decodes and raw-decodes 100 output frames, feeds SwiftTerm, and invokes the renderer boundary for each frame. The full verification run's five samples averaged approximately 0.149 seconds per 100-frame batch (9.306% clock relative standard deviation). This automated smoke microbenchmark has no stored baseline and is neither a regression gate nor a claim about end-to-end display hardware latency.
 - A real daemon was launched with `RUST_LOG=omniagent_latency=debug`, driven through hello/create/input over its Unix socket, and emitted:
   - `DEBUG omniagent_latency: stage="daemon_pty_write" request=3 session_id="latency-evidence" bytes=1`
-- `./macos/check-latency-markers.sh` passed and reported the full keyboard → IPC → PTY → output → feed → AppKit display-pass chain.
+- `./macos/check-latency-markers.sh` passed and reported the full keyboard → IPC → PTY → output → feed → renderer-submission chain.
 
 ### Verification
 
-- `./macos/build.sh test` — 9 passed, 0 failed.
+- `./macos/build.sh test` — 11 passed, 0 failed.
 - `cargo test --manifest-path src-tauri/Cargo.toml --test daemon_client_protocol` — 6 passed, 0 failed.
 - `cargo test -p omniagent-pty-daemon --test protocol` — 7 passed, 0 failed.
-- The pre-existing `one_persistent_connection_streams_raw_bytes_and_applies_resize` four-second timeout reproduced in two exact attempts during this review round; the final exact rerun passed. The changed daemon marker is after the already-successful PTY write/flush and does not alter protocol ordering.
+- The pre-existing `one_persistent_connection_streams_raw_bytes_and_applies_resize` four-second timeout reproduced in prior review attempts and its prior final exact rerun passed. During final rereview verification it timed out once in the parallel run and twice in serial exact reruns. This rereview changes only native Swift code, tests, and the marker audit; the daemon marker remains after the already-successful PTY write/flush and does not alter protocol ordering.

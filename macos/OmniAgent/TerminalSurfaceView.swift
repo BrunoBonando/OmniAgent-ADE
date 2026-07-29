@@ -1,8 +1,9 @@
 import AppKit
+import MetalKit
 import os.signpost
 import SwiftTerm
 
-final class NativeTerminalView: TerminalView {
+final class NativeTerminalView: TerminalView, NSMenuItemValidation {
     override func accessibilityPerformPress() -> Bool {
         window?.makeFirstResponder(self)
         return true
@@ -10,6 +11,16 @@ final class NativeTerminalView: TerminalView {
 
     override func accessibilityValue() -> Any? {
         String(data: terminal.getBufferAsData(), encoding: .utf8) ?? ""
+    }
+
+    @objc func toggleOptionAsMeta(_ sender: Any?) {
+        optionAsMetaKey.toggle()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(toggleOptionAsMeta(_:)) else { return true }
+        menuItem.state = optionAsMetaKey ? .on : .off
+        return true
     }
 }
 
@@ -107,23 +118,34 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
             bytes.count
         )
         terminalView.feed(byteArray: Array(bytes)[...])
-        // This is the end of the application-side AppKit display pass. Metal command
-        // submission is included; WindowServer presentation and physical scanout are not.
         pendingPaintSequence = sequence
         guard !paintMarkerScheduled else { return }
         paintMarkerScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            terminalView.displayIfNeeded()
+            let usedMetal = submitRendererFrame()
             os_signpost(
                 .event,
                 log: Instrumentation.log,
-                name: "Latency.AppKitDisplayPassComplete",
-                "sequence=%llu",
-                pendingPaintSequence
+                name: "Latency.RendererSubmissionComplete",
+                "sequence=%llu renderer=%{public}s",
+                pendingPaintSequence,
+                usedMetal ? "metal" : "core-graphics"
             )
             paintMarkerScheduled = false
         }
+    }
+
+    @discardableResult
+    func submitRendererFrame() -> Bool {
+        if let metalView = terminalView.firstDescendant(of: MTKView.self) {
+            // MTKView.draw() synchronously enters SwiftTerm's delegate, which commits
+            // its command buffer before returning. GPU completion happens later.
+            metalView.draw()
+            return true
+        }
+        terminalView.displayIfNeeded()
+        return false
     }
 
     func focus() {
@@ -192,4 +214,18 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
 
 private func clampedUInt16(_ value: Int) -> UInt16 {
     UInt16(max(1, min(value, Int(UInt16.max))))
+}
+
+private extension NSView {
+    func firstDescendant<View: NSView>(of type: View.Type) -> View? {
+        for subview in subviews {
+            if let match = subview as? View {
+                return match
+            }
+            if let match = subview.firstDescendant(of: type) {
+                return match
+            }
+        }
+        return nil
+    }
 }

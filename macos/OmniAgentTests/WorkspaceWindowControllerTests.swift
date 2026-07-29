@@ -1,4 +1,5 @@
 import XCTest
+import MetalKit
 import SwiftTerm
 @testable import OmniAgent
 
@@ -37,6 +38,26 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(delegate.bytes, Array("é".utf8))
     }
 
+    func testOptionAsMetaHasVisibleNilTargetMenuCommandAndCheckedState() {
+        ApplicationMenus.install()
+        let command = NSApp.mainMenu?
+            .item(withTitle: "Session")?
+            .submenu?
+            .item(withTitle: "Use Option as Meta")
+        let surface = makeSurface()
+
+        XCTAssertNotNil(command)
+        XCTAssertNil(command?.target)
+        XCTAssertEqual(command?.keyEquivalent, "o")
+        XCTAssertEqual(command?.keyEquivalentModifierMask, [.command, .option])
+        XCTAssertFalse(surface.terminalView.optionAsMetaKey)
+
+        surface.terminalView.toggleOptionAsMeta(command)
+        XCTAssertTrue(surface.terminalView.optionAsMetaKey)
+        XCTAssertTrue(surface.terminalView.validateMenuItem(try! XCTUnwrap(command)))
+        XCTAssertEqual(command?.state, .on)
+    }
+
     func testTerminalExposesMinimumNativeAccessibilityContract() {
         let surface = makeSurface()
         surface.feed(Data("ready".utf8), isSnapshot: false)
@@ -48,8 +69,9 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(surface.terminalView.accessibilityPerformPress())
     }
 
-    func testFrameDecodeFeedAndApplicationPaintBenchmark() throws {
-        let surface = makeSurface()
+    func testFrameDecodeFeedAndRendererSubmissionBenchmark() throws {
+        let (surface, window) = makeAttachedSurface()
+        defer { window.close() }
         let encoded = try SessionFrame(
             kind: .output,
             requestOrSequence: 42,
@@ -69,9 +91,23 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                     isSnapshot: false,
                     sequence: frame.requestOrSequence
                 )
-                surface.terminalView.displayIfNeeded()
+                _ = surface.submitRendererFrame()
             }
         }
+    }
+
+    func testAttachedMetalTerminalSubmitsThroughItsRendererWhenAvailable() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal is unavailable on this host")
+        }
+        let (surface, window) = makeAttachedSurface()
+        defer { window.close() }
+
+        XCTAssertTrue(
+            surface.terminalView.descendants.contains { $0 is MTKView },
+            "Metal-capable attached terminal should own SwiftTerm's MTKView"
+        )
+        XCTAssertTrue(surface.submitRendererFrame())
     }
 
     private func makeSurface() -> TerminalSurfaceView {
@@ -81,6 +117,25 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             ),
             sessionID: "native-terminal"
         )
+    }
+
+    private func makeAttachedSurface() -> (TerminalSurfaceView, NSWindow) {
+        let surface = makeSurface()
+        let window = WorkspaceWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = surface
+        window.makeKeyAndOrderFront(nil)
+        return (surface, window)
+    }
+}
+
+private extension NSView {
+    var descendants: [NSView] {
+        subviews + subviews.flatMap(\.descendants)
     }
 }
 
