@@ -292,6 +292,61 @@ async fn malformed_control_json_closes_an_attached_connection() {
     server.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_persist_across_connections_and_daemon_restarts() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = TestServer::start(temp.path()).await;
+
+    let mut setter = Client::connect(&server.socket).await;
+    let set_request = setter
+        .send_json(
+            MessageKind::SetSetting,
+            &serde_json::json!({
+                "key": "layout",
+                "value": r#"{"tabs":[{"id":"one"}]}"#
+            }),
+        )
+        .await;
+    let set = setter.read_kind(MessageKind::Response).await;
+    assert_eq!(set.header.request_or_sequence, set_request);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&set.payload).unwrap(),
+        serde_json::json!({"ok": true})
+    );
+    drop(setter);
+
+    let mut getter = Client::connect(&server.socket).await;
+    let get_request = getter
+        .send_json(
+            MessageKind::GetSetting,
+            &serde_json::json!({"key": "layout"}),
+        )
+        .await;
+    let get = getter.read_kind(MessageKind::Response).await;
+    assert_eq!(get.header.request_or_sequence, get_request);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&get.payload).unwrap(),
+        serde_json::json!({"value": r#"{"tabs":[{"id":"one"}]}"#})
+    );
+    drop(getter);
+    server.stop().await;
+
+    let restarted = TestServer::start(temp.path()).await;
+    let mut getter = Client::connect(&restarted.socket).await;
+    getter
+        .send_json(
+            MessageKind::GetSetting,
+            &serde_json::json!({"key": "layout"}),
+        )
+        .await;
+    let get = getter.read_kind(MessageKind::Response).await;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&get.payload).unwrap(),
+        serde_json::json!({"value": r#"{"tabs":[{"id":"one"}]}"#})
+    );
+    restarted.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn eight_sessions_survive_creator_disconnects_and_reattach() {
     let temp = tempfile::tempdir().unwrap();

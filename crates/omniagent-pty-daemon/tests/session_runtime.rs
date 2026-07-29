@@ -138,6 +138,34 @@ fn a_slow_subscriber_is_bounded_and_told_to_resync() {
 }
 
 #[test]
+fn terminal_exit_after_a_full_output_queue_preserves_resync_and_exit() {
+    let registry = SessionRegistry::new();
+    let session = create(
+        &registry,
+        "full-then-exit",
+        "sleep 0.2; stty -echo; printf LOST; sleep 0.5",
+        None,
+    );
+    let subscription = session.subscribe(1);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while subscription.pending_len() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(subscription.pending_len(), 1);
+    std::thread::sleep(Duration::from_millis(700));
+
+    assert!(matches!(
+        subscription.recv_timeout(Duration::from_secs(2)).unwrap(),
+        SessionEvent::ResyncRequired { .. }
+    ));
+    assert!(matches!(
+        subscription.recv_timeout(Duration::from_secs(2)).unwrap(),
+        SessionEvent::Exited { .. }
+    ));
+}
+
+#[test]
 fn parser_scrollback_is_bounded_but_transcript_is_not() {
     let temp = tempfile::tempdir().unwrap();
     let transcript = temp.path().join("scrollback.log");

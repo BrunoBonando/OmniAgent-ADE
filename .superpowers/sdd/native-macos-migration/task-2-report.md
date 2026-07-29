@@ -83,4 +83,49 @@
 ## Concerns
 
 - The untouched Phase 2 Tauri clients still import the removed legacy `DaemonRequest`/`DaemonResponse` API and invoke the removed attach-helper CLI. This commit intentionally verifies the authoritative daemon crate only; Task 3 must migrate those clients before the full workspace compiles again.
-- `GetSetting`/`SetSetting` validate their typed payloads and return a correlated phase-1 backend-unavailable `Error`. `SessionStatus` and `Attention` have frozen payload types/kinds but their domain production remains with the existing Tauri/session layer until its migration.
+- `SessionStatus` and `Attention` have frozen payload types/kinds but their domain production remains with the existing Tauri/session layer until its migration.
+
+## Round 1 review fixes
+
+### Implementation
+
+- Kept the exact 11 source-plan server kinds and their existing `0x81..0x8b` discriminants unchanged.
+- Wired `SetSetting` and `GetSetting` through the existing `Response` kind and `brain_core::Store` settings table. Set returns `{"ok":true}`; get returns `{"value":<string-or-null>}`, preserving the existing optional-string data behavior and layout JSON byte-for-byte.
+- The daemon opens `brain.db` in the service data directory containing its socket. One daemon-owned store connection serves all persistent clients, and SQLite persists values across daemon restarts.
+- When `SessionExited` reaches an exactly full subscriber queue, queued output is now replaced with `ResyncRequired`, followed by the exit event. The terminal-marker reservation makes the queue remain bounded while ensuring neither byte-loss notification nor exit observability is sacrificed.
+
+### Focused TDD evidence
+
+Covering test files:
+
+- `crates/omniagent-pty-daemon/tests/server_protocol.rs`
+  - `settings_persist_across_connections_and_daemon_restarts`
+- `crates/omniagent-pty-daemon/tests/session_runtime.rs`
+  - `terminal_exit_after_a_full_output_queue_preserves_resync_and_exit`
+
+RED commands and output:
+
+1. `cargo test -p omniagent-pty-daemon --test server_protocol settings_persist_across_connections_and_daemon_restarts -- --exact`
+   - `FAILED`
+   - Timed out in `Client::read` with `called Result::unwrap() on an Err value: Elapsed(())` because the daemon emitted `Error` instead of `Response`.
+   - `test result: FAILED. 0 passed; 1 failed; 4 filtered out`
+2. `cargo test -p omniagent-pty-daemon --test session_runtime terminal_exit_after_a_full_output_queue_preserves_resync_and_exit -- --exact`
+   - `FAILED`
+   - Failed the first-event assertion because the queue exposed `SessionExited` without `ResyncRequired`.
+   - `test result: FAILED. 0 passed; 1 failed; 6 filtered out`
+
+GREEN commands and output:
+
+1. `cargo test -p omniagent-pty-daemon --test server_protocol settings_persist_across_connections_and_daemon_restarts -- --exact`
+   - `test settings_persist_across_connections_and_daemon_restarts ... ok`
+   - `test result: ok. 1 passed; 0 failed; 4 filtered out`
+2. `cargo test -p omniagent-pty-daemon --test session_runtime terminal_exit_after_a_full_output_queue_preserves_resync_and_exit -- --exact`
+   - `test terminal_exit_after_a_full_output_queue_preserves_resync_and_exit ... ok`
+   - `test result: ok. 1 passed; 0 failed; 6 filtered out`
+
+### Round 1 verification
+
+- `cargo fmt -p omniagent-pty-daemon` — passed.
+- `cargo test -p omniagent-pty-daemon` — 18 passed: 6 protocol, 5 persistent socket/server, 7 session runtime; 0 failed.
+- `cargo clippy -p omniagent-pty-daemon --all-targets --all-features -- -D warnings` — passed.
+- `git diff --check` — passed.

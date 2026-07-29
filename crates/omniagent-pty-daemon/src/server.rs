@@ -6,6 +6,7 @@ use crate::protocol::{
 };
 use crate::{AttachState, CreateSession, SessionEvent, SessionRegistry, SessionSubscription};
 use anyhow::{anyhow, Context, Result};
+use brain_core::Store;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::io;
@@ -29,6 +30,7 @@ pub struct DaemonServer {
     socket_path: PathBuf,
     runtime_owner_uid: u32,
     registry: SessionRegistry,
+    settings: Arc<std::sync::Mutex<Store>>,
 }
 
 impl DaemonServer {
@@ -39,6 +41,8 @@ impl DaemonServer {
         std::fs::create_dir_all(runtime_dir).context("create daemon runtime directory")?;
         std::fs::set_permissions(runtime_dir, std::fs::Permissions::from_mode(0o700))
             .context("secure daemon runtime directory")?;
+        let settings =
+            Store::open(runtime_dir).context("open daemon settings in service data directory")?;
         let runtime_owner_uid = std::fs::metadata(runtime_dir)
             .context("inspect daemon runtime directory")?
             .uid();
@@ -62,6 +66,7 @@ impl DaemonServer {
             socket_path,
             runtime_owner_uid,
             registry: SessionRegistry::new(),
+            settings: Arc::new(std::sync::Mutex::new(settings)),
         })
     }
 
@@ -88,9 +93,10 @@ impl DaemonServer {
                 accepted = self.listener.accept() => {
                     let (stream, _) = accepted.context("accept daemon client")?;
                     let registry = self.registry.clone();
+                    let settings = Arc::clone(&self.settings);
                     let owner_uid = self.runtime_owner_uid;
                     clients.spawn(async move {
-                        let _ = handle_client(stream, registry, owner_uid).await;
+                        let _ = handle_client(stream, registry, settings, owner_uid).await;
                     });
                 }
                 _ = &mut shutdown => break,
@@ -141,6 +147,7 @@ impl Drop for Attachment {
 async fn handle_client(
     stream: UnixStream,
     registry: SessionRegistry,
+    settings: Arc<std::sync::Mutex<Store>>,
     runtime_owner_uid: u32,
 ) -> Result<()> {
     let peer_uid = stream.peer_cred().context("read peer credentials")?.uid();
@@ -284,22 +291,38 @@ async fn handle_client(
                 send_response(&writer, request).await
             }
             MessageKind::GetSetting => {
-                parse_json::<SettingKey>(&frame.payload)?;
-                send_error(
-                    &writer,
-                    request,
-                    anyhow!("settings backend is unavailable in protocol phase 1"),
-                )
-                .await
+                let setting = parse_json::<SettingKey>(&frame.payload)?;
+                let value = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| store.get_setting(&setting.key).map_err(Into::into));
+                match value {
+                    Ok(value) => {
+                        send_json(
+                            &writer,
+                            MessageKind::Response,
+                            request,
+                            &serde_json::json!({"value": value}),
+                        )
+                        .await
+                    }
+                    Err(error) => send_error(&writer, request, error).await,
+                }
             }
             MessageKind::SetSetting => {
-                parse_json::<SettingValue>(&frame.payload)?;
-                send_error(
-                    &writer,
-                    request,
-                    anyhow!("settings backend is unavailable in protocol phase 1"),
-                )
-                .await
+                let setting = parse_json::<SettingValue>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| {
+                        store
+                            .set_setting(&setting.key, &setting.value)
+                            .map_err(Into::into)
+                    });
+                match result {
+                    Ok(()) => send_response(&writer, request).await,
+                    Err(error) => send_error(&writer, request, error).await,
+                }
             }
             MessageKind::Hello => {
                 send_error(&writer, request, anyhow!("Hello is only valid once")).await

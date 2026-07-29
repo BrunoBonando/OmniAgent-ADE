@@ -135,7 +135,18 @@ impl SubscriptionInner {
                 return;
             }
         } else if state.events.len() >= self.capacity {
-            state.events.pop_front();
+            let lost_output = state
+                .events
+                .iter()
+                .any(|queued| matches!(queued, SessionEvent::Output { .. }));
+            let preserve_resync = state.resync_pending;
+            state.events.clear();
+            if lost_output || preserve_resync {
+                state.events.push_back(SessionEvent::ResyncRequired {
+                    sequence: event.sequence(),
+                });
+                state.resync_pending = true;
+            }
         }
         state.events.push_back(event);
         self.ready.notify_one();
