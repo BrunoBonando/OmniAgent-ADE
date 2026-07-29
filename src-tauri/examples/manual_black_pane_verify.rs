@@ -54,8 +54,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use omniagent_ade_lib::sessions::{CreateSessionRequest, OutputSink, SessionManager};
 use omniagent_ade_lib::daemon::{self, DaemonSessions};
+use omniagent_ade_lib::sessions::{CreateSessionRequest, OutputSink, SessionManager};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -121,7 +121,8 @@ fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
             .extend_from_slice(chunk);
     });
 
-    let manager = SessionManager::new(scratch.clone(), sink).with_daemon_sessions(Some(tmux.clone()));
+    let manager =
+        SessionManager::new(scratch.clone(), sink).with_daemon_sessions(Some(tmux.clone()));
 
     // A per-run unique id, so the derived Claude conversation UUID has
     // provably never existed — exactly a pre-`--resume` session being
@@ -235,6 +236,8 @@ fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
         manager = relaunched;
     }
 
+    manager.resize(&info.id, 120, 40).expect("attach session");
+
     // Give the engine time to boot and paint.
     let settle = if engine == "shell" { 3 } else { 18 };
     println!("settling {settle}s...");
@@ -253,19 +256,10 @@ fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
         .map(|b| String::from_utf8_lossy(b).into_owned())
         .unwrap_or_default();
     let sessions = tmux.list_sessions();
-    let pane_cmd = tmux.pane_current_command(&daemon::session_name(&info.id));
-    let screen = tmux
-        .capture_pane(&daemon::session_name(&info.id))
-        .unwrap_or_default();
     let visible: String = strip_ansi(&raw);
 
     println!("--- PTY bytes: {bytes}");
-    println!("--- tmux sessions: {sessions:?}");
-    println!("--- pane_current_command: {pane_cmd:?}");
-    println!(
-        "--- captured pane (first 600 chars):\n{}",
-        head(screen.trim(), 600)
-    );
+    println!("--- daemon sessions: {sessions:?}");
     println!(
         "--- what the user would see (stripped PTY tail, 600 chars):\n{}",
         tail(visible.trim(), 600)
@@ -276,10 +270,8 @@ fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
 
     let ok = match case {
         // A working engine renders a real TUI: plenty of bytes, no tmux
-        // error text, and a non-empty screen.
-        "restore" | "fresh" | "reattach" => {
-            !says_no_sessions && !blank && bytes > 500 && !screen.trim().is_empty()
-        }
+        // error text, and a substantial raw terminal stream.
+        "restore" | "fresh" | "reattach" => !says_no_sessions && !blank && bytes > 500,
         "shell" => !says_no_sessions && !blank && create_ms < 2000,
         // The engine genuinely cannot start; the requirement is only that
         // the user is *told*, not that it works.
@@ -338,8 +330,4 @@ fn strip_ansi(s: &str) -> String {
 fn tail(s: &str, n: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     chars[chars.len().saturating_sub(n)..].iter().collect()
-}
-
-fn head(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
 }

@@ -150,14 +150,6 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
-function decodeBase64Chunk(payload: string): string {
-  try {
-    return atob(payload);
-  } catch {
-    return "";
-  }
-}
-
 function submittedCommands(data: string): number {
   const matches = data.match(/\r|\n/g);
   return matches ? matches.length : 0;
@@ -675,11 +667,11 @@ function App() {
   // status === "ready" instead of first-event.
   const pendingFirstPrompt = useRef<Map<string, string>>(new Map());
 
-  usePerSessionEvent<string>(tabIds, "session-output:", (id, payload) => {
-    if (!analyticsReadyRef.current || typeof payload !== "string") return;
+  usePerSessionEvent<number[]>(tabIds, "session-output:", (id, payload) => {
+    if (!analyticsReadyRef.current || !Array.isArray(payload)) return;
     const tab = notifyContextRef.current.tabs.find((entry) => entry.id === id);
     if (!tab) return;
-    const text = decodeBase64Chunk(payload);
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(Uint8Array.from(payload));
     if (text.length > 0) {
       recordOutput(analyticsRef.current, tab.project, text.length, Date.now());
       analyticsDirtyRef.current = true;

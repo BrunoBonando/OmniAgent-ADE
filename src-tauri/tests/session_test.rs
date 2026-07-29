@@ -1,6 +1,7 @@
 //! PTY lifecycle integration tests — plain Rust, no Tauri app/window
 //! involved. Exercises `omniagent_ade_lib::sessions::SessionManager`
-//! directly against real PTYs (real `$SHELL` processes), matching PLAN.md
+//! directly against the real daemon and real PTYs (`$SHELL` processes),
+//! matching PLAN.md
 //! Task 5.1's exact asks:
 //!   1. shell session + `echo hi\n` -> observed output contains "hi"
 //!   2. `kill` reaps the child (no zombie)
@@ -11,7 +12,51 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use omniagent_ade_lib::daemon::{self, DaemonSessions};
 use omniagent_ade_lib::sessions::{CreateSessionRequest, OutputSink, SessionManager};
+use omniagent_pty_daemon::DaemonServer;
+
+struct RealServer {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RealServer {
+    fn start(socket: std::path::PathBuf) -> Self {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async move {
+                let server = DaemonServer::bind(socket).await.unwrap();
+                ready_tx.send(()).unwrap();
+                server.run_until(stopped).await.unwrap();
+            });
+        });
+        ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        Self {
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for RealServer {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+fn test_daemon(temp: &tempfile::TempDir) -> (DaemonSessions, RealServer) {
+    let socket = temp.path().join("runtime/daemon.sock");
+    let server = RealServer::start(socket.clone());
+    (DaemonSessions::new(socket), server)
+}
 
 fn silent_sink() -> OutputSink {
     Arc::new(|_id: &str, _chunk: &[u8]| {})
@@ -35,7 +80,9 @@ fn shell_echo_is_observed_on_the_output_sink() {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
 
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink);
+    let (daemon, _server) = test_daemon(&tmp);
+    let manager =
+        SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(daemon));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     manager.write(&info.id, "echo hi\n").unwrap();
@@ -67,52 +114,34 @@ fn shell_echo_is_observed_on_the_output_sink() {
 }
 
 #[test]
-fn kill_reaps_the_child_process_no_zombie() {
+fn kill_removes_the_daemon_owned_process_without_a_tauri_proxy_pid() {
     let tmp = tempfile::tempdir().unwrap();
-    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink());
+    let (daemon, _server) = test_daemon(&tmp);
+    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
+        .with_daemon_sessions(Some(daemon.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
-    let pid = manager
-        .pid(&info.id)
-        .expect("pid should be available while the session is alive");
-
-    manager.kill(&info.id).unwrap();
-
-    // `SessionManager::kill` calls `child.wait()` synchronously before
-    // returning, so by now the process must be fully reaped, not just
-    // signaled. Two independent OS-level checks prove that:
-    //
-    // 1. `kill(pid, 0)` (signal 0 = "does this pid exist") must fail with
-    //    ESRCH. A *zombie* process still responds successfully to this
-    //    (the pid is still allocated, exit status just hasn't been
-    //    collected yet) — only a fully-reaped process frees the pid.
-    let alive = unsafe { libc::kill(pid as i32, 0) };
-    let alive_errno = std::io::Error::last_os_error().raw_os_error();
-    assert_eq!(alive, -1, "pid {pid} should no longer exist");
     assert_eq!(
-        alive_errno,
-        Some(libc::ESRCH),
-        "expected ESRCH, got {alive_errno:?}"
+        manager.pid(&info.id),
+        None,
+        "the compatibility adapter must not own a proxy child"
     );
 
-    // 2. A second `waitpid` on the same pid must find no such child of
-    //    this process (ECHILD) — proving *we* already collected it via
-    //    `kill()`'s internal `wait()`, rather than leaving it dangling.
-    let mut status: libc::c_int = 0;
-    let wp = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
-    let wp_errno = std::io::Error::last_os_error().raw_os_error();
-    assert_eq!(wp, -1, "waitpid should find no such child (already reaped)");
-    assert_eq!(
-        wp_errno,
-        Some(libc::ECHILD),
-        "expected ECHILD, got {wp_errno:?}"
+    manager.kill(&info.id).unwrap();
+    assert!(
+        !daemon
+            .list_sessions()
+            .contains(&daemon::session_name(&info.id)),
+        "kill must synchronously remove the daemon-owned session"
     );
 }
 
 #[test]
 fn transcript_file_exists_and_secrets_are_redacted() {
     let tmp = tempfile::tempdir().unwrap();
-    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink());
+    let (daemon, _server) = test_daemon(&tmp);
+    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
+        .with_daemon_sessions(Some(daemon));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     manager.write(&info.id, "echo API_KEY=abc123\n").unwrap();
@@ -175,7 +204,9 @@ fn multiple_concurrent_sessions_in_the_same_project_are_independent() {
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink);
+    let (daemon, _server) = test_daemon(&tmp);
+    let manager = SessionManager::new(tmp.path().to_path_buf(), sink)
+        .with_daemon_sessions(Some(daemon.clone()));
 
     let a = manager.create(shell_request(tmp.path())).unwrap();
     let b = manager.create(shell_request(tmp.path())).unwrap();
@@ -230,11 +261,15 @@ fn multiple_concurrent_sessions_in_the_same_project_are_independent() {
     // Killing one session (closing that tab) leaves its siblings alive...
     manager.kill(&b.id).unwrap();
     assert!(
-        manager.pid(&a.id).is_some(),
+        daemon
+            .list_sessions()
+            .contains(&daemon::session_name(&a.id)),
         "a should still be alive after b is killed"
     );
     assert!(
-        manager.pid(&c.id).is_some(),
+        daemon
+            .list_sessions()
+            .contains(&daemon::session_name(&c.id)),
         "c should still be alive after b is killed"
     );
 
@@ -262,7 +297,9 @@ fn multiple_concurrent_sessions_in_the_same_project_are_independent() {
 #[test]
 fn resize_a_live_session_succeeds() {
     let tmp = tempfile::tempdir().unwrap();
-    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink());
+    let (daemon, _server) = test_daemon(&tmp);
+    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
+        .with_daemon_sessions(Some(daemon));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     manager.resize(&info.id, 120, 40).unwrap();
@@ -283,7 +320,7 @@ fn resize_a_live_session_succeeds() {
 /// `transcript_file_exists_and_secrets_are_redacted` above proves
 /// redaction: a `shell` session `echo`ing the exact marker text stands in
 /// for Claude printing it (the reader thread's detection is a plain
-/// substring match on raw output — see `spawn_reader_thread`'s doc comment
+/// substring match on raw output — see the daemon-output processor
 /// for why it's deliberately not hard-gated to `engine == "claude"`, this
 /// test is exactly why). A *real* end-to-end proof against an actual
 /// `claude` CLI is `examples/manual_attention_verify.rs`, run by hand per
@@ -300,7 +337,9 @@ fn attention_marker_burst_fires_exactly_one_debounced_event() {
         })
     };
 
+    let (daemon, _server) = test_daemon(&tmp);
     let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
+        .with_daemon_sessions(Some(daemon))
         .with_attention_sink(attention_hits);
     let info = manager.create(shell_request(tmp.path())).unwrap();
 

@@ -2732,7 +2732,6 @@ name = "omniagent-ade"
 version = "2026.7.28+004"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "brain-core",
  "brain-ingest",
  "libc",

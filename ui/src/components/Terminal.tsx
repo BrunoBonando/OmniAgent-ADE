@@ -43,13 +43,6 @@ interface TerminalProps {
 // the palette is still duplicated by hand, just one file over now that
 // there's more than one preset to hold.
 
-function base64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
 export default function Terminal({ sessionId, visible, focused, themeId, onEngineTitle, agentState, tabEngine }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const loadingRef = useRef<HTMLDivElement | null>(null);
@@ -140,8 +133,8 @@ export default function Terminal({ sessionId, visible, focused, themeId, onEngin
     // message without unbounded growth.
     let outputBuf = "";
 
-    void listen<string>(`session-output:${sessionId}`, (event) => {
-      const bytes = base64ToBytes(event.payload);
+    void listen<number[]>(`session-output:${sessionId}`, (event) => {
+      const bytes = Uint8Array.from(event.payload);
       const term = termRef.current;
       if (!term || !visibleRef.current || !outputQueue) pendingOutput.push(bytes);
       else outputQueue.enqueue(bytes);

@@ -26,8 +26,6 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-base64 = "0.22"
-portable-pty = "0.9"
 # Every `claude` pane owns a conversation whose id OmniAgent derives, rather
 # than letting `--continue` guess "most recent in this directory" (see
 # `sessions.rs`, "Every claude pane owns its own conversation"). `v5` is the
@@ -47,8 +45,8 @@ tokio = { version = "1", features = ["rt"] }
 [dev-dependencies]
 tempfile = "3"
 libc = "0.2"
+portable-pty = "0.9"
 # `tauri::test::mock_app()` — lets the window title be asserted against the
 # version a real Tauri app handle reports, so "the title's version is the one
 # tauri.conf.json declares" is a test rather than a promise.
 tauri = { version = "2", features = ["test"] }
-

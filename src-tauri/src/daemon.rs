@@ -1,35 +1,123 @@
-//! Session manager backed by `omniagent-pty-daemon`: exposes named,
-//! restart-surviving PTY sessions over the daemon's Unix socket.
+//! Persistent framed-protocol client for `omniagent-pty-daemon`.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, Weak};
+use std::time::Duration;
 
-use omniagent_pty_daemon::{DaemonRequest, DaemonResponse, DEFAULT_SOCKET_NAME};
+use omniagent_pty_daemon::protocol::{
+    decode_raw_payload, encode_raw_payload, AttachPayload, AttentionPayload, ErrorPayload, Frame,
+    Header, HelloAckPayload, HelloPayload, MessageKind, ResizePayload, SessionExitedPayload,
+    SessionIdPayload, SessionListPayload, SessionStatusPayload, HEADER_LEN, PROTOCOL_VERSION,
+};
+use omniagent_pty_daemon::{CreateSession, DEFAULT_SOCKET_NAME};
 
 pub const DEFAULT_SOCKET: &str = "omniagent-ade";
 pub const SESSION_NAME_PREFIX: &str = "omniagent-";
 const MAX_SESSION_NAME_LEN: usize = 128;
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(3);
 const DAEMON_START_POLL: Duration = Duration::from_millis(50);
-const DAEMON_HEALTH_RETRY_WINDOW: Duration = Duration::from_millis(200);
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Kept for compatibility with existing references.
 pub const CONFIG_BODY: &str = "";
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonEvent {
+    Snapshot {
+        id: String,
+        sequence: u64,
+        bytes: Vec<u8>,
+    },
+    Output {
+        id: String,
+        sequence: u64,
+        bytes: Vec<u8>,
+    },
+    Status(SessionStatusPayload),
+    Attention {
+        id: String,
+    },
+    ResyncRequired {
+        id: String,
+        sequence: u64,
+    },
+    Exited {
+        id: String,
+        sequence: u64,
+        exit_code: Option<u32>,
+    },
+}
+
+pub type DaemonEventSink = Arc<dyn Fn(DaemonEvent) + Send + Sync>;
+
+#[derive(Clone)]
+struct Handler {
+    sequence: Option<u64>,
+    sink: DaemonEventSink,
+}
+
+struct ClientRuntime {
+    writer: Mutex<Option<(u64, UnixStream)>>,
+    pending: Mutex<HashMap<u64, mpsc::Sender<Result<Frame, String>>>>,
+    handlers: Mutex<HashMap<String, Handler>>,
+    next_request: AtomicU64,
+    generation: AtomicU64,
+    connect: Mutex<()>,
+}
+
+impl Default for ClientRuntime {
+    fn default() -> Self {
+        Self {
+            writer: Mutex::new(None),
+            pending: Mutex::new(HashMap::new()),
+            handlers: Mutex::new(HashMap::new()),
+            next_request: AtomicU64::new(1),
+            generation: AtomicU64::new(0),
+            connect: Mutex::new(()),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct DaemonSessions {
     bin: PathBuf,
     socket: String,
     config: Option<PathBuf>,
     socket_path: PathBuf,
+    runtime: Arc<ClientRuntime>,
+}
+
+impl std::fmt::Debug for DaemonSessions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DaemonSessions")
+            .field("bin", &self.bin)
+            .field("socket", &self.socket)
+            .field("config", &self.config)
+            .field("socket_path", &self.socket_path)
+            .finish()
+    }
 }
 
 impl DaemonSessions {
+    pub fn new(socket_path: PathBuf) -> Self {
+        Self {
+            bin: resolve_daemon_binary().unwrap_or_default(),
+            socket: DEFAULT_SOCKET.to_string(),
+            config: None,
+            socket_path,
+            runtime: Arc::new(ClientRuntime::default()),
+        }
+    }
+
+    pub fn default_for_data_dir(data_dir: &Path) -> Self {
+        Self::new(data_dir.join(DEFAULT_SOCKET_NAME))
+    }
+
     pub fn resolve(socket: &str, _search_path: Option<&str>) -> Option<Self> {
         let bin = resolve_daemon_binary()?;
         Some(Self {
@@ -37,6 +125,7 @@ impl DaemonSessions {
             socket: socket.to_string(),
             config: None,
             socket_path: resolve_socket_path(socket, None),
+            runtime: Arc::new(ClientRuntime::default()),
         })
     }
 
@@ -46,6 +135,7 @@ impl DaemonSessions {
             socket: socket.to_string(),
             config: None,
             socket_path: resolve_socket_path(socket, None),
+            runtime: Arc::new(ClientRuntime::default()),
         }
     }
 
@@ -53,6 +143,7 @@ impl DaemonSessions {
         let cfg = config.into();
         self.socket_path = resolve_socket_path(&self.socket, Some(&cfg));
         self.config = Some(cfg);
+        self.runtime = Arc::new(ClientRuntime::default());
         self
     }
 
@@ -62,6 +153,10 @@ impl DaemonSessions {
 
     pub fn binary(&self) -> &Path {
         &self.bin
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
     }
 
     pub fn has_session(&self, name: &str) -> bool {
@@ -75,91 +170,28 @@ impl DaemonSessions {
         env: &[(String, String)],
         argv: &[String],
     ) -> Result<bool, String> {
-        self.ensure_daemon_running()?;
         if self.has_session(name) {
             return Ok(true);
         }
 
-        let req = DaemonRequest::CreateSession {
+        self.create_session(CreateSession {
             id: name.to_string(),
             command: argv.to_vec(),
             cwd: Some(cwd.to_string_lossy().into_owned()),
             env: env.iter().cloned().collect::<HashMap<_, _>>(),
             cols: 80,
             rows: 24,
-        };
-        self.send_request(&req).map(|_| false)
-    }
-
-    /// argv for a PTY-side bridge client implemented by the daemon binary.
-    pub fn attach_argv(&self, name: &str) -> Vec<String> {
-        vec![
-            self.bin.to_string_lossy().into_owned(),
-            "attach".to_string(),
-            "--id".to_string(),
-            name.to_string(),
-            "--socket".to_string(),
-            self.socket_path.to_string_lossy().into_owned(),
-        ]
+            transcript_path: None,
+        })
+        .map(|_| false)
     }
 
     pub fn kill_session(&self, name: &str) -> bool {
-        let Ok(_) = self.ensure_daemon_running() else {
-            return false;
-        };
-        let req = DaemonRequest::KillSession {
-            id: name.to_string(),
-        };
-        self.send_request(&req)
-            .ok()
-            .and_then(|r| r.result)
-            .and_then(|r| r.get("killed").and_then(|k| k.as_bool()))
-            .unwrap_or(false)
-    }
-
-    pub fn pane_current_command(&self, _name: &str) -> Option<String> {
-        let screen = self.capture_pane(_name)?;
-        let last_line = screen
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim_end();
-        let is_prompt = last_line.ends_with("%")
-            || last_line.ends_with("% ")
-            || last_line.ends_with("$")
-            || last_line.ends_with("$ ")
-            || last_line.ends_with("> ");
-        if is_prompt {
-            Some("zsh".to_string())
-        } else {
-            Some("running".to_string())
-        }
-    }
-
-    pub fn capture_pane(&self, name: &str) -> Option<String> {
-        let Ok(_) = self.ensure_daemon_running() else {
-            return None;
-        };
-        let req = DaemonRequest::AttachSession {
-            id: name.to_string(),
-        };
-        self.send_request(&req)
-            .ok()
-            .and_then(|r| r.result)
-            .and_then(|r| r.get("screen").and_then(|s| s.as_str()).map(str::to_string))
+        self.kill(name).is_ok()
     }
 
     pub fn resize_session(&self, name: &str, cols: u16, rows: u16) -> bool {
-        let Ok(_) = self.ensure_daemon_running() else {
-            return false;
-        };
-        let req = DaemonRequest::ResizeSession {
-            id: name.to_string(),
-            cols,
-            rows,
-        };
-        self.send_request(&req).is_ok()
+        self.resize(name, cols, rows).is_ok()
     }
 
     pub fn kill_server(&self) -> bool {
@@ -172,102 +204,424 @@ impl DaemonSessions {
     }
 
     pub fn list_sessions(&self) -> Vec<String> {
-        let Ok(_) = self.ensure_daemon_running() else {
-            return Vec::new();
-        };
-        let req = DaemonRequest::ListSessions;
-        self.send_request(&req)
-            .ok()
-            .and_then(|r| r.result)
-            .and_then(|r| {
-                r.get("sessions").and_then(|v| {
-                    v.as_array().map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect::<Vec<_>>()
-                    })
-                })
-            })
-            .unwrap_or_default()
+        self.list().unwrap_or_default()
     }
 
-    fn ensure_daemon_running(&self) -> Result<(), String> {
-        if self.wait_until_alive(DAEMON_HEALTH_RETRY_WINDOW) {
+    pub fn list(&self) -> Result<Vec<String>, String> {
+        let response = self.request_json(MessageKind::ListSessions, &serde_json::json!({}))?;
+        expect_kind(&response, MessageKind::SessionList)?;
+        serde_json::from_slice::<SessionListPayload>(&response.payload)
+            .map(|payload| payload.sessions)
+            .map_err(|error| format!("decode session list: {error}"))
+    }
+
+    pub fn create_session(&self, create: CreateSession) -> Result<(), String> {
+        let response = self.request_json(MessageKind::CreateSession, &create)?;
+        expect_kind(&response, MessageKind::SessionCreated)
+    }
+
+    pub fn attach_session(
+        &self,
+        id: &str,
+        after_sequence: Option<u64>,
+        sink: DaemonEventSink,
+    ) -> Result<(), String> {
+        self.ensure_daemon_running()?;
+        self.runtime.handlers.lock().unwrap().insert(
+            id.to_string(),
+            Handler {
+                sequence: after_sequence,
+                sink,
+            },
+        );
+        self.send_attach(id, after_sequence)
+    }
+
+    pub fn detach_session(&self, id: &str) -> Result<(), String> {
+        let response =
+            self.request_json(MessageKind::Detach, &SessionIdPayload { id: id.into() })?;
+        expect_kind(&response, MessageKind::Response)?;
+        self.runtime.handlers.lock().unwrap().remove(id);
+        Ok(())
+    }
+
+    pub fn reattach_session(&self, id: &str, after_sequence: Option<u64>) -> Result<(), String> {
+        if !self.runtime.handlers.lock().unwrap().contains_key(id) {
+            return Err(format!("session {id} is not attached"));
+        }
+        self.send_attach(id, after_sequence)
+    }
+
+    pub fn send_input(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        let response = self.request_frame(Frame::new(
+            MessageKind::Input,
+            self.next_request(),
+            encode_raw_payload(id, bytes).map_err(|error| error.to_string())?,
+        ))?;
+        expect_kind(&response, MessageKind::Response)
+    }
+
+    pub fn send_interrupt(&self, id: &str) -> Result<(), String> {
+        let response =
+            self.request_json(MessageKind::Interrupt, &SessionIdPayload { id: id.into() })?;
+        expect_kind(&response, MessageKind::Response)
+    }
+
+    pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
+        let response = self.request_json(
+            MessageKind::Resize,
+            &ResizePayload {
+                id: id.into(),
+                cols,
+                rows,
+            },
+        )?;
+        expect_kind(&response, MessageKind::Response)
+    }
+
+    pub fn kill(&self, id: &str) -> Result<(), String> {
+        let response = self.request_json(MessageKind::Kill, &SessionIdPayload { id: id.into() })?;
+        expect_kind(&response, MessageKind::Response)?;
+        self.runtime.handlers.lock().unwrap().remove(id);
+        Ok(())
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.ensure_daemon_running().is_ok()
+    }
+
+    pub fn ensure_daemon_running(&self) -> Result<(), String> {
+        let _connect = self.runtime.connect.lock().unwrap();
+        if self.runtime.writer.lock().unwrap().is_some() {
             return Ok(());
         }
 
+        if let Ok(stream) = self.connect_stream() {
+            return self.install_connection(stream);
+        }
         self.remove_stale_socket_if_unreachable();
         if let Some(parent) = self.socket_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("create daemon runtime directory: {error}"))?;
         }
-
+        if self.bin.as_os_str().is_empty() {
+            return Err("omniagent-pty-daemon binary not found".into());
+        }
         Command::new(&self.bin)
             .env("OMNIAGENT_PTY_SOCKET", &self.socket_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("spawn daemon: {e}"))?;
+            .map_err(|error| format!("spawn daemon: {error}"))?;
 
-        if self.wait_until_alive(DAEMON_START_TIMEOUT) {
-            return Ok(());
+        let deadline = std::time::Instant::now() + DAEMON_START_TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            if let Ok(stream) = self.connect_stream() {
+                return self.install_connection(stream);
+            }
+            std::thread::sleep(DAEMON_START_POLL);
         }
-
         Err(format!(
             "daemon socket {} not ready",
             self.socket_path.display()
         ))
     }
 
-    fn is_alive(&self) -> bool {
-        self.send_request(&DaemonRequest::ListSessions).is_ok()
-    }
-
-    fn send_request(&self, req: &DaemonRequest) -> Result<DaemonResponse, String> {
-        let mut stream =
-            UnixStream::connect(&self.socket_path).map_err(|e| format!("connect daemon: {e}"))?;
-
-        let mut payload = serde_json::to_vec(req).map_err(|e| format!("encode request: {e}"))?;
-        payload.push(b'\n');
+    fn connect_stream(&self) -> Result<UnixStream, String> {
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .map_err(|error| format!("connect daemon: {error}"))?;
         stream
-            .write_all(&payload)
-            .map_err(|e| format!("write request: {e}"))?;
-        stream.flush().map_err(|e| format!("flush request: {e}"))?;
-
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|e| format!("read response: {e}"))?;
-        let response: DaemonResponse =
-            serde_json::from_str(&line).map_err(|e| format!("decode response: {e}"))?;
-        if response.success {
-            Ok(response)
-        } else {
-            Err(response
-                .error
-                .unwrap_or_else(|| "daemon request failed".to_string()))
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .map_err(|error| format!("set daemon handshake timeout: {error}"))?;
+        let request = self.next_request();
+        write_sync_frame(
+            &mut stream,
+            &Frame::new(
+                MessageKind::Hello,
+                request,
+                serde_json::to_vec(&HelloPayload {
+                    client: "omniagent-ade-tauri".into(),
+                })
+                .map_err(|error| format!("encode daemon hello: {error}"))?,
+            ),
+        )?;
+        let response = read_sync_frame(&mut stream)?;
+        expect_kind(&response, MessageKind::HelloAck)?;
+        if response.header.request_or_sequence != request {
+            return Err("daemon hello response used the wrong request id".into());
         }
+        let ack: HelloAckPayload = serde_json::from_slice(&response.payload)
+            .map_err(|error| format!("decode daemon hello: {error}"))?;
+        if ack.protocol_version != PROTOCOL_VERSION {
+            return Err(format!(
+                "daemon protocol version {} is unsupported",
+                ack.protocol_version
+            ));
+        }
+        stream
+            .set_read_timeout(None)
+            .map_err(|error| format!("clear daemon handshake timeout: {error}"))?;
+        Ok(stream)
     }
 
-    fn wait_until_alive(&self, timeout: Duration) -> bool {
-        let start = Instant::now();
-        while start.elapsed() < timeout {
-            if self.is_alive() {
-                return true;
+    fn install_connection(&self, stream: UnixStream) -> Result<(), String> {
+        let reader = stream
+            .try_clone()
+            .map_err(|error| format!("clone daemon socket: {error}"))?;
+        let generation = self.runtime.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let runtime = Arc::downgrade(&self.runtime);
+        std::thread::spawn(move || read_loop(reader, runtime, generation));
+
+        // Publish while holding the writer lock, then replay subscriptions
+        // through that same guard. Other callers cannot interleave a frame
+        // until every restored session has reattached at its last sequence.
+        let mut writer = self.runtime.writer.lock().unwrap();
+        *writer = Some((generation, stream));
+        let handlers = self.runtime.handlers.lock().unwrap().clone();
+        for (id, handler) in handlers {
+            let request = self.next_request();
+            let (_, stream) = writer.as_mut().expect("writer installed above");
+            if let Err(error) = write_sync_frame(
+                stream,
+                &Frame::new(
+                    MessageKind::Attach,
+                    request,
+                    serde_json::to_vec(&AttachPayload {
+                        id,
+                        after_sequence: handler.sequence,
+                    })
+                    .map_err(|error| format!("encode daemon reattach: {error}"))?,
+                ),
+            ) {
+                writer.take();
+                return Err(error);
             }
-            thread::sleep(DAEMON_START_POLL);
         }
-        false
+        Ok(())
+    }
+
+    fn request_json(
+        &self,
+        kind: MessageKind,
+        value: &impl serde::Serialize,
+    ) -> Result<Frame, String> {
+        self.request_frame(Frame::new(
+            kind,
+            self.next_request(),
+            serde_json::to_vec(value).map_err(|error| format!("encode daemon request: {error}"))?,
+        ))
+    }
+
+    fn request_frame(&self, frame: Frame) -> Result<Frame, String> {
+        self.ensure_daemon_running()?;
+        let request = frame.header.request_or_sequence;
+        let (tx, rx) = mpsc::channel();
+        self.runtime.pending.lock().unwrap().insert(request, tx);
+        if let Err(error) = self.write(&frame) {
+            self.runtime.pending.lock().unwrap().remove(&request);
+            return Err(error);
+        }
+        let response = match rx.recv_timeout(RESPONSE_TIMEOUT) {
+            Ok(response) => response?,
+            Err(error) => {
+                self.runtime.pending.lock().unwrap().remove(&request);
+                return Err(format!("daemon response timed out: {error}"));
+            }
+        };
+        if response.header.message_kind == MessageKind::Error {
+            let payload: ErrorPayload = serde_json::from_slice(&response.payload)
+                .map_err(|error| format!("decode daemon error: {error}"))?;
+            return Err(payload.message);
+        }
+        Ok(response)
+    }
+
+    fn send_attach(&self, id: &str, after_sequence: Option<u64>) -> Result<(), String> {
+        self.write(&Frame::new(
+            MessageKind::Attach,
+            self.next_request(),
+            serde_json::to_vec(&AttachPayload {
+                id: id.into(),
+                after_sequence,
+            })
+            .map_err(|error| format!("encode daemon attach: {error}"))?,
+        ))
+    }
+
+    fn write(&self, frame: &Frame) -> Result<(), String> {
+        let mut writer = self.runtime.writer.lock().unwrap();
+        let (_, stream) = writer
+            .as_mut()
+            .ok_or_else(|| "daemon connection is not available".to_string())?;
+        if let Err(error) = write_sync_frame(stream, frame) {
+            writer.take();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn next_request(&self) -> u64 {
+        self.runtime.next_request.fetch_add(1, Ordering::Relaxed)
     }
 
     fn remove_stale_socket_if_unreachable(&self) {
-        if !self.socket_path.exists() {
-            return;
-        }
-        if UnixStream::connect(&self.socket_path).is_err() {
+        if self.socket_path.exists() && UnixStream::connect(&self.socket_path).is_err() {
             let _ = std::fs::remove_file(&self.socket_path);
         }
     }
+}
+
+fn expect_kind(frame: &Frame, expected: MessageKind) -> Result<(), String> {
+    if frame.header.message_kind == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected daemon {:?}, received {:?}",
+            expected, frame.header.message_kind
+        ))
+    }
+}
+
+fn read_sync_frame(stream: &mut UnixStream) -> Result<Frame, String> {
+    let mut header = [0; HEADER_LEN];
+    stream
+        .read_exact(&mut header)
+        .map_err(|error| format!("read daemon frame header: {error}"))?;
+    let header = Header::decode(header).map_err(|error| error.to_string())?;
+    let mut payload = vec![0; header.payload_length as usize];
+    stream
+        .read_exact(&mut payload)
+        .map_err(|error| format!("read daemon frame payload: {error}"))?;
+    Ok(Frame { header, payload })
+}
+
+fn write_sync_frame(stream: &mut UnixStream, frame: &Frame) -> Result<(), String> {
+    stream
+        .write_all(&frame.encode().map_err(|error| error.to_string())?)
+        .map_err(|error| format!("write daemon frame: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("flush daemon frame: {error}"))
+}
+
+fn read_loop(mut stream: UnixStream, runtime: Weak<ClientRuntime>, generation: u64) {
+    while let Ok(frame) = read_sync_frame(&mut stream) {
+        let Some(runtime) = runtime.upgrade() else {
+            return;
+        };
+        match frame.header.message_kind {
+            MessageKind::SessionList
+            | MessageKind::SessionCreated
+            | MessageKind::Response
+            | MessageKind::Error => {
+                if let Some(pending) = runtime
+                    .pending
+                    .lock()
+                    .unwrap()
+                    .remove(&frame.header.request_or_sequence)
+                {
+                    let _ = pending.send(Ok(frame));
+                }
+            }
+            MessageKind::Snapshot | MessageKind::Output => {
+                if let Ok((id, bytes)) = decode_raw_payload(&frame.payload) {
+                    let event = if frame.header.message_kind == MessageKind::Snapshot {
+                        DaemonEvent::Snapshot {
+                            id: id.into(),
+                            sequence: frame.header.request_or_sequence,
+                            bytes: bytes.to_vec(),
+                        }
+                    } else {
+                        DaemonEvent::Output {
+                            id: id.into(),
+                            sequence: frame.header.request_or_sequence,
+                            bytes: bytes.to_vec(),
+                        }
+                    };
+                    dispatch_event(&runtime, id, frame.header.request_or_sequence, event);
+                }
+            }
+            MessageKind::SessionStatus => {
+                if let Ok(status) = serde_json::from_slice::<SessionStatusPayload>(&frame.payload) {
+                    let id = status.id.clone();
+                    dispatch_event(
+                        &runtime,
+                        &id,
+                        frame.header.request_or_sequence,
+                        DaemonEvent::Status(status),
+                    );
+                }
+            }
+            MessageKind::Attention => {
+                if let Ok(attention) = serde_json::from_slice::<AttentionPayload>(&frame.payload) {
+                    let id = attention.id;
+                    dispatch_event(
+                        &runtime,
+                        &id,
+                        frame.header.request_or_sequence,
+                        DaemonEvent::Attention { id: id.clone() },
+                    );
+                }
+            }
+            MessageKind::ResyncRequired => {
+                if let Ok(payload) = serde_json::from_slice::<
+                    omniagent_pty_daemon::protocol::ResyncRequiredPayload,
+                >(&frame.payload)
+                {
+                    let id = payload.id;
+                    dispatch_event(
+                        &runtime,
+                        &id,
+                        frame.header.request_or_sequence,
+                        DaemonEvent::ResyncRequired {
+                            id: id.clone(),
+                            sequence: frame.header.request_or_sequence,
+                        },
+                    );
+                }
+            }
+            MessageKind::SessionExited => {
+                if let Ok(payload) = serde_json::from_slice::<SessionExitedPayload>(&frame.payload)
+                {
+                    let id = payload.id;
+                    dispatch_event(
+                        &runtime,
+                        &id,
+                        frame.header.request_or_sequence,
+                        DaemonEvent::Exited {
+                            id: id.clone(),
+                            sequence: frame.header.request_or_sequence,
+                            exit_code: payload.exit_code,
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let Some(runtime) = runtime.upgrade() else {
+        return;
+    };
+    let mut writer = runtime.writer.lock().unwrap();
+    if matches!(writer.as_ref(), Some((current, _)) if *current == generation) {
+        writer.take();
+        for (_, pending) in runtime.pending.lock().unwrap().drain() {
+            let _ = pending.send(Err("daemon connection closed".into()));
+        }
+    }
+}
+
+fn dispatch_event(runtime: &ClientRuntime, id: &str, sequence: u64, event: DaemonEvent) {
+    let sink = {
+        let mut handlers = runtime.handlers.lock().unwrap();
+        let Some(handler) = handlers.get_mut(id) else {
+            return;
+        };
+        handler.sequence = Some(sequence);
+        handler.sink.clone()
+    };
+    sink(event);
 }
 
 pub(crate) fn is_executable_file(path: &Path) -> bool {

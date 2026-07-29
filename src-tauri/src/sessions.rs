@@ -1,14 +1,12 @@
 //! PTY session engine — plain Rust, no Tauri types.
 //!
-//! This module owns the whole lifecycle of terminal sessions: spawning real
-//! PTYs via `portable-pty`, streaming their raw output to whoever is
-//! listening (a Tauri event, a test channel, anything implementing
-//! [`OutputSink`]), tee-ing a redacted transcript to disk, and reaping
-//! children on kill. It is deliberately decoupled from `tauri::AppHandle`/
-//! `State` so it can be unit- and integration-tested by just calling Rust
-//! functions (see `src-tauri/tests/session_test.rs`) — the thin
-//! `#[tauri::command]` wrappers live in `commands.rs` and only adapt this
-//! API to Tauri's calling convention.
+//! This module is the Tauri compatibility adapter for daemon-owned terminal
+//! sessions. The daemon alone owns PTYs, child processes, transcripts, and
+//! reaping; this layer preserves the existing command models, output sinks,
+//! lifecycle hooks, and status/attention behavior. It is deliberately
+//! decoupled from `tauri::AppHandle`/`State` so it can be integration-tested
+//! through plain Rust calls (see `src-tauri/tests/session_test.rs`) — the thin
+//! `#[tauri::command]` wrappers live in `commands.rs`.
 //!
 //! ## On-disk layout (under `<data_dir>/transcripts/`)
 //! - `<session-id>.log` — raw PTY output, secret-redacted
@@ -91,7 +89,7 @@
 //! anticipated ("don't force a solution that doesn't reflect reality") —
 //! it requires zero configuration and zero engine spoofing, which is the
 //! one property that mattered most here. Not hard-gated to `engine ==
-//! "claude"` (see `spawn_reader_thread`'s doc comment for why — in short,
+//! "claude"` (see the daemon-output processor for why — in short,
 //! that would make it untestable through a real PTY without an actual
 //! `claude` process, network access, and a live conversation); in practice
 //! this is still effectively Claude-specific, since it's Claude Code's own
@@ -257,10 +255,8 @@
 //!   never started" is caught on the tmux side — where it is observable —
 //!   rather than only through the attach client, and **every** rung is checked,
 //!   including the last.
-//! - When even the last rung's pane dies, [`SessionManager::spawn_with_notice`]
-//!   spawns the engine directly into the PTY behind a printed explanation, so
-//!   the user reads what went wrong (and usually still gets a working, merely
-//!   non-persistent session) instead of staring at nothing.
+//! - Phase 2 moved startup and exit observability into the persistent daemon;
+//!   Tauri no longer creates a fallback PTY or attach child.
 //!
 //! ## Every `claude` pane owns its own conversation (founder bug, 2026-07-26)
 //! The first version of rungs 2/3 above used `claude -c/--continue`, and it
@@ -395,13 +391,13 @@
 //!   it, and [`ATTENTION_INPUT_GRACE`] for the second live-run correction
 //!   that made the two graces the same length.
 //! - **tool_execution (cyan), `shell` sessions with tmux (the good case)** —
-//!   `tmux display-message -p '#{pane_current_command}'`, which tmux derives
+//!   the pane foreground-command signal, which the terminal host derives
 //!   from the pane tty's foreground process group. Reads `zsh` at the prompt →
 //!   **ready**; reads `sleep`/`cargo`/`vim`/… → **tool_execution**, because for
 //!   a terminal session "a foreground command is running" *is* Bruno's cyan.
 //!   Verified against real tmux including `sleep 4`, the case that produces no
 //!   output at all and that therefore no activity heuristic could ever catch.
-//! - **thinking (white/blue), `claude`/`codex`** — `pane_current_command` is
+//! - **thinking (white/blue), `claude`/`codex`** — the foreground command is
 //!   useless here (a real claude pane reports `2.1.220`, the process title
 //!   Claude Code sets, and keeps reporting it while a tool runs), so these
 //!   fall back to **sustained output activity**: output within
@@ -539,7 +535,7 @@
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock, Weak};
@@ -547,27 +543,29 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use uuid::Uuid;
 
-use brain_core::{now_ts, redact::redact};
+use brain_core::now_ts;
+#[cfg(test)]
+use brain_core::redact::redact;
+#[cfg(test)]
+use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 
-use crate::pty_daemon_client::PtyDaemonClient;
-use crate::daemon::{self, DaemonSessions};
+use crate::daemon::{self, DaemonEvent, DaemonSessions};
 
 /// A callback invoked with `(session_id, raw_chunk)` for every chunk read
 /// from a session's PTY, in real time, un-redacted (this is the "live
 /// terminal" feed — redaction only applies to the on-disk transcript, see
 /// module docs). The Tauri wrapper in `lib.rs` supplies one that calls
-/// `app_handle.emit(&format!("session-output:{id}"), base64_of(chunk))`;
+/// `app_handle.emit(&format!("session-output:{id}"), chunk)`;
 /// tests supply one that pushes to an `mpsc` channel.
 pub type OutputSink = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
 
 /// Everything Phase 7's feedback loop needs to know about a session that
 /// just ended — the argument to [`SessionEndHook`]. Fired once per session,
 /// whichever way it ended (see [`SessionManager::kill`] and the natural-exit
-/// path in `spawn_reader_thread`), always *after* the transcript's final
+/// path in the daemon event handler), always *after* the transcript's final
 /// flush is guaranteed on disk (same ordering guarantee `kill()` already
 /// gives its callers for the transcript file itself — see the module docs
 /// on `SessionHandle::reader_thread`), so `event.transcript_path` is always
@@ -778,9 +776,6 @@ pub struct CreateSessionRequest {
 
 /// Everything needed to keep one live PTY session going.
 struct SessionHandle {
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
     /// Temp `--mcp-config` file for `claude` sessions, if any; removed on
     /// kill/natural-exit cleanup.
     mcp_config_path: Option<PathBuf>,
@@ -791,20 +786,10 @@ struct SessionHandle {
     project: String,
     cwd: String,
     engine: String,
-    /// The background PTY-reader thread (see `spawn_reader_thread`).
-    /// `SessionManager::kill` joins this before returning, so the transcript's
-    /// final flush is guaranteed to have happened by the time `kill()`
-    /// returns — important because a fullscreen-TUI engine (Claude's own
-    /// interactive UI redraws via `\r` + cursor-position escapes, not bare
-    /// `\n`) can leave content sitting in the line-buffered redaction
-    /// buffer for a long time with nothing to flush it until EOF; without
-    /// joining, a caller that exits its own process right after `kill()`
-    /// could race this detached thread and lose that final flush.
-    reader_thread: thread::JoinHandle<()>,
-    /// The daemon session this PTY is attached to, when the daemon is in play.
-    /// `None` = direct spawn (no daemon available), i.e. nothing to kill on
-    /// tab close and nothing that survives the app closing.
-    daemon_session: Option<String>,
+    daemon_session: String,
+    attached: bool,
+    killing: Arc<AtomicBool>,
+    output: Arc<Mutex<SessionOutputProcessor>>,
     /// Live signals the status poller reads. Shared with the reader thread,
     /// which is what actually writes to them.
     activity: Arc<SessionActivity>,
@@ -967,9 +952,8 @@ impl SessionActivity {
             // A burst's first keystroke (nothing typed within the grace)
             // freezes what the light currently says; every keystroke after
             // it merely re-arms the grace. See `status_when_typing_began`.
-            let new_burst = last.map_or(true, |t| {
-                now.saturating_duration_since(t) >= TYPING_ECHO_GRACE
-            });
+            let new_burst =
+                last.is_none_or(|t| now.saturating_duration_since(t) >= TYPING_ECHO_GRACE);
             if new_burst {
                 if let Ok(mut held) = self.status_when_typing_began.lock() {
                     *held = self.raw_busy_status(now);
@@ -1045,6 +1029,24 @@ impl SessionActivity {
     }
 }
 
+struct SessionOutputProcessor {
+    decoder: Utf8ChunkDecoder,
+    marker_window: String,
+    attention_debouncer: AttentionDebouncer,
+    last_user_input: Option<Instant>,
+}
+
+impl SessionOutputProcessor {
+    fn new() -> Self {
+        Self {
+            decoder: Utf8ChunkDecoder::new(),
+            marker_window: String::new(),
+            attention_debouncer: AttentionDebouncer::new(ATTENTION_COOLDOWN),
+            last_user_input: None,
+        }
+    }
+}
+
 /// The PTY session registry. One instance lives for the app's lifetime
 /// (managed Tauri state in `lib.rs`); tests construct their own with a
 /// scratch data dir and an in-memory sink.
@@ -1062,11 +1064,8 @@ pub struct SessionManager {
     /// [`SessionManager::with_status_sink`]). Registering it also starts the
     /// single background poller.
     on_status: Option<StatusSink>,
-    /// The daemon-backed session manager, `None` by default (see
-    /// [`SessionManager::with_daemon_sessions`]). `None` means engines spawn
-    /// straight into the PTY and nothing survives the app closing.
+    /// The sole PTY/process owner. `None` means session creation is unavailable.
     daemon_sessions: Option<DaemonSessions>,
-    pty_daemon: PtyDaemonClient,
     /// Guards the lazy, at-most-once spawn of the status poller (see
     /// [`SessionManager::with_status_sink`] for why it isn't spawned eagerly).
     status_poller: OnceLock<()>,
@@ -1075,7 +1074,6 @@ pub struct SessionManager {
 impl SessionManager {
     pub fn new(data_dir: PathBuf, sink: OutputSink) -> Self {
         let _ = std::fs::create_dir_all(transcripts_dir(&data_dir));
-        let pty_daemon = PtyDaemonClient::default_for_data_dir(&data_dir);
         Self {
             data_dir,
             sink,
@@ -1084,13 +1082,12 @@ impl SessionManager {
             on_attention: None,
             on_status: None,
             daemon_sessions: None,
-            pty_daemon,
             status_poller: OnceLock::new(),
         }
     }
 
-    pub fn with_pty_daemon(mut self, client: PtyDaemonClient) -> Self {
-        self.pty_daemon = client;
+    pub fn with_pty_daemon(mut self, client: DaemonSessions) -> Self {
+        self.daemon_sessions = Some(client);
         self
     }
 
@@ -1099,12 +1096,8 @@ impl SessionManager {
     /// and [`with_attention_sink`](Self::with_attention_sink): the daemon is
     /// app-level infrastructure wired once at boot in `lib.rs`
     /// ([`default_daemon_sessions`]), not a required constructor argument.
-    /// Keeping it opt-in also gives tests a clean injection seam — a per-test
-    /// socket to prove the real daemon path in isolation, or `None` to prove
-    /// the fallback without a running daemon.
-    ///
-    /// Passing `None` is meaningful and safe: it is exactly the "daemon isn't
-    /// available" degradation path.
+    /// Keeping it injectable gives tests a private daemon socket without
+    /// changing production ownership.
     pub fn with_daemon_sessions(mut self, daemon_sessions: Option<DaemonSessions>) -> Self {
         self.daemon_sessions = daemon_sessions;
         self
@@ -1143,25 +1136,17 @@ impl SessionManager {
     /// keeps compiling unchanged. `lib.rs` calls this once at boot to wire
     /// `session-attention:{id}` emission; most tests never call it, which
     /// makes the reader thread skip the (cheap but non-zero) detection work
-    /// entirely — see `spawn_reader_thread`.
+    /// entirely — see [`process_daemon_output`].
     pub fn with_attention_sink(mut self, sink: AttentionSink) -> Self {
         self.on_attention = Some(sink);
         self
     }
 
-    /// Spawns (or re-attaches to) a session running the requested engine and
-    /// registers it. Starts a background reader thread that feeds
-    /// `self.sink` and the redacted transcript file.
-    ///
-    /// With tmux configured ([`with_tmux`](Self::with_tmux)) the PTY child is
-    /// `tmux attach-session` against `omniagent-<id>`, and the engine runs
-    /// inside that tmux session — so it survives the app closing, and a later
-    /// `create` carrying the same `restore_id` re-attaches to the *same live
-    /// process*. Without tmux the engine is spawned directly into the PTY,
-    /// exactly as before. See the module docs for the full degradation
-    /// ladder and for why `restore_id` exists at all.
+    /// Creates (or adopts) a daemon-owned session and registers the Tauri-side
+    /// compatibility metadata. Output attachment is lazy: the frontend first
+    /// subscribes to `session-output:{id}`, then its initial resize attaches
+    /// this manager to the daemon snapshot and live byte stream.
     pub fn create(&self, req: CreateSessionRequest) -> Result<SessionInfo> {
-        // A restore carries the id forward; everything else mints a new one.
         let (id, is_restore) = match req.restore_id.as_deref() {
             Some(rid) => {
                 if !is_valid_session_id(rid) {
@@ -1181,39 +1166,45 @@ impl SessionManager {
             ));
         }
         let created = now_ts();
-
         std::fs::create_dir_all(transcripts_dir(&self.data_dir))
             .context("create transcripts dir")?;
-
-        // Is there already a live daemon session for this id (i.e. did the app
-        // close without this tab being closed)? Answered *before* building
-        // the engine command, because it decides which conversation-identity
-        // flag `claude` gets: a restore that attaches needs none (the
-        // conversation never ended, and the flag would only cost a liveness
-        // probe), a restore that has to start a fresh engine reopens its own
-        // conversation, and a brand-new session claims one.
-        let daemon_name = daemon::session_name(&id);
-        let daemon_session_exists = self
+        let daemon = self
             .daemon_sessions
             .as_ref()
-            .map(|t| t.has_session(&daemon_name))
-            .unwrap_or(false);
-        let identity = spawn_identity(&req.engine, is_restore, daemon_session_exists);
-
-        let Spawned {
-            master,
-            writer,
-            child,
-            reader_thread,
-            activity,
-            mcp_config_path,
-            daemon_session,
-        } = self.spawn_session_process(&req, &id, &daemon_name, identity)?;
-
-        // Armed the instant the file (if any) might exist; disarmed only
-        // once the session below has been fully, successfully created --
-        // see the guard's own doc comment.
+            .ok_or_else(|| anyhow!("PTY daemon is unavailable"))?;
+        let daemon_name = daemon::session_name(&id);
+        let restored = daemon
+            .list()
+            .map_err(|error| anyhow!(error))?
+            .iter()
+            .any(|session| session == &daemon_name);
+        let engine_cmd = if restored {
+            None
+        } else {
+            Some(build_engine_command(
+                &req,
+                &self.data_dir,
+                &id,
+                spawn_identity(&req.engine, is_restore, false),
+            )?)
+        };
+        let mcp_config_path = engine_cmd
+            .as_ref()
+            .and_then(|command| command.mcp_config_path.clone());
         let mut mcp_cleanup_guard = McpConfigCleanupGuard::new(mcp_config_path.clone());
+        if let Some(command) = engine_cmd {
+            daemon
+                .create_session(omniagent_pty_daemon::CreateSession {
+                    id: daemon_name.clone(),
+                    command: command.argv,
+                    cwd: Some(command.cwd),
+                    env: command.env.into_iter().collect(),
+                    cols: 80,
+                    rows: 24,
+                    transcript_path: Some(transcript_path(&self.data_dir, &id)),
+                })
+                .map_err(|error| anyhow!(error))?;
+        }
 
         append_lifecycle_event(
             &lifecycle_path(&self.data_dir, &id),
@@ -1232,22 +1223,24 @@ impl SessionManager {
             engine: req.engine.clone(),
             cwd: req.cwd.clone(),
             created,
-            // The distinction the founder brief actually cares about: did the
-            // user get their session *back*, or a new one?
-            restored: daemon_session_exists,
-            persistent: daemon_session.is_some(),
+            restored,
+            persistent: true,
         };
 
+        let activity = Arc::new(SessionActivity::new(
+            req.engine.clone(),
+            Some(daemon_name.clone()),
+            self.on_status.is_some(),
+        ));
         let handle = SessionHandle {
-            master,
-            writer,
-            child,
             mcp_config_path,
             project: req.project.clone(),
             cwd: req.cwd.clone(),
             engine: req.engine.clone(),
-            reader_thread,
-            daemon_session,
+            daemon_session: daemon_name,
+            attached: false,
+            killing: Arc::new(AtomicBool::new(false)),
+            output: Arc::new(Mutex::new(SessionOutputProcessor::new())),
             activity,
         };
 
@@ -1257,362 +1250,111 @@ impl SessionManager {
         // sees the real daemon configuration (see `with_status_sink`).
         if let Some(status_sink) = &self.on_status {
             self.status_poller.get_or_init(|| {
-                spawn_status_poller(
-                    Arc::downgrade(&self.sessions),
-                    self.daemon_sessions.clone(),
-                    status_sink.clone(),
-                );
+                spawn_status_poller(Arc::downgrade(&self.sessions), status_sink.clone());
             });
         }
 
-        // Fully, successfully created -- the temp mcp config file's
-        // eventual cleanup is now the `SessionHandle`'s responsibility
-        // (kill()/the natural-exit path), not this guard's.
         mcp_cleanup_guard.disarm();
-
         Ok(info)
     }
 
-    /// Opens the PTY, starts whatever the session should actually run — a
-    /// daemon attach client, or the engine itself when the daemon isn't
-    /// usable — and starts its reader thread, walking down
-    /// [`ClaudeIdentity::ladder`] if a conversation-identity flag turns out to
-    /// have killed the process (module docs, "The identity flags are booby
-    /// traps"). Everything about *which* process to run lives here; `create`
-    /// only deals with what to do once it's running.
-    ///
-    /// The reader thread is started **before** the liveness probe, and that
-    /// ordering is load-bearing rather than incidental: on macOS a process
-    /// exiting with unflushed output on its tty cannot finish exiting while
-    /// nothing drains the master — it sits in the kernel's "exiting" state
-    /// (`ps` `STAT` flag `E`) indefinitely, and `try_wait` keeps answering
-    /// "still running" forever. Verified directly: a `/bin/sh -c 'echo bye;
-    /// exit 1'` spawned into an undrained PTY was still un-reaped after 2 s
-    /// of polling, `ps` showing `?NEs (bash)`. Probing before the drain
-    /// therefore always concluded "healthy", silently disabling this entire
-    /// retry. Starting the reader first is also free: on the retry path the
-    /// failed attempt's output (Claude's own `No conversation found to
-    /// continue`) legitimately belongs in that session's transcript.
-    fn spawn_session_process(
-        &self,
-        req: &CreateSessionRequest,
-        id: &str,
-        daemon_name: &str,
-        identity: ClaudeIdentity,
-    ) -> Result<Spawned> {
-        // One attempt per rung. With the daemon, *every* rung's attach client
-        // is startup-probed, including the last, because an instantly-dead
-        // attach is the black-screen shape this module's degradation path must
-        // never hand to the user. Without the daemon, only non-final identity
-        // rungs are probed (`--resume` / `--session-id`) since the stock last
-        // rung has no lower fallback.
-        let ladder = identity.ladder();
-        let last_rung = ladder.len() - 1;
-        let mut daemon_refusal: Option<String> = None;
-
-        for (rung, identity) in ladder.into_iter().enumerate() {
-            let engine_cmd = build_engine_command(req, &self.data_dir, id, identity)?;
-            // Armed the instant the temp `--mcp-config` file might exist, and
-            // disarmed only once this attempt has fully succeeded — the same
-            // contract `create` applies to the steps *after* this function
-            // (see `McpConfigCleanupGuard`). Every `?` below, plus the retry's
-            // `continue`, drops it while armed and deletes the file; without
-            // one here, moving the config write into this function would have
-            // reopened exactly the leak the guard was introduced to close.
-            let mut mcp_cleanup_guard =
-                McpConfigCleanupGuard::new(engine_cmd.mcp_config_path.clone());
-
-            // What the PTY actually runs: either a daemon client attached to
-            // the (possibly pre-existing) session, or — when the daemon is
-            // unavailable or fails — the engine itself, exactly as before
-            // the daemon existed here.
-            let (cmd, daemon_session) = match &self.daemon_sessions {
-                Some(t) => match t.ensure_session(
-                    daemon_name,
-                    Path::new(&req.cwd),
-                    &engine_cmd.env,
-                    &engine_cmd.argv,
-                ) {
-                    // A session that was *already there* needs no proof of
-                    // life: its engine has been running since before the app
-                    // restarted. Only one we just created has to show that the
-                    // command inside it actually started — `new-session`
-                    // reports on creating the pane, not on the `exec` in it.
-                    Ok(true) => (
-                        daemon_attach_command(t, daemon_name, &req.cwd, &engine_cmd.env),
-                        Some(daemon_name.to_string()),
-                    ),
-                    Ok(false)
-                        if !daemon_session_survives_startup(
-                            t,
-                            daemon_name,
-                            DAEMON_PANE_STARTUP_WINDOW,
-                        ) =>
-                    {
-                        // The engine died before it rendered a byte, so the
-                        // daemon has already destroyed the session. Attaching
-                        // now is exactly the black screen this check exists to
-                        // prevent: the client would print `no sessions` and
-                        // exit.
-                        // The identity hint is only true when an identity
-                        // flag was actually carried. `Stock` covers `codex`,
-                        // `shell` and claude's last rung alike, and telling a
-                        // `codex` user that "stock claude refused to start"
-                        // would be a confident lie in the one message they
-                        // have to debug from.
-                        let refusal = match identity {
-                            ClaudeIdentity::Stock => {
-                                format!(
-                                    "`{}` exited immediately inside the daemon session",
-                                    engine_cmd.argv[0]
-                                )
-                            }
-                            flagged => format!(
-                                "`{}` exited immediately inside the daemon session ({})",
-                                engine_cmd.argv[0],
-                                flagged.failure_hint()
-                            ),
-                        };
-                        eprintln!(
-                            "omniagent-ade: {refusal} for session {id} in {}; falling back",
-                            req.cwd
-                        );
-                        daemon_refusal = Some(refusal);
-                        // Nothing should be left behind, but a husk here would
-                        // make the *next* rung's `ensure_session` short-circuit
-                        // onto a dead session — the one shape that turns this
-                        // guard into the very bug it prevents.
-                        t.kill_session(daemon_name);
-                        continue;
-                    }
-                    Ok(false) => (
-                        daemon_attach_command(t, daemon_name, &req.cwd, &engine_cmd.env),
-                        Some(daemon_name.to_string()),
-                    ),
-                    Err(e) => {
-                        // Never a hard failure: a broken daemon costs
-                        // persistence, not the session (module docs).
-                        eprintln!(
-                            "omniagent-ade: daemon session setup failed for {id} ({e}); falling \
-                             back to a direct, non-persistent spawn"
-                        );
-                        (engine_cmd.to_command_builder(), None)
-                    }
-                },
-                None => (engine_cmd.to_command_builder(), None),
-            };
-
-            let pair = native_pty_system()
-                .openpty(PtySize {
-                    rows: 24,
-                    cols: 80,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .context("open pty")?;
-            let reader = pair.master.try_clone_reader().context("clone pty reader")?;
-            let writer = pair.master.take_writer().context("take pty writer")?;
-            let spawn_mode = if daemon_session.is_some() {
-                format!("daemon-attach session={daemon_name}")
-            } else {
-                format!("direct-engine binary={}", engine_cmd.argv[0])
-            };
-            let mut child = pair.slave.spawn_command(cmd).with_context(|| {
-                format!(
-                    "spawn engine process (engine={}, cwd={}, mode={spawn_mode})",
-                    req.engine, req.cwd
-                )
-            })?;
-            // Crucial: drop our own handle to the slave side. If we keep it
-            // open, the kernel won't deliver EOF/EIO to the master reader
-            // when the child exits (our fd would still be holding the slave
-            // open), and the reader thread would never terminate / reap
-            // naturally.
-            drop(pair.slave);
-
-            let activity = Arc::new(SessionActivity::new(
-                req.engine.clone(),
-                daemon_session.clone(),
-                self.on_status.is_some(),
-            ));
-            let reader_thread = spawn_reader_thread(
-                id.to_string(),
-                reader,
-                transcript_path(&self.data_dir, id),
-                lifecycle_path(&self.data_dir, id),
-                self.sink.clone(),
-                Arc::clone(&self.sessions),
-                self.on_end.clone(),
-                self.on_attention.clone(),
-                req.project.clone(),
-                req.cwd.clone(),
-                req.engine.clone(),
-                Arc::clone(&activity),
-            );
-
-            // With the daemon the PTY child is always the daemon-backed attach
-            // client; probe it on every rung (including the last) so an
-            // immediately dead attach can degrade to the direct-spawn fallback
-            // instead of becoming a black pane. Without the daemon, only
-            // identity rungs that still have a fallback beneath them are probed.
-            let probe = startup_probe_window(rung, last_rung, identity, daemon_session.is_some());
-            if matches!(probe, Some(window) if !child_survives_startup(&mut child, window)) {
-                if daemon_session.is_some() {
-                    eprintln!(
-                        "omniagent-ade: daemon attach exited immediately for session {id} in {}; \
-                         falling back",
-                        req.cwd
-                    );
-                } else {
-                    eprintln!(
-                        "omniagent-ade: `claude {}` exited immediately for session {id} in {} \
-                         ({}); falling back",
-                        identity.describe_flags(),
-                        req.cwd,
-                        identity.failure_hint(),
-                    );
-                }
-                // Tear the failed attempt down exactly the way `kill()`
-                // does, minus the parts that assume a registered session:
-                // the reader thread's own EOF path finds no entry in the
-                // registry (nothing was inserted yet) and returns quietly,
-                // so no `end` lifecycle event and no end hook fire for an
-                // attempt that never became a session.
-                let _ = child.wait();
-                drop(writer);
-                drop(pair.master);
-                let _ = reader_thread.join();
-                continue;
+    fn ensure_attached(&self, id: &str) -> Result<()> {
+        let (daemon_name, activity, output, killing, project, cwd, engine) = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let handle = sessions
+                .get_mut(id)
+                .ok_or_else(|| anyhow!("no such session: {id}"))?;
+            if handle.attached {
+                return Ok(());
             }
-
-            // This attempt is live: responsibility for the temp config file
-            // passes to `create`'s own guard, and from there to the
-            // `SessionHandle`.
-            mcp_cleanup_guard.disarm();
-            return Ok(Spawned {
-                master: pair.master,
-                writer,
-                child,
-                reader_thread,
-                activity,
-                mcp_config_path: engine_cmd.mcp_config_path,
-                daemon_session,
-            });
-        }
-        // Every rung's daemon pane died before it rendered anything (the only
-        // way to fall out of that loop — without the daemon the last rung is
-        // unprobed and always returns). Attaching would hand over a black
-        // rectangle, so don't: run the engine directly, behind an explanation.
-        self.spawn_with_notice(req, id, daemon_refusal)
-    }
-
-    /// Last resort, and the reason a user can no longer end up looking at a
-    /// black pane with no signal: every daemon attempt's engine died at
-    /// startup, so the engine is spawned **directly into the PTY** — no
-    /// daemon, no persistence — behind a printed line saying so.
-    ///
-    /// Two outcomes, both strictly better than silence:
-    /// - the direct spawn works (the daemon itself was the problem — a wedged
-    ///   server, a socket the app can't write) and the user gets a working,
-    ///   merely non-persistent session plus a note explaining the downgrade;
-    /// - it fails too (the engine really isn't installed, or is broken) and
-    ///   the engine's *own* error — `claude: command not found`, a dylib
-    ///   complaint, whatever it actually is — lands in the pane and in the
-    ///   transcript, where the user and a later bug report can both read it.
-    ///
-    /// The notice is printed by a `/bin/sh` wrapper rather than pushed through
-    /// [`OutputSink`] because the frontend only subscribes to
-    /// `session-output:<id>` *after* `create` returns it an id — anything
-    /// emitted during `create` would be written to nobody. Coming from the
-    /// child, it is ordinary PTY output: it reaches the terminal whenever the
-    /// terminal starts listening and is tee'd into the transcript by the same
-    /// reader thread as everything else.
-    ///
-    /// The wrapper passes the message and the engine argv as **separate argv
-    /// entries** (`sh -c '…' _ <notice> <program> <args…>`), so nothing is ever
-    /// interpolated into a shell string — a briefing full of quotes, `$(…)`
-    /// and newlines rides through untouched, exactly as it does under the daemon.
-    fn spawn_with_notice(
-        &self,
-        req: &CreateSessionRequest,
-        id: &str,
-        reason: Option<String>,
-    ) -> Result<Spawned> {
-        let engine_cmd = build_engine_command(req, &self.data_dir, id, ClaudeIdentity::Stock)?;
-        let mut mcp_cleanup_guard = McpConfigCleanupGuard::new(engine_cmd.mcp_config_path.clone());
-
-        let reason =
-            reason.unwrap_or_else(|| "the engine did not start inside the daemon".to_string());
-        let notice = format!(
-            "\r\n\x1b[33mOmniAgent:\x1b[0m {reason}.\r\n\
-             \x1b[2mStarting \x1b[0m{}\x1b[2m directly instead — this pane will not survive \
-             quitting the app.\x1b[0m\r\n\r\n",
-            engine_cmd.argv[0]
-        );
-
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
-        // `$0` is the placeholder, `$1` the notice, `"$@"` (after the shift)
-        // the engine and its arguments.
-        cmd.arg("printf '%s' \"$1\"; shift; exec \"$@\"");
-        cmd.arg("omniagent-ade");
-        cmd.arg(&notice);
-        for arg in &engine_cmd.argv {
-            cmd.arg(arg);
-        }
-        cmd.cwd(&engine_cmd.cwd);
-        for (k, v) in &engine_cmd.env {
-            cmd.env(k, v);
-        }
-
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("open pty")?;
-        let reader = pair.master.try_clone_reader().context("clone pty reader")?;
-        let writer = pair.master.take_writer().context("take pty writer")?;
-        let child = pair.slave.spawn_command(cmd).with_context(|| {
-            format!(
-                "spawn engine process (engine={}, cwd={}, mode=direct-notice-wrapper binary={})",
-                req.engine, req.cwd, engine_cmd.argv[0]
+            handle.attached = true;
+            (
+                handle.daemon_session.clone(),
+                Arc::clone(&handle.activity),
+                Arc::clone(&handle.output),
+                Arc::clone(&handle.killing),
+                handle.project.clone(),
+                handle.cwd.clone(),
+                handle.engine.clone(),
             )
-        })?;
-        drop(pair.slave);
-
-        let activity = Arc::new(SessionActivity::new(
-            req.engine.clone(),
-            None,
-            self.on_status.is_some(),
-        ));
-        let reader_thread = spawn_reader_thread(
-            id.to_string(),
-            reader,
-            transcript_path(&self.data_dir, id),
-            lifecycle_path(&self.data_dir, id),
-            self.sink.clone(),
-            Arc::clone(&self.sessions),
-            self.on_end.clone(),
-            self.on_attention.clone(),
-            req.project.clone(),
-            req.cwd.clone(),
-            req.engine.clone(),
-            Arc::clone(&activity),
-        );
-
-        mcp_cleanup_guard.disarm();
-        Ok(Spawned {
-            master: pair.master,
-            writer,
-            child,
-            reader_thread,
-            activity,
-            mcp_config_path: engine_cmd.mcp_config_path,
-            daemon_session: None,
-        })
+        };
+        let daemon = self
+            .daemon_sessions
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow!("PTY daemon is unavailable"))?;
+        let sessions = Arc::downgrade(&self.sessions);
+        let data_dir = self.data_dir.clone();
+        let sink = self.sink.clone();
+        let on_end = self.on_end.clone();
+        let on_attention = self.on_attention.clone();
+        let on_status = self.on_status.clone();
+        let session_id = id.to_string();
+        let callback_daemon = daemon.clone();
+        let callback_daemon_name = daemon_name.clone();
+        let callback_id = session_id.clone();
+        let callback: crate::daemon::DaemonEventSink = Arc::new(move |event| match event {
+            DaemonEvent::Snapshot { bytes, .. } | DaemonEvent::Output { bytes, .. } => {
+                sink(&callback_id, &bytes);
+                activity.mark_output();
+                process_daemon_output(
+                    &callback_id,
+                    &bytes,
+                    &activity,
+                    &output,
+                    on_attention.as_ref(),
+                );
+            }
+            DaemonEvent::Status(status) => {
+                if let Some(status_sink) = &on_status {
+                    let event_engine = status.engine;
+                    let status = protocol_status(status.status);
+                    let changed = activity
+                        .last_status
+                        .lock()
+                        .map(|mut last| {
+                            let changed = *last != Some(status);
+                            *last = Some(status);
+                            changed
+                        })
+                        .unwrap_or(false);
+                    if changed {
+                        status_sink(&SessionStatusEvent::new(
+                            &callback_id,
+                            status,
+                            &event_engine,
+                        ));
+                    }
+                }
+            }
+            DaemonEvent::Attention { .. } => {
+                activity.attention.store(true, Ordering::Relaxed);
+                if let Some(attention_sink) = &on_attention {
+                    attention_sink(&callback_id);
+                }
+            }
+            DaemonEvent::ResyncRequired { .. } => {
+                let _ = callback_daemon.reattach_session(&callback_daemon_name, None);
+            }
+            DaemonEvent::Exited { exit_code, .. } => finish_session(
+                &sessions,
+                &data_dir,
+                &callback_id,
+                exit_code,
+                killing.load(Ordering::Relaxed),
+                on_end.as_ref(),
+                &project,
+                &cwd,
+                &engine,
+            ),
+        });
+        if let Err(error) = daemon.attach_session(&daemon_name, None, callback) {
+            if let Some(handle) = self.sessions.lock().unwrap().get_mut(id) {
+                handle.attached = false;
+            }
+            return Err(anyhow!(error));
+        }
+        Ok(())
     }
 
     /// Writes raw bytes to a session's PTY (keystrokes, pasted text, etc).
@@ -1628,128 +1370,86 @@ impl SessionManager {
     /// second, so a premature clear self-corrects within ~a second rather
     /// than sticking.
     pub fn write(&self, id: &str, data: &str) -> Result<()> {
-        let mut sessions = self.sessions.lock().unwrap();
-        let handle = sessions
-            .get_mut(id)
-            .ok_or_else(|| anyhow!("no such session: {id}"))?;
-        // Pointer traffic (mouse tracking, focus events) reaches the pty but
-        // is not "the user typed" — hovering a pane must neither arm the
-        // typing grace nor clear an attention latch. See `is_pointer_report`.
+        self.ensure_attached(id)?;
+        let (daemon_name, activity) = {
+            let sessions = self.sessions.lock().unwrap();
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| anyhow!("no such session: {id}"))?;
+            (handle.daemon_session.clone(), Arc::clone(&handle.activity))
+        };
         if !is_pointer_report(data) {
-            handle.activity.mark_user_input();
+            activity.mark_user_input();
         }
-        handle.writer.write_all(data.as_bytes())?;
-        handle.writer.flush()?;
-        Ok(())
+        self.daemon_sessions
+            .as_ref()
+            .ok_or_else(|| anyhow!("PTY daemon is unavailable"))?
+            .send_input(&daemon_name, data.as_bytes())
+            .map_err(|error| anyhow!(error))
     }
 
     /// Resizes the PTY (call on terminal-pane resize / fit-addon changes).
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
-        let sessions = self.sessions.lock().unwrap();
-        let handle = sessions
+        self.ensure_attached(id)?;
+        let daemon_name = self
+            .sessions
+            .lock()
+            .unwrap()
             .get(id)
-            .ok_or_else(|| anyhow!("no such session: {id}"))?;
-        if let (Some(t), Some(name)) = (&self.daemon_sessions, &handle.daemon_session) {
-            let _ = t.resize_session(name, cols, rows);
-        }
-        handle
-            .master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("resize pty")?;
-        Ok(())
+            .ok_or_else(|| anyhow!("no such session: {id}"))?
+            .daemon_session
+            .clone();
+        self.daemon_sessions
+            .as_ref()
+            .ok_or_else(|| anyhow!("PTY daemon is unavailable"))?
+            .resize(&daemon_name, cols, rows)
+            .map_err(|error| anyhow!(error))
     }
 
-    /// Kills a session's process and synchronously reaps it (no zombies).
-    /// `Child::kill` (portable-pty) sends SIGHUP with a short grace period
-    /// before escalating to SIGKILL on unix; we always follow up with an
-    /// explicit `wait()` so the process is fully reaped by the time this
-    /// returns, even on the SIGKILL path where `kill()` alone doesn't wait.
-    /// (If `kill()` already reaped during its own grace-period polling, the
-    /// second `wait()` harmlessly errors with ECHILD — ignored.)
+    /// Kills the daemon-owned session. The daemon flushes the transcript and
+    /// reaps its child before acknowledging the request.
     pub fn kill(&self, id: &str) -> Result<()> {
-        let mut handle = {
-            let mut sessions = self.sessions.lock().unwrap();
-            sessions
-                .remove(id)
-                .ok_or_else(|| anyhow!("no such session: {id}"))?
+        let (daemon_name, killing, project, cwd, engine) = {
+            let sessions = self.sessions.lock().unwrap();
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| anyhow!("no such session: {id}"))?;
+            (
+                handle.daemon_session.clone(),
+                Arc::clone(&handle.killing),
+                handle.project.clone(),
+                handle.cwd.clone(),
+                handle.engine.clone(),
+            )
         };
-
-        // Bruno, 2026-07-26: "If the user closes the terminal, the session
-        // can be deleted." Destroy the backing daemon session first, so the
-        // engine inside it dies too.
-        if let (Some(t), Some(name)) = (&self.daemon_sessions, &handle.daemon_session) {
-            if !t.kill_session(name) {
-                // Already gone (the engine exited on its own) is harmless.
-                eprintln!(
-                    "omniagent-ade: daemon kill-session for {name} reported no such session \
-                     (it had most likely already ended on its own)"
-                );
-            }
-        }
-
-        let _ = handle.child.kill();
-        let status = handle.child.wait();
-
-        cleanup_mcp_config(&handle.mcp_config_path);
-
-        let _ = append_lifecycle_event(
-            &lifecycle_path(&self.data_dir, id),
-            &LifecycleEvent::End {
-                ts: now_ts(),
-                exit_code: status.as_ref().ok().map(|s| s.exit_code()),
-                signal: status
-                    .as_ref()
-                    .ok()
-                    .and_then(|s| s.signal().map(|s| s.to_string())),
-                killed: true,
-            },
+        killing.store(true, Ordering::Relaxed);
+        self.daemon_sessions
+            .as_ref()
+            .ok_or_else(|| anyhow!("PTY daemon is unavailable"))?
+            .kill(&daemon_name)
+            .map_err(|error| anyhow!(error))?;
+        finish_session(
+            &Arc::downgrade(&self.sessions),
+            &self.data_dir,
+            id,
+            None,
+            true,
+            self.on_end.as_ref(),
+            &project,
+            &cwd,
+            &engine,
         );
-
-        // Explicitly close our master/writer fds so the reader thread's
-        // blocked `read()` unblocks with EOF/EIO right away (it's already
-        // unblocking on its own now that the child is reaped, but do this
-        // for determinism), then join it: this guarantees any transcript
-        // content still sitting in its line-buffer gets redacted + flushed
-        // to disk before `kill()` returns, rather than racing a detached
-        // thread against our caller's own next move (e.g. reading the
-        // transcript file, or the whole process exiting).
-        drop(handle.writer);
-        drop(handle.master);
-        let _ = handle.reader_thread.join();
-
-        // Phase 7 feedback loop: fire only after the join above, so the
-        // hook (which reads the transcript file's tail) always sees the
-        // final flush, never a partial line still sitting in the reader
-        // thread's buffer.
-        if let Some(hook) = &self.on_end {
-            hook(&SessionEndEvent {
-                id: id.to_string(),
-                project: handle.project,
-                cwd: handle.cwd,
-                engine: handle.engine,
-                transcript_path: transcript_path(&self.data_dir, id),
-            });
-        }
-
         Ok(())
     }
 
-    /// OS pid of a live session's child process. Not part of the frozen
-    /// Tauri-command contract — used by tests to verify reaping, and
-    /// earmarked for the DESIGN 3.1 machine-pressure badge (CPU/RAM per
-    /// session) later.
-    ///
-    /// Note that under tmux this is the pid of the `tmux attach-session`
-    /// *client*, not of the engine — the engine is a child of the tmux
-    /// server, which is exactly what makes it outlive this process.
+    /// The Tauri adapter never owns a child process, so it has no PID.
     pub fn pid(&self, id: &str) -> Option<u32> {
-        let sessions = self.sessions.lock().unwrap();
-        sessions.get(id)?.child.process_id()
+        self.sessions
+            .lock()
+            .unwrap()
+            .contains_key(id)
+            .then_some(())?;
+        None
     }
 
     /// The traffic light for one session, computed fresh right now — the
@@ -1770,8 +1470,7 @@ impl SessionManager {
             let sessions = self.sessions.lock().unwrap();
             Arc::clone(&sessions.get(id)?.activity)
         };
-        // Computed with the registry lock released: it may shell out to the daemon.
-        let status = compute_status(&activity, self.daemon_sessions.as_ref(), Instant::now());
+        let status = compute_status(&activity, None, Instant::now());
         if let Ok(mut last) = activity.last_status.lock() {
             *last = Some(status);
         }
@@ -1811,7 +1510,17 @@ impl SessionManager {
                     event.status,
                     SessionStatus::Thinking | SessionStatus::ToolExecution
                 ) {
-                    if self.write(&id, "\x03").is_ok() {
+                    let daemon_name = self
+                        .sessions
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .map(|handle| handle.daemon_session.clone());
+                    if daemon_name.is_some_and(|name| {
+                        self.daemon_sessions
+                            .as_ref()
+                            .is_some_and(|daemon| daemon.send_interrupt(&name).is_ok())
+                    }) {
                         count += 1;
                     }
                 }
@@ -1821,15 +1530,109 @@ impl SessionManager {
     }
 
     pub fn pty_daemon_status(&self) -> (bool, bool, String, usize) {
-        let available = self.daemon_sessions.is_some();
-        let running = self.pty_daemon.is_alive();
-        let sessions = self.pty_daemon.list_sessions().unwrap_or_default();
+        let Some(daemon) = &self.daemon_sessions else {
+            return (false, false, String::new(), 0);
+        };
         (
-            available,
-            running,
-            self.pty_daemon.socket_path().display().to_string(),
-            sessions.len(),
+            true,
+            daemon.is_alive(),
+            daemon.socket_path().display().to_string(),
+            daemon.list_sessions().len(),
         )
+    }
+}
+
+fn process_daemon_output(
+    id: &str,
+    bytes: &[u8],
+    activity: &SessionActivity,
+    output: &Mutex<SessionOutputProcessor>,
+    on_attention: Option<&AttentionSink>,
+) {
+    let Ok(mut output) = output.lock() else {
+        return;
+    };
+    let decoded = output.decoder.decode(bytes);
+    if on_attention.is_none() && !activity.status_tracking {
+        return;
+    }
+
+    let now = Instant::now();
+    if activity.clear_marker_window.swap(false, Ordering::Relaxed) {
+        output.marker_window.clear();
+        output.last_user_input = Some(now);
+    }
+    output.marker_window.push_str(&decoded);
+    trim_to_last_n_bytes(&mut output.marker_window, ATTENTION_WINDOW_BYTES);
+    let just_responded = output
+        .last_user_input
+        .is_some_and(|time| now.duration_since(time) < ATTENTION_INPUT_GRACE);
+    if contains_error_marker(&output.marker_window) && !just_responded {
+        activity.error.store(true, Ordering::Relaxed);
+    }
+    if contains_attention_marker(&output.marker_window) {
+        if !just_responded {
+            activity.attention.store(true, Ordering::Relaxed);
+        }
+        if output.attention_debouncer.should_fire(now) {
+            if let Some(attention) = on_attention {
+                attention(id);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_session(
+    sessions: &Weak<Mutex<HashMap<String, SessionHandle>>>,
+    data_dir: &Path,
+    id: &str,
+    exit_code: Option<u32>,
+    killed: bool,
+    on_end: Option<&SessionEndHook>,
+    _project: &str,
+    _cwd: &str,
+    _engine: &str,
+) {
+    let Some(sessions) = sessions.upgrade() else {
+        return;
+    };
+    let handle = sessions.lock().unwrap().remove(id);
+    let Some(handle) = handle else {
+        return;
+    };
+    cleanup_mcp_config(&handle.mcp_config_path);
+    let _ = append_lifecycle_event(
+        &lifecycle_path(data_dir, id),
+        &LifecycleEvent::End {
+            ts: now_ts(),
+            exit_code,
+            signal: None,
+            killed,
+        },
+    );
+    if let Some(hook) = on_end {
+        hook(&SessionEndEvent {
+            id: id.to_string(),
+            project: handle.project,
+            cwd: handle.cwd,
+            engine: handle.engine,
+            transcript_path: transcript_path(data_dir, id),
+        });
+    }
+}
+
+fn protocol_status(status: omniagent_pty_daemon::protocol::SessionStatus) -> SessionStatus {
+    match status {
+        omniagent_pty_daemon::protocol::SessionStatus::Ready => SessionStatus::Ready,
+        omniagent_pty_daemon::protocol::SessionStatus::Thinking => SessionStatus::Thinking,
+        omniagent_pty_daemon::protocol::SessionStatus::ToolExecution => {
+            SessionStatus::ToolExecution
+        }
+        omniagent_pty_daemon::protocol::SessionStatus::AwaitingApproval => {
+            SessionStatus::AwaitingApproval
+        }
+        omniagent_pty_daemon::protocol::SessionStatus::Error => SessionStatus::Error,
     }
 }
 
@@ -1896,10 +1699,9 @@ static DAEMON_SESSIONS: OnceLock<Option<DaemonSessions>> = OnceLock::new();
 /// bug [`resolve_shell_path`] exists for), pinned to this app's private
 /// socket, and pointed at this app's own config file.
 ///
-/// `None` means the daemon isn't available, which every caller treats as
-/// "spawn engines directly" rather than as an error. `lib.rs` calls this once
-/// at boot; `SessionManager::new` does *not* call it implicitly, so a plain
-/// manager (every existing test) keeps its exact previous behavior.
+/// `None` means the daemon binary could not be resolved. Session creation then
+/// returns an availability error; the app never falls back to owning a PTY or
+/// engine process itself.
 pub fn default_daemon_sessions(data_dir: &Path) -> Option<DaemonSessions> {
     cached_or_init(&DAEMON_SESSIONS, || {
         let resolved = DaemonSessions::resolve(daemon::DEFAULT_SOCKET, cached_shell_path())?;
@@ -1909,19 +1711,6 @@ pub fn default_daemon_sessions(data_dir: &Path) -> Option<DaemonSessions> {
         })
     })
     .clone()
-}
-
-/// The result of [`SessionManager::spawn_session_process`]: a live PTY and
-/// the process on the other end of it, plus the two things `create` needs to
-/// record about how it got there.
-struct Spawned {
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
-    reader_thread: thread::JoinHandle<()>,
-    activity: Arc<SessionActivity>,
-    mcp_config_path: Option<PathBuf>,
-    daemon_session: Option<String>,
 }
 
 /// How long a `--resume <uuid>` spawn is watched before it's declared healthy.
@@ -1934,6 +1723,7 @@ struct Spawned {
 /// comfortably past it without being an eternity on the one path that pays
 /// it (a *restore* whose tmux session is gone; the ordinary restore attaches
 /// and is never probed).
+#[cfg(test)]
 const RESUME_LIVENESS_WINDOW: Duration = Duration::from_millis(2500);
 
 /// How long a `--session-id <uuid>` spawn is watched before it's declared
@@ -1950,16 +1740,19 @@ const RESUME_LIVENESS_WINDOW: Duration = Duration::from_millis(2500);
 /// old one), but "cannot realistically" is not "cannot", and the cost of
 /// being wrong is a dead terminal. Half a second on tab creation buys the
 /// guarantee that there is always a working Claude behind the pane.
+#[cfg(test)]
 const SESSION_ID_LIVENESS_WINDOW: Duration = Duration::from_millis(500);
 
 /// Poll granularity for [`child_survives_startup`]. Fine enough that a
 /// failure is detected (and the retry started) within a blink of the process
 /// actually dying.
+#[cfg(test)]
 const CONTINUE_LIVENESS_POLL: Duration = Duration::from_millis(50);
 
 /// `true` if `child` was still running at the end of `window` — i.e. it
 /// didn't immediately refuse to start. Returns as soon as the child exits,
 /// so the failure path is fast; only the healthy path waits out the window.
+#[cfg(test)]
 fn child_survives_startup(child: &mut Box<dyn Child + Send + Sync>, window: Duration) -> bool {
     let deadline = Instant::now() + window;
     while Instant::now() < deadline {
@@ -1989,12 +1782,14 @@ fn child_survives_startup(child: &mut Box<dyn Child + Send + Sync>, window: Dura
 /// [`ClaudeIdentity::liveness_window`] sizes. A session that already existed
 /// is never watched at all: its engine has been running since before the app
 /// restarted, so there is nothing to start.
+#[cfg(test)]
 const DAEMON_PANE_STARTUP_WINDOW: Duration = Duration::from_millis(300);
 
 /// Poll granularity for [`daemon_session_survives_startup`]. Each poll is a
 /// real daemon has-session request (single-digit milliseconds against a local
 /// unix socket), so this trades a handful of cheap calls for detecting a dead
 /// pane almost the instant it dies.
+#[cfg(test)]
 const DAEMON_PANE_STARTUP_POLL: Duration = Duration::from_millis(25);
 
 /// Chooses whether (and for how long) a spawn attempt should be startup-probed.
@@ -2006,6 +1801,7 @@ const DAEMON_PANE_STARTUP_POLL: Duration = Duration::from_millis(25);
 ///
 /// Without the daemon, probes are only for non-final identity rungs where
 /// there is a lower fallback to try.
+#[cfg(test)]
 fn startup_probe_window(
     rung: usize,
     last_rung: usize,
@@ -2032,6 +1828,7 @@ fn startup_probe_window(
 /// client attaches leaves the client reporting `no sessions` rather than
 /// the engine reporting anything. Asking the daemon directly is both earlier
 /// and unambiguous.
+#[cfg(test)]
 fn daemon_session_survives_startup(t: &DaemonSessions, name: &str, window: Duration) -> bool {
     let deadline = Instant::now() + window;
     loop {
@@ -2180,6 +1977,7 @@ impl ClaudeIdentity {
     /// chosen id, so `--resume <U>` finds nothing; the `--session-id <U>`
     /// retry starts a fresh conversation *under the right id*, and from that
     /// point on the pane restores its own history like any other.
+    #[cfg(test)]
     fn ladder(self) -> Vec<Self> {
         match self {
             Self::Resume => vec![Self::Resume, Self::Claim, Self::Stock],
@@ -2203,6 +2001,7 @@ impl ClaudeIdentity {
     /// How long a spawn carrying this identity is watched before it counts as
     /// healthy — see the two window constants for the measurements behind the
     /// numbers.
+    #[cfg(test)]
     fn liveness_window(self) -> Duration {
         match self {
             Self::Resume => RESUME_LIVENESS_WINDOW,
@@ -2213,33 +2012,9 @@ impl ClaudeIdentity {
             Self::Stock => Duration::ZERO,
         }
     }
-
-    /// The flags as they appear on the command line — for log messages only.
-    fn describe_flags(self) -> &'static str {
-        match self {
-            Self::Claim => "--session-id <uuid>",
-            Self::Resume => "--resume <uuid>",
-            Self::Stock => "(no identity flag)",
-        }
-    }
-
-    /// The measured reason a spawn with this identity refuses to start — for
-    /// log messages only, so a user reading the console sees the actual
-    /// Claude-side cause rather than a generic "it died".
-    fn failure_hint(self) -> &'static str {
-        match self {
-            Self::Claim => "that conversation id is already in use",
-            Self::Resume => "no conversation exists under this pane's id yet",
-            Self::Stock => "stock claude refused to start",
-        }
-    }
 }
 
-/// An engine invocation, resolved but not yet materialized — the shape both
-/// spawn paths need. `build_command` turns it into a `CommandBuilder` for a
-/// direct PTY spawn; `Tmux::ensure_session` consumes `argv`/`env`/`cwd`
-/// directly, because tmux takes the program and its arguments as separate
-/// argv entries (never a shell string — see the tmux module docs).
+/// An engine invocation resolved for daemon-side creation.
 struct EngineCommand {
     argv: Vec<String>,
     env: Vec<(String, String)>,
@@ -2262,6 +2037,7 @@ impl EngineCommand {
         }
     }
 
+    #[cfg(test)]
     fn to_command_builder(&self) -> CommandBuilder {
         let mut cmd = CommandBuilder::new(&self.argv[0]);
         for arg in &self.argv[1..] {
@@ -2517,28 +2293,6 @@ fn utf8_locale_override(
 /// none. `en_US.UTF-8` is present on every macOS install (`locale -a`), so
 /// this can't fail the way a `de_DE.UTF-8`-style guess could.
 const UTF8_LOCALE: &str = "en_US.UTF-8";
-
-/// The PTY child that attaches to a daemon session. Gets the same
-/// `PATH`/`TERM`/`COLORTERM` as an engine would: `TERM` in particular matters
-/// here because it's the *client's* terminal type, which decides whether
-/// 24-bit color can pass through.
-fn daemon_attach_command(
-    t: &DaemonSessions,
-    daemon_name: &str,
-    cwd: &str,
-    env: &[(String, String)],
-) -> CommandBuilder {
-    let argv = t.attach_argv(daemon_name);
-    let mut cmd = CommandBuilder::new(&argv[0]);
-    for arg in &argv[1..] {
-        cmd.arg(arg);
-    }
-    cmd.cwd(cwd);
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    cmd
-}
 
 /// How long [`spawn_and_capture_path`] will wait for the login-shell
 /// `PATH`-resolution subprocess before giving up and treating it as a
@@ -2833,234 +2587,6 @@ fn append_lifecycle_event(path: &Path, event: &LifecycleEvent) -> Result<()> {
     Ok(())
 }
 
-/// Spawns the background thread that drains a session's PTY: forwards every
-/// raw chunk to `sink` immediately (live terminal feed), and separately
-/// line-buffers + redacts + appends to the transcript file. Line-buffering
-/// the transcript (instead of redacting each raw chunk independently) means
-/// a secret whose bytes happen to land in two different `read()` calls
-/// still gets redacted, as long as it doesn't span a newline.
-///
-/// On EOF, best-effort reaps the child *only if* the session is still in
-/// the registry (i.e. nobody has already called `SessionManager::kill`,
-/// which removes it and reaps synchronously itself) — this covers natural
-/// exits (e.g. the user typing `exit` in a shell session) so those don't
-/// leave zombies either. Also fires the Phase 7 `on_end` hook (if any) on
-/// that same natural-exit path — `SessionManager::kill` fires it itself for
-/// the explicit-kill path, so between the two, every session end is
-/// covered exactly once.
-///
-/// Also runs the founder-feedback attention detection (module docs'
-/// "Attention detection" section) when `on_attention` is `Some` and
-/// `on_attention` is `Some` — scanning every chunk against a small rolling
-/// window (`ATTENTION_MARKERS`) and firing through it, debounced per session
-/// by `AttentionDebouncer`. Skipped entirely (not just a no-op check) when
-/// no sink was registered, so this adds zero work to the common test/
-/// manual-example path that doesn't care. Not hard-gated to `engine ==
-/// "claude"` even though `ATTENTION_MARKERS` is Claude-Code-specific UI
-/// copy: in practice only a `claude` session's own TUI would ever produce
-/// it, and gating on the engine string would make this untestable through a
-/// real PTY without spawning an actual `claude` process (network calls, a
-/// live API key, and an interactive trust/permission dance an automated
-/// test can't drive) — `attention_marker_burst_fires_exactly_one_debounced_
-/// event` in `tests/session_test.rs` instead proves the wiring the same
-/// dependency-free way the existing redaction test does, with a `shell`
-/// session `echo`ing the marker text.
-#[allow(clippy::too_many_arguments)]
-fn spawn_reader_thread(
-    id: String,
-    mut reader: Box<dyn Read + Send>,
-    transcript_path: PathBuf,
-    lifecycle_path: PathBuf,
-    sink: OutputSink,
-    sessions: Arc<Mutex<HashMap<String, SessionHandle>>>,
-    on_end: Option<SessionEndHook>,
-    on_attention: Option<AttentionSink>,
-    project: String,
-    cwd: String,
-    engine: String,
-    activity: Arc<SessionActivity>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let mut transcript_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&transcript_path)
-            .ok();
-
-        let mut pending = String::new();
-        let mut buf = [0u8; 8192];
-        // Decodes chunks for the transcript/attention paths only (see its
-        // doc comment) — buffers an incomplete trailing multi-byte
-        // sequence across reads instead of lossy-converting each raw
-        // chunk independently, which would otherwise corrupt any
-        // multi-byte character split across two `read()`s. The raw
-        // `chunk` handed to `sink` below is untouched by this.
-        let mut utf8_decoder = Utf8ChunkDecoder::new();
-
-        // Attention detection runs when *either* consumer wants it: the
-        // notification sink, or the traffic light (which latches red off the
-        // raw match — see this function's doc comment and the module docs for
-        // why it deliberately doesn't reuse the debounced event).
-        let watch_for_markers = on_attention.is_some() || activity.status_tracking;
-        let mut marker_window = String::new();
-        let mut attention_debouncer = AttentionDebouncer::new(ATTENTION_COOLDOWN);
-        // When this thread last observed a `SessionManager::write` (i.e. the
-        // user responding) — the anchor for `ATTENTION_INPUT_GRACE`.
-        let mut last_user_input: Option<Instant> = None;
-
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let chunk = &buf[..n];
-                    sink(&id, chunk);
-
-                    // The traffic light's liveness signal: any byte out of
-                    // the PTY means something is happening in there. One
-                    // uncontended mutex per read, and deliberately *not* the
-                    // registry lock (see `SessionActivity`'s doc comment).
-                    activity.mark_output();
-
-                    // Decoded once per chunk and reused for both
-                    // consumers below — they observe the identical raw
-                    // byte stream, so a character split across two reads
-                    // must reassemble identically for each.
-                    let decoded = utf8_decoder.decode(chunk);
-
-                    if watch_for_markers {
-                        let now = Instant::now();
-                        // The user typed since the last chunk: everything
-                        // already in the window predates their response and
-                        // must not re-trigger (see
-                        // `SessionActivity::clear_marker_window`).
-                        if activity.clear_marker_window.swap(false, Ordering::Relaxed) {
-                            marker_window.clear();
-                            last_user_input = Some(now);
-                        }
-                        marker_window.push_str(&decoded);
-                        trim_to_last_n_bytes(&mut marker_window, ATTENTION_WINDOW_BYTES);
-
-                        // Red: a non-zero tool exit the engine just
-                        // reported. Same window, same clearing rule and same
-                        // grace as the approval latch below — see
-                        // `ATTENTION_INPUT_GRACE` for why a longer error-only
-                        // grace was tried and measured to be wrong.
-                        if contains_error_marker(&marker_window) {
-                            let just_responded = last_user_input
-                                .is_some_and(|t| now.duration_since(t) < ATTENTION_INPUT_GRACE);
-                            if !just_responded {
-                                activity.error.store(true, Ordering::Relaxed);
-                            }
-                        }
-
-                        if contains_attention_marker(&marker_window) {
-                            // Grace window: the first repaint after the user
-                            // responds legitimately still shows the dialog
-                            // they just answered (see
-                            // `ATTENTION_INPUT_GRACE`), so it must not turn
-                            // the light amber again. A prompt that is
-                            // genuinely still pending redraws ~twice a second
-                            // and re-latches as soon as the grace lapses.
-                            let just_responded = last_user_input
-                                .is_some_and(|t| now.duration_since(t) < ATTENTION_INPUT_GRACE);
-                            if !just_responded {
-                                activity.attention.store(true, Ordering::Relaxed);
-                            }
-                            // The *notification* is deliberately not
-                            // grace-gated — it has its own, much longer
-                            // debounce, and suppressing it here would drop
-                            // the badge for a prompt that appears promptly
-                            // after the user's own input.
-                            if attention_debouncer.should_fire(now) {
-                                if let Some(attention_sink) = &on_attention {
-                                    attention_sink(&id);
-                                }
-                            }
-                        }
-                    }
-
-                    pending.push_str(&decoded);
-                    flush_complete_lines(&mut pending, &mut transcript_file);
-                }
-                Err(_) => break,
-            }
-        }
-
-        // EOF: flush any incomplete trailing sequence still held by the
-        // decoder (see `Utf8ChunkDecoder::finish`'s doc comment) before
-        // the final pending flush below, so the last few bytes of a
-        // torn-off character at the very end of the stream aren't
-        // silently lost.
-        pending.push_str(&utf8_decoder.finish());
-
-        if !pending.is_empty() {
-            write_redacted(&mut transcript_file, &pending);
-        }
-
-        // Remove the handle from the registry and let the lock drop
-        // immediately (end of this block) *before* the blocking
-        // `child.wait()` and filesystem cleanup below -- matching
-        // `SessionManager::kill`'s pattern exactly. Holding the registry
-        // lock across those would stall every other session's write/
-        // resize/kill/create for as long as this reap takes.
-        let mut handle = {
-            let mut sessions = sessions.lock().unwrap();
-            match sessions.remove(&id) {
-                Some(h) => h,
-                None => {
-                    // Already removed+reaped by SessionManager::kill; that
-                    // call already wrote its own "end" lifecycle event.
-                    return;
-                }
-            }
-        };
-
-        // Not already handled by an explicit kill: this is a natural
-        // exit. Reap it so it doesn't zombie -- unlocked, same as kill().
-        let status = handle.child.wait();
-
-        // Deliberately NOT killing the tmux session here. This path means
-        // "the PTY child ended without anyone calling kill()", which is
-        // almost always the engine itself exiting (the user typed `exit`) —
-        // in which case tmux already tore the session down. But it also
-        // covers a transient read error on the master side, where the engine
-        // is very much alive and mid-work; destroying its tmux session there
-        // would throw away exactly the state this whole feature exists to
-        // protect. Only an explicit `kill()` (the user closing the tab)
-        // deletes a session. A session left behind this way shows up in
-        // `tmux -L omniagent-ade ls` and is re-attachable by its id (no log
-        // line here: the common case is the engine having exited normally,
-        // which already destroyed the tmux session, so a "left it alive"
-        // message would be wrong far more often than right).
-        cleanup_mcp_config(&handle.mcp_config_path);
-        let exit_code = status.as_ref().ok().map(|s| s.exit_code());
-        let signal = status
-            .as_ref()
-            .ok()
-            .and_then(|s| s.signal().map(String::from));
-
-        let _ = append_lifecycle_event(
-            &lifecycle_path,
-            &LifecycleEvent::End {
-                ts: now_ts(),
-                exit_code,
-                signal,
-                killed: false,
-            },
-        );
-
-        if let Some(hook) = &on_end {
-            hook(&SessionEndEvent {
-                id,
-                project,
-                cwd,
-                engine,
-                transcript_path,
-            });
-        }
-    })
-}
-
 /// Incrementally decodes a stream of raw PTY byte chunks as UTF-8,
 /// buffering any incomplete trailing multi-byte sequence across calls
 /// instead of lossy-converting each raw `read()` result independently.
@@ -3149,6 +2675,7 @@ impl Utf8ChunkDecoder {
     /// held in `carry` are genuinely incomplete (not just "waiting for the
     /// next chunk") and are lossy-replaced rather than silently dropped —
     /// matching `from_utf8_lossy`'s behavior for the same bytes.
+    #[cfg(test)]
     fn finish(&mut self) -> String {
         if self.carry.is_empty() {
             return String::new();
@@ -3159,6 +2686,7 @@ impl Utf8ChunkDecoder {
     }
 }
 
+#[cfg(test)]
 fn flush_complete_lines(pending: &mut String, file: &mut Option<std::fs::File>) {
     if let Some(idx) = pending.rfind('\n') {
         let split_at = idx + 1;
@@ -3167,6 +2695,7 @@ fn flush_complete_lines(pending: &mut String, file: &mut Option<std::fs::File>) 
     }
 }
 
+#[cfg(test)]
 fn write_redacted(file: &mut Option<std::fs::File>, text: &str) {
     if let Some(f) = file {
         let redacted = redact(text);
@@ -3412,6 +2941,7 @@ fn first_value_char_after(text: &str) -> Option<char> {
 /// which is not a lie, just less specific. And like every marker here it is
 /// UI copy: a future Claude Code that reworded it silently degrades this to
 /// `thinking` rather than reporting anything wrong.
+#[cfg(test)]
 const TOOL_EXECUTION_SCREEN_MARKERS: &[&str] = &["to run in background)"];
 
 /// Keeps `s` at most `max_bytes` long by dropping from the front, snapping
@@ -3543,11 +3073,13 @@ const TYPING_ECHO_GRACE: Duration = Duration::from_millis(1000);
 /// Foreground commands that mean "this pane is sitting at a prompt". `-zsh`
 /// / `-bash` are the login-shell argv[0] convention; `login` is what macOS
 /// puts in front of a login shell.
+#[cfg(test)]
 const IDLE_SHELL_COMMANDS: &[&str] = &[
     "zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh", "-zsh", "-bash", "-sh", "-fish",
     "login",
 ];
 
+#[cfg(test)]
 fn is_idle_shell_command(pane_command: &str) -> bool {
     IDLE_SHELL_COMMANDS.contains(&pane_command)
 }
@@ -3612,11 +3144,12 @@ fn is_pointer_report(data: &str) -> bool {
 /// - Anything else in a `claude`/`codex` session → `None`: the engine is
 ///   *always* the pane's foreground command, so this signal carries no
 ///   information and the caller must fall back to output activity. Measured,
-///   not assumed: a real `claude` 2.1.220 pane reports `pane_current_command`
+///   not assumed: a real `claude` 2.1.220 pane reports a stable process title
 ///   = `2.1.220` (the process title Claude Code sets), and it keeps reporting
 ///   that while a Bash tool runs, because Claude spawns tool commands as
 ///   ordinary children without handing them the tty's foreground process
 ///   group.
+#[cfg(test)]
 fn status_from_pane_command(pane_command: &str, engine: &str) -> Option<SessionStatus> {
     if is_idle_shell_command(pane_command) {
         return Some(SessionStatus::Ready);
@@ -3686,14 +3219,15 @@ fn busy_status_for_engine(engine: &str) -> SessionStatus {
 /// when — and only when — its **visible screen** says a tool is running right
 /// now.
 ///
-/// `screen` is `tmux capture-pane -p` output (see [`Tmux::capture_pane`]), and
-/// using screen *state* rather than the PTY *stream* is the whole point: a
+/// `screen` is a legacy captured terminal snapshot. Using screen *state*
+/// rather than the PTY *stream* was the point of this classifier: a
 /// running tool is a state that ends, and a stream-scan latch would leave cyan
 /// stuck on long after the command finished.
 ///
 /// See [`TOOL_EXECUTION_SCREEN_MARKERS`] for what is matched and why that one
 /// string, and the module docs for the far larger set of candidate signals
 /// that were measured and rejected.
+#[cfg(test)]
 fn status_from_screen(screen: &str) -> Option<SessionStatus> {
     TOOL_EXECUTION_SCREEN_MARKERS
         .iter()
@@ -3722,54 +3256,16 @@ fn status_from_screen(screen: &str) -> Option<SessionStatus> {
 /// this existed: one `display-message`.
 fn compute_status(
     activity: &SessionActivity,
-    daemon_sessions: Option<&DaemonSessions>,
+    _daemon_sessions: Option<&DaemonSessions>,
     now: Instant,
 ) -> SessionStatus {
     if activity.attention.load(Ordering::Relaxed) {
         return SessionStatus::AwaitingApproval;
     }
-
-    let daemon_session = match (daemon_sessions, activity.daemon_session.as_deref()) {
-        (Some(t), Some(name)) => Some((t, name)),
-        _ => None,
-    };
-    // Captured lazily, then reused: `resolve_error` and `status_from_screen`
-    // both want the same screen, and it must not be fetched twice (nor at all
-    // when neither asks). `fetched` is separate from `screen.is_some()` so a
-    // capture that legitimately failed isn't retried within one call.
-    let mut screen: Option<String> = None;
-    let mut fetched = false;
-
-    if activity.error.load(Ordering::Relaxed) {
-        if let Some((t, name)) = daemon_session {
-            screen = t.capture_pane(name);
-            fetched = true;
-        }
-        if resolve_error(activity, screen.as_deref()) {
-            return SessionStatus::Error;
-        }
+    if activity.error.load(Ordering::Relaxed) && !activity.error_dismissed.load(Ordering::Relaxed) {
+        return SessionStatus::Error;
     }
-
-    if let Some((t, name)) = daemon_session {
-        if let Some(pane_command) = t.pane_current_command(name) {
-            if let Some(status) = status_from_pane_command(&pane_command, &activity.engine) {
-                return status;
-            }
-        }
-    }
-
-    let status = status_from_output_activity(activity, now);
-    if status == SessionStatus::Thinking {
-        if let Some((t, name)) = daemon_session {
-            if !fetched {
-                screen = t.capture_pane(name);
-            }
-            if let Some(refined) = screen.as_deref().and_then(status_from_screen) {
-                return refined;
-            }
-        }
-    }
-    status
+    status_from_output_activity(activity, now)
 }
 
 /// Decides whether a latched failure should still be shown, given what the
@@ -3790,6 +3286,7 @@ fn compute_status(
 /// With no screen to consult the latch is taken at face value, except that a
 /// dismissal is still honoured — a failure the user has already answered for
 /// must not come back merely because tmux hiccupped.
+#[cfg(test)]
 fn resolve_error(activity: &SessionActivity, screen: Option<&str>) -> bool {
     if let Some(screen) = screen {
         if !contains_error_marker(screen) {
@@ -3817,7 +3314,6 @@ fn resolve_error(activity: &SessionActivity, screen: Option<&str>) -> bool {
 /// the natural-exit path was already fixed for.
 fn spawn_status_poller(
     sessions: Weak<Mutex<HashMap<String, SessionHandle>>>,
-    daemon_sessions: Option<DaemonSessions>,
     sink: StatusSink,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || loop {
@@ -3841,7 +3337,7 @@ fn spawn_status_poller(
 
         let now = Instant::now();
         for (id, activity) in snapshot {
-            let status = compute_status(&activity, daemon_sessions.as_ref(), now);
+            let status = compute_status(&activity, None, now);
             let changed = match activity.last_status.lock() {
                 Ok(mut last) => {
                     let changed = *last != Some(status);
@@ -4572,176 +4068,8 @@ mod tests {
         assert_eq!(trailing, "\u{FFFD}");
     }
 
-    fn shell_request(cwd: &Path) -> CreateSessionRequest {
-        CreateSessionRequest {
-            project: "demo".to_string(),
-            engine: "shell".to_string(),
-            cwd: cwd.to_string_lossy().into_owned(),
-            briefing: None,
-            restore_id: None,
-        }
-    }
-
     fn silent_sink() -> OutputSink {
         Arc::new(|_id: &str, _chunk: &[u8]| {})
-    }
-
-    /// Test double for `portable_pty::Child` whose `wait()` sleeps for a
-    /// controlled, precise duration before returning — the only reliable
-    /// way to get a *deterministic*, measurable slow reap in a test: this
-    /// crate's real PTY implementation ties master-side EOF to the actual
-    /// termination of the child process on this OS (verified empirically:
-    /// closing a shell's own stdin/stdout/stderr via `exec ... </dev/null
-    /// >/dev/null 2>/dev/null` does *not* make the master see EOF any
-    /// earlier than the process's real exit), so there is no shell-level
-    /// trick that widens the gap between "EOF observed" and "wait()
-    /// returns" enough to measure. A fake `Child` sidesteps that entirely.
-    struct SlowWaitChild {
-        wait_delay: Duration,
-    }
-
-    impl std::fmt::Debug for SlowWaitChild {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("SlowWaitChild").finish()
-        }
-    }
-
-    impl portable_pty::ChildKiller for SlowWaitChild {
-        fn kill(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
-            Box::new(SlowWaitChild {
-                wait_delay: self.wait_delay,
-            })
-        }
-    }
-
-    impl Child for SlowWaitChild {
-        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
-            Ok(None)
-        }
-        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
-            thread::sleep(self.wait_delay);
-            Ok(portable_pty::ExitStatus::with_exit_code(0))
-        }
-        fn process_id(&self) -> Option<u32> {
-            None
-        }
-        #[cfg(windows)]
-        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
-            None
-        }
-    }
-
-    /// Bug: the natural-exit reader-thread path (the `sessions.remove(&id)`
-    /// branch at the end of `spawn_reader_thread`) used to hold the global
-    /// registry lock across the blocking `child.wait()` and
-    /// `cleanup_mcp_config` filesystem call, stalling every other open
-    /// session's write/resize/kill/create for as long as that reap took —
-    /// even though `SessionManager::kill` already got this right (release
-    /// the lock immediately after removing the handle, then
-    /// `wait()`/cleanup unlocked).
-    ///
-    /// Session A is hand-assembled with a real PTY master (so its reader
-    /// thread observes a genuine EOF, exactly like production) but a fake
-    /// `Child` ([`SlowWaitChild`]) whose `wait()` deliberately sleeps for
-    /// 1.5s — giving a precise, deterministic window during which the
-    /// natural-exit path is genuinely reaping. Session B is a real, live
-    /// shell session; its `write`/`resize` (which briefly take the very
-    /// same registry lock A's cleanup does) must return promptly the whole
-    /// time, proving the lock isn't held across A's slow `wait()`.
-    #[test]
-    fn natural_exit_cleanup_does_not_block_other_sessions_write_and_resize() {
-        let tmp = tempfile::tempdir().unwrap();
-        let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink());
-
-        let b = manager.create(shell_request(tmp.path())).unwrap();
-
-        // Assemble session A by hand: a real pty pair's master (so its
-        // reader thread behaves exactly like a real session) with nothing
-        // ever spawned into the slave side, plus the fake slow-waiting
-        // child above.
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap();
-        let reader = pair.master.try_clone_reader().unwrap();
-        let writer = pair.master.take_writer().unwrap();
-
-        let a_id = "sess-test-natural-exit-lock-scope".to_string();
-        let reader_thread = spawn_reader_thread(
-            a_id.clone(),
-            reader,
-            tmp.path().join("transcripts").join(format!("{a_id}.log")),
-            tmp.path()
-                .join("transcripts")
-                .join(format!("{a_id}.lifecycle.jsonl")),
-            silent_sink(),
-            Arc::clone(&manager.sessions),
-            None,
-            None,
-            "demo".to_string(),
-            tmp.path().to_string_lossy().into_owned(),
-            "shell".to_string(),
-            Arc::new(SessionActivity::new("shell".to_string(), None, false)),
-        );
-        let handle = SessionHandle {
-            master: pair.master,
-            writer,
-            child: Box::new(SlowWaitChild {
-                wait_delay: Duration::from_millis(1500),
-            }),
-            mcp_config_path: None,
-            project: "demo".to_string(),
-            cwd: tmp.path().to_string_lossy().into_owned(),
-            engine: "shell".to_string(),
-            reader_thread,
-            daemon_session: None,
-            activity: Arc::new(SessionActivity::new("shell".to_string(), None, false)),
-        };
-        // Insert A into the registry *before* triggering EOF below — the
-        // reader thread is already running (blocked in `read()`, since the
-        // slave side is still held open by `pair.slave` at this point), so
-        // there's no race with its own `sessions.remove(&a_id)`.
-        manager
-            .sessions
-            .lock()
-            .unwrap()
-            .insert(a_id.clone(), handle);
-
-        // Now close the *only* remaining reference to the slave side
-        // (nothing was ever spawned into it) -- this immediately unblocks
-        // A's reader thread with EOF, kicking off the natural-exit path,
-        // whose `child.wait()` will now sleep for 1.5s inside
-        // `SlowWaitChild`.
-        drop(pair.slave);
-
-        // Give A's reader thread a moment to actually observe the EOF and
-        // enter the natural-exit path (acquiring + releasing the lock to
-        // remove itself) before touching session B.
-        thread::sleep(Duration::from_millis(150));
-
-        let started = Instant::now();
-        manager.write(&b.id, "echo still-alive\n").unwrap();
-        manager.resize(&b.id, 100, 30).unwrap();
-        let elapsed = started.elapsed();
-
-        assert!(
-            elapsed < Duration::from_millis(500),
-            "session B's write/resize must not block on session A's in-flight \
-             natural-exit cleanup (a 1.5s fake wait()), took {elapsed:?}"
-        );
-
-        manager.kill(&b.id).unwrap();
-        // Let A's fake 1.5s wait() finish before the test ends, so its
-        // background reader thread doesn't outlive the test process.
-        thread::sleep(Duration::from_millis(1600));
     }
 
     #[test]
@@ -5083,9 +4411,9 @@ mod tests {
     /// complete its exit until something reads the master, so an undrained
     /// child sits in the kernel's "exiting" state and `try_wait` reports
     /// "still running" indefinitely. Found the hard way — an earlier draft of
-    /// this test (and of `spawn_session_process`) skipped the drain and the
+    /// this test (and of the old local spawn path) skipped the drain and the
     /// first assertion below failed after waiting out the full window. See
-    /// `spawn_session_process`'s doc comment for the full write-up.
+    /// historical local-spawn notes for the full write-up.
     #[test]
     fn child_survives_startup_distinguishes_an_instant_exit_from_a_healthy_process() {
         fn spawn_probe(script: &str) -> (Box<dyn Child + Send + Sync>, thread::JoinHandle<()>) {
@@ -5197,241 +4525,6 @@ mod tests {
         fn drop(&mut self) {
             TEST_SHELL_PATH_OVERRIDE.with(|o| o.set(None));
         }
-    }
-
-    /// Drives one `create` against a [`FakeClaude`] and returns the argv the
-    /// surviving attempt was actually launched with.
-    fn argv_of_surviving_claude(restore_id: Option<&str>, refuse: &[&str]) -> String {
-        let _fake = FakeClaude::refusing(refuse);
-        let tmp = tempfile::tempdir().unwrap();
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
-        let sink: OutputSink = Arc::new(move |_id: &str, chunk: &[u8]| {
-            let _ = tx.send(chunk.to_vec());
-        });
-        // No daemon: precisely the degraded path the identity flags exist for
-        // (module docs, degradation ladder step 3).
-        let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(None);
-
-        let info = manager
-            .create(CreateSessionRequest {
-                project: "demo".into(),
-                engine: "claude".into(),
-                cwd: tmp.path().to_string_lossy().into_owned(),
-                briefing: None,
-                restore_id: restore_id.map(str::to_string),
-            })
-            .expect("a refused identity flag must never fail session creation");
-
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let mut seen = String::new();
-        while Instant::now() < deadline && !seen.contains("FAKE_CLAUDE_ARGV:") {
-            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
-                seen.push_str(&String::from_utf8_lossy(&chunk));
-            }
-        }
-        manager.kill(&info.id).unwrap();
-        assert!(
-            seen.contains("FAKE_CLAUDE_ARGV:"),
-            "create must have left a live engine behind; saw: {seen:?}"
-        );
-        seen
-    }
-
-    /// The happy restore: `--resume <this pane's uuid>` is what actually
-    /// reaches the binary, through the real `create()`.
-    #[test]
-    fn a_restore_launches_claude_against_its_own_conversation_uuid() {
-        let seen = argv_of_surviving_claude(Some("sess-resume-ok"), &[]);
-        assert!(
-            seen.contains(&format!(
-                "--resume {}",
-                claude_conversation_uuid("sess-resume-ok")
-            )),
-            "saw: {seen:?}"
-        );
-    }
-
-    /// **Every session that existed before this fix lands.** Its conversation
-    /// was created without a chosen id, so `--resume <derived uuid>` names
-    /// nothing and claude exits 1. `create` must still hand back one healthy
-    /// session — and it must be one that *claims* the derived id, so this
-    /// pane is addressable from now on instead of being permanently stranded.
-    #[test]
-    fn a_restore_whose_conversation_does_not_exist_adopts_the_derived_id() {
-        let seen = argv_of_surviving_claude(Some("sess-no-such-convo"), &["--resume"]);
-        assert!(
-            seen.contains(&format!(
-                "--session-id {}",
-                claude_conversation_uuid("sess-no-such-convo")
-            )),
-            "the retry must claim this pane's id, not start anonymously; saw: {seen:?}"
-        );
-    }
-
-    /// Bottom of the ladder: both identity flags refused (a corrupt or
-    /// half-written conversation store would do it — `--resume` finds nothing
-    /// usable while `--session-id` still reports the id taken). The pane must
-    /// come back as a plain, working `claude` rather than dying.
-    #[test]
-    fn a_restore_refused_at_every_rung_still_lands_on_a_working_claude() {
-        let seen =
-            argv_of_surviving_claude(Some("sess-both-refused"), &["--resume", "--session-id"]);
-        assert!(
-            !seen.contains("--resume") && !seen.contains("--session-id"),
-            "the last rung must be stock claude; saw: {seen:?}"
-        );
-    }
-
-    /// A brand-new tab whose derived id is somehow already taken (it cannot
-    /// realistically be — see [`SESSION_ID_LIVENESS_WINDOW`] — but a dead
-    /// terminal is not an acceptable way to find out) falls to stock claude.
-    #[test]
-    fn a_new_session_whose_claim_is_refused_falls_back_to_stock_claude() {
-        let seen = argv_of_surviving_claude(None, &["--session-id"]);
-        assert!(
-            !seen.contains("--session-id") && !seen.contains("--resume"),
-            "saw: {seen:?}"
-        );
-    }
-
-    // -- The black-pane regression (founder bug, 2026-07-26) --------------
-    //
-    // Bruno: *"every terminal is a black screen"*. Every transcript in his
-    // data dir contained literally `no sessions\r` and nothing else. See the
-    // module docs' "Why tmux needs an absolute path" section for the measured
-    // root cause; these are the tests that hold it closed.
-
-    /// A private tmux server pinned to macOS's minimal default `PATH` — the
-    /// environment a GUI-launched `.app` runs in, and the condition under
-    /// which every pane went black.
-    ///
-    /// The keep-alive session is what pins it: without it the server exits as
-    /// soon as the session under test dies, and the next `tmux` command
-    /// silently restarts it from this test process's own environment.
-    ///
-    /// One honest limit, stated because it changes what these tests prove.
-    /// The *client* environment is what tmux actually resolves against (see
-    /// the module docs), and the client is this test process, which
-    /// necessarily has a full `PATH` — no test can clear its own environment.
-    /// So these tests don't reproduce production's "binary not found
-    /// anywhere"; they reproduce the same defect one step earlier, and
-    /// arguably more sharply: [`FakeClaude`] is reachable **only** through the
-    /// shell-resolved `PATH` this module overrides, never through any real
-    /// environment, so bare-name resolution provably cannot find it. Against
-    /// the pre-fix code the pane therefore comes up running *the machine's
-    /// real `claude`* instead of the fake — proof that the binary the daemon
-    /// `exec`s is not the binary OmniAgent resolved. Absolute argv fixes both
-    /// symptoms at once, because it removes the resolution step entirely.
-    struct MinimalPathDaemonServer {
-        daemon_sessions: DaemonSessions,
-        _dir: tempfile::TempDir,
-    }
-
-    impl MinimalPathDaemonServer {
-        fn start() -> Self {
-            let dir = tempfile::tempdir().unwrap();
-            let socket = format!(
-                "omniagent-minpath-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            );
-            let config = daemon::write_config(dir.path()).unwrap();
-            let bin = DaemonSessions::resolve(&socket, cached_shell_path())
-                .expect("the pty daemon must be available to run this test")
-                .binary()
-                .to_path_buf();
-
-            Self {
-                daemon_sessions: DaemonSessions::with_binary(bin, &socket).with_config(config),
-                _dir: dir,
-            }
-        }
-    }
-
-    impl Drop for MinimalPathDaemonServer {
-        fn drop(&mut self) {
-            self.daemon_sessions.kill_server();
-        }
-    }
-
-    /// Drives one `create` against a [`FakeClaude`] through a
-    /// [`MinimalPathDaemonServer`] and returns everything the pane emitted.
-    /// The fake `claude` lives in a temp dir that is reachable **only** via
-    /// the shell-resolved `PATH` this module overrides — never via the daemon
-    /// server's own minimal `PATH` — which is exactly the founder's setup
-    /// (`claude` at `~/.local/bin`, added to `PATH` by `~/.zshrc`).
-    fn pane_output_under_a_minimal_path_daemon(restore_id: Option<&str>, refuse: &[&str]) -> String {
-        let _fake = FakeClaude::refusing(refuse);
-        let server = MinimalPathDaemonServer::start();
-        let tmp = tempfile::tempdir().unwrap();
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
-        let sink: OutputSink = Arc::new(move |_id: &str, chunk: &[u8]| {
-            let _ = tx.send(chunk.to_vec());
-        });
-        let manager = SessionManager::new(tmp.path().to_path_buf(), sink)
-            .with_daemon_sessions(Some(server.daemon_sessions.clone()));
-
-        let info = manager
-            .create(CreateSessionRequest {
-                project: "demo".into(),
-                engine: "claude".into(),
-                cwd: tmp.path().to_string_lossy().into_owned(),
-                briefing: None,
-                restore_id: restore_id.map(str::to_string),
-            })
-            .expect("a tmux server with a minimal PATH must never fail session creation");
-
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut seen = String::new();
-        while Instant::now() < deadline && !seen.contains("FAKE_CLAUDE_ARGV:") {
-            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
-                seen.push_str(&String::from_utf8_lossy(&chunk));
-            }
-        }
-        let _ = manager.kill(&info.id);
-        seen
-    }
-
-    /// **The founder bug itself.** tmux resolves a pane's command against the
-    /// asking *client's* environment, not the per-session `-e PATH` — so under
-    /// a GUI-launched app the bare name `claude` was never found, the pane
-    /// died before it rendered a byte, the daemon destroyed the session, and
-    /// the attach that followed printed `no sessions` into a black
-    /// rectangle. The pane must come back alive, running the engine OmniAgent
-    /// actually resolved.
-    #[test]
-    fn a_daemon_server_with_a_gui_apps_minimal_path_still_lands_a_live_engine() {
-        let seen = pane_output_under_a_minimal_path_daemon(Some("sess-minpath-plain"), &[]);
-        assert!(
-            !seen.contains("no sessions"),
-            "the pane attached to a daemon session that no longer existed — this is the \
-             black screen; saw: {seen:?}"
-        );
-        assert!(
-            seen.contains("FAKE_CLAUDE_ARGV:"),
-            "the engine never started inside the daemon; saw: {seen:?}"
-        );
-    }
-
-    /// The same minimal-`PATH` server, plus a refused `--resume` (every
-    /// session created before the conversation-identity work). Both failure
-    /// modes stack, and the pane must still come back alive — the retry ladder
-    /// has to work *through the daemon*, not only on the direct-spawn path.
-    #[test]
-    fn under_a_minimal_path_daemon_server_a_refused_resume_still_lands_a_live_engine() {
-        let seen =
-            pane_output_under_a_minimal_path_daemon(Some("sess-minpath-resume"), &["--resume"]);
-        assert!(!seen.contains("no sessions"), "saw: {seen:?}");
-        assert!(
-            seen.contains(&format!(
-                "--session-id {}",
-                claude_conversation_uuid("sess-minpath-resume")
-            )),
-            "the ladder must have stepped down to --session-id under tmux; saw: {seen:?}"
-        );
     }
 
     /// Every engine reaches tmux as an **absolute** path. tmux `exec`s the
@@ -6114,7 +5207,8 @@ mod tests {
     fn daemon_status_reports_availability_from_runtime_mode() {
         let tmp = tempfile::tempdir().unwrap();
         let sink: OutputSink = Arc::new(|_, _| {});
-        let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(None);
+        let manager =
+            SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(None);
         let (available, running, _socket_path, session_count) = manager.pty_daemon_status();
         assert!(!available);
         assert!(!running);
@@ -6180,8 +5274,8 @@ mod tests {
         *activity.busy_since.lock().unwrap() = Some(now - Duration::from_secs(3));
 
         let broken = DaemonSessions::with_binary("/no/such/daemon/binary", "unused");
-        // Neither `pane_current_command` nor `capture_pane` can answer ->
-        // activity heuristic, not a panic and not a wrong hard answer.
+        // No legacy screen/process poll can answer: use the activity
+        // heuristic, not a panic or a wrong hard answer.
         assert_eq!(
             compute_status(&activity, Some(&broken), now),
             SessionStatus::ToolExecution

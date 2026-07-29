@@ -1,12 +1,10 @@
 pub mod commands;
+pub mod daemon;
 pub mod feedback;
 pub mod map_feed;
-pub mod pty_daemon_client;
 pub mod roots;
 pub mod sessions;
-pub mod daemon;
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tauri::{Emitter, Manager};
 
 use commands::BrainState;
@@ -265,8 +263,7 @@ pub fn run() {
 
             let output_handle = handle.clone();
             let sink: sessions::OutputSink = std::sync::Arc::new(move |id: &str, chunk: &[u8]| {
-                let payload = STANDARD.encode(chunk);
-                let _ = output_handle.emit(&format!("session-output:{id}"), payload);
+                let _ = output_handle.emit(&format!("session-output:{id}"), chunk.to_vec());
             });
 
             // Founder feedback (Bruno, 2026-07-24): a session that needs the

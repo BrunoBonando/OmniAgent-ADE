@@ -20,10 +20,10 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use omniagent_ade_lib::daemon::{self, DaemonSessions};
 use omniagent_ade_lib::sessions::{
     CreateSessionRequest, OutputSink, SessionManager, SessionStatus, SessionStatusEvent, StatusSink,
 };
-use omniagent_ade_lib::daemon::{self, DaemonSessions};
 
 // ---------------------------------------------------------------------------
 // harness
@@ -192,8 +192,8 @@ fn a_session_creates_a_real_daemon_session_and_kill_deletes_it() {
     };
     let _guard = ServerGuard(Some(t.clone()));
 
-    let manager =
-        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_daemon_sessions(Some(t.clone()));
+    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
+        .with_daemon_sessions(Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     let expected_name = daemon::session_name(&info.id);
@@ -253,8 +253,8 @@ fn closing_the_app_and_returning_reattaches_the_same_live_session() {
         let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
             let _ = tx.send((id.to_string(), chunk.to_vec()));
         });
-        let manager =
-            SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(t.clone()));
+        let manager = SessionManager::new(tmp.path().to_path_buf(), sink)
+            .with_daemon_sessions(Some(t.clone()));
 
         let info = manager
             .create(CreateSessionRequest {
@@ -296,7 +296,8 @@ fn closing_the_app_and_returning_reattaches_the_same_live_session() {
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(t.clone()));
+    let manager =
+        SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(t.clone()));
 
     let info = manager
         .create(CreateSessionRequest {
@@ -348,8 +349,8 @@ fn restoring_an_id_whose_daemon_session_is_gone_starts_fresh_without_failing() {
     };
     let _guard = ServerGuard(Some(t.clone()));
 
-    let manager =
-        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_daemon_sessions(Some(t.clone()));
+    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
+        .with_daemon_sessions(Some(t.clone()));
     let info = manager
         .create(CreateSessionRequest {
             restore_id: Some("sess-never-existed".to_string()),
@@ -361,36 +362,6 @@ fn restoring_an_id_whose_daemon_session_is_gone_starts_fresh_without_failing() {
     assert!(!info.restored, "nothing was there to restore");
     assert!(info.persistent, "but it is persistent from here on");
     manager.kill(&info.id).unwrap();
-}
-
-/// A `shell` tab must never pay for `claude`'s conversation-identity liveness
-/// probe. The probe waits out its whole window on a *healthy* child, so
-/// arming it for an engine that carries no identity flag would silently add
-/// seconds to the most ordinary action in the app — opening a terminal.
-///
-/// Asserted as real wall-clock time through the real `create`, on the restore
-/// path specifically: that is the one that would arm the longest window
-/// (`--resume`'s 2.5 s) if the engine check were ever dropped.
-#[test]
-fn opening_a_shell_never_waits_out_claudes_liveness_probe() {
-    let tmp = tempfile::tempdir().unwrap();
-    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_daemon_sessions(None);
-
-    let started = Instant::now();
-    let info = manager
-        .create(CreateSessionRequest {
-            restore_id: Some("sess-shell-timing".to_string()),
-            ..shell_request(tmp.path())
-        })
-        .unwrap();
-    let elapsed = started.elapsed();
-    manager.kill(&info.id).unwrap();
-
-    assert!(
-        elapsed < Duration::from_millis(1500),
-        "restoring a shell took {elapsed:?} — it is being liveness-probed as if it \
-         carried a claude identity flag"
-    );
 }
 
 /// Two live tabs must never collide onto one daemon session, and a `restore_id`
@@ -405,8 +376,8 @@ fn restoring_an_id_that_is_already_live_is_rejected() {
     };
     let _guard = ServerGuard(Some(t.clone()));
 
-    let manager =
-        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_daemon_sessions(Some(t.clone()));
+    let manager = SessionManager::new(tmp.path().to_path_buf(), silent_sink())
+        .with_daemon_sessions(Some(t.clone()));
     let info = manager
         .create(CreateSessionRequest {
             restore_id: Some("sess-already-open".to_string()),
@@ -532,7 +503,7 @@ fn shell_status_goes_ready_then_tool_execution_then_ready_around_a_real_command(
 /// Amber beats everything, and the user answering clears it. Uses the same
 /// dependency-free stand-in the existing attention test does (a `shell`
 /// session echoing Claude's exact permission-prompt copy) — see
-/// `sessions.rs`'s `spawn_reader_thread` docs for why detection isn't gated
+/// `sessions.rs`'s daemon-output processor for why detection isn't gated
 /// on the engine name.
 #[test]
 fn approval_marker_turns_the_light_amber_and_writing_clears_it() {
@@ -751,178 +722,6 @@ fn an_idle_session_settles_on_one_state_and_stops_emitting() {
     manager.kill(&info.id).unwrap();
 }
 
-/// The plumbing behind claude/codex cyan: the daemon's screen capture must
-/// return the pane's *live screen* through this app's real daemon config.
-///
-/// This is the one half of that path an automated test can reach without a
-/// live `claude` — the marker matching itself is unit-tested against the real
-/// captured copy (`sessions::tests::a_visibly_running_bash_tool_reads_as_
-/// tool_execution`), and the two together are what the manual verification
-/// exercises end to end.
-#[test]
-fn capture_pane_reads_the_live_screen_through_the_apps_daemon_config() {
-    let tmp = tempfile::tempdir().unwrap();
-    let Some(t) = test_daemon("capture", tmp.path()) else {
-        eprintln!("the pty daemon is unavailable — skipping");
-        return;
-    };
-    let _guard = ServerGuard(Some(t.clone()));
-
-    let manager =
-        SessionManager::new(tmp.path().to_path_buf(), silent_sink()).with_daemon_sessions(Some(t.clone()));
-    let info = manager.create(shell_request(tmp.path())).unwrap();
-    let name = daemon::session_name(&info.id);
-
-    manager.write(&info.id, "echo ON_THE_SCREEN_NOW\n").unwrap();
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut screen = String::new();
-    while Instant::now() < deadline {
-        screen = t.capture_pane(&name).unwrap_or_default();
-        if screen.contains("ON_THE_SCREEN_NOW") {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(150));
-    }
-    assert!(
-        screen.contains("ON_THE_SCREEN_NOW"),
-        "capture-pane must show what's on the pane right now; got {screen:?}"
-    );
-
-    // ...and it must be *state*, not history: once the screen is cleared the
-    // text is gone from the capture, with no clearing heuristic on our side.
-    // (This is exactly why cyan is computed from the screen and not from a
-    // stream latch.)
-    manager.write(&info.id, "clear\n").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        screen = t.capture_pane(&name).unwrap_or_default();
-        if !screen.contains("ON_THE_SCREEN_NOW") {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(150));
-    }
-    assert!(
-        !screen.contains("ON_THE_SCREEN_NOW"),
-        "a cleared screen must stop reporting the old text; got {screen:?}"
-    );
-
-    manager.kill(&info.id).unwrap();
-}
-
-// ---------------------------------------------------------------------------
-// 4. graceful degradation — no daemon on this machine
-// ---------------------------------------------------------------------------
-
-/// A missing daemon must cost persistence and nothing else: the session still
-/// creates, still runs, still streams output, and honestly reports
-/// `persistent: false`. Injected by pointing the daemon binary at a path that
-/// doesn't exist, so this proves the fallback *on a machine where the daemon
-/// is available* — no uninstall required.
-#[test]
-fn a_missing_daemon_binary_falls_back_to_a_working_direct_spawn() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (tx, rx) = mpsc::channel::<(String, Vec<u8>)>();
-    let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
-        let _ = tx.send((id.to_string(), chunk.to_vec()));
-    });
-
-    let broken = DaemonSessions::with_binary("/no/such/daemon/binary/anywhere", "unused-socket");
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(broken));
-
-    let info = manager.create(shell_request(tmp.path())).unwrap();
-    assert!(!info.persistent, "a fallback spawn is not persistent");
-    assert!(!info.restored);
-
-    manager.write(&info.id, "echo FALLBACK_WORKS\n").unwrap();
-    let (found, seen) = wait_for_output(&rx, &info.id, "FALLBACK_WORKS", Duration::from_secs(10));
-    assert!(
-        found,
-        "the fallback session must actually work; saw {seen:?}"
-    );
-
-    manager.kill(&info.id).unwrap();
-}
-
-/// The same degradation via the other door: no daemon configured at all (what
-/// `SessionManager::new` gives you, and what `lib.rs` ends up with when
-/// `default_daemon_sessions` resolves to `None`).
-#[test]
-fn no_daemon_configured_at_all_still_creates_a_working_session() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (tx, rx) = mpsc::channel::<(String, Vec<u8>)>();
-    let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
-        let _ = tx.send((id.to_string(), chunk.to_vec()));
-    });
-
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(None);
-    let info = manager.create(shell_request(tmp.path())).unwrap();
-    assert!(!info.persistent);
-
-    manager.write(&info.id, "echo NO_DAEMON_WORKS\n").unwrap();
-    let (found, seen) = wait_for_output(&rx, &info.id, "NO_DAEMON_WORKS", Duration::from_secs(10));
-    assert!(found, "saw {seen:?}");
-
-    manager.kill(&info.id).unwrap();
-}
-
-/// Without the daemon there's no foreground-process reporting, so status falls
-/// back to output activity for every engine — including `shell`. This asserts
-/// the fallback is *live and honest*, not that it's as good: an `echo` (which
-/// does produce output) is visible as executing and then settles to ready.
-/// The documented blind spot — a silent long-running command like `sleep`
-/// looking idle — is exactly why the daemon is the default.
-#[test]
-fn without_daemon_status_still_works_via_the_output_activity_fallback() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (manager, rx) = manager_with_status(tmp.path(), None);
-    let info = manager.create(shell_request(tmp.path())).unwrap();
-
-    let mut seen = Vec::new();
-    assert!(
-        wait_for_status(
-            &rx,
-            &mut seen,
-            SessionStatus::Ready,
-            Duration::from_secs(10)
-        ),
-        "an idle shell must reach ready even without the daemon; saw {seen:?}"
-    );
-
-    // A *sustained* run of output — output every 200 ms for ~4 s. Both
-    // halves of the heuristic matter here: the 200 ms spacing stays inside
-    // the quiet threshold so it reads as one unbroken run, and 4 s is
-    // comfortably longer than the 1 s a run must last before it counts as
-    // executing. (A tight `seq 1 40000` loop, tried first, was *too* fast —
-    // it finished in well under a second, which by design does not qualify.)
-    manager
-        .write(
-            &info.id,
-            "for i in $(seq 1 20); do echo busy-$i; sleep 0.2; done\n",
-        )
-        .unwrap();
-    assert!(
-        wait_for_status(
-            &rx,
-            &mut seen,
-            SessionStatus::ToolExecution,
-            Duration::from_secs(10)
-        ),
-        "streaming output from a shell must read as tool execution; saw {seen:?}"
-    );
-    assert!(
-        wait_for_status(
-            &rx,
-            &mut seen,
-            SessionStatus::Ready,
-            Duration::from_secs(30)
-        ),
-        "and must settle back to ready once the output stops; saw {seen:?}"
-    );
-
-    manager.kill(&info.id).unwrap();
-}
-
 // ---------------------------------------------------------------------------
 // 5. the wrapped engine still behaves exactly as it did
 // ---------------------------------------------------------------------------
@@ -945,7 +744,8 @@ fn a_daemon_backed_session_still_writes_a_redacted_transcript() {
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(t.clone()));
+    let manager =
+        SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     manager.write(&info.id, "echo API_KEY=abc123\n").unwrap();
@@ -988,7 +788,8 @@ fn resize_reaches_the_engine_through_the_daemon() {
     let sink: OutputSink = Arc::new(move |id: &str, chunk: &[u8]| {
         let _ = tx.send((id.to_string(), chunk.to_vec()));
     });
-    let manager = SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(t.clone()));
+    let manager =
+        SessionManager::new(tmp.path().to_path_buf(), sink).with_daemon_sessions(Some(t.clone()));
     let info = manager.create(shell_request(tmp.path())).unwrap();
 
     manager.resize(&info.id, 132, 43).unwrap();

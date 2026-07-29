@@ -12,14 +12,16 @@
 //!      it flips that status (and get_context stops hiding it).
 
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use brain_core::Store;
 use brain_ingest::enrich::{drain_queue, FakeEngine};
 use mcp_server::tools::{self, ToolContext};
+use omniagent_ade_lib::daemon::DaemonSessions;
 use omniagent_ade_lib::feedback;
 use omniagent_ade_lib::sessions::{CreateSessionRequest, OutputSink, SessionManager};
+use omniagent_pty_daemon::DaemonServer;
 use tempfile::tempdir;
 
 const WELL_FORMED_ANSWER: &str = "TITLE: Add a comment to util.ts\n\nAppended an explanatory comment to util.ts via the session's shell.";
@@ -28,16 +30,73 @@ fn silent_sink() -> OutputSink {
     Arc::new(|_id: &str, _chunk: &[u8]| {})
 }
 
+struct RealServer {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RealServer {
+    fn start(socket: std::path::PathBuf) -> Self {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async move {
+                let server = DaemonServer::bind(socket).await.unwrap();
+                ready_tx.send(()).unwrap();
+                server.run_until(stopped).await.unwrap();
+            });
+        });
+        ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        Self {
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for RealServer {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+struct FeedbackHarness {
+    manager: SessionManager,
+    _server: RealServer,
+}
+
+impl std::ops::Deref for FeedbackHarness {
+    type Target = SessionManager;
+
+    fn deref(&self) -> &Self::Target {
+        &self.manager
+    }
+}
+
 /// A `SessionManager` wired exactly like `lib.rs`'s real `setup()`: the end
 /// hook opens its own short-lived `Store` connection per call and enqueues
 /// through `feedback::on_session_end`.
-fn manager_with_feedback_hook(data_dir: &std::path::Path, sink: OutputSink) -> SessionManager {
+fn manager_with_feedback_hook(data_dir: &std::path::Path, sink: OutputSink) -> FeedbackHarness {
     let hook_data_dir = data_dir.to_path_buf();
     let end_hook: omniagent_ade_lib::sessions::SessionEndHook = Arc::new(move |event| {
         let store = Store::open(&hook_data_dir).expect("open store in feedback hook");
         feedback::on_session_end(&store, event).expect("on_session_end");
     });
-    SessionManager::new(data_dir.to_path_buf(), sink).with_end_hook(end_hook)
+    let socket = data_dir.join("runtime/daemon.sock");
+    let server = RealServer::start(socket.clone());
+    let manager = SessionManager::new(data_dir.to_path_buf(), sink)
+        .with_daemon_sessions(Some(DaemonSessions::new(socket)))
+        .with_end_hook(end_hook);
+    FeedbackHarness {
+        manager,
+        _server: server,
+    }
 }
 
 fn init_git_repo_with_file(dir: &std::path::Path) {

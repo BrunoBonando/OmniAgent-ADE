@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LAYOUT_SETTING_KEY, type ProjectInfo } from "./state/sessions";
 import { NOTIFICATIONS_SETTING_KEY } from "./state/notifications";
 
-const eventHandlers = vi.hoisted(() => new Map<string, (id: string, payload: string) => void>());
+const eventHandlers = vi.hoisted(() => new Map<string, (id: string, payload: number[]) => void>());
 
 const tauriMocks = vi.hoisted(() => ({
   agentCheckInstalledMock: vi.fn(),
@@ -48,7 +48,7 @@ vi.mock("./lib/usePerSessionEvent", () => ({
       }
     }
     for (const id of ids) {
-      eventHandlers.set(`${prefix}${id}`, onEvent as (id: string, payload: string) => void);
+      eventHandlers.set(`${prefix}${id}`, onEvent as (id: string, payload: number[]) => void);
     }
   },
 }));
@@ -159,7 +159,7 @@ describe("usage analytics live updates", () => {
     const handler = eventHandlers.get("session-output:sess-1");
 
     await act(async () => {
-      handler?.("sess-1", btoa("usage tokens: 105"));
+      handler?.("sess-1", Array.from(new TextEncoder().encode("usage tokens: 105")));
     });
 
     expect(screen.getByTestId("token-total")).toHaveTextContent("105");

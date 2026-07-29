@@ -126,7 +126,7 @@ fn main() {
 fn script_for(engine: &str) -> (Vec<Step>, u64) {
     match engine {
         // A real terminal: idle green, a silent long command (the case only
-        // `#{pane_current_command}` can see) cyan, and two real failures that
+        // foreground-process status can see) cyan, and two real failures that
         // demonstrate the honest gap — neither can turn the light red.
         "shell" => (
             vec![
