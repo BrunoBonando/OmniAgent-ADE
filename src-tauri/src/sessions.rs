@@ -538,7 +538,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock, Weak};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -802,10 +802,12 @@ struct SessionDisplay {
     id: String,
     sink: OutputSink,
     state: Mutex<SessionDisplayState>,
+    flushed: Condvar,
 }
 
 struct SessionDisplayState {
     ready: bool,
+    flushing: bool,
     ended: bool,
     overflowed: bool,
     pending: VecDeque<Vec<u8>>,
@@ -824,11 +826,13 @@ impl SessionDisplay {
             sink,
             state: Mutex::new(SessionDisplayState {
                 ready: false,
+                flushing: false,
                 ended: false,
                 overflowed: false,
                 pending: VecDeque::new(),
                 pending_bytes: 0,
             }),
+            flushed: Condvar::new(),
         }
     }
 
@@ -851,27 +855,44 @@ impl SessionDisplay {
     }
 
     fn mark_ready(&self) -> DisplayReady {
-        let (pending, ended, needs_snapshot) = {
-            let mut state = self.state.lock().unwrap();
-            state.ready = true;
-            state.pending_bytes = 0;
-            let ended = state.ended;
-            let needs_snapshot = state.overflowed && !ended;
-            state.overflowed = false;
-            let pending = if needs_snapshot {
-                state.pending.clear();
-                VecDeque::new()
-            } else {
-                std::mem::take(&mut state.pending)
-            };
-            (pending, ended, needs_snapshot)
-        };
-        for bytes in pending {
-            (self.sink)(&self.id, &bytes);
+        let mut state = self.state.lock().unwrap();
+        while state.flushing {
+            state = self.flushed.wait(state).unwrap();
         }
-        DisplayReady {
-            ended,
-            needs_snapshot,
+        if state.ready {
+            return DisplayReady {
+                ended: state.ended,
+                needs_snapshot: false,
+            };
+        }
+        state.flushing = true;
+        drop(state);
+
+        let mut needs_snapshot = false;
+        loop {
+            let mut state = self.state.lock().unwrap();
+            let ended = state.ended;
+            needs_snapshot |= state.overflowed && !ended;
+            state.overflowed = false;
+            if needs_snapshot && !ended {
+                state.pending.clear();
+                state.pending_bytes = 0;
+            }
+            if state.pending.is_empty() {
+                state.ready = true;
+                state.flushing = false;
+                self.flushed.notify_all();
+                return DisplayReady {
+                    ended,
+                    needs_snapshot,
+                };
+            }
+            let pending = std::mem::take(&mut state.pending);
+            state.pending_bytes = 0;
+            drop(state);
+            for bytes in pending {
+                (self.sink)(&self.id, &bytes);
+            }
         }
     }
 
@@ -988,6 +1009,10 @@ struct SessionActivity {
     /// Last status handed to the [`StatusSink`] (or returned by
     /// [`SessionManager::status`]), so the poller can emit on change only.
     last_status: Mutex<Option<SessionStatus>>,
+    /// Shell busy/ready from the daemon's PTY foreground-process detector.
+    /// Agent engines intentionally leave this unset and retain their local
+    /// output heuristics.
+    daemon_status: Mutex<Option<SessionStatus>>,
     /// Whether anything is actually consuming status for this session. When
     /// false the reader thread skips the attention scan entirely (unless an
     /// [`AttentionSink`] wants it), keeping the no-sink path exactly as cheap
@@ -1009,6 +1034,7 @@ impl SessionActivity {
             error_dismissed: AtomicBool::new(false),
             clear_marker_window: AtomicBool::new(false),
             last_status: Mutex::new(None),
+            daemon_status: Mutex::new(None),
             status_tracking,
         }
     }
@@ -1412,9 +1438,14 @@ impl SessionManager {
                 );
             }
             DaemonEvent::Status(status) => {
+                let event_engine = status.engine;
+                let status = protocol_status(status.status);
+                if activity.engine == "shell" {
+                    if let Ok(mut daemon_status) = activity.daemon_status.lock() {
+                        *daemon_status = Some(status);
+                    }
+                }
                 if let Some(status_sink) = &on_status {
-                    let event_engine = status.engine;
-                    let status = protocol_status(status.status);
                     let changed = activity
                         .last_status
                         .lock()
@@ -3430,6 +3461,13 @@ fn compute_status(
     if activity.error.load(Ordering::Relaxed) && !activity.error_dismissed.load(Ordering::Relaxed) {
         return SessionStatus::Error;
     }
+    if activity.engine == "shell" {
+        if let Ok(daemon_status) = activity.daemon_status.lock() {
+            if let Some(status) = *daemon_status {
+                return status;
+            }
+        }
+    }
     status_from_output_activity(activity, now)
 }
 
@@ -3523,6 +3561,40 @@ fn spawn_status_poller(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_flush_keeps_new_bytes_behind_the_buffered_prefix() {
+        let delivered = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let (old_started_tx, old_started_rx) = mpsc::channel();
+        let (release_old_tx, release_old_rx) = mpsc::channel();
+        let release_old_rx = Arc::new(Mutex::new(release_old_rx));
+        let sink: OutputSink = {
+            let delivered = Arc::clone(&delivered);
+            Arc::new(move |_, bytes| {
+                if bytes == b"old" {
+                    old_started_tx.send(()).unwrap();
+                    release_old_rx.lock().unwrap().recv().unwrap();
+                }
+                delivered.lock().unwrap().push(bytes.to_vec());
+            })
+        };
+        let display = Arc::new(SessionDisplay::new("ordered".into(), sink));
+        display.receive(b"old");
+
+        let flushing = {
+            let display = Arc::clone(&display);
+            thread::spawn(move || display.mark_ready())
+        };
+        old_started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        display.receive(b"new");
+        release_old_tx.send(()).unwrap();
+        flushing.join().unwrap();
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![b"old".to_vec(), b"new".to_vec()]
+        );
+    }
 
     /// Materializes a request the way the direct-spawn path in `create()`
     /// does — `build_engine_command` + `to_command_builder`, i.e. the real

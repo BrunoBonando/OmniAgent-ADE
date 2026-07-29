@@ -1,6 +1,6 @@
 use omniagent_pty_daemon::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, write_frame, Frame, MessageKind,
-    MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
+    SessionExitedPayload, SessionListPayload, MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
 };
 use omniagent_pty_daemon::{CreateSession, DaemonServer};
 use serde::Serialize;
@@ -202,6 +202,59 @@ async fn one_persistent_connection_streams_raw_bytes_and_applies_resize() {
         .await;
     client.read_kind(MessageKind::SessionExited).await;
     client.read_kind(MessageKind::Response).await;
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exited_before_attach_still_replays_snapshot_and_exit() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = TestServer::start(temp.path()).await;
+    let mut client = Client::connect(&server.socket).await;
+    client
+        .send_json(
+            MessageKind::CreateSession,
+            &command_session("fast-exit", "printf ULTRA_EARLY; exit 7"),
+        )
+        .await;
+    client.read_kind(MessageKind::SessionCreated).await;
+
+    let mut observed_inactive = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        client
+            .send_json(MessageKind::ListSessions, &serde_json::json!({}))
+            .await;
+        let listed = client.read_kind(MessageKind::SessionList).await;
+        let listed: SessionListPayload = serde_json::from_slice(&listed.payload).unwrap();
+        if !listed.sessions.iter().any(|id| id == "fast-exit") {
+            observed_inactive = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        observed_inactive,
+        "the regression must prove registry removal happened before Attach"
+    );
+
+    client
+        .send_json(
+            MessageKind::Attach,
+            &serde_json::json!({"id":"fast-exit","after_sequence":null}),
+        )
+        .await;
+    let snapshot = client.read().await;
+    assert_eq!(snapshot.header.message_kind, MessageKind::Snapshot);
+    let (_, bytes) = decode_raw_payload(&snapshot.payload).unwrap();
+    assert!(
+        bytes
+            .windows(b"ULTRA_EARLY".len())
+            .any(|window| window == b"ULTRA_EARLY"),
+        "late attach lost the fast child's recoverable output"
+    );
+    let exited = client.read_kind(MessageKind::SessionExited).await;
+    let exited: SessionExitedPayload = serde_json::from_slice(&exited.payload).unwrap();
+    assert_eq!(exited.exit_code, Some(7));
     server.stop().await;
 }
 

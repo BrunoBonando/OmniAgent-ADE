@@ -207,7 +207,7 @@ async fn handle_client(
             MessageKind::Attach => {
                 let attach = parse_json::<AttachPayload>(&frame.payload)?;
                 attachments.remove(&attach.id);
-                match registry.get(&attach.id) {
+                match registry.get_attachable(&attach.id) {
                     Some(session) => {
                         let (state, subscription) = session
                             .attach_and_subscribe(attach.after_sequence, CLIENT_QUEUE_CAPACITY);

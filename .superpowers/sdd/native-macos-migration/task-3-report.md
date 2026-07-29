@@ -156,3 +156,53 @@ GREEN:
 
 - The unfiltered Tauri lib run remains 170/172 with the two baseline branch/version assertions documented above.
 - Persistence-test daemon processes are intentionally persistent and their legacy `ServerGuard` kills sessions but not the server process. The private instances spawned by the failed verification runs were identified by explicit PID/start time, terminated, and a process check confirmed none remained.
+
+## Fix round 2 — exited attach, authoritative shell status, display ordering
+
+### Changes
+
+- The daemon registry now moves naturally exited sessions into a late-attach tombstone rather than dropping the last authoritative state immediately. Tombstones are excluded from active `ListSessions`, retained for at most 10 seconds, and capped at 16 entries. A new session with the same id replaces its old tombstone.
+- A tombstone attach uses the unchanged v1 shapes to deliver the terminal snapshot/replay followed by the recorded `SessionExited`. This closes the real create-response → child-exit → registry-removal → Attach race without timing sleeps or a public protocol change.
+- Tauri records daemon shell status separately from local activity. `compute_status` still gives attention/error priority, then treats daemon shell `tool_execution`/`ready` as authoritative for poll and pull paths; non-shell agents retain their existing output heuristics.
+- Display readiness now has an explicit flushing phase. New callback bytes append while buffered batches drain, concurrent readiness calls wait, and `ready` becomes true only while holding the gate on an atomically empty queue. Sink calls remain outside the gate mutex.
+
+### TDD evidence
+
+RED, before implementation:
+
+- `cargo test -p omniagent-pty-daemon --test server_protocol exited_before_attach_still_replays_snapshot_and_exit -- --exact --nocapture`
+  - The test first observed `fast-exit` absent from active `SessionList`, then Attach received `Error` instead of `Snapshot`.
+- `cargo test -p omniagent-ade --test session_persistence_test shell_status_goes_ready_then_tool_execution_then_ready_around_a_real_command -- --exact --nocapture`
+  - Push observed cyan, but the first pull during the silent `sleep 2` returned `Ready`, proving the 300 ms local classifier overwrote daemon state.
+- `cargo test -p omniagent-ade --lib sessions::tests::display_flush_keeps_new_bytes_behind_the_buffered_prefix -- --exact --nocapture`
+  - Deterministic blocked-sink orchestration delivered `[new, old]` instead of `[old, new]`.
+
+GREEN:
+
+- The same three focused commands pass.
+- `cargo test -p omniagent-ade --test daemon_client_protocol`
+  - 6 passed.
+- `cargo test -p omniagent-ade --test feedback_test`
+  - 5 passed.
+- `cargo test -p omniagent-ade --test session_persistence_test -- --test-threads=1`
+  - 11 passed, including three repeated authoritative pull assertions while the silent command is running and a final Ready pull.
+- `cargo test -p omniagent-pty-daemon --test server_protocol exited_before_attach_still_replays_snapshot_and_exit -- --exact`
+  - Real fast child passed: active list removal was observed before Attach, then recoverable `ULTRA_EARLY` snapshot bytes and exit code 7 arrived.
+- `cargo test -p omniagent-pty-daemon --test session_runtime shell_status_tracks_a_silent_foreground_command_without_screen_polling -- --exact`
+  - Passed.
+- `cargo test -p omniagent-ade --lib -- --test-threads=1 --skip commands::tests::git_branch_returns_the_checked_out_branch_for_a_real_repo --skip tests::the_titles_version_is_the_one_tauri_conf_json_declares`
+  - 171 passed, 2 known baseline assertions filtered.
+- `cargo test -p mcp-server --test contract_test`
+  - 10 passed; the frozen v1 MCP contract remains unchanged.
+- `npm --prefix ui test`
+  - 78 files passed; 1,181 tests passed and 8 skipped.
+- `npm --prefix ui run build`
+  - Passed; only the existing Vite chunk-size advisory was emitted.
+- `cargo check -p omniagent-ade --all-targets --all-features` and warning-as-error Clippy for both changed Rust packages passed.
+- `rustfmt --check` passed for every changed Rust file and `git diff --check` passed. Workspace-wide `cargo fmt --all -- --check` still reports only the two pre-existing, unmodified manual-example formatting diffs.
+
+### Verification notes
+
+- The daemon suite's new and changed tests pass. One unmodified scrollback/transcript test intermittently read its transcript before `line-3099` was flushed during the all-tests run; its immediate exact rerun passed.
+- A final serial protocol run passed 5/6 while the unmodified `one_persistent_connection_streams_raw_bytes_and_applies_resize` test timed out waiting for its final kill response; two exact attempts reproduced that existing four-second timeout and a subsequent exact run passed. The new exited-before-attach regression remained green throughout.
+- Successful persistence runs left no external `omniagent-pty-daemon` process behind; process state is checked again before commit.

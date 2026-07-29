@@ -477,6 +477,14 @@ fn shell_status_goes_ready_then_tool_execution_then_ready_around_a_real_command(
         ),
         "a running command must show tool execution (cyan); saw {seen:?}"
     );
+    for _ in 0..3 {
+        assert_eq!(
+            manager.status(&info.id).unwrap().status,
+            SessionStatus::ToolExecution,
+            "daemon cyan must remain authoritative through the pull API while silent work runs"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
 
     assert!(
         wait_for_status(
@@ -486,6 +494,11 @@ fn shell_status_goes_ready_then_tool_execution_then_ready_around_a_real_command(
             Duration::from_secs(10)
         ),
         "the light must go back to green when the command finishes; saw {seen:?}"
+    );
+    assert_eq!(
+        manager.status(&info.id).unwrap().status,
+        SessionStatus::Ready,
+        "daemon completion must return the pull API to ready"
     );
 
     assert!(

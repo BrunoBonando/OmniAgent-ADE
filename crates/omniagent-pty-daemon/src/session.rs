@@ -9,11 +9,13 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const SCROLLBACK_LINES: usize = 3_000;
 pub const MAX_SESSIONS: usize = 8;
 const OUTPUT_HISTORY_CHUNKS: usize = 256;
+const EXITED_SESSION_RETENTION: Duration = Duration::from_secs(10);
+const MAX_EXITED_SESSIONS: usize = MAX_SESSIONS * 2;
 
 struct Transcript {
     file: std::fs::File,
@@ -241,6 +243,7 @@ pub struct ManagedSession {
     engine: String,
     status: Mutex<SessionStatus>,
     shell_command_state: AtomicU8,
+    exit_code: Mutex<Option<Option<u32>>>,
 }
 
 impl ManagedSession {
@@ -306,6 +309,11 @@ impl ManagedSession {
         capacity: usize,
     ) -> (AttachState, SessionSubscription) {
         let terminal = self.terminal.lock();
+        // Keep the exit record locked while registering the subscriber. This
+        // makes a concurrent finish choose exactly one delivery path: either
+        // it broadcasts after this subscription is registered, or we replay
+        // the already-recorded exit below.
+        let exit_code = self.exit_code.lock();
         let subscription = self.subscribe_inner(capacity);
         let (state, sequence) = match terminal {
             Ok(mut terminal) => {
@@ -334,6 +342,14 @@ impl ManagedSession {
                 status,
                 engine: self.engine.clone(),
             });
+        }
+        if let Ok(exit_code) = exit_code {
+            if let Some(exit_code) = *exit_code {
+                subscription.inner.push(SessionEvent::Exited {
+                    sequence,
+                    exit_code,
+                });
+            }
         }
         (state, subscription)
     }
@@ -487,6 +503,9 @@ impl ManagedSession {
             .lock()
             .map(|terminal| terminal.sequence)
             .unwrap_or(0);
+        if let Ok(mut ended) = self.exit_code.lock() {
+            *ended = Some(exit_code);
+        }
         self.broadcast(SessionEvent::Exited {
             sequence,
             exit_code,
@@ -519,6 +538,32 @@ impl ManagedSession {
 struct RegistryState {
     sessions: HashMap<String, Arc<ManagedSession>>,
     creating: HashSet<String>,
+    exited: HashMap<String, ExitedSession>,
+}
+
+struct ExitedSession {
+    session: Arc<ManagedSession>,
+    exited_at: Instant,
+}
+
+impl RegistryState {
+    fn prune_exited(&mut self) {
+        self.exited
+            .retain(|_, exited| exited.exited_at.elapsed() < EXITED_SESSION_RETENTION);
+        if self.exited.len() <= MAX_EXITED_SESSIONS {
+            return;
+        }
+        let mut oldest = self
+            .exited
+            .iter()
+            .map(|(id, exited)| (id.clone(), exited.exited_at))
+            .collect::<Vec<_>>();
+        oldest.sort_by_key(|(_, exited_at)| *exited_at);
+        let remove = self.exited.len() - MAX_EXITED_SESSIONS;
+        for (id, _) in oldest.into_iter().take(remove) {
+            self.exited.remove(&id);
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -537,6 +582,8 @@ impl SessionRegistry {
                 .state
                 .lock()
                 .map_err(|e| anyhow!("session registry lock poisoned: {e}"))?;
+            state.prune_exited();
+            state.exited.remove(&request.id);
             if state.sessions.contains_key(&request.id)
                 || !state.creating.insert(request.id.clone())
             {
@@ -601,12 +648,23 @@ impl SessionRegistry {
                     .and_then(|mut child| child.wait().ok())
                     .map(|status| status.exit_code())
             });
-            if let Some(session) = weak_session.upgrade() {
+            let ended_session = weak_session.upgrade();
+            if let Some(session) = &ended_session {
                 session.finish(exit_code);
             }
             if let Some(registry) = weak_registry.upgrade() {
                 if let Ok(mut registry) = registry.lock() {
                     registry.sessions.remove(&id);
+                    if let Some(session) = ended_session {
+                        registry.exited.insert(
+                            id,
+                            ExitedSession {
+                                session,
+                                exited_at: Instant::now(),
+                            },
+                        );
+                        registry.prune_exited();
+                    }
                 }
             }
         });
@@ -620,6 +678,14 @@ impl SessionRegistry {
                 let Some(session) = status_session.upgrade() else {
                     return;
                 };
+                if session
+                    .exit_code
+                    .lock()
+                    .map(|exit_code| exit_code.is_some())
+                    .unwrap_or(true)
+                {
+                    return;
+                }
                 session.refresh_shell_status();
             });
         }
@@ -631,11 +697,25 @@ impl SessionRegistry {
         self.state.lock().ok()?.sessions.get(id).cloned()
     }
 
+    pub(crate) fn get_attachable(&self, id: &str) -> Option<Arc<ManagedSession>> {
+        let mut state = self.state.lock().ok()?;
+        state.prune_exited();
+        state.sessions.get(id).cloned().or_else(|| {
+            state
+                .exited
+                .get(id)
+                .map(|exited| Arc::clone(&exited.session))
+        })
+    }
+
     pub fn list(&self) -> Vec<String> {
         let mut sessions = self
             .state
             .lock()
-            .map(|state| state.sessions.keys().cloned().collect::<Vec<_>>())
+            .map(|mut state| {
+                state.prune_exited();
+                state.sessions.keys().cloned().collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         sessions.sort();
         sessions
@@ -656,6 +736,7 @@ impl SessionRegistry {
             .lock()
             .map(|mut state| {
                 state.creating.clear();
+                state.exited.clear();
                 state.sessions.drain().map(|(_, session)| session).collect()
             })
             .unwrap_or_else(|_| Vec::new());
@@ -723,6 +804,7 @@ fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
             engine,
             status: Mutex::new(SessionStatus::Ready),
             shell_command_state: AtomicU8::new(0),
+            exit_code: Mutex::new(None),
         }),
         reader,
         transcript,
