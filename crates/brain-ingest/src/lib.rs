@@ -14,6 +14,7 @@ pub mod gitmine;
 pub mod gitreview;
 pub mod import_detect;
 mod paths;
+pub mod roots;
 pub mod walk;
 pub mod watch;
 

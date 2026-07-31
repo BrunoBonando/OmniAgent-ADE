@@ -391,6 +391,7 @@ dependencies = [
  "brain-core",
  "clap",
  "ignore",
+ "mcp-server",
  "notify",
  "once_cell",
  "predicates",

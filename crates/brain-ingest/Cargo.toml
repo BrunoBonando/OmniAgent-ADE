@@ -5,6 +5,12 @@ edition.workspace = true
 
 [dependencies]
 brain-core = { path = "../brain-core" }
+# Task 6a-2: `roots.rs`'s `rename_project` reads/writes the same
+# `project_label_key`/`list_projects` projection `src-tauri` and
+# `omniagent-pty-daemon` already share via `mcp-server` (DESIGN.md 3.3's
+# "one shared retrieval API"), so a rename is visible to every caller
+# immediately rather than this crate re-deriving the settings-table key.
+mcp-server = { path = "../mcp-server" }
 ignore = "0.4"
 tree-sitter = "0.24"
 tree-sitter-typescript = "0.23"
