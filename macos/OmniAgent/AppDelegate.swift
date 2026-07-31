@@ -82,7 +82,11 @@ enum ApplicationMenus {
 
         let file = NSMenu(title: "File")
         main.addItem(withSubmenu: file)
-        file.addItem(item("Close Window", #selector(NSWindow.performClose(_:)), "w"))
+        file.addItem(item("New Terminal Pane", Selector(("newTerminalPane:")), "t"))
+        file.addItem(item("Close Pane", Selector(("closePane:")), "w"))
+        file.addItem(
+            item("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])
+        )
 
         let edit = NSMenu(title: "Edit")
         main.addItem(withSubmenu: edit)
@@ -108,11 +112,41 @@ enum ApplicationMenus {
             )
         )
 
+        // Pane commands travel the responder chain (target nil): directional
+        // focus and swap land on PaneWorkspaceView, pane lifecycle on
+        // WorkspaceWindowController.
+        let panes = NSMenu(title: "Panes")
+        main.addItem(withSubmenu: panes)
+        let directions: [(String, String, Selector, Selector)] = [
+            ("Left", arrowKey(NSLeftArrowFunctionKey), Selector(("focusPaneLeft:")), Selector(("swapPaneLeft:"))),
+            ("Right", arrowKey(NSRightArrowFunctionKey), Selector(("focusPaneRight:")), Selector(("swapPaneRight:"))),
+            ("Up", arrowKey(NSUpArrowFunctionKey), Selector(("focusPaneUp:")), Selector(("swapPaneUp:"))),
+            ("Down", arrowKey(NSDownArrowFunctionKey), Selector(("focusPaneDown:")), Selector(("swapPaneDown:"))),
+        ]
+        for (name, key, focus, _) in directions {
+            panes.addItem(item("Focus \(name)", focus, key, [.command, .option]))
+        }
+        panes.addItem(.separator())
+        for (name, key, _, swap) in directions {
+            panes.addItem(item("Move Pane \(name)", swap, key, [.command, .control]))
+        }
+        panes.addItem(.separator())
+        for index in 1...PaneGrid.maxPanes {
+            let selection = item("Pane \(index)", Selector(("selectPane:")), "\(index)")
+            selection.tag = index
+            panes.addItem(selection)
+        }
+
         let window = NSMenu(title: "Window")
         main.addItem(withSubmenu: window)
         window.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
         window.addItem(item("Zoom", #selector(NSWindow.performZoom(_:))))
         NSApp.windowsMenu = window
+    }
+
+    private static func arrowKey(_ functionKey: Int) -> String {
+        guard let scalar = UnicodeScalar(UInt32(functionKey)) else { return "" }
+        return String(Character(scalar))
     }
 
     private static func item(

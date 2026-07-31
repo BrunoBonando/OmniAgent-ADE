@@ -3,6 +3,11 @@ import os.signpost
 import SwiftTerm
 
 final class WorkspaceWindow: NSWindow {
+    /// Click-to-focus: whichever pane ends up holding the first responder
+    /// becomes the focused pane, without the panes having to fight SwiftTerm
+    /// for the mouse event.
+    var onFirstResponderChange: ((NSResponder?) -> Void)?
+
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, firstResponder is TerminalView {
             os_signpost(
@@ -15,19 +20,35 @@ final class WorkspaceWindow: NSWindow {
         }
         super.sendEvent(event)
     }
+
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let accepted = super.makeFirstResponder(responder)
+        if accepted { onFirstResponderChange?(firstResponder) }
+        return accepted
+    }
 }
 
-final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
+/// Owns the window, the connection, and the session lifecycle of every pane in
+/// the workspace. Layout, pane identity and focus belong to `PaneWorkspaceView`;
+/// creating, attaching and killing sessions belongs here.
+final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     private let connection: SessionConnection
-    private let sessionID: String
-    private let terminalSurface: TerminalSurfaceView
-    private var sessionReady = false
+    private let initialSessionID: String
+    private let workspace: PaneWorkspaceView
+    /// Every pane this window opens belongs to one session group, exactly as
+    /// `TabInfo.group` carries it in the web build. The sidebar/session outline
+    /// that lets a person create a second group is Task 6.
+    private let sessionGroup = "sess-grp-1"
+    private var readySessions: Set<String> = []
     private var observedFirstOutput = false
+    private var statusTitle: String?
 
     init(connection: SessionConnection, sessionID: String) {
         self.connection = connection
-        self.sessionID = sessionID
-        terminalSurface = TerminalSurfaceView(connection: connection, sessionID: sessionID)
+        initialSessionID = sessionID
+        workspace = PaneWorkspaceView { id in
+            TerminalSurfaceView(connection: connection, sessionID: id)
+        }
 
         let window = WorkspaceWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1040, height: 680),
@@ -44,27 +65,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             alpha: 1
         )
         window.minSize = NSSize(width: 520, height: 320)
-
-        let content = NSView(frame: window.contentLayoutRect)
-        terminalSurface.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(terminalSurface)
-        NSLayoutConstraint.activate([
-            terminalSurface.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            terminalSurface.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            terminalSurface.topAnchor.constraint(equalTo: content.topAnchor),
-            terminalSurface.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-        ])
-        window.contentView = content
-        window.initialFirstResponder = terminalSurface.terminalView
+        workspace.frame = window.contentLayoutRect
+        window.contentView = workspace
 
         super.init(window: window)
         window.delegate = self
-        terminalSurface.onTitleChange = { [weak window] title in
-            window?.title = title.isEmpty ? "OmniAgent" : title
+        window.onFirstResponderChange = { [weak self] responder in
+            self?.workspace.adoptFocus(from: responder)
         }
-        terminalSurface.onDirectoryChange = { [weak window] directory in
-            window?.representedURL = directory.map(URL.init(fileURLWithPath:))
-        }
+        workspace.onFocusedPaneChanged = { [weak self] _ in self?.refreshTitle() }
+        addPane(sessionID: sessionID, createSession: false)
+        window.initialFirstResponder = workspace.surface(for: sessionID)?.terminalView
     }
 
     @available(*, unavailable)
@@ -84,41 +95,46 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             switch state {
             case .connected:
-                if sessionReady {
-                    window?.title = "OmniAgent"
-                    terminalSurface.syncSize()
-                } else {
-                    ensureSession()
-                }
+                statusTitle = nil
+                refreshTitle()
+                for id in workspace.paneIDs { ensureSession(id) }
             case .connecting:
-                window?.title = "OmniAgent — Connecting"
+                statusTitle = "Connecting"
+                refreshTitle()
             case .disconnected:
-                window?.title = "OmniAgent — Reconnecting"
+                statusTitle = "Reconnecting"
+                refreshTitle()
             }
         }
         connection.onTerminalData = { [weak self] id, bytes, sequence, isSnapshot in
-            guard let self, id == sessionID else { return }
+            guard let self, let surface = workspace.surface(for: id) else { return }
             if !observedFirstOutput {
                 observedFirstOutput = true
                 os_signpost(.event, log: Instrumentation.log, name: "First Terminal Output")
             }
-            terminalSurface.feed(bytes, isSnapshot: isSnapshot, sequence: sequence)
+            surface.feed(bytes, isSnapshot: isSnapshot, sequence: sequence)
         }
         connection.onStatus = { [weak self] event in
-            guard let self, event.id == sessionID else { return }
-            window?.title = "OmniAgent — \(event.status.title)"
+            guard let self, event.id == workspace.focusedPaneID else { return }
+            statusTitle = event.status.title
+            refreshTitle()
         }
         connection.onAttention = { [weak self] id in
-            guard id == self?.sessionID else { return }
+            guard self?.workspace.container(for: id) != nil else { return }
             NSApp.requestUserAttention(.informationalRequest)
         }
         connection.onExit = { [weak self] event in
-            guard let self, event.id == sessionID else { return }
-            sessionReady = false
-            window?.title = "OmniAgent — Session ended"
+            guard let self, workspace.container(for: event.id) != nil else { return }
+            readySessions.remove(event.id)
+            if event.id == workspace.focusedPaneID {
+                statusTitle = "Session ended"
+                refreshTitle()
+            }
         }
         connection.onError = { [weak self] error in
-            self?.window?.title = "OmniAgent — \(error.localizedDescription)"
+            guard let self else { return }
+            statusTitle = error.localizedDescription
+            refreshTitle()
         }
         connection.connect()
     }
@@ -127,29 +143,90 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         connection.disconnect()
     }
 
-    @objc func focusTerminal(_ sender: Any?) {
-        terminalSurface.focus()
-    }
-
     func windowWillClose(_ notification: Notification) {
         stop()
     }
 
-    private func ensureSession() {
+    func windowDidBecomeKey(_ notification: Notification) {
+        workspace.restoreFocus()
+    }
+
+    // MARK: - Responder-chain commands
+
+    @objc func focusTerminal(_ sender: Any?) {
+        workspace.restoreFocus()
+    }
+
+    /// ⌘T — a brand-new pane on a brand-new session, using the same shell,
+    /// environment and starting geometry the first pane was created with.
+    @objc func newTerminalPane(_ sender: Any?) {
+        guard workspace.paneIDs.count < PaneGrid.maxPanes else { return }
+        addPane(sessionID: UUID().uuidString, createSession: true)
+    }
+
+    /// ⌘W — closes the focused pane and the session behind it. The window's own
+    /// close is ⇧⌘W.
+    @objc func closePane(_ sender: Any?) {
+        guard let focused = workspace.focusedPaneID else { return }
+        connection.kill(sessionID: focused)
+        readySessions.remove(focused)
+        workspace.closePane(focused)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(newTerminalPane(_:)):
+            return workspace.paneIDs.count < PaneGrid.maxPanes
+        case #selector(closePane(_:)):
+            return workspace.focusedPaneID != nil
+        default:
+            return true
+        }
+    }
+
+    // MARK: - Panes and sessions
+
+    private func addPane(sessionID: String, createSession: Bool) {
+        let descriptor = PaneDescriptor(
+            sessionID: sessionID,
+            group: sessionGroup,
+            groupLabel: "Session 1",
+            title: ""
+        )
+        guard workspace.addPane(descriptor) else { return }
+        let surface = workspace.surface(for: sessionID)
+        surface?.onTitleChange = { [weak self] title in
+            guard let self else { return }
+            workspace.updateDescriptor(for: sessionID) { $0.title = title }
+            if workspace.focusedPaneID == sessionID { refreshTitle() }
+        }
+        surface?.onDirectoryChange = { [weak self] directory in
+            guard let self, workspace.focusedPaneID == sessionID else { return }
+            window?.representedURL = directory.map(URL.init(fileURLWithPath:))
+        }
+        if createSession { ensureSession(sessionID) }
+    }
+
+    private func ensureSession(_ sessionID: String) {
+        guard !readySessions.contains(sessionID) else {
+            attach(sessionID)
+            return
+        }
         connection.listSessions { [weak self] result in
             guard let self else { return }
             switch result {
             case let .success(sessions) where sessions.contains(sessionID):
-                attach()
+                attach(sessionID)
             case .success:
-                createSession()
+                createSession(sessionID)
             case let .failure(error):
-                window?.title = "OmniAgent — \(error.localizedDescription)"
+                statusTitle = error.localizedDescription
+                refreshTitle()
             }
         }
     }
 
-    private func createSession() {
+    private func createSession(_ sessionID: String) {
         let signpost = OSSignpostID(log: Instrumentation.log)
         os_signpost(
             .begin,
@@ -180,19 +257,32 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             switch result {
             case .success:
-                attach()
+                attach(sessionID)
             case let .failure(error):
-                window?.title = "OmniAgent — \(error.localizedDescription)"
+                statusTitle = error.localizedDescription
+                refreshTitle()
             }
         }
     }
 
-    private func attach() {
-        sessionReady = true
+    private func attach(_ sessionID: String) {
+        guard let surface = workspace.surface(for: sessionID) else { return }
+        readySessions.insert(sessionID)
         connection.attach(sessionID: sessionID, afterSequence: nil)
-        terminalSurface.syncSize()
-        window?.title = "OmniAgent"
+        surface.syncSize()
+        statusTitle = nil
+        refreshTitle()
         os_signpost(.event, log: Instrumentation.log, name: "Attach Session")
+    }
+
+    private func refreshTitle() {
+        if let statusTitle {
+            window?.title = "OmniAgent — \(statusTitle)"
+            return
+        }
+        let paneTitle = workspace.focusedPaneID
+            .flatMap { workspace.descriptor(for: $0)?.title } ?? ""
+        window?.title = paneTitle.isEmpty ? "OmniAgent" : paneTitle
     }
 }
 

@@ -4,24 +4,107 @@ import SwiftTerm
 @testable import OmniAgent
 
 final class WorkspaceWindowControllerTests: XCTestCase {
-    func testWindowOwnsExactlyOneTerminalAndFocusReturnsToIt() {
-        let connection = SessionConnection(
-            socketURL: URL(fileURLWithPath: "/tmp/omniagent-controller-test.sock")
-        )
-        let controller = WorkspaceWindowController(
-            connection: connection,
-            sessionID: "native-terminal"
-        )
+    func testWindowOpensOnASinglePaneWorkspaceAndFocusReturnsToIt() {
+        let controller = makeController()
+        defer { controller.close() }
 
         controller.showWindow(nil)
-        let surfaces = controller.window?.contentView?.subviews.compactMap {
-            $0 as? TerminalSurfaceView
-        }
-        XCTAssertEqual(surfaces?.count, 1)
+        let workspace = controller.window?.contentView as? PaneWorkspaceView
+        XCTAssertEqual(workspace?.paneIDs, ["native-terminal"])
+        XCTAssertEqual(workspace?.focusedPaneID, "native-terminal")
 
         controller.focusTerminal(nil)
-        XCTAssertTrue(controller.window?.firstResponder === surfaces?.first?.terminalView)
-        controller.close()
+        XCTAssertTrue(
+            controller.window?.firstResponder === workspace?.surface(for: "native-terminal")?.terminalView
+        )
+    }
+
+    func testNewPaneCommandAddsPanesWithFreshSessionIDsAndStopsAtTheCap() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+
+        for _ in 0..<12 { controller.newTerminalPane(nil) }
+
+        XCTAssertEqual(workspace.paneIDs.count, PaneGrid.maxPanes, "the cap holds")
+        XCTAssertEqual(Set(workspace.paneIDs).count, PaneGrid.maxPanes, "every pane has its own id")
+        XCTAssertEqual(
+            workspace.paneIDs.filter { UUID(uuidString: $0) != nil }.count,
+            PaneGrid.maxPanes - 1,
+            "new panes get fresh UUID session ids"
+        )
+        for id in workspace.paneIDs {
+            XCTAssertEqual(workspace.descriptor(for: id)?.group, workspace.descriptor(for: "native-terminal")?.group)
+        }
+    }
+
+    func testClosePaneCommandRemovesTheFocusedPaneAndLeavesTheRestAlive() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+        controller.newTerminalPane(nil)
+        controller.newTerminalPane(nil)
+        let survivors = workspace.paneIDs.filter { $0 != workspace.focusedPaneID }
+        let survivingTerminals = survivors.map { ObjectIdentifier(workspace.surface(for: $0)!.terminalView) }
+
+        controller.closePane(nil)
+
+        XCTAssertEqual(workspace.paneIDs.count, 2)
+        XCTAssertEqual(
+            survivors.map { ObjectIdentifier(workspace.surface(for: $0)!.terminalView) },
+            survivingTerminals
+        )
+    }
+
+    func testPaneCommandsAreOnTheMenuAndReachTheWorkspaceThroughTheResponderChain() throws {
+        ApplicationMenus.install()
+        let panes = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "Panes")?.submenu)
+        let focusRight = try XCTUnwrap(panes.item(withTitle: "Focus Right"))
+        XCTAssertNil(focusRight.target, "pane commands travel the responder chain")
+        XCTAssertEqual(focusRight.action, Selector(("focusPaneRight:")))
+        XCTAssertEqual(focusRight.keyEquivalentModifierMask, [.command, .option])
+        let movePane = try XCTUnwrap(panes.item(withTitle: "Move Pane Right"))
+        XCTAssertEqual(movePane.action, Selector(("swapPaneRight:")))
+        XCTAssertEqual(movePane.keyEquivalentModifierMask, [.command, .control])
+        let fourth = try XCTUnwrap(panes.item(withTitle: "Pane 4"))
+        XCTAssertEqual(fourth.action, Selector(("selectPane:")))
+        XCTAssertEqual(fourth.tag, 4)
+        XCTAssertEqual(fourth.keyEquivalent, "4")
+        let file = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "File")?.submenu)
+        XCTAssertEqual(file.item(withTitle: "New Terminal Pane")?.action, Selector(("newTerminalPane:")))
+        XCTAssertEqual(file.item(withTitle: "New Terminal Pane")?.keyEquivalent, "t")
+        XCTAssertEqual(file.item(withTitle: "Close Pane")?.action, Selector(("closePane:")))
+
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        let workspace = try XCTUnwrap(window.contentView as? PaneWorkspaceView)
+        controller.newTerminalPane(nil)
+
+        var responder: NSResponder? = window.firstResponder
+        var chain: [NSResponder] = []
+        while let current = responder {
+            chain.append(current)
+            responder = current.nextResponder
+        }
+        XCTAssertTrue(chain.contains { $0 === workspace }, "the focused terminal sits under the workspace")
+        XCTAssertTrue(chain.contains { $0 === controller }, "the controller answers pane lifecycle commands")
+        XCTAssertTrue(workspace.responds(to: Selector(("focusPaneRight:"))))
+        XCTAssertTrue(workspace.responds(to: Selector(("selectPane:"))))
+        XCTAssertTrue(controller.responds(to: Selector(("newTerminalPane:"))))
+        XCTAssertTrue(controller.responds(to: Selector(("closePane:"))))
+    }
+
+    private func makeController() -> WorkspaceWindowController {
+        WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-controller-test.sock")
+            ),
+            sessionID: "native-terminal"
+        )
     }
 
     func testTerminalPreservesComposedTextInsteadOfTreatingOptionAsMeta() {
