@@ -151,12 +151,96 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.responds(to: #selector(WorkspaceWindowController.closePane(_:))))
     }
 
+    // MARK: - Restoration
+
+    func testAWindowOpensEmptyAndTheRestoredLayoutFillsIt() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+        XCTAssertTrue(workspace.paneIDs.isEmpty, "nothing is on screen before the socket answers")
+
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "grp-1", groupLabel: "Session 1"),
+                    PersistedTab(project: "alpha", engine: .claude, cwd: "/a", id: "sess-b", group: "grp-1", groupLabel: "Session 1"),
+                ])
+            )
+        )
+
+        XCTAssertEqual(workspace.paneIDs, ["sess-a", "sess-b"], "in the order they were stored")
+        XCTAssertEqual(workspace.descriptor(for: "sess-b")?.engine, .claude)
+        XCTAssertEqual(workspace.descriptor(for: "sess-b")?.groupLabel, "Session 1")
+        XCTAssertEqual(workspace.descriptor(for: "sess-a")?.cwd, "/a")
+    }
+
+    func testAnEmptyLayoutRestoresToOneBootstrapPaneRatherThanAnEmptyWindow() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+
+        controller.applyRestoredPanes([])
+
+        XCTAssertEqual(workspace.paneIDs.count, 1)
+        XCTAssertEqual(workspace.focusedPaneID, workspace.paneIDs.first)
+        XCTAssertEqual(workspace.descriptor(for: workspace.paneIDs[0])?.engine, .shell)
+    }
+
+    func testRestorationNeverDuplicatesAPaneTheWindowAlreadyHas() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+
+        controller.applyRestoredPanes([
+            WorkspaceRestoration.bootstrapPane(sessionID: "native-terminal"),
+            WorkspaceRestoration.bootstrapPane(sessionID: "sess-new"),
+        ])
+
+        XCTAssertEqual(workspace.paneIDs, ["native-terminal", "sess-new"])
+    }
+
+    func testANewPaneJoinsTheFocusedPanesSessionProjectAndDirectory() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "grp-1", groupLabel: "Build"),
+                ])
+            )
+        )
+
+        controller.newTerminalPane(nil)
+
+        let added = try XCTUnwrap(workspace.paneIDs.last.flatMap { workspace.descriptor(for: $0) })
+        XCTAssertNotEqual(added.sessionID, "sess-a")
+        XCTAssertEqual(added.group, "grp-1")
+        XCTAssertEqual(added.groupLabel, "Build")
+        XCTAssertEqual(added.project, "alpha")
+        XCTAssertEqual(added.cwd, "/a")
+        XCTAssertEqual(added.engine, .shell, "the native build can only launch a shell today")
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(
                 socketURL: URL(fileURLWithPath: "/tmp/omniagent-controller-test.sock")
             ),
             sessionID: "native-terminal"
+        )
+    }
+
+    private func makeEmptyController() -> WorkspaceWindowController {
+        WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-controller-test.sock")
+            ),
+            panes: []
         )
     }
 

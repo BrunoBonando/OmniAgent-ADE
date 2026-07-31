@@ -116,6 +116,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// controller owns session lifecycle, this view owns layout and identity.
     var onRequestNewPane: (() -> Void)?
     var onFocusedPaneChanged: ((String?) -> Void)?
+    /// Raised when the set of panes, their order, or one pane's metadata
+    /// changed — i.e. exactly when the `layout` settings row would no longer
+    /// describe what is on screen. Deliberately *not* raised from
+    /// `updateLayout`, which runs on every frame of a divider drag and whose
+    /// pixel geometry the persisted shape does not carry anyway.
+    var onPanesChanged: (() -> Void)?
 
     private let makeSurface: (String) -> TerminalSurfaceView
     private var containers: [String: PaneContainerView] = [:]
@@ -187,6 +193,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         grid = PaneGrid.synced(grid, desiredIDs: paneIDs + [descriptor.sessionID])
         updateLayout()
         focusPane(descriptor.sessionID)
+        onPanesChanged?()
         return true
     }
 
@@ -212,6 +219,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
                 onFocusedPaneChanged?(nil)
             }
         }
+        onPanesChanged?()
         return true
     }
 
@@ -225,15 +233,18 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         grid.swap(first, second)
         self.grid = grid
         updateLayout()
+        onPanesChanged?()
         return true
     }
 
     func updateDescriptor(for sessionID: String, _ mutate: (inout PaneDescriptor) -> Void) {
         guard var descriptor = descriptors[sessionID] else { return }
         mutate(&descriptor)
+        guard descriptors[sessionID] != descriptor else { return }
         descriptors[sessionID] = descriptor
         containers[sessionID]?.descriptorChanged(descriptor)
         updateAccessibilityLabels()
+        onPanesChanged?()
     }
 
     // MARK: - Focus

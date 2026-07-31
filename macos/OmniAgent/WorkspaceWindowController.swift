@@ -32,13 +32,13 @@ final class WorkspaceWindow: NSWindow {
 /// the workspace. Layout, pane identity and focus belong to `PaneWorkspaceView`;
 /// creating, attaching and killing sessions belongs here.
 final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
-    private let connection: SessionConnection
+    let connection: SessionConnection
     private let workspace: PaneWorkspaceView
-    /// Every pane this window opens belongs to one session group, exactly as
-    /// `TabInfo.group` carries it in the web build. The sidebar/session outline
-    /// that lets a person create a second group is Task 6.
-    private let sessionGroup = "sess-grp-1"
     private var readySessions: Set<String> = []
+    /// Restoration runs exactly once, on the first `.connected` — a later
+    /// reconnect must re-attach the panes that already exist, never read the
+    /// `layout` row again and rebuild them on top.
+    private var hasRestored = false
     private var observedFirstOutput = false
     /// Status text per session — an exited, erroring or thinking pane keeps its
     /// own line instead of one window-wide string every pane overwrites. The
@@ -49,7 +49,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// (connecting, reconnecting, transport errors). Outranks session status.
     private var connectionStatus: String?
 
-    init(connection: SessionConnection, sessionID: String) {
+    /// `panes` may be empty: the app delegate opens the window before the
+    /// socket is up, and `start()` fills it from the `layout` row once the
+    /// connection lands. A non-empty seed is for callers that already know
+    /// their panes (tests, and the single-pane convenience below).
+    init(connection: SessionConnection, panes: [RestoredPane]) {
         self.connection = connection
         workspace = PaneWorkspaceView { id in
             TerminalSurfaceView(connection: connection, sessionID: id)
@@ -80,8 +84,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         workspace.onFocusedPaneChanged = { [weak self] _ in self?.refreshTitle() }
         workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
-        addPane(sessionID: sessionID, createSession: false)
-        window.initialFirstResponder = workspace.surface(for: sessionID)?.terminalView
+        workspace.onPanesChanged = { [weak self] in self?.persistLayout() }
+        for pane in panes { addPane(pane, startSession: false) }
+        window.initialFirstResponder = workspace.focusedPaneID
+            .flatMap { workspace.surface(for: $0)?.terminalView }
+    }
+
+    /// One pane, one fresh session — the Task 4/5 shape, kept for callers
+    /// that want a window with a known pane in it without going through the
+    /// `layout` row.
+    convenience init(connection: SessionConnection, sessionID: String) {
+        self.init(
+            connection: connection,
+            panes: [WorkspaceRestoration.bootstrapPane(sessionID: sessionID)]
+        )
     }
 
     @available(*, unavailable)
@@ -102,7 +118,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             switch state {
             case .connected:
                 applyConnectionStatus(nil)
-                for id in workspace.paneIDs { ensureSession(id) }
+                restoreWorkspaceIfNeeded()
             case .connecting:
                 applyConnectionStatus("Connecting")
             case .disconnected:
@@ -156,11 +172,28 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.restoreFocus()
     }
 
-    /// ⌘T — a brand-new pane on a brand-new session, using the same shell,
-    /// environment and starting geometry the first pane was created with.
+    /// ⌘T — a brand-new pane on a brand-new session, joining the focused
+    /// pane's session group and inheriting its project and working directory
+    /// (the web build's "a new pane joins the session on screen"). With no
+    /// focused pane it starts an ungrouped shell in the home directory.
     @objc func newTerminalPane(_ sender: Any?) {
         guard workspace.paneIDs.count < PaneGrid.maxPanes else { return }
-        addPane(sessionID: UUID().uuidString, createSession: true)
+        let sibling = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
+        let template = WorkspaceRestoration.bootstrapPane()
+        addPane(
+            RestoredPane(
+                sessionID: template.sessionID,
+                reattaches: false,
+                project: sibling?.project ?? template.project,
+                engine: .shell,
+                cwd: sibling?.cwd.isEmpty == false ? sibling!.cwd : template.cwd,
+                label: nil,
+                themeId: sibling?.themeId,
+                group: sibling?.group ?? template.group,
+                groupLabel: sibling?.groupLabel
+            ),
+            startSession: true
+        )
     }
 
     /// ⌘W — closes the focused pane and the session behind it. The window's own
@@ -184,16 +217,61 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
+    // MARK: - Restoration
+
+    /// Rebuilds the panes the `layout` row describes, once, on the first
+    /// connection. A missing, empty or unreadable row falls back to the one
+    /// bootstrap pane — never to a window with nothing in it.
+    private func restoreWorkspaceIfNeeded() {
+        guard !hasRestored else {
+            for id in workspace.paneIDs { ensureSession(id) }
+            return
+        }
+        hasRestored = true
+        connection.getSetting(key: SettingsKey.layout) { [weak self] result in
+            let raw = (try? result.get()) ?? nil
+            self?.applyRestoredPanes(WorkspaceRestoration.plan(fromLayout: raw))
+        }
+    }
+
+    /// Adds every planned pane the window does not already have, then brings
+    /// each pane's session up. Split out from `restoreWorkspaceIfNeeded` so a
+    /// plan can be applied in a test without a socket.
+    func applyRestoredPanes(_ panes: [RestoredPane]) {
+        hasRestored = true
+        let plan = panes.isEmpty && workspace.paneIDs.isEmpty
+            ? [WorkspaceRestoration.bootstrapPane()]
+            : panes
+        for pane in plan where workspace.descriptor(for: pane.sessionID) == nil {
+            addPane(pane, startSession: false)
+        }
+        for id in workspace.paneIDs { ensureSession(id) }
+        workspace.restoreFocus()
+        // The plan came *from* the row, so re-writing it is normally a no-op;
+        // it matters when restoration repaired something (a capped ninth
+        // pane, a minted id) — the repair is what the next launch should see.
+        persistLayout()
+    }
+
+    /// Writes the live panes back to the shared `layout` row. Refused before
+    /// restoration has run: a write from a window that has not yet read the
+    /// row would overwrite the very panes it is about to restore.
+    private func persistLayout() {
+        guard hasRestored else { return }
+        let descriptors = workspace.paneIDs.compactMap { workspace.descriptor(for: $0) }
+        connection.setSetting(
+            key: SettingsKey.layout,
+            value: PersistedLayoutCodec.serialize(
+                WorkspaceRestoration.persistedTabs(from: descriptors)
+            )
+        )
+    }
+
     // MARK: - Panes and sessions
 
-    private func addPane(sessionID: String, createSession: Bool) {
-        let descriptor = PaneDescriptor(
-            sessionID: sessionID,
-            group: sessionGroup,
-            groupLabel: "Session 1",
-            title: ""
-        )
-        guard workspace.addPane(descriptor) else { return }
+    private func addPane(_ pane: RestoredPane, startSession: Bool) {
+        let sessionID = pane.sessionID
+        guard workspace.addPane(PaneDescriptor(pane)) else { return }
         let surface = workspace.surface(for: sessionID)
         surface?.onTitleChange = { [weak self] title in
             guard let self else { return }
@@ -204,7 +282,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let self, workspace.focusedPaneID == sessionID else { return }
             window?.representedURL = directory.map(URL.init(fileURLWithPath:))
         }
-        if createSession { ensureSession(sessionID) }
+        if startSession { ensureSession(sessionID) }
     }
 
     private func ensureSession(_ sessionID: String) {
@@ -225,7 +303,27 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
+    /// Starts the PTY behind one pane.
+    ///
+    /// **Only a `shell` pane can be started here.** Everything a non-shell
+    /// engine needs to launch — `PATH` resolution, MCP wiring, pre-briefing —
+    /// lives in `src-tauri/src/sessions.rs`'s `build_command`, which no
+    /// protocol message exposes; the daemon takes an already-built argv. A
+    /// restored `claude`/`codex` pane whose daemon session is still alive
+    /// therefore reattaches normally (the common case — the daemon outlives
+    /// the app, which is the whole point of the persistent protocol), and one
+    /// whose session is gone says so instead of quietly starting a login
+    /// shell under the other engine's name.
     private func createSession(_ sessionID: String) {
+        let descriptor = workspace.descriptor(for: sessionID)
+        let engine = descriptor?.engine ?? .shell
+        guard engine == .shell else {
+            applySessionStatus(
+                "\(engine.rawValue) session ended — start it from the web app",
+                for: sessionID
+            )
+            return
+        }
         let signpost = OSSignpostID(log: Instrumentation.log)
         os_signpost(
             .begin,
@@ -233,11 +331,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             name: "Create Session",
             signpostID: signpost
         )
+        let cwd = descriptor?.cwd.isEmpty == false
+            ? descriptor!.cwd
+            : FileManager.default.homeDirectoryForCurrentUser.path
         connection.createSession(
             CreateSessionRequest(
                 id: sessionID,
                 command: ["/bin/zsh", "-l"],
-                cwd: FileManager.default.homeDirectoryForCurrentUser.path,
+                cwd: cwd,
                 environment: [
                     "TERM": "xterm-256color",
                     "COLORTERM": "truecolor",

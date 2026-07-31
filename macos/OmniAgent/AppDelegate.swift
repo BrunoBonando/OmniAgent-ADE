@@ -18,10 +18,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ApplicationMenus.install()
         let connection = SessionConnection(socketURL: Self.socketURL)
-        let workspace = WorkspaceWindowController(
-            connection: connection,
-            sessionID: "native-terminal"
-        )
+        // No panes yet: the window opens immediately, and `start()` fills it
+        // from the shared `layout` row the moment the socket comes up. The
+        // window must not wait on the daemon — a daemon that is slow (or not
+        // running) has to produce a visible window saying so, not no window.
+        let workspace = WorkspaceWindowController(connection: connection, panes: [])
         self.workspace = workspace
         workspace.showWindow(nil)
         workspace.start()
