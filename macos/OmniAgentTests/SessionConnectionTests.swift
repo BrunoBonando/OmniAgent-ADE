@@ -83,6 +83,261 @@ final class SessionConnectionTests: XCTestCase {
         connection.disconnect()
         server.stop()
     }
+
+    // MARK: - Settings / brain client methods (Task 6a)
+
+    func testGetSettingSendsTheKeyAndDecodesAnOptionalValue() throws {
+        let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
+        let server = try UnixTestServer(path: socketPath)
+        let responded = expectation(description: "getSetting responded")
+
+        server.run { client in
+            try Self.ackHello(on: client)
+            let request = try readFrame(from: client)
+            XCTAssertEqual(request.kind, .getSetting)
+            let payload = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: request.payload) as? [String: Any]
+            )
+            XCTAssertEqual(payload["key"] as? String, "layout")
+            try writeFrame(
+                SessionFrame(
+                    kind: .response,
+                    requestOrSequence: request.requestOrSequence,
+                    payload: try JSONSerialization.data(withJSONObject: ["value": "{\"tabs\":[]}"])
+                ),
+                to: client
+            )
+        }
+
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: socketPath),
+            reconnectDelay: 0.02
+        )
+        var sent = false
+        connection.onStateChange = { state in
+            guard state == .connected, !sent else { return }
+            sent = true
+            connection.getSetting(key: "layout") { result in
+                XCTAssertEqual(try? result.get(), "{\"tabs\":[]}")
+                responded.fulfill()
+            }
+        }
+        connection.connect()
+
+        wait(for: [responded], timeout: 3)
+        connection.disconnect()
+        server.stop()
+    }
+
+    func testGetSettingDecodesAMissingValueAsNil() throws {
+        let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
+        let server = try UnixTestServer(path: socketPath)
+        let responded = expectation(description: "getSetting responded")
+
+        server.run { client in
+            try Self.ackHello(on: client)
+            let request = try readFrame(from: client)
+            try writeFrame(
+                SessionFrame(
+                    kind: .response,
+                    requestOrSequence: request.requestOrSequence,
+                    payload: try JSONSerialization.data(withJSONObject: ["value": NSNull()])
+                ),
+                to: client
+            )
+        }
+
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: socketPath),
+            reconnectDelay: 0.02
+        )
+        var sent = false
+        connection.onStateChange = { state in
+            guard state == .connected, !sent else { return }
+            sent = true
+            connection.getSetting(key: "does-not-exist") { result in
+                switch result {
+                case let .success(value):
+                    XCTAssertNil(value)
+                case let .failure(error):
+                    XCTFail("getSetting failed: \(error)")
+                }
+                responded.fulfill()
+            }
+        }
+        connection.connect()
+
+        wait(for: [responded], timeout: 3)
+        connection.disconnect()
+        server.stop()
+    }
+
+    func testSetSettingSendsTheKeyAndValueAndCompletesOnResponse() throws {
+        let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
+        let server = try UnixTestServer(path: socketPath)
+        let responded = expectation(description: "setSetting responded")
+
+        server.run { client in
+            try Self.ackHello(on: client)
+            let request = try readFrame(from: client)
+            XCTAssertEqual(request.kind, .setSetting)
+            let payload = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: request.payload) as? [String: Any]
+            )
+            XCTAssertEqual(payload["key"] as? String, "layout")
+            XCTAssertEqual(payload["value"] as? String, "{\"tabs\":[]}")
+            try writeFrame(
+                SessionFrame(
+                    kind: .response,
+                    requestOrSequence: request.requestOrSequence,
+                    payload: try JSONSerialization.data(withJSONObject: ["ok": true])
+                ),
+                to: client
+            )
+        }
+
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: socketPath),
+            reconnectDelay: 0.02
+        )
+        var sent = false
+        connection.onStateChange = { state in
+            guard state == .connected, !sent else { return }
+            sent = true
+            connection.setSetting(key: "layout", value: "{\"tabs\":[]}") { result in
+                if case let .failure(error) = result {
+                    XCTFail("setSetting failed: \(error)")
+                }
+                responded.fulfill()
+            }
+        }
+        connection.connect()
+
+        wait(for: [responded], timeout: 3)
+        connection.disconnect()
+        server.stop()
+    }
+
+    func testListProjectsSendsAnEmptyPayloadAndDecodesTheProjectSummaries() throws {
+        let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
+        let server = try UnixTestServer(path: socketPath)
+        let responded = expectation(description: "listProjects responded")
+
+        server.run { client in
+            try Self.ackHello(on: client)
+            let request = try readFrame(from: client)
+            XCTAssertEqual(request.kind, .brainListProjects)
+            try writeFrame(
+                SessionFrame(
+                    kind: .response,
+                    requestOrSequence: request.requestOrSequence,
+                    payload: try JSONSerialization.data(withJSONObject: [
+                        "projects": [
+                            ["id": "demo", "label": "demo", "path": "/tmp/demo"],
+                            ["id": "other", "label": "Other", "path": NSNull()],
+                        ],
+                    ])
+                ),
+                to: client
+            )
+        }
+
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: socketPath),
+            reconnectDelay: 0.02
+        )
+        var sent = false
+        connection.onStateChange = { state in
+            guard state == .connected, !sent else { return }
+            sent = true
+            connection.listProjects { result in
+                let projects = try? result.get()
+                XCTAssertEqual(
+                    projects,
+                    [
+                        BrainProjectSummary(id: "demo", label: "demo", path: "/tmp/demo"),
+                        BrainProjectSummary(id: "other", label: "Other", path: nil),
+                    ]
+                )
+                responded.fulfill()
+            }
+        }
+        connection.connect()
+
+        wait(for: [responded], timeout: 3)
+        connection.disconnect()
+        server.stop()
+    }
+
+    func testGetContextSendsTheProjectAndDecodesTheBriefing() throws {
+        let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
+        let server = try UnixTestServer(path: socketPath)
+        let responded = expectation(description: "getContext responded")
+
+        server.run { client in
+            try Self.ackHello(on: client)
+            let request = try readFrame(from: client)
+            XCTAssertEqual(request.kind, .brainGetContext)
+            let payload = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: request.payload) as? [String: Any]
+            )
+            XCTAssertEqual(payload["project"] as? String, "demo")
+            try writeFrame(
+                SessionFrame(
+                    kind: .response,
+                    requestOrSequence: request.requestOrSequence,
+                    payload: try JSONSerialization.data(withJSONObject: [
+                        "context": [
+                            "summary": "A demo project.",
+                            "recent_decisions": [
+                                ["id": "demo:d1", "kind": "memory", "project": "demo", "label": "Decision: x"],
+                            ],
+                            "related_projects": [],
+                            "memory_notes": [],
+                        ],
+                    ])
+                ),
+                to: client
+            )
+        }
+
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: socketPath),
+            reconnectDelay: 0.02
+        )
+        var sent = false
+        connection.onStateChange = { state in
+            guard state == .connected, !sent else { return }
+            sent = true
+            connection.getContext(project: "demo") { result in
+                let context = try? result.get()
+                XCTAssertEqual(context?.summary, "A demo project.")
+                XCTAssertEqual(context?.recentDecisions.count, 1)
+                XCTAssertEqual(context?.recentDecisions.first?.id, "demo:d1")
+                XCTAssertEqual(context?.recentDecisions.first?.path, nil)
+                XCTAssertEqual(context?.relatedProjects, [])
+                XCTAssertEqual(context?.memoryNotes, [])
+                responded.fulfill()
+            }
+        }
+        connection.connect()
+
+        wait(for: [responded], timeout: 3)
+        connection.disconnect()
+        server.stop()
+    }
+
+    private static func ackHello(on client: Int32) throws {
+        let hello = try readFrame(from: client)
+        try writeFrame(
+            SessionFrame(
+                kind: .helloAck,
+                requestOrSequence: hello.requestOrSequence,
+                payload: try JSONSerialization.data(withJSONObject: ["protocol_version": 1])
+            ),
+            to: client
+        )
+    }
 }
 
 private final class UnixTestServer {

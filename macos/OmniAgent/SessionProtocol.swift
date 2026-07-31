@@ -12,6 +12,14 @@ enum MessageKind: UInt8 {
     case detach = 0x09
     case getSetting = 0x0a
     case setSetting = 0x0b
+    /// Brain-store read: every ingested project (Task 6a — appended, never
+    /// renumbering an existing kind). Mirrors
+    /// `omniagent_pty_daemon::protocol::MessageKind::BrainListProjects`.
+    case brainListProjects = 0x0c
+    /// Brain-store read: one project's briefing block (Task 6a — appended,
+    /// never renumbering an existing kind). Mirrors
+    /// `omniagent_pty_daemon::protocol::MessageKind::BrainGetContext`.
+    case brainGetContext = 0x0d
     case helloAck = 0x81
     case sessionList = 0x82
     case sessionCreated = 0x83

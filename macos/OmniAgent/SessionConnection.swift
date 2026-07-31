@@ -23,6 +23,43 @@ struct SessionStatusEvent: Codable, Equatable {
     let engine: String
 }
 
+/// The `list_projects` / `get_context.related_projects` shape,
+/// `mcp_server::tools::list_projects`'s frozen `{id, label, path}` (Task 6a).
+struct BrainProjectSummary: Codable, Equatable {
+    let id: String
+    let label: String
+    let path: String?
+}
+
+/// The shared node projection `mcp_server::tools`'s `search_brain`/`related`/
+/// `get_context` all reuse: `{id, kind, project, label, path?, summary?}`
+/// (Task 6a — `get_context`'s `recent_decisions`/`memory_notes` entries).
+struct BrainNodeView: Codable, Equatable {
+    let id: String
+    let kind: String
+    let project: String
+    let label: String
+    let path: String?
+    let summary: String?
+}
+
+/// `get_context {project}` -> `{summary, recent_decisions, related_projects,
+/// memory_notes}` (Task 6a) — the per-project briefing block a native
+/// settings/usage/inspector surface reads.
+struct BrainContext: Codable, Equatable {
+    let summary: String
+    let recentDecisions: [BrainNodeView]
+    let relatedProjects: [BrainProjectSummary]
+    let memoryNotes: [BrainNodeView]
+
+    enum CodingKeys: String, CodingKey {
+        case summary
+        case recentDecisions = "recent_decisions"
+        case relatedProjects = "related_projects"
+        case memoryNotes = "memory_notes"
+    }
+}
+
 struct SessionExitedEvent: Codable, Equatable {
     let id: String
     let exitCode: UInt32?
@@ -239,6 +276,77 @@ final class SessionConnection {
                 self.attachments.removeValue(forKey: sessionID)
             }
             self.finishResponse(result, completion: completion)
+        }
+    }
+
+    // MARK: - Settings (Task 6a)
+
+    /// Reads one `settings`-table row (e.g. `LAYOUT_SETTING_KEY`'s `"layout"`
+    /// row) — `nil` when unset, mirroring `Store::get_setting` and the Tauri
+    /// `settings_get` command's `Option<String>` result exactly.
+    func getSetting(key: String, completion: @escaping (Result<String?, Error>) -> Void) {
+        sendCodable(kind: .getSetting, value: SettingKeyPayload(key: key)) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result {
+                        try self.decoder.decode(SettingValueResponse.self, from: frame.payload).value
+                    }
+                }
+            )
+        }
+    }
+
+    /// Upserts a `settings`-table row.
+    func setSetting(
+        key: String,
+        value: String,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        sendCodable(kind: .setSetting, value: SettingValuePayload(key: key, value: value)) {
+            self.finishResponse($0, completion: completion)
+        }
+    }
+
+    // MARK: - Brain reads (Task 6a)
+
+    /// Every ingested project — `mcp_server::tools::list_projects`'s frozen
+    /// shape, unchanged whether read via this daemon route or the Tauri
+    /// `brain_query { kind: "list_projects" }` command.
+    func listProjects(completion: @escaping (Result<[BrainProjectSummary], Error>) -> Void) {
+        request(kind: .brainListProjects, payload: Data("{}".utf8)) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result {
+                        try self.decoder.decode(BrainListProjectsResponse.self, from: frame.payload)
+                            .projects
+                    }
+                }
+            )
+        }
+    }
+
+    /// One project's briefing block — `mcp_server::tools::get_context`'s
+    /// frozen shape. An unknown `project` is not an error: it degrades to an
+    /// empty briefing, same as the Tauri `brain_get_context` command backed
+    /// by the same shared tool.
+    func getContext(project: String, completion: @escaping (Result<BrainContext, Error>) -> Void) {
+        sendCodable(kind: .brainGetContext, value: BrainGetContextPayload(project: project)) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result {
+                        try self.decoder.decode(BrainGetContextResponse.self, from: frame.payload).context
+                    }
+                }
+            )
         }
     }
 
@@ -622,6 +730,36 @@ private struct ResizePayload: Codable {
 
 private struct ErrorPayload: Codable {
     let message: String
+}
+
+private struct SettingKeyPayload: Codable {
+    let key: String
+}
+
+private struct SettingValuePayload: Codable {
+    let key: String
+    let value: String
+}
+
+/// `GetSetting`'s `Response` payload shape (`{"value": ...}` — the daemon
+/// wraps the raw `Option<String>` under a named key rather than sending a
+/// bare JSON string/null, since `Response` is also used for plain acks).
+private struct SettingValueResponse: Codable {
+    let value: String?
+}
+
+private struct BrainGetContextPayload: Codable {
+    let project: String
+}
+
+/// `BrainListProjects`'s `Response` payload shape (`{"projects": [...]}`).
+private struct BrainListProjectsResponse: Codable {
+    let projects: [BrainProjectSummary]
+}
+
+/// `BrainGetContext`'s `Response` payload shape (`{"context": {...}}`).
+private struct BrainGetContextResponse: Codable {
+    let context: BrainContext
 }
 
 private func withUnixSocketAddress<T>(
