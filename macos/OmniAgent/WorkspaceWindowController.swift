@@ -33,7 +33,6 @@ final class WorkspaceWindow: NSWindow {
 /// creating, attaching and killing sessions belongs here.
 final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     private let connection: SessionConnection
-    private let initialSessionID: String
     private let workspace: PaneWorkspaceView
     /// Every pane this window opens belongs to one session group, exactly as
     /// `TabInfo.group` carries it in the web build. The sidebar/session outline
@@ -45,7 +44,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     init(connection: SessionConnection, sessionID: String) {
         self.connection = connection
-        initialSessionID = sessionID
         workspace = PaneWorkspaceView { id in
             TerminalSurfaceView(connection: connection, sessionID: id)
         }

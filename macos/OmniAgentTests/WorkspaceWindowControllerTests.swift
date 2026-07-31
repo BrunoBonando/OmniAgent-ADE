@@ -63,19 +63,25 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let panes = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "Panes")?.submenu)
         let focusRight = try XCTUnwrap(panes.item(withTitle: "Focus Right"))
         XCTAssertNil(focusRight.target, "pane commands travel the responder chain")
-        XCTAssertEqual(focusRight.action, Selector(("focusPaneRight:")))
+        XCTAssertEqual(focusRight.action, #selector(PaneWorkspaceView.focusPaneRight(_:)))
         XCTAssertEqual(focusRight.keyEquivalentModifierMask, [.command, .option])
         let movePane = try XCTUnwrap(panes.item(withTitle: "Move Pane Right"))
-        XCTAssertEqual(movePane.action, Selector(("swapPaneRight:")))
+        XCTAssertEqual(movePane.action, #selector(PaneWorkspaceView.swapPaneRight(_:)))
         XCTAssertEqual(movePane.keyEquivalentModifierMask, [.command, .control])
         let fourth = try XCTUnwrap(panes.item(withTitle: "Pane 4"))
-        XCTAssertEqual(fourth.action, Selector(("selectPane:")))
+        XCTAssertEqual(fourth.action, #selector(PaneWorkspaceView.selectPane(_:)))
         XCTAssertEqual(fourth.tag, 4)
         XCTAssertEqual(fourth.keyEquivalent, "4")
         let file = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "File")?.submenu)
-        XCTAssertEqual(file.item(withTitle: "New Terminal Pane")?.action, Selector(("newTerminalPane:")))
+        XCTAssertEqual(
+            file.item(withTitle: "New Terminal Pane")?.action,
+            #selector(WorkspaceWindowController.newTerminalPane(_:))
+        )
         XCTAssertEqual(file.item(withTitle: "New Terminal Pane")?.keyEquivalent, "t")
-        XCTAssertEqual(file.item(withTitle: "Close Pane")?.action, Selector(("closePane:")))
+        XCTAssertEqual(
+            file.item(withTitle: "Close Pane")?.action,
+            #selector(WorkspaceWindowController.closePane(_:))
+        )
 
         let controller = makeController()
         defer { controller.close() }
@@ -92,10 +98,10 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         }
         XCTAssertTrue(chain.contains { $0 === workspace }, "the focused terminal sits under the workspace")
         XCTAssertTrue(chain.contains { $0 === controller }, "the controller answers pane lifecycle commands")
-        XCTAssertTrue(workspace.responds(to: Selector(("focusPaneRight:"))))
-        XCTAssertTrue(workspace.responds(to: Selector(("selectPane:"))))
-        XCTAssertTrue(controller.responds(to: Selector(("newTerminalPane:"))))
-        XCTAssertTrue(controller.responds(to: Selector(("closePane:"))))
+        XCTAssertTrue(workspace.responds(to: #selector(PaneWorkspaceView.focusPaneRight(_:))))
+        XCTAssertTrue(workspace.responds(to: #selector(PaneWorkspaceView.selectPane(_:))))
+        XCTAssertTrue(controller.responds(to: #selector(WorkspaceWindowController.newTerminalPane(_:))))
+        XCTAssertTrue(controller.responds(to: #selector(WorkspaceWindowController.closePane(_:))))
     }
 
     private func makeController() -> WorkspaceWindowController {

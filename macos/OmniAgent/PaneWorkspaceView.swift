@@ -177,33 +177,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return true
     }
 
-    /// Replaces a pane's session in place, keeping its cell — the native
-    /// counterpart of `syncPaneTree`'s 1-for-1 case (an engine restart).
-    @discardableResult
-    func replacePane(_ old: String, with descriptor: PaneDescriptor) -> Bool {
-        guard let container = containers[old], grid?.contains(old) == true else { return false }
-        let wasFocused = focusedPaneID == old
-        resizeCoalescer.cancel(old)
-        container.removeFromSuperview()
-        containers.removeValue(forKey: old)
-        descriptors.removeValue(forKey: old)
-
-        descriptors[descriptor.sessionID] = descriptor
-        let replacement = PaneContainerView(
-            paneID: descriptor.sessionID,
-            surface: makeSurface(descriptor.sessionID),
-            workspace: self
-        )
-        replacement.surface.resizeCoalescer = resizeCoalescer
-        replacement.surface.suspendsDrawing = suspendsDrawing
-        containers[descriptor.sessionID] = replacement
-        addSubview(replacement)
-        grid?.replace(old, with: descriptor.sessionID)
-        updateLayout()
-        if wasFocused { focusPane(descriptor.sessionID) }
-        return true
-    }
-
     func updateDescriptor(for sessionID: String, _ mutate: (inout PaneDescriptor) -> Void) {
         guard var descriptor = descriptors[sessionID] else { return }
         mutate(&descriptor)
