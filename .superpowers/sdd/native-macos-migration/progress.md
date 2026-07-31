@@ -42,3 +42,6 @@ Task 6a: minor (deferred): dead Layout struct and unused CaseIterable conformanc
 Task 6a: minor (deferred): no shared fixture guarding Swift/TS layout codec drift, unlike pane-grid.json's convention (PersistedLayoutTests.swift)
 Task 6a: minor (deferred): SessionConnection new client methods untested against .error/non-.response frames (SessionConnection.swift:287-352)
 Task 6a: fix round 1/5 (1 addressed, 0 open on original finding; re-review found 1 new Important regression: sessions.rs:4821-4822 missed the .with_data_dir ripple, would spawn real daemon against production brain.db; commits 2400811..3a0c165)
+Task 6a: fix round 2/5 (1 addressed, 0 open; also fixed manual_black_pane_verify.rs found in the same sweep; commits 3a0c165..9e6a9c2)
+Task 6a: minor (deferred): DaemonSessions::default_for_data_dir is inert/misleadingly named — sets socket path, not the data_dir override field; zero call sites today (src-tauri/src/daemon.rs:209-211)
+Task 6a: complete (commits eeb7af4..9e6a9c2, review clean after 2 fix rounds, 9 minors deferred to final review)
