@@ -20,6 +20,8 @@
 		10000000000000000000000B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* AppDelegate.swift */; };
 		10000000000000000000000C /* PaneGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* PaneGrid.swift */; };
 		10000000000000000000000D /* PaneGridTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000E /* PaneGridTests.swift */; };
+		10000000000000000000000E /* PaneWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000F /* PaneWorkspaceView.swift */; };
+		10000000000000000000000F /* PaneWorkspaceViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* PaneWorkspaceViewTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -47,6 +49,8 @@
 		20000000000000000000000C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		20000000000000000000000D /* PaneGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneGrid.swift; sourceTree = "<group>"; };
 		20000000000000000000000E /* PaneGridTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneGridTests.swift; sourceTree = "<group>"; };
+		20000000000000000000000F /* PaneWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneWorkspaceView.swift; sourceTree = "<group>"; };
+		200000000000000000000010 /* PaneWorkspaceViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneWorkspaceViewTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -85,6 +89,7 @@
 				200000000000000000000007 /* SessionConnection.swift */,
 				200000000000000000000009 /* Instrumentation.swift */,
 				20000000000000000000000D /* PaneGrid.swift */,
+				20000000000000000000000F /* PaneWorkspaceView.swift */,
 				20000000000000000000000A /* TerminalSurfaceView.swift */,
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
 				20000000000000000000000C /* AppDelegate.swift */,
@@ -98,6 +103,7 @@
 				200000000000000000000002 /* FrameCodecTests.swift */,
 				200000000000000000000006 /* SessionConnectionTests.swift */,
 				20000000000000000000000E /* PaneGridTests.swift */,
+				200000000000000000000010 /* PaneWorkspaceViewTests.swift */,
 				200000000000000000000008 /* WorkspaceWindowControllerTests.swift */,
 			);
 			path = OmniAgentTests;
@@ -222,6 +228,7 @@
 				100000000000000000000006 /* SessionConnection.swift in Sources */,
 				100000000000000000000008 /* Instrumentation.swift in Sources */,
 				10000000000000000000000C /* PaneGrid.swift in Sources */,
+				10000000000000000000000E /* PaneWorkspaceView.swift in Sources */,
 				100000000000000000000009 /* TerminalSurfaceView.swift in Sources */,
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
 				10000000000000000000000B /* AppDelegate.swift in Sources */,
@@ -235,6 +242,7 @@
 				100000000000000000000002 /* FrameCodecTests.swift in Sources */,
 				100000000000000000000005 /* SessionConnectionTests.swift in Sources */,
 				10000000000000000000000D /* PaneGridTests.swift in Sources */,
+				10000000000000000000000F /* PaneWorkspaceViewTests.swift in Sources */,
 				100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

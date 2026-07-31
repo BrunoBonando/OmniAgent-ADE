@@ -32,11 +32,35 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     var onTitleChange: ((String) -> Void)?
     var onDirectoryChange: ((String?) -> Void)?
 
+    /// When set, PTY resizes are batched here instead of being sent on every
+    /// size change — one send per display refresh during a live divider drag.
+    weak var resizeCoalescer: PaneResizeCoalescer?
+
+    /// A fully occluded pane keeps parsing output into SwiftTerm's bounded
+    /// buffer but stops asking the renderer to draw it.
+    var suspendsDrawing = false {
+        didSet {
+            guard oldValue, !suspendsDrawing else { return }
+            terminalView.needsDisplay = true
+        }
+    }
+
+    private(set) var resizeSendCount = 0
+    private(set) var drawRequestCount = 0
+
+    private struct PendingResize {
+        let cols: UInt16
+        let rows: UInt16
+        let pixelWidth: UInt16
+        let pixelHeight: UInt16
+    }
+
     private let connection: SessionConnection
     private let sessionID: String
     private var attemptedMetal = false
     private var drawMarkerScheduled = false
     private var pendingDrawSequence: UInt64 = 0
+    private var pendingResize: PendingResize?
 
     init(connection: SessionConnection, sessionID: String) {
         self.connection = connection
@@ -75,14 +99,16 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         terminalView.setAccessibilityRole(.textArea)
         terminalView.setAccessibilityLabel("Terminal")
         terminalView.terminalDelegate = self
-        terminalView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(terminalView)
-        NSLayoutConstraint.activate([
-            terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            terminalView.topAnchor.constraint(equalTo: topAnchor),
-            terminalView.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
+        terminalView.frame = bounds
+    }
+
+    /// Direct frame propagation rather than Auto Layout: the pane workspace
+    /// calculates frames itself, and a live divider drag must resize the
+    /// terminal in the same turn the pointer moved, not on the next layout pass.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        terminalView.frame = bounds
     }
 
     @available(*, unavailable)
@@ -119,7 +145,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         )
         terminalView.feed(byteArray: Array(bytes)[...])
         pendingDrawSequence = sequence
-        guard !drawMarkerScheduled else { return }
+        guard !suspendsDrawing, !drawMarkerScheduled else { return }
         drawMarkerScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -138,6 +164,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
 
     @discardableResult
     func requestRendererDraw() -> Bool {
+        drawRequestCount += 1
         if let metalView = terminalView.firstDescendant(of: MTKView.self) {
             // draw() may return without a drawable or while a frame is in flight.
             // SwiftTerm's optional Metal.Commit signpost is the submit boundary.
@@ -153,10 +180,46 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     }
 
     func syncSize() {
-        sizeChanged(
-            source: terminalView,
-            newCols: terminalView.terminal.cols,
-            newRows: terminalView.terminal.rows
+        scheduleResize()
+    }
+
+    /// Records the terminal's current geometry and hands it to the coalescer —
+    /// or sends it straight away when this surface stands alone (no workspace).
+    func scheduleResize() {
+        let backing = terminalView.convertToBacking(terminalView.bounds)
+        pendingResize = PendingResize(
+            cols: clampedUInt16(terminalView.terminal.cols),
+            rows: clampedUInt16(terminalView.terminal.rows),
+            pixelWidth: clampedUInt16(Int(backing.width.rounded())),
+            pixelHeight: clampedUInt16(Int(backing.height.rounded()))
+        )
+        if let resizeCoalescer {
+            resizeCoalescer.schedule(sessionID)
+        } else {
+            flushResize()
+        }
+    }
+
+    /// Sends the most recent geometry, once. Intermediate sizes a drag passed
+    /// through are never sent — the PTY only needs where the divider landed.
+    func flushResize() {
+        guard let resize = pendingResize else { return }
+        pendingResize = nil
+        resizeSendCount += 1
+        connection.resize(
+            sessionID: sessionID,
+            cols: resize.cols,
+            rows: resize.rows,
+            pixelWidth: resize.pixelWidth,
+            pixelHeight: resize.pixelHeight
+        )
+        os_signpost(
+            .event,
+            log: Instrumentation.log,
+            name: "Terminal Resize",
+            "%d x %d",
+            Int(resize.cols),
+            Int(resize.rows)
         )
     }
 
@@ -166,22 +229,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     }
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-        let backing = source.convertToBacking(source.bounds)
-        connection.resize(
-            sessionID: sessionID,
-            cols: clampedUInt16(newCols),
-            rows: clampedUInt16(newRows),
-            pixelWidth: clampedUInt16(Int(backing.width.rounded())),
-            pixelHeight: clampedUInt16(Int(backing.height.rounded()))
-        )
-        os_signpost(
-            .event,
-            log: Instrumentation.log,
-            name: "Terminal Resize",
-            "%d x %d",
-            newCols,
-            newRows
-        )
+        scheduleResize()
     }
 
     func setTerminalTitle(source: TerminalView, title: String) {
