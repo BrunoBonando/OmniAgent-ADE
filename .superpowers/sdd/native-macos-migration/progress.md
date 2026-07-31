@@ -59,3 +59,11 @@ Task 6b-1: minor (deferred): UserNotificationDelivery() sets itself as UNUserNot
 Task 6b-1: minor (deferred): WorkspaceWindowController.swift is 622 lines, settings-write pair (write/persistLayout/persistNotifications/lastPersisted) is an extractable collaborator
 Task 6b-1: minor (deferred): palette action test covers 4/7 PaletteAction cases; recordNotification wiring untested
 Task 6b-1: minor (deferred): Dictionary(uniqueKeysWithValues:) traps on duplicate session ids in CommandPaletteModel.build/SessionOutlineView.reload
+Task 6b-1: fix round 1/5 (5 addressed — missing session-group creation + 4 Important — 0 open; commits c823e20..478930d)
+Task 6b-1: minor (deferred): full 8-pane saved layout silently loses its last pane if a ⌘T races the restore read (WorkspaceWindowController.swift:439-451)
+Task 6b-1: minor (deferred): a failed layout read disarms reconnect re-attach for panes created during the outage, and the window title sticks on the error (WorkspaceWindowController.swift:399-402,428-429)
+Task 6b-1: minor (deferred): editingEnded triggers reloadData synchronously from controlTextDidEndEditing, an AppKit hazard; should dispatch async (SessionOutlineView.swift:113-117)
+Task 6b-1: minor (deferred): beginRename() latches isRenaming=true unconditionally even if no field editor opens, no escape (SessionOutlineView.swift:365-373)
+Task 6b-1: minor (deferred): fix report's "matches web build's cap semantics" claim for gating newSession on the 8-pane cap is inaccurate — web cap is per-session with new-session as the explicit escape hatch; native closes that hatch (defensible on native grounds, just mis-justified)
+Task 6b-1: minor (deferred): rename tests never open a real field editor (no window), controlTextDidEndEditing path untested; one new-session test still uses paneIDs.last fill-order assumption instead of pane(inGroup:)
+Task 6b-1: complete (commits cda3ac2..478930d, review clean after 1 fix round, 7 additional minors + prior 11 deferred to final review)
