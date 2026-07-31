@@ -226,6 +226,119 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(added.engine, .shell, "the native build can only launch a shell today")
     }
 
+    // MARK: - Command palette and toolbar
+
+    func testTheCommandPaletteAndSidebarToggleAreOnTheMenuAndTravelTheResponderChain() throws {
+        ApplicationMenus.install()
+        let palette = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "Command Palette"))
+        XCTAssertNil(palette.target)
+        XCTAssertEqual(palette.action, #selector(WorkspaceWindowController.showCommandPalette(_:)))
+        XCTAssertEqual(palette.keyEquivalent, "k")
+        XCTAssertEqual(palette.keyEquivalentModifierMask, [.command])
+
+        let sidebar = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "Window")?.submenu?.item(withTitle: "Toggle Sidebar"))
+        XCTAssertNil(sidebar.target)
+        XCTAssertEqual(sidebar.action, #selector(WorkspaceWindowController.toggleSidebar(_:)))
+        XCTAssertEqual(sidebar.keyEquivalentModifierMask, [.command, .control])
+    }
+
+    func testTheToolbarCarriesOnlyCommandsThatAlsoExistElsewhereAndTargetsTheResponderChain() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        let toolbar = try XCTUnwrap(controller.window?.toolbar)
+
+        XCTAssertEqual(controller.window?.toolbarStyle, .unified)
+        let identifiers = controller.toolbarDefaultItemIdentifiers(toolbar)
+        XCTAssertEqual(
+            identifiers,
+            [
+                WorkspaceWindowController.ToolbarItem.sidebar,
+                .sidebarTrackingSeparator,
+                WorkspaceWindowController.ToolbarItem.newPane,
+                WorkspaceWindowController.ToolbarItem.closePane,
+                .flexibleSpace,
+                WorkspaceWindowController.ToolbarItem.palette,
+            ]
+        )
+        for identifier in identifiers where !identifier.rawValue.hasPrefix("NS") {
+            let item = try XCTUnwrap(
+                controller.toolbar(toolbar, itemForItemIdentifier: identifier, willBeInsertedIntoToolbar: true)
+            )
+            XCTAssertNil(item.target, "\(identifier.rawValue) travels the responder chain")
+            XCTAssertNotNil(item.action)
+            XCTAssertNotNil(item.image, "\(identifier.rawValue) has a symbol")
+        }
+    }
+
+    func testTheToolbarSharesTheMenusEnablementRuleRatherThanAddingASecondOne() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        let toolbar = try XCTUnwrap(controller.window?.toolbar)
+        let closePane = try XCTUnwrap(
+            controller.toolbar(toolbar, itemForItemIdentifier: WorkspaceWindowController.ToolbarItem.closePane, willBeInsertedIntoToolbar: true)
+        )
+
+        XCTAssertFalse(controller.validateToolbarItem(closePane), "no pane, nothing to close")
+
+        controller.applyRestoredPanes([])
+
+        XCTAssertTrue(controller.validateToolbarItem(closePane))
+    }
+
+    func testEveryPaletteActionRunsTheSameCodeTheMenuItemDoes() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1"),
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-b", group: "g1"),
+                ])
+            )
+        )
+
+        controller.run(.focusPane(sessionID: "sess-a"))
+        XCTAssertEqual(controller.workspaceView.focusedPaneID, "sess-a")
+
+        controller.run(.newPane)
+        XCTAssertEqual(controller.workspaceView.paneIDs.count, 3)
+
+        controller.run(.closePane(sessionID: "sess-b"))
+        XCTAssertFalse(controller.workspaceView.paneIDs.contains("sess-b"))
+
+        let split = try XCTUnwrap(controller.window?.contentViewController as? NSSplitViewController)
+        let collapsed = split.splitViewItems[0].isCollapsed
+        controller.run(.toggleSidebar)
+        XCTAssertNotEqual(split.splitViewItems[0].isCollapsed, collapsed)
+    }
+
+    func testThePaletteIsBuiltFromTheLiveWorkspaceOnEveryOpen() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1"),
+                ])
+            )
+        )
+
+        controller.showCommandPalette(nil)
+        XCTAssertTrue(controller.palette.model.matches.contains { $0.action == .focusPane(sessionID: "sess-a") })
+
+        controller.palette.dismiss()
+        controller.workspaceView.closePane("sess-a")
+        controller.showCommandPalette(nil)
+
+        XCTAssertFalse(
+            controller.palette.model.matches.contains { $0.action == .focusPane(sessionID: "sess-a") },
+            "a pane that closed while the palette was shut can never be offered"
+        )
+        controller.palette.dismiss()
+    }
+
     // MARK: - Session outline
 
     func testTheOutlineFollowsThePanesAndTheFocusedOne() throws {

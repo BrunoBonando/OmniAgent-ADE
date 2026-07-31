@@ -35,6 +35,10 @@
 		10000000000000000000001A /* SessionOutline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001B /* SessionOutline.swift */; };
 		10000000000000000000001B /* SessionOutlineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001C /* SessionOutlineView.swift */; };
 		10000000000000000000001C /* SessionOutlineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001D /* SessionOutlineTests.swift */; };
+		10000000000000000000001D /* CommandPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001E /* CommandPalette.swift */; };
+		10000000000000000000001E /* CommandPaletteController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001F /* CommandPaletteController.swift */; };
+		10000000000000000000001F /* WorkspaceToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000020 /* WorkspaceToolbar.swift */; };
+		100000000000000000000020 /* CommandPaletteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000021 /* CommandPaletteTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -77,6 +81,10 @@
 		20000000000000000000001B /* SessionOutline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionOutline.swift; sourceTree = "<group>"; };
 		20000000000000000000001C /* SessionOutlineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionOutlineView.swift; sourceTree = "<group>"; };
 		20000000000000000000001D /* SessionOutlineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionOutlineTests.swift; sourceTree = "<group>"; };
+		20000000000000000000001E /* CommandPalette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandPalette.swift; sourceTree = "<group>"; };
+		20000000000000000000001F /* CommandPaletteController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandPaletteController.swift; sourceTree = "<group>"; };
+		200000000000000000000020 /* WorkspaceToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceToolbar.swift; sourceTree = "<group>"; };
+		200000000000000000000021 /* CommandPaletteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandPaletteTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -126,6 +134,9 @@
 				200000000000000000000019 /* SessionNotifier.swift */,
 				20000000000000000000001B /* SessionOutline.swift */,
 				20000000000000000000001C /* SessionOutlineView.swift */,
+				20000000000000000000001E /* CommandPalette.swift */,
+				20000000000000000000001F /* CommandPaletteController.swift */,
+				200000000000000000000020 /* WorkspaceToolbar.swift */,
 			);
 			path = OmniAgent;
 			sourceTree = "<group>";
@@ -144,6 +155,7 @@
 				200000000000000000000018 /* NotificationFeedTests.swift */,
 				20000000000000000000001A /* SessionNotifierTests.swift */,
 				20000000000000000000001D /* SessionOutlineTests.swift */,
+				200000000000000000000021 /* CommandPaletteTests.swift */,
 			);
 			path = OmniAgentTests;
 			sourceTree = "<group>";
@@ -279,6 +291,9 @@
 				100000000000000000000018 /* SessionNotifier.swift in Sources */,
 				10000000000000000000001A /* SessionOutline.swift in Sources */,
 				10000000000000000000001B /* SessionOutlineView.swift in Sources */,
+				10000000000000000000001D /* CommandPalette.swift in Sources */,
+				10000000000000000000001E /* CommandPaletteController.swift in Sources */,
+				10000000000000000000001F /* WorkspaceToolbar.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -296,6 +311,7 @@
 				100000000000000000000017 /* NotificationFeedTests.swift in Sources */,
 				100000000000000000000019 /* SessionNotifierTests.swift in Sources */,
 				10000000000000000000001C /* SessionOutlineTests.swift in Sources */,
+				100000000000000000000020 /* CommandPaletteTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

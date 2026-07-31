@@ -38,6 +38,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// a split view — the workspace is one half of it, not the whole thing.
     var workspaceView: PaneWorkspaceView { workspace }
     let outline = SessionOutlineView()
+    let palette = CommandPaletteController()
     private var readySessions: Set<String> = []
     /// Restoration runs exactly once, on the first `.connected` — a later
     /// reconnect must re-attach the panes that already exist, never read the
@@ -109,6 +110,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         window.contentViewController = split
 
         super.init(window: window)
+        installToolbar(on: window)
         window.delegate = self
         window.onFirstResponderChange = { [weak self] responder in
             self?.workspace.adoptFocus(from: responder)
@@ -311,6 +313,56 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // it matters when restoration repaired something (a capped ninth
         // pane, a minted id) — the repair is what the next launch should see.
         persistLayout()
+    }
+
+    // MARK: - Command palette
+
+    /// ⌘K. The list is rebuilt from the live workspace on every open, so it
+    /// can never offer a pane that closed while the palette was shut.
+    @objc func showCommandPalette(_ sender: Any?) {
+        palette.onRun = { [weak self] action in self?.run(action) }
+        palette.present(
+            commands: CommandPaletteModel.build(
+                panes: workspace.paneIDs.compactMap { workspace.descriptor(for: $0) },
+                paneOrder: workspace.paneIDs,
+                focusedPaneID: workspace.focusedPaneID,
+                unreadNotifications: notifier.unreadCount
+            ),
+            over: window
+        )
+    }
+
+    /// The one place a palette row becomes a workspace command — every arm
+    /// calls the same method the menu item and the toolbar button call, so
+    /// the three can never drift.
+    func run(_ action: PaletteAction) {
+        switch action {
+        case let .focusPane(sessionID):
+            revealPane(sessionID)
+        case let .closePane(sessionID):
+            workspace.focusPane(sessionID)
+            closePane(nil)
+        case .newPane:
+            newTerminalPane(nil)
+        // Interrupt and reattach are the focused terminal's own responder
+        // actions (`TerminalSurfaceView`), reached here directly rather than
+        // re-implemented, so the palette runs the identical code the ⌘. and
+        // ⌘R menu items do.
+        case .interruptFocusedPane:
+            workspace.focusedPaneID.flatMap { workspace.surface(for: $0) }?.interruptSession(nil)
+        case .reattachFocusedPane:
+            workspace.focusedPaneID.flatMap { workspace.surface(for: $0) }?.reattachSession(nil)
+        case .toggleSidebar:
+            toggleSidebar(nil)
+        case .clearNotifications:
+            notifier.clear()
+        }
+    }
+
+    @objc func toggleSidebar(_ sender: Any?) {
+        (window?.contentViewController as? NSSplitViewController)?
+            .splitViewItems.first?
+            .animator().isCollapsed.toggle()
     }
 
     // MARK: - Session outline

@@ -97,6 +97,8 @@ enum ApplicationMenus {
         file.addItem(
             item("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])
         )
+        file.addItem(.separator())
+        file.addItem(item("Command Palette", Selector(("showCommandPalette:")), "k"))
 
         let edit = NSMenu(title: "Edit")
         main.addItem(withSubmenu: edit)
@@ -149,6 +151,13 @@ enum ApplicationMenus {
 
         let window = NSMenu(title: "Window")
         main.addItem(withSubmenu: window)
+        // ⌃⌘S rather than AppKit's own ⌃⌘S-free default: `toggleSidebar:` here
+        // is the workspace controller's, not `NSSplitViewController`'s, so the
+        // palette row and this item run the same method.
+        window.addItem(
+            item("Toggle Sidebar", Selector(("toggleSidebar:")), "s", [.command, .control])
+        )
+        window.addItem(.separator())
         window.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
         window.addItem(item("Zoom", #selector(NSWindow.performZoom(_:))))
         NSApp.windowsMenu = window
