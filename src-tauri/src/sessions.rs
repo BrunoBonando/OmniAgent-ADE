@@ -4819,7 +4819,8 @@ mod tests {
         let t = DaemonSessions::resolve(&socket, cached_shell_path())
             .expect("the pty daemon must be available to run this test");
         let t = DaemonSessions::with_binary(t.binary(), &socket)
-            .with_config(daemon::write_config(dir.path()).unwrap());
+            .with_config(daemon::write_config(dir.path()).unwrap())
+            .with_data_dir(dir.path());
 
         // A command that cannot be exec'd at all — the founder bug's shape.
         let dead = t.ensure_session(

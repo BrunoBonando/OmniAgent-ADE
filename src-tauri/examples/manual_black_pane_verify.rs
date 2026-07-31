@@ -107,7 +107,8 @@ fn run_case(case: &str, real: Option<&(String, String)>) -> (bool, String) {
 
     let tmux = DaemonSessions::resolve(&socket, std::env::var("PATH").ok().as_deref())
         .expect("the pty daemon must be available for this harness")
-        .with_config(daemon::write_config(&scratch).expect("write daemon.conf"));
+        .with_config(daemon::write_config(&scratch).expect("write daemon.conf"))
+        .with_data_dir(&scratch);
     println!("daemon: {} on socket {socket}", tmux.binary().display());
 
     let buffers: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));

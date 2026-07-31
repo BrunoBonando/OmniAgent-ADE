@@ -41,3 +41,4 @@ Task 6a: minor (deferred): BrainListProjects accepts any JSON value as payload, 
 Task 6a: minor (deferred): dead Layout struct and unused CaseIterable conformances in PersistedLayout.swift:7,17,84-86
 Task 6a: minor (deferred): no shared fixture guarding Swift/TS layout codec drift, unlike pane-grid.json's convention (PersistedLayoutTests.swift)
 Task 6a: minor (deferred): SessionConnection new client methods untested against .error/non-.response frames (SessionConnection.swift:287-352)
+Task 6a: fix round 1/5 (1 addressed, 0 open on original finding; re-review found 1 new Important regression: sessions.rs:4821-4822 missed the .with_data_dir ripple, would spawn real daemon against production brain.db; commits 2400811..3a0c165)
