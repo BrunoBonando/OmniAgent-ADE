@@ -6,7 +6,7 @@
 - [x] Task 2 complete (Phase 1 persistent daemon protocol)
 - [x] Task 3 complete (Phase 2 Tauri compatibility client on persistent protocol)
 - [x] Task 4 complete (Phase 3 native one-terminal vertical slice)
-- [~] Task 5 in progress (Phase 4 AppKit pane workspace kickoff)
+- [x] Task 5 complete (Phase 4 identity-preserving AppKit pane workspace)
 - [ ] Task 6 not started
 - [ ] Task 7 not started
 
