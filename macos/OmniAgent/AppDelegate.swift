@@ -18,14 +18,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ApplicationMenus.install()
         let connection = SessionConnection(socketURL: Self.socketURL)
+        let delivery = UserNotificationDelivery()
         // No panes yet: the window opens immediately, and `start()` fills it
         // from the shared `layout` row the moment the socket comes up. The
         // window must not wait on the daemon — a daemon that is slow (or not
         // running) has to produce a visible window saying so, not no window.
-        let workspace = WorkspaceWindowController(connection: connection, panes: [])
+        let workspace = WorkspaceWindowController(
+            connection: connection,
+            panes: [],
+            notifier: SessionNotifier(delivery: delivery)
+        )
+        delivery.onActivate = { [weak workspace] sessionID in
+            workspace?.revealPane(sessionID)
+        }
         self.workspace = workspace
         workspace.showWindow(nil)
         workspace.start()
+        workspace.notifier.requestAuthorization()
         NSApp.activate(ignoringOtherApps: true)
         os_signpost(
             .end,

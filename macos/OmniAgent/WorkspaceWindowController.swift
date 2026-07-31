@@ -48,13 +48,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Status that belongs to the connection rather than to any one session
     /// (connecting, reconnecting, transport errors). Outranks session status.
     private var connectionStatus: String?
+    /// The last status each pane reported — what tells an approval's outcome
+    /// apart from an unrelated status change.
+    private var lastStatus: [String: RemoteSessionStatus] = [:]
+    let notifier: SessionNotifier
+    /// The notification feed is written back exactly like the layout row is,
+    /// and refused for the same reason until it has been read.
+    private var hasRestoredNotifications = false
 
     /// `panes` may be empty: the app delegate opens the window before the
     /// socket is up, and `start()` fills it from the `layout` row once the
     /// connection lands. A non-empty seed is for callers that already know
     /// their panes (tests, and the single-pane convenience below).
-    init(connection: SessionConnection, panes: [RestoredPane]) {
+    init(
+        connection: SessionConnection,
+        panes: [RestoredPane],
+        notifier: SessionNotifier = SessionNotifier(delivery: UserNotificationDelivery())
+    ) {
         self.connection = connection
+        self.notifier = notifier
         workspace = PaneWorkspaceView { id in
             TerminalSurfaceView(connection: connection, sessionID: id)
         }
@@ -85,6 +97,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.onFocusedPaneChanged = { [weak self] _ in self?.refreshTitle() }
         workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
         workspace.onPanesChanged = { [weak self] in self?.persistLayout() }
+        notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
         for pane in panes { addPane(pane, startSession: false) }
         window.initialFirstResponder = workspace.focusedPaneID
             .flatMap { workspace.surface(for: $0)?.terminalView }
@@ -138,7 +151,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // a pane that went to "Needs approval" in the background shows it.
             guard let self, workspace.container(for: event.id) != nil else { return }
             applySessionStatus(event.status.title, for: event.id)
+            recordNotification(for: event)
         }
+        // The Rust-side attention latch. Deliberately a dock bounce and not a
+        // second notification: the moment it fires, the session also reports
+        // `awaiting_approval` through `onStatus` above, which is what actually
+        // becomes a banner — notifying from both would double every prompt.
         connection.onAttention = { [weak self] id in
             guard self?.workspace.container(for: id) != nil else { return }
             NSApp.requestUserAttention(.informationalRequest)
@@ -146,7 +164,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connection.onExit = { [weak self] event in
             guard let self, workspace.container(for: event.id) != nil else { return }
             readySessions.remove(event.id)
+            lastStatus.removeValue(forKey: event.id)
             applySessionStatus("Session ended", for: event.id)
+            notifier.recordExit(
+                sessionID: event.id,
+                paneTitle: workspace.descriptor(for: event.id)?.title ?? "",
+                exitCode: event.exitCode
+            )
         }
         connection.onError = { [weak self] error in
             self?.applyConnectionStatus(error.localizedDescription)
@@ -223,6 +247,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// connection. A missing, empty or unreadable row falls back to the one
     /// bootstrap pane — never to a window with nothing in it.
     private func restoreWorkspaceIfNeeded() {
+        restoreNotificationsIfNeeded()
         guard !hasRestored else {
             for id in workspace.paneIDs { ensureSession(id) }
             return
@@ -251,6 +276,63 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // it matters when restoration repaired something (a capped ninth
         // pane, a minted id) — the repair is what the next launch should see.
         persistLayout()
+    }
+
+    // MARK: - Notifications
+
+    /// Brings one pane forward: the window to the front, the app to the
+    /// foreground, focus onto that pane. What clicking a notification does,
+    /// and what the session outline and the command palette both call.
+    @discardableResult
+    func revealPane(_ sessionID: String) -> Bool {
+        guard workspace.descriptor(for: sessionID) != nil else { return false }
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        workspace.focusPane(sessionID)
+        return true
+    }
+
+    /// Turns one status event into the feed's decision. The window is the
+    /// only place that knows the two "is the user looking at this" facts, so
+    /// it assembles the context and `NotificationFeed` owns the rule.
+    func recordNotification(for event: SessionStatusEvent) {
+        let previous = lastStatus[event.id]
+        lastStatus[event.id] = event.status
+        notifier.record(
+            NotificationContext(
+                event: event,
+                pane: workspace.descriptor(for: event.id),
+                projectLabel: workspace.descriptor(for: event.id)?.project ?? "",
+                focusedPaneID: workspace.focusedPaneID,
+                windowVisible: window?.occlusionState.contains(.visible) ?? false,
+                appActive: NSApp.isActive,
+                previousStatus: previous,
+                now: Date().timeIntervalSince1970 * 1000
+            )
+        )
+        // Any status other than "still asking" means the prompt was answered
+        // — from the pane, from the banner, anywhere.
+        if event.status != .awaitingApproval {
+            notifier.resolveApproval(sessionID: event.id)
+        }
+    }
+
+    /// Reads the persisted feed once, alongside the layout.
+    private func restoreNotificationsIfNeeded() {
+        guard !hasRestoredNotifications else { return }
+        hasRestoredNotifications = true
+        connection.getSetting(key: SettingsKey.notifications) { [weak self] result in
+            let raw = (try? result.get()) ?? nil
+            self?.notifier.restore(NotificationFeedCodec.deserialize(raw))
+        }
+    }
+
+    private func persistNotifications(_ entries: [NotificationEntry]) {
+        guard hasRestoredNotifications else { return }
+        connection.setSetting(
+            key: SettingsKey.notifications,
+            value: NotificationFeedCodec.serialize(entries)
+        )
     }
 
     /// Writes the live panes back to the shared `layout` row. Refused before

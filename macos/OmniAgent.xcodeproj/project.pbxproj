@@ -28,6 +28,10 @@
 		100000000000000000000013 /* SettingsKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* SettingsKeys.swift */; };
 		100000000000000000000014 /* WorkspaceRestoration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* WorkspaceRestoration.swift */; };
 		100000000000000000000015 /* WorkspaceRestorationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* WorkspaceRestorationTests.swift */; };
+		100000000000000000000016 /* NotificationFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* NotificationFeed.swift */; };
+		100000000000000000000017 /* NotificationFeedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* NotificationFeedTests.swift */; };
+		100000000000000000000018 /* SessionNotifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000019 /* SessionNotifier.swift */; };
+		100000000000000000000019 /* SessionNotifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001A /* SessionNotifierTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -63,6 +67,10 @@
 		200000000000000000000014 /* SettingsKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsKeys.swift; sourceTree = "<group>"; };
 		200000000000000000000015 /* WorkspaceRestoration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceRestoration.swift; sourceTree = "<group>"; };
 		200000000000000000000016 /* WorkspaceRestorationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceRestorationTests.swift; sourceTree = "<group>"; };
+		200000000000000000000017 /* NotificationFeed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationFeed.swift; sourceTree = "<group>"; };
+		200000000000000000000018 /* NotificationFeedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationFeedTests.swift; sourceTree = "<group>"; };
+		200000000000000000000019 /* SessionNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotifier.swift; sourceTree = "<group>"; };
+		20000000000000000000001A /* SessionNotifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotifierTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -108,6 +116,8 @@
 				200000000000000000000012 /* PersistedLayout.swift */,
 				200000000000000000000014 /* SettingsKeys.swift */,
 				200000000000000000000015 /* WorkspaceRestoration.swift */,
+				200000000000000000000017 /* NotificationFeed.swift */,
+				200000000000000000000019 /* SessionNotifier.swift */,
 			);
 			path = OmniAgent;
 			sourceTree = "<group>";
@@ -123,6 +133,8 @@
 				200000000000000000000008 /* WorkspaceWindowControllerTests.swift */,
 				200000000000000000000013 /* PersistedLayoutTests.swift */,
 				200000000000000000000016 /* WorkspaceRestorationTests.swift */,
+				200000000000000000000018 /* NotificationFeedTests.swift */,
+				20000000000000000000001A /* SessionNotifierTests.swift */,
 			);
 			path = OmniAgentTests;
 			sourceTree = "<group>";
@@ -254,6 +266,8 @@
 				100000000000000000000011 /* PersistedLayout.swift in Sources */,
 				100000000000000000000013 /* SettingsKeys.swift in Sources */,
 				100000000000000000000014 /* WorkspaceRestoration.swift in Sources */,
+				100000000000000000000016 /* NotificationFeed.swift in Sources */,
+				100000000000000000000018 /* SessionNotifier.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -268,6 +282,8 @@
 				100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */,
 				100000000000000000000012 /* PersistedLayoutTests.swift in Sources */,
 				100000000000000000000015 /* WorkspaceRestorationTests.swift in Sources */,
+				100000000000000000000017 /* NotificationFeedTests.swift in Sources */,
+				100000000000000000000019 /* SessionNotifierTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
