@@ -67,3 +67,10 @@ Task 6b-1: minor (deferred): beginRename() latches isRenaming=true unconditional
 Task 6b-1: minor (deferred): fix report's "matches web build's cap semantics" claim for gating newSession on the 8-pane cap is inaccurate — web cap is per-session with new-session as the explicit escape hatch; native closes that hatch (defensible on native grounds, just mis-justified)
 Task 6b-1: minor (deferred): rename tests never open a real field editor (no window), controlTextDidEndEditing path untested; one new-session test still uses paneIDs.last fill-order assumption instead of pane(inGroup:)
 Task 6b-1: complete (commits cda3ac2..478930d, review clean after 1 fix round, 7 additional minors + prior 11 deferred to final review)
+Task 6a-2: INTERRUPTED mid-implementation (user stopped the session for a computer restart, not a task failure) — commits bac1ecd..21f3257:
+  8eb7461 feat(brain-ingest): extract roots.rs's ingestion orchestration into a Tauri-independent module
+  25ba266 refactor(tauri): delegate roots.rs commands to the extracted brain-ingest module
+  bf46bf5 feat(daemon): add protocol message kinds for the roots/ingestion surface and brain search
+  21f3257 wip(daemon): dispatch handlers for roots/ingestion message kinds (compiles clean, UNTESTED — no cargo test run yet, no new tests written, no Swift client methods)
+  Not reviewed. No task-6a-2-report.md written yet.
+  Resume by re-reading task-6a-2-brief.md and these 4 commits, then: run `cargo test -p omniagent-pty-daemon` and `cargo test -p omniagent-ade` for regressions first, add tests for every new message kind (malformed/oversized payload rejection + round-trip, matching Task 6a's pattern), add the Swift SessionConnection client methods, then dispatch the task reviewer as usual.
