@@ -9,7 +9,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         defer { controller.close() }
 
         controller.showWindow(nil)
-        let workspace = controller.window?.contentView as? PaneWorkspaceView
+        let workspace: PaneWorkspaceView? = controller.workspaceView
         XCTAssertEqual(workspace?.paneIDs, ["native-terminal"])
         XCTAssertEqual(workspace?.focusedPaneID, "native-terminal")
 
@@ -23,7 +23,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
-        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+        let workspace = controller.workspaceView
 
         for _ in 0..<12 { controller.newTerminalPane(nil) }
 
@@ -43,7 +43,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
-        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+        let workspace = controller.workspaceView
         controller.newTerminalPane(nil)
         controller.newTerminalPane(nil)
         let survivors = workspace.paneIDs.filter { $0 != workspace.focusedPaneID }
@@ -62,7 +62,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
-        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+        let workspace = controller.workspaceView
         controller.newTerminalPane(nil)
         let first = "native-terminal"
         let second = try XCTUnwrap(workspace.focusedPaneID)
@@ -134,7 +134,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         defer { controller.close() }
         controller.showWindow(nil)
         let window = try XCTUnwrap(controller.window)
-        let workspace = try XCTUnwrap(window.contentView as? PaneWorkspaceView)
+        let workspace = controller.workspaceView
         controller.newTerminalPane(nil)
 
         var responder: NSResponder? = window.firstResponder
@@ -157,7 +157,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeEmptyController()
         defer { controller.close() }
         controller.showWindow(nil)
-        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+        let workspace = controller.workspaceView
         XCTAssertTrue(workspace.paneIDs.isEmpty, "nothing is on screen before the socket answers")
 
         controller.applyRestoredPanes(
@@ -179,7 +179,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeEmptyController()
         defer { controller.close() }
         controller.showWindow(nil)
-        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+        let workspace = controller.workspaceView
 
         controller.applyRestoredPanes([])
 
@@ -192,7 +192,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
-        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+        let workspace = controller.workspaceView
 
         controller.applyRestoredPanes([
             WorkspaceRestoration.bootstrapPane(sessionID: "native-terminal"),
@@ -206,7 +206,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeEmptyController()
         defer { controller.close() }
         controller.showWindow(nil)
-        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+        let workspace = controller.workspaceView
         controller.applyRestoredPanes(
             WorkspaceRestoration.plan(
                 fromLayout: PersistedLayoutCodec.serialize([
@@ -224,6 +224,63 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(added.project, "alpha")
         XCTAssertEqual(added.cwd, "/a")
         XCTAssertEqual(added.engine, .shell, "the native build can only launch a shell today")
+    }
+
+    // MARK: - Session outline
+
+    func testTheOutlineFollowsThePanesAndTheFocusedOne() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1", groupLabel: "Build"),
+                ])
+            )
+        )
+        XCTAssertEqual(controller.outline.outlineView.numberOfRows, 3, "project, session, pane")
+
+        controller.newTerminalPane(nil)
+
+        XCTAssertEqual(controller.outline.outlineView.numberOfRows, 4, "the new pane appears in its session")
+        let focused = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        XCTAssertEqual(
+            controller.outline.outlineView.selectedRow,
+            controller.outline.outlineView.row(forItem: SessionOutlineView.OutlineItem.pane(focused))
+        )
+    }
+
+    func testRenamingASessionWritesTheNameOntoEveryPaneInIt() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1"),
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-b", group: "g1"),
+                ])
+            )
+        )
+        let session = try XCTUnwrap(
+            SessionOutline.group(
+                controller.workspaceView.paneIDs.compactMap { controller.workspaceView.descriptor(for: $0) },
+                focusedPaneID: nil
+            ).first?.sessions.first
+        )
+
+        controller.renameSession(session, to: "  Migration  ")
+
+        XCTAssertEqual(controller.workspaceView.descriptor(for: "sess-a")?.groupLabel, "Migration")
+        XCTAssertEqual(controller.workspaceView.descriptor(for: "sess-b")?.groupLabel, "Migration")
+
+        controller.renameSession(session, to: "   ")
+        XCTAssertEqual(
+            controller.workspaceView.descriptor(for: "sess-a")?.groupLabel,
+            "Migration",
+            "a blank name is not a rename"
+        )
     }
 
     private func makeController() -> WorkspaceWindowController {

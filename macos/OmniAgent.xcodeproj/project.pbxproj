@@ -32,6 +32,9 @@
 		100000000000000000000017 /* NotificationFeedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* NotificationFeedTests.swift */; };
 		100000000000000000000018 /* SessionNotifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000019 /* SessionNotifier.swift */; };
 		100000000000000000000019 /* SessionNotifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001A /* SessionNotifierTests.swift */; };
+		10000000000000000000001A /* SessionOutline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001B /* SessionOutline.swift */; };
+		10000000000000000000001B /* SessionOutlineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001C /* SessionOutlineView.swift */; };
+		10000000000000000000001C /* SessionOutlineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001D /* SessionOutlineTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -71,6 +74,9 @@
 		200000000000000000000018 /* NotificationFeedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationFeedTests.swift; sourceTree = "<group>"; };
 		200000000000000000000019 /* SessionNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotifier.swift; sourceTree = "<group>"; };
 		20000000000000000000001A /* SessionNotifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotifierTests.swift; sourceTree = "<group>"; };
+		20000000000000000000001B /* SessionOutline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionOutline.swift; sourceTree = "<group>"; };
+		20000000000000000000001C /* SessionOutlineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionOutlineView.swift; sourceTree = "<group>"; };
+		20000000000000000000001D /* SessionOutlineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionOutlineTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -118,6 +124,8 @@
 				200000000000000000000015 /* WorkspaceRestoration.swift */,
 				200000000000000000000017 /* NotificationFeed.swift */,
 				200000000000000000000019 /* SessionNotifier.swift */,
+				20000000000000000000001B /* SessionOutline.swift */,
+				20000000000000000000001C /* SessionOutlineView.swift */,
 			);
 			path = OmniAgent;
 			sourceTree = "<group>";
@@ -135,6 +143,7 @@
 				200000000000000000000016 /* WorkspaceRestorationTests.swift */,
 				200000000000000000000018 /* NotificationFeedTests.swift */,
 				20000000000000000000001A /* SessionNotifierTests.swift */,
+				20000000000000000000001D /* SessionOutlineTests.swift */,
 			);
 			path = OmniAgentTests;
 			sourceTree = "<group>";
@@ -268,6 +277,8 @@
 				100000000000000000000014 /* WorkspaceRestoration.swift in Sources */,
 				100000000000000000000016 /* NotificationFeed.swift in Sources */,
 				100000000000000000000018 /* SessionNotifier.swift in Sources */,
+				10000000000000000000001A /* SessionOutline.swift in Sources */,
+				10000000000000000000001B /* SessionOutlineView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -284,6 +295,7 @@
 				100000000000000000000015 /* WorkspaceRestorationTests.swift in Sources */,
 				100000000000000000000017 /* NotificationFeedTests.swift in Sources */,
 				100000000000000000000019 /* SessionNotifierTests.swift in Sources */,
+				10000000000000000000001C /* SessionOutlineTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

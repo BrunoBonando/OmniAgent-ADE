@@ -34,6 +34,10 @@ final class WorkspaceWindow: NSWindow {
 final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     let connection: SessionConnection
     private let workspace: PaneWorkspaceView
+    /// The pane rectangle. Reachable because the window's content view is now
+    /// a split view — the workspace is one half of it, not the whole thing.
+    var workspaceView: PaneWorkspaceView { workspace }
+    let outline = SessionOutlineView()
     private var readySessions: Set<String> = []
     /// Restoration runs exactly once, on the first `.connected` — a later
     /// reconnect must re-attach the panes that already exist, never read the
@@ -86,19 +90,50 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             alpha: 1
         )
         window.minSize = NSSize(width: 520, height: 320)
-        workspace.frame = window.contentLayoutRect
-        window.contentView = workspace
+        // An `NSSplitViewController` rather than a hand-rolled `NSSplitView`:
+        // the sidebar item is what gives the outline the system's own
+        // translucency, its collapse animation, its remembered width, and the
+        // standard `toggleSidebar:` responder action — all behaviour this
+        // task would otherwise be re-implementing.
+        let sidebar = NSViewController()
+        sidebar.view = outline
+        let content = NSViewController()
+        content.view = workspace
+        let split = NSSplitViewController()
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        sidebarItem.minimumThickness = 180
+        sidebarItem.maximumThickness = 340
+        sidebarItem.canCollapse = true
+        split.addSplitViewItem(sidebarItem)
+        split.addSplitViewItem(NSSplitViewItem(viewController: content))
+        window.contentViewController = split
 
         super.init(window: window)
         window.delegate = self
         window.onFirstResponderChange = { [weak self] responder in
             self?.workspace.adoptFocus(from: responder)
         }
-        workspace.onFocusedPaneChanged = { [weak self] _ in self?.refreshTitle() }
+        workspace.onFocusedPaneChanged = { [weak self] _ in
+            self?.refreshTitle()
+            self?.reloadOutline()
+        }
         workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
-        workspace.onPanesChanged = { [weak self] in self?.persistLayout() }
+        workspace.onPanesChanged = { [weak self] in
+            self?.persistLayout()
+            self?.reloadOutline()
+        }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
+        outline.onSelectPane = { [weak self] id in self?.workspace.focusPane(id) }
+        outline.onSelectSession = { [weak self] session in
+            guard let first = session.paneIDs.first else { return }
+            self?.workspace.focusPane(first)
+        }
+        outline.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
+        outline.onRenameSession = { [weak self] session, name in
+            self?.renameSession(session, to: name)
+        }
         for pane in panes { addPane(pane, startSession: false) }
+        reloadOutline()
         window.initialFirstResponder = workspace.focusedPaneID
             .flatMap { workspace.surface(for: $0)?.terminalView }
     }
@@ -276,6 +311,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // it matters when restoration repaired something (a capped ninth
         // pane, a minted id) — the repair is what the next launch should see.
         persistLayout()
+    }
+
+    // MARK: - Session outline
+
+    private func reloadOutline() {
+        outline.reload(
+            panes: workspace.paneIDs.compactMap { workspace.descriptor(for: $0) },
+            focusedPaneID: workspace.focusedPaneID
+        )
+    }
+
+    /// Renames a session — the name is stored on every pane in the group,
+    /// exactly as `session/renamed` does in the web build, which is what
+    /// makes one array the whole restore story.
+    func renameSession(_ session: SessionGroupNode, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        for paneID in session.paneIDs {
+            workspace.updateDescriptor(for: paneID) { $0.groupLabel = trimmed }
+        }
     }
 
     // MARK: - Notifications
