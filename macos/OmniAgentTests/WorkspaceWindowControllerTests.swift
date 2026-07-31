@@ -261,6 +261,180 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(writes.last?.1).contains("Build"))
     }
 
+    func testAFailedLayoutReadNeverWritesAnEmptyLayoutOverTheSavedOne() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+        controller.showWindow(nil)
+
+        controller.layoutReadFailed(SessionConnectionError.disconnected)
+
+        XCTAssertTrue(
+            controller.workspaceView.paneIDs.isEmpty,
+            "a row that could not be read is not a row that says there are no tabs"
+        )
+        XCTAssertTrue(try XCTUnwrap(controller.window?.title).contains("Couldn't read the saved layout"))
+
+        // The window is still usable, and nothing it does can destroy the row.
+        controller.newTerminalPane(nil)
+        controller.workspaceView.updateDescriptor(for: try XCTUnwrap(controller.workspaceView.paneIDs.first)) {
+            $0.project = "alpha"
+        }
+
+        XCTAssertEqual(writes.count, 0, "the write gate stays shut until a read actually succeeds")
+    }
+
+    func testAPaneOpenedWhileTheReadIsInFlightIsNotWrittenUntilTheRowLands() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+        controller.showWindow(nil)
+
+        // The read has been dispatched but has not come back yet — exactly the
+        // window in which `hasRestored` used to already be true.
+        controller.newTerminalPane(nil)
+        controller.workspaceView.updateDescriptor(for: try XCTUnwrap(controller.workspaceView.paneIDs.first)) {
+            $0.project = "alpha"
+        }
+        XCTAssertTrue(writes.isEmpty, "nothing may be written before the row has been read")
+
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "beta", engine: .shell, cwd: "/b", id: "sess-b", group: "g1"),
+                ])
+            )
+        )
+
+        let written = try XCTUnwrap(writes.last?.1)
+        XCTAssertTrue(written.contains("sess-b"), "the saved pane survived")
+        XCTAssertTrue(written.contains("alpha"), "and so did the one opened while the read was in flight")
+    }
+
+    func testANotificationRecordedWhileTheFeedIsBeingReadSurvivesTheRestore() {
+        let delivery = RecordingDelivery()
+        let notifier = SessionNotifier(delivery: delivery)
+        let live = NotificationEntry(
+            id: "live", sessionID: "s", project: "p", projectLabel: "P", cwd: "/",
+            engine: "shell", status: .awaitingApproval, title: "t", sessionLabel: nil,
+            createdAt: 2, read: false
+        )
+        let stored = NotificationEntry(
+            id: "stored", sessionID: "s", project: "p", projectLabel: "P", cwd: "/",
+            engine: "shell", status: .ready, title: "t", sessionLabel: nil,
+            createdAt: 1, read: true
+        )
+        notifier.restore([live])
+
+        notifier.restore([stored])
+
+        XCTAssertEqual(
+            notifier.entries.map(\.id),
+            ["live", "stored"],
+            "the newer live entry keeps its place at the front instead of being replaced away"
+        )
+    }
+
+    // MARK: - Sessions
+
+    func testStartingASessionPutsItsPaneInABrandNewGroupWithTheLowestFreeName() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1", groupLabel: "Session 1"),
+                ])
+            )
+        )
+
+        let group = try XCTUnwrap(controller.startSession(inDirectory: "/a/sub", project: "alpha"))
+
+        XCTAssertNotEqual(group, "g1", "a second session is a second group, not the focused pane's")
+        XCTAssertTrue(SessionIdentifier.isValid(group), "and it survives a relaunch")
+        let added = try XCTUnwrap(controller.pane(inGroup: group))
+        XCTAssertEqual(added.groupLabel, "Session 2", "the lowest free number in this project")
+        XCTAssertEqual(added.cwd, "/a/sub", "the session's own directory, not the sibling's")
+        XCTAssertEqual(added.project, "alpha")
+
+        let second = try XCTUnwrap(controller.startSession(inDirectory: "/a", project: "alpha"))
+        XCTAssertNotEqual(second, group, "two sessions started back to back never share a group id")
+        XCTAssertEqual(controller.pane(inGroup: second)?.groupLabel, "Session 3")
+    }
+
+    func testNewSessionAsksForItsDirectoryAndRespectsTheEightPaneCap() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1"),
+                ])
+            )
+        )
+        var seeds: [String] = []
+        controller.directoryChooser = { seed, completion in
+            seeds.append(seed)
+            completion("/chosen")
+        }
+
+        controller.newSession(nil)
+
+        XCTAssertEqual(seeds, ["/a"], "the chooser opens at the current session's own root")
+        XCTAssertEqual(controller.workspaceView.paneIDs.count, 2)
+        XCTAssertEqual(controller.workspaceView.paneIDs.last.flatMap { controller.workspaceView.descriptor(for: $0)?.cwd }, "/chosen")
+
+        // Cancelling the chooser starts nothing.
+        controller.directoryChooser = { _, completion in completion(nil) }
+        controller.newSession(nil)
+        XCTAssertEqual(controller.workspaceView.paneIDs.count, 2)
+
+        controller.directoryChooser = { _, completion in completion("/chosen") }
+        while controller.workspaceView.paneIDs.count < PaneGrid.maxPanes { controller.newTerminalPane(nil) }
+        controller.newSession(nil)
+        XCTAssertEqual(controller.workspaceView.paneIDs.count, PaneGrid.maxPanes, "the cap holds")
+        XCTAssertFalse(
+            controller.validateMenuItem(
+                NSMenuItem(title: "New Session", action: #selector(WorkspaceWindowController.newSession(_:)), keyEquivalent: "")
+            )
+        )
+    }
+
+    func testTheOutlinePlusButtonAddsToItsOwnRowNotToWhateverHasFocus() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1", groupLabel: "One"),
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/b", id: "sess-b", group: "g2", groupLabel: "Two"),
+                ])
+            )
+        )
+        controller.workspaceView.focusPane("sess-a")
+        let sessions = SessionOutline.group(
+            controller.workspaceView.paneIDs.compactMap { controller.workspaceView.descriptor(for: $0) },
+            focusedPaneID: "sess-a"
+        ).first?.sessions ?? []
+        let secondSession = try XCTUnwrap(sessions.first { $0.id == "g2" })
+
+        controller.newPane(in: secondSession)
+
+        let added = try XCTUnwrap(
+            controller.workspaceView.paneIDs
+                .compactMap { controller.workspaceView.descriptor(for: $0) }
+                .first { $0.sessionID != "sess-a" && $0.sessionID != "sess-b" }
+        )
+        XCTAssertEqual(added.group, "g2", "the row that was clicked, not the row that had focus")
+        XCTAssertEqual(added.groupLabel, "Two")
+        XCTAssertEqual(added.cwd, "/b")
+    }
+
     // MARK: - Command palette and toolbar
 
     func testTheCommandPaletteAndSidebarToggleAreOnTheMenuAndTravelTheResponderChain() throws {
@@ -270,6 +444,11 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(palette.action, #selector(WorkspaceWindowController.showCommandPalette(_:)))
         XCTAssertEqual(palette.keyEquivalent, "k")
         XCTAssertEqual(palette.keyEquivalentModifierMask, [.command])
+
+        let session = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "New Session"))
+        XCTAssertNil(session.target)
+        XCTAssertEqual(session.action, #selector(WorkspaceWindowController.newSession(_:)))
+        XCTAssertEqual(session.keyEquivalent, "n")
 
         let sidebar = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "Window")?.submenu?.item(withTitle: "Toggle Sidebar"))
         XCTAssertNil(sidebar.target)
@@ -608,4 +787,27 @@ private final class RecordingTerminalDelegate: TerminalViewDelegate {
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
     func scrolled(source: TerminalView, position: Double) {}
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+}
+
+private extension WorkspaceWindowController {
+    /// The pane a given session group holds. Sessions are addressed by group,
+    /// never by position: `paneIDs` is the grid's *fill* order, and a shape
+    /// with a hole in it does not put the newest pane last.
+    func pane(inGroup group: String) -> PaneDescriptor? {
+        workspaceView.paneIDs
+            .compactMap { workspaceView.descriptor(for: $0) }
+            .first { $0.group == group }
+    }
+}
+
+/// Shared with `SessionNotifierTests`' own fake, kept separate so each file
+/// stays readable on its own.
+private final class RecordingDelivery: NotificationDelivering {
+    private(set) var delivered: [NotificationEntry] = []
+    private(set) var withdrawn: [String] = []
+
+    func requestAuthorization() {}
+    func deliver(_ entry: NotificationEntry) { delivered.append(entry) }
+    func withdraw(identifiers: [String]) { withdrawn.append(contentsOf: identifiers) }
+    func deliverTransient(identifier: String, title: String, body: String, sessionID: String) {}
 }

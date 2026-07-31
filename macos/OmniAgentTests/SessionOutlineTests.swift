@@ -229,10 +229,94 @@ final class SessionOutlineViewTests: XCTestCase {
         let row = outline.outlineView.row(forItem: SessionOutlineView.OutlineItem.session(project: "alpha", group: "g1"))
         let cell = outline.outlineView.view(atColumn: 0, row: row, makeIfNecessary: true) as? SessionOutlineRowView
 
+        XCTAssertTrue(outline.beginRenamingSession(atRow: row))
         cell?.commitRename(named: "  Migration  ")
+        XCTAssertTrue(outline.beginRenamingSession(atRow: row))
         cell?.commitRename(named: "   ")
 
         XCTAssertEqual(renames, ["Migration"])
+    }
+
+    func testAReloadWhileRenamingIsDeferredNotDroppedSoAnOpenFieldSurvives() throws {
+        let outline = SessionOutlineView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
+        outline.reload(panes: [pane("a", project: "alpha", group: "g1", groupLabel: "Build")], focusedPaneID: "a")
+        let row = outline.outlineView.row(forItem: SessionOutlineView.OutlineItem.session(project: "alpha", group: "g1"))
+        let cell = try XCTUnwrap(outline.outlineView.view(atColumn: 0, row: row, makeIfNecessary: true) as? SessionOutlineRowView)
+        XCTAssertTrue(outline.beginRenamingSession(atRow: row))
+        XCTAssertTrue(outline.isRenaming)
+
+        // A background pane repainting its OSC title fires this several times
+        // a second; each one used to tear the open field down.
+        for title in ["~/src", "~/src/deep", "~/"] {
+            var busy = pane("a", project: "alpha", group: "g1", groupLabel: "Build")
+            busy.title = title
+            outline.reload(panes: [busy, pane("b", project: "alpha", group: "g1", groupLabel: "Build")], focusedPaneID: "a")
+        }
+
+        XCTAssertEqual(outline.outlineView.numberOfRows, 3, "the outline held still while the field was open")
+        XCTAssertTrue(
+            outline.outlineView.view(atColumn: 0, row: row, makeIfNecessary: false) === cell,
+            "and the cell being edited was never rebuilt"
+        )
+
+        cell.commitRename(named: "Migration")
+
+        XCTAssertFalse(outline.isRenaming)
+        XCTAssertEqual(
+            outline.outlineView.numberOfRows,
+            4,
+            "the newest deferred reload lands the moment editing ends — deferred, never dropped"
+        )
+    }
+
+    func testAnAbandonedRenameStillReleasesTheDeferredReload() {
+        let outline = SessionOutlineView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
+        outline.reload(panes: [pane("a", project: "alpha", group: "g1", groupLabel: "Build")], focusedPaneID: "a")
+        let row = outline.outlineView.row(forItem: SessionOutlineView.OutlineItem.session(project: "alpha", group: "g1"))
+        let cell = outline.outlineView.view(atColumn: 0, row: row, makeIfNecessary: true) as? SessionOutlineRowView
+        outline.beginRenamingSession(atRow: row)
+        outline.reload(panes: [pane("a", project: "alpha", group: "g1"), pane("b", project: "alpha", group: "g1")], focusedPaneID: "a")
+
+        // A blank name is rejected as a rename, but editing has still ended.
+        cell?.commitRename(named: "   ")
+
+        XCTAssertFalse(outline.isRenaming)
+        XCTAssertEqual(outline.outlineView.numberOfRows, 4, "the outline is not frozen forever")
+    }
+
+    func testARowIsReLabelledInPlaceAndNeverOverwritesAnOpenNameField() throws {
+        // Each kind gets its own reuse identifier, so AppKit can only hand a
+        // recycled row back to a row of the same shape.
+        XCTAssertEqual(
+            Set([
+                SessionOutlineRowView.Kind.project.reuseIdentifier,
+                SessionOutlineRowView.Kind.session(isCurrent: true).reuseIdentifier,
+                SessionOutlineRowView.Kind.pane(isFocused: true).reuseIdentifier,
+            ]).count,
+            3
+        )
+        XCTAssertEqual(
+            SessionOutlineRowView.Kind.session(isCurrent: true).reuseIdentifier,
+            SessionOutlineRowView.Kind.session(isCurrent: false).reuseIdentifier,
+            "the current marker is typography, not a different shape of row"
+        )
+
+        let row = SessionOutlineRowView(kind: .session(isCurrent: false))
+        row.apply(title: "Build", detail: "1 pane", kind: .session(isCurrent: false))
+        XCTAssertEqual(row.textField?.stringValue, "Build")
+
+        row.apply(title: "Build", detail: "2 panes", kind: .session(isCurrent: true))
+        XCTAssertEqual(row.textField?.stringValue, "Build", "re-labelled in place")
+
+        row.beginRename()
+        row.textField?.stringValue = "Migra"
+        row.apply(title: "Build", detail: "3 panes", kind: .session(isCurrent: true))
+
+        XCTAssertEqual(
+            row.textField?.stringValue,
+            "Migra",
+            "a reload that slipped through must never overwrite what is being typed"
+        )
     }
 
     func testEveryRowCarriesAnAccessibilityLabelThatNamesWhatItIs() throws {
@@ -249,5 +333,11 @@ final class SessionOutlineViewTests: XCTestCase {
 
     private func pane(_ id: String, project: String, group: String, groupLabel: String? = nil) -> PaneDescriptor {
         PaneDescriptor(sessionID: id, group: group, groupLabel: groupLabel, project: project, engine: .shell, cwd: "/")
+    }
+
+    func testAFreshSessionGroupIDSurvivesARelaunchAndNeverRepeats() {
+        let ids = (0..<50).map { _ in SessionOutline.newSessionGroupID() }
+        XCTAssertEqual(Set(ids).count, 50, "two sessions started in the same millisecond still differ")
+        XCTAssertTrue(ids.allSatisfy { SessionIdentifier.isValid($0) }, "a group id the backend rejects would un-group its panes")
     }
 }

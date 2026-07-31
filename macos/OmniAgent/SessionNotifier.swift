@@ -134,8 +134,16 @@ final class SessionNotifier {
     /// Adopts the persisted row. Deliberately does not re-deliver anything:
     /// a banner for a prompt from last week, replayed at launch, would be
     /// noise — the row is a log, not a queue.
+    ///
+    /// **Merged, not assigned.** The read is asynchronous, and a session can
+    /// report `awaiting_approval` while it is still in flight; a wholesale
+    /// replace would deliver that banner and then silently drop the entry
+    /// behind it. Anything recorded in that window is newer than everything
+    /// in the row, so it keeps its place at the front.
     func restore(_ restored: [NotificationEntry]) {
-        entries = Array(restored.prefix(NotificationFeed.maxEntries))
+        let liveIDs = Set(entries.map(\.id))
+        entries = Array((entries + restored.filter { !liveIDs.contains($0.id) })
+            .prefix(NotificationFeed.maxEntries))
         onEntriesChanged?(entries)
     }
 

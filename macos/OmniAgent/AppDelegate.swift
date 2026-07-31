@@ -93,6 +93,7 @@ enum ApplicationMenus {
         let file = NSMenu(title: "File")
         main.addItem(withSubmenu: file)
         file.addItem(item("New Terminal Pane", Selector(("newTerminalPane:")), "t"))
+        file.addItem(item("New Session", Selector(("newSession:")), "n"))
         file.addItem(item("Close Pane", Selector(("closePane:")), "w"))
         file.addItem(
             item("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])

@@ -97,6 +97,21 @@ enum SessionOutline {
 
     static func defaultSessionName(_ n: Int) -> String { "Session \(n)" }
 
+    /// A fresh session-group id — the port of `newSessionGroupId`.
+    ///
+    /// Wall clock plus a process-local counter, so two sessions started in
+    /// the same millisecond still differ, in the same
+    /// `[A-Za-z0-9_-]{1,96}` shape `SessionIdentifier` accepts: a group id
+    /// that could not survive a relaunch would silently un-group its panes on
+    /// the next launch.
+    static func newSessionGroupID(now: Date = Date()) -> String {
+        groupCounter += 1
+        return "sess-grp-\(Int(now.timeIntervalSince1970 * 1000))-\(groupCounter)"
+    }
+
+    /// Main-thread only, like every other caller in this file.
+    private static var groupCounter = 0
+
     /// **The numbering rule:** the lowest positive integer whose default name
     /// is not already taken by a live session in that project. So sessions
     /// created and closed out of order never collide and never climb forever

@@ -40,10 +40,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     let outline = SessionOutlineView()
     let palette = CommandPaletteController()
     private var readySessions: Set<String> = []
-    /// Restoration runs exactly once, on the first `.connected` — a later
-    /// reconnect must re-attach the panes that already exist, never read the
-    /// `layout` row again and rebuild them on top.
-    private var hasRestored = false
+    /// The `layout` read has been sent — a later reconnect must re-attach the
+    /// panes that already exist rather than reading the row again and
+    /// rebuilding them on top. Cleared again if the read *fails*, so the next
+    /// reconnect retries rather than leaving the window degraded forever.
+    private var layoutReadDispatched = false
+    /// The `layout` read came back **successfully**. This, not
+    /// `layoutReadDispatched`, is the write gate: the read is asynchronous,
+    /// and a pane opened while it is in flight would otherwise derive a
+    /// layout from a still-empty workspace and write `{"tabs":[]}` over a row
+    /// nothing has read yet.
+    private var layoutReadCompleted = false
     private var observedFirstOutput = false
     /// Status text per session — an exited, erroring or thinking pane keeps its
     /// own line instead of one window-wide string every pane overwrites. The
@@ -57,9 +64,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// apart from an unrelated status change.
     private var lastStatus: [String: RemoteSessionStatus] = [:]
     let notifier: SessionNotifier
-    /// The notification feed is written back exactly like the layout row is,
-    /// and refused for the same reason until it has been read.
-    private var hasRestoredNotifications = false
+    /// The notification feed's two flags, for exactly the reasons the layout's
+    /// two above exist.
+    private var notificationsReadDispatched = false
+    private var notificationsReadCompleted = false
     /// The last value written to each settings row — see `write(_:to:)`.
     private var lastPersisted: [String: String] = [:]
     /// Where settings writes go. `nil` means the daemon; a test substitutes a
@@ -136,7 +144,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let first = session.paneIDs.first else { return }
             self?.workspace.focusPane(first)
         }
-        outline.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
+        outline.onRequestNewPane = { [weak self] session in self?.newPane(in: session) }
         outline.onRenameSession = { [weak self] session, name in
             self?.renameSession(session, to: name)
         }
@@ -239,28 +247,124 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.restoreFocus()
     }
 
-    /// ⌘T — a brand-new pane on a brand-new session, joining the focused
-    /// pane's session group and inheriting its project and working directory
-    /// (the web build's "a new pane joins the session on screen"). With no
-    /// focused pane it starts an ungrouped shell in the home directory.
+    /// ⌘T — a new pane on a new PTY, inside an existing session.
+    ///
+    /// The pane joins the focused pane's session group and inherits its
+    /// project and working directory (the web build's "a new pane joins the
+    /// session on screen"). With no focused pane it starts an ungrouped shell
+    /// in the home directory. Starting a *second, independent* session is
+    /// `newSession(_:)`, not this.
     @objc func newTerminalPane(_ sender: Any?) {
-        guard workspace.paneIDs.count < PaneGrid.maxPanes else { return }
-        let sibling = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
+        newPane(in: nil)
+    }
+
+    /// Adds one pane seeded from an explicit session, or — with `nil` — from
+    /// whatever currently has focus.
+    ///
+    /// The explicit form is what the outline's per-row "+" calls: the target
+    /// session is the row that was clicked, which is not necessarily the row
+    /// holding the focused pane.
+    @discardableResult
+    func newPane(in session: SessionGroupNode?) -> Bool {
+        guard workspace.paneIDs.count < PaneGrid.maxPanes else { return false }
+        let sibling = session.map { seed in
+            seed.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
+        } ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         let template = WorkspaceRestoration.bootstrapPane()
         addPane(
             RestoredPane(
                 sessionID: template.sessionID,
                 reattaches: false,
-                project: sibling?.project ?? template.project,
+                project: sibling?.project ?? session?.project ?? template.project,
                 engine: .shell,
-                cwd: sibling?.cwd.isEmpty == false ? sibling!.cwd : template.cwd,
+                cwd: sibling?.cwd.isEmpty == false ? sibling!.cwd : (session?.cwd ?? template.cwd),
                 label: nil,
                 themeId: sibling?.themeId,
-                group: sibling?.group ?? template.group,
-                groupLabel: sibling?.groupLabel
+                group: session?.id ?? sibling?.group ?? template.group,
+                groupLabel: sibling?.groupLabel ?? session?.name
             ),
             startSession: true
         )
+        return true
+    }
+
+    /// ⌘N — a **second, independent session**: a new pane in a brand-new
+    /// session group, named by the same lowest-free-number rule the web build
+    /// uses (`SessionOutline.nextSessionName`).
+    ///
+    /// The web's `NewSessionModal` asks for the session's own directory,
+    /// validated as the project folder or a subfolder of it. The native
+    /// equivalent of that one real decision is a directory chooser seeded
+    /// with the current session's own root; everything else about the session
+    /// (its project, a shell pane to start it) follows from where it lands,
+    /// because this build has no project picker or engine launcher yet.
+    @objc func newSession(_ sender: Any?) {
+        guard workspace.paneIDs.count < PaneGrid.maxPanes else { return }
+        let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
+        let seedDirectory = current?.cwd.isEmpty == false
+            ? current!.cwd
+            : FileManager.default.homeDirectoryForCurrentUser.path
+        chooseSessionDirectory(startingAt: seedDirectory) { [weak self] chosen in
+            guard let self, let chosen else { return }
+            startSession(inDirectory: chosen, project: current?.project ?? "")
+        }
+    }
+
+    /// The session-creation half of `newSession(_:)`, without the chooser —
+    /// so the naming and grouping rules are testable without a panel.
+    @discardableResult
+    func startSession(inDirectory cwd: String, project: String) -> String? {
+        guard workspace.paneIDs.count < PaneGrid.maxPanes else { return nil }
+        let group = SessionOutline.newSessionGroupID()
+        let name = SessionOutline.nextSessionName(
+            workspace.paneIDs.compactMap { workspace.descriptor(for: $0) },
+            project: project
+        )
+        addPane(
+            RestoredPane(
+                sessionID: UUID().uuidString,
+                reattaches: false,
+                project: project,
+                engine: .shell,
+                cwd: cwd,
+                label: nil,
+                themeId: nil,
+                group: group,
+                groupLabel: name
+            ),
+            startSession: true
+        )
+        return group
+    }
+
+    /// Where a new session's directory comes from. `nil` means "ask with an
+    /// `NSOpenPanel`"; a test substitutes an answer so `newSession(_:)` can
+    /// run without blocking on a modal.
+    var directoryChooser: ((String, @escaping (String?) -> Void) -> Void)?
+
+    private func chooseSessionDirectory(
+        startingAt path: String,
+        completion: @escaping (String?) -> Void
+    ) {
+        if let directoryChooser {
+            directoryChooser(path, completion)
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.message = "Where should this session's terminals start?"
+        panel.prompt = "Start Session"
+        panel.directoryURL = URL(fileURLWithPath: path, isDirectory: true)
+        guard let window else {
+            completion(panel.runModal() == .OK ? panel.url?.path : nil)
+            return
+        }
+        panel.beginSheetModal(for: window) { response in
+            completion(response == .OK ? panel.url?.path : nil)
+        }
     }
 
     /// ⌘W — closes the focused pane and the session behind it. The window's own
@@ -275,7 +379,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
-        case #selector(newTerminalPane(_:)):
+        case #selector(newTerminalPane(_:)), #selector(newSession(_:)):
             return workspace.paneIDs.count < PaneGrid.maxPanes
         case #selector(closePane(_:)):
             return workspace.focusedPaneID != nil
@@ -287,26 +391,51 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     // MARK: - Restoration
 
     /// Rebuilds the panes the `layout` row describes, once, on the first
-    /// connection. A missing, empty or unreadable row falls back to the one
-    /// bootstrap pane — never to a window with nothing in it.
+    /// connection. An empty or corrupt row falls back to the one bootstrap
+    /// pane — but a row that could not be *read* is a different thing
+    /// entirely, see `layoutReadFailed`.
     private func restoreWorkspaceIfNeeded() {
         restoreNotificationsIfNeeded()
-        guard !hasRestored else {
+        guard !layoutReadDispatched else {
             for id in workspace.paneIDs { ensureSession(id) }
             return
         }
-        hasRestored = true
+        layoutReadDispatched = true
         connection.getSetting(key: SettingsKey.layout) { [weak self] result in
-            let raw = (try? result.get()) ?? nil
-            self?.applyRestoredPanes(WorkspaceRestoration.plan(fromLayout: raw))
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                applyRestoredPanes(WorkspaceRestoration.plan(fromLayout: raw))
+            case let .failure(error):
+                layoutReadFailed(error)
+            }
         }
+    }
+
+    /// The `layout` row could not be read.
+    ///
+    /// This must never be collapsed into "there is no saved layout": that path
+    /// bootstraps a pane and writes the resulting one-tab row back, so a
+    /// single transient daemon or database error at launch would permanently
+    /// destroy the user's saved tabs — in a row the web app also reads.
+    ///
+    /// So: no panes are invented, the write gate stays shut (⌘T still works,
+    /// it just is not persisted), the failure is surfaced the same way
+    /// `ensureSession`'s own `.failure` arm surfaces one, and the read is
+    /// re-armed so the next reconnect retries instead of leaving the window
+    /// degraded for the rest of the session.
+    func layoutReadFailed(_ error: Error) {
+        layoutReadDispatched = false
+        applyConnectionStatus("Couldn't read the saved layout — \(error.localizedDescription)")
     }
 
     /// Adds every planned pane the window does not already have, then brings
     /// each pane's session up. Split out from `restoreWorkspaceIfNeeded` so a
     /// plan can be applied in a test without a socket.
     func applyRestoredPanes(_ panes: [RestoredPane]) {
-        hasRestored = true
+        // Only here, with the row's contents actually in hand, does writing
+        // back become safe.
+        layoutReadCompleted = true
         let plan = panes.isEmpty && workspace.paneIDs.isEmpty
             ? [WorkspaceRestoration.bootstrapPane()]
             : panes
@@ -317,7 +446,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.restoreFocus()
         // The plan came *from* the row, so re-writing it is normally a no-op;
         // it matters when restoration repaired something (a capped ninth
-        // pane, a minted id) — the repair is what the next launch should see.
+        // pane, a minted id) — the repair is what the next launch should see,
+        // and when a pane was opened while the read was still in flight.
         persistLayout()
     }
 
@@ -332,7 +462,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 panes: workspace.paneIDs.compactMap { workspace.descriptor(for: $0) },
                 paneOrder: workspace.paneIDs,
                 focusedPaneID: workspace.focusedPaneID,
-                unreadNotifications: notifier.unreadCount
+                unreadNotifications: notifier.unreadCount,
+                nextSessionName: SessionOutline.nextSessionName(
+                    workspace.paneIDs.compactMap { workspace.descriptor(for: $0) },
+                    project: workspace.focusedPaneID
+                        .flatMap { workspace.descriptor(for: $0)?.project } ?? ""
+                )
             ),
             over: window
         )
@@ -350,6 +485,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             closePane(nil)
         case .newPane:
             newTerminalPane(nil)
+        case .newSession:
+            newSession(nil)
         // Interrupt and reattach are the focused terminal's own responder
         // actions (`TerminalSurfaceView`), reached here directly rather than
         // re-implemented, so the palette runs the identical code the ⌘. and
@@ -430,26 +567,34 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
-    /// Reads the persisted feed once, alongside the layout.
+    /// Reads the persisted feed once, alongside the layout. Same failure
+    /// contract as `layoutReadFailed`: a feed that could not be read is not
+    /// an empty feed, so the write gate stays shut and the read is re-armed.
     private func restoreNotificationsIfNeeded() {
-        guard !hasRestoredNotifications else { return }
-        hasRestoredNotifications = true
+        guard !notificationsReadDispatched else { return }
+        notificationsReadDispatched = true
         connection.getSetting(key: SettingsKey.notifications) { [weak self] result in
-            let raw = (try? result.get()) ?? nil
-            self?.notifier.restore(NotificationFeedCodec.deserialize(raw))
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                notificationsReadCompleted = true
+                notifier.restore(NotificationFeedCodec.deserialize(raw))
+            case .failure:
+                notificationsReadDispatched = false
+            }
         }
     }
 
     private func persistNotifications(_ entries: [NotificationEntry]) {
-        guard hasRestoredNotifications else { return }
+        guard notificationsReadCompleted else { return }
         write(NotificationFeedCodec.serialize(entries), to: SettingsKey.notifications)
     }
 
-    /// Writes the live panes back to the shared `layout` row. Refused before
-    /// restoration has run: a write from a window that has not yet read the
-    /// row would overwrite the very panes it is about to restore.
+    /// Writes the live panes back to the shared `layout` row. Refused until
+    /// the row has actually been read: a write from a window that has not
+    /// seen it would overwrite the very panes it is about to restore.
     private func persistLayout() {
-        guard hasRestored else { return }
+        guard layoutReadCompleted else { return }
         let descriptors = workspace.paneIDs.compactMap { workspace.descriptor(for: $0) }
         write(
             PersistedLayoutCodec.serialize(WorkspaceRestoration.persistedTabs(from: descriptors)),

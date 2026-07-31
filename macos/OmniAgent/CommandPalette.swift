@@ -7,6 +7,7 @@ enum PaletteAction: Equatable {
     case focusPane(sessionID: String)
     case closePane(sessionID: String)
     case newPane
+    case newSession
     case interruptFocusedPane
     case reattachFocusedPane
     case toggleSidebar
@@ -44,7 +45,8 @@ struct CommandPaletteModel: Equatable {
         panes: [PaneDescriptor],
         paneOrder: [String],
         focusedPaneID: String?,
-        unreadNotifications: Int
+        unreadNotifications: Int,
+        nextSessionName: String? = nil
     ) -> [PaletteCommand] {
         let byID = Dictionary(uniqueKeysWithValues: panes.map { ($0.sessionID, $0) })
         let ordered = paneOrder.compactMap { byID[$0] }
@@ -68,6 +70,14 @@ struct CommandPaletteModel: Equatable {
         }
         commands.append(
             PaletteCommand(id: "new-pane", title: "New terminal pane", detail: "⌘T", action: .newPane)
+        )
+        commands.append(
+            PaletteCommand(
+                id: "new-session",
+                title: "New session\(nextSessionName.map { " — \($0)" } ?? "")",
+                detail: "⌘N",
+                action: .newSession
+            )
         )
         if let focusedPaneID, let pane = byID[focusedPaneID] {
             let name = SessionOutline.paneLabel(pane)

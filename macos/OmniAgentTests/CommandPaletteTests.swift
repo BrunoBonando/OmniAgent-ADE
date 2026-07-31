@@ -30,7 +30,7 @@ final class CommandPaletteTests: XCTestCase {
             focusedPaneID: nil,
             unreadNotifications: 0
         )
-        XCTAssertEqual(unfocused.map(\.id), ["focus:a", "new-pane", "toggle-sidebar"])
+        XCTAssertEqual(unfocused.map(\.id), ["focus:a", "new-pane", "new-session", "toggle-sidebar"])
 
         let focused = CommandPaletteModel.build(
             panes: [pane("a", project: "alpha", group: "g1")],
@@ -40,9 +40,27 @@ final class CommandPaletteTests: XCTestCase {
         )
         XCTAssertEqual(
             focused.map(\.id),
-            ["focus:a", "new-pane", "close-pane", "interrupt", "reattach", "toggle-sidebar"]
+            ["focus:a", "new-pane", "new-session", "close-pane", "interrupt", "reattach", "toggle-sidebar"]
         )
         XCTAssertEqual(focused.first { $0.id == "close-pane" }?.action, .closePane(sessionID: "a"))
+    }
+
+    func testTheNewSessionRowNamesTheSessionItWouldCreate() {
+        let named = CommandPaletteModel.build(
+            panes: [pane("a", project: "alpha", group: "g1", groupLabel: "Session 1")],
+            paneOrder: ["a"],
+            focusedPaneID: nil,
+            unreadNotifications: 0,
+            nextSessionName: "Session 2"
+        ).first { $0.id == "new-session" }
+        XCTAssertEqual(named?.title, "New session — Session 2")
+        XCTAssertEqual(named?.detail, "⌘N")
+        XCTAssertEqual(named?.action, .newSession)
+
+        let unnamed = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0
+        ).first { $0.id == "new-session" }
+        XCTAssertEqual(unnamed?.title, "New session", "no name to offer, no dangling dash")
     }
 
     func testTheClearNotificationsRowExistsOnlyWhenThereIsSomethingToClear() {
@@ -60,7 +78,7 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(
             CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0)
                 .map(\.id),
-            ["new-pane", "toggle-sidebar"]
+            ["new-pane", "new-session", "toggle-sidebar"]
         )
     }
 
