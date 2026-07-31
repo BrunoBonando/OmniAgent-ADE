@@ -29,3 +29,5 @@ Task 5: minor (deferred): occlusion observer/display link torn down only in view
 Task 5: minor (deferred): PaneWorkspaceView.swift is 812 lines/7 types, split PaneContainerView/PaneHeaderView/PaneDividerView/PaneHolePlaceholderView into PaneViews.swift (PaneWorkspaceView.swift:479-812)
 Task 5: minor (deferred): two test names over-promise what they assert (PaneWorkspaceViewTests.swift testPanesAndHolesTileTheWorkspaceBoundsExactly, testEveryPaneIsBothADragSourceAndADropDestination)
 Task 5: minor (deferred): StubDraggingInfo uses a shared process-global NSPasteboard; Fixture enum name too generic (PaneWorkspaceViewTests.swift, PaneGridTests.swift)
+Task 5: fix round 1/5 (2 addressed, 0 open; commits a89990f..3162243)
+Task 5: complete (commits caaf9fb..3162243, review clean, 8 minors deferred to final review)

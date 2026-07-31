@@ -7,7 +7,7 @@
 - [x] Task 3 complete (Phase 2 Tauri compatibility client on persistent protocol)
 - [x] Task 4 complete (Phase 3 native one-terminal vertical slice)
 - [x] Task 5 complete (Phase 4 identity-preserving AppKit pane workspace)
-- [ ] Task 6 not started
+- [~] Task 6 in progress (Phases 5-6 remaining native surface, persistence service, distribution)
 - [ ] Task 7 not started
 
 ## Global constraints
