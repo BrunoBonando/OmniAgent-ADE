@@ -21,16 +21,16 @@
 //!   the map pane's "enrichment queued (N)" badge.
 //! - **Staleness**: [`roots_staleness`] compares each project's
 //!   `last_ingested:<project>` setting (written by every successful
-//!   [`ingest_one`] call) against [`STALE_THRESHOLD_SECS`]. A project with
-//!   no such setting at all (e.g. ingested earlier by the `brain` CLI,
-//!   before this task existed) is reported *not* stale rather than flagged
-//!   on first launch — the signal is "hasn't been refreshed in a while",
-//!   not "we've never personally watched it," which would false-positive on
-//!   every pre-Phase-8 project the instant this ships.
+//!   ingest) against a threshold. A project with no such setting at all
+//!   (e.g. ingested earlier by the `brain` CLI, before this task existed)
+//!   is reported *not* stale rather than flagged on first launch — the
+//!   signal is "hasn't been refreshed in a while", not "we've never
+//!   personally watched it," which would false-positive on every
+//!   pre-Phase-8 project the instant this ships.
 //! - **Per-project pause**: `ingest_paused:<project>` in `settings`, checked
-//!   by [`ingest_roots_in_background`] before touching a project — paused
-//!   projects are skipped on both first-run ingestion and "Rebuild brain".
-//! - **Rebuild brain**: [`rebuild_brain`] deletes `brain.db` (+ WAL/SHM/
+//!   before touching a project — paused projects are skipped on both
+//!   first-run ingestion and "Rebuild brain".
+//! - **Rebuild brain**: [`roots_rebuild`] deletes `brain.db` (+ WAL/SHM/
 //!   journal siblings) and re-ingests every persisted root from scratch.
 //!   Markdown memory (`brain/<project>/*.md`) lives entirely outside
 //!   `brain.db` and this function never touches that directory — DESIGN.md
@@ -39,508 +39,55 @@
 //!   captured before the delete and replayed into the fresh database so
 //!   "rebuild the derived graph" doesn't also mean "forget every
 //!   preference."
-
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+//!
+//! ## Task 6a-2 — this module is now a thin Tauri wrapper
+//!
+//! Every actual behavior in this file — the `IngestionState` state machine,
+//! `add_root`/`get_roots`, pause/staleness bookkeeping, `add_project`/
+//! `rename_project`'s bodies, and "Rebuild brain" — has moved to
+//! [`brain_ingest::roots`], a Tauri-independent module `omniagent-pty-daemon`
+//! now also calls into (so onboarding/project-management operations can be
+//! routed through the daemon exactly like Task 6a routed `list_projects`/
+//! `get_context`). This file keeps every `#[tauri::command]`'s exact
+//! signature and behavior — it only locks `BrainState`'s `Store` and
+//! delegates. The `use brain_ingest::roots::{...}` import below re-exposes
+//! the moved private helpers under their old names so this file's original
+//! `#[cfg(test)]` module (below) keeps compiling and passing completely
+//! unchanged — it is the non-regression guard for this refactor.
 
 use anyhow::Result;
-use brain_core::{now_ts, Node, NodeKind, Origin, Store};
-use serde::Serialize;
+// Only the names this file's own `#[tauri::command]` bodies actually call
+// are imported at module scope — the rest of `brain_ingest::roots`'s surface
+// (the pure helpers this file used to define itself) is imported directly
+// inside `mod tests` below, purely to keep that test module's original
+// source compiling unchanged; importing them here too would just be an
+// unused-import warning outside `cfg(test)` builds.
+pub use brain_ingest::roots::IngestionState;
+use brain_ingest::roots::{
+    biggest_project, get_roots, ingest_roots_in_background, staleness, IngestionStatus,
+    ProjectStaleness, ProjectSummary,
+};
 use tauri::State;
 
 use crate::commands::BrainState;
 
-const PROJECT_ROOTS_KEY: &str = "project_roots";
-const PAUSE_PREFIX: &str = "ingest_paused:";
-const LAST_INGESTED_PREFIX: &str = "last_ingested:";
-/// Individually-added projects (Bruno's founder-feedback fast path, task
-/// [`add_project`]): `{id: path}` JSON, distinct from [`PROJECT_ROOTS_KEY`]
-/// because the two have different walk semantics — a "root" is a parent
-/// folder `discover_projects` scans for *many* project subdirectories,
-/// while an entry here is already one exact project directory that must be
-/// re-ingested directly (via [`ingest_one`]), never walked. Read by
-/// [`roots_rebuild`] so a project added this way survives "Rebuild brain"
-/// instead of silently vanishing because it isn't under any known root.
-const PROJECT_PATHS_KEY: &str = "project_paths";
-
-/// A project not (re)ingested by the app in this long is reported "stale" by
-/// [`roots_staleness`]. `ponytail:` a flat constant rather than a settings
-/// toggle — tune once real dogfood usage says otherwise.
-const STALE_THRESHOLD_SECS: i64 = 24 * 60 * 60;
-
-// --------------------------------------------------------------- settings
-
-fn get_roots(store: &Store) -> Result<Vec<String>> {
-    let raw = store.get_setting(PROJECT_ROOTS_KEY)?;
-    Ok(match raw {
-        Some(s) => serde_json::from_str(&s).unwrap_or_default(),
-        None => Vec::new(),
-    })
-}
-
-fn add_root(store: &Store, path: &str) -> Result<()> {
-    let mut roots = get_roots(store)?;
-    if !roots.iter().any(|r| r == path) {
-        roots.push(path.to_string());
-        store.set_setting(PROJECT_ROOTS_KEY, &serde_json::to_string(&roots)?)?;
-    }
-    Ok(())
-}
-
-/// Every individually-added project (`add_project`), `id -> path`.
-fn get_project_paths(store: &Store) -> Result<HashMap<String, String>> {
-    let raw = store.get_setting(PROJECT_PATHS_KEY)?;
-    Ok(match raw {
-        Some(s) => serde_json::from_str(&s).unwrap_or_default(),
-        None => HashMap::new(),
-    })
-}
-
-/// Records (or overwrites, keyed by `id`) one individually-added project's
-/// path so a future "Rebuild brain" knows to re-ingest it directly.
-fn add_project_path(store: &Store, id: &str, path: &str) -> Result<()> {
-    let mut paths = get_project_paths(store)?;
-    paths.insert(id.to_string(), path.to_string());
-    store.set_setting(PROJECT_PATHS_KEY, &serde_json::to_string(&paths)?)?;
-    Ok(())
-}
-
-fn pause_key(project: &str) -> String {
-    format!("{PAUSE_PREFIX}{project}")
-}
-
-fn is_paused(store: &Store, project: &str) -> bool {
-    store
-        .get_setting(&pause_key(project))
-        .ok()
-        .flatten()
-        .as_deref()
-        == Some("true")
-}
-
-fn last_ingested_key(project: &str) -> String {
-    format!("{LAST_INGESTED_PREFIX}{project}")
-}
-
-/// Ingests one already-known project directory and stamps its
-/// `last_ingested:<project>` setting on success. Shared by first-run
-/// ingestion, "Rebuild brain", and the single-project "re-check" action —
-/// one place that both does the ingest and records when it happened.
-fn ingest_one(store: &Store, name: &str, dir: &Path) -> Result<brain_ingest::IngestStats> {
-    let stats = brain_ingest::ingest_project(store, dir, name)?;
-    store.set_setting(&last_ingested_key(name), &now_ts().to_string())?;
-    Ok(stats)
-}
-
-// ------------------------------------------------------------- ingestion
-
-/// Snapshot of an in-flight (or just-finished) ingestion run — polled by
-/// the frontend every ~2s while `running` is true (PLAN.md Task 8.1: "poll
-/// ingestion progress ... let the already-built BrainMap component visually
-/// reflect growth in near-real-time").
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct IngestionStatus {
-    pub running: bool,
-    pub projects_total: usize,
-    pub projects_done: usize,
-    pub current_project: Option<String>,
-    /// Total node count across the whole brain, refreshed after each
-    /// project finishes — the number the map pane's live growth is really
-    /// standing in for.
-    pub total_nodes: usize,
-    pub error: Option<String>,
-    /// How many independent ingestion operations (bulk root scans from
-    /// [`ingest_roots_in_background`], individual `add_project` ingests
-    /// from [`ingest_project_in_background`]) are currently active.
-    /// `running` is always *derived* from this being `> 0` (see
-    /// [`IngestionState::begin`]/[`IngestionState::end`]) rather than
-    /// being an independently-set bool — this is the fix for the bug
-    /// where the two paths disagreed about who "owned" clearing it: one
-    /// ingestion finishing can no longer incorrectly clear `running`
-    /// while a different one is still in flight. Not part of the public
-    /// snapshot contract the frontend polls (`ingestion_status`'s JSON
-    /// shape is unchanged).
-    #[serde(skip)]
-    active_workers: usize,
-}
-
-/// `Arc<Mutex<..>>`-backed Tauri-managed state, cloneable so a background
-/// `std::thread::spawn` closure can hold its own handle without borrowing
-/// from a `tauri::State` (which isn't `'static`) — same reasoning `lib.rs`'s
-/// existing drain-loop thread already applies to `data_dir`.
-#[derive(Clone)]
-pub struct IngestionState(Arc<Mutex<IngestionStatus>>);
-
-impl IngestionState {
-    pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(IngestionStatus::default())))
-    }
-
-    fn snapshot(&self) -> IngestionStatus {
-        self.0
-            .lock()
-            .expect("ingestion status mutex poisoned")
-            .clone()
-    }
-
-    fn update(&self, f: impl FnOnce(&mut IngestionStatus)) {
-        let mut guard = self.0.lock().expect("ingestion status mutex poisoned");
-        f(&mut guard);
-    }
-
-    /// Marks one independent ingestion operation (a bulk root scan or a
-    /// single `add_project` ingest) as starting: bumps the active-worker
-    /// count (deriving `running = true`) and *additively* grows
-    /// `projects_total` by `additional_projects` — never a destructive
-    /// reset, so a second operation starting while the first is still
-    /// running never clobbers its in-flight counters (the bug: the old
-    /// bulk path unconditionally did `*status = IngestionStatus { .. }`
-    /// here, wiping out anything an already-running `add_project` ingest
-    /// had accumulated).
-    fn begin(&self, additional_projects: usize) {
-        self.update(|s| {
-            s.active_workers += 1;
-            s.running = true;
-            s.projects_total += additional_projects;
-        });
-    }
-
-    /// Marks one independent ingestion operation as finished: decrements
-    /// the active-worker count and derives `running` from whether any
-    /// other operation is still active — never unconditionally clears it
-    /// (the bug: both paths used to set `running = false` at their own
-    /// end regardless of whether a sibling operation was still going).
-    /// `current_project` is only cleared once nothing is active anymore,
-    /// so it doesn't flicker to `None` while a sibling ingestion is still
-    /// working through its own projects.
-    fn end(&self) {
-        self.update(|s| {
-            s.active_workers = s.active_workers.saturating_sub(1);
-            s.running = s.active_workers > 0;
-            if s.active_workers == 0 {
-                s.current_project = None;
-            }
-        });
-    }
-}
-
-impl Default for IngestionState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Ingests one project and folds the result into `status` — the
-/// per-project body shared by the bulk discovery loop
-/// ([`ingest_roots_in_background`]) and the single-project fast path
-/// ([`ingest_project_in_background`]).
-fn run_one_ingest(store: &Store, name: &str, dir: &Path, status: &IngestionState) {
-    status.update(|s| s.current_project = Some(name.to_string()));
-    if let Err(e) = ingest_one(store, name, dir) {
-        eprintln!("omniagent-ade: ingest of {name} failed: {e}");
-        status.update(|s| s.error = Some(format!("{name}: {e}")));
-    }
-    let total_nodes = store.all_nodes().map(|n| n.len()).unwrap_or(0);
-    status.update(|s| {
-        s.projects_done += 1;
-        s.total_nodes = total_nodes;
-    });
-}
-
-/// Runs on a background thread (spawned by [`roots_start_ingest`] /
-/// [`rebuild_brain`]): discovers projects under `roots` (skipping any
-/// already-known project marked paused), adds `extra_projects` (already-
-/// known exact project directories — [`add_project`]'s individually-tracked
-/// projects, re-ingested on rebuild without being walked/rediscovered), and
-/// ingests each in turn, updating `status` as it goes so [`ingestion_status`]
-/// has something fresh to report. Opens its own `Store` connection rather
-/// than sharing `BrainState`'s — same rationale as `lib.rs`'s drain-loop
-/// thread: SQLite handles multiple local connections to one `brain.db` fine
-/// at this write volume, and it avoids threading a `'static` reference to
-/// `BrainState` through here.
-fn ingest_roots_in_background(
-    data_dir: PathBuf,
-    roots: Vec<String>,
-    extra_projects: Vec<(String, PathBuf)>,
-    status: IngestionState,
-) {
-    std::thread::spawn(move || {
-        let store = match Store::open(&data_dir) {
-            Ok(s) => s,
-            Err(e) => {
-                // `begin()` was never called (nothing to compose with yet),
-                // so there's no active-worker count to unwind here — just
-                // record the error. `running` is left exactly as `begin()`
-                // would have found it (untouched by this failed attempt).
-                status.update(|s| {
-                    s.error = Some(format!("failed to open brain store: {e}"));
-                });
-                return;
-            }
-        };
-
-        let mut discovered: Vec<(String, PathBuf)> = Vec::new();
-        for root in &roots {
-            discovered.extend(brain_ingest::discover_projects(Path::new(root)));
-        }
-        discovered.extend(extra_projects);
-
-        status.begin(discovered.len());
-
-        for (name, dir) in &discovered {
-            if is_paused(&store, name) {
-                status.update(|s| s.projects_done += 1);
-                continue;
-            }
-            // Panic isolation: one project's ingest panicking (a
-            // malformed file, an unexpected parser edge case, ...) must
-            // not kill this whole background thread and leave every
-            // *other* discovered project un-ingested with `running`
-            // stuck `true` forever. `AssertUnwindSafe` is sound here —
-            // `run_one_ingest` only ever touches `store`/`status` through
-            // calls fully scoped to this one project; nothing is held
-            // across the boundary for a caught panic to leave dangling.
-            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_one_ingest(&store, name, dir, &status);
-            })) {
-                eprintln!(
-                    "omniagent-ade: PANIC while ingesting project {name} (caught, bulk \
-                     ingestion continues with the next project): {}",
-                    crate::panic_message(&payload)
-                );
-                status.update(|s| {
-                    s.projects_done += 1;
-                    s.error = Some(format!("{name}: panicked during ingestion"));
-                });
-            }
-        }
-
-        status.end();
-    });
-}
-
-/// [`add_project`]'s "return immediately, ingest invisibly after" half:
-/// spawns a background thread (own `Store` connection, same reasoning as
-/// [`ingest_roots_in_background`]) that ingests exactly one already-known
-/// project directory. Updates the *same* shared [`IngestionState`] the bulk
-/// onboarding/rebuild flows use — so the frontend's existing
-/// `ingestion_status` poll picks this up for free, no second channel — via
-/// the same [`IngestionState::begin`]/[`IngestionState::end`] pair
-/// [`ingest_roots_in_background`] uses, so it composes safely (active-
-/// worker counted, counters additive) if a bulk ingest happens to be
-/// running at the same moment.
-fn ingest_project_in_background(
-    data_dir: PathBuf,
-    name: String,
-    dir: PathBuf,
-    status: IngestionState,
-) {
-    std::thread::spawn(move || {
-        let store = match Store::open(&data_dir) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("omniagent-ade: add_project background ingest failed to open store: {e}");
-                return;
-            }
-        };
-
-        status.begin(1);
-        // Panic isolation, same reasoning as `ingest_roots_in_background`'s
-        // loop: `status.end()` below must always run so `running` doesn't
-        // get stuck `true` forever if the ingest itself panics.
-        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_one_ingest(&store, &name, &dir, &status);
-        })) {
-            eprintln!(
-                "omniagent-ade: PANIC while ingesting project {name} (caught): {}",
-                crate::panic_message(&payload)
-            );
-            status.update(|s| {
-                s.projects_done += 1;
-                s.error = Some(format!("{name}: panicked during ingestion"));
-            });
-        }
-        status.end();
-    });
-}
-
-/// Persists `path` as a known project root and kicks off ingestion for
-/// every project discovered under it, in the background — the first-run
-/// folder picker's whole job. Rejects a second concurrent run rather than
-/// silently interleaving two ingestion passes against the same store.
-#[tauri::command]
-pub fn roots_start_ingest(
-    path: String,
-    brain: State<'_, BrainState>,
-    ingestion: State<'_, IngestionState>,
-) -> Result<(), String> {
-    let root = PathBuf::from(&path);
-    if !root.is_dir() {
-        return Err(format!("{path} is not a directory"));
-    }
-    if ingestion.snapshot().running {
-        return Err("ingestion is already running".to_string());
-    }
-
-    {
-        let store = brain.store.lock().map_err(|e| e.to_string())?;
-        add_root(&store, &path).map_err(|e| e.to_string())?;
-    }
-
-    ingest_roots_in_background(
-        brain.data_dir.clone(),
-        vec![path],
-        Vec::new(),
-        ingestion.inner().clone(),
-    );
-    Ok(())
-}
-
-/// The frontend's ~2s poll target while onboarding/rebuild ingestion runs.
-#[tauri::command]
-pub fn ingestion_status(ingestion: State<'_, IngestionState>) -> Result<IngestionStatus, String> {
-    Ok(ingestion.snapshot())
-}
-
-/// Every project root the user has ever picked (first-run or a later "add
-/// another folder" — the same command handles both, `add_root` dedupes).
-#[tauri::command]
-pub fn roots_list(brain: State<'_, BrainState>) -> Result<Vec<String>, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
-    get_roots(&store).map_err(|e| e.to_string())
-}
-
-/// The project with the most nodes in the store — Task 8.1's "offer a first
-/// terminal tab on the project with the most files/entities." Mirrors the
-/// `{id, label, path}` shape `list_projects`/`ProjectInfo` already use on
-/// the frontend, so the same `sessionCreate`/`requestNewTab` flow can
-/// consume it directly.
-#[derive(Debug, Clone, Serialize)]
-pub struct ProjectSummary {
-    pub id: String,
-    pub label: String,
-    pub path: Option<String>,
-}
-
-#[tauri::command]
-pub fn roots_biggest_project(
-    brain: State<'_, BrainState>,
-) -> Result<Option<ProjectSummary>, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
-    biggest_project(&store).map_err(|e| e.to_string())
-}
-
-fn biggest_project(store: &Store) -> Result<Option<ProjectSummary>> {
-    let projects = store.list_projects()?;
-    let mut best: Option<(ProjectSummary, usize)> = None;
-    for p in projects {
-        let count = store.nodes_for_project(&p.project)?.len();
-        let bigger = best.as_ref().map(|(_, c)| count > *c).unwrap_or(true);
-        if bigger {
-            best = Some((
-                ProjectSummary {
-                    id: p.id,
-                    label: p.label,
-                    path: p.path,
-                },
-                count,
-            ));
-        }
-    }
-    Ok(best.map(|(p, _)| p))
-}
-
-// ----------------------------------------------------------- add project
-//
-// Founder feedback, 2026-07-24 (Bruno, verbatim): "Open one terminal, and
-// start from there. The overall graph is done always internally, not per
-// folder. That means that the user can add multiple sessions within one
-// project or add a new project (item on the left) with a new number of
-// terminals / agents." Before this, the sidebar's project list came ENTIRELY
-// from `list_projects()` — i.e. from nodes ingestion itself created — so a
-// user could not add a project and get a terminal without first triggering
-// and waiting on a full ingest. [`add_project`] fixes that: it upserts the
-// `Project` node and records the path *synchronously* (so it's in the
-// sidebar the instant this command returns), then kicks off [`ingest_one`]
-// on a background thread and returns immediately — ingestion fills in the
-// richer graph data invisibly afterward via the same upsert-by-id the rest
-// of this module already relies on (a later `ingest_one` re-upsert is a
-// no-op from the user's point of view: same id, richer `summary`/edges).
-//
-// Deliberately does NOT reuse [`discover_projects`]/[`add_root`]: those walk
-// a ROOT folder's *immediate subdirectories* looking for many projects
-// (Phase 8's bulk "point at a parent folder full of repos" onboarding flow,
-// kept as-is here) — feeding `add_project`'s exact single project directory
-// into that machinery would make it misread the project's own
-// subdirectories as separate projects. [`PROJECT_PATHS_KEY`] is the small,
-// parallel extension that keeps this project rediscoverable by "Rebuild
-// brain" without conflating the two shapes.
-
-/// Derives a project id from an optional user-supplied `name`, falling back
-/// to `dir`'s folder basename — the same "the directory name is the project
-/// name" convention [`discover_projects`]/[`ingest_one`] already use
-/// elsewhere, so an added project ingests under one consistent id whether
-/// it's named explicitly or left at its default.
-fn project_id_for(dir: &Path, name: Option<&str>) -> Result<String> {
-    if let Some(trimmed) = name.map(str::trim) {
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-    dir.file_name()
-        .and_then(|n| n.to_str())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("{} has no usable folder name", dir.display()))
-}
-
 /// The pure body behind [`add_project`] — takes plain `&BrainState`/
 /// `&IngestionState` rather than Tauri's `State<'_, T>` so it's directly
 /// unit-testable (this module's established split, e.g. [`rebuild_store`]
-/// behind [`roots_rebuild`]).
+/// behind [`roots_rebuild`]). Delegates to `brain_ingest::roots::add_project`
+/// (Task 6a-2) — the store lock is taken and dropped here, at the Tauri
+/// boundary, exactly as before.
 fn add_project_impl(
     brain: &BrainState,
     ingestion: &IngestionState,
     path: &str,
     name: Option<&str>,
 ) -> Result<ProjectSummary> {
-    let dir = PathBuf::from(path);
-    if !dir.is_dir() {
-        anyhow::bail!("{path} is not a directory");
-    }
-    let id = project_id_for(&dir, name)?;
-
-    let summary = {
-        let store = brain
-            .store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("brain store mutex poisoned"))?;
-        store.upsert_node(&Node {
-            id: id.clone(),
-            kind: NodeKind::Project,
-            project: id.clone(),
-            label: id.clone(),
-            path: Some(path.to_string()),
-            summary: None,
-            origin: Origin::Extracted,
-            updated: now_ts(),
-        })?;
-        add_project_path(&store, &id, path)?;
-        ProjectSummary {
-            id: id.clone(),
-            label: id.clone(),
-            path: Some(path.to_string()),
-        }
-    };
-
-    // Not gated behind the same "ingestion already running" check
-    // `roots_start_ingest`/`roots_rebuild` use: this ingest runs on its own
-    // `Store` connection and updates `IngestionState` additively (see
-    // `ingest_project_in_background`'s doc comment), so it composes safely
-    // alongside a concurrent bulk run instead of needing exclusivity with it.
-    ingest_project_in_background(brain.data_dir.clone(), id, dir, ingestion.clone());
-
-    Ok(summary)
+    let store = brain
+        .store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("brain store mutex poisoned"))?;
+    brain_ingest::roots::add_project(&store, &brain.data_dir, ingestion, path, name)
 }
 
 /// Adds exactly one project at `path` (Bruno's "open one terminal, and
@@ -560,27 +107,15 @@ pub fn add_project(
         .map_err(|e| e.to_string())
 }
 
-// -------------------------------------------------------------- rename
-
 /// The pure body behind [`rename_project`] — same `&BrainState`-not-`State`
 /// split every other command in this module uses for direct unit-testing.
+/// Delegates to `brain_ingest::roots::rename_project` (Task 6a-2).
 fn rename_project_impl(brain: &BrainState, id: &str, new_label: &str) -> Result<()> {
-    let trimmed = new_label.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("project name can't be empty");
-    }
     let store = brain
         .store
         .lock()
         .map_err(|_| anyhow::anyhow!("brain store mutex poisoned"))?;
-    let node = store
-        .get_node(id)?
-        .ok_or_else(|| anyhow::anyhow!("unknown project: {id}"))?;
-    if node.kind != NodeKind::Project {
-        anyhow::bail!("{id} is not a project");
-    }
-    store.set_setting(&mcp_server::tools::project_label_key(id), trimmed)?;
-    Ok(())
+    brain_ingest::roots::rename_project(&store, id, new_label)
 }
 
 /// Renames a project's *display* label only — closes the root cause of a
@@ -602,7 +137,42 @@ pub fn rename_project(
     rename_project_impl(brain.inner(), &id, &new_label).map_err(|e| e.to_string())
 }
 
-// -------------------------------------------------------- pause / staleness
+/// Persists `path` as a known project root and kicks off ingestion for
+/// every project discovered under it, in the background — the first-run
+/// folder picker's whole job. Rejects a second concurrent run rather than
+/// silently interleaving two ingestion passes against the same store.
+#[tauri::command]
+pub fn roots_start_ingest(
+    path: String,
+    brain: State<'_, BrainState>,
+    ingestion: State<'_, IngestionState>,
+) -> Result<(), String> {
+    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    brain_ingest::roots::start_ingest(brain.data_dir.clone(), &store, ingestion.inner(), &path)
+        .map_err(|e| e.to_string())
+}
+
+/// The frontend's ~2s poll target while onboarding/rebuild ingestion runs.
+#[tauri::command]
+pub fn ingestion_status(ingestion: State<'_, IngestionState>) -> Result<IngestionStatus, String> {
+    Ok(ingestion.snapshot())
+}
+
+/// Every project root the user has ever picked (first-run or a later "add
+/// another folder" — the same command handles both, `add_root` dedupes).
+#[tauri::command]
+pub fn roots_list(brain: State<'_, BrainState>) -> Result<Vec<String>, String> {
+    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    get_roots(&store).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn roots_biggest_project(
+    brain: State<'_, BrainState>,
+) -> Result<Option<ProjectSummary>, String> {
+    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    biggest_project(&store).map_err(|e| e.to_string())
+}
 
 /// Every project id currently marked paused (skipped by future
 /// ingest/rebuild passes) — backs the sidebar context menu's checkbox
@@ -610,15 +180,7 @@ pub fn rename_project(
 #[tauri::command]
 pub fn roots_paused_projects(brain: State<'_, BrainState>) -> Result<Vec<String>, String> {
     let store = brain.store.lock().map_err(|e| e.to_string())?;
-    let settings = store.all_settings().map_err(|e| e.to_string())?;
-    Ok(settings
-        .into_iter()
-        .filter_map(|(k, v)| {
-            (v == "true")
-                .then(|| k.strip_prefix(PAUSE_PREFIX).map(str::to_string))
-                .flatten()
-        })
-        .collect())
+    brain_ingest::roots::paused_projects(&store).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -628,46 +190,13 @@ pub fn roots_set_paused(
     brain: State<'_, BrainState>,
 ) -> Result<(), String> {
     let store = brain.store.lock().map_err(|e| e.to_string())?;
-    store
-        .set_setting(&pause_key(&project), if paused { "true" } else { "false" })
-        .map_err(|e| e.to_string())
-}
-
-/// One project's staleness reading — [`roots_staleness`]'s response shape.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ProjectStaleness {
-    pub project: String,
-    pub last_ingested: Option<i64>,
-    pub stale: bool,
+    brain_ingest::roots::set_paused(&store, &project, paused).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn roots_staleness(brain: State<'_, BrainState>) -> Result<Vec<ProjectStaleness>, String> {
     let store = brain.store.lock().map_err(|e| e.to_string())?;
     staleness(&store).map_err(|e| e.to_string())
-}
-
-fn staleness(store: &Store) -> Result<Vec<ProjectStaleness>> {
-    let now = now_ts();
-    let projects = store.list_projects()?;
-    let mut out = Vec::with_capacity(projects.len());
-    for p in projects {
-        let last_ingested: Option<i64> = store
-            .get_setting(&last_ingested_key(&p.project))?
-            .and_then(|s| s.parse().ok());
-        // Missing timestamp = never (re)ingested by this app version (e.g. a
-        // project the `brain` CLI ingested pre-Phase-8) — not stale, per the
-        // module doc: absence of evidence isn't evidence of staleness here.
-        let stale = last_ingested
-            .map(|t| now - t > STALE_THRESHOLD_SECS)
-            .unwrap_or(false);
-        out.push(ProjectStaleness {
-            project: p.project,
-            last_ingested,
-            stale,
-        });
-    }
-    Ok(out)
 }
 
 /// Manual "re-check" action: re-ingests one already-known project from its
@@ -677,18 +206,8 @@ fn staleness(store: &Store) -> Result<Vec<ProjectStaleness>> {
 #[tauri::command]
 pub fn roots_reingest_project(project: String, brain: State<'_, BrainState>) -> Result<(), String> {
     let store = brain.store.lock().map_err(|e| e.to_string())?;
-    let node = store
-        .get_node(&project)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("unknown project: {project}"))?;
-    let path = node
-        .path
-        .ok_or_else(|| format!("project {project} has no recorded path"))?;
-    ingest_one(&store, &project, Path::new(&path)).map_err(|e| e.to_string())?;
-    Ok(())
+    brain_ingest::roots::reingest_project(&store, &project).map_err(|e| e.to_string())
 }
-
-// -------------------------------------------------------------- rebuild
 
 /// "Rebuild brain": deletes `brain.db` (+ WAL/SHM/journal siblings) and
 /// re-ingests every persisted, non-paused root from scratch. Settings are
@@ -708,26 +227,7 @@ pub fn roots_rebuild(
 
     let (roots, extra_projects) = {
         let mut guard = brain.store.lock().map_err(|e| e.to_string())?;
-        let preserved: HashMap<String, String> = guard
-            .all_settings()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .collect();
-        let roots = get_roots(&guard).map_err(|e| e.to_string())?;
-        // Individually-added projects (`add_project`) aren't under any
-        // known root, so they'd otherwise vanish after a rebuild — carry
-        // them forward explicitly. `preserved` already captured
-        // `PROJECT_PATHS_KEY` above, so it survives into the fresh store
-        // too; this is just what tells the background ingest to actually
-        // re-ingest each of them.
-        let extra_projects: Vec<(String, PathBuf)> = get_project_paths(&guard)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|(id, path)| (id, PathBuf::from(path)))
-            .collect();
-        let fresh = rebuild_store(&brain.data_dir, &preserved).map_err(|e| e.to_string())?;
-        *guard = fresh;
-        (roots, extra_projects)
+        brain_ingest::roots::rebuild(&brain.data_dir, &mut guard).map_err(|e| e.to_string())?
     };
 
     ingest_roots_in_background(
@@ -739,35 +239,15 @@ pub fn roots_rebuild(
     Ok(())
 }
 
-/// Deletes `brain.db` (+ WAL/SHM/journal siblings) under `data_dir` and
-/// opens a fresh `Store`, replaying every `(key, value)` in `preserved` into
-/// it. Factored out of the `#[tauri::command]` above so it's directly
-/// unit-testable against a tempdir, independent of Tauri's `State`
-/// plumbing (this codebase's established split — see `map_feed.rs`'s
-/// `build_map_graph`/command pair for the same pattern). Safe to call while
-/// another `Store`/`Connection` still has the old file open: `remove_file`
-/// is a POSIX `unlink`, which only removes the directory entry — the old
-/// connection keeps working against the (now-nameless) inode until it's
-/// dropped, and `Store::open` right after creates a brand new file at the
-/// same path.
-fn rebuild_store(data_dir: &Path, preserved: &HashMap<String, String>) -> Result<Store> {
-    for suffix in ["", "-wal", "-shm", "-journal"] {
-        let mut name = data_dir.join("brain.db").into_os_string();
-        name.push(suffix);
-        let _ = std::fs::remove_file(PathBuf::from(name));
-    }
-
-    let fresh = Store::open(data_dir)?;
-    for (k, v) in preserved {
-        fresh.set_setting(k, v)?;
-    }
-    Ok(fresh)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brain_core::{Node, NodeKind, Origin};
+    use brain_core::{now_ts, Node, NodeKind, Origin, Store};
+    use brain_ingest::roots::{
+        add_project_path, add_root, get_project_paths, ingest_one, is_paused, last_ingested_key,
+        pause_key, rebuild_store, PROJECT_ROOTS_KEY, STALE_THRESHOLD_SECS,
+    };
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     fn project_node(id: &str, root: &Path) -> Node {
@@ -915,7 +395,7 @@ mod tests {
                 .unwrap();
         }
 
-        let mut preserved = HashMap::new();
+        let mut preserved = std::collections::HashMap::new();
         preserved.insert(PROJECT_ROOTS_KEY.to_string(), r#"["/tmp/p1"]"#.to_string());
         preserved.insert("review_memory".to_string(), "true".to_string());
 
@@ -947,7 +427,7 @@ mod tests {
         // The old connection (`old_store`) is deliberately kept alive here —
         // this is exactly the situation `roots_rebuild`'s command body is
         // in: the `MutexGuard` still holds the old `Store` while this runs.
-        let fresh = rebuild_store(dir.path(), &HashMap::new()).unwrap();
+        let fresh = rebuild_store(dir.path(), &std::collections::HashMap::new()).unwrap();
         assert!(fresh.get_node("p1").unwrap().is_none());
 
         // The old handle is still perfectly usable against its own
