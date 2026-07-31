@@ -67,6 +67,52 @@ pub struct BrainGetContextPayload {
     pub project: String,
 }
 
+/// `BrainSearch` request payload — mirrors `mcp_server::tools::search_brain`'s
+/// frozen `{query, scope?}` argument shape (Task 6a-2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrainSearchPayload {
+    pub query: String,
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+/// `RootsStartIngest` request payload — the root folder to scan for
+/// projects (Task 6a-2, mirrors `src-tauri`'s `roots_start_ingest` command's
+/// `path` argument).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootsStartIngestPayload {
+    pub path: String,
+}
+
+/// `RootsAddProject` request payload (Task 6a-2, mirrors `add_project`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootsAddProjectPayload {
+    pub path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// `RootsRenameProject` request payload (Task 6a-2, mirrors `rename_project`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootsRenameProjectPayload {
+    pub id: String,
+    pub new_label: String,
+}
+
+/// `RootsSetPaused` request payload (Task 6a-2, mirrors `roots_set_paused`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootsSetPausedPayload {
+    pub project: String,
+    pub paused: bool,
+}
+
+/// `RootsReingestProject` request payload (Task 6a-2, mirrors
+/// `roots_reingest_project`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootsReingestProjectPayload {
+    pub project: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponsePayload {
     pub ok: bool,
@@ -133,6 +179,44 @@ pub enum MessageKind {
     /// `{summary, recent_decisions, related_projects, memory_notes}` shape
     /// (Task 6a — appended, never renumbering an existing kind).
     BrainGetContext = 0x0d,
+    /// Persists a project root and kicks off background ingestion under it
+    /// (Task 6a-2 — appended, never renumbering an existing kind). Mirrors
+    /// `src-tauri`'s `roots_start_ingest` command.
+    RootsStartIngest = 0x0e,
+    /// Polls the daemon's own `IngestionState` snapshot (Task 6a-2). Mirrors
+    /// `ingestion_status`.
+    RootsIngestionStatus = 0x0f,
+    /// Every persisted project root (Task 6a-2). Mirrors `roots_list`.
+    RootsList = 0x10,
+    /// The project with the most nodes in the store (Task 6a-2). Mirrors
+    /// `roots_biggest_project`.
+    RootsBiggestProject = 0x11,
+    /// Adds exactly one project directory, synchronously creating its node
+    /// and kicking off background ingestion (Task 6a-2). Mirrors
+    /// `add_project`.
+    RootsAddProject = 0x12,
+    /// Overrides a project's display label (Task 6a-2). Mirrors
+    /// `rename_project`.
+    RootsRenameProject = 0x13,
+    /// Every project id currently marked paused (Task 6a-2). Mirrors
+    /// `roots_paused_projects`.
+    RootsPausedProjects = 0x14,
+    /// Marks a project paused/unpaused for future ingest/rebuild passes
+    /// (Task 6a-2). Mirrors `roots_set_paused`.
+    RootsSetPaused = 0x15,
+    /// Every project's staleness reading (Task 6a-2). Mirrors
+    /// `roots_staleness`.
+    RootsStaleness = 0x16,
+    /// Manual "re-check" for one already-known project (Task 6a-2). Mirrors
+    /// `roots_reingest_project`.
+    RootsReingestProject = 0x17,
+    /// "Rebuild brain": wipes and re-ingests the whole store (Task 6a-2).
+    /// Mirrors `roots_rebuild`.
+    RootsRebuild = 0x18,
+    /// Full-text search over the local knowledge graph (Task 6a-2) —
+    /// `mcp_server::tools::search_brain`, left unwired by Task 6a and closed
+    /// here so the native command palette's brain search has a route.
+    BrainSearch = 0x19,
     HelloAck = 0x81,
     SessionList = 0x82,
     SessionCreated = 0x83,
@@ -164,6 +248,18 @@ impl TryFrom<u8> for MessageKind {
             0x0b => Self::SetSetting,
             0x0c => Self::BrainListProjects,
             0x0d => Self::BrainGetContext,
+            0x0e => Self::RootsStartIngest,
+            0x0f => Self::RootsIngestionStatus,
+            0x10 => Self::RootsList,
+            0x11 => Self::RootsBiggestProject,
+            0x12 => Self::RootsAddProject,
+            0x13 => Self::RootsRenameProject,
+            0x14 => Self::RootsPausedProjects,
+            0x15 => Self::RootsSetPaused,
+            0x16 => Self::RootsStaleness,
+            0x17 => Self::RootsReingestProject,
+            0x18 => Self::RootsRebuild,
+            0x19 => Self::BrainSearch,
             0x81 => Self::HelloAck,
             0x82 => Self::SessionList,
             0x83 => Self::SessionCreated,

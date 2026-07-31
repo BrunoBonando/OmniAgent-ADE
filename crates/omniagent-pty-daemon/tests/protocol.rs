@@ -1,8 +1,10 @@
 use omniagent_pty_daemon::protocol::{
     decode_raw_payload, encode_raw_payload, AttentionPayload, BrainGetContextPayload,
-    ErrorPayload, Frame, FrameError, Header, MessageKind, ResizePayload, ResponsePayload,
-    ResyncRequiredPayload, SessionExitedPayload, SessionStatus, SessionStatusPayload, SettingKey,
-    SettingValue, MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
+    BrainSearchPayload, ErrorPayload, Frame, FrameError, Header, MessageKind,
+    ResizePayload, ResponsePayload, ResyncRequiredPayload, RootsAddProjectPayload,
+    RootsReingestProjectPayload, RootsRenameProjectPayload, RootsSetPausedPayload,
+    RootsStartIngestPayload, SessionExitedPayload, SessionStatus, SessionStatusPayload,
+    SettingKey, SettingValue, MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
 };
 
 #[test]
@@ -188,6 +190,108 @@ fn brain_message_kind_discriminants_are_appended_after_v1_never_renumbering_it()
     assert_eq!(
         MessageKind::try_from(0x0d).unwrap(),
         MessageKind::BrainGetContext
+    );
+}
+
+/// Task 6a-2: the roots/ingestion surface's kinds, appended after Task 6a's
+/// `BrainGetContext` (the last client kind before this task) rather than
+/// slotted in among the frozen v1 discriminants — those must never shift.
+#[test]
+fn roots_message_kind_discriminants_are_appended_after_brain_get_context_never_renumbering_it() {
+    assert_eq!(
+        [
+            MessageKind::RootsStartIngest as u8,
+            MessageKind::RootsIngestionStatus as u8,
+            MessageKind::RootsList as u8,
+            MessageKind::RootsBiggestProject as u8,
+            MessageKind::RootsAddProject as u8,
+            MessageKind::RootsRenameProject as u8,
+            MessageKind::RootsPausedProjects as u8,
+            MessageKind::RootsSetPaused as u8,
+            MessageKind::RootsStaleness as u8,
+            MessageKind::RootsReingestProject as u8,
+            MessageKind::RootsRebuild as u8,
+            MessageKind::BrainSearch as u8,
+        ],
+        [
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19
+        ]
+    );
+    assert_eq!(
+        MessageKind::try_from(0x0e).unwrap(),
+        MessageKind::RootsStartIngest
+    );
+    assert_eq!(
+        MessageKind::try_from(0x19).unwrap(),
+        MessageKind::BrainSearch
+    );
+}
+
+#[test]
+fn roots_and_brain_search_payload_shapes_are_frozen() {
+    assert_eq!(
+        serde_json::to_value(RootsStartIngestPayload {
+            path: "/tmp/projects".into(),
+        })
+        .unwrap(),
+        serde_json::json!({"path": "/tmp/projects"})
+    );
+    assert_eq!(
+        serde_json::to_value(RootsAddProjectPayload {
+            path: "/tmp/one-project".into(),
+            name: Some("My Project".into()),
+        })
+        .unwrap(),
+        serde_json::json!({"path": "/tmp/one-project", "name": "My Project"})
+    );
+    // `name` is optional on the wire — a client that omits it must still
+    // decode, defaulting to `None` (mirrors `add_project`'s optional arg).
+    assert_eq!(
+        serde_json::from_value::<RootsAddProjectPayload>(
+            serde_json::json!({"path": "/tmp/one-project"})
+        )
+        .unwrap()
+        .name,
+        None
+    );
+    assert_eq!(
+        serde_json::to_value(RootsRenameProjectPayload {
+            id: "p1".into(),
+            new_label: "New Name".into(),
+        })
+        .unwrap(),
+        serde_json::json!({"id": "p1", "new_label": "New Name"})
+    );
+    assert_eq!(
+        serde_json::to_value(RootsSetPausedPayload {
+            project: "p1".into(),
+            paused: true,
+        })
+        .unwrap(),
+        serde_json::json!({"project": "p1", "paused": true})
+    );
+    assert_eq!(
+        serde_json::to_value(RootsReingestProjectPayload {
+            project: "p1".into(),
+        })
+        .unwrap(),
+        serde_json::json!({"project": "p1"})
+    );
+    assert_eq!(
+        serde_json::to_value(BrainSearchPayload {
+            query: "sqlite".into(),
+            scope: Some("demo".into()),
+        })
+        .unwrap(),
+        serde_json::json!({"query": "sqlite", "scope": "demo"})
+    );
+    // `scope` is optional on the wire, mirroring `search_brain`'s frozen
+    // `{query, scope?}` MCP argument shape.
+    assert_eq!(
+        serde_json::from_value::<BrainSearchPayload>(serde_json::json!({"query": "sqlite"}))
+            .unwrap()
+            .scope,
+        None
     );
 }
 

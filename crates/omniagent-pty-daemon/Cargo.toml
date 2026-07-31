@@ -22,6 +22,11 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 brain-core = { path = "../brain-core" }
 mcp-server = { path = "../mcp-server" }
+# Task 6a-2: routes roots.rs's onboarding/ingestion/degradation surface
+# (add/rename/pause/reingest/rebuild/staleness) through the daemon, reusing
+# brain-ingest::roots's Tauri-independent extraction rather than
+# re-deriving a second implementation of that state machine here.
+brain-ingest = { path = "../brain-ingest" }
 
 [dev-dependencies]
 tempfile = "3"
