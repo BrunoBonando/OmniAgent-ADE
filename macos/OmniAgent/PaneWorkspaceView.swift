@@ -3,14 +3,65 @@ import QuartzCore
 import os.signpost
 
 /// One pane's identity and the metadata that travels with it — the native
-/// equivalent of `TabInfo`'s `id` / `group` / `groupLabel`. Held in a dictionary
-/// keyed by session id, so a pane keeps its grouping no matter which cell of the
-/// rectangle it currently occupies.
+/// equivalent of `TabInfo`. Held in a dictionary keyed by session id, so a pane
+/// keeps its grouping no matter which cell of the rectangle it currently
+/// occupies.
+///
+/// The `project`/`engine`/`cwd`/`label`/`themeId` fields are exactly the ones
+/// `PersistedTab` stores, kept here so `WorkspaceRestoration.persistedTabs` can
+/// write a live pane back to the `layout` row without a second bookkeeping
+/// collection to keep in sync — the same "restore the tabs and everything else
+/// comes back with them" property `ui/src/state/sessionGroups.ts` relies on.
+/// `title` is separate and deliberately not persisted: it is the terminal's own
+/// live OSC title, not something the user named.
 struct PaneDescriptor: Equatable {
     let sessionID: String
     var group: String
     var groupLabel: String?
     var title: String
+    var project: String
+    var engine: Engine
+    var cwd: String
+    var label: String?
+    var themeId: TerminalThemeId?
+
+    init(
+        sessionID: String,
+        group: String,
+        groupLabel: String? = nil,
+        title: String = "",
+        project: String = "",
+        engine: Engine = .shell,
+        cwd: String = "",
+        label: String? = nil,
+        themeId: TerminalThemeId? = nil
+    ) {
+        self.sessionID = sessionID
+        self.group = group
+        self.groupLabel = groupLabel
+        self.title = title
+        self.project = project
+        self.engine = engine
+        self.cwd = cwd
+        self.label = label
+        self.themeId = themeId
+    }
+
+    /// The pane's own restored shape, so a plan can be applied without the
+    /// caller re-typing every field.
+    init(_ pane: RestoredPane) {
+        self.init(
+            sessionID: pane.sessionID,
+            group: pane.group,
+            groupLabel: pane.groupLabel,
+            title: "",
+            project: pane.project,
+            engine: pane.engine,
+            cwd: pane.cwd,
+            label: pane.label,
+            themeId: pane.themeId
+        )
+    }
 }
 
 /// Batches PTY resizes so a live divider drag sends at most one `resize` per

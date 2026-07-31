@@ -25,6 +25,9 @@
 		100000000000000000000010 /* pane-grid.json in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* pane-grid.json */; };
 		100000000000000000000011 /* PersistedLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* PersistedLayout.swift */; };
 		100000000000000000000012 /* PersistedLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* PersistedLayoutTests.swift */; };
+		100000000000000000000013 /* SettingsKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* SettingsKeys.swift */; };
+		100000000000000000000014 /* WorkspaceRestoration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* WorkspaceRestoration.swift */; };
+		100000000000000000000015 /* WorkspaceRestorationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* WorkspaceRestorationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +60,9 @@
 		200000000000000000000011 /* pane-grid.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "pane-grid.json"; path = "../fixtures/native-macos-compat/pane-grid.json"; sourceTree = SOURCE_ROOT; };
 		200000000000000000000012 /* PersistedLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistedLayout.swift; sourceTree = "<group>"; };
 		200000000000000000000013 /* PersistedLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistedLayoutTests.swift; sourceTree = "<group>"; };
+		200000000000000000000014 /* SettingsKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsKeys.swift; sourceTree = "<group>"; };
+		200000000000000000000015 /* WorkspaceRestoration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceRestoration.swift; sourceTree = "<group>"; };
+		200000000000000000000016 /* WorkspaceRestorationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceRestorationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -100,6 +106,8 @@
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
 				20000000000000000000000C /* AppDelegate.swift */,
 				200000000000000000000012 /* PersistedLayout.swift */,
+				200000000000000000000014 /* SettingsKeys.swift */,
+				200000000000000000000015 /* WorkspaceRestoration.swift */,
 			);
 			path = OmniAgent;
 			sourceTree = "<group>";
@@ -114,6 +122,7 @@
 				200000000000000000000011 /* pane-grid.json */,
 				200000000000000000000008 /* WorkspaceWindowControllerTests.swift */,
 				200000000000000000000013 /* PersistedLayoutTests.swift */,
+				200000000000000000000016 /* WorkspaceRestorationTests.swift */,
 			);
 			path = OmniAgentTests;
 			sourceTree = "<group>";
@@ -243,6 +252,8 @@
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
 				10000000000000000000000B /* AppDelegate.swift in Sources */,
 				100000000000000000000011 /* PersistedLayout.swift in Sources */,
+				100000000000000000000013 /* SettingsKeys.swift in Sources */,
+				100000000000000000000014 /* WorkspaceRestoration.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -256,6 +267,7 @@
 				10000000000000000000000F /* PaneWorkspaceViewTests.swift in Sources */,
 				100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */,
 				100000000000000000000012 /* PersistedLayoutTests.swift in Sources */,
+				100000000000000000000015 /* WorkspaceRestorationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
