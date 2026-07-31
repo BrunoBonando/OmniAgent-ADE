@@ -64,13 +64,16 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// Raised when a pane wants to exist or stop existing — the window
     /// controller owns session lifecycle, this view owns layout and identity.
     var onRequestNewPane: (() -> Void)?
-    var onRequestClosePane: ((String) -> Void)?
     var onFocusedPaneChanged: ((String?) -> Void)?
 
     private let makeSurface: (String) -> TerminalSurfaceView
     private var containers: [String: PaneContainerView] = [:]
     private var descriptors: [String: PaneDescriptor] = [:]
     private var dividerViews: [PaneDividerView] = []
+    /// One per hole cell — the empty cell of an incomplete rectangle, which
+    /// doubles as the "Add Terminal" affordance exactly as the web grid's
+    /// hole tile does.
+    private(set) var holePlaceholders: [PaneHolePlaceholderView] = []
     private var resizeDisplayLink: CADisplayLink?
     private var asyncFlushScheduled = false
     private var occlusionObserver: NSObjectProtocol?
@@ -342,7 +345,22 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             container.surface.scheduleResize()
         }
         syncDividerViews(layout.dividers)
+        syncHolePlaceholders(layout, holeIDs: grid.cells.filter(\.isHole).map(\.id))
         updateAccessibilityLabels()
+    }
+
+    private func syncHolePlaceholders(_ layout: PaneLayout, holeIDs: [String]) {
+        while holePlaceholders.count > holeIDs.count {
+            holePlaceholders.removeLast().removeFromSuperview()
+        }
+        while holePlaceholders.count < holeIDs.count {
+            let placeholder = PaneHolePlaceholderView { [weak self] in self?.onRequestNewPane?() }
+            holePlaceholders.append(placeholder)
+            addSubview(placeholder, positioned: .below, relativeTo: subviews.first)
+        }
+        for (placeholder, id) in zip(holePlaceholders, holeIDs) {
+            placeholder.frame = layout.frames[id] ?? .zero
+        }
     }
 
     private func syncDividerViews(_ dividers: [PaneDivider]) {
@@ -762,5 +780,60 @@ final class PaneDividerView: NSView {
     override func mouseUp(with event: NSEvent) {
         lastLocation = nil
         workspace?.resizeCoalescer.flush()
+    }
+}
+
+
+/// The empty cell of an incomplete rectangle. Visible (so a hole reads as a
+/// deliberate empty slot rather than a rendering bug) and clickable, which is
+/// the same double duty the web grid's hole tile does.
+final class PaneHolePlaceholderView: NSView {
+    private let onActivate: () -> Void
+
+    init(onActivate: @escaping () -> Void) {
+        self.onActivate = onActivate
+        super.init(frame: .zero)
+        wantsLayer = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Add terminal")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let outline = NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 8), xRadius: 8, yRadius: 8)
+        outline.lineWidth = 1
+        outline.setLineDash([6, 5], count: 2, phase: 0)
+        NSColor(srgbRed: 36 / 255, green: 43 / 255, blue: 57 / 255, alpha: 1).setStroke()
+        outline.stroke()
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: NSColor(srgbRed: 110 / 255, green: 120 / 255, blue: 138 / 255, alpha: 1),
+        ]
+        let text = "+ New terminal" as NSString
+        let size = text.size(withAttributes: attributes)
+        text.draw(
+            at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2),
+            withAttributes: attributes
+        )
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        activate()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        activate()
+        return true
+    }
+
+    func activate() {
+        onActivate()
     }
 }

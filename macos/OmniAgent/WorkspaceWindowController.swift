@@ -74,6 +74,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.workspace.adoptFocus(from: responder)
         }
         workspace.onFocusedPaneChanged = { [weak self] _ in self?.refreshTitle() }
+        workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
         addPane(sessionID: sessionID, createSession: false)
         window.initialFirstResponder = workspace.surface(for: sessionID)?.terminalView
     }

@@ -38,6 +38,27 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(frames[2].maxX, workspace.bounds.maxX)
     }
 
+    func testHolesGetAnAddTerminalPlaceholderInTheEmptyCell() {
+        let workspace = makeWorkspace(panes: 3)
+        var requests = 0
+        workspace.onRequestNewPane = { requests += 1 }
+
+        XCTAssertEqual(workspace.holePlaceholders.count, 1, "3 panes leave one hole in the 2x2 rung")
+        let hole = workspace.holePlaceholders[0]
+        XCTAssertEqual(hole.frame.maxX, workspace.bounds.maxX, "the hole is the lower-right cell")
+        XCTAssertEqual(hole.frame.maxY, workspace.bounds.maxY)
+        XCTAssertEqual(hole.accessibilityRole(), .button)
+        XCTAssertEqual(hole.accessibilityLabel(), "Add terminal")
+
+        XCTAssertTrue(hole.accessibilityPerformPress())
+        XCTAssertEqual(requests, 1, "the hole doubles as the Add Terminal affordance")
+
+        for index in 4...PaneGrid.maxPanes {
+            XCTAssertTrue(workspace.addPane(makeDescriptor("pane-\(index)")))
+        }
+        XCTAssertTrue(workspace.holePlaceholders.isEmpty, "a full rung has no holes")
+    }
+
     // MARK: - Identity
 
     func testTerminalInstancesSurviveEveryLayoutMutation() {

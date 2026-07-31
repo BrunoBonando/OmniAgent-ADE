@@ -419,13 +419,11 @@ enum Fixture {
         }
     }
 
-    static func paneGrid(file: StaticString = #filePath) throws -> PaneGridFixture {
-        let root = URL(fileURLWithPath: "\(file)")
-            .deletingLastPathComponent() // OmniAgentTests
-            .deletingLastPathComponent() // macos
-            .deletingLastPathComponent() // repository root
-        let url = root
-            .appendingPathComponent("fixtures/native-macos-compat/pane-grid.json")
+    static func paneGrid() throws -> PaneGridFixture {
+        let url = try XCTUnwrap(
+            Bundle(for: PaneGridTests.self).url(forResource: "pane-grid", withExtension: "json"),
+            "fixtures/native-macos-compat/pane-grid.json is not bundled with the tests"
+        )
         return try JSONDecoder().decode(PaneGridFixture.self, from: Data(contentsOf: url))
     }
 }
