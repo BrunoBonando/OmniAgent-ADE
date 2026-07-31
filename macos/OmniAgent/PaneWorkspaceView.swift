@@ -481,11 +481,32 @@ final class PaneContainerView: NSView, NSDraggingSource {
     let surface: TerminalSurfaceView
     let header: PaneHeaderView
 
+    /// Border colours live on the container's own layer, which composites
+    /// ABOVE its sublayers — the header and the terminal surface tile the
+    /// container exactly and are both opaque, so anything drawn in `draw(_:)`
+    /// would be buried under them.
+    static let idleBorderColor = NSColor(srgbRed: 30 / 255, green: 36 / 255, blue: 48 / 255, alpha: 1)
+    static let focusedBorderColor = NSColor(srgbRed: 65 / 255, green: 132 / 255, blue: 255 / 255, alpha: 0.85)
+    static let dropTargetBorderColor = NSColor(srgbRed: 65 / 255, green: 132 / 255, blue: 255 / 255, alpha: 1)
+
     var isFocused = false {
-        didSet { guard isFocused != oldValue else { return }; header.isFocused = isFocused; needsDisplay = true }
+        didSet {
+            guard isFocused != oldValue else { return }
+            header.isFocused = isFocused
+            updateChrome()
+        }
     }
 
-    private(set) var isDropTarget = false
+    private(set) var isDropTarget = false {
+        didSet {
+            guard isDropTarget != oldValue else { return }
+            updateChrome()
+        }
+    }
+
+    /// The drop tint, as a top-most sibling rather than a fill in `draw(_:)`,
+    /// for the same compositing reason.
+    let dropHighlight = PaneDropOverlayView()
 
     private weak var workspace: PaneWorkspaceView?
 
@@ -499,6 +520,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
         header.onDragOut = { [weak self] event in self?.beginPaneDrag(with: event) }
         addSubview(header)
         addSubview(surface)
+        addSubview(dropHighlight, positioned: .above, relativeTo: nil)
+        updateChrome()
         registerForDraggedTypes([PaneWorkspaceView.paneDragType])
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -531,6 +554,17 @@ final class PaneContainerView: NSView, NSDraggingSource {
             width: bounds.width,
             height: max(0, bounds.height - headerHeight)
         )
+        dropHighlight.frame = bounds
+    }
+
+    private func updateChrome() {
+        layer?.borderWidth = 1
+        layer?.borderColor = (
+            isDropTarget ? Self.dropTargetBorderColor
+                : isFocused ? Self.focusedBorderColor
+                : Self.idleBorderColor
+        ).cgColor
+        dropHighlight.isHidden = !isDropTarget
     }
 
     func descriptorChanged(_ descriptor: PaneDescriptor) {
@@ -544,22 +578,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
         } else {
             setAccessibilityLabel(position.prefix(1).uppercased() + position.dropFirst())
         }
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        let border = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
-        border.lineWidth = 1
-        if isDropTarget {
-            NSColor(srgbRed: 65 / 255, green: 132 / 255, blue: 255 / 255, alpha: 0.22).setFill()
-            bounds.fill(using: .sourceOver)
-            NSColor(srgbRed: 65 / 255, green: 132 / 255, blue: 255 / 255, alpha: 1).setStroke()
-        } else if isFocused {
-            NSColor(srgbRed: 65 / 255, green: 132 / 255, blue: 255 / 255, alpha: 0.85).setStroke()
-        } else {
-            NSColor(srgbRed: 30 / 255, green: 36 / 255, blue: 48 / 255, alpha: 1).setStroke()
-        }
-        border.stroke()
     }
 
     // MARK: - Dragging source
@@ -600,27 +618,48 @@ final class PaneContainerView: NSView, NSDraggingSource {
               workspace?.canAcceptDrop(from: source, onto: paneID) == true
         else { return [] }
         isDropTarget = true
-        needsDisplay = true
         return .move
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
         isDropTarget = false
-        needsDisplay = true
     }
 
     override func draggingEnded(_ sender: NSDraggingInfo) {
         isDropTarget = false
-        needsDisplay = true
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         isDropTarget = false
-        needsDisplay = true
         guard let source = sender.draggingPasteboard.string(forType: PaneWorkspaceView.paneDragType)
         else { return false }
         return workspace?.performPaneDrop(from: source, onto: paneID) ?? false
     }
+}
+
+/// The drop tint. A view rather than a `draw(_:)` fill so it composites above
+/// the opaque terminal, and transparent to hit testing so it never swallows a
+/// click or a drag that belongs to the pane underneath.
+final class PaneDropOverlayView: NSView {
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        isHidden = true
+        layer?.backgroundColor = NSColor(
+            srgbRed: 65 / 255,
+            green: 132 / 255,
+            blue: 255 / 255,
+            alpha: 0.22
+        ).cgColor
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// The pane's drag handle and label. Deliberately thin: the session outline,

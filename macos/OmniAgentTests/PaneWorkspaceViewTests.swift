@@ -228,6 +228,39 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(container.registeredDraggedTypes.contains(PaneWorkspaceView.paneDragType))
     }
 
+    func testFocusRingAndDropTintCompositeAboveTheOpaqueTerminal() {
+        let workspace = makeWorkspace(panes: 4)
+        // pane-4 was added last and therefore holds focus; pane-1 starts idle.
+        let target = workspace.container(for: "pane-1")!
+        // The header and the terminal surface tile the container exactly and are
+        // both opaque, so the ring has to be a layer border (composites above
+        // sublayers) and the tint a top-most subview — not a draw(_:) fill.
+        XCTAssertEqual(target.header.frame.maxY, target.surface.frame.minY)
+        XCTAssertEqual(target.surface.frame.maxY, target.bounds.maxY)
+        XCTAssertEqual(target.layer?.borderWidth, 1)
+        XCTAssertEqual(target.layer?.borderColor, PaneContainerView.idleBorderColor.cgColor)
+        XCTAssertTrue(target.dropHighlight.isHidden)
+
+        workspace.focusPane("pane-1")
+        XCTAssertEqual(target.layer?.borderColor, PaneContainerView.focusedBorderColor.cgColor)
+        workspace.focusPane("pane-4")
+        XCTAssertEqual(target.layer?.borderColor, PaneContainerView.idleBorderColor.cgColor)
+
+        XCTAssertEqual(target.draggingEntered(StubDraggingInfo(paneID: "pane-4")), .move)
+        XCTAssertFalse(target.dropHighlight.isHidden, "the hovered pane is visibly the swap target")
+        XCTAssertEqual(target.dropHighlight.frame, target.bounds)
+        XCTAssertTrue(target.subviews.last === target.dropHighlight, "the tint sits above the terminal")
+        XCTAssertEqual(target.layer?.borderColor, PaneContainerView.dropTargetBorderColor.cgColor)
+        XCTAssertNil(
+            target.dropHighlight.hitTest(NSPoint(x: 5, y: 5)),
+            "the tint never swallows a click meant for the pane"
+        )
+
+        target.draggingExited(nil)
+        XCTAssertTrue(target.dropHighlight.isHidden)
+        XCTAssertEqual(target.layer?.borderColor, PaneContainerView.idleBorderColor.cgColor)
+    }
+
     // MARK: - Accessibility
 
     func testEachPaneAndItsTerminalCarryAccessibilityDescriptions() {

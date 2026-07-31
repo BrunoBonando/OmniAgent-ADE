@@ -40,7 +40,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private let sessionGroup = "sess-grp-1"
     private var readySessions: Set<String> = []
     private var observedFirstOutput = false
-    private var statusTitle: String?
+    /// Status text per session — an exited, erroring or thinking pane keeps its
+    /// own line instead of one window-wide string every pane overwrites. The
+    /// title shows the *focused* pane's entry, so switching panes tells the
+    /// truth about the pane you are looking at.
+    private var sessionStatus: [String: String] = [:]
+    /// Status that belongs to the connection rather than to any one session
+    /// (connecting, reconnecting, transport errors). Outranks session status.
+    private var connectionStatus: String?
 
     init(connection: SessionConnection, sessionID: String) {
         self.connection = connection
@@ -94,15 +101,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let self else { return }
             switch state {
             case .connected:
-                statusTitle = nil
-                refreshTitle()
+                applyConnectionStatus(nil)
                 for id in workspace.paneIDs { ensureSession(id) }
             case .connecting:
-                statusTitle = "Connecting"
-                refreshTitle()
+                applyConnectionStatus("Connecting")
             case .disconnected:
-                statusTitle = "Reconnecting"
-                refreshTitle()
+                applyConnectionStatus("Reconnecting")
             }
         }
         connection.onTerminalData = { [weak self] id, bytes, sequence, isSnapshot in
@@ -114,9 +118,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             surface.feed(bytes, isSnapshot: isSnapshot, sequence: sequence)
         }
         connection.onStatus = { [weak self] event in
-            guard let self, event.id == workspace.focusedPaneID else { return }
-            statusTitle = event.status.title
-            refreshTitle()
+            // Every pane records its own status, focused or not, so switching to
+            // a pane that went to "Needs approval" in the background shows it.
+            guard let self, workspace.container(for: event.id) != nil else { return }
+            applySessionStatus(event.status.title, for: event.id)
         }
         connection.onAttention = { [weak self] id in
             guard self?.workspace.container(for: id) != nil else { return }
@@ -125,15 +130,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connection.onExit = { [weak self] event in
             guard let self, workspace.container(for: event.id) != nil else { return }
             readySessions.remove(event.id)
-            if event.id == workspace.focusedPaneID {
-                statusTitle = "Session ended"
-                refreshTitle()
-            }
+            applySessionStatus("Session ended", for: event.id)
         }
         connection.onError = { [weak self] error in
-            guard let self else { return }
-            statusTitle = error.localizedDescription
-            refreshTitle()
+            self?.applyConnectionStatus(error.localizedDescription)
         }
         connection.connect()
     }
@@ -169,6 +169,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard let focused = workspace.focusedPaneID else { return }
         connection.kill(sessionID: focused)
         readySessions.remove(focused)
+        sessionStatus.removeValue(forKey: focused)
         workspace.closePane(focused)
     }
 
@@ -219,8 +220,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             case .success:
                 createSession(sessionID)
             case let .failure(error):
-                statusTitle = error.localizedDescription
-                refreshTitle()
+                applySessionStatus(error.localizedDescription, for: sessionID)
             }
         }
     }
@@ -258,8 +258,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             case .success:
                 attach(sessionID)
             case let .failure(error):
-                statusTitle = error.localizedDescription
-                refreshTitle()
+                applySessionStatus(error.localizedDescription, for: sessionID)
             }
         }
     }
@@ -269,14 +268,31 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         readySessions.insert(sessionID)
         connection.attach(sessionID: sessionID, afterSequence: nil)
         surface.syncSize()
-        statusTitle = nil
-        refreshTitle()
+        // Only this session's status clears — another pane's error stays on its
+        // own pane.
+        applySessionStatus(nil, for: sessionID)
         os_signpost(.event, log: Instrumentation.log, name: "Attach Session")
     }
 
+    /// The single writer for one session's status line. `nil` clears it.
+    func applySessionStatus(_ status: String?, for sessionID: String) {
+        sessionStatus[sessionID] = status
+        refreshTitle()
+    }
+
+    /// The single writer for connection-wide status.
+    func applyConnectionStatus(_ status: String?) {
+        connectionStatus = status
+        refreshTitle()
+    }
+
     private func refreshTitle() {
-        if let statusTitle {
-            window?.title = "OmniAgent — \(statusTitle)"
+        if let connectionStatus {
+            window?.title = "OmniAgent — \(connectionStatus)"
+            return
+        }
+        if let focused = workspace.focusedPaneID, let status = sessionStatus[focused] {
+            window?.title = "OmniAgent — \(status)"
             return
         }
         let paneTitle = workspace.focusedPaneID

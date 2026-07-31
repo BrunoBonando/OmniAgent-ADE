@@ -58,6 +58,53 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    func testWindowTitleFollowsTheFocusedPanesOwnStatusAndNeverGoesStale() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = try XCTUnwrap(controller.window?.contentView as? PaneWorkspaceView)
+        controller.newTerminalPane(nil)
+        let first = "native-terminal"
+        let second = try XCTUnwrap(workspace.focusedPaneID)
+        XCTAssertNotEqual(first, second)
+        XCTAssertEqual(controller.window?.title, "OmniAgent")
+
+        // A background pane's status stays on that pane.
+        controller.applySessionStatus("Session ended", for: first)
+        XCTAssertEqual(controller.window?.title, "OmniAgent")
+
+        workspace.focusPane(first)
+        XCTAssertEqual(controller.window?.title, "OmniAgent — Session ended")
+
+        // Switching back must not keep claiming the other pane's status.
+        workspace.focusPane(second)
+        XCTAssertEqual(controller.window?.title, "OmniAgent")
+
+        // A status a pane reached while unfocused shows when it gains focus.
+        controller.applySessionStatus("Needs approval", for: second)
+        XCTAssertEqual(controller.window?.title, "OmniAgent — Needs approval")
+
+        // One pane attaching clears only its own line.
+        controller.applySessionStatus(nil, for: second)
+        XCTAssertEqual(controller.window?.title, "OmniAgent")
+        workspace.focusPane(first)
+        XCTAssertEqual(controller.window?.title, "OmniAgent — Session ended")
+
+        // Connection status outranks any pane's.
+        controller.applyConnectionStatus("Reconnecting")
+        XCTAssertEqual(controller.window?.title, "OmniAgent — Reconnecting")
+        workspace.focusPane(second)
+        XCTAssertEqual(controller.window?.title, "OmniAgent — Reconnecting")
+        controller.applyConnectionStatus(nil)
+        XCTAssertEqual(controller.window?.title, "OmniAgent")
+
+        // A closed pane takes its status with it.
+        workspace.focusPane(first)
+        controller.closePane(nil)
+        XCTAssertEqual(workspace.focusedPaneID, second)
+        XCTAssertEqual(controller.window?.title, "OmniAgent")
+    }
+
     func testPaneCommandsAreOnTheMenuAndReachTheWorkspaceThroughTheResponderChain() throws {
         ApplicationMenus.install()
         let panes = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "Panes")?.submenu)

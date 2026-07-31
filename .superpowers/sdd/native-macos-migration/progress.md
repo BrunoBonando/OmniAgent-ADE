@@ -19,3 +19,13 @@ Task 4: fix round 2/5 (2 addressed, 0 open; commits ecaccd2..9607b73)
 Task 4: fix round 3/5 (3 addressed, 0 open; commits 9607b73..a0e388f)
 Task 4: code complete (commits 5ac1567..a0e388f, review clean)
 Task 4 external gate: signed-installed-app Instruments p95 and terminal/input fidelity matrix remain unrun and block release acceptance.
+Task 5: implemented (commits caaf9fb..a89990f) — PaneGrid.swift port of paneGrid.ts, PaneWorkspaceView.swift, N-session WorkspaceWindowController, tests. Review: spec ✅, 2 Important, 8 Minor.
+Task 5: ⚠️ resolved by controller — PersistedTab/layout/SessionInfo/SessionStatus preservation not verifiable from diff because no persistence exists in the native client yet (Task 6's job, routes through Rust service per plan Task 6); not a Task 5 gap.
+Task 5: minor (deferred): closePane leaves blank view + leaks hole placeholders on nil grid (PaneWorkspaceView.swift:307-311)
+Task 5: minor (deferred): "Add terminal" hole missing from accessibilityChildren() (PaneWorkspaceView.swift:424)
+Task 5: minor (deferred): currentDivider(matching:) is dead indirection, comment is wrong (PaneWorkspaceView.swift:371-375)
+Task 5: minor (deferred): display-link half of resize coalescing untested (attached-window path) (PaneWorkspaceViewTests.swift)
+Task 5: minor (deferred): occlusion observer/display link torn down only in viewDidMoveToWindow, no deinit (PaneWorkspaceView.swift:390-397)
+Task 5: minor (deferred): PaneWorkspaceView.swift is 812 lines/7 types, split PaneContainerView/PaneHeaderView/PaneDividerView/PaneHolePlaceholderView into PaneViews.swift (PaneWorkspaceView.swift:479-812)
+Task 5: minor (deferred): two test names over-promise what they assert (PaneWorkspaceViewTests.swift testPanesAndHolesTileTheWorkspaceBoundsExactly, testEveryPaneIsBothADragSourceAndADropDestination)
+Task 5: minor (deferred): StubDraggingInfo uses a shared process-global NSPasteboard; Fixture enum name too generic (PaneWorkspaceViewTests.swift, PaneGridTests.swift)
