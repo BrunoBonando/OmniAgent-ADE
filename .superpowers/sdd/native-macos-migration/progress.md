@@ -45,3 +45,17 @@ Task 6a: fix round 1/5 (1 addressed, 0 open on original finding; re-review found
 Task 6a: fix round 2/5 (1 addressed, 0 open; also fixed manual_black_pane_verify.rs found in the same sweep; commits 3a0c165..9e6a9c2)
 Task 6a: minor (deferred): DaemonSessions::default_for_data_dir is inert/misleadingly named — sets socket path, not the data_dir override field; zero call sites today (src-tauri/src/daemon.rs:209-211)
 Task 6a: complete (commits eeb7af4..9e6a9c2, review clean after 2 fix rounds, 9 minors deferred to final review)
+Task 6a-2: briefed (ingestion/roots daemon routing) — see task-6a-2-brief.md, dispatch after Task 6b-1 lands to avoid concurrent daemon-protocol edits
+Task 6b split: 6b-1 (AppKit surface: sidebar/palette/toolbar/notifications/restoration) delivered; 6b-2 (SwiftUI settings/onboarding/usage/inspectors) deferred, blocked on Task 6a-2
+Task 6b-1: implemented (commits cda3ac2..c823e20). Review: spec ❌ (missing session-group creation; 2 documented/accepted deviations: onAttention via NSApp.requestUserAttention not UNUserNotificationCenter, palette drops brain-search pending 6a-2), 4 Important, ~11 Minor.
+Task 6b-1: minor (deferred): Escape doesn't leave rename edit chrome (SessionOutlineView.swift:277)
+Task 6b-1: minor (deferred): ported-but-unwired API (markAllRead, relativeTime, nextSessionName) — settle once session-group creation lands
+Task 6b-1: minor (deferred): project id leaks into persisted notification's human-facing label (WorkspaceWindowController.swift:412-414, SessionNotifier.swift:112)
+Task 6b-1: minor (deferred): redundant write-back of just-read layout/notifications on every launch (lastPersisted not seeded from the read value)
+Task 6b-1: minor (deferred): toggleSidebar: menu item likely handled by NSSplitViewController before reaching the controller's method, test can't distinguish (WorkspaceWindowController.swift:368)
+Task 6b-1: minor (deferred): connection widened to non-private with no cross-file consumer (WorkspaceWindowController.swift:35)
+Task 6b-1: minor (deferred): lastStatus not cleared on closePane unlike sibling dicts
+Task 6b-1: minor (deferred): UserNotificationDelivery() sets itself as UNUserNotificationCenter delegate in init, second controller would steal it
+Task 6b-1: minor (deferred): WorkspaceWindowController.swift is 622 lines, settings-write pair (write/persistLayout/persistNotifications/lastPersisted) is an extractable collaborator
+Task 6b-1: minor (deferred): palette action test covers 4/7 PaletteAction cases; recordNotification wiring untested
+Task 6b-1: minor (deferred): Dictionary(uniqueKeysWithValues:) traps on duplicate session ids in CommandPaletteModel.build/SessionOutlineView.reload
