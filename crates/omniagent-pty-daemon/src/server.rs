@@ -1,13 +1,15 @@
 use crate::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, write_frame, AttachPayload,
-    BrainGetContextPayload, ErrorPayload, Frame, HelloAckPayload, HelloPayload, MessageKind,
-    ResizePayload, ResponsePayload, ResyncRequiredPayload, SessionCreatedPayload,
-    SessionExitedPayload, SessionIdPayload, SessionListPayload, SessionStatusPayload, SettingKey,
-    SettingValue, PROTOCOL_VERSION,
+    BrainGetContextPayload, BrainSearchPayload, ErrorPayload, Frame, HelloAckPayload, HelloPayload,
+    MessageKind, ResizePayload, ResponsePayload, ResyncRequiredPayload, RootsAddProjectPayload,
+    RootsReingestProjectPayload, RootsRenameProjectPayload, RootsSetPausedPayload,
+    RootsStartIngestPayload, SessionCreatedPayload, SessionExitedPayload, SessionIdPayload,
+    SessionListPayload, SessionStatusPayload, SettingKey, SettingValue, PROTOCOL_VERSION,
 };
 use crate::{AttachState, CreateSession, SessionEvent, SessionRegistry, SessionSubscription};
 use anyhow::{anyhow, Context, Result};
 use brain_core::Store;
+use brain_ingest::roots::{self, IngestionState};
 use mcp_server::tools::{self, ToolContext};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -43,6 +45,16 @@ pub struct DaemonServer {
     /// would silently point every brain read and every `settings` row
     /// (including `layout`) at a different, unshared `brain.db`.
     data_dir: PathBuf,
+    /// The daemon's own ingestion-progress state machine (Task 6a-2),
+    /// constructed once here and cloned into every client connection —
+    /// mirroring how the Tauri app's process owns exactly one
+    /// `IngestionState` for its whole lifetime (`lib.rs`'s `app.manage(..)`).
+    /// The daemon and the Tauri app each hold an independent instance
+    /// against the same `brain.db`; this crate makes no attempt to
+    /// coordinate ingestion progress *across* the two processes (out of
+    /// scope per the brief — same reasoning as both processes already
+    /// holding independent `Store` connections to one WAL-mode file).
+    ingestion: IngestionState,
 }
 
 impl DaemonServer {
@@ -109,6 +121,7 @@ impl DaemonServer {
             registry: SessionRegistry::new(),
             settings: Arc::new(std::sync::Mutex::new(settings)),
             data_dir,
+            ingestion: IngestionState::new(),
         })
     }
 
@@ -138,8 +151,12 @@ impl DaemonServer {
                     let settings = Arc::clone(&self.settings);
                     let owner_uid = self.runtime_owner_uid;
                     let data_dir = self.data_dir.clone();
+                    let ingestion = self.ingestion.clone();
                     clients.spawn(async move {
-                        let _ = handle_client(stream, registry, settings, owner_uid, data_dir).await;
+                        let _ = handle_client(
+                            stream, registry, settings, owner_uid, data_dir, ingestion,
+                        )
+                        .await;
                     });
                 }
                 _ = &mut shutdown => break,
@@ -193,6 +210,7 @@ async fn handle_client(
     settings: Arc<std::sync::Mutex<Store>>,
     runtime_owner_uid: u32,
     data_dir: PathBuf,
+    ingestion: IngestionState,
 ) -> Result<()> {
     let peer_uid = stream.peer_cred().context("read peer credentials")?.uid();
     if !peer_uid_allowed(peer_uid, runtime_owner_uid) {
@@ -423,6 +441,215 @@ async fn handle_client(
                             MessageKind::Response,
                             request,
                             &serde_json::json!({"context": context}),
+                        )
+                        .await
+                    }
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
+            MessageKind::RootsStartIngest => {
+                let payload = parse_json::<RootsStartIngestPayload>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| {
+                        roots::start_ingest(data_dir.clone(), &store, &ingestion, &payload.path)
+                    });
+                match result {
+                    Ok(()) => send_response(&writer, request).await,
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
+            MessageKind::RootsIngestionStatus => {
+                parse_json::<serde_json::Value>(&frame.payload)?;
+                send_json(
+                    &writer,
+                    MessageKind::Response,
+                    request,
+                    &serde_json::json!({"status": ingestion.snapshot()}),
+                )
+                .await
+            }
+            MessageKind::RootsList => {
+                parse_json::<serde_json::Value>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| roots::get_roots(&store));
+                match result {
+                    Ok(list) => {
+                        send_json(
+                            &writer,
+                            MessageKind::Response,
+                            request,
+                            &serde_json::json!({"roots": list}),
+                        )
+                        .await
+                    }
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
+            MessageKind::RootsBiggestProject => {
+                parse_json::<serde_json::Value>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| roots::biggest_project(&store));
+                match result {
+                    Ok(project) => {
+                        send_json(
+                            &writer,
+                            MessageKind::Response,
+                            request,
+                            &serde_json::json!({"project": project}),
+                        )
+                        .await
+                    }
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
+            MessageKind::RootsAddProject => {
+                let payload = parse_json::<RootsAddProjectPayload>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| {
+                        roots::add_project(
+                            &store,
+                            &data_dir,
+                            &ingestion,
+                            &payload.path,
+                            payload.name.as_deref(),
+                        )
+                    });
+                match result {
+                    Ok(project) => {
+                        send_json(
+                            &writer,
+                            MessageKind::Response,
+                            request,
+                            &serde_json::json!({"project": project}),
+                        )
+                        .await
+                    }
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
+            MessageKind::RootsRenameProject => {
+                let payload = parse_json::<RootsRenameProjectPayload>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| roots::rename_project(&store, &payload.id, &payload.new_label));
+                match result {
+                    Ok(()) => send_response(&writer, request).await,
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
+            MessageKind::RootsPausedProjects => {
+                parse_json::<serde_json::Value>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| roots::paused_projects(&store));
+                match result {
+                    Ok(projects) => {
+                        send_json(
+                            &writer,
+                            MessageKind::Response,
+                            request,
+                            &serde_json::json!({"projects": projects}),
+                        )
+                        .await
+                    }
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
+            MessageKind::RootsSetPaused => {
+                let payload = parse_json::<RootsSetPausedPayload>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| {
+                        roots::set_paused(&store, &payload.project, payload.paused)
+                    });
+                match result {
+                    Ok(()) => send_response(&writer, request).await,
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
+            MessageKind::RootsStaleness => {
+                parse_json::<serde_json::Value>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| roots::staleness(&store));
+                match result {
+                    Ok(projects) => {
+                        send_json(
+                            &writer,
+                            MessageKind::Response,
+                            request,
+                            &serde_json::json!({"projects": projects}),
+                        )
+                        .await
+                    }
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
+            MessageKind::RootsReingestProject => {
+                let payload = parse_json::<RootsReingestProjectPayload>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| roots::reingest_project(&store, &payload.project));
+                match result {
+                    Ok(()) => send_response(&writer, request).await,
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
+            MessageKind::RootsRebuild => {
+                parse_json::<serde_json::Value>(&frame.payload)?;
+                if ingestion.snapshot().running {
+                    send_error(&writer, request, anyhow!("ingestion is already running")).await
+                } else {
+                    let result = settings
+                        .lock()
+                        .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                        .and_then(|mut store| roots::rebuild(&data_dir, &mut store));
+                    match result {
+                        Ok((discovered_roots, extra_projects)) => {
+                            roots::ingest_roots_in_background(
+                                data_dir.clone(),
+                                discovered_roots,
+                                extra_projects,
+                                ingestion.clone(),
+                            );
+                            send_response(&writer, request).await
+                        }
+                        Err(error) => send_error(&writer, request, error).await,
+                    }
+                }
+            }
+            MessageKind::BrainSearch => {
+                let payload = parse_json::<BrainSearchPayload>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| {
+                        tools::search_brain(
+                            &tool_context(&store, &data_dir),
+                            &serde_json::json!({"query": payload.query, "scope": payload.scope}),
+                        )
+                        .map_err(|error| anyhow!("{error}"))
+                    });
+                match result {
+                    Ok(results) => {
+                        send_json(
+                            &writer,
+                            MessageKind::Response,
+                            request,
+                            &serde_json::json!({"results": results}),
                         )
                         .await
                     }
