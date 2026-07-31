@@ -60,6 +60,13 @@ pub struct SettingValue {
     pub value: String,
 }
 
+/// `BrainGetContext` request payload — the project id, mirroring
+/// `mcp_server::tools::get_context`'s frozen `{project}` argument shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrainGetContextPayload {
+    pub project: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponsePayload {
     pub ok: bool,
@@ -118,6 +125,14 @@ pub enum MessageKind {
     Detach = 0x09,
     GetSetting = 0x0a,
     SetSetting = 0x0b,
+    /// Brain-store read: every ingested project, `mcp_server::tools::list_projects`'s
+    /// `{id, label, path}` shape (Task 6a — appended, never renumbering an
+    /// existing kind).
+    BrainListProjects = 0x0c,
+    /// Brain-store read: one project's briefing block, `mcp_server::tools::get_context`'s
+    /// `{summary, recent_decisions, related_projects, memory_notes}` shape
+    /// (Task 6a — appended, never renumbering an existing kind).
+    BrainGetContext = 0x0d,
     HelloAck = 0x81,
     SessionList = 0x82,
     SessionCreated = 0x83,
@@ -147,6 +162,8 @@ impl TryFrom<u8> for MessageKind {
             0x09 => Self::Detach,
             0x0a => Self::GetSetting,
             0x0b => Self::SetSetting,
+            0x0c => Self::BrainListProjects,
+            0x0d => Self::BrainGetContext,
             0x81 => Self::HelloAck,
             0x82 => Self::SessionList,
             0x83 => Self::SessionCreated,

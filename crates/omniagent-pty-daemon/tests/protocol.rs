@@ -1,8 +1,8 @@
 use omniagent_pty_daemon::protocol::{
-    decode_raw_payload, encode_raw_payload, AttentionPayload, ErrorPayload, Frame, FrameError,
-    Header, MessageKind, ResizePayload, ResponsePayload, ResyncRequiredPayload,
-    SessionExitedPayload, SessionStatus, SessionStatusPayload, SettingKey, SettingValue,
-    MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
+    decode_raw_payload, encode_raw_payload, AttentionPayload, BrainGetContextPayload,
+    ErrorPayload, Frame, FrameError, Header, MessageKind, ResizePayload, ResponsePayload,
+    ResyncRequiredPayload, SessionExitedPayload, SessionStatus, SessionStatusPayload, SettingKey,
+    SettingValue, MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
 };
 
 #[test]
@@ -174,6 +174,23 @@ fn v1_message_kind_discriminants_are_stable_and_non_overlapping() {
     );
 }
 
+/// Task 6a: brain-store read kinds, appended after the last v1 client kind
+/// rather than slotted in among them — the frozen v1 discriminants above
+/// must never shift to make room.
+#[test]
+fn brain_message_kind_discriminants_are_appended_after_v1_never_renumbering_it() {
+    assert_eq!(MessageKind::BrainListProjects as u8, 0x0c);
+    assert_eq!(MessageKind::BrainGetContext as u8, 0x0d);
+    assert_eq!(
+        MessageKind::try_from(0x0c).unwrap(),
+        MessageKind::BrainListProjects
+    );
+    assert_eq!(
+        MessageKind::try_from(0x0d).unwrap(),
+        MessageKind::BrainGetContext
+    );
+}
+
 #[test]
 fn deferred_domain_messages_have_frozen_json_payload_shapes() {
     assert_eq!(
@@ -227,6 +244,13 @@ fn deferred_domain_messages_have_frozen_json_payload_shapes() {
         })
         .unwrap(),
         serde_json::json!({"key":"layout","value":"{}"})
+    );
+    assert_eq!(
+        serde_json::to_value(BrainGetContextPayload {
+            project: "p1".into(),
+        })
+        .unwrap(),
+        serde_json::json!({"project":"p1"})
     );
     assert_eq!(
         serde_json::to_value(ResponsePayload { ok: true }).unwrap(),

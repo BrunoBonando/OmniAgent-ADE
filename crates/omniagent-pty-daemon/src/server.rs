@@ -1,17 +1,19 @@
 use crate::protocol::{
-    decode_raw_payload, encode_raw_payload, read_frame, write_frame, AttachPayload, ErrorPayload,
-    Frame, HelloAckPayload, HelloPayload, MessageKind, ResizePayload, ResponsePayload,
-    ResyncRequiredPayload, SessionCreatedPayload, SessionExitedPayload, SessionIdPayload,
-    SessionListPayload, SessionStatusPayload, SettingKey, SettingValue, PROTOCOL_VERSION,
+    decode_raw_payload, encode_raw_payload, read_frame, write_frame, AttachPayload,
+    BrainGetContextPayload, ErrorPayload, Frame, HelloAckPayload, HelloPayload, MessageKind,
+    ResizePayload, ResponsePayload, ResyncRequiredPayload, SessionCreatedPayload,
+    SessionExitedPayload, SessionIdPayload, SessionListPayload, SessionStatusPayload, SettingKey,
+    SettingValue, PROTOCOL_VERSION,
 };
 use crate::{AttachState, CreateSession, SessionEvent, SessionRegistry, SessionSubscription};
 use anyhow::{anyhow, Context, Result};
 use brain_core::Store;
+use mcp_server::tools::{self, ToolContext};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::unix::OwnedWriteHalf;
@@ -31,6 +33,11 @@ pub struct DaemonServer {
     runtime_owner_uid: u32,
     registry: SessionRegistry,
     settings: Arc<std::sync::Mutex<Store>>,
+    /// The same directory `settings`' `Store` opened `brain.db` under —
+    /// threaded into `mcp_server::tools::ToolContext` for `BrainListProjects`/
+    /// `BrainGetContext` dispatch (Task 6a), exactly mirroring `BrainState`'s
+    /// `data_dir` on the Tauri side (`src-tauri/src/commands/mod.rs`).
+    data_dir: PathBuf,
 }
 
 impl DaemonServer {
@@ -38,6 +45,7 @@ impl DaemonServer {
         let runtime_dir = socket_path
             .parent()
             .ok_or_else(|| anyhow!("socket path needs a parent directory"))?;
+        let data_dir = runtime_dir.to_path_buf();
         std::fs::create_dir_all(runtime_dir).context("create daemon runtime directory")?;
         std::fs::set_permissions(runtime_dir, std::fs::Permissions::from_mode(0o700))
             .context("secure daemon runtime directory")?;
@@ -67,6 +75,7 @@ impl DaemonServer {
             runtime_owner_uid,
             registry: SessionRegistry::new(),
             settings: Arc::new(std::sync::Mutex::new(settings)),
+            data_dir,
         })
     }
 
@@ -95,8 +104,9 @@ impl DaemonServer {
                     let registry = self.registry.clone();
                     let settings = Arc::clone(&self.settings);
                     let owner_uid = self.runtime_owner_uid;
+                    let data_dir = self.data_dir.clone();
                     clients.spawn(async move {
-                        let _ = handle_client(stream, registry, settings, owner_uid).await;
+                        let _ = handle_client(stream, registry, settings, owner_uid, data_dir).await;
                     });
                 }
                 _ = &mut shutdown => break,
@@ -149,6 +159,7 @@ async fn handle_client(
     registry: SessionRegistry,
     settings: Arc<std::sync::Mutex<Store>>,
     runtime_owner_uid: u32,
+    data_dir: PathBuf,
 ) -> Result<()> {
     let peer_uid = stream.peer_cred().context("read peer credentials")?.uid();
     if !peer_uid_allowed(peer_uid, runtime_owner_uid) {
@@ -338,6 +349,53 @@ async fn handle_client(
                     Err(error) => send_error(&writer, request, error).await,
                 }
             }
+            MessageKind::BrainListProjects => {
+                parse_json::<serde_json::Value>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| {
+                        tools::list_projects(&tool_context(&store, &data_dir), &serde_json::json!({}))
+                            .map_err(|error| anyhow!("{error}"))
+                    });
+                match result {
+                    Ok(projects) => {
+                        send_json(
+                            &writer,
+                            MessageKind::Response,
+                            request,
+                            &serde_json::json!({"projects": projects}),
+                        )
+                        .await
+                    }
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
+            MessageKind::BrainGetContext => {
+                let payload = parse_json::<BrainGetContextPayload>(&frame.payload)?;
+                let result = settings
+                    .lock()
+                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                    .and_then(|store| {
+                        tools::get_context(
+                            &tool_context(&store, &data_dir),
+                            &serde_json::json!({"project": payload.project}),
+                        )
+                        .map_err(|error| anyhow!("{error}"))
+                    });
+                match result {
+                    Ok(context) => {
+                        send_json(
+                            &writer,
+                            MessageKind::Response,
+                            request,
+                            &serde_json::json!({"context": context}),
+                        )
+                        .await
+                    }
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
             MessageKind::Hello => {
                 send_error(&writer, request, anyhow!("Hello is only valid once")).await
             }
@@ -360,6 +418,15 @@ async fn handle_client(
 
 fn parse_json<T: DeserializeOwned>(payload: &[u8]) -> Result<T> {
     serde_json::from_slice(payload).context("decode control JSON")
+}
+
+/// Builds the `mcp_server::tools` dispatch context for one brain-store
+/// request (`BrainListProjects`/`BrainGetContext`) — same
+/// `ToolContext { store, data_dir }` shape `src-tauri`'s `BrainState::tool_ctx`
+/// builds, so `list_projects`/`get_context` behave identically from either
+/// caller.
+fn tool_context<'a>(store: &'a Store, data_dir: &'a Path) -> ToolContext<'a> {
+    ToolContext { store, data_dir }
 }
 
 async fn send_attach_state(

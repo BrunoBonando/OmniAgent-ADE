@@ -1,3 +1,4 @@
+use brain_core::{now_ts, Node, NodeKind, Origin, Store};
 use omniagent_pty_daemon::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, write_frame, Frame, MessageKind,
     SessionExitedPayload, SessionListPayload, MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
@@ -460,5 +461,129 @@ async fn eight_sessions_survive_creator_disconnects_and_reattach() {
             .await;
         client.read_kind(MessageKind::Response).await;
     }
+    server.stop().await;
+}
+
+fn memory_node(id: &str, project: &str, label: &str) -> Node {
+    Node {
+        id: id.to_string(),
+        kind: NodeKind::Memory,
+        project: project.to_string(),
+        label: label.to_string(),
+        path: None,
+        summary: None,
+        origin: Origin::UserAuthored,
+        updated: now_ts(),
+    }
+}
+
+/// Task 6a: `BrainListProjects`/`BrainGetContext` dispatch against the same
+/// `brain_core::Store` `GetSetting`/`SetSetting` already share, reusing the
+/// frozen `mcp_server::tools::list_projects`/`get_context` projections
+/// rather than a second implementation of the same query.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn brain_list_projects_and_get_context_round_trip_through_the_daemon() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_dir = temp.path().join("runtime");
+    {
+        let store = Store::open(&runtime_dir).unwrap();
+        store
+            .upsert_node(&Node {
+                kind: NodeKind::Project,
+                path: Some("/tmp/demo".to_string()),
+                summary: Some("A demo project.".to_string()),
+                ..memory_node("demo", "demo", "demo")
+            })
+            .unwrap();
+        store
+            .upsert_node(&Node {
+                kind: NodeKind::Project,
+                path: Some("/tmp/other".to_string()),
+                ..memory_node("other", "other", "other")
+            })
+            .unwrap();
+        store
+            .upsert_node(&memory_node("demo:decision-1", "demo", "Decision: Use SQLite"))
+            .unwrap();
+        store
+            .upsert_node(&memory_node("demo:note-1", "demo", "Note: remember this"))
+            .unwrap();
+    }
+
+    let server = TestServer::start(temp.path()).await;
+    let mut client = Client::connect(&server.socket).await;
+
+    let list_request = client
+        .send_json(MessageKind::BrainListProjects, &serde_json::json!({}))
+        .await;
+    let list = client.read_kind(MessageKind::Response).await;
+    assert_eq!(list.header.request_or_sequence, list_request);
+    let list_body: serde_json::Value = serde_json::from_slice(&list.payload).unwrap();
+    let projects = list_body["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 2);
+    assert_eq!(projects[0]["id"], "demo");
+    assert_eq!(projects[0]["label"], "demo");
+    assert_eq!(projects[0]["path"], "/tmp/demo");
+    assert_eq!(projects[1]["id"], "other");
+
+    let context_request = client
+        .send_json(
+            MessageKind::BrainGetContext,
+            &serde_json::json!({"project": "demo"}),
+        )
+        .await;
+    let context = client.read_kind(MessageKind::Response).await;
+    assert_eq!(context.header.request_or_sequence, context_request);
+    let context_body: serde_json::Value = serde_json::from_slice(&context.payload).unwrap();
+    let context = &context_body["context"];
+    assert_eq!(context["summary"], "A demo project.");
+    assert_eq!(context["recent_decisions"].as_array().unwrap().len(), 1);
+    assert_eq!(context["memory_notes"].as_array().unwrap().len(), 2);
+
+    // An unknown project is not an error — `get_context` degrades to an
+    // empty briefing (`ToolContext::get_node` returns `None`), same as the
+    // Tauri `brain_get_context` command backed by the same shared tool.
+    client
+        .send_json(
+            MessageKind::BrainGetContext,
+            &serde_json::json!({"project": "does-not-exist"}),
+        )
+        .await;
+    let empty = client.read_kind(MessageKind::Response).await;
+    let empty_body: serde_json::Value = serde_json::from_slice(&empty.payload).unwrap();
+    assert_eq!(empty_body["context"]["summary"], "");
+    assert!(empty_body["context"]["memory_notes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    server.stop().await;
+}
+
+/// Envelope validation (malformed control JSON closes the connection) must
+/// hold for the new brain kinds exactly as it already does for existing
+/// ones (`malformed_control_json_closes_an_attached_connection` above) —
+/// new message kinds go through the same `parse_json` gate, not a side
+/// channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_brain_get_context_payload_closes_the_connection() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = TestServer::start(temp.path()).await;
+    let mut client = Client::connect(&server.socket).await;
+
+    let request = client.request;
+    write_frame(
+        &mut client.stream,
+        &Frame::new(MessageKind::BrainGetContext, request, b"{".to_vec()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), read_frame(&mut client.stream))
+            .await
+            .unwrap()
+            .is_err()
+    );
+
     server.stop().await;
 }

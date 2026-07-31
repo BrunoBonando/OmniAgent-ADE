@@ -2756,6 +2756,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "brain-core",
+ "mcp-server",
  "portable-pty",
  "serde",
  "serde_json",
