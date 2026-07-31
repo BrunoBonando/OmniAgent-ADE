@@ -86,9 +86,9 @@ enum ApplicationMenus {
 
         let edit = NSMenu(title: "Edit")
         main.addItem(withSubmenu: edit)
-        edit.addItem(item("Copy", Selector(("copy:")), "c"))
-        edit.addItem(item("Paste", Selector(("paste:")), "v"))
-        edit.addItem(item("Select All", Selector(("selectAll:")), "a"))
+        edit.addItem(item("Copy", #selector(NSText.copy(_:)), "c"))
+        edit.addItem(item("Paste", #selector(NSText.paste(_:)), "v"))
+        edit.addItem(item("Select All", #selector(NSText.selectAll(_:)), "a"))
 
         let session = NSMenu(title: "Session")
         main.addItem(withSubmenu: session)
@@ -107,6 +107,74 @@ enum ApplicationMenus {
                 [.command, .option]
             )
         )
+
+        let pane = NSMenu(title: "Pane")
+        main.addItem(withSubmenu: pane)
+        pane.addItem(item("Add Pane", #selector(PaneWorkspaceView.addPaneCommand(_:)), "t"))
+        pane.addItem(
+            item(
+                "Close Pane",
+                #selector(PaneWorkspaceView.closePane(_:)),
+                "w",
+                [.command, .shift]
+            )
+        )
+        pane.addItem(.separator())
+        pane.addItem(
+            item("Focus Left", #selector(PaneWorkspaceView.focusPaneLeft(_:)), "←", [.command, .option])
+        )
+        pane.addItem(
+            item("Focus Right", #selector(PaneWorkspaceView.focusPaneRight(_:)), "→", [.command, .option])
+        )
+        pane.addItem(
+            item("Focus Up", #selector(PaneWorkspaceView.focusPaneUp(_:)), "↑", [.command, .option])
+        )
+        pane.addItem(
+            item("Focus Down", #selector(PaneWorkspaceView.focusPaneDown(_:)), "↓", [.command, .option])
+        )
+        pane.addItem(.separator())
+        pane.addItem(
+            item(
+                "Swap Left",
+                #selector(PaneWorkspaceView.swapPaneLeft(_:)),
+                "←",
+                [.command, .option, .shift]
+            )
+        )
+        pane.addItem(
+            item(
+                "Swap Right",
+                #selector(PaneWorkspaceView.swapPaneRight(_:)),
+                "→",
+                [.command, .option, .shift]
+            )
+        )
+        pane.addItem(
+            item(
+                "Swap Up",
+                #selector(PaneWorkspaceView.swapPaneUp(_:)),
+                "↑",
+                [.command, .option, .shift]
+            )
+        )
+        pane.addItem(
+            item(
+                "Swap Down",
+                #selector(PaneWorkspaceView.swapPaneDown(_:)),
+                "↓",
+                [.command, .option, .shift]
+            )
+        )
+        pane.addItem(.separator())
+        for number in 1...PaneLayout.maximumPanes {
+            let paneItem = item(
+                "Pane \(number)",
+                #selector(PaneWorkspaceView.selectPane(_:)),
+                String(number)
+            )
+            paneItem.tag = number
+            pane.addItem(paneItem)
+        }
 
         let window = NSMenu(title: "Window")
         main.addItem(withSubmenu: window)

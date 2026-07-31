@@ -18,6 +18,10 @@
 		100000000000000000000009 /* TerminalSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000A /* TerminalSurfaceView.swift */; };
 		10000000000000000000000A /* WorkspaceWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* WorkspaceWindowController.swift */; };
 		10000000000000000000000B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* AppDelegate.swift */; };
+		10000000000000000000000C /* PaneLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* PaneLayoutTests.swift */; };
+		10000000000000000000000D /* PaneLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000E /* PaneLayout.swift */; };
+		10000000000000000000000E /* PaneWorkspaceViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000F /* PaneWorkspaceViewTests.swift */; };
+		10000000000000000000000F /* PaneWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* PaneWorkspaceView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -43,6 +47,10 @@
 		20000000000000000000000A /* TerminalSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSurfaceView.swift; sourceTree = "<group>"; };
 		20000000000000000000000B /* WorkspaceWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowController.swift; sourceTree = "<group>"; };
 		20000000000000000000000C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		20000000000000000000000D /* PaneLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneLayoutTests.swift; sourceTree = "<group>"; };
+		20000000000000000000000E /* PaneLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneLayout.swift; sourceTree = "<group>"; };
+		20000000000000000000000F /* PaneWorkspaceViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneWorkspaceViewTests.swift; sourceTree = "<group>"; };
+		200000000000000000000010 /* PaneWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneWorkspaceView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -83,6 +91,8 @@
 				20000000000000000000000A /* TerminalSurfaceView.swift */,
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
 				20000000000000000000000C /* AppDelegate.swift */,
+				20000000000000000000000E /* PaneLayout.swift */,
+				200000000000000000000010 /* PaneWorkspaceView.swift */,
 			);
 			path = OmniAgent;
 			sourceTree = "<group>";
@@ -93,6 +103,8 @@
 				200000000000000000000002 /* FrameCodecTests.swift */,
 				200000000000000000000006 /* SessionConnectionTests.swift */,
 				200000000000000000000008 /* WorkspaceWindowControllerTests.swift */,
+				20000000000000000000000D /* PaneLayoutTests.swift */,
+				20000000000000000000000F /* PaneWorkspaceViewTests.swift */,
 			);
 			path = OmniAgentTests;
 			sourceTree = "<group>";
@@ -218,6 +230,8 @@
 				100000000000000000000009 /* TerminalSurfaceView.swift in Sources */,
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
 				10000000000000000000000B /* AppDelegate.swift in Sources */,
+				10000000000000000000000D /* PaneLayout.swift in Sources */,
+				10000000000000000000000F /* PaneWorkspaceView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -228,6 +242,8 @@
 				100000000000000000000002 /* FrameCodecTests.swift in Sources */,
 				100000000000000000000005 /* SessionConnectionTests.swift in Sources */,
 				100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */,
+				10000000000000000000000C /* PaneLayoutTests.swift in Sources */,
+				10000000000000000000000E /* PaneWorkspaceViewTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

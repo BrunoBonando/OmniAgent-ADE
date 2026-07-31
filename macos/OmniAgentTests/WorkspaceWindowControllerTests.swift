@@ -4,7 +4,7 @@ import SwiftTerm
 @testable import OmniAgent
 
 final class WorkspaceWindowControllerTests: XCTestCase {
-    func testWindowOwnsExactlyOneTerminalAndFocusReturnsToIt() {
+    func testWindowOwnsPaneWorkspaceWithOneTerminalAndFocusReturnsToIt() throws {
         let connection = SessionConnection(
             socketURL: URL(fileURLWithPath: "/tmp/omniagent-controller-test.sock")
         )
@@ -14,14 +14,31 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
 
         controller.showWindow(nil)
-        let surfaces = controller.window?.contentView?.subviews.compactMap {
-            $0 as? TerminalSurfaceView
-        }
-        XCTAssertEqual(surfaces?.count, 1)
+        let workspace = try XCTUnwrap(
+            controller.window?.contentView?.subviews.first as? PaneWorkspaceView
+        )
+        let surface = try XCTUnwrap(workspace.surface(forPaneID: "native-terminal"))
 
         controller.focusTerminal(nil)
-        XCTAssertTrue(controller.window?.firstResponder === surfaces?.first?.terminalView)
+        XCTAssertTrue(controller.window?.firstResponder === surface.terminalView)
         controller.close()
+    }
+
+    func testPaneMenusUseNilTargetResponderActions() throws {
+        ApplicationMenus.install()
+        let paneMenu = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "Pane")?.submenu)
+
+        XCTAssertNil(paneMenu.item(withTitle: "Add Pane")?.target)
+        XCTAssertEqual(
+            paneMenu.item(withTitle: "Add Pane")?.action,
+            #selector(PaneWorkspaceView.addPaneCommand(_:))
+        )
+        XCTAssertNil(paneMenu.item(withTitle: "Focus Left")?.target)
+        XCTAssertEqual(
+            paneMenu.item(withTitle: "Focus Left")?.action,
+            #selector(PaneWorkspaceView.focusPaneLeft(_:))
+        )
+        XCTAssertEqual(paneMenu.item(withTitle: "Pane 8")?.tag, 8)
     }
 
     func testTerminalPreservesComposedTextInsteadOfTreatingOptionAsMeta() {

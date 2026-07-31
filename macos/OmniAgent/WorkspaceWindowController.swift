@@ -20,14 +20,19 @@ final class WorkspaceWindow: NSWindow {
 final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private let connection: SessionConnection
     private let sessionID: String
-    private let terminalSurface: TerminalSurfaceView
-    private var sessionReady = false
-    private var observedFirstOutput = false
+    private let paneWorkspace: PaneWorkspaceView
+    private var readySessions: Set<String> = []
+    private var observedOutput: Set<String> = []
+    private var nextPaneNumber = 2
+    private var creatingPane = false
 
     init(connection: SessionConnection, sessionID: String) {
         self.connection = connection
         self.sessionID = sessionID
-        terminalSurface = TerminalSurfaceView(connection: connection, sessionID: sessionID)
+        paneWorkspace = try! PaneWorkspaceView(
+            connection: connection,
+            panes: [PaneDescriptor(id: sessionID, sessionID: sessionID)]
+        )
 
         let window = WorkspaceWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1040, height: 680),
@@ -46,25 +51,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         window.minSize = NSSize(width: 520, height: 320)
 
         let content = NSView(frame: window.contentLayoutRect)
-        terminalSurface.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(terminalSurface)
+        paneWorkspace.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(paneWorkspace)
         NSLayoutConstraint.activate([
-            terminalSurface.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            terminalSurface.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            terminalSurface.topAnchor.constraint(equalTo: content.topAnchor),
-            terminalSurface.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            paneWorkspace.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            paneWorkspace.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            paneWorkspace.topAnchor.constraint(equalTo: content.topAnchor),
+            paneWorkspace.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         window.contentView = content
-        window.initialFirstResponder = terminalSurface.terminalView
+        window.initialFirstResponder = paneWorkspace.surface(forPaneID: sessionID)?.terminalView
 
         super.init(window: window)
         window.delegate = self
-        terminalSurface.onTitleChange = { [weak window] title in
-            window?.title = title.isEmpty ? "OmniAgent" : title
-        }
-        terminalSurface.onDirectoryChange = { [weak window] directory in
-            window?.representedURL = directory.map(URL.init(fileURLWithPath:))
-        }
+        configureSurface(forPaneID: sessionID)
+        paneWorkspace.onAddPane = { [weak self] in self?.requestNewPane() }
+        paneWorkspace.onClosePane = { [weak self] pane in self?.closePane(pane) }
     }
 
     @available(*, unavailable)
@@ -84,9 +86,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             switch state {
             case .connected:
-                if sessionReady {
+                if !readySessions.isEmpty {
                     window?.title = "OmniAgent"
-                    terminalSurface.syncSize()
+                    for id in readySessions {
+                        paneWorkspace.surface(forSessionID: id)?.syncSize()
+                    }
                 } else {
                     ensureSession()
                 }
@@ -97,24 +101,27 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             }
         }
         connection.onTerminalData = { [weak self] id, bytes, sequence, isSnapshot in
-            guard let self, id == sessionID else { return }
-            if !observedFirstOutput {
-                observedFirstOutput = true
+            guard let self, let surface = paneWorkspace.surface(forSessionID: id) else { return }
+            if observedOutput.insert(id).inserted {
                 os_signpost(.event, log: Instrumentation.log, name: "First Terminal Output")
             }
-            terminalSurface.feed(bytes, isSnapshot: isSnapshot, sequence: sequence)
+            surface.feed(bytes, isSnapshot: isSnapshot, sequence: sequence)
         }
         connection.onStatus = { [weak self] event in
-            guard let self, event.id == sessionID else { return }
+            guard
+                let self,
+                paneWorkspace.paneLayout.panes[paneWorkspace.paneLayout.focusedPaneID ?? ""]?
+                    .sessionID == event.id
+            else { return }
             window?.title = "OmniAgent — \(event.status.title)"
         }
         connection.onAttention = { [weak self] id in
-            guard id == self?.sessionID else { return }
+            guard self?.paneWorkspace.surface(forSessionID: id) != nil else { return }
             NSApp.requestUserAttention(.informationalRequest)
         }
         connection.onExit = { [weak self] event in
-            guard let self, event.id == sessionID else { return }
-            sessionReady = false
+            guard let self, paneWorkspace.surface(forSessionID: event.id) != nil else { return }
+            readySessions.remove(event.id)
             window?.title = "OmniAgent — Session ended"
         }
         connection.onError = { [weak self] error in
@@ -128,7 +135,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc func focusTerminal(_ sender: Any?) {
-        terminalSurface.focus()
+        paneWorkspace.focusCurrentPane()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -140,16 +147,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             switch result {
             case let .success(sessions) where sessions.contains(sessionID):
-                attach()
+                attach(sessionID)
             case .success:
-                createSession()
+                createSession(sessionID) { [weak self] created in
+                    guard let self, created else { return }
+                    attach(sessionID)
+                }
             case let .failure(error):
                 window?.title = "OmniAgent — \(error.localizedDescription)"
             }
         }
     }
 
-    private func createSession() {
+    private func createSession(_ id: String, completion: @escaping (Bool) -> Void) {
         let signpost = OSSignpostID(log: Instrumentation.log)
         os_signpost(
             .begin,
@@ -159,7 +169,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         )
         connection.createSession(
             CreateSessionRequest(
-                id: sessionID,
+                id: id,
                 command: ["/bin/zsh", "-l"],
                 cwd: FileManager.default.homeDirectoryForCurrentUser.path,
                 environment: [
@@ -180,19 +190,70 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             switch result {
             case .success:
-                attach()
+                completion(true)
+            case let .failure(error):
+                window?.title = "OmniAgent — \(error.localizedDescription)"
+                completion(false)
+            }
+        }
+    }
+
+    private func attach(_ id: String) {
+        readySessions.insert(id)
+        connection.attach(sessionID: id, afterSequence: nil)
+        paneWorkspace.surface(forSessionID: id)?.syncSize()
+        window?.title = "OmniAgent"
+        os_signpost(.event, log: Instrumentation.log, name: "Attach Session")
+    }
+
+    private func requestNewPane() {
+        guard
+            !creatingPane,
+            paneWorkspace.paneLayout.panes.count < PaneLayout.maximumPanes
+        else { return }
+        creatingPane = true
+        var id: String
+        repeat {
+            id = "\(sessionID)-\(nextPaneNumber)"
+            nextPaneNumber += 1
+        } while paneWorkspace.paneLayout.panes[id] != nil
+        createSession(id) { [weak self] created in
+            guard let self else { return }
+            creatingPane = false
+            guard created else { return }
+            do {
+                try paneWorkspace.addPane(PaneDescriptor(id: id, sessionID: id))
+                configureSurface(forPaneID: id)
+                attach(id)
+            } catch {
+                window?.title = "OmniAgent — \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func closePane(_ pane: PaneDescriptor) {
+        connection.kill(sessionID: pane.sessionID) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                readySessions.remove(pane.sessionID)
+                _ = paneWorkspace.removePane(pane.id)
             case let .failure(error):
                 window?.title = "OmniAgent — \(error.localizedDescription)"
             }
         }
     }
 
-    private func attach() {
-        sessionReady = true
-        connection.attach(sessionID: sessionID, afterSequence: nil)
-        terminalSurface.syncSize()
-        window?.title = "OmniAgent"
-        os_signpost(.event, log: Instrumentation.log, name: "Attach Session")
+    private func configureSurface(forPaneID id: String) {
+        guard let surface = paneWorkspace.surface(forPaneID: id) else { return }
+        surface.onTitleChange = { [weak self] title in
+            guard self?.paneWorkspace.paneLayout.focusedPaneID == id else { return }
+            self?.window?.title = title.isEmpty ? "OmniAgent" : title
+        }
+        surface.onDirectoryChange = { [weak self] directory in
+            guard self?.paneWorkspace.paneLayout.focusedPaneID == id else { return }
+            self?.window?.representedURL = directory.map(URL.init(fileURLWithPath:))
+        }
     }
 }
 

@@ -4,7 +4,28 @@ import os.signpost
 import SwiftTerm
 
 final class NativeTerminalView: TerminalView, NSMenuItemValidation {
+    var onCommandDrag: ((NSEvent) -> Void)?
+    var onFocus: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        paneWasFocused()
+        super.mouseDown(with: event)
+    }
+
+    func paneWasFocused() {
+        onFocus?()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if event.modifierFlags.contains(.command), let onCommandDrag {
+            onCommandDrag(event)
+        } else {
+            super.mouseDragged(with: event)
+        }
+    }
+
     override func accessibilityPerformPress() -> Bool {
+        paneWasFocused()
         window?.makeFirstResponder(self)
         return true
     }
@@ -37,6 +58,17 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     private var attemptedMetal = false
     private var drawMarkerScheduled = false
     private var pendingDrawSequence: UInt64 = 0
+    private var coalescesResize = false
+    private lazy var resizeCoalescer = TerminalResizeCoalescer { [weak self] size in
+        guard let self else { return }
+        connection.resize(
+            sessionID: sessionID,
+            cols: size.cols,
+            rows: size.rows,
+            pixelWidth: size.pixelWidth,
+            pixelHeight: size.pixelHeight
+        )
+    }
 
     init(connection: SessionConnection, sessionID: String) {
         self.connection = connection
@@ -118,6 +150,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
             bytes.count
         )
         terminalView.feed(byteArray: Array(bytes)[...])
+        guard !terminalView.isHidden else { return }
         pendingDrawSequence = sequence
         guard !drawMarkerScheduled else { return }
         drawMarkerScheduled = true
@@ -167,13 +200,15 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
         let backing = source.convertToBacking(source.bounds)
-        connection.resize(
-            sessionID: sessionID,
-            cols: clampedUInt16(newCols),
-            rows: clampedUInt16(newRows),
-            pixelWidth: clampedUInt16(Int(backing.width.rounded())),
-            pixelHeight: clampedUInt16(Int(backing.height.rounded()))
+        resizeCoalescer.submit(
+            TerminalSize(
+                cols: clampedUInt16(newCols),
+                rows: clampedUInt16(newRows),
+                pixelWidth: clampedUInt16(Int(backing.width.rounded())),
+                pixelHeight: clampedUInt16(Int(backing.height.rounded()))
+            )
         )
+        if !coalescesResize { resizeCoalescer.flush() }
         os_signpost(
             .event,
             log: Instrumentation.log,
@@ -209,6 +244,58 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
 
     @objc func focusTerminal(_ sender: Any?) {
         focus()
+    }
+
+    func setResizeCoalescing(_ enabled: Bool) {
+        coalescesResize = enabled
+    }
+
+    func flushPendingResize() {
+        resizeCoalescer.flush()
+    }
+
+    func setDrawingSuspended(_ suspended: Bool) {
+        guard terminalView.isHidden != suspended else { return }
+        terminalView.isHidden = suspended
+        if !suspended { _ = requestRendererDraw() }
+    }
+
+    func describePane(index: Int, count: Int, descriptor: PaneDescriptor) {
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        let details = [descriptor.label, descriptor.groupLabel].compactMap { $0 }
+        setAccessibilityLabel(
+            (["Pane \(index) of \(count)"] + details).joined(separator: ", ")
+        )
+        terminalView.setAccessibilityLabel(
+            ["Terminal", descriptor.label].compactMap { $0 }.joined(separator: ", ")
+        )
+    }
+}
+
+struct TerminalSize: Equatable {
+    let cols: UInt16
+    let rows: UInt16
+    let pixelWidth: UInt16
+    let pixelHeight: UInt16
+}
+
+struct TerminalResizeCoalescer {
+    private let send: (TerminalSize) -> Void
+    private var pending: TerminalSize?
+
+    init(send: @escaping (TerminalSize) -> Void) {
+        self.send = send
+    }
+
+    mutating func submit(_ size: TerminalSize) {
+        pending = size
+    }
+
+    mutating func flush() {
+        guard let pending else { return }
+        self.pending = nil
+        send(pending)
     }
 }
 
