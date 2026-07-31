@@ -45,6 +45,11 @@ final class SessionOutlineView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         outlineView.autoresizesOutlineColumn = false
         outlineView.dataSource = self
         outlineView.delegate = self
+        // Renaming through the outline's own double-click action rather than
+        // a `mouseDown` override on the cell: `NSOutlineView` consumes the
+        // mouse itself, so a cell-level override would simply never fire.
+        outlineView.target = self
+        outlineView.doubleAction = #selector(rowDoubleClicked)
         outlineView.setAccessibilityLabel("Sessions")
 
         scrollView.documentView = outlineView
@@ -178,6 +183,22 @@ final class SessionOutlineView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         if case .project = item as? OutlineItem { return false }
         return true
     }
+
+    /// Double-clicking a session row renames it in place — the same gesture
+    /// the web build's pane header and project menu established.
+    @objc func rowDoubleClicked() {
+        beginRenamingSession(atRow: outlineView.clickedRow)
+    }
+
+    /// Split out so the gesture and a test drive the same code.
+    @discardableResult
+    func beginRenamingSession(atRow row: Int) -> Bool {
+        guard row >= 0, case .session = outlineView.item(atRow: row) as? OutlineItem,
+              let cell = outlineView.view(atColumn: 0, row: row, makeIfNecessary: true) as? SessionOutlineRowView
+        else { return false }
+        cell.beginRename()
+        return true
+    }
 }
 
 /// One outline row. Three kinds, one view: the differences are typography and
@@ -212,7 +233,7 @@ final class SessionOutlineRowView: NSTableCellView {
         label.isBordered = false
         label.drawsBackground = false
         label.target = self
-        label.action = #selector(commitRename)
+        label.action = #selector(commitEditedName)
         addSubview(label)
         textField = label
 
@@ -261,27 +282,25 @@ final class SessionOutlineRowView: NSTableCellView {
         addButton?.frame = NSRect(x: max(0, bounds.width - trailing), y: 0, width: trailing, height: bounds.height)
     }
 
-    /// Double-click a session row to rename it.
-    override func mouseDown(with event: NSEvent) {
-        guard case .session = kind, event.clickCount == 2, onRename != nil else {
-            super.mouseDown(with: event)
-            return
-        }
-        beginRename()
-    }
-
     func beginRename() {
+        guard case .session = kind else { return }
         label.isEditable = true
         label.isBordered = true
         label.drawsBackground = true
         window?.makeFirstResponder(label)
     }
 
-    @objc private func commitRename() {
-        let trimmed = label.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    @objc private func commitEditedName() {
+        commitRename(named: label.stringValue)
+    }
+
+    /// The name the field ended up holding, trimmed. A blank name is not a
+    /// rename — it leaves the session called whatever it was.
+    func commitRename(named name: String) {
         label.isEditable = false
         label.isBordered = false
         label.drawsBackground = false
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         onRename?(trimmed)
     }

@@ -207,6 +207,34 @@ final class SessionOutlineViewTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(projectRow, 0)
     }
 
+    func testDoubleClickingASessionRowStartsARenameAndOtherRowsDoNot() {
+        let outline = SessionOutlineView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
+        outline.reload(panes: [pane("a", project: "alpha", group: "g1", groupLabel: "Build")], focusedPaneID: "a")
+
+        let projectRow = outline.outlineView.row(forItem: SessionOutlineView.OutlineItem.project("alpha"))
+        let sessionRow = outline.outlineView.row(forItem: SessionOutlineView.OutlineItem.session(project: "alpha", group: "g1"))
+        let paneRow = outline.outlineView.row(forItem: SessionOutlineView.OutlineItem.pane("a"))
+
+        XCTAssertTrue(outline.beginRenamingSession(atRow: sessionRow))
+        XCTAssertFalse(outline.beginRenamingSession(atRow: projectRow), "a project row is not a session name")
+        XCTAssertFalse(outline.beginRenamingSession(atRow: paneRow), "neither is a pane row")
+        XCTAssertFalse(outline.beginRenamingSession(atRow: -1), "nor is empty space below the list")
+    }
+
+    func testARenamedSessionRowReportsTheTrimmedNameAndNeverABlankOne() {
+        let outline = SessionOutlineView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
+        var renames: [String] = []
+        outline.onRenameSession = { _, name in renames.append(name) }
+        outline.reload(panes: [pane("a", project: "alpha", group: "g1", groupLabel: "Build")], focusedPaneID: "a")
+        let row = outline.outlineView.row(forItem: SessionOutlineView.OutlineItem.session(project: "alpha", group: "g1"))
+        let cell = outline.outlineView.view(atColumn: 0, row: row, makeIfNecessary: true) as? SessionOutlineRowView
+
+        cell?.commitRename(named: "  Migration  ")
+        cell?.commitRename(named: "   ")
+
+        XCTAssertEqual(renames, ["Migration"])
+    }
+
     func testEveryRowCarriesAnAccessibilityLabelThatNamesWhatItIs() throws {
         let outline = SessionOutlineView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
         outline.reload(panes: [pane("a", project: "alpha", group: "g1", groupLabel: "Build")], focusedPaneID: "a")

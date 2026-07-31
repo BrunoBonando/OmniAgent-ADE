@@ -226,6 +226,41 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(added.engine, .shell, "the native build can only launch a shell today")
     }
 
+    // MARK: - Persistence
+
+    func testTheLayoutRowIsWrittenOnlyAfterRestorationAndOnlyWhenItActuallyChanged() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+        controller.showWindow(nil)
+
+        controller.newTerminalPane(nil)
+        XCTAssertTrue(writes.isEmpty, "a window that has not read the row must not overwrite it")
+
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1"),
+                ])
+            )
+        )
+        let afterRestore = writes.count
+        XCTAssertGreaterThan(afterRestore, 0)
+        XCTAssertEqual(writes.last?.0, SettingsKey.layout)
+        XCTAssertTrue(try XCTUnwrap(writes.last?.1).contains("sess-a"))
+
+        // The OSC title is not part of the stored shape, so a shell that
+        // repaints it on every prompt must not write the row again.
+        controller.workspaceView.updateDescriptor(for: "sess-a") { $0.title = "~/src" }
+        controller.workspaceView.updateDescriptor(for: "sess-a") { $0.title = "~/src/deep" }
+        XCTAssertEqual(writes.count, afterRestore, "an unchanged row is not rewritten")
+
+        controller.workspaceView.updateDescriptor(for: "sess-a") { $0.groupLabel = "Build" }
+        XCTAssertEqual(writes.count, afterRestore + 1, "a stored field changing does write")
+        XCTAssertTrue(try XCTUnwrap(writes.last?.1).contains("Build"))
+    }
+
     // MARK: - Command palette and toolbar
 
     func testTheCommandPaletteAndSidebarToggleAreOnTheMenuAndTravelTheResponderChain() throws {

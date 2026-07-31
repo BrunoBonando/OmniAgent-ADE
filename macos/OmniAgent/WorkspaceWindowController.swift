@@ -60,6 +60,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The notification feed is written back exactly like the layout row is,
     /// and refused for the same reason until it has been read.
     private var hasRestoredNotifications = false
+    /// The last value written to each settings row — see `write(_:to:)`.
+    private var lastPersisted: [String: String] = [:]
+    /// Where settings writes go. `nil` means the daemon; a test substitutes a
+    /// recorder so the write-suppression rule can be asserted without a
+    /// socket, and without touching the developer's real `brain.db`.
+    var settingsWriter: ((String, String) -> Void)?
 
     /// `panes` may be empty: the app delegate opens the window before the
     /// socket is up, and `start()` fills it from the `layout` row once the
@@ -436,10 +442,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     private func persistNotifications(_ entries: [NotificationEntry]) {
         guard hasRestoredNotifications else { return }
-        connection.setSetting(
-            key: SettingsKey.notifications,
-            value: NotificationFeedCodec.serialize(entries)
-        )
+        write(NotificationFeedCodec.serialize(entries), to: SettingsKey.notifications)
     }
 
     /// Writes the live panes back to the shared `layout` row. Refused before
@@ -448,12 +451,27 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func persistLayout() {
         guard hasRestored else { return }
         let descriptors = workspace.paneIDs.compactMap { workspace.descriptor(for: $0) }
-        connection.setSetting(
-            key: SettingsKey.layout,
-            value: PersistedLayoutCodec.serialize(
-                WorkspaceRestoration.persistedTabs(from: descriptors)
-            )
+        write(
+            PersistedLayoutCodec.serialize(WorkspaceRestoration.persistedTabs(from: descriptors)),
+            to: SettingsKey.layout
         )
+    }
+
+    /// Writes a settings row only when its value actually changed.
+    ///
+    /// Both rows are re-derived from live state on every mutation, and plenty
+    /// of those mutations do not change what is stored — a shell that repaints
+    /// its OSC title on every prompt would otherwise write an identical
+    /// `layout` row several times a second, against the database the web app
+    /// is also reading.
+    private func write(_ value: String, to key: String) {
+        guard lastPersisted[key] != value else { return }
+        lastPersisted[key] = value
+        if let settingsWriter {
+            settingsWriter(key, value)
+        } else {
+            connection.setSetting(key: key, value: value)
+        }
     }
 
     // MARK: - Panes and sessions
