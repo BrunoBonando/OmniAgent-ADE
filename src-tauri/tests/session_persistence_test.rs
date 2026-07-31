@@ -75,9 +75,19 @@ fn default_socket_path(socket_name: &str) -> Option<std::path::PathBuf> {
 
 /// Real daemon on a private socket + this app's real config, or `None` when
 /// the daemon isn't available (in which case the caller skips).
+///
+/// `.with_data_dir(data_dir)` pins the spawned daemon subprocess's brain
+/// store to this test's own tempdir (Task 6a's data_dir fix, and the reason
+/// this test needs it at all: the daemon no longer derives its data
+/// directory from the socket path, so without an explicit override here the
+/// spawned subprocess would inherit this test *process's* ambient
+/// environment and open the real `~/Library/Application Support/
+/// OmniAgent-ADE/brain.db` — exactly the "never touch OmniAgent's real
+/// server" invariant this module's own doc comment promises).
 fn test_daemon(label: &str, data_dir: &std::path::Path) -> Option<DaemonSessions> {
     let socket = unique_socket(label);
-    let resolved = DaemonSessions::resolve(&socket, std::env::var("PATH").ok().as_deref())?;
+    let resolved = DaemonSessions::resolve(&socket, std::env::var("PATH").ok().as_deref())?
+        .with_data_dir(data_dir);
     Some(match daemon::write_config(data_dir) {
         Some(cfg) => resolved.with_config(cfg),
         None => resolved,

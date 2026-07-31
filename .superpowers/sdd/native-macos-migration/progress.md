@@ -31,3 +31,13 @@ Task 5: minor (deferred): two test names over-promise what they assert (PaneWork
 Task 5: minor (deferred): StubDraggingInfo uses a shared process-global NSPasteboard; Fixture enum name too generic (PaneWorkspaceViewTests.swift, PaneGridTests.swift)
 Task 5: fix round 1/5 (2 addressed, 0 open; commits a89990f..3162243)
 Task 5: complete (commits caaf9fb..3162243, review clean, 8 minors deferred to final review)
+Task 6: split into 6a (daemon/Swift settings+brain routing), 6b (native UI surface), 6c (persistence service), 6d (distribution) — see task-6[a-d]-brief.md
+Task 6a: implemented (commits eeb7af4..2400811) — new BrainListProjects/BrainGetContext message kinds, PersistedLayoutCodec. Review: spec ❌ (1 Important), 8 Minor.
+Task 6a: minor (deferred): data_dir plumbing inert until a mutation tool is wired, will be wrong when it is (server.rs:48,197-201,231,253,256,278,428)
+Task 6a: minor (deferred): near-duplicate dispatch blocks for the two new brain kinds (server.rs:352-397)
+Task 6a: minor (deferred): tool_context() helper is a two-field literal behind a function, inline it (server.rs:428-430)
+Task 6a: minor (deferred): ToolError variants flattened to a generic Error frame (server.rs:359,383)
+Task 6a: minor (deferred): BrainListProjects accepts any JSON value as payload, empty payload closes connection instead of being treated as no-args (server.rs:353)
+Task 6a: minor (deferred): dead Layout struct and unused CaseIterable conformances in PersistedLayout.swift:7,17,84-86
+Task 6a: minor (deferred): no shared fixture guarding Swift/TS layout codec drift, unlike pane-grid.json's convention (PersistedLayoutTests.swift)
+Task 6a: minor (deferred): SessionConnection new client methods untested against .error/non-.response frames (SessionConnection.swift:287-352)

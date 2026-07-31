@@ -36,13 +36,20 @@ struct RealServer {
 }
 
 impl RealServer {
-    fn start(socket: std::path::PathBuf) -> Self {
+    /// `data_dir` is the shared brain-store directory `DaemonServer::bind`
+    /// would otherwise resolve on its own via `brain_core::Store::
+    /// default_data_dir()` (Task 6a's data_dir fix) — passed explicitly here
+    /// (via `bind_with_data_dir`) so this test never opens a real
+    /// `~/Library/Application Support/OmniAgent-ADE/brain.db`.
+    fn start(socket: std::path::PathBuf, data_dir: std::path::PathBuf) -> Self {
         let (ready_tx, ready_rx) = mpsc::channel();
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let thread = std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async move {
-                let server = DaemonServer::bind(socket).await.unwrap();
+                let server = DaemonServer::bind_with_data_dir(socket, data_dir)
+                    .await
+                    .unwrap();
                 ready_tx.send(()).unwrap();
                 server.run_until(stopped).await.unwrap();
             });
@@ -89,7 +96,7 @@ fn manager_with_feedback_hook(data_dir: &std::path::Path, sink: OutputSink) -> F
         feedback::on_session_end(&store, event).expect("on_session_end");
     });
     let socket = data_dir.join("runtime/daemon.sock");
-    let server = RealServer::start(socket.clone());
+    let server = RealServer::start(socket.clone(), data_dir.to_path_buf());
     let manager = SessionManager::new(data_dir.to_path_buf(), sink)
         .with_daemon_sessions(Some(DaemonSessions::new(socket)))
         .with_end_hook(end_hook);

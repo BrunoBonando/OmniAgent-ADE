@@ -170,6 +170,16 @@ pub struct DaemonSessions {
     config: Option<PathBuf>,
     socket_path: PathBuf,
     runtime: Arc<ClientRuntime>,
+    /// Explicit `OMNIAGENT_ADE_DATA_DIR` override for a daemon subprocess
+    /// this instance spawns (see [`Self::ensure_daemon_running`]). `None`
+    /// (every production caller today) means the spawned subprocess simply
+    /// inherits this process's own environment — correct as long as nothing
+    /// mutates it in between, which is exactly the assumption a test
+    /// spawning its own private daemon must NOT rely on (`cargo test` runs
+    /// many tests concurrently in one process; mutating a process-global
+    /// env var per test would race). [`Self::with_data_dir`] is that
+    /// explicit, race-free override point.
+    data_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for DaemonSessions {
@@ -179,6 +189,7 @@ impl std::fmt::Debug for DaemonSessions {
             .field("socket", &self.socket)
             .field("config", &self.config)
             .field("socket_path", &self.socket_path)
+            .field("data_dir", &self.data_dir)
             .finish()
     }
 }
@@ -191,6 +202,7 @@ impl DaemonSessions {
             config: None,
             runtime: Arc::new(ClientRuntime::new(socket_path.clone())),
             socket_path,
+            data_dir: None,
         }
     }
 
@@ -206,6 +218,7 @@ impl DaemonSessions {
             config: None,
             socket_path: resolve_socket_path(socket, None),
             runtime: Arc::new(ClientRuntime::new(resolve_socket_path(socket, None))),
+            data_dir: None,
         })
     }
 
@@ -216,6 +229,7 @@ impl DaemonSessions {
             config: None,
             socket_path: resolve_socket_path(socket, None),
             runtime: Arc::new(ClientRuntime::new(resolve_socket_path(socket, None))),
+            data_dir: None,
         }
     }
 
@@ -224,6 +238,21 @@ impl DaemonSessions {
         self.socket_path = resolve_socket_path(&self.socket, Some(&cfg));
         self.config = Some(cfg);
         self.runtime = Arc::new(ClientRuntime::new(self.socket_path.clone()));
+        self
+    }
+
+    /// Pins the brain-store data directory a subprocess spawned by
+    /// [`Self::ensure_daemon_running`] must use, passed as an explicit
+    /// `OMNIAGENT_ADE_DATA_DIR` env var on that one child process rather
+    /// than left to ambient-environment inheritance. Every production
+    /// caller leaves this unset (inheritance already gives the daemon
+    /// subprocess the same `brain_core::Store::default_data_dir()` result
+    /// the app itself resolved, since both read the same process
+    /// environment) — this exists for callers (test harnesses) that must
+    /// point a spawned daemon at a private, non-shared data directory
+    /// without mutating this process's own environment.
+    pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(data_dir.into());
         self
     }
 
@@ -393,10 +422,15 @@ impl DaemonSessions {
         if self.bin.as_os_str().is_empty() {
             return Err("omniagent-pty-daemon binary not found".into());
         }
-        Command::new(&self.bin)
+        let mut command = Command::new(&self.bin);
+        command
             .env("OMNIAGENT_PTY_SOCKET", &self.socket_path)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(data_dir) = &self.data_dir {
+            command.env("OMNIAGENT_ADE_DATA_DIR", data_dir);
+        }
+        command
             .spawn()
             .map_err(|error| format!("spawn daemon: {error}"))?;
 

@@ -13,6 +13,19 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 
+/// The socket's runtime dir and the shared brain-store data dir are
+/// deliberately two separate paths under `root` (Task 6a's data_dir fix —
+/// see `DaemonServer::bind_with_data_dir`'s doc): a test that accidentally
+/// reused one path for both would not catch a regression back to the bug
+/// where the daemon opened its `Store` at the socket's own directory
+/// instead of the app's real, shared `brain.db` location. Exposed as a
+/// standalone function (not inlined into `TestServer::start`) so a test
+/// that needs to pre-populate the store before the daemon starts derives
+/// the exact same path, rather than duplicating the `"brain-data"` literal.
+fn brain_data_dir(root: &Path) -> std::path::PathBuf {
+    root.join("brain-data")
+}
+
 struct TestServer {
     socket: std::path::PathBuf,
     stop: Option<oneshot::Sender<()>>,
@@ -22,7 +35,9 @@ struct TestServer {
 impl TestServer {
     async fn start(root: &Path) -> Self {
         let socket = root.join("runtime").join("daemon.sock");
-        let server = DaemonServer::bind(socket.clone()).await.unwrap();
+        let server = DaemonServer::bind_with_data_dir(socket.clone(), brain_data_dir(root))
+            .await
+            .unwrap();
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(server.run_until(stopped));
         Self {
@@ -481,12 +496,16 @@ fn memory_node(id: &str, project: &str, label: &str) -> Node {
 /// `brain_core::Store` `GetSetting`/`SetSetting` already share, reusing the
 /// frozen `mcp_server::tools::list_projects`/`get_context` projections
 /// rather than a second implementation of the same query.
+///
+/// Seeds the store at `brain_data_dir(root)` — deliberately NOT the
+/// socket's own `runtime` directory — so this test would have failed
+/// against the pre-fix daemon (which opened `Store::open(runtime_dir)` and
+/// therefore never saw these seeded nodes at all).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn brain_list_projects_and_get_context_round_trip_through_the_daemon() {
     let temp = tempfile::tempdir().unwrap();
-    let runtime_dir = temp.path().join("runtime");
     {
-        let store = Store::open(&runtime_dir).unwrap();
+        let store = Store::open(&brain_data_dir(temp.path())).unwrap();
         store
             .upsert_node(&Node {
                 kind: NodeKind::Project,

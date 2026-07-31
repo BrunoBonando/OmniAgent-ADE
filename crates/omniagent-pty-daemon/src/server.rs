@@ -33,24 +33,57 @@ pub struct DaemonServer {
     runtime_owner_uid: u32,
     registry: SessionRegistry,
     settings: Arc<std::sync::Mutex<Store>>,
-    /// The same directory `settings`' `Store` opened `brain.db` under —
+    /// The shared brain-store data directory (`data_dir/brain.db`) —
     /// threaded into `mcp_server::tools::ToolContext` for `BrainListProjects`/
-    /// `BrainGetContext` dispatch (Task 6a), exactly mirroring `BrainState`'s
-    /// `data_dir` on the Tauri side (`src-tauri/src/commands/mod.rs`).
+    /// `BrainGetContext` dispatch (Task 6a). Resolved by [`Self::bind`] via
+    /// `brain_core::Store::default_data_dir()`, the **same** function
+    /// `src-tauri`'s `BrainState` (`src-tauri/src/lib.rs`) calls to open its
+    /// own `Store` — this is deliberately *not* derived from the socket
+    /// path/runtime dir (see [`Self::bind_with_data_dir`]'s doc), which
+    /// would silently point every brain read and every `settings` row
+    /// (including `layout`) at a different, unshared `brain.db`.
     data_dir: PathBuf,
 }
 
 impl DaemonServer {
+    /// Binds the daemon socket at `socket_path` and opens the shared brain
+    /// store at `brain_core::Store::default_data_dir()` — honoring
+    /// `OMNIAGENT_ADE_DATA_DIR` exactly like every other crate in this
+    /// workspace does (PLAN.md's Local-first constraint: "Env override
+    /// `OMNIAGENT_ADE_DATA_DIR` for tests — every crate must honor it").
     pub async fn bind(socket_path: PathBuf) -> Result<Self> {
+        Self::bind_with_data_dir(socket_path, Store::default_data_dir()).await
+    }
+
+    /// Same as [`Self::bind`], but takes the brain-store data directory
+    /// explicitly rather than resolving it internally — the injection point
+    /// tests use. A test must never open a real
+    /// `~/Library/Application Support/OmniAgent-ADE/brain.db`, and mutating
+    /// the process-global `OMNIAGENT_ADE_DATA_DIR` env var per test would
+    /// race against every other test running concurrently in the same
+    /// binary (`cargo test` runs different test functions on separate
+    /// threads by default) — passing the directory as a plain argument
+    /// avoids both.
+    ///
+    /// `data_dir` is intentionally independent of `socket_path`'s parent
+    /// directory (the "runtime dir"). The runtime dir is only ever the
+    /// socket's own home — its permissions and the peer-UID check below are
+    /// about who may *connect*, nothing to do with where the shared brain
+    /// data lives. Conflating the two (this crate's bug prior to the Task 6a
+    /// fix) silently pointed `BrainListProjects`/`BrainGetContext`, and even
+    /// `GetSetting`/`SetSetting`'s `layout` row, at `~/.omniagent-ade/`
+    /// (the socket's directory) instead of the app's real, shared
+    /// `brain.db` — every brain read came back empty and `layout` was never
+    /// actually the row the web/Tauri app reads and writes.
+    pub async fn bind_with_data_dir(socket_path: PathBuf, data_dir: PathBuf) -> Result<Self> {
         let runtime_dir = socket_path
             .parent()
             .ok_or_else(|| anyhow!("socket path needs a parent directory"))?;
-        let data_dir = runtime_dir.to_path_buf();
         std::fs::create_dir_all(runtime_dir).context("create daemon runtime directory")?;
         std::fs::set_permissions(runtime_dir, std::fs::Permissions::from_mode(0o700))
             .context("secure daemon runtime directory")?;
-        let settings =
-            Store::open(runtime_dir).context("open daemon settings in service data directory")?;
+        let settings = Store::open(&data_dir)
+            .context("open daemon settings in the shared brain data directory")?;
         let runtime_owner_uid = std::fs::metadata(runtime_dir)
             .context("inspect daemon runtime directory")?
             .uid();
@@ -571,4 +604,45 @@ async fn send_frame(writer: &Arc<Mutex<OwnedWriteHalf>>, frame: Frame) -> Result
     write_frame(&mut *writer.lock().await, &frame)
         .await
         .context("write daemon frame")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Task 6a regression: `bind()` — the real entry point `run_daemon`/
+    /// `main.rs` use in production — must resolve the shared brain-store
+    /// data directory via `brain_core::Store::default_data_dir()`, honoring
+    /// `OMNIAGENT_ADE_DATA_DIR` exactly like `src-tauri`'s `BrainState`
+    /// does, and NOT derive it from the socket path's own parent directory.
+    /// The bug this catches: `bind()` used to open `Store::open(runtime_dir)`
+    /// (the socket's directory), which silently pointed every brain read —
+    /// and the `layout` setting — at an unshared, essentially-empty
+    /// `brain.db` instead of the one the app/web UI actually read and write.
+    ///
+    /// This is the only test in this crate that mutates the process-global
+    /// `OMNIAGENT_ADE_DATA_DIR` env var. It lives here (a unit test inside
+    /// `src/server.rs`, its own separate test binary) rather than in
+    /// `tests/server_protocol.rs`, which runs many concurrent
+    /// multi-threaded tests that would otherwise race a global env var
+    /// mutation — `brain-core/tests/store_test.rs` documents the same
+    /// concern for its own env-var test.
+    #[tokio::test]
+    async fn bind_resolves_the_shared_data_dir_via_default_data_dir_not_the_socket_path() {
+        let scratch = tempfile::tempdir().unwrap();
+        let data_dir = scratch.path().join("shared-brain-data");
+        std::env::set_var("OMNIAGENT_ADE_DATA_DIR", &data_dir);
+
+        let socket_path = scratch.path().join("elsewhere-entirely").join("daemon.sock");
+        let server = DaemonServer::bind(socket_path).await.unwrap();
+
+        assert_eq!(server.data_dir, data_dir);
+        assert_eq!(server.data_dir, Store::default_data_dir());
+        // Proves the socket's own directory played no part in the result.
+        assert_ne!(server.data_dir, scratch.path().join("elsewhere-entirely"));
+        assert!(data_dir.join("brain.db").exists());
+
+        drop(server);
+        std::env::remove_var("OMNIAGENT_ADE_DATA_DIR");
+    }
 }
