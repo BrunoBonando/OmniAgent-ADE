@@ -20,6 +20,42 @@ enum MessageKind: UInt8 {
     /// never renumbering an existing kind). Mirrors
     /// `omniagent_pty_daemon::protocol::MessageKind::BrainGetContext`.
     case brainGetContext = 0x0d
+    /// Persists a project root and kicks off background ingestion under it
+    /// (Task 6a-2 — appended, never renumbering an existing kind). Mirrors
+    /// `omniagent_pty_daemon::protocol::MessageKind::RootsStartIngest`.
+    case rootsStartIngest = 0x0e
+    /// Polls the daemon's own `IngestionState` snapshot (Task 6a-2). Mirrors
+    /// `RootsIngestionStatus`.
+    case rootsIngestionStatus = 0x0f
+    /// Every persisted project root (Task 6a-2). Mirrors `RootsList`.
+    case rootsList = 0x10
+    /// The project with the most nodes in the store (Task 6a-2). Mirrors
+    /// `RootsBiggestProject`.
+    case rootsBiggestProject = 0x11
+    /// Adds exactly one project directory (Task 6a-2). Mirrors
+    /// `RootsAddProject`.
+    case rootsAddProject = 0x12
+    /// Overrides a project's display label (Task 6a-2). Mirrors
+    /// `RootsRenameProject`.
+    case rootsRenameProject = 0x13
+    /// Every project id currently marked paused (Task 6a-2). Mirrors
+    /// `RootsPausedProjects`.
+    case rootsPausedProjects = 0x14
+    /// Marks a project paused/unpaused (Task 6a-2). Mirrors
+    /// `RootsSetPaused`.
+    case rootsSetPaused = 0x15
+    /// Every project's staleness reading (Task 6a-2). Mirrors
+    /// `RootsStaleness`.
+    case rootsStaleness = 0x16
+    /// Manual "re-check" for one already-known project (Task 6a-2). Mirrors
+    /// `RootsReingestProject`.
+    case rootsReingestProject = 0x17
+    /// "Rebuild brain": wipes and re-ingests the whole store (Task 6a-2).
+    /// Mirrors `RootsRebuild`.
+    case rootsRebuild = 0x18
+    /// Full-text search over the local knowledge graph (Task 6a-2). Mirrors
+    /// `BrainSearch`.
+    case brainSearch = 0x19
     case helloAck = 0x81
     case sessionList = 0x82
     case sessionCreated = 0x83

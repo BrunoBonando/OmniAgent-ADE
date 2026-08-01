@@ -350,6 +350,194 @@ final class SessionConnection {
         }
     }
 
+    // MARK: - Roots / ingestion (Task 6a-2)
+
+    /// Persists `path` as a known project root and kicks off background
+    /// ingestion for every project discovered under it — the first-run
+    /// folder picker's whole job. Mirrors `roots_start_ingest`.
+    func startIngest(path: String, completion: ((Result<Void, Error>) -> Void)? = nil) {
+        sendCodable(kind: .rootsStartIngest, value: RootsStartIngestPayload(path: path)) {
+            self.finishResponse($0, completion: completion)
+        }
+    }
+
+    /// Polls the daemon's own in-flight (or just-finished) ingestion
+    /// snapshot. Mirrors `ingestion_status`.
+    func ingestionStatus(completion: @escaping (Result<IngestionStatus, Error>) -> Void) {
+        request(kind: .rootsIngestionStatus, payload: Data("{}".utf8)) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result {
+                        try self.decoder.decode(RootsIngestionStatusResponse.self, from: frame.payload).status
+                    }
+                }
+            )
+        }
+    }
+
+    /// Every persisted project root. Mirrors `roots_list`.
+    func rootsList(completion: @escaping (Result<[String], Error>) -> Void) {
+        request(kind: .rootsList, payload: Data("{}".utf8)) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result {
+                        try self.decoder.decode(RootsListResponse.self, from: frame.payload).roots
+                    }
+                }
+            )
+        }
+    }
+
+    /// The project with the most nodes in the store — offers a first
+    /// terminal tab on it. `nil` when nothing has been ingested yet. Mirrors
+    /// `roots_biggest_project`.
+    func biggestProject(completion: @escaping (Result<BrainProjectSummary?, Error>) -> Void) {
+        request(kind: .rootsBiggestProject, payload: Data("{}".utf8)) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result {
+                        try self.decoder.decode(RootsBiggestProjectResponse.self, from: frame.payload).project
+                    }
+                }
+            )
+        }
+    }
+
+    /// Adds exactly one project directory, synchronously creating its node
+    /// and kicking off background ingestion. Mirrors `add_project`.
+    func addProject(
+        path: String,
+        name: String? = nil,
+        completion: @escaping (Result<BrainProjectSummary, Error>) -> Void
+    ) {
+        sendCodable(kind: .rootsAddProject, value: RootsAddProjectPayload(path: path, name: name)) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result {
+                        try self.decoder.decode(RootsAddProjectResponse.self, from: frame.payload).project
+                    }
+                }
+            )
+        }
+    }
+
+    /// Overrides a project's display label. Mirrors `rename_project`.
+    func renameProject(
+        id: String,
+        newLabel: String,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        sendCodable(
+            kind: .rootsRenameProject,
+            value: RootsRenameProjectPayload(id: id, newLabel: newLabel)
+        ) {
+            self.finishResponse($0, completion: completion)
+        }
+    }
+
+    /// Every project id currently marked paused. Mirrors
+    /// `roots_paused_projects`.
+    func pausedProjects(completion: @escaping (Result<[String], Error>) -> Void) {
+        request(kind: .rootsPausedProjects, payload: Data("{}".utf8)) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result {
+                        try self.decoder.decode(RootsPausedProjectsResponse.self, from: frame.payload).projects
+                    }
+                }
+            )
+        }
+    }
+
+    /// Marks a project paused/unpaused for future ingest/rebuild passes.
+    /// Mirrors `roots_set_paused`.
+    func setPaused(
+        project: String,
+        paused: Bool,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        sendCodable(
+            kind: .rootsSetPaused,
+            value: RootsSetPausedPayload(project: project, paused: paused)
+        ) {
+            self.finishResponse($0, completion: completion)
+        }
+    }
+
+    /// Every project's staleness reading. Mirrors `roots_staleness`.
+    func staleness(completion: @escaping (Result<[ProjectStaleness], Error>) -> Void) {
+        request(kind: .rootsStaleness, payload: Data("{}".utf8)) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result {
+                        try self.decoder.decode(RootsStalenessResponse.self, from: frame.payload).projects
+                    }
+                }
+            )
+        }
+    }
+
+    /// Manual "re-check" for one already-known project. Mirrors
+    /// `roots_reingest_project`.
+    func reingestProject(project: String, completion: ((Result<Void, Error>) -> Void)? = nil) {
+        sendCodable(
+            kind: .rootsReingestProject,
+            value: RootsReingestProjectPayload(project: project)
+        ) {
+            self.finishResponse($0, completion: completion)
+        }
+    }
+
+    /// "Rebuild brain": wipes and re-ingests the whole store. Mirrors
+    /// `roots_rebuild`.
+    func rebuildBrain(completion: ((Result<Void, Error>) -> Void)? = nil) {
+        request(kind: .rootsRebuild, payload: Data("{}".utf8)) { result in
+            self.finishResponse(result, completion: completion)
+        }
+    }
+
+    // MARK: - Search (Task 6a-2)
+
+    /// Full-text search over the local knowledge graph. Mirrors
+    /// `mcp_server::tools::search_brain` — the native command palette's
+    /// brain search route.
+    func search(
+        query: String,
+        scope: String? = nil,
+        completion: @escaping (Result<[BrainNodeView], Error>) -> Void
+    ) {
+        sendCodable(kind: .brainSearch, value: BrainSearchPayload(query: query, scope: scope)) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result {
+                        try self.decoder.decode(BrainSearchResponse.self, from: frame.payload).results
+                    }
+                }
+            )
+        }
+    }
+
     private func openConnection() {
         guard descriptor < 0, shouldReconnect else { return }
         transition(to: .connecting)
@@ -760,6 +948,110 @@ private struct BrainListProjectsResponse: Codable {
 /// `BrainGetContext`'s `Response` payload shape (`{"context": {...}}`).
 private struct BrainGetContextResponse: Codable {
     let context: BrainContext
+}
+
+// MARK: - Roots / ingestion payloads (Task 6a-2)
+
+private struct RootsStartIngestPayload: Codable {
+    let path: String
+}
+
+private struct RootsAddProjectPayload: Codable {
+    let path: String
+    let name: String?
+}
+
+private struct RootsRenameProjectPayload: Codable {
+    let id: String
+    let newLabel: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case newLabel = "new_label"
+    }
+}
+
+private struct RootsSetPausedPayload: Codable {
+    let project: String
+    let paused: Bool
+}
+
+private struct RootsReingestProjectPayload: Codable {
+    let project: String
+}
+
+private struct RootsListResponse: Codable {
+    let roots: [String]
+}
+
+private struct RootsBiggestProjectResponse: Codable {
+    let project: BrainProjectSummary?
+}
+
+private struct RootsAddProjectResponse: Codable {
+    let project: BrainProjectSummary
+}
+
+private struct RootsPausedProjectsResponse: Codable {
+    let projects: [String]
+}
+
+/// `ingestion_status`'s polled snapshot shape — `IngestionStatus`'s frozen
+/// Serde projection (`brain_ingest::roots::IngestionStatus`), unchanged
+/// whether read via this daemon route or the Tauri `ingestion_status`
+/// command.
+struct IngestionStatus: Codable, Equatable {
+    let running: Bool
+    let projectsTotal: Int
+    let projectsDone: Int
+    let currentProject: String?
+    let totalNodes: Int
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case running
+        case projectsTotal = "projects_total"
+        case projectsDone = "projects_done"
+        case currentProject = "current_project"
+        case totalNodes = "total_nodes"
+        case error
+    }
+}
+
+private struct RootsIngestionStatusResponse: Codable {
+    let status: IngestionStatus
+}
+
+/// One project's staleness reading — `roots_staleness`'s frozen
+/// `{project, last_ingested, stale}` shape.
+struct ProjectStaleness: Codable, Equatable {
+    let project: String
+    let lastIngested: Int64?
+    let stale: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case project
+        case lastIngested = "last_ingested"
+        case stale
+    }
+}
+
+private struct RootsStalenessResponse: Codable {
+    let projects: [ProjectStaleness]
+}
+
+// MARK: - Search payloads (Task 6a-2)
+
+private struct BrainSearchPayload: Codable {
+    let query: String
+    let scope: String?
+}
+
+/// `BrainSearch`'s `Response` payload shape (`{"results": [...]}`) — reuses
+/// `BrainNodeView`, the same `{id, kind, project, label, path?, summary?}`
+/// projection `search_brain`/`related`/`get_context` all share.
+private struct BrainSearchResponse: Codable {
+    let results: [BrainNodeView]
 }
 
 private func withUnixSocketAddress<T>(
