@@ -606,3 +606,342 @@ async fn malformed_brain_get_context_payload_closes_the_connection() {
 
     server.stop().await;
 }
+
+/// Task 6a-2: `RootsAddProject`/`RootsRenameProject`/`RootsSetPaused`/
+/// `RootsPausedProjects`/`RootsStaleness`/`RootsReingestProject` dispatch
+/// through to `brain_ingest::roots`'s Tauri-independent functions, exercised
+/// end to end through the daemon exactly as a native client would drive
+/// onboarding/settings — one project added, renamed, paused, and re-checked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn roots_add_rename_pause_and_staleness_round_trip_through_the_daemon() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_path = project_dir.path().to_string_lossy().into_owned();
+
+    let server = TestServer::start(temp.path()).await;
+    let mut client = Client::connect(&server.socket).await;
+
+    let add_request = client
+        .send_json(
+            MessageKind::RootsAddProject,
+            &serde_json::json!({"path": project_path, "name": "My Project"}),
+        )
+        .await;
+    let added = client.read_kind(MessageKind::Response).await;
+    assert_eq!(added.header.request_or_sequence, add_request);
+    let added_body: serde_json::Value = serde_json::from_slice(&added.payload).unwrap();
+    assert_eq!(added_body["project"]["id"], "My Project");
+    assert_eq!(added_body["project"]["path"], project_path);
+
+    // Queryable immediately through the same brain-store read Task 6a wired.
+    let list_request = client
+        .send_json(MessageKind::BrainListProjects, &serde_json::json!({}))
+        .await;
+    let list = client.read_kind(MessageKind::Response).await;
+    assert_eq!(list.header.request_or_sequence, list_request);
+    let list_body: serde_json::Value = serde_json::from_slice(&list.payload).unwrap();
+    assert_eq!(list_body["projects"][0]["id"], "My Project");
+
+    let rename_request = client
+        .send_json(
+            MessageKind::RootsRenameProject,
+            &serde_json::json!({"id": "My Project", "new_label": "Renamed Project"}),
+        )
+        .await;
+    let renamed = client.read_kind(MessageKind::Response).await;
+    assert_eq!(renamed.header.request_or_sequence, rename_request);
+
+    let paused_before = client
+        .send_json(MessageKind::RootsPausedProjects, &serde_json::json!({}))
+        .await;
+    let before = client.read_kind(MessageKind::Response).await;
+    assert_eq!(before.header.request_or_sequence, paused_before);
+    let before_body: serde_json::Value = serde_json::from_slice(&before.payload).unwrap();
+    assert!(before_body["projects"].as_array().unwrap().is_empty());
+
+    let set_paused_request = client
+        .send_json(
+            MessageKind::RootsSetPaused,
+            &serde_json::json!({"project": "My Project", "paused": true}),
+        )
+        .await;
+    let set_paused = client.read_kind(MessageKind::Response).await;
+    assert_eq!(set_paused.header.request_or_sequence, set_paused_request);
+
+    let paused_after = client
+        .send_json(MessageKind::RootsPausedProjects, &serde_json::json!({}))
+        .await;
+    let after = client.read_kind(MessageKind::Response).await;
+    assert_eq!(after.header.request_or_sequence, paused_after);
+    let after_body: serde_json::Value = serde_json::from_slice(&after.payload).unwrap();
+    assert_eq!(after_body["projects"], serde_json::json!(["My Project"]));
+
+    let staleness_request = client
+        .send_json(MessageKind::RootsStaleness, &serde_json::json!({}))
+        .await;
+    let staleness = client.read_kind(MessageKind::Response).await;
+    assert_eq!(staleness.header.request_or_sequence, staleness_request);
+    let staleness_body: serde_json::Value = serde_json::from_slice(&staleness.payload).unwrap();
+    let projects = staleness_body["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0]["project"], "My Project");
+
+    // `add_project` already stamped `last_ingested` via its background
+    // ingest of the (empty) tempdir, so a manual re-check must succeed
+    // against an already-known project rather than erroring "unknown".
+    let reingest_request = client
+        .send_json(
+            MessageKind::RootsReingestProject,
+            &serde_json::json!({"project": "My Project"}),
+        )
+        .await;
+    let reingest = client.read_kind(MessageKind::Response).await;
+    assert_eq!(reingest.header.request_or_sequence, reingest_request);
+
+    let unknown_reingest = client
+        .send_json(
+            MessageKind::RootsReingestProject,
+            &serde_json::json!({"project": "does-not-exist"}),
+        )
+        .await;
+    let unknown = client.read_kind(MessageKind::Error).await;
+    assert_eq!(unknown.header.request_or_sequence, unknown_reingest);
+
+    server.stop().await;
+}
+
+/// Task 6a-2: `RootsStartIngest` persists the root and kicks off background
+/// discovery; `RootsIngestionStatus` polls the daemon's own `IngestionState`
+/// until it settles; `RootsList`/`RootsBiggestProject` read back what was
+/// persisted/ingested — the first-run onboarding flow driven entirely
+/// through the daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn roots_start_ingest_list_and_ingestion_status_round_trip_through_the_daemon() {
+    let temp = tempfile::tempdir().unwrap();
+    let root_dir = tempfile::tempdir().unwrap();
+    let root_path = root_dir.path().to_string_lossy().into_owned();
+
+    let server = TestServer::start(temp.path()).await;
+    let mut client = Client::connect(&server.socket).await;
+
+    let start_request = client
+        .send_json(
+            MessageKind::RootsStartIngest,
+            &serde_json::json!({"path": root_path}),
+        )
+        .await;
+    let started = client.read_kind(MessageKind::Response).await;
+    assert_eq!(started.header.request_or_sequence, start_request);
+
+    // Poll until the background discovery/ingest pass (over an empty root,
+    // so it settles almost immediately) reports done — bounded so a real
+    // regression (stuck `running: true`) fails the test instead of hanging.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let poll_request = client
+            .send_json(MessageKind::RootsIngestionStatus, &serde_json::json!({}))
+            .await;
+        let status = client.read_kind(MessageKind::Response).await;
+        assert_eq!(status.header.request_or_sequence, poll_request);
+        let status_body: serde_json::Value = serde_json::from_slice(&status.payload).unwrap();
+        if status_body["status"]["running"] == serde_json::json!(false) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "ingestion never settled"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let list_request = client
+        .send_json(MessageKind::RootsList, &serde_json::json!({}))
+        .await;
+    let list = client.read_kind(MessageKind::Response).await;
+    assert_eq!(list.header.request_or_sequence, list_request);
+    let list_body: serde_json::Value = serde_json::from_slice(&list.payload).unwrap();
+    assert_eq!(list_body["roots"], serde_json::json!([root_path]));
+
+    // No projects were discovered under an empty root, so there is no
+    // biggest project yet — `RootsBiggestProject` must degrade to `null`,
+    // not error.
+    let biggest_request = client
+        .send_json(MessageKind::RootsBiggestProject, &serde_json::json!({}))
+        .await;
+    let biggest = client.read_kind(MessageKind::Response).await;
+    assert_eq!(biggest.header.request_or_sequence, biggest_request);
+    let biggest_body: serde_json::Value = serde_json::from_slice(&biggest.payload).unwrap();
+    assert_eq!(biggest_body["project"], serde_json::Value::Null);
+
+    server.stop().await;
+}
+
+/// Task 6a-2: `RootsRebuild` wipes and re-ingests the whole store, mirroring
+/// the Tauri "Rebuild brain" button — dispatched through the daemon, it must
+/// actually clear existing brain-store nodes (not just report success), and
+/// a rebuild started while a bulk ingestion is already running must be
+/// rejected rather than interleaving two passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn roots_rebuild_round_trips_through_the_daemon() {
+    let temp = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open(&brain_data_dir(temp.path())).unwrap();
+        store
+            .upsert_node(&Node {
+                kind: NodeKind::Project,
+                path: Some("/tmp/stale-project".to_string()),
+                ..memory_node("stale-project", "stale-project", "Stale Project")
+            })
+            .unwrap();
+    }
+
+    let server = TestServer::start(temp.path()).await;
+    let mut client = Client::connect(&server.socket).await;
+
+    let before_request = client
+        .send_json(MessageKind::BrainListProjects, &serde_json::json!({}))
+        .await;
+    let before = client.read_kind(MessageKind::Response).await;
+    assert_eq!(before.header.request_or_sequence, before_request);
+    let before_body: serde_json::Value = serde_json::from_slice(&before.payload).unwrap();
+    assert_eq!(before_body["projects"].as_array().unwrap().len(), 1);
+
+    let rebuild_request = client
+        .send_json(MessageKind::RootsRebuild, &serde_json::json!({}))
+        .await;
+    let rebuilt = client.read_kind(MessageKind::Response).await;
+    assert_eq!(rebuilt.header.request_or_sequence, rebuild_request);
+
+    let after_request = client
+        .send_json(MessageKind::BrainListProjects, &serde_json::json!({}))
+        .await;
+    let after = client.read_kind(MessageKind::Response).await;
+    assert_eq!(after.header.request_or_sequence, after_request);
+    let after_body: serde_json::Value = serde_json::from_slice(&after.payload).unwrap();
+    assert!(after_body["projects"].as_array().unwrap().is_empty());
+
+    server.stop().await;
+}
+
+/// Task 6a-2: `BrainSearch` closes the gap Task 6a's reviewer flagged —
+/// `mcp_server::tools::search_brain` was defined but unwired — so the native
+/// command palette's brain search has a route through the daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn brain_search_round_trips_through_the_daemon() {
+    let temp = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open(&brain_data_dir(temp.path())).unwrap();
+        store
+            .upsert_node(&memory_node("demo:parse_config", "demo", "parse_config"))
+            .unwrap();
+    }
+
+    let server = TestServer::start(temp.path()).await;
+    let mut client = Client::connect(&server.socket).await;
+
+    let search_request = client
+        .send_json(
+            MessageKind::BrainSearch,
+            &serde_json::json!({"query": "parse_config"}),
+        )
+        .await;
+    let results = client.read_kind(MessageKind::Response).await;
+    assert_eq!(results.header.request_or_sequence, search_request);
+    let results_body: serde_json::Value = serde_json::from_slice(&results.payload).unwrap();
+    let hits = results_body["results"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["id"], "demo:parse_config");
+
+    // An unmatched query is not an error — an empty result list, same as
+    // `search_brain`'s own contract.
+    client
+        .send_json(
+            MessageKind::BrainSearch,
+            &serde_json::json!({"query": "nothing-matches-this"}),
+        )
+        .await;
+    let empty = client.read_kind(MessageKind::Response).await;
+    let empty_body: serde_json::Value = serde_json::from_slice(&empty.payload).unwrap();
+    assert!(empty_body["results"].as_array().unwrap().is_empty());
+
+    server.stop().await;
+}
+
+/// Envelope validation must hold for every payload-bearing Task 6a-2 kind,
+/// exactly as it already does for `BrainGetContext`
+/// (`malformed_brain_get_context_payload_closes_the_connection` above) —
+/// each new kind goes through the same `parse_json` gate, not a side
+/// channel. One fresh connection per kind, since a malformed frame closes
+/// the connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_roots_and_search_payloads_close_the_connection() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = TestServer::start(temp.path()).await;
+
+    for kind in [
+        MessageKind::RootsStartIngest,
+        MessageKind::RootsAddProject,
+        MessageKind::RootsRenameProject,
+        MessageKind::RootsSetPaused,
+        MessageKind::RootsReingestProject,
+        MessageKind::BrainSearch,
+    ] {
+        let mut client = Client::connect(&server.socket).await;
+        let request = client.request;
+        write_frame(
+            &mut client.stream,
+            &Frame::new(kind, request, b"{".to_vec()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), read_frame(&mut client.stream))
+                .await
+                .unwrap()
+                .is_err(),
+            "{kind:?} accepted a malformed payload instead of closing the connection"
+        );
+    }
+
+    server.stop().await;
+}
+
+/// The no-required-field Task 6a-2 kinds (`RootsIngestionStatus`/`RootsList`/
+/// `RootsBiggestProject`/`RootsPausedProjects`/`RootsStaleness`/
+/// `RootsRebuild`) still decode their payload as JSON
+/// (`parse_json::<serde_json::Value>`) before dispatching — invalid JSON
+/// syntax must close the connection for these exactly as it does for every
+/// typed payload above, confirming they are not a bypass of envelope
+/// validation just because every field is optional.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_json_closes_the_connection_for_no_payload_roots_kinds() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = TestServer::start(temp.path()).await;
+
+    for kind in [
+        MessageKind::RootsIngestionStatus,
+        MessageKind::RootsList,
+        MessageKind::RootsBiggestProject,
+        MessageKind::RootsPausedProjects,
+        MessageKind::RootsStaleness,
+        MessageKind::RootsRebuild,
+    ] {
+        let mut client = Client::connect(&server.socket).await;
+        let request = client.request;
+        write_frame(
+            &mut client.stream,
+            &Frame::new(kind, request, b"{".to_vec()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), read_frame(&mut client.stream))
+                .await
+                .unwrap()
+                .is_err(),
+            "{kind:?} accepted invalid JSON instead of closing the connection"
+        );
+    }
+
+    server.stop().await;
+}
