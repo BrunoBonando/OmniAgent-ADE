@@ -7,8 +7,8 @@
 - [x] Task 3 complete (Phase 2 Tauri compatibility client on persistent protocol)
 - [x] Task 4 complete (Phase 3 native one-terminal vertical slice)
 - [x] Task 5 complete (Phase 4 identity-preserving AppKit pane workspace)
-- [~] Task 6 in progress (Phases 5-6 remaining native surface, persistence service, distribution)
-- [ ] Task 7 not started
+- [x] Task 6 complete (Phases 5-6 remaining native surface, persistence service, distribution — split into 6a/6a-2/6b-1/6b-2/6c/6d, all complete)
+- [x] Task 7 complete (Phase 7 cutover gate mechanism + doc sync; the gated destructive removal itself has NOT run — 0/2 release-candidate cycles recorded, `scripts/cutover.sh status` reports CLOSED)
 
 ## Global constraints
 
