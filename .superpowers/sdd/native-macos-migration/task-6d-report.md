@@ -278,3 +278,148 @@ What I did **not** do: rewrite the harness's wire client to speak the current bi
 - `scripts/native-macos-pty-harness.py` — `app_resources()` replaced with `find_daemon()`/`find_mcp()` supporting both bundle layouts; `omniagent-mcp` is now optional.
 - `scripts/test_native_macos_pty_harness.py` — added `test_swift_bundle_layout_resolution`.
 - `.gitignore` — added `/macos/.build/` (the `universal` subcommand's dedicated `-derivedDataPath`).
+
+---
+
+## Review fix: the daemon/plist embed was unconditional on every configuration, forcing Rust on plain Debug builds
+
+**Finding (verbatim from the reviewer):** `macos/build.sh:18-22` + `project.pbxproj:96,108` — the Copy Files phases ran on every build/config including Debug (`runOnlyForDeploymentPostprocessing = 0`), so plain `./macos/build.sh build`/`test` unconditionally required a working Rust toolchain, silently breaking the "plain Xcode-only, no Rust needed" workflow every earlier Task 6 sub-task (4, 6a, 6a-2, 6b-1, 6b-2, 6c) relied on. The addendum had offered a Run Script phase as an equally valid alternative to Copy Files specifically because a Run Script phase (unlike Copy Files) can check `$CONFIGURATION` and skip.
+
+### What changed
+
+**`macos/OmniAgent.xcodeproj/project.pbxproj`** — replaced the two unconditional `PBXCopyFilesBuildPhase` entries ("Embed PTY Daemon", "Embed LaunchAgent Plists") with a single `PBXShellScriptBuildPhase` ("Embed PTY Daemon + LaunchAgent Plists (non-Debug)") on the `OmniAgent` target:
+
+```sh
+if [ "$CONFIGURATION" = "Debug" ]; then
+  echo "note: skipping daemon binary + LaunchAgent plist embed for the Debug configuration (no Rust toolchain required for plain builds/tests)."
+  exit 0
+fi
+STAGE="$SRCROOT/../target/native-macos-embed"
+DEST_MACOS="$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/MacOS"
+DEST_LAUNCH_AGENTS="$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents"
+if [ ! -x "$STAGE/omniagent-pty-daemon" ]; then
+  echo "error: $STAGE/omniagent-pty-daemon not found. Run macos/embed-daemon.sh (or macos/build.sh universal) before building the $CONFIGURATION configuration." >&2
+  exit 1
+fi
+mkdir -p "$DEST_MACOS" "$DEST_LAUNCH_AGENTS"
+cp -f "$STAGE/omniagent-pty-daemon" "$DEST_MACOS/omniagent-pty-daemon"
+chmod 755 "$DEST_MACOS/omniagent-pty-daemon"
+cp -f "$STAGE"/*.plist "$DEST_LAUNCH_AGENTS/"
+chmod 644 "$DEST_LAUNCH_AGENTS"/*.plist
+```
+
+Skips (exit 0, no-op) for `Debug`; for any other configuration (`Release`, `Preview`, or a future one), requires the daemon binary to already be staged and fails clearly if it isn't — the same "fail clearly, name what's missing, say how to fix it" contract the rest of this task already applies to signing/notarization, extended to this adjacent prerequisite. `alwaysOutOfDate = 1` is set so the phase always re-evaluates rather than being skipped by Xcode's own script-phase caching (correctness over speed, since its behavior depends on external state the build system doesn't track).
+
+This is a deliberate, judgment-based consolidation of the original two named phases ("Embed PTY Daemon" / "Embed LaunchAgent Plists") into one: both need the identical `$CONFIGURATION` gate and the identical failure mode, so one phase halves the pbxproj object count and the risk of the two gates drifting out of sync, at the cost of one slightly less granular name in Xcode's build log. The addendum named a Run Script phase as an equally valid alternative to Copy Files, and the reviewer's own fix guidance explicitly left the two-phases-vs-one-phase choice to my judgment.
+
+Also removed, since a Run Script phase needs none of them: the 3 `PBXBuildFile` entries that wrapped the daemon/plist file references for the old Copy Files phases' `files` lists, the 3 `PBXFileReference` entries themselves, and the "Embedded" `PBXGroup` (and its one reference from the `OmniAgent` group) that existed only to hold those file references for Xcode's navigator. Net effect: fewer pbxproj objects than before this fix, not more.
+
+**Sandboxing wrinkle found while verifying the fix, and fixed in the same pass:** the target's `ENABLE_USER_SCRIPT_SANDBOXING = YES` setting (present since the original Task 6d commit, for both Debug and Release) sandboxes Run Script build phases' filesystem writes to whatever they declare in `outputPaths` — a restriction Copy Files phases are exempt from as a native build-phase type. The first `./macos/build.sh universal` run against the new Run Script phase failed with `Sandbox: cp(...) deny(1) file-write-create .../Contents/MacOS/omniagent-pty-daemon`, because I'd initially left `inputPaths`/`outputPaths` empty. Fixed by declaring both:
+
+```
+inputPaths = (
+  "$(SRCROOT)/../target/native-macos-embed/omniagent-pty-daemon",
+  "$(SRCROOT)/../target/native-macos-embed/digital.bruno.omniagent.pty-daemon.plist",
+  "$(SRCROOT)/../target/native-macos-embed/digital.bruno.omniagent.preview.pty-daemon.plist",
+);
+outputPaths = (
+  "$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/omniagent-pty-daemon",
+  "$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/digital.bruno.omniagent.pty-daemon.plist",
+  "$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/digital.bruno.omniagent.preview.pty-daemon.plist",
+);
+```
+
+after which `universal` succeeded. Not a second Important finding in its own right — a direct consequence of switching phase types to fix the one the reviewer raised — but documented here since it wasn't part of the original plan and changed the final shape of the phase.
+
+**`macos/build.sh`** — `build`/`test` no longer call `embed-daemon.sh` at all (previously they staged this machine's own arch unconditionally). Only `universal` still does, immediately before its `xcodebuild -configuration Release` invocation, matching the Run Script phase's own gate (`universal` builds Release, which the phase does not skip).
+
+### Verification
+
+**Debug (`build`/`test`) genuinely requires no Rust toolchain** — proved by stripping `~/.cargo/bin` (where `cargo`/`rustc`/`rustup` all live in this environment) from `PATH` for the actual build/test invocation, not just by inspection:
+
+```
+$ STRIPPED_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '\.cargo/bin' | paste -sd: -)
+$ env PATH="$STRIPPED_PATH" which cargo rustc rustup
+(exit 1 -- confirmed unreachable)
+
+$ rm -rf target/native-macos-embed ~/Library/Developer/Xcode/DerivedData/OmniAgent-*
+$ env PATH="$STRIPPED_PATH" ./macos/build.sh build
+...
+note: skipping daemon binary + LaunchAgent plist embed for the Debug configuration (no Rust toolchain required for plain builds/tests).
+...
+** BUILD SUCCEEDED **
+
+$ ls .../Build/Products/Debug/OmniAgent.app/Contents/MacOS/
+OmniAgent          # no omniagent-pty-daemon -- correctly absent, matching the skip
+$ ls .../Build/Products/Debug/OmniAgent.app/Contents/Library
+ls: .../Contents/Library: No such file or directory   # correctly absent too
+
+$ env PATH="$STRIPPED_PATH" ./macos/build.sh test
+...
+note: skipping daemon binary + LaunchAgent plist embed for the Debug configuration (no Rust toolchain required for plain builds/tests).
+...
+315 unique test cases started, 314 passed individually.
+Failing tests:
+    WorkspaceWindowControllerTests.testCommandOptionOIsClaimedByMenuBeforeSwiftTermKittyKeyDown()
+** TEST FAILED **
+```
+
+`target/native-macos-embed` was deleted first, too, so this isn't "Rust wasn't invoked because stale files from an earlier run were already there" — there was nothing staged at all, and Debug still built and tested cleanly with `cargo` completely unreachable. The one failing test is the same pre-existing full-suite-load flake every prior Task 6 report has recorded (confirmed passing in isolation again, same as always); nothing in this fix touches it.
+
+**Release (`universal`) still embeds the real, correct artifacts** — re-ran the exact bundle-structure check from the original report against a freshly rebuilt universal app:
+
+```
+$ rm -rf macos/.build && ./macos/build.sh universal
+** BUILD SUCCEEDED **
+
+$ lipo -info .../Contents/MacOS/OmniAgent
+Architectures in the fat file: ... are: x86_64 arm64
+$ lipo -info .../Contents/MacOS/omniagent-pty-daemon
+Architectures in the fat file: ... are: x86_64 arm64
+
+$ find .../OmniAgent.app -maxdepth 4 | sort
+.../Contents/Library/LaunchAgents/digital.bruno.omniagent.preview.pty-daemon.plist
+.../Contents/Library/LaunchAgents/digital.bruno.omniagent.pty-daemon.plist
+.../Contents/MacOS/OmniAgent
+.../Contents/MacOS/omniagent-pty-daemon
+(plus Info.plist/PkgInfo/Resources, identical to the original report)
+```
+
+Identical structure to the original report's verification. Also re-signed this rebuilt bundle with the same real Developer ID identity to confirm signing survived the phase-type change end to end:
+
+```
+$ OMNIAGENT_CODESIGN_IDENTITY="Developer ID Application: Bruno Bonando (86JZ74B6NT)" ./macos/dist.sh sign .../OmniAgent.app
+... ./macos/dist.sh sign: done.
+$ codesign -dvvv .../OmniAgent.app | grep flags
+CodeDirectory v=20500 ... flags=0x10000(runtime) ...
+```
+
+**Preview configuration also still embeds correctly** (it's "non-Debug" too, same as Release): built directly via `xcodebuild -configuration Preview` after `./macos/embed-daemon.sh arm64`, `find` confirmed both `Contents/MacOS/omniagent-pty-daemon` and both `Contents/Library/LaunchAgents/*.plist` present, matching the original report's Preview verification.
+
+**Full regression, normal environment (Rust available, as it always is on a real dev machine):**
+
+```
+$ rm -rf ~/Library/Developer/Xcode/DerivedData/OmniAgent-*
+$ ./macos/build.sh build
+** BUILD SUCCEEDED **
+
+$ ./macos/build.sh test
+315 unique test cases started, 314 passed individually.
+Failing tests:
+    WorkspaceWindowControllerTests.testCommandOptionOIsClaimedByMenuBeforeSwiftTermKittyKeyDown()
+
+$ git diff --check
+(clean, exit 0)
+```
+
+### Self-review
+
+1. Did not touch the two deferred Minor findings (`sign()` should hard-fail on a missing daemon binary; the notary-profile check makes a network call) — out of scope per the coordinator's explicit instruction, left for the whole-branch review.
+2. The sandboxing fix (`inputPaths`/`outputPaths`) was not something I anticipated going in; found it by actually running the build against the new phase type rather than assuming a Copy Files → Run Script swap would be a drop-in replacement, and fixed it in the same pass rather than leaving `universal` broken.
+3. Verified the "no Rust required" claim behaviorally (`PATH` stripped for the actual command), not just by reading the shell script and asserting it looks right.
+4. Net pbxproj complexity decreased: 2 Copy Files phases + 3 build files + 3 file references + 1 group (9 objects) became 1 Run Script phase (1 object).
+
+### Files changed (this fix)
+
+- `macos/OmniAgent.xcodeproj/project.pbxproj` — Copy Files phases replaced with one Debug-gated Run Script phase; now-unused build files/file references/group removed.
+- `macos/build.sh` — `build`/`test` no longer stage the daemon binary at all; only `universal` does.

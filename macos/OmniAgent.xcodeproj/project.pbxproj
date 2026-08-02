@@ -68,9 +68,6 @@
 		1000000000000000000003E /* DaemonPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000003F /* DaemonPersistenceTests.swift */; };
 		10000000000000000000040 /* DaemonPersistenceControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000041 /* DaemonPersistenceControllerTests.swift */; };
 		10000000000000000000042 /* DaemonServiceRegistrarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000043 /* DaemonServiceRegistrarTests.swift */; };
-		10000000000000000000044 /* omniagent-pty-daemon in Embed PTY Daemon */ = {isa = PBXBuildFile; fileRef = 20000000000000000000044 /* omniagent-pty-daemon */; };
-		10000000000000000000045 /* digital.bruno.omniagent.pty-daemon.plist in Embed LaunchAgent Plists */ = {isa = PBXBuildFile; fileRef = 20000000000000000000045 /* digital.bruno.omniagent.pty-daemon.plist */; };
-		10000000000000000000046 /* digital.bruno.omniagent.preview.pty-daemon.plist in Embed LaunchAgent Plists */ = {isa = PBXBuildFile; fileRef = 20000000000000000000046 /* digital.bruno.omniagent.preview.pty-daemon.plist */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -83,31 +80,29 @@
 		};
 /* End PBXContainerItemProxy section */
 
-/* Begin PBXCopyFilesBuildPhase section */
-		C00000000000000000000001 /* Embed PTY Daemon */ = {
-			isa = PBXCopyFilesBuildPhase;
+/* Begin PBXShellScriptBuildPhase section */
+		C00000000000000000000001 /* Embed PTY Daemon + LaunchAgent Plists (non-Debug) */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 6;
 			files = (
-				10000000000000000000044 /* omniagent-pty-daemon in Embed PTY Daemon */,
 			);
-			name = "Embed PTY Daemon";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		C00000000000000000000002 /* Embed LaunchAgent Plists */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "Contents/Library/LaunchAgents";
-			dstSubfolderSpec = 1;
-			files = (
-				10000000000000000000045 /* digital.bruno.omniagent.pty-daemon.plist in Embed LaunchAgent Plists */,
-				10000000000000000000046 /* digital.bruno.omniagent.preview.pty-daemon.plist in Embed LaunchAgent Plists */,
+			inputPaths = (
+				"$(SRCROOT)/../target/native-macos-embed/omniagent-pty-daemon",
+				"$(SRCROOT)/../target/native-macos-embed/digital.bruno.omniagent.pty-daemon.plist",
+				"$(SRCROOT)/../target/native-macos-embed/digital.bruno.omniagent.preview.pty-daemon.plist",
 			);
-			name = "Embed LaunchAgent Plists";
+			name = "Embed PTY Daemon + LaunchAgent Plists (non-Debug)";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/omniagent-pty-daemon",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/digital.bruno.omniagent.pty-daemon.plist",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/digital.bruno.omniagent.preview.pty-daemon.plist",
+			);
 			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = "/bin/sh";
+			shellScript = "if [ \"$CONFIGURATION\" = \"Debug\" ]; then\n  echo \"note: skipping daemon binary + LaunchAgent plist embed for the Debug configuration (no Rust toolchain required for plain builds/tests).\"\n  exit 0\nfi\nSTAGE=\"$SRCROOT/../target/native-macos-embed\"\nDEST_MACOS=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/MacOS\"\nDEST_LAUNCH_AGENTS=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents\"\nif [ ! -x \"$STAGE/omniagent-pty-daemon\" ]; then\n  echo \"error: $STAGE/omniagent-pty-daemon not found. Run macos/embed-daemon.sh (or macos/build.sh universal) before building the $CONFIGURATION configuration.\" >&2\n  exit 1\nfi\nmkdir -p \"$DEST_MACOS\" \"$DEST_LAUNCH_AGENTS\"\ncp -f \"$STAGE/omniagent-pty-daemon\" \"$DEST_MACOS/omniagent-pty-daemon\"\nchmod 755 \"$DEST_MACOS/omniagent-pty-daemon\"\ncp -f \"$STAGE\"/*.plist \"$DEST_LAUNCH_AGENTS/\"\nchmod 644 \"$DEST_LAUNCH_AGENTS\"/*.plist\n";
 		};
-/* End PBXCopyFilesBuildPhase section */
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXFileReference section */
 		200000000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
@@ -172,9 +167,6 @@
 		2000000000000000000003F /* DaemonPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistenceTests.swift; sourceTree = "<group>"; };
 		20000000000000000000041 /* DaemonPersistenceControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistenceControllerTests.swift; sourceTree = "<group>"; };
 		20000000000000000000043 /* DaemonServiceRegistrarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonServiceRegistrarTests.swift; sourceTree = "<group>"; };
-		20000000000000000000044 /* omniagent-pty-daemon */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "omniagent-pty-daemon"; path = "../target/native-macos-embed/omniagent-pty-daemon"; sourceTree = SOURCE_ROOT; };
-		20000000000000000000045 /* digital.bruno.omniagent.pty-daemon.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = "digital.bruno.omniagent.pty-daemon.plist"; path = "../target/native-macos-embed/digital.bruno.omniagent.pty-daemon.plist"; sourceTree = SOURCE_ROOT; };
-		20000000000000000000046 /* digital.bruno.omniagent.preview.pty-daemon.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = "digital.bruno.omniagent.preview.pty-daemon.plist"; path = "../target/native-macos-embed/digital.bruno.omniagent.preview.pty-daemon.plist"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -241,7 +233,6 @@
 				20000000000000000000039 /* DaemonPersistence.swift */,
 				2000000000000000000003B /* DaemonServiceRegistrar.swift */,
 				2000000000000000000003D /* DaemonPersistenceController.swift */,
-				500000000000000000000005 /* Embedded */,
 			);
 			path = OmniAgent;
 			sourceTree = "<group>";
@@ -289,16 +280,6 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		500000000000000000000005 /* Embedded */ = {
-			isa = PBXGroup;
-			children = (
-				20000000000000000000044 /* omniagent-pty-daemon */,
-				20000000000000000000045 /* digital.bruno.omniagent.pty-daemon.plist */,
-				20000000000000000000046 /* digital.bruno.omniagent.preview.pty-daemon.plist */,
-			);
-			name = Embedded;
-			sourceTree = "<group>";
-		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -309,8 +290,7 @@
 				800000000000000000000001 /* Sources */,
 				400000000000000000000001 /* Frameworks */,
 				800000000000000000000003 /* Resources */,
-				C00000000000000000000001 /* Embed PTY Daemon */,
-				C00000000000000000000002 /* Embed LaunchAgent Plists */,
+				C00000000000000000000001 /* Embed PTY Daemon + LaunchAgent Plists (non-Debug) */,
 			);
 			buildRules = (
 			);

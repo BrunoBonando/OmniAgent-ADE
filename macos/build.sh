@@ -10,18 +10,15 @@ esac
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 arch=$(uname -m)
 
-# The OmniAgent target's "Embed PTY Daemon" / "Embed LaunchAgent Plists"
-# Copy Files build phases (Task 6d addendum) reference fixed paths under
-# target/native-macos-embed/; xcodebuild fails outright if those inputs are
-# missing, so every action below stages them first. `build`/`test` only
-# need this machine's own arch (fast local loop); `universal` needs both.
+# `build`/`test` build the Debug configuration (the scheme's default for
+# both), and the OmniAgent target's "Embed PTY Daemon + LaunchAgent Plists
+# (non-Debug)" Run Script build phase (Task 6d) skips itself entirely for
+# Debug -- so plain `./macos/build.sh build`/`test` never touches Rust,
+# preserving the Xcode-only workflow every earlier Task 6 sub-task relied
+# on. `universal` builds Release, which that phase does NOT skip, so it
+# needs the daemon binary + plists staged first.
 if [ "$action" = "universal" ]; then
   "$root/macos/embed-daemon.sh" arm64 x86_64
-else
-  "$root/macos/embed-daemon.sh" "$arch"
-fi
-
-if [ "$action" = "universal" ]; then
   exec xcodebuild build \
     -project "$root/macos/OmniAgent.xcodeproj" \
     -scheme OmniAgent \
