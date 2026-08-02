@@ -610,25 +610,10 @@ async fn handle_client(
             }
             MessageKind::RootsRebuild => {
                 parse_json::<serde_json::Value>(&frame.payload)?;
-                if ingestion.snapshot().running {
-                    send_error(&writer, request, anyhow!("ingestion is already running")).await
-                } else {
-                    let result = settings
-                        .lock()
-                        .map_err(|error| anyhow!("settings lock poisoned: {error}"))
-                        .and_then(|mut store| roots::rebuild(&data_dir, &mut store));
-                    match result {
-                        Ok((discovered_roots, extra_projects)) => {
-                            roots::ingest_roots_in_background(
-                                data_dir.clone(),
-                                discovered_roots,
-                                extra_projects,
-                                ingestion.clone(),
-                            );
-                            send_response(&writer, request).await
-                        }
-                        Err(error) => send_error(&writer, request, error).await,
-                    }
+                let result = roots::rebuild_and_reingest(&data_dir, &settings, &ingestion);
+                match result {
+                    Ok(()) => send_response(&writer, request).await,
+                    Err(error) => send_error(&writer, request, error).await,
                 }
             }
             MessageKind::BrainSearch => {

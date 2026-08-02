@@ -64,8 +64,7 @@ use anyhow::Result;
 // unused-import warning outside `cfg(test)` builds.
 pub use brain_ingest::roots::IngestionState;
 use brain_ingest::roots::{
-    biggest_project, get_roots, ingest_roots_in_background, staleness, IngestionStatus,
-    ProjectStaleness, ProjectSummary,
+    biggest_project, get_roots, staleness, IngestionStatus, ProjectStaleness, ProjectSummary,
 };
 use tauri::State;
 
@@ -221,22 +220,8 @@ pub fn roots_rebuild(
     brain: State<'_, BrainState>,
     ingestion: State<'_, IngestionState>,
 ) -> Result<(), String> {
-    if ingestion.snapshot().running {
-        return Err("ingestion is already running".to_string());
-    }
-
-    let (roots, extra_projects) = {
-        let mut guard = brain.store.lock().map_err(|e| e.to_string())?;
-        brain_ingest::roots::rebuild(&brain.data_dir, &mut guard).map_err(|e| e.to_string())?
-    };
-
-    ingest_roots_in_background(
-        brain.data_dir.clone(),
-        roots,
-        extra_projects,
-        ingestion.inner().clone(),
-    );
-    Ok(())
+    brain_ingest::roots::rebuild_and_reingest(&brain.data_dir, &brain.store, ingestion.inner())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -244,8 +229,9 @@ mod tests {
     use super::*;
     use brain_core::{now_ts, Node, NodeKind, Origin, Store};
     use brain_ingest::roots::{
-        add_project_path, add_root, get_project_paths, ingest_one, is_paused, last_ingested_key,
-        pause_key, rebuild_store, PROJECT_ROOTS_KEY, STALE_THRESHOLD_SECS,
+        add_project_path, add_root, get_project_paths, ingest_one, ingest_roots_in_background,
+        is_paused, last_ingested_key, pause_key, rebuild_store, PROJECT_ROOTS_KEY,
+        STALE_THRESHOLD_SECS,
     };
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;

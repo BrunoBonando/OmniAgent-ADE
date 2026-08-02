@@ -75,3 +75,30 @@ All of them, per `25ba266` (unchanged in this session): `roots_start_ingest`, `i
 - [x] `./macos/build.sh test` — run on a real Mac (commit `581aeab`). Surfaced 5 compile errors in `SessionConnectionTests.swift` (lines 364, 599, 655, 752, 791): `XCTAssertNoThrow(try result.get())` inside a `(Result<Void, Error>) -> Void` completion closure makes Swift infer the closure itself as throwing, which doesn't match `SessionConnection`'s non-throwing completion signature. Fixed by replacing each with `if case .failure(let error) = result { XCTFail("unexpected failure: \(error)") }`. After the fix: full suite passes — `SessionConnectionTests` 17/17, all other suites 0 failures. One unrelated flake surfaced in the full-suite run, `WorkspaceWindowControllerTests.testCommandOptionOIsClaimedByMenuBeforeSwiftTermKittyKeyDown` (a real-window/modal-session test, pre-existing, untouched by this task's diff); re-run in isolation (`-only-testing:`) it passes in 0.075s, confirming environment-timing flakiness, not a regression.
 - [x] `./macos/build.sh build` — run on a real Mac (commit `581aeab`), **BUILD SUCCEEDED**.
 - [x] `git diff --check` — clean.
+
+## Review-fix addendum — `RootsRebuild` duplication (review 1's Important finding)
+
+Review 1 found that `RootsRebuild` was the one operation in this task's surface still hand-rolled at both call sites: `src-tauri/src/roots.rs`'s `roots_rebuild` and the daemon's `MessageKind::RootsRebuild` dispatch arm each independently (a) checked `ingestion.snapshot().running` and rejected with the same message, (b) locked the store and called `roots::rebuild`, (c) called `ingest_roots_in_background` with the same four arguments — the exact duplication this task's extraction was supposed to eliminate.
+
+**Fix:** added `brain_ingest::roots::rebuild_and_reingest(data_dir: &Path, store: &Mutex<Store>, ingestion: &IngestionState) -> Result<()>` (`crates/brain-ingest/src/roots.rs`, placed directly after `rebuild`) that owns the whole sequence: the running-check, the store lock/`rebuild`/swap, and the `ingest_roots_in_background` kickoff — mirroring how `start_ingest` already fully encapsulates its own analogous sequence. It takes the mutex itself (not a pre-acquired guard) so the lock is provably dropped before the background thread is spawned, same as `start_ingest`'s convention.
+
+Both call sites now do nothing but call it:
+- `src-tauri/src/roots.rs::roots_rebuild` — `brain_ingest::roots::rebuild_and_reingest(&brain.data_dir, &brain.store, ingestion.inner()).map_err(|e| e.to_string())`.
+- `crates/omniagent-pty-daemon/src/server.rs`'s `MessageKind::RootsRebuild` arm — `roots::rebuild_and_reingest(&data_dir, &settings, &ingestion)`, matched into `send_response`/`send_error` exactly like every other kind (`settings: Arc<std::sync::Mutex<Store>>` deref-coerces to `&Mutex<Store>>` at the call site).
+
+Side effect: `ingest_roots_in_background` was no longer called directly from `src-tauri/src/roots.rs`'s production code (only from its `#[cfg(test)]` module, which exercises it directly per this file's own documented test-import convention), so it was moved out of the module-scope `use brain_ingest::roots::{...}` block and into `mod tests`'s own import block to avoid an unused-import warning — no behavior change, an import-hygiene-only edit.
+
+No other behavior changed at either call site: same running-check message (`"ingestion is already running"`), same lock-poisoned message (`"brain store mutex poisoned"`), same success/error shape.
+
+### Verification run (this session, real Mac, commit range starts at `be92c78`)
+
+- `cargo build -p brain-ingest -p omniagent-pty-daemon -p omniagent-ade` — clean, zero warnings (confirmed the `ingest_roots_in_background` import move above; before the move this produced exactly one `unused_imports` warning in `src-tauri/src/roots.rs`).
+- `cargo test -p brain-ingest` — **191 passed, 0 failed, 1 ignored** (lib tests, includes `roots.rs`'s module unchanged) plus `cli_test`/`enrich_test`/`ingest_test` integration suites, all passing.
+- `cargo test -p omniagent-pty-daemon` — **12 passed, 2 failed** in `server_protocol.rs`: `one_persistent_connection_streams_raw_bytes_and_applies_resize` (the same real-PTY timeout this report already documents as an environment characteristic) and, newly on this machine, `roots_add_rename_pause_and_staleness_round_trip_through_the_daemon` (a `Elapsed(())` timeout in the shared 4s frame-read helper). Neither touches `RootsRebuild`. Verified both are pre-existing, environment-only flakiness and **not caused by this fix**: (1) each passes reliably in isolation, with or without this session's diff (`cargo test -p omniagent-pty-daemon --test server_protocol roots_add_rename_pause_and_staleness_round_trip_through_the_daemon` → ok, 0.05s); (2) `git stash`-ing this session's diff and re-running the full `server_protocol` file reproduces the identical two failures at baseline. `roots_rebuild_round_trips_through_the_daemon` itself passes in every run. `protocol.rs`'s 10 tests all pass.
+- `cargo test -p omniagent-ade --lib` — **171 passed, 2 failed**: `tests::the_titles_version_is_the_one_tauri_conf_json_declares` (the same pre-existing `Cargo.toml`/`tauri.conf.json` version-drift check this report already documents, now `v2026.7.28+004` vs `v2026.7.29+006` since the date has moved on) and `sessions::tests::codex_gets_omniagent_mcp_wiring` (an "omniagent-mcp binary not found next to the app binary" ordering flake). Same `git stash` check: both reproduce identically at baseline (171 passed / 2 failed, same two tests, same messages) — pre-existing, unrelated to this fix. `roots.rs`'s own test module passes unchanged.
+- `./macos/build.sh build` — **BUILD SUCCEEDED** (no Swift touched by this fix; confirmed rather than assumed).
+- `git diff --check` — clean.
+
+### Commit
+
+`fix(brain-ingest): share RootsRebuild's orchestration between src-tauri and the daemon` — adds `rebuild_and_reingest`, updates both call sites, moves the now-test-only `ingest_roots_in_background` import.

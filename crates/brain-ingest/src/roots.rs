@@ -659,6 +659,42 @@ pub fn rebuild(
     Ok((roots, extra_projects))
 }
 
+/// The full "Rebuild brain" sequence — [`start_ingest`]'s counterpart for
+/// the rebuild path. Task 6a-2's review found this was the one operation in
+/// this module still hand-rolled at both call sites (`src-tauri::roots::
+/// roots_rebuild` and the daemon's `MessageKind::RootsRebuild` arm each
+/// independently checked `ingestion.snapshot().running`, locked the store,
+/// called [`rebuild`], and kicked off [`ingest_roots_in_background`] with
+/// the same four arguments) — every other operation this crate added was
+/// already a single call into this module from both sides. This function
+/// closes that gap: it owns the running-check, the store lock/rebuild/swap,
+/// and the background-kickoff, so a future change to any part of that
+/// sequence only has one implementation to update.
+///
+/// Takes the mutex itself (like [`start_ingest`] takes a `&Store` it never
+/// holds past its own return) rather than a pre-acquired guard, so the lock
+/// is provably dropped before [`ingest_roots_in_background`] spawns its
+/// background thread.
+pub fn rebuild_and_reingest(
+    data_dir: &Path,
+    store: &Mutex<Store>,
+    ingestion: &IngestionState,
+) -> Result<()> {
+    if ingestion.snapshot().running {
+        anyhow::bail!("ingestion is already running");
+    }
+
+    let (roots, extra_projects) = {
+        let mut guard = store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("brain store mutex poisoned"))?;
+        rebuild(data_dir, &mut guard)?
+    };
+
+    ingest_roots_in_background(data_dir.to_path_buf(), roots, extra_projects, ingestion.clone());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
