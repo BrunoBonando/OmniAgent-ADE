@@ -11,17 +11,35 @@ import socket
 import subprocess
 import tempfile
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional
 
 
-def app_resources(app: Path) -> Tuple[Path, Path]:
-    resources = app / "Contents" / "Resources"
-    daemon = resources / "omniagent-pty-daemon"
-    mcp = resources / "omniagent-mcp"
-    for binary in (daemon, mcp):
-        if not binary.is_file() or not os.access(binary, os.X_OK):
-            raise RuntimeError(f"missing executable bundled resource: {binary}")
-    return daemon, mcp
+def _executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def find_daemon(app: Path) -> Path:
+    """Locates the bundled daemon binary in either known packaging layout:
+    Contents/MacOS/ (the native Swift app, Task 6d's Copy Files build
+    phase) or Contents/Resources/ (the Tauri app, Task 1's bundle.resources
+    mapping). Checked in that order to match
+    DaemonBinaryLocator.candidates's own bundle-relative search order
+    (macos/OmniAgent/DaemonServiceRegistrar.swift)."""
+    for candidate in (
+        app / "Contents" / "MacOS" / "omniagent-pty-daemon",
+        app / "Contents" / "Resources" / "omniagent-pty-daemon",
+    ):
+        if _executable(candidate):
+            return candidate
+    raise RuntimeError(f"missing executable bundled daemon resource in {app}")
+
+
+def find_mcp(app: Path) -> Optional[Path]:
+    """The MCP server is only bundled by the Tauri app's Contents/Resources
+    layout; the native Swift app doesn't embed it (it isn't part of the
+    terminal app itself), so its absence is not an error here."""
+    candidate = app / "Contents" / "Resources" / "omniagent-mcp"
+    return candidate if _executable(candidate) else None
 
 
 def request(socket_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -66,7 +84,8 @@ def wait_for_screen(socket_path: Path, session_id: str, marker: str) -> float:
 
 class InstalledDaemon:
     def __init__(self, app: Path):
-        self.daemon, self.mcp = app_resources(app)
+        self.daemon = find_daemon(app)
+        self.mcp = find_mcp(app)
         self.temp = tempfile.TemporaryDirectory(prefix="omniagent-phase0-")
         self.socket_path = Path(self.temp.name) / "pty.sock"
         self.process: Optional[subprocess.Popen] = None
@@ -150,7 +169,8 @@ def smoke_mcp(binary: Path, data_dir: Path) -> None:
 
 def smoke(app: Path) -> None:
     with InstalledDaemon(app) as daemon:
-        smoke_mcp(daemon.mcp, Path(daemon.temp.name) / "mcp-data")
+        if daemon.mcp is not None:
+            smoke_mcp(daemon.mcp, Path(daemon.temp.name) / "mcp-data")
         session_id = "phase0-smoke"
         create_shell(daemon.socket_path, session_id)
         input_bytes(daemon.socket_path, session_id, b"printf 'OMNIAGENT_PHASE0_INPUT\\n'\n")

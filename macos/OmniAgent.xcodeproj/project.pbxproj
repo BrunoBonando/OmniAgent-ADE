@@ -68,6 +68,9 @@
 		1000000000000000000003E /* DaemonPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000003F /* DaemonPersistenceTests.swift */; };
 		10000000000000000000040 /* DaemonPersistenceControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000041 /* DaemonPersistenceControllerTests.swift */; };
 		10000000000000000000042 /* DaemonServiceRegistrarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000043 /* DaemonServiceRegistrarTests.swift */; };
+		10000000000000000000044 /* omniagent-pty-daemon in Embed PTY Daemon */ = {isa = PBXBuildFile; fileRef = 20000000000000000000044 /* omniagent-pty-daemon */; };
+		10000000000000000000045 /* digital.bruno.omniagent.pty-daemon.plist in Embed LaunchAgent Plists */ = {isa = PBXBuildFile; fileRef = 20000000000000000000045 /* digital.bruno.omniagent.pty-daemon.plist */; };
+		10000000000000000000046 /* digital.bruno.omniagent.preview.pty-daemon.plist in Embed LaunchAgent Plists */ = {isa = PBXBuildFile; fileRef = 20000000000000000000046 /* digital.bruno.omniagent.preview.pty-daemon.plist */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -79,6 +82,32 @@
 			remoteInfo = OmniAgent;
 		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C00000000000000000000001 /* Embed PTY Daemon */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 6;
+			files = (
+				10000000000000000000044 /* omniagent-pty-daemon in Embed PTY Daemon */,
+			);
+			name = "Embed PTY Daemon";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C00000000000000000000002 /* Embed LaunchAgent Plists */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "Contents/Library/LaunchAgents";
+			dstSubfolderSpec = 1;
+			files = (
+				10000000000000000000045 /* digital.bruno.omniagent.pty-daemon.plist in Embed LaunchAgent Plists */,
+				10000000000000000000046 /* digital.bruno.omniagent.preview.pty-daemon.plist in Embed LaunchAgent Plists */,
+			);
+			name = "Embed LaunchAgent Plists";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		200000000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
@@ -143,6 +172,9 @@
 		2000000000000000000003F /* DaemonPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistenceTests.swift; sourceTree = "<group>"; };
 		20000000000000000000041 /* DaemonPersistenceControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistenceControllerTests.swift; sourceTree = "<group>"; };
 		20000000000000000000043 /* DaemonServiceRegistrarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonServiceRegistrarTests.swift; sourceTree = "<group>"; };
+		20000000000000000000044 /* omniagent-pty-daemon */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "omniagent-pty-daemon"; path = "../target/native-macos-embed/omniagent-pty-daemon"; sourceTree = SOURCE_ROOT; };
+		20000000000000000000045 /* digital.bruno.omniagent.pty-daemon.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = "digital.bruno.omniagent.pty-daemon.plist"; path = "../target/native-macos-embed/digital.bruno.omniagent.pty-daemon.plist"; sourceTree = SOURCE_ROOT; };
+		20000000000000000000046 /* digital.bruno.omniagent.preview.pty-daemon.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = "digital.bruno.omniagent.preview.pty-daemon.plist"; path = "../target/native-macos-embed/digital.bruno.omniagent.preview.pty-daemon.plist"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -209,6 +241,7 @@
 				20000000000000000000039 /* DaemonPersistence.swift */,
 				2000000000000000000003B /* DaemonServiceRegistrar.swift */,
 				2000000000000000000003D /* DaemonPersistenceController.swift */,
+				500000000000000000000005 /* Embedded */,
 			);
 			path = OmniAgent;
 			sourceTree = "<group>";
@@ -256,6 +289,16 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		500000000000000000000005 /* Embedded */ = {
+			isa = PBXGroup;
+			children = (
+				20000000000000000000044 /* omniagent-pty-daemon */,
+				20000000000000000000045 /* digital.bruno.omniagent.pty-daemon.plist */,
+				20000000000000000000046 /* digital.bruno.omniagent.preview.pty-daemon.plist */,
+			);
+			name = Embedded;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -266,6 +309,8 @@
 				800000000000000000000001 /* Sources */,
 				400000000000000000000001 /* Frameworks */,
 				800000000000000000000003 /* Resources */,
+				C00000000000000000000001 /* Embed PTY Daemon */,
+				C00000000000000000000002 /* Embed LaunchAgent Plists */,
 			);
 			buildRules = (
 			);
@@ -546,6 +591,42 @@
 			};
 			name = Release;
 		};
+		B00000000000000000000006 /* Preview */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Preview;
+		};
+		B00000000000000000000007 /* Preview */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "OmniAgent Preview";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = "digital.bruno.omniagent.preview";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Preview;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -554,6 +635,7 @@
 			buildConfigurations = (
 				B00000000000000000000000 /* Debug */,
 				B00000000000000000000001 /* Release */,
+				B00000000000000000000006 /* Preview */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -563,6 +645,7 @@
 			buildConfigurations = (
 				B00000000000000000000002 /* Debug */,
 				B00000000000000000000003 /* Release */,
+				B00000000000000000000007 /* Preview */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

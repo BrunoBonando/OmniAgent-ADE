@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Task 6d hardened-runtime entitlements — deliberately non-sandboxed.
+
+  Per docs/plans/native-macos-migration.md's Global Constraints ("The
+  initial direct-download build is not App Sandbox enabled") and the
+  Task 6d brief's explicit instruction, this file omits
+  `com.apple.security.app-sandbox` entirely — its *absence* is the
+  intentional statement "this app is not sandboxed," not an oversight.
+
+  Everything else in this dict is scoped to what OmniAgent actually does
+  today, checked against the source (macos/OmniAgent/*.swift) rather than
+  copied from a template:
+
+    - Local Unix-domain-socket IPC to the PTY daemon (SessionConnection.swift,
+      DaemonServiceRegistrar.swift's DaemonSocketProbe) — a plain AF_UNIX
+      socket, which needs no entitlement outside App Sandbox.
+    - Spawning the bundled, same-identity-signed omniagent-pty-daemon helper
+      in degraded app-owned mode (DaemonServiceRegistrar.swift's
+      LiveDaemonProcessLauncher, a plain Foundation.Process fork/exec) —
+      likewise unrestricted for a non-sandboxed, hardened-runtime app; this
+      is the same mechanism countless Mac dev tools use to shell out to
+      bundled helpers, and Hardened Runtime's library-validation protections
+      apply to code loaded into *this* process's address space (dylibs/
+      plugins), not to a separately signed child process.
+    - No JIT, no unsigned executable memory, no DYLD environment variables,
+      no dynamically loaded unsigned/third-party plugins, and no
+      `com.apple.security.get-task-allow` (that entitlement must stay absent
+      for a notarizable release build — its presence is a debug-only
+      concept and would make `codesign`'s hardened-runtime signature
+      reject notarization).
+
+  Net result: no entitlement keys are currently justified beyond the
+  explicit non-sandbox statement above. If a future feature needs one
+  (e.g. network sockets if the app ever talks to a remote host directly,
+  or Apple Events automation), add it here with the same
+  "what specifically needs it" justification — not preemptively.
+-->
+<plist version="1.0">
+<dict/>
+</plist>

@@ -16,6 +16,11 @@ dist-ssr
 /target/
 # Cargo.lock IS committed (this is an application, not a library)
 
+# macos/build.sh's "universal" subcommand's own -derivedDataPath (Task 6d);
+# plain build/test still use Xcode's default DerivedData location outside
+# the repo.
+/macos/.build/
+
 # Local brain data (never ship a user's actual data)
 *.db
 *.db-journal
