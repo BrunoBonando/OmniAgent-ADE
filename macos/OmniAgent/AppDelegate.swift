@@ -17,7 +17,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ApplicationMenus.install()
-        let connection = SessionConnection(socketURL: Self.socketURL)
+        let paths = Self.daemonPaths
+        // Task 6c: register (or fall back to spawning) the daemon *before*
+        // the socket connect attempt begins, so degraded mode's own spawn
+        // has a head start on the connection's first retry.
+        let daemonPersistence = DaemonPersistenceController(paths: paths)
+        daemonPersistence.start()
+        let connection = SessionConnection(socketURL: paths.socketURL)
         let delivery = UserNotificationDelivery()
         // No panes yet: the window opens immediately, and `start()` fills it
         // from the shared `layout` row the moment the socket comes up. The
@@ -26,7 +32,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let workspace = WorkspaceWindowController(
             connection: connection,
             panes: [],
-            notifier: SessionNotifier(delivery: delivery)
+            notifier: SessionNotifier(delivery: delivery),
+            daemonPersistence: daemonPersistence
         )
         delivery.onActivate = { [weak workspace] sessionID in
             workspace?.revealPane(sessionID)
@@ -45,6 +52,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Deliberately does not touch the daemon process or its PTY
+        // sessions in either persistence mode — see
+        // `DaemonPersistenceController.stop()`'s doc comment and the Task
+        // 6c report's "termination cleanup" section.
         workspace?.stop()
     }
 
@@ -52,13 +63,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
-    private static var socketURL: URL {
-        if let override = ProcessInfo.processInfo.environment["OMNIAGENT_PTY_SOCKET"] {
-            return URL(fileURLWithPath: override)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".omniagent-ade", isDirectory: true)
-            .appendingPathComponent("omniagent-pty.sock")
+    /// Task 6c's channel-aware path resolution. Production's result is
+    /// byte-identical to this property's pre-6c literal (see
+    /// `DaemonPersistenceTests`), so this is a resolution-mechanism change,
+    /// not a behavior change, for every build shipped so far.
+    private static var daemonPaths: DaemonPaths {
+        DaemonPaths.resolve(
+            channel: DaemonBuildChannel.resolve(bundleIdentifier: Bundle.main.bundleIdentifier)
+        )
     }
 }
 

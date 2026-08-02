@@ -84,6 +84,82 @@ final class SessionConnectionTests: XCTestCase {
         server.stop()
     }
 
+    // MARK: - Restart-loss reporting (Task 6c)
+
+    /// The daemon restarted while this session was attached: the reconnect
+    /// after `firstClient` drops finds a *new* daemon that has never heard
+    /// of "native-terminal" (`Attach` -> `.error`, "session not found").
+    /// `onReattachFailed` is the signal `DaemonPersistenceController` turns
+    /// into a restart-loss report — this test is the contract for it.
+    func testReconnectReportsReattachFailureWhenTheDaemonNoLongerKnowsTheSession() throws {
+        let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
+        let server = try UnixTestServer(path: socketPath)
+        let initialAttach = expectation(description: "initial attach")
+        let reattachRejected = expectation(description: "reattach rejected")
+
+        server.run { firstClient in
+            let hello = try readFrame(from: firstClient)
+            try writeFrame(
+                SessionFrame(
+                    kind: .helloAck,
+                    requestOrSequence: hello.requestOrSequence,
+                    payload: try JSONSerialization.data(withJSONObject: ["protocol_version": 1])
+                ),
+                to: firstClient
+            )
+            _ = try readFrame(from: firstClient)
+            initialAttach.fulfill()
+            Darwin.close(firstClient)
+
+            let secondClient = try server.accept()
+            let reconnectHello = try readFrame(from: secondClient)
+            try writeFrame(
+                SessionFrame(
+                    kind: .helloAck,
+                    requestOrSequence: reconnectHello.requestOrSequence,
+                    payload: try JSONSerialization.data(withJSONObject: ["protocol_version": 1])
+                ),
+                to: secondClient
+            )
+            let reattach = try readFrame(from: secondClient)
+            try writeFrame(
+                SessionFrame(
+                    kind: .error,
+                    requestOrSequence: reattach.requestOrSequence,
+                    payload: try JSONSerialization.data(
+                        withJSONObject: ["message": "session native-terminal not found"]
+                    )
+                ),
+                to: secondClient
+            )
+            reattachRejected.fulfill()
+            Darwin.close(secondClient)
+        }
+
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: socketPath),
+            reconnectDelay: 0.02
+        )
+        var attached = false
+        connection.onStateChange = { state in
+            guard state == .connected, !attached else { return }
+            attached = true
+            connection.attach(sessionID: "native-terminal", afterSequence: nil)
+        }
+        var reportedLoss: [String] = []
+        let onReattachFailedCalled = expectation(description: "onReattachFailed fired")
+        connection.onReattachFailed = { sessionID in
+            reportedLoss.append(sessionID)
+            onReattachFailedCalled.fulfill()
+        }
+        connection.connect()
+
+        wait(for: [initialAttach, reattachRejected, onReattachFailedCalled], timeout: 3)
+        XCTAssertEqual(reportedLoss, ["native-terminal"])
+        connection.disconnect()
+        server.stop()
+    }
+
     // MARK: - Settings / brain client methods (Task 6a)
 
     func testGetSettingSendsTheKeyAndDecodesAnOptionalValue() throws {

@@ -116,6 +116,14 @@ final class SessionConnection {
     var onAttention: ((String) -> Void)?
     var onExit: ((SessionExitedEvent) -> Void)?
     var onError: ((Error) -> Void)?
+    /// Fires when a **reconnect's automatic reattach** comes back "session
+    /// not found" — Task 6c's restart-loss signal. Only the reconnect-time
+    /// blind reattach (the `helloAck` handler's loop below) is tracked, not
+    /// every `attach(sessionID:afterSequence:)` call: the other call sites
+    /// (`WorkspaceWindowController.ensureSession`/`attach`) already check
+    /// `listSessions` first, so a failure there would be a genuine protocol
+    /// anomaly, not "the daemon restarted and forgot this session."
+    var onReattachFailed: ((String) -> Void)?
 
     private struct Attachment {
         var sequence: UInt64?
@@ -134,6 +142,12 @@ final class SessionConnection {
     private var helloRequest: UInt64?
     private var pending: [UInt64: (Result<SessionFrame, Error>) -> Void] = [:]
     private var attachments: [String: Attachment] = [:]
+    /// Request id -> session id, populated only for the reconnect-time
+    /// automatic reattach loop in `handle(_:)`'s `helloAck` branch — what
+    /// lets a later `.error` response be recognized as "this reattach
+    /// failed" without correlating through `pending` (which `sendAttach`
+    /// deliberately never registers into; see its own doc comment).
+    private var pendingReattachSessions: [UInt64: String] = [:]
     private var shouldReconnect = false
     private var reconnectScheduled = false
     private var state: ConnectionState = .disconnected
@@ -644,7 +658,11 @@ final class SessionConnection {
             finishConnectSignpost()
             transition(to: .connected)
             for (sessionID, attachment) in attachments {
-                sendAttach(sessionID: sessionID, afterSequence: attachment.sequence)
+                sendAttach(
+                    sessionID: sessionID,
+                    afterSequence: attachment.sequence,
+                    trackReattachFailure: true
+                )
             }
             return
         }
@@ -656,6 +674,15 @@ final class SessionConnection {
             let message =
                 (try? decoder.decode(ErrorPayload.self, from: frame.payload).message)
                 ?? "The daemon rejected the request."
+            if let sessionID = pendingReattachSessions.removeValue(forKey: frame.requestOrSequence) {
+                // The daemon no longer knows this session — it forgot
+                // because it restarted, not because the app asked for
+                // something invalid. Stop reattaching to it on the next
+                // reconnect, and let the caller (`WorkspaceWindowController`)
+                // report the loss rather than retry forever.
+                attachments.removeValue(forKey: sessionID)
+                callbackQueue.async { self.onReattachFailed?(sessionID) }
+            }
             completeRequest(
                 frame,
                 result: .failure(SessionConnectionError.daemon(message))
@@ -771,9 +798,16 @@ final class SessionConnection {
         }
     }
 
-    private func sendAttach(sessionID: String, afterSequence: UInt64?) {
+    private func sendAttach(
+        sessionID: String,
+        afterSequence: UInt64?,
+        trackReattachFailure: Bool = false
+    ) {
         do {
             let request = takeRequest()
+            if trackReattachFailure {
+                pendingReattachSessions[request] = sessionID
+            }
             try send(
                 SessionFrame(
                     kind: .attach,

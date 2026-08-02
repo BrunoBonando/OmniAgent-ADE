@@ -94,6 +94,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private var onboardingDispatched = false
     private var usageReadDispatched = false
     private var usageReadCompleted = false
+    /// Task 6c: the `SMAppService`/degraded-mode mechanism and its status
+    /// UI. Constructed by `AppDelegate` (which needs it before `connect()`
+    /// even starts, to give a degraded-mode spawn a head start) and passed
+    /// in here so `SettingsWindowController` — and, through
+    /// `onReattachFailed` below, restart-loss reporting — can reach it.
+    let daemonPersistence: DaemonPersistenceController
 
     /// `panes` may be empty: the app delegate opens the window before the
     /// socket is up, and `start()` fills it from the `layout` row once the
@@ -102,10 +108,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     init(
         connection: SessionConnection,
         panes: [RestoredPane],
-        notifier: SessionNotifier = SessionNotifier(delivery: UserNotificationDelivery())
+        notifier: SessionNotifier = SessionNotifier(delivery: UserNotificationDelivery()),
+        daemonPersistence: DaemonPersistenceController = DaemonPersistenceController()
     ) {
         self.connection = connection
         self.notifier = notifier
+        self.daemonPersistence = daemonPersistence
         let settingsStore = SettingsStore(client: connection)
         self.settingsStore = settingsStore
         let authGateCoordinator = AuthGateCoordinator(settings: settingsStore)
@@ -119,7 +127,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             authGate: authGateCoordinator,
             authGateWindow: authGateWindow,
             brainAdmin: connection,
-            notifier: notifier
+            notifier: notifier,
+            daemonStatus: daemonPersistence
         )
         workspace = PaneWorkspaceView { id in
             TerminalSurfaceView(connection: connection, sessionID: id)
@@ -273,11 +282,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connection.onError = { [weak self] error in
             self?.applyConnectionStatus(error.localizedDescription)
         }
+        // Task 6c restart-loss reporting: a reconnect's automatic reattach
+        // came back "session not found" — the daemon restarted and forgot
+        // this session. Tell the pane (rather than leave its last status
+        // showing) and add it to the aggregated report the Daemon settings
+        // tab reads from `daemonPersistence`.
+        connection.onReattachFailed = { [weak self] sessionID in
+            guard let self else { return }
+            readySessions.remove(sessionID)
+            applySessionStatus("Session lost — daemon restarted", for: sessionID)
+            daemonPersistence.recordReattachFailure(sessionID: sessionID)
+        }
         connection.connect()
     }
 
     func stop() {
         connection.disconnect()
+        daemonPersistence.stop()
     }
 
     func windowWillClose(_ notification: Notification) {

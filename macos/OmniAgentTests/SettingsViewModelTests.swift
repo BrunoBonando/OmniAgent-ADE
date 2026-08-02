@@ -11,11 +11,37 @@ private final class RecordingDelivery: NotificationDelivering {
     func deliverTransient(identifier: String, title: String, body: String, sessionID: String) {}
 }
 
+/// A scripted `DaemonStatusProviding` — local to this file, mirroring
+/// `FakeSettingsClient`/`FakeBrainAdminClient`'s shape, so the Daemon tab's
+/// view-model wiring is testable without a real `DaemonPersistenceController`.
+private final class FakeDaemonStatus: DaemonStatusProviding {
+    var mode: DaemonPersistenceMode
+    var statusDescription: String
+    var lostSessions: [String]
+    private(set) var dismissCallCount = 0
+
+    init(
+        mode: DaemonPersistenceMode = .appOwned,
+        statusDescription: String = "Running in app-owned mode.",
+        lostSessions: [String] = []
+    ) {
+        self.mode = mode
+        self.statusDescription = statusDescription
+        self.lostSessions = lostSessions
+    }
+
+    func dismissLostSessions() {
+        dismissCallCount += 1
+        lostSessions = []
+    }
+}
+
 final class SettingsViewModelTests: XCTestCase {
     private func makeModel(
         settingsRows: [String: String] = [:],
         brainAdmin: FakeBrainAdminClient = FakeBrainAdminClient(),
-        notifier: SessionNotifier = SessionNotifier(delivery: RecordingDelivery())
+        notifier: SessionNotifier = SessionNotifier(delivery: RecordingDelivery()),
+        daemonStatus: FakeDaemonStatus = FakeDaemonStatus()
     ) -> (SettingsViewModel, FakeSettingsClient) {
         let client = FakeSettingsClient(rows: settingsRows)
         let settings = SettingsStore(client: client)
@@ -24,7 +50,9 @@ final class SettingsViewModelTests: XCTestCase {
             authGate: AuthGateCoordinator(settings: settings),
             brainAdmin: brainAdmin,
             notifier: notifier,
-            version: "2026.7.30"
+            version: "2026.7.30",
+            daemonStatus: daemonStatus,
+            openLoginItemsSettings: {}
         )
         return (model, client)
     }
@@ -131,5 +159,50 @@ final class SettingsViewModelTests: XCTestCase {
         model.rebuildBrain()
         XCTAssertTrue(model.rebuildConfirming, "stays open so the user can retry")
         XCTAssertNotNil(model.rebuildError)
+    }
+
+    // MARK: - Daemon (Task 6c)
+
+    func testInitLoadsTheDaemonStatusSnapshot() {
+        let daemonStatus = FakeDaemonStatus(
+            mode: .registeredService,
+            statusDescription: "Running as a login item.",
+            lostSessions: ["s1"]
+        )
+        let (model, _) = makeModel(daemonStatus: daemonStatus)
+
+        XCTAssertEqual(model.daemonMode, .registeredService)
+        XCTAssertEqual(model.daemonStatusDescription, "Running as a login item.")
+        XCTAssertEqual(model.daemonLostSessions, ["s1"])
+    }
+
+    func testDismissLostSessionsClearsBothTheProviderAndThePublishedList() {
+        let daemonStatus = FakeDaemonStatus(lostSessions: ["s1", "s2"])
+        let (model, _) = makeModel(daemonStatus: daemonStatus)
+        XCTAssertEqual(model.daemonLostSessions, ["s1", "s2"])
+
+        model.dismissLostSessions()
+
+        XCTAssertEqual(daemonStatus.dismissCallCount, 1)
+        XCTAssertEqual(model.daemonLostSessions, [])
+    }
+
+    func testOpenLoginItemsSettingsCallsTheInjectedHook() {
+        var called = false
+        let client = FakeSettingsClient(rows: [:])
+        let settings = SettingsStore(client: client)
+        let model = SettingsViewModel(
+            settings: settings,
+            authGate: AuthGateCoordinator(settings: settings),
+            brainAdmin: FakeBrainAdminClient(),
+            notifier: SessionNotifier(delivery: RecordingDelivery()),
+            version: nil,
+            daemonStatus: FakeDaemonStatus(),
+            openLoginItemsSettings: { called = true }
+        )
+
+        model.openLoginItemsSettings()
+
+        XCTAssertTrue(called)
     }
 }

@@ -2,10 +2,10 @@ import AppKit
 import SwiftUI
 
 /// The Settings screen's I/O and derived state — one view model behind the
-/// five sections `SettingsView` renders (Account/Notifications/Review/
-/// Panels/About), each reading/writing through `SettingsStore` so every
-/// control uses the exact key strings the web app shares the same
-/// `brain.db` row with.
+/// sections `SettingsView` renders (Account/Notifications/Review/Panels/
+/// Daemon/About), each reading/writing through `SettingsStore` (or, for
+/// Daemon, `DaemonStatusProviding`) so every control uses the exact key
+/// strings the web app shares the same `brain.db` row with.
 final class SettingsViewModel: ObservableObject {
     @Published private(set) var authSummary = "Loading…"
     @Published private(set) var authSignedIn = false
@@ -16,6 +16,10 @@ final class SettingsViewModel: ObservableObject {
     @Published private(set) var rebuildInProgress = false
     @Published var rebuildError: String?
     @Published var rebuildConfirming = false
+    // MARK: - Task 6c: daemon persistence status
+    @Published private(set) var daemonMode: DaemonPersistenceMode = .appOwned
+    @Published private(set) var daemonStatusDescription = ""
+    @Published private(set) var daemonLostSessions: [String] = []
 
     let versionLine: String?
     let notifier: SessionNotifier
@@ -23,26 +27,36 @@ final class SettingsViewModel: ObservableObject {
     private let settings: SettingsStore
     private let authGate: AuthGateCoordinator
     private let brainAdmin: BrainAdminClient
+    private let daemonStatus: DaemonStatusProviding
     /// Installed by `SettingsWindowController` — "Sign in" re-runs the same
     /// gate flow `AuthGateWindowController` shows at launch, rather than a
     /// second sign-in implementation living in this screen.
     var presentAuthGate: (() -> Void)?
+    /// Deep-links to System Settings > General > Login Items. Injectable —
+    /// production wires the real `SystemLoginItemsSettings.open`, tests
+    /// substitute a recorder.
+    var openLoginItemsSettings: () -> Void
 
     init(
         settings: SettingsStore,
         authGate: AuthGateCoordinator,
         brainAdmin: BrainAdminClient,
         notifier: SessionNotifier,
-        version: String?
+        version: String?,
+        daemonStatus: DaemonStatusProviding = DaemonPersistenceController(),
+        openLoginItemsSettings: @escaping () -> Void = SystemLoginItemsSettings.open
     ) {
         self.settings = settings
         self.authGate = authGate
         self.brainAdmin = brainAdmin
         self.notifier = notifier
+        self.daemonStatus = daemonStatus
+        self.openLoginItemsSettings = openLoginItemsSettings
         versionLine = version.map { "v\($0) — dogfood build" }
         refreshAccount()
         refreshReview()
         refreshPanels()
+        refreshDaemonStatus()
         refreshNotifications()
     }
 
@@ -111,6 +125,24 @@ final class SettingsViewModel: ObservableObject {
         settings.set(SettingsKey.codeReviewWidth, codeReviewWidthText)
     }
 
+    // MARK: - Daemon (Task 6c)
+
+    /// Snapshot-on-open, same reasoning as `refreshNotifications()`:
+    /// `daemonStatus` isn't `ObservableObject` (it's read-once infrastructure
+    /// state, not a live feed), and Settings already accepts this tradeoff
+    /// for Notifications. A daemon restart that happens *while* Settings is
+    /// open won't show until the window is reopened.
+    func refreshDaemonStatus() {
+        daemonMode = daemonStatus.mode
+        daemonStatusDescription = daemonStatus.statusDescription
+        daemonLostSessions = daemonStatus.lostSessions
+    }
+
+    func dismissLostSessions() {
+        daemonStatus.dismissLostSessions()
+        daemonLostSessions = daemonStatus.lostSessions
+    }
+
     // MARK: - About
 
     func rebuildBrain() {
@@ -129,7 +161,7 @@ final class SettingsViewModel: ObservableObject {
 
 /// The Settings screen: `NSHostingController`-hosted, reachable from the
 /// OmniAgent application menu's "Settings…" (⌘,) — see
-/// `AppDelegate.ApplicationMenus`. Five sections plus the Usage readout,
+/// `AppDelegate.ApplicationMenus`. Six sections plus the Usage readout,
 /// each a thin tab over `SettingsViewModel`.
 struct SettingsView: View {
     @ObservedObject var model: SettingsViewModel
@@ -145,6 +177,8 @@ struct SettingsView: View {
                 .tabItem { Label("Review", systemImage: "checkmark.seal") }
             PanelsSettingsTab(model: model)
                 .tabItem { Label("Panels", systemImage: "sidebar.right") }
+            DaemonSettingsTab(model: model)
+                .tabItem { Label("Daemon", systemImage: "bolt.horizontal.circle") }
             UsageView(model: usage)
                 .tabItem { Label("Usage", systemImage: "chart.bar") }
             AboutSettingsTab(model: model)
@@ -262,6 +296,45 @@ private struct PanelsSettingsTab: View {
     }
 }
 
+/// Daemon (Task 6c) — a new tab rather than a section folded into About:
+/// `SMAppService` registration mode, degraded app-owned fallback, and
+/// restart-loss reporting are a distinct enough concern (with their own
+/// action button and a list that can grow) that cramming them into About's
+/// existing version/rebuild layout would have crowded both. About stays the
+/// "what is this build" tab; this is the "is the background service healthy"
+/// tab.
+private struct DaemonSettingsTab: View {
+    @ObservedObject var model: SettingsViewModel
+
+    var body: some View {
+        SettingsTabBackground {
+            Text("Daemon").font(.title3.bold())
+            Text(model.daemonStatusDescription)
+                .foregroundStyle(OmniAgentPalette.textSecondary)
+            if model.daemonMode == .appOwned {
+                Button("Open Login Items Settings…") { model.openLoginItemsSettings() }
+            }
+            Divider()
+            if model.daemonLostSessions.isEmpty {
+                Text("No sessions lost since launch.")
+                    .font(.caption)
+                    .foregroundStyle(OmniAgentPalette.textSecondary)
+            } else {
+                Text("Lost when the daemon last restarted:")
+                    .font(.caption.bold())
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(model.daemonLostSessions, id: \.self) { sessionID in
+                            Text(sessionID).font(.caption)
+                        }
+                    }
+                }
+                Button("Dismiss") { model.dismissLostSessions() }
+            }
+        }
+    }
+}
+
 /// About — bundle version, tagline, and the now-unblocked "Rebuild brain".
 private struct AboutSettingsTab: View {
     @ObservedObject var model: SettingsViewModel
@@ -308,19 +381,22 @@ final class SettingsWindowController: NSWindowController {
     private let authGateWindow: AuthGateWindowController
     private let brainAdmin: BrainAdminClient & BrainSearchClient
     private let notifier: SessionNotifier
+    private let daemonStatus: DaemonStatusProviding
 
     init(
         settings: SettingsStore,
         authGate: AuthGateCoordinator,
         authGateWindow: AuthGateWindowController,
         brainAdmin: BrainAdminClient & BrainSearchClient,
-        notifier: SessionNotifier
+        notifier: SessionNotifier,
+        daemonStatus: DaemonStatusProviding
     ) {
         self.settings = settings
         self.authGate = authGate
         self.authGateWindow = authGateWindow
         self.brainAdmin = brainAdmin
         self.notifier = notifier
+        self.daemonStatus = daemonStatus
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
             styleMask: [.titled, .closable],
@@ -349,7 +425,8 @@ final class SettingsWindowController: NSWindowController {
             authGate: authGate,
             brainAdmin: brainAdmin,
             notifier: notifier,
-            version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+            version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+            daemonStatus: daemonStatus
         )
         model.presentAuthGate = { [weak self] in
             self?.authGateWindow.present(over: self?.window)
