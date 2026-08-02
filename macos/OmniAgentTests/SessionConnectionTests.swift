@@ -361,7 +361,7 @@ final class SessionConnectionTests: XCTestCase {
             guard state == .connected, !sent else { return }
             sent = true
             connection.startIngest(path: "/tmp/projects") { result in
-                XCTAssertNoThrow(try result.get())
+                if case .failure(let error) = result { XCTFail("unexpected failure: \(error)") }
                 responded.fulfill()
             }
         }
@@ -596,7 +596,7 @@ final class SessionConnectionTests: XCTestCase {
             guard state == .connected, !sent else { return }
             sent = true
             connection.renameProject(id: "demo", newLabel: "Renamed") { result in
-                XCTAssertNoThrow(try result.get())
+                if case .failure(let error) = result { XCTFail("unexpected failure: \(error)") }
                 responded.fulfill()
             }
         }
@@ -652,7 +652,7 @@ final class SessionConnectionTests: XCTestCase {
             guard state == .connected, !sent else { return }
             sent = true
             connection.setPaused(project: "demo", paused: true) { result in
-                XCTAssertNoThrow(try result.get())
+                if case .failure(let error) = result { XCTFail("unexpected failure: \(error)") }
                 pausedResponded.fulfill()
                 connection.pausedProjects { result in
                     XCTAssertEqual(try? result.get(), ["demo"])
@@ -749,7 +749,7 @@ final class SessionConnectionTests: XCTestCase {
             guard state == .connected, !sent else { return }
             sent = true
             connection.reingestProject(project: "demo") { result in
-                XCTAssertNoThrow(try result.get())
+                if case .failure(let error) = result { XCTFail("unexpected failure: \(error)") }
                 responded.fulfill()
             }
         }
@@ -788,7 +788,7 @@ final class SessionConnectionTests: XCTestCase {
             guard state == .connected, !sent else { return }
             sent = true
             connection.rebuildBrain { result in
-                XCTAssertNoThrow(try result.get())
+                if case .failure(let error) = result { XCTFail("unexpected failure: \(error)") }
                 responded.fulfill()
             }
         }
