@@ -117,3 +117,53 @@ New (`macos/OmniAgentTests/`): `DaemonPersistenceTests.swift`, `DaemonPersistenc
 Edited: `AppDelegate.swift` (channel-aware paths, constructs/starts `DaemonPersistenceController`, threads it through, `applicationWillTerminate` comment), `WorkspaceWindowController.swift` (`daemonPersistence` property/init param, `onReattachFailed` wiring, `stop()` extension), `SessionConnection.swift` (`onReattachFailed`, `pendingReattachSessions`, `sendAttach`'s new tracking parameter), `SettingsView.swift` (new Daemon tab, `SettingsViewModel` additions, `SettingsWindowController`'s new `daemonStatus` parameter), `SessionConnectionTests.swift` (+1 test), `SettingsViewModelTests.swift` (+1 fake, +3 tests).
 
 `macos/OmniAgent.xcodeproj/project.pbxproj` — edited by a one-off Python script (not checked in, per the established convention from Tasks 6a/6b-1/6b-2) adding `PBXBuildFile`/`PBXFileReference`/group/`Sources`-phase entries for the 5 new files. Verified with `plutil -lint` and `xcodebuild -list` before building.
+
+---
+
+## Fix for reviewed Important finding — the spawn gate was file-presence, not liveness
+
+**Finding (verbatim, `macos/OmniAgent/DaemonPersistenceController.swift:77-79`):** the degraded-mode "is a daemon already running?" check was `FileManager.default.fileExists(atPath: paths.socketURL.path)` — file presence, not a liveness probe. A Unix domain socket file is not removed when its owning process dies uncleanly (`SIGKILL`, a panic before cleanup runs). In app-owned mode there is no `launchd` supervision, so an unclean crash left a stale socket file that `shouldSpawn` read as "already running," permanently blocking a respawn until the user manually deleted the file. This regressed the very precedent the task claims to port: `src-tauri/src/daemon.rs`'s `remove_stale_socket_if_unreachable()` actively attempts `UnixStream::connect` and only treats a socket as stale if the connect fails.
+
+### What changed
+
+- **`DaemonSocketProbe`** (new, in `DaemonServiceRegistrar.swift` — the thin/real layer, not the pure `DaemonPersistence` core, since it's a genuine syscall) — `isReachable(at:)` opens an `AF_UNIX`/`SOCK_STREAM` socket and attempts a real, immediately-abandoned `Darwin.connect()`, mirroring `remove_stale_socket_if_unreachable()`'s approach exactly (connect-and-see, not stat-and-guess).
+- **`SessionConnection.swift`'s `withUnixSocketAddress`** (the `sockaddr_un`-filling helper `SessionConnection.openConnection()` already used) was changed from `private` to internal so `DaemonSocketProbe` reuses it instead of re-implementing the same unsafe-pointer code a second time in a new file. `SessionConnectionTests.swift` had its own near-identical `private` copy (used only by its `UnixTestServer` test double) — deleted in favor of the same shared one, with `try` added at its one call site (the shared version throws on an over-length path; the deleted copy didn't).
+- **`DaemonPersistence.shouldSpawn`**'s parameter renamed `socketAlreadyPresent` → `socketReachable` (decision logic unchanged — still just `mode == .appOwned && !socketReachable` — only the parameter's *meaning* was wrong before, not the boolean logic consuming it). **`DaemonPersistenceController`**'s stored closure/init parameter renamed to match, and its convenience initializer now wires `DaemonSocketProbe.isReachable(at: paths.socketURL)` instead of the file-existence check. This keeps the reviewer-praised pure/thin split intact: the pure `DaemonPersistence.shouldSpawn` still knows nothing about sockets or files, only about a `Bool`; `DaemonSocketProbe` is the one new thin-shell piece that actually knows how to determine that `Bool` correctly.
+
+### Test added
+
+**`DaemonPersistenceControllerTests.testStartSpawnsWhenAStaleSocketFileIsPresentButNothingIsListening`** — binds and listens on a real Unix domain socket at a scratch path, closes the listening descriptor *without unlinking the path* (the exact "process died uncleanly" repro the review described), then constructs a `DaemonPersistenceController` wired to the **real** `DaemonSocketProbe.isReachable` (not a fake) against that stale path, and asserts `launcher.launchCallCount == 1` — a spawn happens despite the file being present.
+
+New file **`DaemonServiceRegistrarTests.swift`** (`DaemonSocketProbeTests`) covers `DaemonSocketProbe.isReachable` directly and in isolation:
+- no file at all → not reachable;
+- a real listener bound and actively listening → reachable;
+- the stale-file repro (bind, listen, close without unlink) → not reachable — the literal scenario named in the review;
+- a plain non-socket file at the path → not reachable.
+
+It also exposes the shared `bindAndListenTestSocket(at:)` helper (module-internal, not `private`) that both this file and `DaemonPersistenceControllerTests`'s new test reuse, rather than each hand-rolling its own bind/listen boilerplate.
+
+The pre-existing **`testStartDoesNotSpawnWhenTheSocketIsAlreadyPresent`** was renamed to **`testStartDoesNotSpawnWhenTheSocketIsReachable`** (same fake-closure-driven assertion — `socketReachable: true` → no spawn — now named for what the parameter actually means) and still passes unchanged in substance. **`DaemonPersistenceTests.testShouldSpawnOnlyInAppOwnedModeWithTheSocketUnreachable`** (renamed from `...WithNoSocketAlreadyPresent`) still exercises all four `(mode, reachable)` combinations of the pure `shouldSpawn` function and still passes.
+
+### Commands run and results
+
+`./macos/build.sh build` — `** BUILD SUCCEEDED **`, zero new warnings.
+
+`./macos/build.sh test`:
+
+```
+315 unique test cases started, 314 passed individually.
+```
+
+New: `DaemonSocketProbeTests` (4 tests, all green) and one new test in `DaemonPersistenceControllerTests` (now 12). The one suite-level `** TEST FAILED **` is, again, `WorkspaceWindowControllerTests.testCommandOptionOIsClaimedByMenuBeforeSwiftTermKittyKeyDown` — the same pre-existing full-suite-load flake, re-confirmed passing in isolation immediately after this run (`-only-testing:...testCommandOptionOIsClaimedByMenuBeforeSwiftTermKittyKeyDown`, `** TEST SUCCEEDED **`, 0.06s). Nothing in this fix touches that test or its surrounding files.
+
+`git diff --check` — clean.
+
+### One thing caught along the way, not part of the reviewed finding
+
+Removing `private` from `SessionConnection.swift`'s `withUnixSocketAddress` initially caused an "ambiguous use of `withUnixSocketAddress(path:_:)`" compile error in `SessionConnectionTests.swift`, because that file independently declared its own `private` (non-throwing) function of the same name for its `UnixTestServer` test double — legal before (two `private`-to-different-files declarations don't collide), but ambiguous once the app-module one became visible in the same file via `@testable import`. Fixed by deleting the test file's duplicate and pointing its one call site at the shared, now-reusable version (adding `try`, since the shared version can throw on an over-length path) — the DRY outcome the doc comment on the now-internal `withUnixSocketAddress` already promised, not a new decision.
+
+### Self-review
+
+- Confirmed the pure/thin separation the reviewer praised is intact: `DaemonPersistence.swift` (the pure core) gained zero new imports and zero syscalls — only a renamed parameter and an updated doc comment. All new socket code lives in `DaemonServiceRegistrar.swift` (the thin layer) and its test file.
+- Did not touch the two deferred Minor findings (`pendingReattachSessions` leak, the report's test-count typo) — out of scope per the review instructions, left for the whole-branch review.
+- The fix is scoped exactly to the one Important finding: no other behavior in `DaemonPersistenceController`/`DaemonPersistence` changed.

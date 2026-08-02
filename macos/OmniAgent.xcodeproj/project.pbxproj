@@ -67,6 +67,7 @@
 		1000000000000000000003C /* DaemonPersistenceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000003D /* DaemonPersistenceController.swift */; };
 		1000000000000000000003E /* DaemonPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000003F /* DaemonPersistenceTests.swift */; };
 		10000000000000000000040 /* DaemonPersistenceControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000041 /* DaemonPersistenceControllerTests.swift */; };
+		10000000000000000000042 /* DaemonServiceRegistrarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000043 /* DaemonServiceRegistrarTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -141,6 +142,7 @@
 		2000000000000000000003D /* DaemonPersistenceController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistenceController.swift; sourceTree = "<group>"; };
 		2000000000000000000003F /* DaemonPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistenceTests.swift; sourceTree = "<group>"; };
 		20000000000000000000041 /* DaemonPersistenceControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistenceControllerTests.swift; sourceTree = "<group>"; };
+		20000000000000000000043 /* DaemonServiceRegistrarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonServiceRegistrarTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -240,6 +242,7 @@
 				20000000000000000000038 /* WorkspaceWindowControllerTask6b2Tests.swift */,
 				2000000000000000000003F /* DaemonPersistenceTests.swift */,
 				20000000000000000000041 /* DaemonPersistenceControllerTests.swift */,
+				20000000000000000000043 /* DaemonServiceRegistrarTests.swift */,
 			);
 			path = OmniAgentTests;
 			sourceTree = "<group>";
@@ -424,6 +427,7 @@
 				10000000000000000000037 /* WorkspaceWindowControllerTask6b2Tests.swift in Sources */,
 				1000000000000000000003E /* DaemonPersistenceTests.swift in Sources */,
 				10000000000000000000040 /* DaemonPersistenceControllerTests.swift in Sources */,
+				10000000000000000000042 /* DaemonServiceRegistrarTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

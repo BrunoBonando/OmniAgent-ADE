@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import ServiceManagement
 
@@ -61,6 +62,26 @@ enum SystemLoginItemsSettings {
 }
 
 // MARK: - Degraded app-owned mode: spawning the daemon ourselves
+
+/// Is a daemon actually listening on this Unix domain socket? **File
+/// presence is not enough** — a socket file is not removed automatically
+/// when its owning process dies uncleanly (SIGKILL, a panic before its own
+/// cleanup runs), which is exactly the case degraded app-owned mode has to
+/// handle since nothing supervises it the way launchd supervises a
+/// registered service. Mirrors `src-tauri/src/daemon.rs`'s
+/// `remove_stale_socket_if_unreachable()`: a real, immediately-abandoned
+/// `connect()` attempt, not a `FileManager` existence check.
+enum DaemonSocketProbe {
+    static func isReachable(at socketURL: URL) -> Bool {
+        let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { Darwin.close(descriptor) }
+        let result = try? withUnixSocketAddress(path: socketURL.path) {
+            Darwin.connect(descriptor, $0, $1)
+        }
+        return result == 0
+    }
+}
 
 /// Where the daemon binary might be found, in priority order. Mirrors
 /// `src-tauri/src/daemon.rs`'s `resolve_daemon_binary` — the Tauri-side

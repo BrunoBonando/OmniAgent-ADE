@@ -1088,7 +1088,10 @@ private struct BrainSearchResponse: Codable {
     let results: [BrainNodeView]
 }
 
-private func withUnixSocketAddress<T>(
+/// Not `private`: `DaemonSocketProbe` (`DaemonServiceRegistrar.swift`)
+/// reuses this to fill a `sockaddr_un` correctly rather than duplicating
+/// this unsafe-pointer code a second time.
+func withUnixSocketAddress<T>(
     path: String,
     _ body: (UnsafePointer<sockaddr>, socklen_t) -> T
 ) throws -> T {

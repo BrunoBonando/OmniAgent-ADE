@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import OmniAgent
 
@@ -55,14 +56,14 @@ final class DaemonPersistenceControllerTests: XCTestCase {
         registrar: FakeDaemonServiceRegistrar,
         launcher: FakeDaemonProcessLauncher = FakeDaemonProcessLauncher(),
         binaryPath: String? = "/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon",
-        socketAlreadyPresent: Bool = false
+        socketReachable: Bool = false
     ) -> DaemonPersistenceController {
         DaemonPersistenceController(
             paths: paths,
             registrar: registrar,
             processLauncher: launcher,
             resolveBinaryPath: { binaryPath },
-            socketAlreadyPresent: { socketAlreadyPresent }
+            socketReachable: { socketReachable }
         )
     }
 
@@ -135,14 +136,42 @@ final class DaemonPersistenceControllerTests: XCTestCase {
         XCTAssertEqual(controller.mode, .appOwned)
     }
 
-    func testStartDoesNotSpawnWhenTheSocketIsAlreadyPresent() {
+    func testStartDoesNotSpawnWhenTheSocketIsReachable() {
         let registrar = FakeDaemonServiceRegistrar(status: .notRegistered, registerOutcome: .failed)
         let launcher = FakeDaemonProcessLauncher()
-        let controller = makeController(registrar: registrar, launcher: launcher, socketAlreadyPresent: true)
+        let controller = makeController(registrar: registrar, launcher: launcher, socketReachable: true)
 
         controller.start()
 
         XCTAssertEqual(launcher.launchCallCount, 0)
+    }
+
+    /// The reviewed fix: a stale socket *file* left behind by an
+    /// uncleanly-killed app-owned daemon (no launchd supervision in that
+    /// mode) must not block a respawn. Exercises the real
+    /// `DaemonSocketProbe.isReachable` — not a fake — against a real Unix
+    /// domain socket that was bound and listening, then had its listener
+    /// closed without unlinking the path, mirroring a `SIGKILL`.
+    func testStartSpawnsWhenAStaleSocketFileIsPresentButNothingIsListening() throws {
+        let socketPath = "/tmp/omniagent-stale-\(UUID().uuidString.prefix(8)).sock"
+        let listener = try bindAndListenTestSocket(at: socketPath)
+        Darwin.close(listener) // the file survives; nothing is listening anymore
+        defer { unlink(socketPath) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath), "the stale file must still exist")
+
+        let registrar = FakeDaemonServiceRegistrar(status: .notRegistered, registerOutcome: .failed)
+        let launcher = FakeDaemonProcessLauncher()
+        let controller = DaemonPersistenceController(
+            paths: paths,
+            registrar: registrar,
+            processLauncher: launcher,
+            resolveBinaryPath: { "/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon" },
+            socketReachable: { DaemonSocketProbe.isReachable(at: URL(fileURLWithPath: socketPath)) }
+        )
+
+        controller.start()
+
+        XCTAssertEqual(launcher.launchCallCount, 1, "a stale socket file must not block a respawn")
     }
 
     func testStartDoesNotSpawnWhenNoBinaryCanBeResolved() {

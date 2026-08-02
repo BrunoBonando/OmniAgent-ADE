@@ -34,7 +34,9 @@ final class DaemonPersistenceController {
     private let registrar: DaemonServiceRegistrar
     private let processLauncher: DaemonProcessLaunching
     private let resolveBinaryPath: () -> String?
-    private let socketAlreadyPresent: () -> Bool
+    /// A real liveness probe result, not file existence — see
+    /// `DaemonSocketProbe`'s doc comment for why the distinction matters.
+    private let socketReachable: () -> Bool
     /// Retained for as long as the app runs so the child process stays
     /// tracked — never used to terminate it (see `LiveDaemonProcessLauncher`'s
     /// doc comment).
@@ -48,13 +50,13 @@ final class DaemonPersistenceController {
         registrar: DaemonServiceRegistrar,
         processLauncher: DaemonProcessLaunching,
         resolveBinaryPath: @escaping () -> String?,
-        socketAlreadyPresent: @escaping () -> Bool
+        socketReachable: @escaping () -> Bool
     ) {
         self.paths = paths
         self.registrar = registrar
         self.processLauncher = processLauncher
         self.resolveBinaryPath = resolveBinaryPath
-        self.socketAlreadyPresent = socketAlreadyPresent
+        self.socketReachable = socketReachable
     }
 
     /// The real, production-shaped construction: a genuine `SMAppService`
@@ -74,16 +76,17 @@ final class DaemonPersistenceController {
                     fileExists: { FileManager.default.isExecutableFile(atPath: $0) }
                 )
             },
-            socketAlreadyPresent: {
-                FileManager.default.fileExists(atPath: paths.socketURL.path)
+            socketReachable: {
+                DaemonSocketProbe.isReachable(at: paths.socketURL)
             }
         )
     }
 
     /// Call once at launch, before connecting. Registers (or reads back an
     /// already-registered status without re-prompting), resolves the mode,
-    /// and — only in app-owned mode, only when nothing is already
-    /// listening — spawns the daemon.
+    /// and — only in app-owned mode, only when nothing is actually
+    /// reachable on the socket (a real probe, not a file check) — spawns
+    /// the daemon.
     func start() {
         let status = registrar.currentStatus()
         let outcome: DaemonRegistrationOutcome =
@@ -95,7 +98,7 @@ final class DaemonPersistenceController {
         onModeChanged?(mode)
 
         guard
-            DaemonPersistence.shouldSpawn(mode: mode, socketAlreadyPresent: socketAlreadyPresent())
+            DaemonPersistence.shouldSpawn(mode: mode, socketReachable: socketReachable())
         else { return }
         guard let binaryPath = resolveBinaryPath() else { return }
         ownedProcess = try? processLauncher.launch(

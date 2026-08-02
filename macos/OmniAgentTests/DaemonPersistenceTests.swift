@@ -103,14 +103,14 @@ final class DaemonPersistenceTests: XCTestCase {
 
     // MARK: - shouldSpawn
 
-    func testShouldSpawnOnlyInAppOwnedModeWithNoSocketAlreadyPresent() {
-        XCTAssertTrue(DaemonPersistence.shouldSpawn(mode: .appOwned, socketAlreadyPresent: false))
-        XCTAssertFalse(DaemonPersistence.shouldSpawn(mode: .appOwned, socketAlreadyPresent: true))
+    func testShouldSpawnOnlyInAppOwnedModeWithTheSocketUnreachable() {
+        XCTAssertTrue(DaemonPersistence.shouldSpawn(mode: .appOwned, socketReachable: false))
+        XCTAssertFalse(DaemonPersistence.shouldSpawn(mode: .appOwned, socketReachable: true))
         XCTAssertFalse(
-            DaemonPersistence.shouldSpawn(mode: .registeredService, socketAlreadyPresent: false)
+            DaemonPersistence.shouldSpawn(mode: .registeredService, socketReachable: false)
         )
         XCTAssertFalse(
-            DaemonPersistence.shouldSpawn(mode: .registeredService, socketAlreadyPresent: true)
+            DaemonPersistence.shouldSpawn(mode: .registeredService, socketReachable: true)
         )
     }
 

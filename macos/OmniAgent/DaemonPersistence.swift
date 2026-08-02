@@ -158,10 +158,14 @@ enum DaemonPersistence {
 
     /// Degraded mode must not pile a second daemon process on top of one
     /// already listening (dev-started manually, or spawned by an earlier
-    /// launch of this same app) — a live socket path reads as "already
-    /// running", and the spawn is skipped.
-    static func shouldSpawn(mode: DaemonPersistenceMode, socketAlreadyPresent: Bool) -> Bool {
-        mode == .appOwned && !socketAlreadyPresent
+    /// launch of this same app). `socketReachable` must come from an actual
+    /// liveness probe (`DaemonSocketProbe.isReachable`), not file
+    /// existence — a Unix domain socket file survives its owning process
+    /// dying uncleanly, and trusting the file alone would leave a stale
+    /// crash permanently unrecoverable in app-owned mode (no launchd to
+    /// notice and restart it). See `DaemonSocketProbe`'s doc comment.
+    static func shouldSpawn(mode: DaemonPersistenceMode, socketReachable: Bool) -> Bool {
+        mode == .appOwned && !socketReachable
     }
 
     static func statusDescription(

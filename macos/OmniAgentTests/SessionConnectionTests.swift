@@ -948,7 +948,10 @@ private final class UnixTestServer {
         unlink(path)
         listener = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard listener >= 0 else { throw POSIXError(.EIO) }
-        let result = withUnixSocketAddress(path: path) {
+        // Reuses `SessionConnection.swift`'s own `withUnixSocketAddress` (made
+        // non-private for exactly this — see its doc comment) rather than a
+        // second, easy-to-drift copy of this unsafe-pointer code.
+        let result = try withUnixSocketAddress(path: path) {
             Darwin.bind(listener, $0, $1)
         }
         guard result == 0, Darwin.listen(listener, 2) == 0 else {
@@ -978,29 +981,6 @@ private final class UnixTestServer {
     func stop() {
         Darwin.close(listener)
         unlink(path)
-    }
-}
-
-private func withUnixSocketAddress<T>(
-    path: String,
-    _ body: (UnsafePointer<sockaddr>, socklen_t) -> T
-) -> T {
-    var address = sockaddr_un()
-    let pathBytes = Array(path.utf8CString)
-    precondition(pathBytes.count <= MemoryLayout.size(ofValue: address.sun_path))
-    address.sun_family = sa_family_t(AF_UNIX)
-    let length = socklen_t(MemoryLayout<sa_family_t>.size + pathBytes.count)
-    address.sun_len = UInt8(length)
-    withUnsafeMutablePointer(to: &address.sun_path) {
-        let destination = UnsafeMutableRawPointer($0).assumingMemoryBound(to: UInt8.self)
-        for (index, byte) in pathBytes.enumerated() {
-            destination[index] = UInt8(bitPattern: byte)
-        }
-    }
-    return withUnsafePointer(to: &address) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-            body($0, length)
-        }
     }
 }
 
