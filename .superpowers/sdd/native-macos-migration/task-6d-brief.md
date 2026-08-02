@@ -26,10 +26,21 @@ You almost certainly do not have real Apple Developer signing/notarization crede
 - No App Sandbox — explicit non-sandbox entitlements, not merely omitted ones.
 - Scripts live alongside `macos/build.sh` and follow its conventions (shell style, subcommand structure) rather than introducing a new build-tooling pattern.
 
+## Addendum — Task 6c's deferred resource-embedding (read this, it's new since this brief was first written)
+
+Task 6c (`.superpowers/sdd/native-macos-migration/task-6c-report.md`) built the full `SMAppService`/LaunchAgent persistence mechanism, but deliberately deferred the Xcode-side resource embedding to this task — it is now part of Task 6d's required behavior, not optional:
+
+- **Embed the compiled `omniagent-pty-daemon` Rust binary into the app bundle at `Contents/MacOS/omniagent-pty-daemon`** — this is the exact path `DaemonBinaryLocator.candidates` (in `macos/OmniAgent/DaemonPersistence.swift`) checks first, after its `OMNIAGENT_PTY_DAEMON_BIN` env override. The binary must be **signed under the same identity as the app** (hardened-runtime signing, same as the app bundle itself) for Gatekeeper/notarization to accept the bundle as a whole. Building it is a `cargo build --release -p omniagent-pty-daemon` step that needs wiring into the Xcode build (a Run Script build phase, matching however the existing Tauri build already bundles this binary as a resource — check `src-tauri`'s build process for precedent — or an equivalent `xcodebuild`/`macos/build.sh` pre-step).
+- **Add an Xcode Copy Files build phase that installs the LaunchAgent plist at `Contents/Library/LaunchAgents/`.** The plist *content* is already built and unit-tested — `DaemonLaunchAgentPlist.build` in `macos/OmniAgent/DaemonPersistence.swift` — it currently has no production caller (deliberately, per Task 6c's report: "this function's real consumer is Task 6d"). You need to actually generate/write this plist file into the bundle at build time (e.g. a Run Script phase that calls into the app to emit it, or a small standalone script/tool that mirrors its logic) and copy it to the right bundle location with the right file permissions LaunchAgents expect.
+- **Activate the preview build channel.** Task 6c's channel-resolution *policy* is complete and tested (bundle-id suffix distinguishes preview from production, plus an `OMNIAGENT_ADE_BUILD_CHANNEL=preview` env override that already works) — but only Debug/Release Xcode build configurations exist today, both using the same bundle id `digital.bruno.omniagent`. Add a build configuration (or scheme) that uses a distinct preview bundle id, matching what Task 6c's `DaemonPaths`/channel resolution already expects. Document exactly what bundle-id suffix/naming convention you chose.
+
+Once these three are done, `SMAppServiceDaemonRegistrar.register()` should start succeeding on a properly signed+installed build with zero further Swift code changes — verify this is at least structurally true (the right files land in the right places in the built bundle) even though full end-to-end registration approval can't be exercised without real signing credentials and interactive System Settings approval (same environment constraint as the rest of this task — see "Constraints on your environment" above).
+
 ## Verification
 
 - Run the new script(s) with credentials absent and confirm the clear-failure behavior directly (paste the actual output in your report).
 - `./macos/build.sh build` still passes.
+- Verify the built bundle actually contains `Contents/MacOS/omniagent-pty-daemon` and `Contents/Library/LaunchAgents/<label>.plist` at the right paths (e.g. via `find`/`ls` on the built `.app`, pasted in your report) — this is the concrete, checkable proof the addendum above landed correctly.
 - `git diff --check`
 
 Commit all Task 6d work and write `.superpowers/sdd/native-macos-migration/task-6d-report.md`.
