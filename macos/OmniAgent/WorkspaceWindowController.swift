@@ -75,6 +75,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// socket, and without touching the developer's real `brain.db`.
     var settingsWriter: ((String, String) -> Void)?
 
+    // MARK: - Task 6b-2: settings/onboarding/usage/inspector
+
+    let settingsStore: SettingsStore
+    let usageRecorder = UsageAnalyticsRecorder()
+    /// The shared project id -> label cache, built from `listProjects` —
+    /// what fixes 6b-1 concern #3 ("project rows show ids, not labels") for
+    /// the outline, the palette and the inspector alike, from one read.
+    private(set) var projectLabels: [String: String] = [:]
+    let authGateCoordinator: AuthGateCoordinator
+    private let authGateWindow: AuthGateWindowController
+    private let firstRunWindow: FirstRunWindowController
+    private let settingsWindowController: SettingsWindowController
+    let inspector: InspectorWindowController
+    /// Guards the auth-gate/first-run presentation sequence to once per
+    /// launch, the same one-shot-then-re-arm-on-failure shape
+    /// `layoutReadDispatched` uses.
+    private var onboardingDispatched = false
+    private var usageReadDispatched = false
+    private var usageReadCompleted = false
+
     /// `panes` may be empty: the app delegate opens the window before the
     /// socket is up, and `start()` fills it from the `layout` row once the
     /// connection lands. A non-empty seed is for callers that already know
@@ -86,6 +106,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     ) {
         self.connection = connection
         self.notifier = notifier
+        let settingsStore = SettingsStore(client: connection)
+        self.settingsStore = settingsStore
+        let authGateCoordinator = AuthGateCoordinator(settings: settingsStore)
+        self.authGateCoordinator = authGateCoordinator
+        let authGateWindow = AuthGateWindowController(coordinator: authGateCoordinator)
+        self.authGateWindow = authGateWindow
+        firstRunWindow = FirstRunWindowController(ingestion: connection)
+        inspector = InspectorWindowController(client: connection)
+        settingsWindowController = SettingsWindowController(
+            settings: settingsStore,
+            authGate: authGateCoordinator,
+            authGateWindow: authGateWindow,
+            brainAdmin: connection,
+            notifier: notifier
+        )
         workspace = PaneWorkspaceView { id in
             TerminalSurfaceView(connection: connection, sessionID: id)
         }
@@ -129,9 +164,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         window.onFirstResponderChange = { [weak self] responder in
             self?.workspace.adoptFocus(from: responder)
         }
-        workspace.onFocusedPaneChanged = { [weak self] _ in
+        workspace.onFocusedPaneChanged = { [weak self] paneID in
             self?.refreshTitle()
             self?.reloadOutline()
+            self?.refreshInspectorIfVisible(for: paneID)
         }
         workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
         workspace.onPanesChanged = { [weak self] in
@@ -139,6 +175,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.reloadOutline()
         }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
+        usageRecorder.onStoreChanged = { [weak self] store in self?.persistUsageAnalytics(store) }
         outline.onSelectPane = { [weak self] id in self?.workspace.focusPane(id) }
         outline.onSelectSession = { [weak self] session in
             guard let first = session.paneIDs.first else { return }
@@ -183,6 +220,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             case .connected:
                 applyConnectionStatus(nil)
                 restoreWorkspaceIfNeeded()
+                restoreUsageAnalyticsIfNeeded()
+                refreshProjectLabels()
+                presentOnboardingIfNeeded()
             case .connecting:
                 applyConnectionStatus("Connecting")
             case .disconnected:
@@ -203,6 +243,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let self, workspace.container(for: event.id) != nil else { return }
             applySessionStatus(event.status.title, for: event.id)
             recordNotification(for: event)
+            usageRecorder.recordStatus(
+                sessionID: event.id,
+                project: workspace.descriptor(for: event.id)?.project ?? "",
+                status: event.status,
+                at: Date().timeIntervalSince1970 * 1000
+            )
         }
         // The Rust-side attention latch. Deliberately a dock bounce and not a
         // second notification: the moment it fires, the session also reports
@@ -222,6 +268,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 paneTitle: workspace.descriptor(for: event.id)?.title ?? "",
                 exitCode: event.exitCode
             )
+            usageRecorder.recordExit(sessionID: event.id, at: Date().timeIntervalSince1970 * 1000)
         }
         connection.onError = { [weak self] error in
             self?.applyConnectionStatus(error.localizedDescription)
@@ -467,7 +514,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     workspace.paneIDs.compactMap { workspace.descriptor(for: $0) },
                     project: workspace.focusedPaneID
                         .flatMap { workspace.descriptor(for: $0)?.project } ?? ""
-                )
+                ),
+                projectLabels: projectLabels
             ),
             over: window
         )
@@ -499,7 +547,51 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             toggleSidebar(nil)
         case .clearNotifications:
             notifier.clear()
+        case let .searchBrain(query):
+            connection.search(query: query, scope: nil) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case let .success(hits):
+                    presentSearchResults(hits, for: query)
+                case .failure:
+                    palette.present(
+                        commands: [PaletteCommand(id: "search-error", title: "Brain search failed.", detail: nil, action: .noop)],
+                        over: window
+                    )
+                }
+            }
+        case let .revealProjectContext(project):
+            showInspector(for: project)
+        case .noop:
+            break
         }
+    }
+
+    /// The palette's "results mode": the same panel, its rows swapped for
+    /// what the search found — the native shape of the web palette's own
+    /// `searchResults` view replacing its action list in place.
+    private func presentSearchResults(_ hits: [BrainNodeView], for query: String) {
+        let rows: [PaletteCommand]
+        if hits.isEmpty {
+            rows = [
+                PaletteCommand(
+                    id: "no-results",
+                    title: "No matches in the brain for \u{201C}\(query)\u{201D}.",
+                    detail: nil,
+                    action: .noop
+                ),
+            ]
+        } else {
+            rows = hits.map { hit in
+                PaletteCommand(
+                    id: "hit:\(hit.id)",
+                    title: "\(hit.label) — \(SessionOutline.projectLabel(hit.project, labels: projectLabels))",
+                    detail: hit.kind,
+                    action: .revealProjectContext(project: hit.project)
+                )
+            }
+        }
+        palette.present(commands: rows, over: window)
     }
 
     @objc func toggleSidebar(_ sender: Any?) {
@@ -513,8 +605,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func reloadOutline() {
         outline.reload(
             panes: workspace.paneIDs.compactMap { workspace.descriptor(for: $0) },
-            focusedPaneID: workspace.focusedPaneID
+            focusedPaneID: workspace.focusedPaneID,
+            projectLabels: projectLabels
         )
+    }
+
+    /// The project directory every project-label-aware surface
+    /// (outline/palette/inspector) shares — refreshed on every connect
+    /// (cheap, read-only, unlike the `layout` row there is no destructive
+    /// write this could clobber, so no "read once" guard is needed).
+    func refreshProjectLabels() {
+        connection.listProjects { [weak self] result in
+            guard let self, case let .success(projects) = result else { return }
+            projectLabels = Dictionary(projects.map { ($0.id, $0.label) }, uniquingKeysWith: { _, newest in newest })
+            reloadOutline()
+        }
     }
 
     /// Renames a session — the name is stored on every pane in the group,
@@ -590,6 +695,93 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         write(NotificationFeedCodec.serialize(entries), to: SettingsKey.notifications)
     }
 
+    // MARK: - Usage analytics (Task 6b-2)
+
+    /// Reads the persisted `usage_analytics_v1` row once, alongside the
+    /// layout/notifications reads — same failure contract as
+    /// `restoreNotificationsIfNeeded`: a row that could not be read is not
+    /// an empty store, so the write gate stays shut and the read re-arms.
+    private func restoreUsageAnalyticsIfNeeded() {
+        guard !usageReadDispatched else { return }
+        usageReadDispatched = true
+        connection.getSetting(key: SettingsKey.usageAnalytics) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                usageReadCompleted = true
+                usageRecorder.restore(UsageAnalyticsCodec.deserialize(raw))
+            case .failure:
+                usageReadDispatched = false
+            }
+        }
+    }
+
+    private func persistUsageAnalytics(_ store: UsageAnalyticsStore) {
+        guard usageReadCompleted else { return }
+        write(UsageAnalyticsCodec.serialize(store), to: SettingsKey.usageAnalytics)
+    }
+
+    // MARK: - Onboarding (Task 6b-2)
+
+    /// The launch-time sequence: the auth gate first (if unresolved), then
+    /// FirstRun (if no project root has ever been picked) — the same order
+    /// `App.tsx`'s boot effect enforces (`needsAuthGate` resolves before
+    /// `needsOnboarding` is ever allowed to render anything). Dispatched
+    /// once per launch; a reconnect does not re-ask.
+    private func presentOnboardingIfNeeded() {
+        guard !onboardingDispatched else { return }
+        onboardingDispatched = true
+        authGateWindow.presentIfNeeded(over: window) { [weak self] in
+            self?.presentFirstRunIfNeeded()
+        }
+    }
+
+    private func presentFirstRunIfNeeded() {
+        FirstRunWindowController.needsPresenting(ingestion: connection) { [weak self] needed in
+            guard let self, needed else { return }
+            firstRunWindow.present(over: window) { [weak self] project in
+                guard let self else { return }
+                startSession(inDirectory: project.path ?? "", project: project.id)
+                refreshProjectLabels()
+            }
+        }
+    }
+
+    /// ⌘, — the Settings screen, hosted fresh every time it opens.
+    @objc func showSettings(_ sender: Any?) {
+        settingsWindowController.present(over: window, usageRecorder: usageRecorder)
+    }
+
+    // MARK: - Inspector (Task 6b-2)
+
+    /// ⌘I — the per-project brain-context panel, scoped to the focused
+    /// pane's project.
+    @objc func showInspectorPanel(_ sender: Any?) {
+        guard let project = workspace.focusedPaneID.flatMap({ workspace.descriptor(for: $0)?.project }) else { return }
+        showInspector(for: project)
+    }
+
+    /// Also what a palette search hit and a future project-menu row open —
+    /// one entry point regardless of what asked for it.
+    func showInspector(for project: String) {
+        inspector.show(
+            project: project,
+            label: SessionOutline.projectLabel(project, labels: projectLabels),
+            over: window
+        ) { [weak self] id, newLabel in
+            guard let self else { return }
+            projectLabels[id] = newLabel
+            reloadOutline()
+        }
+    }
+
+    private func refreshInspectorIfVisible(for paneID: String?) {
+        guard let paneID, let project = workspace.descriptor(for: paneID)?.project,
+              let visible = inspector.projectIfVisible, visible != project
+        else { return }
+        showInspector(for: project)
+    }
+
     /// Writes the live panes back to the shared `layout` row. Refused until
     /// the row has actually been read: a write from a window that has not
     /// seen it would overwrite the very panes it is about to restore.
@@ -624,6 +816,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func addPane(_ pane: RestoredPane, startSession: Bool) {
         let sessionID = pane.sessionID
         guard workspace.addPane(PaneDescriptor(pane)) else { return }
+        usageRecorder.recordPaneOpened(
+            paneID: sessionID,
+            sessionKey: pane.group,
+            project: pane.project,
+            at: Date().timeIntervalSince1970 * 1000
+        )
         let surface = workspace.surface(for: sessionID)
         surface?.onTitleChange = { [weak self] title in
             guard let self else { return }

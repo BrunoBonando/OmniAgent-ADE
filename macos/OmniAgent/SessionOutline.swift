@@ -142,11 +142,18 @@ enum SessionOutline {
         return pane.engine.rawValue
     }
 
-    /// What a project row says. The native build has no project *labels* yet
-    /// (`list_projects` is a separate read the outline does not make), so an
-    /// id is shown as-is and the ungrouped/no-project case is named rather
-    /// than shown as an empty row.
-    static func projectLabel(_ project: String) -> String {
-        project.isEmpty ? "No project" : project
+    /// What a project row says: the label `listProjects` returned for this
+    /// project id, else the id itself (a project the directory hasn't
+    /// loaded yet, or one the brain has never heard of), and the
+    /// ungrouped/no-project case named rather than shown as an empty row.
+    ///
+    /// `labels` is the one shared id -> label cache
+    /// `WorkspaceWindowController.projectLabels` builds from `listProjects`
+    /// — the fix for 6b-1 concern #3 ("project rows show ids, not labels")
+    /// is passing that same cache in here, not a second lookup path the
+    /// inspector/palette would otherwise need of their own.
+    static func projectLabel(_ project: String, labels: [String: String] = [:]) -> String {
+        guard !project.isEmpty else { return "No project" }
+        return labels[project] ?? project
     }
 }

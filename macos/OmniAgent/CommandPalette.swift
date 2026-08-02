@@ -12,6 +12,16 @@ enum PaletteAction: Equatable {
     case reattachFocusedPane
     case toggleSidebar
     case clearNotifications
+    /// Runs `SessionConnection.search` for the current query (Task 6a-2 —
+    /// the row Task 6b-1 promised would "come back when the query does").
+    case searchBrain(query: String)
+    /// One brain-search hit, selected — opens the inspector on the hit's
+    /// project, the closest real "go look at this" action available without
+    /// a map/graph view.
+    case revealProjectContext(project: String)
+    /// An informational row with nothing to run ("No matches…") — a
+    /// no-op rather than reusing an unrelated action for "does nothing".
+    case noop
 }
 
 /// One row.
@@ -26,10 +36,12 @@ struct PaletteCommand: Equatable {
 /// The ⌘K palette's contents and filtering — the native port of
 /// `ui/src/components/CommandPalette.tsx`'s action list.
 ///
-/// **No brain search.** The web palette's third section calls `search_brain`,
-/// which Task 6a deliberately did not route through the daemon; a row that
-/// opened an empty result list would be the dead UI this codebase refuses.
-/// The row comes back when the query does.
+/// **Brain search.** Task 6a-2 routed `search_brain` through the daemon, so
+/// the row Task 6b-1 deliberately left out ("it comes back when the query
+/// does") is back: `matches` appends a synthetic "Search brain for …" row
+/// whenever the query is non-empty. Running it is `WorkspaceWindowController`'s
+/// job (same split every other action already has) — this model only ever
+/// describes the row, never calls `SessionConnection.search` itself.
 struct CommandPaletteModel: Equatable {
     private(set) var commands: [PaletteCommand]
     private(set) var query = ""
@@ -46,7 +58,8 @@ struct CommandPaletteModel: Equatable {
         paneOrder: [String],
         focusedPaneID: String?,
         unreadNotifications: Int,
-        nextSessionName: String? = nil
+        nextSessionName: String? = nil,
+        projectLabels: [String: String] = [:]
     ) -> [PaletteCommand] {
         let byID = Dictionary(uniqueKeysWithValues: panes.map { ($0.sessionID, $0) })
         let ordered = paneOrder.compactMap { byID[$0] }
@@ -60,7 +73,7 @@ struct CommandPaletteModel: Equatable {
                     commands.append(
                         PaletteCommand(
                             id: "focus:\(paneID)",
-                            title: "Switch to \(SessionOutline.projectLabel(project.project)) — \(session.label) — \(SessionOutline.paneLabel(pane))",
+                            title: "Switch to \(SessionOutline.projectLabel(project.project, labels: projectLabels)) — \(session.label) — \(SessionOutline.paneLabel(pane))",
                             detail: pane.engine.rawValue,
                             action: .focusPane(sessionID: paneID)
                         )
@@ -115,10 +128,25 @@ struct CommandPaletteModel: Equatable {
     /// Case-insensitive substring on the row's title, order preserved — the
     /// same match the web palette does, deliberately not a fuzzy score: the
     /// list is short and stable ordering is what makes muscle memory work.
+    ///
+    /// A non-empty query also appends a trailing "Search brain for …" row —
+    /// present whenever there is something to search for, exactly like the
+    /// web palette's own always-offered search row, regardless of whether
+    /// any action also matched.
     var matches: [PaletteCommand] {
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !needle.isEmpty else { return commands }
-        return commands.filter { $0.title.lowercased().contains(needle) }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return commands }
+        let needle = trimmed.lowercased()
+        var rows = commands.filter { $0.title.lowercased().contains(needle) }
+        rows.append(
+            PaletteCommand(
+                id: "search-brain",
+                title: "Search brain for \u{201C}\(trimmed)\u{201D}",
+                detail: nil,
+                action: .searchBrain(query: trimmed)
+            )
+        )
+        return rows
     }
 
     var selected: PaletteCommand? {

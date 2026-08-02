@@ -27,6 +27,10 @@ final class SessionOutlineView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
     private var tree: [ProjectSessionsNode] = []
     private var panes: [String: PaneDescriptor] = [:]
     private var focusedPaneID: String?
+    /// The shared project id -> label cache `WorkspaceWindowController`
+    /// builds from `listProjects` — see `SessionOutline.projectLabel`'s doc
+    /// for why this replaces the raw-id row (6b-1 concern #3).
+    private var projectLabels: [String: String] = [:]
     /// Set while the outline is applying a model change, so the selection it
     /// restores does not echo back as a user intent.
     private var isReloading = false
@@ -80,14 +84,15 @@ final class SessionOutlineView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
     /// yanks the selection back, so a rename would be impossible to finish on
     /// any window with a busy pane in it. The newest request is kept and
     /// applied the moment editing ends — never dropped.
-    func reload(panes: [PaneDescriptor], focusedPaneID: String?) {
+    func reload(panes: [PaneDescriptor], focusedPaneID: String?, projectLabels: [String: String] = [:]) {
         guard !isRenaming else {
-            pendingReload = (panes, focusedPaneID)
+            pendingReload = (panes, focusedPaneID, projectLabels)
             return
         }
         pendingReload = nil
         self.panes = Dictionary(uniqueKeysWithValues: panes.map { ($0.sessionID, $0) })
         self.focusedPaneID = focusedPaneID
+        self.projectLabels = projectLabels
         tree = SessionOutline.group(panes, focusedPaneID: focusedPaneID)
         isReloading = true
         outlineView.reloadData()
@@ -108,12 +113,12 @@ final class SessionOutlineView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
     /// a view-based table: the editing control is the `NSTextField` inside
     /// the cell, not the table itself.
     private(set) var isRenaming = false
-    private var pendingReload: (panes: [PaneDescriptor], focusedPaneID: String?)?
+    private var pendingReload: (panes: [PaneDescriptor], focusedPaneID: String?, projectLabels: [String: String])?
 
     private func editingEnded() {
         isRenaming = false
         guard let pending = pendingReload else { return }
-        reload(panes: pending.panes, focusedPaneID: pending.focusedPaneID)
+        reload(panes: pending.panes, focusedPaneID: pending.focusedPaneID, projectLabels: pending.projectLabels)
     }
 
     /// The outline's items. A value type keyed by id rather than the model
@@ -173,7 +178,7 @@ final class SessionOutlineView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         switch item {
         case let .project(project):
             let row = dequeue(kind: .project)
-            row.apply(title: SessionOutline.projectLabel(project), detail: nil, kind: .project)
+            row.apply(title: SessionOutline.projectLabel(project, labels: projectLabels), detail: nil, kind: .project)
             return row
         case let .session(project, group):
             guard let session = sessionNode(project: project, group: group) else { return nil }

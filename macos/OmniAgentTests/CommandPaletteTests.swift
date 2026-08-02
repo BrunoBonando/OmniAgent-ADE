@@ -82,6 +82,42 @@ final class CommandPaletteTests: XCTestCase {
         )
     }
 
+    /// 6b-1 concern #3: a project row (here, the palette's "Switch to …"
+    /// title) shows the id when no label is known, and the real label once
+    /// `WorkspaceWindowController.projectLabels` has one — the same cache
+    /// the outline and the inspector share, not a second lookup.
+    func testSwitchRowsUseTheProjectLabelCacheWhenProvidedAndFallBackToTheID() {
+        let noLabels = CommandPaletteModel.build(
+            panes: [pane("a", project: "alpha", group: "g1")],
+            paneOrder: ["a"],
+            focusedPaneID: nil,
+            unreadNotifications: 0
+        )
+        XCTAssertEqual(noLabels.first { $0.id == "focus:a" }?.title, "Switch to alpha — Session 1 — shell")
+
+        let withLabels = CommandPaletteModel.build(
+            panes: [pane("a", project: "alpha", group: "g1")],
+            paneOrder: ["a"],
+            focusedPaneID: nil,
+            unreadNotifications: 0,
+            projectLabels: ["alpha": "Alpha Project"]
+        )
+        XCTAssertEqual(withLabels.first { $0.id == "focus:a" }?.title, "Switch to Alpha Project — Session 1 — shell")
+    }
+
+    // MARK: - brain search (Task 6a-2/6b-2)
+
+    func testTheSearchBrainRowIsAbsentWithNoQueryAndAppearsOnceThereIsOne() {
+        var model = CommandPaletteModel(commands: sample)
+        XCTAssertNil(model.matches.first { $0.id == "search-brain" }, "no query, nothing to search for yet")
+
+        model.update(query: "graph")
+        let row = model.matches.first { $0.id == "search-brain" }
+        XCTAssertEqual(row?.title, "Search brain for \u{201C}graph\u{201D}")
+        XCTAssertEqual(row?.action, .searchBrain(query: "graph"))
+        XCTAssertEqual(model.matches.last?.id, "search-brain", "always trails the real matches")
+    }
+
     // MARK: - filtering and selection
 
     func testFilteringIsACaseInsensitiveSubstringThatPreservesOrder() {
@@ -89,7 +125,11 @@ final class CommandPaletteTests: XCTestCase {
 
         model.update(query: "PANE")
 
-        XCTAssertEqual(model.matches.map(\.id), ["focus:a", "new-pane", "close-pane"])
+        XCTAssertEqual(
+            model.matches.map(\.id),
+            ["focus:a", "new-pane", "close-pane", "search-brain"],
+            "a non-empty query always trails with the search-brain row too"
+        )
     }
 
     func testAnEmptyOrWhitespaceQueryShowsEverything() {
@@ -119,14 +159,12 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(model.selectedIndex, sample.count - 1, "down at the bottom stays at the bottom")
     }
 
-    func testAQueryThatMatchesNothingSelectsNothingRatherThanTheWrongRow() {
+    func testAQueryThatMatchesNoActionStillOffersTheSearchBrainRow() {
         var model = CommandPaletteModel(commands: sample)
         model.update(query: "zzzz")
 
-        XCTAssertTrue(model.matches.isEmpty)
-        XCTAssertNil(model.selected)
-        model.moveSelection(by: 1)
-        XCTAssertNil(model.selected)
+        XCTAssertEqual(model.matches.map(\.id), ["search-brain"], "nothing to switch to, but always something to search for")
+        XCTAssertEqual(model.selected?.action, .searchBrain(query: "zzzz"))
     }
 
     func testResetClearsTheQueryAndTheHighlightAlongWithTheList() {

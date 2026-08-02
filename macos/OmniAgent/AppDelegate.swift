@@ -73,6 +73,11 @@ enum ApplicationMenus {
             item("About OmniAgent", #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
         )
         application.addItem(.separator())
+        // Task 6b-2's SwiftUI settings screen — the standard macOS
+        // Settings/Preferences slot (⌘,), traveling the responder chain
+        // like every other command in this app.
+        application.addItem(item("Settings…", Selector(("showSettings:")), ","))
+        application.addItem(.separator())
         let services = NSMenu(title: "Services")
         application.addItem(withSubmenu: services, title: "Services")
         NSApp.servicesMenu = services
@@ -158,6 +163,9 @@ enum ApplicationMenus {
         window.addItem(
             item("Toggle Sidebar", Selector(("toggleSidebar:")), "s", [.command, .control])
         )
+        // Task 6b-2's per-project brain-context panel, scoped to the
+        // focused pane's project.
+        window.addItem(item("Show Inspector", Selector(("showInspectorPanel:")), "i"))
         window.addItem(.separator())
         window.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
         window.addItem(item("Zoom", #selector(NSWindow.performZoom(_:))))

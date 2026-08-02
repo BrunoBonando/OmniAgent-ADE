@@ -39,6 +39,29 @@
 		10000000000000000000001E /* CommandPaletteController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001F /* CommandPaletteController.swift */; };
 		10000000000000000000001F /* WorkspaceToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000020 /* WorkspaceToolbar.swift */; };
 		100000000000000000000020 /* CommandPaletteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000021 /* CommandPaletteTests.swift */; };
+		10000000000000000000021 /* SettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000022 /* SettingsStore.swift */; };
+		10000000000000000000022 /* BrainClients.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000023 /* BrainClients.swift */; };
+		10000000000000000000023 /* AuthGateState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000024 /* AuthGateState.swift */; };
+		10000000000000000000024 /* AuthGateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000025 /* AuthGateView.swift */; };
+		10000000000000000000025 /* OnboardingState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000026 /* OnboardingState.swift */; };
+		10000000000000000000026 /* FirstRunView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000027 /* FirstRunView.swift */; };
+		10000000000000000000027 /* UsageAnalytics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000028 /* UsageAnalytics.swift */; };
+		10000000000000000000028 /* UsageAnalyticsRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000029 /* UsageAnalyticsRecorder.swift */; };
+		10000000000000000000029 /* UsageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000002A /* UsageView.swift */; };
+		1000000000000000000002A /* InspectorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000002B /* InspectorView.swift */; };
+		1000000000000000000002B /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000002C /* SettingsView.swift */; };
+		1000000000000000000002C /* SettingsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000002D /* SettingsStoreTests.swift */; };
+		1000000000000000000002D /* AuthGateStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000002E /* AuthGateStateTests.swift */; };
+		1000000000000000000002E /* AuthGateCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000002F /* AuthGateCoordinatorTests.swift */; };
+		1000000000000000000002F /* OnboardingStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000030 /* OnboardingStateTests.swift */; };
+		10000000000000000000030 /* FirstRunViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000031 /* FirstRunViewModelTests.swift */; };
+		10000000000000000000031 /* UsageAnalyticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000032 /* UsageAnalyticsTests.swift */; };
+		10000000000000000000032 /* UsageAnalyticsRecorderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000033 /* UsageAnalyticsRecorderTests.swift */; };
+		10000000000000000000033 /* BrainAdminClientTestDouble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000034 /* BrainAdminClientTestDouble.swift */; };
+		10000000000000000000034 /* InspectorViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000035 /* InspectorViewModelTests.swift */; };
+		10000000000000000000035 /* UsageViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000036 /* UsageViewModelTests.swift */; };
+		10000000000000000000036 /* SettingsViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000037 /* SettingsViewModelTests.swift */; };
+		10000000000000000000037 /* WorkspaceWindowControllerTask6b2Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000038 /* WorkspaceWindowControllerTask6b2Tests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -85,6 +108,29 @@
 		20000000000000000000001F /* CommandPaletteController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandPaletteController.swift; sourceTree = "<group>"; };
 		200000000000000000000020 /* WorkspaceToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceToolbar.swift; sourceTree = "<group>"; };
 		200000000000000000000021 /* CommandPaletteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandPaletteTests.swift; sourceTree = "<group>"; };
+		20000000000000000000022 /* SettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStore.swift; sourceTree = "<group>"; };
+		20000000000000000000023 /* BrainClients.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrainClients.swift; sourceTree = "<group>"; };
+		20000000000000000000024 /* AuthGateState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthGateState.swift; sourceTree = "<group>"; };
+		20000000000000000000025 /* AuthGateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthGateView.swift; sourceTree = "<group>"; };
+		20000000000000000000026 /* OnboardingState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingState.swift; sourceTree = "<group>"; };
+		20000000000000000000027 /* FirstRunView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstRunView.swift; sourceTree = "<group>"; };
+		20000000000000000000028 /* UsageAnalytics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageAnalytics.swift; sourceTree = "<group>"; };
+		20000000000000000000029 /* UsageAnalyticsRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageAnalyticsRecorder.swift; sourceTree = "<group>"; };
+		2000000000000000000002A /* UsageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageView.swift; sourceTree = "<group>"; };
+		2000000000000000000002B /* InspectorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorView.swift; sourceTree = "<group>"; };
+		2000000000000000000002C /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		2000000000000000000002D /* SettingsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStoreTests.swift; sourceTree = "<group>"; };
+		2000000000000000000002E /* AuthGateStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthGateStateTests.swift; sourceTree = "<group>"; };
+		2000000000000000000002F /* AuthGateCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthGateCoordinatorTests.swift; sourceTree = "<group>"; };
+		20000000000000000000030 /* OnboardingStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingStateTests.swift; sourceTree = "<group>"; };
+		20000000000000000000031 /* FirstRunViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstRunViewModelTests.swift; sourceTree = "<group>"; };
+		20000000000000000000032 /* UsageAnalyticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageAnalyticsTests.swift; sourceTree = "<group>"; };
+		20000000000000000000033 /* UsageAnalyticsRecorderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageAnalyticsRecorderTests.swift; sourceTree = "<group>"; };
+		20000000000000000000034 /* BrainAdminClientTestDouble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrainAdminClientTestDouble.swift; sourceTree = "<group>"; };
+		20000000000000000000035 /* InspectorViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorViewModelTests.swift; sourceTree = "<group>"; };
+		20000000000000000000036 /* UsageViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageViewModelTests.swift; sourceTree = "<group>"; };
+		20000000000000000000037 /* SettingsViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViewModelTests.swift; sourceTree = "<group>"; };
+		20000000000000000000038 /* WorkspaceWindowControllerTask6b2Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowControllerTask6b2Tests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -137,6 +183,17 @@
 				20000000000000000000001E /* CommandPalette.swift */,
 				20000000000000000000001F /* CommandPaletteController.swift */,
 				200000000000000000000020 /* WorkspaceToolbar.swift */,
+				20000000000000000000022 /* SettingsStore.swift */,
+				20000000000000000000023 /* BrainClients.swift */,
+				20000000000000000000024 /* AuthGateState.swift */,
+				20000000000000000000025 /* AuthGateView.swift */,
+				20000000000000000000026 /* OnboardingState.swift */,
+				20000000000000000000027 /* FirstRunView.swift */,
+				20000000000000000000028 /* UsageAnalytics.swift */,
+				20000000000000000000029 /* UsageAnalyticsRecorder.swift */,
+				2000000000000000000002A /* UsageView.swift */,
+				2000000000000000000002B /* InspectorView.swift */,
+				2000000000000000000002C /* SettingsView.swift */,
 			);
 			path = OmniAgent;
 			sourceTree = "<group>";
@@ -156,6 +213,18 @@
 				20000000000000000000001A /* SessionNotifierTests.swift */,
 				20000000000000000000001D /* SessionOutlineTests.swift */,
 				200000000000000000000021 /* CommandPaletteTests.swift */,
+				2000000000000000000002D /* SettingsStoreTests.swift */,
+				2000000000000000000002E /* AuthGateStateTests.swift */,
+				2000000000000000000002F /* AuthGateCoordinatorTests.swift */,
+				20000000000000000000030 /* OnboardingStateTests.swift */,
+				20000000000000000000031 /* FirstRunViewModelTests.swift */,
+				20000000000000000000032 /* UsageAnalyticsTests.swift */,
+				20000000000000000000033 /* UsageAnalyticsRecorderTests.swift */,
+				20000000000000000000034 /* BrainAdminClientTestDouble.swift */,
+				20000000000000000000035 /* InspectorViewModelTests.swift */,
+				20000000000000000000036 /* UsageViewModelTests.swift */,
+				20000000000000000000037 /* SettingsViewModelTests.swift */,
+				20000000000000000000038 /* WorkspaceWindowControllerTask6b2Tests.swift */,
 			);
 			path = OmniAgentTests;
 			sourceTree = "<group>";
@@ -294,6 +363,17 @@
 				10000000000000000000001D /* CommandPalette.swift in Sources */,
 				10000000000000000000001E /* CommandPaletteController.swift in Sources */,
 				10000000000000000000001F /* WorkspaceToolbar.swift in Sources */,
+				10000000000000000000021 /* SettingsStore.swift in Sources */,
+				10000000000000000000022 /* BrainClients.swift in Sources */,
+				10000000000000000000023 /* AuthGateState.swift in Sources */,
+				10000000000000000000024 /* AuthGateView.swift in Sources */,
+				10000000000000000000025 /* OnboardingState.swift in Sources */,
+				10000000000000000000026 /* FirstRunView.swift in Sources */,
+				10000000000000000000027 /* UsageAnalytics.swift in Sources */,
+				10000000000000000000028 /* UsageAnalyticsRecorder.swift in Sources */,
+				10000000000000000000029 /* UsageView.swift in Sources */,
+				1000000000000000000002A /* InspectorView.swift in Sources */,
+				1000000000000000000002B /* SettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -312,6 +392,18 @@
 				100000000000000000000019 /* SessionNotifierTests.swift in Sources */,
 				10000000000000000000001C /* SessionOutlineTests.swift in Sources */,
 				100000000000000000000020 /* CommandPaletteTests.swift in Sources */,
+				1000000000000000000002C /* SettingsStoreTests.swift in Sources */,
+				1000000000000000000002D /* AuthGateStateTests.swift in Sources */,
+				1000000000000000000002E /* AuthGateCoordinatorTests.swift in Sources */,
+				1000000000000000000002F /* OnboardingStateTests.swift in Sources */,
+				10000000000000000000030 /* FirstRunViewModelTests.swift in Sources */,
+				10000000000000000000031 /* UsageAnalyticsTests.swift in Sources */,
+				10000000000000000000032 /* UsageAnalyticsRecorderTests.swift in Sources */,
+				10000000000000000000033 /* BrainAdminClientTestDouble.swift in Sources */,
+				10000000000000000000034 /* InspectorViewModelTests.swift in Sources */,
+				10000000000000000000035 /* UsageViewModelTests.swift in Sources */,
+				10000000000000000000036 /* SettingsViewModelTests.swift in Sources */,
+				10000000000000000000037 /* WorkspaceWindowControllerTask6b2Tests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
