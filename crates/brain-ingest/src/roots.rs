@@ -643,6 +643,12 @@ pub fn rebuild(
     data_dir: &Path,
     store_slot: &mut Store,
 ) -> Result<(Vec<String>, Vec<(String, PathBuf)>)> {
+    // If the *other* long-lived process (native app vs. Tauri app) already
+    // rebuilt since this handle was opened, `store_slot` is pointing at an
+    // orphaned inode and its settings are a stale snapshot — carrying those
+    // forward would resurrect them over whatever has been written since. See
+    // `brain_core::Store::was_replaced`.
+    store_slot.reopen_if_replaced()?;
     let preserved: HashMap<String, String> = store_slot.all_settings()?.into_iter().collect();
     let roots = get_roots(store_slot)?;
     // Individually-added projects (`add_project`) aren't under any known

@@ -19,7 +19,7 @@
 pub mod agents;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use mcp_server::tools::{self, ToolContext};
 use serde_json::{json, Value};
@@ -146,6 +146,26 @@ impl BrainState {
         })
     }
 
+    /// Locks the brain store, reopening it first if `brain.db` was replaced
+    /// underneath this process — **the only way a command should reach
+    /// `self.store`**.
+    ///
+    /// Both this app and `omniagent-pty-daemon` (which the native macOS app
+    /// drives) hold long-lived `Store` handles against one `brain.db`, and
+    /// Task 7 mandates a period where both run side by side. "Rebuild brain"
+    /// from either one goes through `brain_ingest::roots::rebuild_store`,
+    /// which `unlink`s `brain.db` and creates a fresh file at the same path,
+    /// swapping only the rebuilder's own handle. Everything this process
+    /// wrote afterwards would keep reporting success against the orphaned,
+    /// now-nameless inode and be gone on the next launch. The mirror of
+    /// `omniagent_pty_daemon::server::lock_store`; see
+    /// `brain_core::Store::was_replaced` for the mechanism.
+    pub fn locked_store(&self) -> Result<MutexGuard<'_, brain_core::Store>, String> {
+        let mut guard = self.store.lock().map_err(|e| e.to_string())?;
+        guard.reopen_if_replaced().map_err(|e| e.to_string())?;
+        Ok(guard)
+    }
+
     fn tool_ctx<'a>(&'a self, store: &'a brain_core::Store) -> ToolContext<'a> {
         ToolContext {
             store,
@@ -168,7 +188,7 @@ pub fn brain_query(
     scope: Option<String>,
     brain: State<'_, BrainState>,
 ) -> Result<Value, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     let ctx = brain.tool_ctx(&store);
     match kind.as_str() {
         "list_projects" => tools::list_projects(&ctx, &json!({})),
@@ -187,7 +207,7 @@ pub fn brain_query(
 /// renders it down to the flat markdown text passed to `session_create`.
 #[tauri::command]
 pub fn brain_get_context(project: String, brain: State<'_, BrainState>) -> Result<Value, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     let ctx = brain.tool_ctx(&store);
     tools::get_context(&ctx, &json!({ "project": project })).map_err(|e| e.to_string())
 }
@@ -198,7 +218,7 @@ pub fn brain_get_context(project: String, brain: State<'_, BrainState>) -> Resul
 /// covered by a plain Rust unit test on [`render_briefing`] below.
 #[tauri::command]
 pub fn brain_briefing(project: String, brain: State<'_, BrainState>) -> Result<String, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     let ctx = brain.tool_ctx(&store);
     let context =
         tools::get_context(&ctx, &json!({ "project": project })).map_err(|e| e.to_string())?;
@@ -209,7 +229,7 @@ pub fn brain_briefing(project: String, brain: State<'_, BrainState>) -> Result<S
 /// persisted tab layout). `None` when unset.
 #[tauri::command]
 pub fn settings_get(key: String, brain: State<'_, BrainState>) -> Result<Option<String>, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     store.get_setting(&key).map_err(|e| e.to_string())
 }
 
@@ -220,7 +240,7 @@ pub fn settings_set(
     value: String,
     brain: State<'_, BrainState>,
 ) -> Result<(), String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     store.set_setting(&key, &value).map_err(|e| e.to_string())
 }
 
@@ -229,7 +249,7 @@ pub fn settings_set(
 /// other command in this file.
 #[tauri::command]
 pub fn enrich_queue_pending_count(brain: State<'_, BrainState>) -> Result<usize, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     store.pending_job_count().map_err(|e| e.to_string())
 }
 
@@ -1144,6 +1164,51 @@ mod tests {
                 Some("codex".to_string())
             );
         }
+    }
+
+    /// Final whole-branch review, Important #1: the native app's daemon can
+    /// rebuild `brain.db` out from under this process. `locked_store` is what
+    /// keeps every command's subsequent write landing in the file that
+    /// actually exists rather than in the orphaned inode.
+    #[test]
+    fn locked_store_reopens_after_the_other_process_rebuilt_brain_db() {
+        let dir = tempdir().unwrap();
+        let state = BrainState::open(dir.path().to_path_buf()).unwrap();
+        state
+            .locked_store()
+            .unwrap()
+            .set_setting("layout", "before-the-rebuild")
+            .unwrap();
+
+        // The other process's "Rebuild brain" (brain_ingest::roots::
+        // rebuild_store): unlink brain.db + siblings, fresh file, same path.
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut name = dir.path().join("brain.db").into_os_string();
+            name.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(name));
+        }
+        let rebuilt = brain_core::Store::open(dir.path()).unwrap();
+        rebuilt
+            .set_setting("notifications", "written-by-the-rebuilder")
+            .unwrap();
+        drop(rebuilt);
+
+        state
+            .locked_store()
+            .unwrap()
+            .set_setting("layout", "after-the-rebuild")
+            .unwrap();
+
+        let verify = brain_core::Store::open(dir.path()).unwrap();
+        assert_eq!(
+            verify.get_setting("layout").unwrap().as_deref(),
+            Some("after-the-rebuild"),
+            "the write went to an orphaned inode instead of brain.db"
+        );
+        assert_eq!(
+            verify.get_setting("notifications").unwrap().as_deref(),
+            Some("written-by-the-rebuilder")
+        );
     }
 
     #[test]

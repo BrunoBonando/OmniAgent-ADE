@@ -412,6 +412,83 @@ async fn settings_persist_across_connections_and_daemon_restarts() {
     restarted.stop().await;
 }
 
+/// The cross-process "Rebuild brain" hazard (final whole-branch review,
+/// Important #1). The daemon and the Tauri app each hold their own
+/// long-lived `Store` against one `brain.db`; a rebuild from *either* side
+/// unlinks that file and creates a new one at the same path, swapping only
+/// the rebuilder's handle. Without `lock_store`'s inode check the daemon
+/// would go on writing `layout`/`notifications`/`usage_analytics_v1` into
+/// the orphaned inode — every write reported `{"ok": true}`, every one lost
+/// on the next daemon restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_written_after_another_process_rebuilt_brain_db_land_in_the_new_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = TestServer::start(temp.path()).await;
+    let data_dir = brain_data_dir(temp.path());
+
+    let mut client = Client::connect(&server.socket).await;
+    client
+        .send_json(
+            MessageKind::SetSetting,
+            &serde_json::json!({"key": "layout", "value": "before-the-rebuild"}),
+        )
+        .await;
+    client.read_kind(MessageKind::Response).await;
+
+    // The *other* process's "Rebuild brain" — exactly what
+    // `brain_ingest::roots::rebuild_store` does (unlink brain.db and its
+    // WAL/SHM/journal siblings, open a fresh file at the same path), run
+    // here from outside the daemon because the point is that the daemon is
+    // not the process that did it.
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut name = data_dir.join("brain.db").into_os_string();
+        name.push(suffix);
+        let _ = std::fs::remove_file(std::path::PathBuf::from(name));
+    }
+    let rebuilt = Store::open(&data_dir).unwrap();
+    rebuilt
+        .set_setting("notifications", "written-by-the-rebuilder")
+        .unwrap();
+    drop(rebuilt);
+
+    client
+        .send_json(
+            MessageKind::SetSetting,
+            &serde_json::json!({"key": "layout", "value": "after-the-rebuild"}),
+        )
+        .await;
+    client.read_kind(MessageKind::Response).await;
+
+    // Read back through the daemon...
+    client
+        .send_json(
+            MessageKind::GetSetting,
+            &serde_json::json!({"key": "notifications"}),
+        )
+        .await;
+    let got = client.read_kind(MessageKind::Response).await;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&got.payload).unwrap(),
+        serde_json::json!({"value": "written-by-the-rebuilder"}),
+        "the daemon is still reading the pre-rebuild inode"
+    );
+    drop(client);
+    server.stop().await;
+
+    // ...and, decisively, off the file that actually lives on disk.
+    let verify = Store::open(&data_dir).unwrap();
+    assert_eq!(
+        verify.get_setting("layout").unwrap().as_deref(),
+        Some("after-the-rebuild"),
+        "the daemon's write went to an orphaned inode instead of brain.db"
+    );
+    assert_eq!(
+        verify.get_setting("notifications").unwrap().as_deref(),
+        Some("written-by-the-rebuilder"),
+        "and it must not have clobbered the rebuilt file"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn eight_sessions_survive_creator_disconnects_and_reattach() {
     let temp = tempfile::tempdir().unwrap();

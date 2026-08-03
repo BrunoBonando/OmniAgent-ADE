@@ -105,7 +105,7 @@ pub fn map_graph(
     filter: Vec<String>,
     brain: State<'_, BrainState>,
 ) -> Result<MapGraph, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     build_map_graph(&store, project.as_deref(), &expanded, &filter).map_err(|e| e.to_string())
 }
 
@@ -335,7 +335,7 @@ pub fn map_node_detail(
     id: String,
     brain: State<'_, BrainState>,
 ) -> Result<Option<MapNodeDetail>, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     build_map_node_detail(&store, &id).map_err(|e| e.to_string())
 }
 

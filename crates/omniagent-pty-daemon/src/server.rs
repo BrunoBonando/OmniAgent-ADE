@@ -368,9 +368,7 @@ async fn handle_client(
             }
             MessageKind::GetSetting => {
                 let setting = parse_json::<SettingKey>(&frame.payload)?;
-                let value = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let value = lock_store(&settings)
                     .and_then(|store| store.get_setting(&setting.key).map_err(Into::into));
                 match value {
                     Ok(value) => {
@@ -387,9 +385,7 @@ async fn handle_client(
             }
             MessageKind::SetSetting => {
                 let setting = parse_json::<SettingValue>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| {
                         store
                             .set_setting(&setting.key, &setting.value)
@@ -402,9 +398,7 @@ async fn handle_client(
             }
             MessageKind::BrainListProjects => {
                 parse_json::<serde_json::Value>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| {
                         tools::list_projects(&tool_context(&store, &data_dir), &serde_json::json!({}))
                             .map_err(|error| anyhow!("{error}"))
@@ -424,9 +418,7 @@ async fn handle_client(
             }
             MessageKind::BrainGetContext => {
                 let payload = parse_json::<BrainGetContextPayload>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| {
                         tools::get_context(
                             &tool_context(&store, &data_dir),
@@ -449,9 +441,7 @@ async fn handle_client(
             }
             MessageKind::RootsStartIngest => {
                 let payload = parse_json::<RootsStartIngestPayload>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| {
                         roots::start_ingest(data_dir.clone(), &store, &ingestion, &payload.path)
                     });
@@ -472,9 +462,7 @@ async fn handle_client(
             }
             MessageKind::RootsList => {
                 parse_json::<serde_json::Value>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| roots::get_roots(&store));
                 match result {
                     Ok(list) => {
@@ -491,9 +479,7 @@ async fn handle_client(
             }
             MessageKind::RootsBiggestProject => {
                 parse_json::<serde_json::Value>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| roots::biggest_project(&store));
                 match result {
                     Ok(project) => {
@@ -510,9 +496,7 @@ async fn handle_client(
             }
             MessageKind::RootsAddProject => {
                 let payload = parse_json::<RootsAddProjectPayload>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| {
                         roots::add_project(
                             &store,
@@ -537,9 +521,7 @@ async fn handle_client(
             }
             MessageKind::RootsRenameProject => {
                 let payload = parse_json::<RootsRenameProjectPayload>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| roots::rename_project(&store, &payload.id, &payload.new_label));
                 match result {
                     Ok(()) => send_response(&writer, request).await,
@@ -548,9 +530,7 @@ async fn handle_client(
             }
             MessageKind::RootsPausedProjects => {
                 parse_json::<serde_json::Value>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| roots::paused_projects(&store));
                 match result {
                     Ok(projects) => {
@@ -567,9 +547,7 @@ async fn handle_client(
             }
             MessageKind::RootsSetPaused => {
                 let payload = parse_json::<RootsSetPausedPayload>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| {
                         roots::set_paused(&store, &payload.project, payload.paused)
                     });
@@ -580,9 +558,7 @@ async fn handle_client(
             }
             MessageKind::RootsStaleness => {
                 parse_json::<serde_json::Value>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| roots::staleness(&store));
                 match result {
                     Ok(projects) => {
@@ -599,9 +575,7 @@ async fn handle_client(
             }
             MessageKind::RootsReingestProject => {
                 let payload = parse_json::<RootsReingestProjectPayload>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| roots::reingest_project(&store, &payload.project));
                 match result {
                     Ok(()) => send_response(&writer, request).await,
@@ -618,9 +592,7 @@ async fn handle_client(
             }
             MessageKind::BrainSearch => {
                 let payload = parse_json::<BrainSearchPayload>(&frame.payload)?;
-                let result = settings
-                    .lock()
-                    .map_err(|error| anyhow!("settings lock poisoned: {error}"))
+                let result = lock_store(&settings)
                     .and_then(|store| {
                         tools::search_brain(
                             &tool_context(&store, &data_dir),
@@ -663,6 +635,33 @@ async fn handle_client(
 
 fn parse_json<T: DeserializeOwned>(payload: &[u8]) -> Result<T> {
     serde_json::from_slice(payload).context("decode control JSON")
+}
+
+/// Locks the shared brain store, reopening it first if `brain.db` was
+/// replaced underneath this process.
+///
+/// The daemon is the *second* long-lived holder of a `Store` handle against
+/// one `brain.db` (the Tauri app is the first, and Task 7 mandates a period
+/// where both run side by side). "Rebuild brain" — from either app — goes
+/// through `brain_ingest::roots::rebuild_store`, which `unlink`s `brain.db`
+/// and creates a fresh file at the same path, swapping only *its own*
+/// process's handle. Everything the other process subsequently writes
+/// (`layout`, `notifications`, `usage_analytics_v1`, every `roots::*` row)
+/// would keep succeeding against the now-nameless inode and vanish for good
+/// the next time that process restarted.
+///
+/// One `stat(2)` of an almost-always-cached path per control request is a
+/// rounding error next to the SQLite work each of these handlers goes on to
+/// do, so this is checked on every store operation rather than on a timer:
+/// no window, no background task, no extra state to get wrong.
+fn lock_store(settings: &std::sync::Mutex<Store>) -> Result<std::sync::MutexGuard<'_, Store>> {
+    let mut guard = settings
+        .lock()
+        .map_err(|error| anyhow!("settings lock poisoned: {error}"))?;
+    guard
+        .reopen_if_replaced()
+        .context("reopen the shared brain.db after it was rebuilt")?;
+    Ok(guard)
 }
 
 /// Builds the `mcp_server::tools` dispatch context for one brain-store

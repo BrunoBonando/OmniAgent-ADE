@@ -188,7 +188,7 @@ pub fn pending_notes_list(
     project: Option<String>,
     brain: State<'_, BrainState>,
 ) -> Result<Vec<PendingNoteView>, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     list_pending_notes(&store, project.as_deref()).map_err(|e| e.to_string())
 }
 
@@ -196,7 +196,7 @@ pub fn pending_notes_list(
 /// search/briefings) and rewrites its on-disk frontmatter for consistency.
 #[tauri::command]
 pub fn pending_notes_approve(node_id: String, brain: State<'_, BrainState>) -> Result<(), String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     approve_note(&store, &node_id).map_err(|e| e.to_string())
 }
 
@@ -204,7 +204,7 @@ pub fn pending_notes_approve(node_id: String, brain: State<'_, BrainState>) -> R
 /// existed, its `.md` file on disk.
 #[tauri::command]
 pub fn pending_notes_discard(node_id: String, brain: State<'_, BrainState>) -> Result<(), String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     discard_note(&store, &node_id).map_err(|e| e.to_string())
 }
 

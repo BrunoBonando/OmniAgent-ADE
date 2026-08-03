@@ -1,9 +1,40 @@
 use rusqlite::{params, Connection, OptionalExtension};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Store {
     pub(crate) conn: Connection,
+    /// Where this store was opened from, and which on-disk file it got.
+    /// `None` for [`Store::open_in_memory`] — a `:memory:` database has no
+    /// file for anyone to replace.
+    origin: Option<StoreOrigin>,
+}
+
+/// The `data_dir` a [`Store`] was opened from plus the identity of the
+/// `brain.db` inode it actually opened — what [`Store::was_replaced`]
+/// compares against.
+struct StoreOrigin {
+    data_dir: PathBuf,
+    identity: FileIdentity,
+}
+
+/// A POSIX file identity: the `(st_dev, st_ino)` pair, which is what
+/// actually distinguishes "the same file" from "a different file that
+/// happens to live at the same path". Path equality is not enough here —
+/// "Rebuild brain" `unlink`s `brain.db` and creates a *new* file at the
+/// identical path, so only the inode changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    std::fs::metadata(path).ok().map(|meta| FileIdentity {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,13 +349,72 @@ impl Store {
     ///   commit.
     pub fn open(data_dir: &Path) -> rusqlite::Result<Store> {
         std::fs::create_dir_all(data_dir).expect("create data dir");
-        let conn = Connection::open(data_dir.join("brain.db"))?;
+        let path = data_dir.join("brain.db");
+        let conn = Connection::open(&path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
         )?;
         conn.execute_batch(include_str!("schema.sql"))?;
         ensure_enrich_queue_pending_dedup_index(&conn)?;
-        Ok(Store { conn })
+        // Recorded *after* the connection is open and the schema exists, so
+        // the identity is the file this handle is actually talking to.
+        let origin = file_identity(&path).map(|identity| StoreOrigin {
+            data_dir: data_dir.to_path_buf(),
+            identity,
+        });
+        Ok(Store { conn, origin })
+    }
+
+    /// True when the `brain.db` this handle opened is no longer the file at
+    /// the path it was opened from — i.e. some other process (or an earlier
+    /// call in this one) ran "Rebuild brain".
+    ///
+    /// `brain_ingest::roots::rebuild_store` deletes `brain.db` and creates a
+    /// fresh file at the same path. `remove_file` is a POSIX `unlink`: every
+    /// already-open connection keeps working perfectly against the old, now
+    /// *nameless* inode, silently. Before this branch that was harmless —
+    /// only one process held a long-lived `Store` and it swapped its own
+    /// handle as part of the rebuild. `omniagent-pty-daemon` is now a second
+    /// long-lived holder against the same file, so a rebuild triggered from
+    /// either app would leave the *other* one writing `layout`/
+    /// `notifications`/`usage_analytics_v1` rows into an orphaned inode that
+    /// nothing will ever read again and that disappears when the handle
+    /// closes. Hence this check, and [`Self::reopen_if_replaced`].
+    ///
+    /// A path that has no file at all right now also counts as replaced: the
+    /// unlink has happened and this handle is already orphaned, whether or
+    /// not the rebuilder has re-created the file yet.
+    ///
+    /// Always `false` for an in-memory store (nothing on disk to replace).
+    pub fn was_replaced(&self) -> bool {
+        let Some(origin) = &self.origin else {
+            return false;
+        };
+        match file_identity(&origin.data_dir.join("brain.db")) {
+            Some(current) => current != origin.identity,
+            None => true,
+        }
+    }
+
+    /// Re-opens this store against the file currently living at its
+    /// `data_dir` when [`Self::was_replaced`] says the old one is gone,
+    /// replacing this handle in place. Returns whether a reopen happened.
+    ///
+    /// Callers hold `Store` behind a mutex (`src-tauri`'s `BrainState`,
+    /// `omniagent-pty-daemon`'s `DaemonServer::settings`); calling this while
+    /// holding that lock, before each operation, is what makes a cross-process
+    /// rebuild transparent instead of silently lossy. Cheap enough to do per
+    /// operation: one `stat(2)` of a path that is essentially always in the
+    /// kernel's cache, and no reopen at all in the overwhelmingly common case.
+    pub fn reopen_if_replaced(&mut self) -> rusqlite::Result<bool> {
+        if !self.was_replaced() {
+            return Ok(false);
+        }
+        let Some(data_dir) = self.origin.as_ref().map(|o| o.data_dir.clone()) else {
+            return Ok(false);
+        };
+        *self = Store::open(&data_dir)?;
+        Ok(true)
     }
 
     /// In-memory store, for tests only.
@@ -339,7 +429,7 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(include_str!("schema.sql"))?;
         ensure_enrich_queue_pending_dedup_index(&conn)?;
-        Ok(Store { conn })
+        Ok(Store { conn, origin: None })
     }
 
     /// Runs `f` inside a single explicit `BEGIN`/`COMMIT` transaction
@@ -864,6 +954,101 @@ mod pragma_tests {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mode.to_lowercase(), "memory");
+    }
+}
+
+/// "Rebuild brain" replaces `brain.db` under every *other* long-lived handle
+/// in the machine. These pin down that a handle notices and recovers rather
+/// than writing into an orphaned inode.
+#[cfg(test)]
+mod replacement_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Byte-for-byte what `brain_ingest::roots::rebuild_store` does to the
+    /// directory (unlink `brain.db` + its WAL/SHM/journal siblings, then open
+    /// a fresh file at the same path) — reproduced here rather than depended
+    /// on, because `brain-core` sits *below* `brain-ingest` and must not
+    /// import it.
+    fn rebuild_like_the_other_process(data_dir: &Path) -> Store {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut name = data_dir.join("brain.db").into_os_string();
+            name.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(name));
+        }
+        Store::open(data_dir).unwrap()
+    }
+
+    #[test]
+    fn a_replaced_brain_db_is_detected_and_reopened_so_later_writes_are_not_lost() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        store.set_setting("layout", "before").unwrap();
+        assert!(!store.was_replaced(), "nothing has touched the file yet");
+        assert!(!store.reopen_if_replaced().unwrap());
+
+        // The other process (the native app or the Tauri app) rebuilds.
+        let other = rebuild_like_the_other_process(dir.path());
+        other.set_setting("notifications", "written-by-the-rebuilder").unwrap();
+        drop(other);
+
+        assert!(store.was_replaced(), "the inode at brain.db changed");
+        assert!(store.reopen_if_replaced().unwrap(), "and we reopened it");
+        assert!(!store.was_replaced(), "the new identity is now recorded");
+
+        store.set_setting("layout", "after").unwrap();
+
+        // Read through a third, independent handle: the point is that the
+        // write landed in the file that actually lives at the path, not in a
+        // nameless inode only this handle can see.
+        let verify = Store::open(dir.path()).unwrap();
+        assert_eq!(verify.get_setting("layout").unwrap().as_deref(), Some("after"));
+        assert_eq!(
+            verify.get_setting("notifications").unwrap().as_deref(),
+            Some("written-by-the-rebuilder"),
+            "reopening must not clobber what the rebuilder wrote"
+        );
+    }
+
+    #[test]
+    fn without_the_reopen_a_write_after_a_rebuild_is_silently_lost() {
+        // The bug this whole mechanism exists for, pinned down so the fix
+        // cannot be quietly reverted: a handle that never checks keeps
+        // writing to the unlinked inode and the file on disk never sees it.
+        let dir = tempdir().unwrap();
+        let stale = Store::open(dir.path()).unwrap();
+        drop(rebuild_like_the_other_process(dir.path()));
+
+        stale.set_setting("layout", "into-the-void").unwrap();
+        assert_eq!(
+            stale.get_setting("layout").unwrap().as_deref(),
+            Some("into-the-void"),
+            "the orphaned handle happily reads back its own write"
+        );
+
+        let verify = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            verify.get_setting("layout").unwrap(),
+            None,
+            "but the file at the path never got it"
+        );
+    }
+
+    #[test]
+    fn a_brain_db_deleted_and_not_yet_recreated_also_counts_as_replaced() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        std::fs::remove_file(dir.path().join("brain.db")).unwrap();
+        assert!(store.was_replaced());
+        assert!(store.reopen_if_replaced().unwrap());
+        assert!(dir.path().join("brain.db").exists());
+    }
+
+    #[test]
+    fn an_in_memory_store_is_never_considered_replaced() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert!(!store.was_replaced());
+        assert!(!store.reopen_if_replaced().unwrap());
     }
 }
 

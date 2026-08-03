@@ -146,7 +146,7 @@ pub fn roots_start_ingest(
     brain: State<'_, BrainState>,
     ingestion: State<'_, IngestionState>,
 ) -> Result<(), String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     brain_ingest::roots::start_ingest(brain.data_dir.clone(), &store, ingestion.inner(), &path)
         .map_err(|e| e.to_string())
 }
@@ -161,7 +161,7 @@ pub fn ingestion_status(ingestion: State<'_, IngestionState>) -> Result<Ingestio
 /// another folder" — the same command handles both, `add_root` dedupes).
 #[tauri::command]
 pub fn roots_list(brain: State<'_, BrainState>) -> Result<Vec<String>, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     get_roots(&store).map_err(|e| e.to_string())
 }
 
@@ -169,7 +169,7 @@ pub fn roots_list(brain: State<'_, BrainState>) -> Result<Vec<String>, String> {
 pub fn roots_biggest_project(
     brain: State<'_, BrainState>,
 ) -> Result<Option<ProjectSummary>, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     biggest_project(&store).map_err(|e| e.to_string())
 }
 
@@ -178,7 +178,7 @@ pub fn roots_biggest_project(
 /// state.
 #[tauri::command]
 pub fn roots_paused_projects(brain: State<'_, BrainState>) -> Result<Vec<String>, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     brain_ingest::roots::paused_projects(&store).map_err(|e| e.to_string())
 }
 
@@ -188,13 +188,13 @@ pub fn roots_set_paused(
     paused: bool,
     brain: State<'_, BrainState>,
 ) -> Result<(), String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     brain_ingest::roots::set_paused(&store, &project, paused).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn roots_staleness(brain: State<'_, BrainState>) -> Result<Vec<ProjectStaleness>, String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     staleness(&store).map_err(|e| e.to_string())
 }
 
@@ -204,7 +204,7 @@ pub fn roots_staleness(brain: State<'_, BrainState>) -> Result<Vec<ProjectStalen
 /// the stale badge.
 #[tauri::command]
 pub fn roots_reingest_project(project: String, brain: State<'_, BrainState>) -> Result<(), String> {
-    let store = brain.store.lock().map_err(|e| e.to_string())?;
+    let store = brain.locked_store()?;
     brain_ingest::roots::reingest_project(&store, &project).map_err(|e| e.to_string())
 }
 
