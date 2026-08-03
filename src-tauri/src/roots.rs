@@ -76,16 +76,18 @@ use crate::commands::BrainState;
 /// behind [`roots_rebuild`]). Delegates to `brain_ingest::roots::add_project`
 /// (Task 6a-2) — the store lock is taken and dropped here, at the Tauri
 /// boundary, exactly as before.
+///
+/// Goes through [`BrainState::locked_store`] (not a plain `brain.store.lock()`)
+/// so a "Rebuild brain" run by the daemon or the other process while this is
+/// in flight is picked up rather than silently writing into an orphaned
+/// inode — see that method's doc for the full mechanism.
 fn add_project_impl(
     brain: &BrainState,
     ingestion: &IngestionState,
     path: &str,
     name: Option<&str>,
 ) -> Result<ProjectSummary> {
-    let store = brain
-        .store
-        .lock()
-        .map_err(|_| anyhow::anyhow!("brain store mutex poisoned"))?;
+    let store = brain.locked_store().map_err(|e| anyhow::anyhow!(e))?;
     brain_ingest::roots::add_project(&store, &brain.data_dir, ingestion, path, name)
 }
 
@@ -109,11 +111,11 @@ pub fn add_project(
 /// The pure body behind [`rename_project`] — same `&BrainState`-not-`State`
 /// split every other command in this module uses for direct unit-testing.
 /// Delegates to `brain_ingest::roots::rename_project` (Task 6a-2).
+///
+/// Goes through [`BrainState::locked_store`], same as [`add_project_impl`] —
+/// see that fn's doc for why a plain `brain.store.lock()` isn't safe here.
 fn rename_project_impl(brain: &BrainState, id: &str, new_label: &str) -> Result<()> {
-    let store = brain
-        .store
-        .lock()
-        .map_err(|_| anyhow::anyhow!("brain store mutex poisoned"))?;
+    let store = brain.locked_store().map_err(|e| anyhow::anyhow!(e))?;
     brain_ingest::roots::rename_project(&store, id, new_label)
 }
 
@@ -763,6 +765,44 @@ mod tests {
             .get_setting(&last_ingested_key(&project_name))
             .unwrap()
             .is_some());
+    }
+
+    /// Final whole-branch review, Important #1's residual gap: `add_project`
+    /// (like every other command in this file) must route through
+    /// `BrainState::locked_store` rather than `brain.store.lock()` directly,
+    /// or a "Rebuild brain" run by the other process (daemon or app) while
+    /// this is in flight would land the new `Project` node in an orphaned
+    /// inode instead of the file that actually exists. Mirrors
+    /// `commands::locked_store_reopens_after_the_other_process_rebuilt_brain_db`.
+    #[test]
+    fn add_project_impl_reopens_after_the_other_process_rebuilt_brain_db() {
+        let data_dir = tempdir().unwrap();
+        let project_dir = tempdir().unwrap();
+        let brain = BrainState::open(data_dir.path().to_path_buf()).unwrap();
+        let ingestion = IngestionState::new();
+
+        // The other process's "Rebuild brain" (brain_ingest::roots::
+        // rebuild_store): unlink brain.db + siblings, fresh file, same path.
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut name = data_dir.path().join("brain.db").into_os_string();
+            name.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(name));
+        }
+        let rebuilt = brain_core::Store::open(data_dir.path()).unwrap();
+        drop(rebuilt);
+
+        let path = project_dir.path().to_string_lossy().into_owned();
+        let summary = add_project_impl(&brain, &ingestion, &path, Some("My Project")).unwrap();
+        assert_eq!(summary.id, "My Project");
+
+        // The write must be visible in the file that actually exists on
+        // disk, not lost in the orphaned inode `brain.store` still pointed
+        // at before this call.
+        let verify = brain_core::Store::open(data_dir.path()).unwrap();
+        assert!(
+            verify.get_node("My Project").unwrap().is_some(),
+            "add_project's write went to an orphaned inode instead of brain.db"
+        );
     }
 
     #[test]
