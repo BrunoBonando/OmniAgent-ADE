@@ -319,8 +319,14 @@ async fn runtime_permissions_peer_policy_and_bad_frames_are_enforced() {
     server.stop().await;
 }
 
+/// A malformed control *payload* inside a structurally valid frame is a bad
+/// request, not a broken stream: the daemon answers `Error` and the
+/// connection — including every live attachment on it — keeps working
+/// (final whole-branch review, Minor #7). Before that fix a single bad
+/// control frame dropped the socket and blanked every pane in the native app
+/// until it reconnected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn malformed_control_json_closes_an_attached_connection() {
+async fn malformed_control_json_errors_without_dropping_an_attached_connection() {
     let temp = tempfile::tempdir().unwrap();
     let server = TestServer::start(temp.path()).await;
     let mut client = Client::connect(&server.socket).await;
@@ -340,19 +346,26 @@ async fn malformed_control_json_closes_an_attached_connection() {
     client.read_kind(MessageKind::Snapshot).await;
     client.read_kind(MessageKind::SessionStatus).await;
 
-    let request = client.request;
+    let bad_request = client.request;
+    client.request += 1;
     write_frame(
         &mut client.stream,
-        &Frame::new(MessageKind::Resize, request, b"{".to_vec()),
+        &Frame::new(MessageKind::Resize, bad_request, b"{".to_vec()),
     )
     .await
     .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), read_frame(&mut client.stream))
-            .await
-            .unwrap()
-            .is_err()
-    );
+    let error = client.read_kind(MessageKind::Error).await;
+    assert_eq!(error.header.request_or_sequence, bad_request);
+
+    // Same connection, same attachment: still fully usable afterwards.
+    let ok_request = client
+        .send_json(
+            MessageKind::Resize,
+            &serde_json::json!({"id":"malformed","cols":100,"rows":30}),
+        )
+        .await;
+    let ok = client.read_kind(MessageKind::Response).await;
+    assert_eq!(ok.header.request_or_sequence, ok_request);
 
     server.stop().await;
 }
@@ -656,30 +669,31 @@ async fn brain_list_projects_and_get_context_round_trip_through_the_daemon() {
     server.stop().await;
 }
 
-/// Envelope validation (malformed control JSON closes the connection) must
-/// hold for the new brain kinds exactly as it already does for existing
-/// ones (`malformed_control_json_closes_an_attached_connection` above) —
-/// new message kinds go through the same `parse_json` gate, not a side
-/// channel.
+/// Payload validation must hold for the new brain kinds exactly as it
+/// already does for existing ones
+/// (`malformed_control_json_errors_without_dropping_an_attached_connection`
+/// above) — new message kinds go through the same `parse_json` gate, not a
+/// side channel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn malformed_brain_get_context_payload_closes_the_connection() {
+async fn malformed_brain_get_context_payload_errors_without_closing_the_connection() {
     let temp = tempfile::tempdir().unwrap();
     let server = TestServer::start(temp.path()).await;
     let mut client = Client::connect(&server.socket).await;
 
     let request = client.request;
+    client.request += 1;
     write_frame(
         &mut client.stream,
         &Frame::new(MessageKind::BrainGetContext, request, b"{".to_vec()),
     )
     .await
     .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), read_frame(&mut client.stream))
-            .await
-            .unwrap()
-            .is_err()
-    );
+    let error = client.read_kind(MessageKind::Error).await;
+    assert_eq!(error.header.request_or_sequence, request);
+
+    let alive = client.send_json(MessageKind::ListSessions, &serde_json::json!({})).await;
+    let listed = client.read_kind(MessageKind::SessionList).await;
+    assert_eq!(listed.header.request_or_sequence, alive);
 
     server.stop().await;
 }
@@ -944,16 +958,18 @@ async fn brain_search_round_trips_through_the_daemon() {
     server.stop().await;
 }
 
-/// Envelope validation must hold for every payload-bearing Task 6a-2 kind,
+/// Payload validation must hold for every payload-bearing Task 6a-2 kind,
 /// exactly as it already does for `BrainGetContext`
-/// (`malformed_brain_get_context_payload_closes_the_connection` above) —
-/// each new kind goes through the same `parse_json` gate, not a side
-/// channel. One fresh connection per kind, since a malformed frame closes
-/// the connection.
+/// (`malformed_brain_get_context_payload_errors_without_closing_the_connection`
+/// above) — each new kind goes through the same `parse_json` gate, not a side
+/// channel. One connection for all of them, which is itself the assertion:
+/// a bad payload no longer costs the connection, so the next kind can be
+/// driven down the same socket.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn malformed_roots_and_search_payloads_close_the_connection() {
+async fn malformed_roots_and_search_payloads_error_without_closing_the_connection() {
     let temp = tempfile::tempdir().unwrap();
     let server = TestServer::start(temp.path()).await;
+    let mut client = Client::connect(&server.socket).await;
 
     for kind in [
         MessageKind::RootsStartIngest,
@@ -963,39 +979,75 @@ async fn malformed_roots_and_search_payloads_close_the_connection() {
         MessageKind::RootsReingestProject,
         MessageKind::BrainSearch,
     ] {
-        let mut client = Client::connect(&server.socket).await;
         let request = client.request;
+        client.request += 1;
         write_frame(
             &mut client.stream,
             &Frame::new(kind, request, b"{".to_vec()),
         )
         .await
         .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_secs(2), read_frame(&mut client.stream))
-                .await
-                .unwrap()
-                .is_err(),
-            "{kind:?} accepted a malformed payload instead of closing the connection"
+        let error = client.read_kind(MessageKind::Error).await;
+        assert_eq!(
+            error.header.request_or_sequence, request,
+            "{kind:?} did not answer its own request with an Error"
         );
     }
+
+    let alive = client
+        .send_json(MessageKind::ListSessions, &serde_json::json!({}))
+        .await;
+    assert_eq!(
+        client.read_kind(MessageKind::SessionList).await.header.request_or_sequence,
+        alive,
+        "six malformed payloads in a row must leave the connection usable"
+    );
 
     server.stop().await;
 }
 
-/// The no-required-field Task 6a-2 kinds (`RootsIngestionStatus`/`RootsList`/
-/// `RootsBiggestProject`/`RootsPausedProjects`/`RootsStaleness`/
-/// `RootsRebuild`) still decode their payload as JSON
-/// (`parse_json::<serde_json::Value>`) before dispatching — invalid JSON
-/// syntax must close the connection for these exactly as it does for every
-/// typed payload above, confirming they are not a bypass of envelope
-/// validation just because every field is optional.
+/// The no-argument kinds (`ListSessions`/`BrainListProjects`/
+/// `RootsIngestionStatus`/`RootsList`/`RootsBiggestProject`/
+/// `RootsPausedProjects`/`RootsStaleness`/`RootsRebuild`) accept **both**
+/// natural encodings of "no arguments" — a literal `{}` and a zero-length
+/// payload — and answer syntactically invalid JSON with an `Error` rather
+/// than dropping the connection (final whole-branch review, Minor #7: an
+/// empty payload is exactly what a client that has no arguments to send
+/// would emit, and it used to cost the whole socket).
+///
+/// `RootsRebuild` is excluded from the happy paths on purpose: succeeding
+/// would delete and re-ingest the test store. Its malformed-payload arm is
+/// still covered below.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn malformed_json_closes_the_connection_for_no_payload_roots_kinds() {
+async fn no_argument_kinds_accept_an_empty_payload_and_error_on_invalid_json() {
     let temp = tempfile::tempdir().unwrap();
     let server = TestServer::start(temp.path()).await;
+    let mut client = Client::connect(&server.socket).await;
+
+    for (kind, reply) in [
+        (MessageKind::ListSessions, MessageKind::SessionList),
+        (MessageKind::BrainListProjects, MessageKind::Response),
+        (MessageKind::RootsIngestionStatus, MessageKind::Response),
+        (MessageKind::RootsList, MessageKind::Response),
+        (MessageKind::RootsBiggestProject, MessageKind::Response),
+        (MessageKind::RootsPausedProjects, MessageKind::Response),
+        (MessageKind::RootsStaleness, MessageKind::Response),
+    ] {
+        let request = client.request;
+        client.request += 1;
+        write_frame(&mut client.stream, &Frame::new(kind, request, Vec::new()))
+            .await
+            .unwrap();
+        assert_eq!(
+            client.read_kind(reply).await.header.request_or_sequence,
+            request,
+            "{kind:?} rejected an empty (no-arguments) payload"
+        );
+    }
 
     for kind in [
+        MessageKind::ListSessions,
+        MessageKind::BrainListProjects,
         MessageKind::RootsIngestionStatus,
         MessageKind::RootsList,
         MessageKind::RootsBiggestProject,
@@ -1003,22 +1055,29 @@ async fn malformed_json_closes_the_connection_for_no_payload_roots_kinds() {
         MessageKind::RootsStaleness,
         MessageKind::RootsRebuild,
     ] {
-        let mut client = Client::connect(&server.socket).await;
         let request = client.request;
+        client.request += 1;
         write_frame(
             &mut client.stream,
             &Frame::new(kind, request, b"{".to_vec()),
         )
         .await
         .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_secs(2), read_frame(&mut client.stream))
-                .await
-                .unwrap()
-                .is_err(),
-            "{kind:?} accepted invalid JSON instead of closing the connection"
+        assert_eq!(
+            client.read_kind(MessageKind::Error).await.header.request_or_sequence,
+            request,
+            "{kind:?} did not answer invalid JSON with an Error on its own request"
         );
     }
+
+    let alive = client
+        .send_json(MessageKind::ListSessions, &serde_json::json!({}))
+        .await;
+    assert_eq!(
+        client.read_kind(MessageKind::SessionList).await.header.request_or_sequence,
+        alive,
+        "the connection must survive every one of them"
+    );
 
     server.stop().await;
 }

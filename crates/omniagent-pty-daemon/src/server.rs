@@ -237,9 +237,41 @@ async fn handle_client(
     let mut attachments = HashMap::<String, Attachment>::new();
     while let Ok(frame) = read_frame(&mut reader).await {
         let request = frame.header.request_or_sequence;
+        /// Decodes this frame's JSON payload, or answers with an `Error`
+        /// frame and moves on to the next frame.
+        ///
+        /// A malformed *payload* inside a structurally valid *frame* is a bad
+        /// request, not a broken connection — one bad control frame used to
+        /// propagate out of `handle_client` via `?` and drop the socket,
+        /// blanking every pane in the native app until it reconnected
+        /// (final whole-branch review, Minor #7). `MessageKind::Input`
+        /// already got this right; this is that same shape, applied to every
+        /// JSON-payload kind without re-indenting each arm.
+        ///
+        /// Envelope-level validation (the 1 MiB cap, the protocol-version
+        /// byte, unknown message kinds, the peer-UID check) is deliberately
+        /// untouched and still terminates the connection: those say the
+        /// *stream* cannot be trusted, which is a different claim.
+        ///
+        /// Defined inside the loop so it can reach `frame`/`request`/`writer`
+        /// — `macro_rules!` resolves outer identifiers at its definition
+        /// site, not its call site.
+        macro_rules! decode_payload {
+            ($ty:ty) => {
+                match parse_json::<$ty>(&frame.payload) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if send_error(&writer, request, error).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            };
+        }
         let result = match frame.header.message_kind {
             MessageKind::ListSessions => {
-                parse_json::<serde_json::Value>(&frame.payload)?;
+                decode_payload!(serde_json::Value);
                 send_json(
                     &writer,
                     MessageKind::SessionList,
@@ -251,7 +283,7 @@ async fn handle_client(
                 .await
             }
             MessageKind::CreateSession => {
-                let create = parse_json::<CreateSession>(&frame.payload)?;
+                let create = decode_payload!(CreateSession);
                 let id = create.id.clone();
                 match registry.create_session(create) {
                     Ok(_) => {
@@ -267,7 +299,7 @@ async fn handle_client(
                 }
             }
             MessageKind::Attach => {
-                let attach = parse_json::<AttachPayload>(&frame.payload)?;
+                let attach = decode_payload!(AttachPayload);
                 attachments.remove(&attach.id);
                 match registry.get_attachable(&attach.id) {
                     Some(session) => {
@@ -314,7 +346,7 @@ async fn handle_client(
                 Err(error) => send_error(&writer, request, error).await,
             },
             MessageKind::Resize => {
-                let resize = parse_json::<ResizePayload>(&frame.payload)?;
+                let resize = decode_payload!(ResizePayload);
                 match registry.get(&resize.id) {
                     Some(session) => match session.resize(
                         resize.cols,
@@ -332,7 +364,7 @@ async fn handle_client(
                 }
             }
             MessageKind::Interrupt => {
-                let session = parse_json::<SessionIdPayload>(&frame.payload)?;
+                let session = decode_payload!(SessionIdPayload);
                 match registry.get(&session.id) {
                     Some(session) => match session.send_interrupt() {
                         Ok(()) => send_response(&writer, request).await,
@@ -349,7 +381,7 @@ async fn handle_client(
                 }
             }
             MessageKind::Kill => {
-                let session = parse_json::<SessionIdPayload>(&frame.payload)?;
+                let session = decode_payload!(SessionIdPayload);
                 if registry.kill(&session.id) {
                     send_response(&writer, request).await
                 } else {
@@ -362,12 +394,12 @@ async fn handle_client(
                 }
             }
             MessageKind::Detach => {
-                let session = parse_json::<SessionIdPayload>(&frame.payload)?;
+                let session = decode_payload!(SessionIdPayload);
                 attachments.remove(&session.id);
                 send_response(&writer, request).await
             }
             MessageKind::GetSetting => {
-                let setting = parse_json::<SettingKey>(&frame.payload)?;
+                let setting = decode_payload!(SettingKey);
                 let value = lock_store(&settings)
                     .and_then(|store| store.get_setting(&setting.key).map_err(Into::into));
                 match value {
@@ -384,7 +416,7 @@ async fn handle_client(
                 }
             }
             MessageKind::SetSetting => {
-                let setting = parse_json::<SettingValue>(&frame.payload)?;
+                let setting = decode_payload!(SettingValue);
                 let result = lock_store(&settings)
                     .and_then(|store| {
                         store
@@ -397,7 +429,7 @@ async fn handle_client(
                 }
             }
             MessageKind::BrainListProjects => {
-                parse_json::<serde_json::Value>(&frame.payload)?;
+                decode_payload!(serde_json::Value);
                 let result = lock_store(&settings)
                     .and_then(|store| {
                         tools::list_projects(&tool_context(&store, &data_dir), &serde_json::json!({}))
@@ -417,7 +449,7 @@ async fn handle_client(
                 }
             }
             MessageKind::BrainGetContext => {
-                let payload = parse_json::<BrainGetContextPayload>(&frame.payload)?;
+                let payload = decode_payload!(BrainGetContextPayload);
                 let result = lock_store(&settings)
                     .and_then(|store| {
                         tools::get_context(
@@ -440,7 +472,7 @@ async fn handle_client(
                 }
             }
             MessageKind::RootsStartIngest => {
-                let payload = parse_json::<RootsStartIngestPayload>(&frame.payload)?;
+                let payload = decode_payload!(RootsStartIngestPayload);
                 let result = lock_store(&settings)
                     .and_then(|store| {
                         roots::start_ingest(data_dir.clone(), &store, &ingestion, &payload.path)
@@ -451,7 +483,7 @@ async fn handle_client(
                 }
             }
             MessageKind::RootsIngestionStatus => {
-                parse_json::<serde_json::Value>(&frame.payload)?;
+                decode_payload!(serde_json::Value);
                 send_json(
                     &writer,
                     MessageKind::Response,
@@ -461,7 +493,7 @@ async fn handle_client(
                 .await
             }
             MessageKind::RootsList => {
-                parse_json::<serde_json::Value>(&frame.payload)?;
+                decode_payload!(serde_json::Value);
                 let result = lock_store(&settings)
                     .and_then(|store| roots::get_roots(&store));
                 match result {
@@ -478,7 +510,7 @@ async fn handle_client(
                 }
             }
             MessageKind::RootsBiggestProject => {
-                parse_json::<serde_json::Value>(&frame.payload)?;
+                decode_payload!(serde_json::Value);
                 let result = lock_store(&settings)
                     .and_then(|store| roots::biggest_project(&store));
                 match result {
@@ -495,7 +527,7 @@ async fn handle_client(
                 }
             }
             MessageKind::RootsAddProject => {
-                let payload = parse_json::<RootsAddProjectPayload>(&frame.payload)?;
+                let payload = decode_payload!(RootsAddProjectPayload);
                 let result = lock_store(&settings)
                     .and_then(|store| {
                         roots::add_project(
@@ -520,7 +552,7 @@ async fn handle_client(
                 }
             }
             MessageKind::RootsRenameProject => {
-                let payload = parse_json::<RootsRenameProjectPayload>(&frame.payload)?;
+                let payload = decode_payload!(RootsRenameProjectPayload);
                 let result = lock_store(&settings)
                     .and_then(|store| roots::rename_project(&store, &payload.id, &payload.new_label));
                 match result {
@@ -529,7 +561,7 @@ async fn handle_client(
                 }
             }
             MessageKind::RootsPausedProjects => {
-                parse_json::<serde_json::Value>(&frame.payload)?;
+                decode_payload!(serde_json::Value);
                 let result = lock_store(&settings)
                     .and_then(|store| roots::paused_projects(&store));
                 match result {
@@ -546,7 +578,7 @@ async fn handle_client(
                 }
             }
             MessageKind::RootsSetPaused => {
-                let payload = parse_json::<RootsSetPausedPayload>(&frame.payload)?;
+                let payload = decode_payload!(RootsSetPausedPayload);
                 let result = lock_store(&settings)
                     .and_then(|store| {
                         roots::set_paused(&store, &payload.project, payload.paused)
@@ -557,7 +589,7 @@ async fn handle_client(
                 }
             }
             MessageKind::RootsStaleness => {
-                parse_json::<serde_json::Value>(&frame.payload)?;
+                decode_payload!(serde_json::Value);
                 let result = lock_store(&settings)
                     .and_then(|store| roots::staleness(&store));
                 match result {
@@ -574,7 +606,7 @@ async fn handle_client(
                 }
             }
             MessageKind::RootsReingestProject => {
-                let payload = parse_json::<RootsReingestProjectPayload>(&frame.payload)?;
+                let payload = decode_payload!(RootsReingestProjectPayload);
                 let result = lock_store(&settings)
                     .and_then(|store| roots::reingest_project(&store, &payload.project));
                 match result {
@@ -583,7 +615,7 @@ async fn handle_client(
                 }
             }
             MessageKind::RootsRebuild => {
-                parse_json::<serde_json::Value>(&frame.payload)?;
+                decode_payload!(serde_json::Value);
                 let result = roots::rebuild_and_reingest(&data_dir, &settings, &ingestion);
                 match result {
                     Ok(()) => send_response(&writer, request).await,
@@ -591,7 +623,7 @@ async fn handle_client(
                 }
             }
             MessageKind::BrainSearch => {
-                let payload = parse_json::<BrainSearchPayload>(&frame.payload)?;
+                let payload = decode_payload!(BrainSearchPayload);
                 let result = lock_store(&settings)
                     .and_then(|store| {
                         tools::search_brain(
@@ -633,7 +665,26 @@ async fn handle_client(
     Ok(())
 }
 
+/// Decodes a control frame's JSON payload.
+///
+/// A **zero-length** payload decodes as `{}`. Eight of the client message
+/// kinds take no arguments at all (`ListSessions`, `BrainListProjects`,
+/// `RootsIngestionStatus`, `RootsList`, `RootsBiggestProject`,
+/// `RootsPausedProjects`, `RootsStaleness`, `RootsRebuild`) and the natural
+/// way for a client to encode "no arguments" is an empty payload rather than
+/// the two bytes `{}`. Rejecting that used to drop the whole connection
+/// (final whole-branch review, Minor #7). The empty frame is unambiguous —
+/// there is no message kind for which "" is a meaningful, differently-shaped
+/// payload — so accepting it here rather than per-arm keeps one rule instead
+/// of eight. For a kind that *does* have required fields it simply produces
+/// a clearer "missing field `id`" error than "EOF while parsing a value",
+/// and either way the caller answers with an `Error` frame.
 fn parse_json<T: DeserializeOwned>(payload: &[u8]) -> Result<T> {
+    let payload = if payload.is_empty() {
+        b"{}".as_slice()
+    } else {
+        payload
+    };
     serde_json::from_slice(payload).context("decode control JSON")
 }
 
