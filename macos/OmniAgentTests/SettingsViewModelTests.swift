@@ -36,6 +36,31 @@ private final class FakeDaemonStatus: DaemonStatusProviding {
     }
 }
 
+/// The About tab's version line. Until the final whole-branch review
+/// (Important #4) the Xcode project set no `MARKETING_VERSION` at all, so
+/// every native build shipped `CFBundleShortVersionString = 1.0` forever —
+/// which also broke `cutover.sh record --version`, Task 7's cutover gate.
+final class NativeAppVersionTests: XCTestCase {
+    func testRecombinesTheMarketingVersionAndBuildNumberIntoTheRepoWideString() {
+        // `scripts/bump-build-version.sh` writes MARKETING_VERSION = 2026.8.3
+        // and CURRENT_PROJECT_VERSION = 1 for a repo version of 2026.8.3+001;
+        // this must put them back together exactly.
+        XCTAssertEqual(NativeAppVersion.compose(short: "2026.8.3", build: "1"), "2026.8.3+001")
+        XCTAssertEqual(NativeAppVersion.compose(short: "2026.8.3", build: "12"), "2026.8.3+012")
+        XCTAssertEqual(NativeAppVersion.compose(short: "2026.12.31", build: "144"), "2026.12.31+144")
+    }
+
+    func testDegradesToTheMarketingVersionRatherThanToNothing() {
+        XCTAssertEqual(NativeAppVersion.compose(short: "2026.8.3", build: nil), "2026.8.3")
+        XCTAssertEqual(NativeAppVersion.compose(short: "2026.8.3", build: "not-a-number"), "2026.8.3")
+    }
+
+    func testHasNoVersionLineWhenTheBundleDeclaresNoVersionAtAll() {
+        XCTAssertNil(NativeAppVersion.compose(short: nil, build: "1"))
+        XCTAssertNil(NativeAppVersion.compose(short: "", build: "1"))
+    }
+}
+
 final class SettingsViewModelTests: XCTestCase {
     private func makeModel(
         settingsRows: [String: String] = [:],

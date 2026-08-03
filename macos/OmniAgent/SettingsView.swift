@@ -1,6 +1,44 @@
 import AppKit
 import SwiftUI
 
+/// The build's own version, recombined from the two Info.plist keys Xcode
+/// generates from `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION`.
+///
+/// The project shipped `CFBundleShortVersionString = 1.0` on every build
+/// forever until the final whole-branch review (Important #4): neither key
+/// was set in any build configuration, so `GENERATE_INFOPLIST_FILE = YES`
+/// fell back to Xcode's default. That broke the About tab *and* the thing
+/// Task 7's cutover gate depends on — `cutover.sh record --version V` needs
+/// a real, distinguishing native-app version.
+///
+/// The two keys exist because the repo's version (`2026.8.3+001`, kept in
+/// lockstep across `tauri.conf.json`/`ui/package.json`/`src-tauri/Cargo.toml`
+/// by `scripts/bump-build-version.sh`) is not a legal
+/// `CFBundleShortVersionString`, which Apple defines as one to three
+/// period-separated integers. So the date triple goes in `MARKETING_VERSION`
+/// and the same-day counter in `CURRENT_PROJECT_VERSION`, and this puts them
+/// back together into the one string every other surface in the repo shows.
+enum NativeAppVersion {
+    static func current(bundle: Bundle = .main) -> String? {
+        compose(
+            short: bundle.infoDictionary?["CFBundleShortVersionString"] as? String,
+            build: bundle.infoDictionary?["CFBundleVersion"] as? String
+        )
+    }
+
+    /// Split out from `current` so the recombination rule is testable without
+    /// a `Bundle` (whose `infoDictionary` cannot be substituted).
+    ///
+    /// A missing/unparseable build number degrades to just the marketing
+    /// version rather than to nothing: showing `v2026.8.3` is still useful,
+    /// and a version string is not worth failing a screen over.
+    static func compose(short: String?, build: String?) -> String? {
+        guard let short, !short.isEmpty else { return nil }
+        guard let build, let counter = Int(build) else { return short }
+        return String(format: "%@+%03d", short, counter)
+    }
+}
+
 /// The Settings screen's I/O and derived state — one view model behind the
 /// sections `SettingsView` renders (Account/Notifications/Review/Panels/
 /// Daemon/About), each reading/writing through `SettingsStore` (or, for
@@ -425,7 +463,7 @@ final class SettingsWindowController: NSWindowController {
             authGate: authGate,
             brainAdmin: brainAdmin,
             notifier: notifier,
-            version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+            version: NativeAppVersion.current(),
             daemonStatus: daemonStatus
         )
         model.presentAuthGate = { [weak self] in

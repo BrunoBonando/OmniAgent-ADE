@@ -68,6 +68,10 @@
 		1000000000000000000003E /* DaemonPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000003F /* DaemonPersistenceTests.swift */; };
 		10000000000000000000040 /* DaemonPersistenceControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000041 /* DaemonPersistenceControllerTests.swift */; };
 		10000000000000000000042 /* DaemonServiceRegistrarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000043 /* DaemonServiceRegistrarTests.swift */; };
+		10000000000000000000044 /* NativeMacosCompatibilityFixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000045 /* NativeMacosCompatibilityFixtureTests.swift */; };
+		10000000000000000000045 /* persisted-layout.json in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000046 /* persisted-layout.json */; };
+		10000000000000000000046 /* rust-session-models.json in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000047 /* rust-session-models.json */; };
+		10000000000000000000047 /* status-end-events.json in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000048 /* status-end-events.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -89,18 +93,16 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/../target/native-macos-embed/omniagent-pty-daemon",
-				"$(SRCROOT)/../target/native-macos-embed/digital.bruno.omniagent.pty-daemon.plist",
-				"$(SRCROOT)/../target/native-macos-embed/digital.bruno.omniagent.preview.pty-daemon.plist",
+				"$(SRCROOT)/../target/native-macos-embed/$(PRODUCT_BUNDLE_IDENTIFIER).pty-daemon.plist",
 			);
 			name = "Embed PTY Daemon + LaunchAgent Plists (non-Debug)";
 			outputPaths = (
 				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/omniagent-pty-daemon",
-				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/digital.bruno.omniagent.pty-daemon.plist",
-				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/digital.bruno.omniagent.preview.pty-daemon.plist",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/$(PRODUCT_BUNDLE_IDENTIFIER).pty-daemon.plist",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = "/bin/sh";
-			shellScript = "if [ \"$CONFIGURATION\" = \"Debug\" ]; then\n  echo \"note: skipping daemon binary + LaunchAgent plist embed for the Debug configuration (no Rust toolchain required for plain builds/tests).\"\n  exit 0\nfi\nSTAGE=\"$SRCROOT/../target/native-macos-embed\"\nDEST_MACOS=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/MacOS\"\nDEST_LAUNCH_AGENTS=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents\"\nif [ ! -x \"$STAGE/omniagent-pty-daemon\" ]; then\n  echo \"error: $STAGE/omniagent-pty-daemon not found. Run macos/embed-daemon.sh (or macos/build.sh universal) before building the $CONFIGURATION configuration.\" >&2\n  exit 1\nfi\nmkdir -p \"$DEST_MACOS\" \"$DEST_LAUNCH_AGENTS\"\ncp -f \"$STAGE/omniagent-pty-daemon\" \"$DEST_MACOS/omniagent-pty-daemon\"\nchmod 755 \"$DEST_MACOS/omniagent-pty-daemon\"\ncp -f \"$STAGE\"/*.plist \"$DEST_LAUNCH_AGENTS/\"\nchmod 644 \"$DEST_LAUNCH_AGENTS\"/*.plist\n";
+			shellScript = "if [ \"$CONFIGURATION\" = \"Debug\" ]; then\n  echo \"note: skipping daemon binary + LaunchAgent plist embed for the Debug configuration (no Rust toolchain required for plain builds/tests).\"\n  exit 0\nfi\nSTAGE=\"$SRCROOT/../target/native-macos-embed\"\nDEST_MACOS=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/MacOS\"\nDEST_LAUNCH_AGENTS=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents\"\n# Exactly ONE plist: this bundle's own channel. embed-daemon.sh stages both\n# (production and preview) and this phase used to copy both, which put the\n# preview plist -- which bakes in the BUILD MACHINE's literal $HOME under\n# EnvironmentVariables -- inside notarized production artifacts shipped to\n# other people (final whole-branch review, Minor #5). The name is derived\n# from PRODUCT_BUNDLE_IDENTIFIER, the same \"<bundle id>.pty-daemon\" rule\n# DaemonPaths.resolve/DaemonLaunchAgentPlist apply in Swift\n# (macos/OmniAgent/DaemonPersistence.swift).\nPLIST=\"$PRODUCT_BUNDLE_IDENTIFIER.pty-daemon.plist\"\nif [ ! -x \"$STAGE/omniagent-pty-daemon\" ]; then\n  echo \"error: $STAGE/omniagent-pty-daemon not found. Run macos/embed-daemon.sh (or macos/build.sh universal) before building the $CONFIGURATION configuration.\" >&2\n  exit 1\nfi\nif [ ! -f \"$STAGE/$PLIST\" ]; then\n  echo \"error: $STAGE/$PLIST not found. Run macos/embed-daemon.sh (or macos/build.sh universal) before building the $CONFIGURATION configuration.\" >&2\n  exit 1\nfi\nmkdir -p \"$DEST_MACOS\" \"$DEST_LAUNCH_AGENTS\"\ncp -f \"$STAGE/omniagent-pty-daemon\" \"$DEST_MACOS/omniagent-pty-daemon\"\nchmod 755 \"$DEST_MACOS/omniagent-pty-daemon\"\n# Drop anything an earlier build of the *other* channel left in an\n# incremental build directory, so a bundle can never end up carrying two.\nrm -f \"$DEST_LAUNCH_AGENTS\"/*.plist\ncp -f \"$STAGE/$PLIST\" \"$DEST_LAUNCH_AGENTS/$PLIST\"\nchmod 644 \"$DEST_LAUNCH_AGENTS/$PLIST\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -167,6 +169,10 @@
 		2000000000000000000003F /* DaemonPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistenceTests.swift; sourceTree = "<group>"; };
 		20000000000000000000041 /* DaemonPersistenceControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistenceControllerTests.swift; sourceTree = "<group>"; };
 		20000000000000000000043 /* DaemonServiceRegistrarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonServiceRegistrarTests.swift; sourceTree = "<group>"; };
+		20000000000000000000045 /* NativeMacosCompatibilityFixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMacosCompatibilityFixtureTests.swift; sourceTree = "<group>"; };
+		20000000000000000000046 /* persisted-layout.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "persisted-layout.json"; path = "../fixtures/native-macos-compat/persisted-layout.json"; sourceTree = SOURCE_ROOT; };
+		20000000000000000000047 /* rust-session-models.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "rust-session-models.json"; path = "../fixtures/native-macos-compat/rust-session-models.json"; sourceTree = SOURCE_ROOT; };
+		20000000000000000000048 /* status-end-events.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "status-end-events.json"; path = "../fixtures/native-macos-compat/status-end-events.json"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -245,6 +251,10 @@
 				20000000000000000000000E /* PaneGridTests.swift */,
 				200000000000000000000010 /* PaneWorkspaceViewTests.swift */,
 				200000000000000000000011 /* pane-grid.json */,
+				20000000000000000000045 /* NativeMacosCompatibilityFixtureTests.swift */,
+				20000000000000000000046 /* persisted-layout.json */,
+				20000000000000000000047 /* rust-session-models.json */,
+				20000000000000000000048 /* status-end-events.json */,
 				200000000000000000000008 /* WorkspaceWindowControllerTests.swift */,
 				200000000000000000000013 /* PersistedLayoutTests.swift */,
 				200000000000000000000016 /* WorkspaceRestorationTests.swift */,
@@ -377,6 +387,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				100000000000000000000010 /* pane-grid.json in Resources */,
+				10000000000000000000045 /* persisted-layout.json in Resources */,
+				10000000000000000000046 /* rust-session-models.json in Resources */,
+				10000000000000000000047 /* status-end-events.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -433,6 +446,7 @@
 				10000000000000000000000F /* PaneWorkspaceViewTests.swift in Sources */,
 				100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */,
 				100000000000000000000012 /* PersistedLayoutTests.swift in Sources */,
+				10000000000000000000044 /* NativeMacosCompatibilityFixtureTests.swift in Sources */,
 				100000000000000000000015 /* WorkspaceRestorationTests.swift in Sources */,
 				100000000000000000000017 /* NotificationFeedTests.swift in Sources */,
 				100000000000000000000019 /* SessionNotifierTests.swift in Sources */,
@@ -494,6 +508,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_TESTABILITY = YES;
@@ -506,6 +521,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 2026.8.3;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = digital.bruno.omniagent;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -521,6 +537,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -532,6 +549,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 2026.8.3;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = digital.bruno.omniagent;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -587,6 +605,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -598,6 +617,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 2026.8.3;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = "digital.bruno.omniagent.preview";
 				PRODUCT_NAME = "$(TARGET_NAME)";

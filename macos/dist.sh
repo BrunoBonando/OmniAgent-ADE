@@ -6,11 +6,33 @@
 # artifact), then run these against the resulting .app path.
 set -eu
 
+# Subcommands:
+#   sign        hardened-runtime codesign of the embedded daemon + the bundle
+#   notarize    submit to Apple, wait, staple
+#   verify      bundle structure + Gatekeeper assessment  <- the release gate
+#   verify-smoke  the packaged PTY smoke check, KNOWN BROKEN, opt-in only
+#
+# Why `verify-smoke` is a separate subcommand and not part of `verify`
+# (final whole-branch review, Important #3): the smoke check shells out to
+# scripts/native-macos-pty-harness.py, which still speaks Task 1's original
+# per-request JSON-over-a-newline protocol. Task 2 replaced the daemon's wire
+# format with the persistent 16-byte-envelope framing and the harness was
+# never updated, so it cannot get a response out of ANY current daemon build,
+# packaged or not (independently confirmed against the unmodified harness in
+# both the Task 6d and Task 7 reports). While it was wired into `verify`,
+# `verify` could never exit 0 -- which trains everyone to ignore the exit
+# code of the one command that is supposed to be the release gate, and
+# quietly voids the bundle-structure and Gatekeeper checks it also performs.
+# Rewriting the harness onto the current protocol is a real piece of work
+# that both prior tasks deliberately deferred; splitting it out here is not
+# that fix, it is what makes `verify`'s exit code mean something again in the
+# meantime. Run `verify-smoke` explicitly if you are working on the harness.
 action=${1:-}
 case "$action" in
-  sign|notarize|verify) ;;
+  sign|notarize|verify|verify-smoke) ;;
   *)
-    echo "usage: $0 sign|notarize|verify <path-to-OmniAgent.app>" >&2
+    echo "usage: $0 sign|notarize|verify|verify-smoke <path-to-OmniAgent.app>" >&2
+    echo "  (verify-smoke is a known-broken harness check, opt-in only -- see this script's comments)" >&2
     exit 2
     ;;
 esac
@@ -55,12 +77,34 @@ EOF
   [ -f "$entitlements" ] || { echo "$0 sign: missing entitlements file: $entitlements" >&2; exit 1; }
   plutil -lint "$entitlements" >/dev/null
 
-  if [ -f "$daemon" ]; then
-    echo "$0 sign: signing embedded daemon ($daemon)..." >&2
-    codesign --force --options runtime --timestamp --sign "$identity" "$daemon"
-  else
-    echo "$0 sign: warning: no daemon binary embedded at $daemon (nothing to sign there)" >&2
+  # Hard failure, not a warning (final whole-branch review, Important #3).
+  # An OmniAgent.app with no embedded daemon is not a shippable artifact --
+  # the app has no PTY backend at all -- and signing one produces a
+  # convincingly signed, notarizable, completely non-functional bundle. This
+  # used to only warn, on the theory that `verify`'s bundle-structure check
+  # was the backstop; that backstop lived inside a subcommand whose exit code
+  # could never be 0 (see the header comment). Same fail-clearly posture this
+  # function already takes for a missing signing identity or entitlements
+  # file.
+  if [ ! -f "$daemon" ]; then
+    cat >&2 <<EOF
+$0 sign: no daemon binary embedded at
+  $daemon
+
+The app bundle has no PTY backend, so signing it would produce a validly
+signed but non-functional artifact. Build a distributable bundle first:
+
+  ./macos/build.sh universal
+
+(which runs macos/embed-daemon.sh and the Xcode "Embed PTY Daemon and
+LaunchAgent Plists" phase). Note that Debug builds deliberately skip the
+embed step -- sign a Release or Preview build.
+EOF
+    exit 1
   fi
+
+  echo "$0 sign: signing embedded daemon ($daemon)..." >&2
+  codesign --force --options runtime --timestamp --sign "$identity" "$daemon"
 
   echo "$0 sign: signing app bundle ($app)..." >&2
   codesign --force --options runtime --timestamp \
@@ -138,25 +182,43 @@ verify() {
     status=1
   fi
 
-  echo "$0 verify: packaged PTY smoke -----------------------------------" >&2
-  if ! python3 "$root/scripts/native-macos-pty-harness.py" smoke "$app"; then
-    cat >&2 <<EOF
-$0 verify: FAIL packaged PTY smoke
-
-Known pre-existing issue, not a Task 6d/distribution defect: this harness
-(scripts/native-macos-pty-harness.py, added in Task 1) still speaks Task
-1's original per-request JSON-over-a-newline protocol. Task 2 replaced the
-daemon's wire protocol with the persistent 16-byte-envelope framing
-(crates/omniagent-pty-daemon/src/server.rs's MessageKind-based Hello/
-HelloAck handshake) and the harness was never updated for that rewrite, so
-it fails to get a response from ANY current daemon build, packaged or not
--- see the Task 6d report for how this was confirmed against the
-unmodified, pre-Task-6d harness too.
-EOF
-    status=1
+  if [ "$status" -eq 0 ]; then
+    echo "$0 verify: OK (bundle structure + Gatekeeper)." >&2
   fi
-
+  echo "$0 verify: note: the packaged PTY smoke check is NOT part of this gate -- run '$0 verify-smoke $app' for it (known broken, see this script's header)." >&2
   return $status
 }
 
-$action
+# --- verify-smoke: the packaged PTY smoke check, opt-in and known broken ---
+
+verify_smoke() {
+  echo "$0 verify-smoke: packaged PTY smoke ------------------------------" >&2
+  if python3 "$root/scripts/native-macos-pty-harness.py" smoke "$app"; then
+    echo "$0 verify-smoke: OK." >&2
+    return 0
+  fi
+  cat >&2 <<EOF
+$0 verify-smoke: FAIL packaged PTY smoke
+
+EXPECTED until the harness is rewritten. Known pre-existing issue, not a
+distribution defect: this harness (scripts/native-macos-pty-harness.py,
+added in Task 1) still speaks Task 1's original per-request
+JSON-over-a-newline protocol. Task 2 replaced the daemon's wire protocol
+with the persistent 16-byte-envelope framing
+(crates/omniagent-pty-daemon/src/server.rs's MessageKind-based Hello/
+HelloAck handshake) and the harness was never updated for that rewrite, so
+it fails to get a response from ANY current daemon build, packaged or not
+-- confirmed against the unmodified, pre-Task-6d harness in both the Task
+6d and Task 7 reports.
+
+This is why the check is not part of '$0 verify': a permanently red gate is
+a gate nobody reads. Fixing it means porting the harness onto the current
+framing, which is its own piece of work.
+EOF
+  return 1
+}
+
+case "$action" in
+  verify-smoke) verify_smoke ;;
+  *) $action ;;
+esac
