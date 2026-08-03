@@ -37,11 +37,23 @@ final class SettingsStore {
     /// case — the one place that convention (`review_memory`'s "unset means
     /// off", `auth_signed_in`'s "unset means on") is spelled out per call
     /// site rather than guessed.
-    func getBool(_ key: String, default defaultValue: Bool, completion: @escaping (Bool) -> Void) {
+    ///
+    /// **`nil` means the read failed, and is not the same as unset.** This
+    /// used to be `switch try? result.get()`, which collapsed a `.failure`
+    /// (daemon down, socket dropped, database locked) into "no such row" and
+    /// handed back the default — so a transient error at Settings-open time
+    /// rendered the control in its default position, and the user's next
+    /// interaction wrote that default over the real row in the shared
+    /// `brain.db` (final whole-branch review, Minor #11). That is exactly the
+    /// failure class `WorkspaceWindowController.layoutReadFailed` exists to
+    /// prevent for the `layout` row; the caller is expected to hold the same
+    /// kind of write gate — see `SettingsViewModel.setReviewMemory`.
+    func getBool(_ key: String, default defaultValue: Bool, completion: @escaping (Bool?) -> Void) {
         get(key) { result in
-            switch try? result.get() {
-            case let value?: completion(value == "true")
-            case nil: completion(defaultValue)
+            switch result {
+            case let .success(value?): completion(value == "true")
+            case .success(nil): completion(defaultValue)
+            case .failure: completion(nil)
             }
         }
     }

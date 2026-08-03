@@ -39,6 +39,34 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         }
     }
 
+    /// Minor #10: `lastStatus` was the one per-pane dictionary `closePane`
+    /// never cleared, so a long-lived window accumulated an entry for every
+    /// pane it had ever opened.
+    func testClosingAPaneForgetsItsLastStatusAlongWithItsOtherPerPaneState() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        controller.newTerminalPane(nil)
+        let closing = try XCTUnwrap(workspace.focusedPaneID)
+        let survivor = try XCTUnwrap(workspace.paneIDs.first { $0 != closing })
+
+        for id in [closing, survivor] {
+            controller.recordNotification(
+                for: SessionStatusEvent(id: id, status: .awaitingApproval, notify: true, engine: "shell")
+            )
+        }
+        XCTAssertEqual(Set(controller.lastStatus.keys), [closing, survivor])
+
+        controller.closePane(nil)
+
+        XCTAssertEqual(
+            Set(controller.lastStatus.keys),
+            [survivor],
+            "a closed pane's status must not outlive it"
+        )
+    }
+
     func testClosePaneCommandRemovesTheFocusedPaneAndLeavesTheRestAlive() throws {
         let controller = makeController()
         defer { controller.close() }

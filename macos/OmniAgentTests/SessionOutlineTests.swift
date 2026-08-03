@@ -138,6 +138,14 @@ final class SessionOutlineTests: XCTestCase {
     }
 }
 
+/// An `NSView` that accepts first-responder status and then refuses to give
+/// it up — the only reliable way to make `NSWindow.makeFirstResponder` return
+/// `false` in a test, which is the case `beginRename`'s latch has to survive.
+private final class StubbornResponderView: NSView {
+    override var acceptsFirstResponder: Bool { true }
+    override func resignFirstResponder() -> Bool { false }
+}
+
 /// The `NSOutlineView` half: the rows it builds and the intents it raises.
 final class SessionOutlineViewTests: XCTestCase {
     func testTheOutlineShowsEveryProjectSessionAndPaneExpanded() {
@@ -264,9 +272,90 @@ final class SessionOutlineViewTests: XCTestCase {
         XCTAssertFalse(outline.isRenaming)
         XCTAssertEqual(
             outline.outlineView.numberOfRows,
-            4,
-            "the newest deferred reload lands the moment editing ends — deferred, never dropped"
+            3,
+            "the reload must NOT run inline: commitRename can be reached from "
+                + "controlTextDidEndEditing:, while AppKit is still tearing the field editor down"
         )
+
+        flushMainQueue()
+
+        XCTAssertEqual(
+            outline.outlineView.numberOfRows,
+            4,
+            "the newest deferred reload lands on the next runloop turn — deferred, never dropped"
+        )
+    }
+
+    /// The reload released by a rename is re-read at the moment it runs, not
+    /// captured when editing ended, so a reload that lands in between wins.
+    func testTheNewestReloadWinsWhenOneArrivesWhileTheDeferredOneIsInFlight() throws {
+        let outline = SessionOutlineView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
+        outline.reload(panes: [pane("a", project: "alpha", group: "g1", groupLabel: "Build")], focusedPaneID: "a")
+        let row = outline.outlineView.row(forItem: SessionOutlineView.OutlineItem.session(project: "alpha", group: "g1"))
+        let cell = try XCTUnwrap(outline.outlineView.view(atColumn: 0, row: row, makeIfNecessary: true) as? SessionOutlineRowView)
+
+        XCTAssertTrue(outline.beginRenamingSession(atRow: row))
+        outline.reload(
+            panes: [pane("a", project: "alpha", group: "g1"), pane("b", project: "alpha", group: "g1")],
+            focusedPaneID: "a"
+        )
+        cell.commitRename(named: "Migration")
+        // Lands after editing ended but before the deferred block runs.
+        outline.reload(
+            panes: [
+                pane("a", project: "alpha", group: "g1"),
+                pane("b", project: "alpha", group: "g1"),
+                pane("c", project: "alpha", group: "g2"),
+            ],
+            focusedPaneID: "a"
+        )
+        flushMainQueue()
+
+        // 1 project + 2 sessions + 3 panes.
+        XCTAssertEqual(outline.outlineView.numberOfRows, 6, "the stale deferred reload must not win")
+    }
+
+    /// The `isEditing` latch is what suspends the outline's reloads, so
+    /// latching it when focus never moved into the field would freeze the
+    /// outline with no field to type in and no gesture that ends editing.
+    func testARenameThatCannotTakeFocusIsRefusedRatherThanLatched() throws {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 240, height: 400),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let outline = SessionOutlineView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
+        window.contentView?.addSubview(outline)
+        outline.reload(panes: [pane("a", project: "alpha", group: "g1", groupLabel: "Build")], focusedPaneID: "a")
+        let row = outline.outlineView.row(forItem: SessionOutlineView.OutlineItem.session(project: "alpha", group: "g1"))
+        let cell = try XCTUnwrap(outline.outlineView.view(atColumn: 0, row: row, makeIfNecessary: true) as? SessionOutlineRowView)
+
+        // A real AppKit refusal: the current first responder declines to
+        // resign, so `makeFirstResponder` returns false.
+        let stubborn = StubbornResponderView()
+        window.contentView?.addSubview(stubborn)
+        XCTAssertTrue(window.makeFirstResponder(stubborn))
+
+        XCTAssertFalse(cell.beginRename(), "the row must report that the field did not open")
+        XCTAssertFalse(outline.beginRenamingSession(atRow: row), "and so must the outline")
+        XCTAssertFalse(outline.isRenaming, "so reloads are never suspended by a rename that never began")
+
+        // The outline is still live: a later reload applies immediately.
+        outline.reload(
+            panes: [pane("a", project: "alpha", group: "g1"), pane("b", project: "alpha", group: "g1")],
+            focusedPaneID: "a"
+        )
+        XCTAssertEqual(outline.outlineView.numberOfRows, 4)
+    }
+
+    /// Drains one turn of the main queue. Every test here runs on the main
+    /// thread, so `DispatchQueue.main.async` work does not run until the
+    /// runloop spins; waiting on an expectation enqueued behind it does that.
+    private func flushMainQueue(file: StaticString = #filePath, line: UInt = #line) {
+        let drained = expectation(description: "main queue drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 1)
     }
 
     func testAnAbandonedRenameStillReleasesTheDeferredReload() {
@@ -281,6 +370,7 @@ final class SessionOutlineViewTests: XCTestCase {
         cell?.commitRename(named: "   ")
 
         XCTAssertFalse(outline.isRenaming)
+        flushMainQueue()
         XCTAssertEqual(outline.outlineView.numberOfRows, 4, "the outline is not frozen forever")
     }
 

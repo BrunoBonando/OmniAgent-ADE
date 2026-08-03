@@ -61,7 +61,13 @@ struct CommandPaletteModel: Equatable {
         nextSessionName: String? = nil,
         projectLabels: [String: String] = [:]
     ) -> [PaletteCommand] {
-        let byID = Dictionary(uniqueKeysWithValues: panes.map { ($0.sessionID, $0) })
+        // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
+        // the already-fixed call site in `WorkspaceWindowController`'s
+        // `projectLabels`: the trapping initializer crashes the app outright
+        // on a duplicate key. Pane ids are unique upstream so this is
+        // unreachable today, but opening the command palette should not be
+        // able to take the app down if that ever stops being true.
+        let byID = Dictionary(panes.map { ($0.sessionID, $0) }, uniquingKeysWith: { _, newest in newest })
         let ordered = paneOrder.compactMap { byID[$0] }
         let tree = SessionOutline.group(ordered, focusedPaneID: focusedPaneID)
 

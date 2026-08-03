@@ -61,8 +61,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// (connecting, reconnecting, transport errors). Outranks session status.
     private var connectionStatus: String?
     /// The last status each pane reported — what tells an approval's outcome
-    /// apart from an unrelated status change.
-    private var lastStatus: [String: RemoteSessionStatus] = [:]
+    /// apart from an unrelated status change. Cleared for a pane both when its
+    /// session exits and when the user closes it (`closePane`), so it holds
+    /// only live panes; `private(set)` so the test that pins that can see it.
+    private(set) var lastStatus: [String: RemoteSessionStatus] = [:]
     let notifier: SessionNotifier
     /// The notification feed's two flags, for exactly the reasons the layout's
     /// two above exist.
@@ -442,6 +444,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connection.kill(sessionID: focused)
         readySessions.remove(focused)
         sessionStatus.removeValue(forKey: focused)
+        // `lastStatus` is per-pane too and was the one sibling this never
+        // cleared, so a long-lived window accumulated one entry per pane it
+        // ever opened (final whole-branch review, Minor #10). `onExit` already
+        // clears it for a session that ends on its own; this is the path
+        // where the *user* closes the pane.
+        lastStatus.removeValue(forKey: focused)
         workspace.closePane(focused)
     }
 

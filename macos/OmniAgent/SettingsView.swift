@@ -49,8 +49,25 @@ final class SettingsViewModel: ObservableObject {
     @Published private(set) var authSignedIn = false
     @Published private(set) var notificationEntries: [NotificationEntry] = []
     @Published private(set) var reviewMemoryEnabled = false
+    /// The `review_memory` row could not be *read*.
+    ///
+    /// Kept distinct from "the row is unset" for the same reason
+    /// `WorkspaceWindowController.layoutReadFailed` keeps them distinct for
+    /// `layout`: both apps share one `brain.db`, and substituting a default
+    /// on a transient read error puts the control in a position the user did
+    /// not choose — whose next toggle would then persist that default over
+    /// the real value. While this is true the control is shown as
+    /// "couldn't load" and `setReviewMemory` refuses to write, retrying the
+    /// read instead (the same re-arm `layoutReadFailed` does).
+    @Published private(set) var reviewMemoryReadFailed = false
     @Published var fileTreeWidthText = ""
     @Published var codeReviewWidthText = ""
+    /// The panel-width rows could not be read — same write gate, same
+    /// reasoning as `reviewMemoryReadFailed`. Two flags because the two rows
+    /// are two independent reads and either can fail on its own.
+    @Published private(set) var fileTreeWidthReadFailed = false
+    @Published private(set) var codeReviewWidthReadFailed = false
+    var panelsReadFailed: Bool { fileTreeWidthReadFailed || codeReviewWidthReadFailed }
     @Published private(set) var rebuildInProgress = false
     @Published var rebuildError: String?
     @Published var rebuildConfirming = false
@@ -135,31 +152,74 @@ final class SettingsViewModel: ObservableObject {
 
     func refreshReview() {
         settings.getBool(SettingsKey.reviewMemory, default: false) { [weak self] value in
-            self?.reviewMemoryEnabled = value
+            guard let self else { return }
+            // `nil` is a failed read, not an unset row — see `getBool`.
+            guard let value else {
+                reviewMemoryReadFailed = true
+                return
+            }
+            reviewMemoryEnabled = value
+            reviewMemoryReadFailed = false
         }
     }
 
+    /// Refuses to write while the row's real value is unknown, retrying the
+    /// read instead — the same re-arm-and-retry shape
+    /// `WorkspaceWindowController.layoutReadFailed` uses. Writing here would
+    /// persist a default the user never chose over a row the web build reads
+    /// too.
     func setReviewMemory(_ enabled: Bool) {
+        guard !reviewMemoryReadFailed else {
+            refreshReview()
+            return
+        }
         reviewMemoryEnabled = enabled
         settings.setBool(SettingsKey.reviewMemory, enabled)
     }
 
     // MARK: - Panels
 
+    /// `(try? result.get()) ?? ""` used to be the whole of this, which made a
+    /// failed read indistinguishable from an unset row: the field rendered
+    /// empty, and a Return keypress then wrote `""` over the real width in the
+    /// row the web build shares. Failure now leaves the field alone and shuts
+    /// the write gate.
     func refreshPanels() {
         settings.get(SettingsKey.fileTreeWidth) { [weak self] result in
-            self?.fileTreeWidthText = (try? result.get()) ?? ""
+            guard let self else { return }
+            switch result {
+            case let .success(value):
+                fileTreeWidthText = value ?? ""
+                fileTreeWidthReadFailed = false
+            case .failure:
+                fileTreeWidthReadFailed = true
+            }
         }
         settings.get(SettingsKey.codeReviewWidth) { [weak self] result in
-            self?.codeReviewWidthText = (try? result.get()) ?? ""
+            guard let self else { return }
+            switch result {
+            case let .success(value):
+                codeReviewWidthText = value ?? ""
+                codeReviewWidthReadFailed = false
+            case .failure:
+                codeReviewWidthReadFailed = true
+            }
         }
     }
 
     func commitFileTreeWidth() {
+        guard !fileTreeWidthReadFailed else {
+            refreshPanels()
+            return
+        }
         settings.set(SettingsKey.fileTreeWidth, fileTreeWidthText)
     }
 
     func commitCodeReviewWidth() {
+        guard !codeReviewWidthReadFailed else {
+            refreshPanels()
+            return
+        }
         settings.set(SettingsKey.codeReviewWidth, codeReviewWidthText)
     }
 
@@ -301,13 +361,23 @@ private struct ReviewSettingsTab: View {
                 isOn: Binding(get: { model.reviewMemoryEnabled }, set: { model.setReviewMemory($0) })
             )
             .toggleStyle(.checkbox)
-            Text(
-                model.reviewMemoryEnabled
-                    ? "New session summaries wait for approval before they show up in search or briefings."
-                    : "Auto-commit is on (default) — new session summaries land immediately."
-            )
-            .font(.caption)
-            .foregroundStyle(OmniAgentPalette.textSecondary)
+            .disabled(model.reviewMemoryReadFailed)
+            if model.reviewMemoryReadFailed {
+                // Deliberately not showing a value: this control does not know
+                // what the setting is, and pretending it is off would be a lie
+                // the next click would write down.
+                Text("Couldn't read this setting — reopen Settings once the daemon is back.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else {
+                Text(
+                    model.reviewMemoryEnabled
+                        ? "New session summaries wait for approval before they show up in search or briefings."
+                        : "Auto-commit is on (default) — new session summaries land immediately."
+                )
+                .font(.caption)
+                .foregroundStyle(OmniAgentPalette.textSecondary)
+            }
         }
     }
 }
@@ -324,11 +394,18 @@ private struct PanelsSettingsTab: View {
                 TextField("px", text: $model.fileTreeWidthText)
                     .frame(width: 80)
                     .onSubmit { model.commitFileTreeWidth() }
+                    .disabled(model.fileTreeWidthReadFailed)
             }
             LabeledContent("Code review panel width") {
                 TextField("px", text: $model.codeReviewWidthText)
                     .frame(width: 80)
                     .onSubmit { model.commitCodeReviewWidth() }
+                    .disabled(model.codeReviewWidthReadFailed)
+            }
+            if model.panelsReadFailed {
+                Text("Couldn't read the saved widths — reopen Settings once the daemon is back.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
         }
     }

@@ -90,7 +90,13 @@ final class SessionOutlineView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
             return
         }
         pendingReload = nil
-        self.panes = Dictionary(uniqueKeysWithValues: panes.map { ($0.sessionID, $0) })
+        // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
+        // the already-fixed call site in `WorkspaceWindowController`'s
+        // `projectLabels`: the trapping initializer crashes the app outright
+        // on a duplicate key. Pane ids are unique upstream so this is
+        // unreachable today, but "unreachable" is exactly the assumption a
+        // rendering path should not stake a crash on.
+        self.panes = Dictionary(panes.map { ($0.sessionID, $0) }, uniquingKeysWith: { _, newest in newest })
         self.focusedPaneID = focusedPaneID
         self.projectLabels = projectLabels
         tree = SessionOutline.group(panes, focusedPaneID: focusedPaneID)
@@ -115,10 +121,34 @@ final class SessionOutlineView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
     private(set) var isRenaming = false
     private var pendingReload: (panes: [PaneDescriptor], focusedPaneID: String?, projectLabels: [String: String])?
 
+    /// Releases the reload a rename was holding — **on the next runloop turn,
+    /// never inline.**
+    ///
+    /// The commit path that gets here runs from
+    /// `controlTextDidEndEditing:`, i.e. while AppKit is still tearing down
+    /// the field editor for the cell being reloaded. `reloadData` from inside
+    /// that teardown is a documented hazard: it deallocates the very view the
+    /// notification is still unwinding through. Deferring by one turn costs
+    /// nothing visible (the outline redraws in the same frame) and takes the
+    /// reload entirely out of AppKit's editing teardown.
+    ///
+    /// The pending reload is deliberately re-read inside the block rather
+    /// than captured: a newer one may have landed in the meantime, and it is
+    /// the newest that should win — the same "deferred, never dropped" rule
+    /// `reload` itself follows. If something else already applied it
+    /// (`pendingReload == nil`), this becomes a no-op instead of replaying
+    /// stale panes over fresh ones.
     private func editingEnded() {
         isRenaming = false
-        guard let pending = pendingReload else { return }
-        reload(panes: pending.panes, focusedPaneID: pending.focusedPaneID, projectLabels: pending.projectLabels)
+        guard pendingReload != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !isRenaming, let pending = pendingReload else { return }
+            reload(
+                panes: pending.panes,
+                focusedPaneID: pending.focusedPaneID,
+                projectLabels: pending.projectLabels
+            )
+        }
     }
 
     /// The outline's items. A value type keyed by id rather than the model
@@ -366,14 +396,35 @@ final class SessionOutlineRowView: NSTableCellView {
         addButton?.frame = NSRect(x: max(0, bounds.width - trailing), y: 0, width: trailing, height: bounds.height)
     }
 
+    /// Opens the name field, returning whether it actually opened.
+    ///
+    /// The `isEditing` latch is what suspends the outline's reloads
+    /// (`SessionOutlineView.reload` defers while `isRenaming`) and what
+    /// `commitRename` requires before it will do anything. Latching it when
+    /// focus did *not* move into the field would leave the outline frozen
+    /// with no field to type in and no gesture that ends editing — there is
+    /// no Escape out of a state nobody can see. So the latch is gated on
+    /// `makeFirstResponder`'s real answer, and the editable appearance is
+    /// rolled back if it says no.
+    ///
+    /// A row with no `window` is treated as "nothing to fail": there is no
+    /// window to hold a first responder, which is the case in the unit tests
+    /// (a cell is built and driven directly, never installed in a window). In
+    /// production every cell handed out by `NSOutlineView` is in one, so the
+    /// branch that matters is the one where AppKit genuinely refuses.
     @discardableResult
     func beginRename() -> Bool {
         guard case .session = kind else { return false }
-        isEditing = true
         label.isEditable = true
         label.isBordered = true
         label.drawsBackground = true
-        window?.makeFirstResponder(label)
+        if let window, !window.makeFirstResponder(label) {
+            label.isEditable = false
+            label.isBordered = false
+            label.drawsBackground = false
+            return false
+        }
+        isEditing = true
         return true
     }
 

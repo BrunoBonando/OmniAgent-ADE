@@ -160,6 +160,89 @@ final class SessionConnectionTests: XCTestCase {
         server.stop()
     }
 
+    /// Minor #10: `pendingReattachSessions` was pruned only on the `.error`
+    /// branch, so every *successful* reattach left an entry behind — one per
+    /// session per reconnect, forever. Two reconnects, both reattaching
+    /// successfully, must leave nothing behind.
+    func testASuccessfulReattachDoesNotAccumulateTrackingEntriesAcrossReconnects() throws {
+        let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
+        let server = try UnixTestServer(path: socketPath)
+        let firstAttach = expectation(description: "first attach answered")
+        let secondAttach = expectation(description: "reattach answered")
+
+        func answerSnapshot(_ client: Int32, request: UInt64) throws {
+            // The daemon answers an attach with a Snapshot carrying a
+            // *sequence*, not the attach's request id — the exact reason the
+            // entry could not be found by request id on the success path.
+            try writeFrame(
+                SessionFrame(
+                    kind: .snapshot,
+                    requestOrSequence: 7,
+                    payload: try RawPayload.encode(sessionID: "native-terminal", bytes: Data("hi".utf8))
+                ),
+                to: client
+            )
+        }
+
+        server.run { firstClient in
+            let hello = try readFrame(from: firstClient)
+            try writeFrame(
+                SessionFrame(
+                    kind: .helloAck,
+                    requestOrSequence: hello.requestOrSequence,
+                    payload: try JSONSerialization.data(withJSONObject: ["protocol_version": 1])
+                ),
+                to: firstClient
+            )
+            let attach = try readFrame(from: firstClient)
+            try answerSnapshot(firstClient, request: attach.requestOrSequence)
+            firstAttach.fulfill()
+            Darwin.close(firstClient)
+
+            let secondClient = try server.accept()
+            let reconnectHello = try readFrame(from: secondClient)
+            try writeFrame(
+                SessionFrame(
+                    kind: .helloAck,
+                    requestOrSequence: reconnectHello.requestOrSequence,
+                    payload: try JSONSerialization.data(withJSONObject: ["protocol_version": 1])
+                ),
+                to: secondClient
+            )
+            let reattach = try readFrame(from: secondClient)
+            try answerSnapshot(secondClient, request: reattach.requestOrSequence)
+            secondAttach.fulfill()
+            Darwin.close(secondClient)
+        }
+
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: socketPath),
+            reconnectDelay: 0.02
+        )
+        var attached = false
+        connection.onStateChange = { state in
+            guard state == .connected, !attached else { return }
+            attached = true
+            connection.attach(sessionID: "native-terminal", afterSequence: nil)
+        }
+        let snapshots = expectation(description: "two snapshots delivered")
+        snapshots.expectedFulfillmentCount = 2
+        connection.onTerminalData = { _, _, _, isSnapshot in
+            if isSnapshot { snapshots.fulfill() }
+        }
+        connection.connect()
+
+        wait(for: [firstAttach, secondAttach, snapshots], timeout: 3)
+        XCTAssertEqual(
+            connection.pendingReattachCount,
+            0,
+            "a confirmed reattach must not leave a tracking entry behind"
+        )
+        connection.disconnect()
+        XCTAssertEqual(connection.pendingReattachCount, 0, "and disconnecting clears the rest")
+        server.stop()
+    }
+
     // MARK: - Settings / brain client methods (Task 6a)
 
     func testGetSettingSendsTheKeyAndDecodesAnOptionalValue() throws {

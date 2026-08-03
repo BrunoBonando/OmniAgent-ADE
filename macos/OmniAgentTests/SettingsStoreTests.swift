@@ -88,6 +88,27 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(client.rows["review_memory"], "false")
     }
 
+    /// A read that *failed* is not a row that is unset. Collapsing the two
+    /// (the old `switch try? result.get()`) put a control in its default
+    /// position on a transient daemon error, and the next interaction wrote
+    /// that default over the real row in the shared `brain.db` — the failure
+    /// class `WorkspaceWindowController.layoutReadFailed` exists to prevent
+    /// (final whole-branch review, Minor #11).
+    func testGetBoolReportsAFailedReadAsNilRatherThanAsTheDefault() {
+        let client = FakeSettingsClient(rows: ["review_memory": "true"])
+        client.failing = ["review_memory"]
+        let store = SettingsStore(client: client)
+
+        for fallback in [true, false] {
+            let expectation = expectation(description: "failed read, default \(fallback)")
+            store.getBool("review_memory", default: fallback) { value in
+                XCTAssertNil(value, "a failed read must not masquerade as the default")
+                expectation.fulfill()
+            }
+            wait(for: [expectation], timeout: 1)
+        }
+    }
+
     private func assertBool(
         _ store: SettingsStore,
         key: String,

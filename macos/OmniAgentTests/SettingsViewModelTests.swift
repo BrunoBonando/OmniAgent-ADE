@@ -119,6 +119,84 @@ final class SettingsViewModelTests: XCTestCase {
         XCTAssertEqual(client.rows["code_review_width"], "500")
     }
 
+    /// Minor #11: a transient read failure must not become a write. Both the
+    /// Review toggle and the panel-width fields used to fall back to a
+    /// default on a `.failure`, then persist that default the moment the user
+    /// touched them — over a row the web build reads from the same
+    /// `brain.db`.
+    func testAFailedReviewReadNeverWritesTheDefaultOverTheRealRow() {
+        let client = FakeSettingsClient(rows: ["review_memory": "true"])
+        client.failing = ["review_memory"]
+        let settings = SettingsStore(client: client)
+        let model = SettingsViewModel(
+            settings: settings,
+            authGate: AuthGateCoordinator(settings: settings),
+            brainAdmin: FakeBrainAdminClient(),
+            notifier: SessionNotifier(delivery: RecordingDelivery()),
+            version: "2026.8.3+001",
+            daemonStatus: FakeDaemonStatus(),
+            openLoginItemsSettings: {}
+        )
+
+        XCTAssertTrue(model.reviewMemoryReadFailed, "the failure is surfaced, not swallowed")
+
+        model.setReviewMemory(true)
+        XCTAssertTrue(
+            client.setCalls.filter { $0.key == "review_memory" }.isEmpty,
+            "the write gate must stay shut while the real value is unknown"
+        )
+        XCTAssertEqual(client.rows["review_memory"], "true", "the real row is untouched")
+
+        // The retry the refused write kicked off now succeeds.
+        client.failing = []
+        model.setReviewMemory(false)
+        XCTAssertTrue(model.reviewMemoryEnabled, "the retry read the real value back")
+        XCTAssertFalse(model.reviewMemoryReadFailed)
+
+        // And with a good read behind it, writing works normally again.
+        model.setReviewMemory(false)
+        XCTAssertEqual(client.rows["review_memory"], "false")
+    }
+
+    func testAFailedPanelWidthReadNeverWritesAnEmptyWidthOverTheSavedOne() {
+        let client = FakeSettingsClient(rows: ["file_tree_width": "260", "code_review_width": "420"])
+        client.failing = ["file_tree_width"]
+        let settings = SettingsStore(client: client)
+        let model = SettingsViewModel(
+            settings: settings,
+            authGate: AuthGateCoordinator(settings: settings),
+            brainAdmin: FakeBrainAdminClient(),
+            notifier: SessionNotifier(delivery: RecordingDelivery()),
+            version: "2026.8.3+001",
+            daemonStatus: FakeDaemonStatus(),
+            openLoginItemsSettings: {}
+        )
+
+        XCTAssertTrue(model.fileTreeWidthReadFailed)
+        XCTAssertTrue(model.panelsReadFailed)
+        XCTAssertFalse(model.codeReviewWidthReadFailed, "the other row read fine")
+        XCTAssertEqual(model.codeReviewWidthText, "420")
+
+        model.commitFileTreeWidth()
+        XCTAssertTrue(
+            client.setCalls.filter { $0.key == "file_tree_width" }.isEmpty,
+            "an empty field from a failed read must never be persisted"
+        )
+        XCTAssertEqual(client.rows["file_tree_width"], "260", "the real width is untouched")
+
+        // The row that *did* read is writable throughout.
+        model.codeReviewWidthText = "500"
+        model.commitCodeReviewWidth()
+        XCTAssertEqual(client.rows["code_review_width"], "500")
+
+        client.failing = []
+        model.commitFileTreeWidth() // refuses, retries the read
+        XCTAssertFalse(model.fileTreeWidthReadFailed)
+        XCTAssertEqual(model.fileTreeWidthText, "260")
+        model.commitFileTreeWidth()
+        XCTAssertEqual(client.rows["file_tree_width"], "260")
+    }
+
     func testSignOutResetsTheAuthGateAndRefreshesTheSummary() {
         let (model, client) = makeModel(settingsRows: ["auth_signed_in": "true", "auth_persona": "student"])
         XCTAssertTrue(model.authSignedIn)

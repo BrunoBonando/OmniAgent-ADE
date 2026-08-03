@@ -147,7 +147,20 @@ final class SessionConnection {
     /// lets a later `.error` response be recognized as "this reattach
     /// failed" without correlating through `pending` (which `sendAttach`
     /// deliberately never registers into; see its own doc comment).
+    ///
+    /// Scoped to **one** reattach round: cleared when a round starts, when a
+    /// reattach is confirmed (a `.snapshot` for that session, or the
+    /// `.response` the daemon sends for an empty resume), and when the
+    /// connection closes. It used to be pruned only on the `.error` branch,
+    /// so every *successful* reattach left an entry behind forever — one per
+    /// session per reconnect, for the life of the app (final whole-branch
+    /// review, Minor #10).
     private var pendingReattachSessions: [UInt64: String] = [:]
+    /// How many reattach-tracking entries are outstanding. Exists for the
+    /// test that pins Minor #10 (the map must not grow without bound across
+    /// reconnects); read on `ioQueue`, where every mutation happens, so it
+    /// can never race the connection's own I/O.
+    var pendingReattachCount: Int { ioQueue.sync { pendingReattachSessions.count } }
     private var shouldReconnect = false
     private var reconnectScheduled = false
     private var state: ConnectionState = .disconnected
@@ -657,6 +670,9 @@ final class SessionConnection {
             helloRequest = nil
             finishConnectSignpost()
             transition(to: .connected)
+            // A new round: anything left from the previous connection's
+            // round can never be answered now.
+            pendingReattachSessions.removeAll()
             for (sessionID, attachment) in attachments {
                 sendAttach(
                     sessionID: sessionID,
@@ -669,6 +685,9 @@ final class SessionConnection {
 
         switch frame.kind {
         case .response, .sessionList, .sessionCreated:
+            // The daemon answers an empty resume with a plain `.response`
+            // on the attach's own request id — a confirmed reattach.
+            pendingReattachSessions.removeValue(forKey: frame.requestOrSequence)
             completeRequest(frame)
         case .error:
             let message =
@@ -690,6 +709,14 @@ final class SessionConnection {
         case .snapshot, .output:
             do {
                 let raw = try RawPayload.decode(frame.payload)
+                if frame.kind == .snapshot {
+                    // A snapshot is the daemon's answer to an attach. It
+                    // carries a *sequence*, not the attach's request id, so
+                    // the tracking entry has to be found by session instead.
+                    pendingReattachSessions = pendingReattachSessions.filter {
+                        $0.value != raw.sessionID
+                    }
+                }
                 updateSequence(sessionID: raw.sessionID, sequence: frame.requestOrSequence)
                 os_signpost(
                     .event,
@@ -867,6 +894,9 @@ final class SessionConnection {
             descriptor = -1
         }
         helloRequest = nil
+        // Per-connection state: a reattach whose connection is gone can
+        // never be answered on it.
+        pendingReattachSessions.removeAll()
         let completions = pending.values
         pending.removeAll()
         for completion in completions {
