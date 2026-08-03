@@ -5,12 +5,6 @@ edition.workspace = true
 
 [dependencies]
 brain-core = { path = "../brain-core" }
-# Task 6a-2: `roots.rs`'s `rename_project` reads/writes the same
-# `project_label_key`/`list_projects` projection `src-tauri` and
-# `omniagent-pty-daemon` already share via `mcp-server` (DESIGN.md 3.3's
-# "one shared retrieval API"), so a rename is visible to every caller
-# immediately rather than this crate re-deriving the settings-table key.
-mcp-server = { path = "../mcp-server" }
 ignore = "0.4"
 tree-sitter = "0.24"
 tree-sitter-typescript = "0.23"
@@ -47,6 +41,18 @@ name = "brain"
 path = "src/bin/brain.rs"
 
 [dev-dependencies]
+# Test-only, deliberately NOT a production dependency: `mcp-server` is the
+# frozen public MCP contract, a layer *above* ingestion, so this crate
+# depending on it inverted the intended layering (final whole-branch review,
+# Minor #6). The one production use — the `project_label:` settings key —
+# now lives in `brain-core`, which both crates already sit on. What remains
+# here is a single cross-seam test
+# (`rename_project_survives_a_simulated_reingest_that_resets_the_nodes_own_label`)
+# asserting that a rename written by this crate is what
+# `mcp_server::tools::list_projects` actually renders; a dev-dependency does
+# not propagate to `omniagent-pty-daemon`/`src-tauri`, so the shipped
+# dependency graph no longer has the inversion.
+mcp-server = { path = "../mcp-server" }
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 tempfile = "3.27.0"

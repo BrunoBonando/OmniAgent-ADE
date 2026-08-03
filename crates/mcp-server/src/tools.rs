@@ -293,26 +293,18 @@ pub fn record_note(ctx: &ToolContext, args: &Value) -> Result<Value, ToolError> 
     write_memory(ctx, "Note", args)
 }
 
-/// Settings-table key for a project's custom display-name override, set via
-/// the app's `rename_project` Tauri command (`src-tauri/src/roots.rs`) —
-/// defined here, in the shared retrieval crate (DESIGN.md 3.4: "one shared
-/// retrieval API ... used by all three [app, daemon, MCP server]"), so
-/// every caller of [`list_projects`] sees a renamed project's real label —
-/// the app's sidebar via `brain_query`, AND any external MCP client
-/// mounting this same store.
+/// Re-export of [`brain_core::project_label_key`], kept at this path because
+/// it is where the helper was first defined and where `src-tauri` and
+/// `brain-ingest` already reference it from.
 ///
-/// Lives in the separate `settings` table rather than the node's own
-/// `label` column on purpose: `brain_ingest::ingest_project` unconditionally
-/// re-upserts a `Project` node's `label` back to its id on every
-/// re-ingest/watch-triggered pass (see that function's own doc comment) —
-/// a plain node-label edit would silently revert on the next file change,
-/// "re-check now", or "Rebuild brain". The settings table isn't touched by
-/// ingestion at all (and `roots_rebuild` already explicitly preserves it
-/// across a rebuild), so storing the override there and applying it as a
-/// read-time overlay here is the only way a rename actually sticks.
-pub fn project_label_key(project_id: &str) -> String {
-    format!("project_label:{project_id}")
-}
+/// It moved down into `brain-core` (final whole-branch review, Minor #6):
+/// `brain-ingest` needed it too, and depending on this crate for one string
+/// helper inverted the intended layering — `mcp-server` is the frozen public
+/// contract *above* ingestion, not below it. `brain-core` is the crate both
+/// already sit on, and the key names a `settings` row, which is `Store`'s own
+/// table. See the definition for why the override lives in `settings` rather
+/// than on the node's `label` column.
+pub use brain_core::project_label_key;
 
 /// `list_projects {}` -> `[{id, label, path}]`. `label` reflects a
 /// `rename_project` override (see [`project_label_key`]) when one exists,

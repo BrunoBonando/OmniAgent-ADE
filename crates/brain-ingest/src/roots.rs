@@ -516,9 +516,10 @@ pub fn add_project(
 /// elsewhere actually uses — never changes; only what
 /// `mcp_server::tools::list_projects` (and therefore `brain_query` / the
 /// sidebar / every pane header) *displays* for it does, immediately,
-/// everywhere that reads it. See `mcp_server::tools::project_label_key`'s
-/// doc for why this writes to the settings table rather than the node's own
-/// `label` column.
+/// everywhere that reads it. See `brain_core::project_label_key`'s doc for
+/// why this writes to the settings table rather than the node's own `label`
+/// column, and why the key itself lives in `brain-core` rather than in the
+/// `mcp-server` crate that reads it.
 pub fn rename_project(store: &Store, id: &str, new_label: &str) -> Result<()> {
     let trimmed = new_label.trim();
     if trimmed.is_empty() {
@@ -530,7 +531,7 @@ pub fn rename_project(store: &Store, id: &str, new_label: &str) -> Result<()> {
     if node.kind != NodeKind::Project {
         anyhow::bail!("{id} is not a project");
     }
-    store.set_setting(&mcp_server::tools::project_label_key(id), trimmed)?;
+    store.set_setting(&brain_core::project_label_key(id), trimmed)?;
     Ok(())
 }
 
@@ -1389,7 +1390,7 @@ mod tests {
         assert_eq!(node.label, "OmniAgent-ADE");
         assert_eq!(
             store
-                .get_setting(&mcp_server::tools::project_label_key("OmniAgent-ADE"))
+                .get_setting(&brain_core::project_label_key("OmniAgent-ADE"))
                 .unwrap()
                 .as_deref(),
             Some("OmniAgent")

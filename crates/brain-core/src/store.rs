@@ -291,6 +291,34 @@ fn ensure_enrich_queue_pending_dedup_index(conn: &Connection) -> rusqlite::Resul
     )
 }
 
+/// Settings-table key for a project's custom display-name override, set via
+/// the app's `rename_project` command (`src-tauri/src/roots.rs`) and the
+/// daemon's `RootsRenameProject` (both through
+/// `brain_ingest::roots::rename_project`), and applied as a read-time
+/// overlay by `mcp_server::tools::list_projects` — so every caller sees a
+/// renamed project's real label: the app's sidebar via `brain_query`, the
+/// native app via the daemon, AND any external MCP client mounting this same
+/// store (DESIGN.md 3.4: "one shared retrieval API ... used by all three").
+///
+/// Lives here in `brain-core`, the crate every one of those sits on, rather
+/// than in `mcp-server` where it started: `brain-ingest` is a *lower* layer
+/// than the frozen MCP contract and must not depend on it for a string
+/// helper (final whole-branch review, Minor #6). `mcp_server::tools`
+/// re-exports this name so no existing caller path had to change.
+///
+/// Lives in the separate `settings` table rather than the node's own
+/// `label` column on purpose: `brain_ingest::ingest_project` unconditionally
+/// re-upserts a `Project` node's `label` back to its id on every
+/// re-ingest/watch-triggered pass (see that function's own doc comment) —
+/// a plain node-label edit would silently revert on the next file change,
+/// "re-check now", or "Rebuild brain". The settings table isn't touched by
+/// ingestion at all (and "Rebuild brain" already explicitly preserves it
+/// across a rebuild), so storing the override there and applying it as a
+/// read-time overlay is the only way a rename actually sticks.
+pub fn project_label_key(project_id: &str) -> String {
+    format!("project_label:{project_id}")
+}
+
 impl Store {
     /// Resolves the local-first data directory: honors the `OMNIAGENT_ADE_DATA_DIR`
     /// env var override (used by tests and by `OMNIAGENT_ADE_DATA_DIR=... brain ingest`
