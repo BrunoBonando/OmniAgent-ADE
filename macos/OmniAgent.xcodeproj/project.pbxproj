@@ -75,6 +75,9 @@
 		10000000000000000000047 /* status-end-events.json in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000048 /* status-end-events.json */; };
 		10000000000000000000050 /* WorkspaceShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000050 /* WorkspaceShell.swift */; };
 		10000000000000000000051 /* WorkspaceShellTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000051 /* WorkspaceShellTests.swift */; };
+		10000000000000000000052 /* EngineIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000052 /* EngineIcon.swift */; };
+		10000000000000000000060 /* WorkspaceFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000060 /* WorkspaceFiles.swift */; };
+		10000000000000000000061 /* WorkspaceFilesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000061 /* WorkspaceFilesTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -179,6 +182,9 @@
 		20000000000000000000049 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		20000000000000000000050 /* WorkspaceShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceShell.swift; sourceTree = "<group>"; };
 		20000000000000000000051 /* WorkspaceShellTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceShellTests.swift; sourceTree = "<group>"; };
+		20000000000000000000052 /* EngineIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineIcon.swift; sourceTree = "<group>"; };
+		20000000000000000000060 /* WorkspaceFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFiles.swift; sourceTree = "<group>"; };
+		20000000000000000000061 /* WorkspaceFilesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFilesTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -232,6 +238,7 @@
 				20000000000000000000001F /* CommandPaletteController.swift */,
 				200000000000000000000020 /* WorkspaceToolbar.swift */,
 				20000000000000000000050 /* WorkspaceShell.swift */,
+				20000000000000000000052 /* EngineIcon.swift */,
 				20000000000000000000022 /* SettingsStore.swift */,
 				20000000000000000000023 /* BrainClients.swift */,
 				20000000000000000000024 /* AuthGateState.swift */,
@@ -246,6 +253,7 @@
 				20000000000000000000039 /* DaemonPersistence.swift */,
 				2000000000000000000003B /* DaemonServiceRegistrar.swift */,
 				2000000000000000000003D /* DaemonPersistenceController.swift */,
+				20000000000000000000060 /* WorkspaceFiles.swift */,
 				20000000000000000000049 /* Assets.xcassets */,
 			);
 			path = OmniAgent;
@@ -286,6 +294,7 @@
 				20000000000000000000041 /* DaemonPersistenceControllerTests.swift */,
 				20000000000000000000043 /* DaemonServiceRegistrarTests.swift */,
 				20000000000000000000051 /* WorkspaceShellTests.swift */,
+				20000000000000000000061 /* WorkspaceFilesTests.swift */,
 			);
 			path = OmniAgentTests;
 			sourceTree = "<group>";
@@ -430,6 +439,7 @@
 				10000000000000000000001E /* CommandPaletteController.swift in Sources */,
 				10000000000000000000001F /* WorkspaceToolbar.swift in Sources */,
 				10000000000000000000050 /* WorkspaceShell.swift in Sources */,
+				10000000000000000000052 /* EngineIcon.swift in Sources */,
 				10000000000000000000021 /* SettingsStore.swift in Sources */,
 				10000000000000000000022 /* BrainClients.swift in Sources */,
 				10000000000000000000023 /* AuthGateState.swift in Sources */,
@@ -444,6 +454,7 @@
 				10000000000000000000038 /* DaemonPersistence.swift in Sources */,
 				1000000000000000000003A /* DaemonServiceRegistrar.swift in Sources */,
 				1000000000000000000003C /* DaemonPersistenceController.swift in Sources */,
+				10000000000000000000060 /* WorkspaceFiles.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -479,6 +490,7 @@
 				10000000000000000000040 /* DaemonPersistenceControllerTests.swift in Sources */,
 				10000000000000000000042 /* DaemonServiceRegistrarTests.swift in Sources */,
 				10000000000000000000051 /* WorkspaceShellTests.swift in Sources */,
+				10000000000000000000061 /* WorkspaceFilesTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

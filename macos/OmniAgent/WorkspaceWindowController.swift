@@ -37,12 +37,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The pane rectangle. Reachable because the window's content view is now
     /// a split view — the workspace is one half of it, not the whole thing.
     var workspaceView: PaneWorkspaceView { workspace }
-    let outline = SessionOutlineView()
-    /// The design's two-level sidebar (step 1, 2026-08-10). `lazy` so it can
-    /// take `outline` — a `self` read that is only legal once phase-1 init has
-    /// finished, which is also why the split view is assembled after
-    /// `super.init` rather than inline with the window.
-    private(set) lazy var shellSidebar = WorkspaceSidebarView(outline: outline)
+    /// The design's two-level sidebar. It draws the sessions tree itself now
+    /// rather than hosting `SessionOutlineView` — the design's rows carry
+    /// engine logos, per-pane status dots and a grid badge, none of which an
+    /// `NSOutlineView` cell can lay out the way the drawing does.
+    ///
+    /// `SessionOutlineView` is consequently no longer part of the shell. It is
+    /// left in the tree with its own tests until a follow-up removes it, so
+    /// this change stays a UI change.
+    let shellSidebar = WorkspaceSidebarView()
     /// The content half of the split: the pane workspace and the placeholder
     /// both live here permanently, and the destination only toggles which is
     /// hidden. Unmounting `PaneWorkspaceView` would tear down live SwiftTerm
@@ -188,15 +191,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
         usageRecorder.onStoreChanged = { [weak self] store in self?.persistUsageAnalytics(store) }
-        outline.onSelectPane = { [weak self] id in self?.workspace.focusPane(id) }
-        outline.onSelectSession = { [weak self] session in
+        shellSidebar.onSelectPane = { [weak self] id in self?.workspace.focusPane(id) }
+        shellSidebar.onSelectSession = { [weak self] session in
             guard let first = session.paneIDs.first else { return }
             self?.workspace.focusPane(first)
         }
-        outline.onRequestNewPane = { [weak self] session in self?.newPane(in: session) }
-        outline.onRenameSession = { [weak self] session, name in
+        shellSidebar.onRenameSession = { [weak self] session, name in
             self?.renameSession(session, to: name)
         }
+        shellSidebar.onNewSession = { [weak self] in self?.newSession(nil) }
+        shellSidebar.onNewTerminal = { [weak self] in
+            guard let self else { return }
+            let panes = self.workspace.paneIDs.compactMap { self.workspace.descriptor(for: $0) }
+            let current = SessionOutline.group(panes, focusedPaneID: self.workspace.focusedPaneID)
+                .flatMap(\.sessions)
+                .first(where: \.isCurrent)
+            guard let current else { return }
+            self.newPane(in: current)
+        }
+        shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
         for pane in panes { addPane(pane, startSession: false) }
         selectInitialWorkspaceIfNeeded(animated: false)
         reloadOutline()
@@ -243,10 +256,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         content.view = contentContainer
         let split = NSSplitViewController()
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
-        // Raised from 180: the design's Level 1 cards carry a 32pt tile plus a
-        // path, and below ~220 the path is all ellipsis.
-        sidebarItem.minimumThickness = 220
-        sidebarItem.maximumThickness = 340
+        // The design fixes the sidebar at 238pt (`flex:none;width:238px`), and
+        // every inset inside it is measured against that. Pinning both bounds
+        // is what makes the drawing and the app agree; the pane grid takes all
+        // the resizing.
+        sidebarItem.minimumThickness = ShellMetrics.sidebarWidth
+        sidebarItem.maximumThickness = ShellMetrics.sidebarWidth
         sidebarItem.canCollapse = true
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
@@ -274,6 +289,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 path: nil
             )
         shellSidebar.showWorkspace(summary, animated: animated)
+        // The FILES tree follows the workspace. Prefer the brain's recorded
+        // path; fall back to the cwd of a pane in this project, which is what
+        // a session opened by folder picker will have.
+        let paneCwd = workspace.paneIDs
+            .compactMap { workspace.descriptor(for: $0) }
+            .first { $0.project == id }?
+            .cwd
+        let directory = summary.path ?? paneCwd
+        shellSidebar.setFilesRoot(directory.map { URL(fileURLWithPath: $0) })
         reloadOutline()
     }
 
@@ -733,15 +757,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// slide back reveal an empty pane for a frame.
     private func reloadOutline() {
         let all = workspace.paneIDs.compactMap { workspace.descriptor(for: $0) }
-        let scoped = selectedProjectID.map { id in all.filter { $0.project == id } } ?? all
-        outline.reload(
-            panes: scoped,
+        shellSidebar.reloadSessions(
+            panes: all,
             focusedPaneID: workspace.focusedPaneID,
-            projectLabels: projectLabels
+            statuses: lastStatus,
+            project: selectedProjectID
         )
-        let counts = sessionCounts()
-        shellSidebar.setSessionCount(selectedProjectID.flatMap { counts[$0] } ?? 0)
-        shellSidebar.setWorkspaces(workspaces, sessionCounts: counts)
+        shellSidebar.setWorkspaces(workspaces, sessionCounts: sessionCounts())
     }
 
     /// The project directory every project-label-aware surface

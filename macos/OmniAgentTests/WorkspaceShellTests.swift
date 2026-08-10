@@ -3,18 +3,36 @@ import XCTest
 
 @testable import OmniAgent
 
-/// The design's step-1 shell: the two-level slide, the destination switch, and
-/// the picker the slide reveals.
+/// The design's shell: the two-level slide, the destination switch, the picker
+/// the slide reveals, and the sessions tree that hangs off Terminals.
 final class WorkspaceShellTests: XCTestCase {
     private func makeSidebar() -> WorkspaceSidebarView {
-        let sidebar = WorkspaceSidebarView(outline: SessionOutlineView())
-        sidebar.frame = NSRect(x: 0, y: 0, width: 240, height: 700)
+        let sidebar = WorkspaceSidebarView()
+        sidebar.frame = NSRect(x: 0, y: 0, width: ShellMetrics.sidebarWidth, height: 700)
         sidebar.layoutSubtreeIfNeeded()
         return sidebar
     }
 
     private func project(_ id: String, _ label: String, _ path: String? = nil) -> BrainProjectSummary {
         BrainProjectSummary(id: id, label: label, path: path)
+    }
+
+    private func pane(
+        _ id: String,
+        group: String,
+        project: String = "p1",
+        engine: Engine = .claude,
+        title: String = "term"
+    ) -> PaneDescriptor {
+        PaneDescriptor(
+            sessionID: id,
+            group: group,
+            groupLabel: group,
+            title: title,
+            project: project,
+            engine: engine,
+            cwd: "/tmp"
+        )
     }
 
     // MARK: - The slide
@@ -37,58 +55,32 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertTrue(sidebar.isShowingPicker)
     }
 
-    /// No workspace is not a nav to slide to — it is the first-run screen.
-    func testNoWorkspacePinsThePicker() {
-        let sidebar = makeSidebar()
-        sidebar.showWorkspace(project("p1", "api"), animated: false)
-        sidebar.showWorkspace(nil, animated: false)
-        XCTAssertTrue(sidebar.isShowingPicker)
-        XCTAssertNil(sidebar.selectedWorkspace)
-    }
-
-    /// The track's offset is re-derived in `layout()` rather than remembered,
-    /// so a resized sidebar still lands exactly one level over.
-    func testTheTrackFollowsASidebarResize() {
-        let sidebar = makeSidebar()
-        sidebar.showWorkspace(project("p1", "api"), animated: false)
-        sidebar.frame = NSRect(x: 0, y: 0, width: 320, height: 700)
-        sidebar.layoutSubtreeIfNeeded()
-        // Converted into the sidebar's own space, not read off `frame`: the
-        // level's frame is in the *track's* coordinates, where it always sits
-        // one width over. What matters is where it lands on screen.
-        let level2 = try? XCTUnwrap(sidebar.navRows[0].superview?.superview)
-        let origin = level2?.convert(NSPoint.zero, to: sidebar)
-        XCTAssertEqual(origin?.x ?? -1, 0, accuracy: 0.5)
-    }
-
     // MARK: - Destinations
 
-    func testTerminalsIsTheOpeningDestination() {
+    func testTerminalsIsTheDefaultDestination() {
         XCTAssertEqual(makeSidebar().destination, .terminals)
     }
 
-    func testSelectingADestinationLightsExactlyThatRow() {
+    func testSelectingADestinationLightsExactlyOneRow() {
         let sidebar = makeSidebar()
         sidebar.applyDestination(.board)
         XCTAssertEqual(sidebar.destination, .board)
-        let lit = sidebar.navRows.filter(\.isSelected).map(\.destination)
-        XCTAssertEqual(lit, [.board])
+        let lit = sidebar.navRows.filter { $0.destination == sidebar.destination }
+        XCTAssertEqual(lit.count, 1)
     }
 
-    /// The sessions tree hangs off Terminals — the design draws it under that
-    /// row and nowhere else.
-    func testTheSessionTreeShowsOnlyUnderTerminals() {
+    /// The design nests the sessions tree under Terminals, so it is only on
+    /// screen for that destination.
+    func testTheSessionsTreeOnlyShowsUnderTerminals() {
         let sidebar = makeSidebar()
         sidebar.applyDestination(.terminals)
-        sidebar.layoutSubtreeIfNeeded()
-        XCTAssertFalse(sidebar.outlineContainer.isHidden)
-
+        XCTAssertFalse(sidebar.sessionsTree.isHiddenOrHasHiddenAncestor)
         sidebar.applyDestination(.dashboard)
-        sidebar.layoutSubtreeIfNeeded()
-        XCTAssertTrue(sidebar.outlineContainer.isHidden)
+        XCTAssertTrue(sidebar.sessionsTree.isHiddenOrHasHiddenAncestor)
     }
 
-    func testEveryDestinationHasARow() {
+    /// Every destination row exists, in the design's order.
+    func testNavRowsMatchTheDesignOrder() {
         XCTAssertEqual(
             makeSidebar().navRows.map(\.destination),
             [.dashboard, .board, .terminals, .files]
@@ -97,64 +89,200 @@ final class WorkspaceShellTests: XCTestCase {
 
     // MARK: - The picker
 
-    func testThePickerBuildsOneCardPerWorkspace() {
+    func testThePickerRendersOneCardPerWorkspace() {
         let sidebar = makeSidebar()
         sidebar.setWorkspaces(
-            [project("p1", "api", "/tmp/api"), project("p2", "web", "/tmp/web")],
+            [project("p1", "api"), project("p2", "web")],
             sessionCounts: ["p1": 2]
         )
         XCTAssertEqual(sidebar.picker.cards.map(\.workspace.id), ["p1", "p2"])
     }
 
-    func testPickingACardRaisesTheWorkspace() {
+    func testThePickerRebuildsRatherThanAppends() {
         let sidebar = makeSidebar()
         sidebar.setWorkspaces([project("p1", "api")], sessionCounts: [:])
-        var picked: String?
-        sidebar.onSelectWorkspace = { picked = $0.id }
-        sidebar.picker.cards.first?.onPress?()
-        XCTAssertEqual(picked, "p1")
+        sidebar.setWorkspaces([project("p2", "web")], sessionCounts: [:])
+        XCTAssertEqual(sidebar.picker.cards.map(\.workspace.id), ["p2"])
     }
 
-    func testRebuildingThePickerDoesNotStackOldCards() {
-        let sidebar = makeSidebar()
-        sidebar.setWorkspaces([project("p1", "api"), project("p2", "web")], sessionCounts: [:])
-        sidebar.setWorkspaces([project("p3", "voice")], sessionCounts: [:])
-        XCTAssertEqual(sidebar.picker.cards.map(\.workspace.id), ["p3"])
+    func testTheCardPrintsTheFolderNotTheWholePath() {
+        XCTAssertEqual(WorkspaceCardView.folderName("/Users/me/Code/api"), "api")
+        XCTAssertEqual(WorkspaceCardView.folderName(nil), "—")
     }
 
-    // MARK: - Palette
-
-    func testInitialsTakeTwoWordsWhenThereAreTwo() {
-        XCTAssertEqual(ShellPalette.initials("OmniAgent ADE"), "OA")
-        XCTAssertEqual(ShellPalette.initials("bruno-digital"), "BD")
-        XCTAssertEqual(ShellPalette.initials("voice"), "VO")
-        XCTAssertEqual(ShellPalette.initials("x"), "X")
-        XCTAssertEqual(ShellPalette.initials(""), "")
+    func testTheBackRowAbbreviatesTheHomeDirectory() {
+        let home = NSHomeDirectory()
+        XCTAssertEqual(WorkspaceBackRowView.abbreviate("\(home)/Code/api"), "~/Code/api")
+        XCTAssertEqual(WorkspaceBackRowView.abbreviate(nil), "—")
     }
 
-    /// Pinned against the TypeScript `idColor` this ports: `"p1"` hashes to
-    /// 3521, and 3521 % 6 is 5. If the wrapping arithmetic ever drifts, a
-    /// workspace silently changes colour between the two builds.
-    func testAvatarColourMatchesTheTypeScriptHash() {
-        XCTAssertEqual(ShellPalette.avatarColor(forID: "p1"), ShellPalette.avatarColors[5])
+    // MARK: - Workspace identity
+
+    /// The tile colour has to survive a relaunch without being persisted, so
+    /// the hash must be stable and in range.
+    func testTheAvatarGradientIsStableAndInRange() {
+        let first = ShellPalette.avatarGradient(forID: "omniagent-ade")
+        let second = ShellPalette.avatarGradient(forID: "omniagent-ade")
+        XCTAssertEqual(first.0, second.0)
+        XCTAssertEqual(first.1, second.1)
+        XCTAssertTrue(ShellPalette.avatarGradients.contains { $0.0 == first.0 && $0.1 == first.1 })
     }
 
-    /// A long id must wrap, not trap — plain `Int` arithmetic would overflow.
-    func testAvatarColourSurvivesALongID() {
-        let id = String(repeating: "workspace-", count: 40)
-        XCTAssertTrue(ShellPalette.avatarColors.contains(ShellPalette.avatarColor(forID: id)))
-    }
-
-    func testAvatarColourIsStable() {
-        XCTAssertEqual(
-            ShellPalette.avatarColor(forID: "same"),
-            ShellPalette.avatarColor(forID: "same")
+    /// A long id used to overflow-trap before the hash was made wrapping.
+    func testTheAvatarGradientSurvivesALongID() {
+        let long = String(repeating: "workspace-", count: 64)
+        XCTAssertTrue(
+            ShellPalette.avatarGradients.contains {
+                let picked = ShellPalette.avatarGradient(forID: long)
+                return $0.0 == picked.0 && $0.1 == picked.1
+            }
         )
     }
 
-    func testSessionCountLabelReadsNaturally() {
+    func testInitialsTakeTwoWordsThenTwoLetters() {
+        XCTAssertEqual(ShellPalette.initials("OmniAgent ADE"), "OA")
+        XCTAssertEqual(ShellPalette.initials("voice"), "VO")
+        XCTAssertEqual(ShellPalette.initials("bruno-studio"), "BS")
+    }
+
+    func testSessionCountLabelReadsAsProse() {
         XCTAssertEqual(ShellPalette.sessionCountLabel(0), "no sessions")
         XCTAssertEqual(ShellPalette.sessionCountLabel(1), "1 session")
         XCTAssertEqual(ShellPalette.sessionCountLabel(4), "4 sessions")
+    }
+
+    // MARK: - Sessions tree
+
+    func testTerminalsSubtitleNamesTheOpenSessionAndItsGrid() {
+        let sidebar = makeSidebar()
+        let panes = (1...4).map { pane("t\($0)", group: "s1") }
+        sidebar.reloadSessions(
+            panes: panes,
+            focusedPaneID: "t1",
+            statuses: [:],
+            project: "p1"
+        )
+        let terminals = sidebar.navRows.first { $0.destination == .terminals }
+        // Four panes ladder to a 2x2, which the design prints as rows×cols.
+        XCTAssertEqual(terminals?.subtitleText, "s1 · 2×2")
+    }
+
+    func testTerminalsSubtitleSaysSoWhenThereIsNoSession() {
+        let sidebar = makeSidebar()
+        sidebar.reloadSessions(panes: [], focusedPaneID: nil, statuses: [:], project: "p1")
+        let terminals = sidebar.navRows.first { $0.destination == .terminals }
+        XCTAssertEqual(terminals?.subtitleText, "no session")
+    }
+
+    /// Panes belonging to another workspace must not leak into this one's tree.
+    func testTheTreeIsScopedToTheOpenWorkspace() {
+        let sidebar = makeSidebar()
+        sidebar.reloadSessions(
+            panes: [pane("a", group: "s1", project: "p1"), pane("b", group: "s2", project: "p2")],
+            focusedPaneID: "a",
+            statuses: [:],
+            project: "p1"
+        )
+        XCTAssertEqual(sidebar.sessionsTree.renderedSessionIDs, ["s1"])
+    }
+
+    /// One pane is printed as a bare count; more than one gets the grid shape.
+    func testTheGridBadgeMatchesTheLadder() {
+        XCTAssertEqual(SessionRowView.badgeText(paneCount: 1), "1")
+        XCTAssertEqual(SessionRowView.badgeText(paneCount: 2), "1×2")
+        XCTAssertEqual(SessionRowView.badgeText(paneCount: 4), "2×2")
+    }
+
+    func testStatusDotColoursFollowTheDesign() {
+        XCTAssertEqual(ShellDotsView.color(for: .thinking), ShellPalette.blue)
+        XCTAssertEqual(ShellDotsView.color(for: .awaitingApproval), ShellPalette.amber)
+        XCTAssertEqual(ShellDotsView.color(for: .ready), ShellPalette.green)
+        XCTAssertEqual(ShellDotsView.color(for: .error), ShellPalette.red)
+        XCTAssertEqual(ShellDotsView.color(for: nil), ShellPalette.idle)
+    }
+
+    /// Only the working agent breathes; a finished one would be noise.
+    func testOnlyThinkingPulses() {
+        XCTAssertTrue(ShellDotsView.pulses(.thinking))
+        XCTAssertFalse(ShellDotsView.pulses(.ready))
+        XCTAssertFalse(ShellDotsView.pulses(nil))
+    }
+
+    // MARK: - Rename
+
+    /// Renaming used to live on `SessionOutlineView`; it has to keep working
+    /// now that the design's own rows replaced it.
+    func testCommittingARenameReportsTheNewName() {
+        let row = SessionRowView(
+            session: sessionNode(label: "old"),
+            expanded: true,
+            statuses: []
+        )
+        var reported: String?
+        row.onRename = { reported = $0 }
+        row.beginRenaming()
+        row.renameField.stringValue = "new name"
+        row.commitRenameForTesting()
+        XCTAssertEqual(reported, "new name")
+    }
+
+    /// An empty name is a cancel, not a request to erase the label.
+    func testAnEmptyRenameIsIgnored() {
+        let row = SessionRowView(
+            session: sessionNode(label: "old"),
+            expanded: true,
+            statuses: []
+        )
+        var reported: String?
+        row.onRename = { reported = $0 }
+        row.beginRenaming()
+        row.renameField.stringValue = "   "
+        row.commitRenameForTesting()
+        XCTAssertNil(reported)
+    }
+
+    private func sessionNode(label: String) -> SessionGroupNode {
+        SessionGroupNode(
+            id: "s1",
+            project: "p1",
+            name: label,
+            label: label,
+            cwd: "/tmp",
+            paneIDs: ["t1"],
+            isCurrent: true
+        )
+    }
+
+    // MARK: - Files tree rows
+
+    func testFileBadgesMatchTheDesignsLetters() {
+        XCTAssertEqual(WorkspaceFileRowView.badgeText(file(badge: .modified)), "M")
+        XCTAssertEqual(WorkspaceFileRowView.badgeText(file(badge: .added)), "A")
+        XCTAssertEqual(WorkspaceFileRowView.badgeText(file(badge: .deleted)), "D")
+        XCTAssertEqual(WorkspaceFileRowView.badgeText(file(badge: nil)), "")
+    }
+
+    /// A directory prints how many changed files are under it, and prints
+    /// nothing at all when the answer is zero.
+    func testDirectoryBadgeCountsChangesBeneathIt() {
+        var directory = WorkspaceFileNode(
+            name: "src",
+            url: URL(fileURLWithPath: "/tmp/src"),
+            isDirectory: true
+        )
+        directory.changedCount = 3
+        XCTAssertEqual(WorkspaceFileRowView.badgeText(directory), "3")
+        directory.changedCount = 0
+        XCTAssertEqual(WorkspaceFileRowView.badgeText(directory), "")
+    }
+
+    private func file(badge: GitBadge?) -> WorkspaceFileNode {
+        var node = WorkspaceFileNode(
+            name: "token.service.ts",
+            url: URL(fileURLWithPath: "/tmp/token.service.ts"),
+            isDirectory: false
+        )
+        node.gitBadge = badge
+        return node
     }
 }

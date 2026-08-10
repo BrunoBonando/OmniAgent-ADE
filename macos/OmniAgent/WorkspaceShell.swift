@@ -1,21 +1,20 @@
 import AppKit
 
-// The workspace shell from the "OmniAgent ADE" design doc, step 1 (Bruno,
-// 2026-08-10): a two-level sidebar that slides between a workspace picker
-// (Level 1) and the open workspace's navigation (Level 2), plus the four
-// destinations Level 2 navigates to — Dashboard, Board, Terminals, Files.
+// The workspace shell from the "OmniAgent ADE" design doc (design/OmniAgent
+// ADE.dc.html, the 2026-08-10 import). A two-level sidebar that slides between
+// a workspace picker (Level 1) and the open workspace's navigation (Level 2),
+// with the account row pinned outside the sliding track.
 //
-// **Terminals is the only one that does anything in this step**, deliberately:
-// it keeps showing `SessionOutlineView` over `PaneWorkspaceView`, i.e. the
-// existing sessions/panes/SwiftTerm hot path, entirely untouched. Dashboard
-// and Board are empty placeholders on purpose ("Dashboard and board are just
-// placeholders to empty views for now. Let's focus just on the foundation").
-// Files is a placeholder too, for a different reason — see
-// `WorkspaceDestination.files`.
+// Every number in here — inset, corner radius, point size, alpha — is read off
+// that document rather than chosen. The design is a web mock, so its `px` are
+// CSS pixels, which map 1:1 onto AppKit points; a value that looks oddly
+// specific (14.5pt type, .5px hairlines, a 2.5pt selection bar) is specific in
+// the drawing too. `ShellPalette`/`ShellMetrics` exist so those constants are
+// stated once, next to the rule they came from, instead of being sprinkled
+// through twenty view classes.
 //
-// Everything here is AppKit: the app has no webview, and the design's CSS
-// slide has no native equivalent, so the transition is a hand-rolled
-// constant animation on a two-pane track (`WorkspaceSidebarView`).
+// Deliberately all AppKit: the sidebar is rows, labels, tinted fills and two
+// hand-drawn glyph sets, none of which needs a web view next to SwiftTerm.
 
 // MARK: - Destinations
 
@@ -23,13 +22,7 @@ import AppKit
 enum WorkspaceDestination: String, CaseIterable {
     case dashboard
     case board
-    /// The only one wired to real content in step 1.
     case terminals
-    /// A placeholder for a reason the other two don't share: the design draws
-    /// a Finder-like tree with live git badges, and this app has **no**
-    /// file-listing client at all (nothing in `macos/` calls `list_dir` or
-    /// walks a directory). That is a new daemon surface, not a view — out of
-    /// scope for a foundation step.
     case files
 
     var title: String {
@@ -41,72 +34,113 @@ enum WorkspaceDestination: String, CaseIterable {
         }
     }
 
+    /// The static half of the design's second line. Terminals and Files
+    /// override theirs with live text, so those are only the fallback.
     var subtitle: String {
         switch self {
         case .dashboard: return "activity, tokens, approvals"
         case .board: return "backlog, sprint, timeline"
-        case .terminals: return "sessions and their terminals"
-        case .files: return "tree, diffs, editor"
+        case .terminals: return "no session"
+        case .files: return "no changes"
         }
     }
 
-    /// SF Symbols rather than bundled art: every glyph the design draws is a
-    /// standard shape, and a system symbol is what keeps the row matching the
-    /// rest of macOS across accent colours, text sizes and appearances.
-    var symbolName: String {
+    var glyph: ShellGlyph {
         switch self {
-        case .dashboard: return "chart.bar.fill"
-        case .board: return "rectangle.split.3x1.fill"
-        case .terminals: return "terminal"
-        case .files: return "folder.fill"
+        case .dashboard: return .bars
+        case .board: return .columns
+        case .terminals: return .terminal
+        case .files: return .folder
         }
     }
 }
 
 // MARK: - Palette
 
-/// The design doc's dark tokens, once. Deliberately not `NSColor.controlAccentColor`
-/// and friends: this window is pinned to `.darkAqua` with its own near-black
-/// ground, and the design specifies exact values.
+/// The design doc's dark tokens, once. Deliberately not
+/// `NSColor.controlAccentColor` and friends: this window is pinned to
+/// `.darkAqua` with its own near-black ground, and the design specifies exact
+/// values that must not drift with the user's system accent.
 enum ShellPalette {
-    static let panel = NSColor(srgbRed: 23 / 255, green: 23 / 255, blue: 26 / 255, alpha: 1)
-    static let content = NSColor(srgbRed: 10 / 255, green: 10 / 255, blue: 12 / 255, alpha: 1)
-    static let ink = NSColor(srgbRed: 240 / 255, green: 240 / 255, blue: 244 / 255, alpha: 1)
-    static let inkDim = NSColor(srgbRed: 139 / 255, green: 139 / 255, blue: 149 / 255, alpha: 1)
-    static let inkFaint = NSColor(srgbRed: 101 / 255, green: 101 / 255, blue: 111 / 255, alpha: 1)
-    static let accent = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 1)
-    static let hairline = NSColor(white: 1, alpha: 0.07)
-    static let hover = NSColor(white: 1, alpha: 0.06)
-    static let cardFill = NSColor(white: 1, alpha: 0.04)
-    static let cardStroke = NSColor(white: 1, alpha: 0.09)
-    static let selected = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.14)
+    static let panel = srgb(23, 23, 26, 0.94)
+    static let content = srgb(10, 10, 12)
 
-    /// Port of `ui/src/state/projectColors.ts` — same palette, same stable
-    /// hash, so a workspace keeps its colour across the two implementations
-    /// and across relaunches without anything being persisted.
-    static let avatarColors: [NSColor] = [
-        NSColor(srgbRed: 182 / 255, green: 150 / 255, blue: 242 / 255, alpha: 1),
-        NSColor(srgbRed: 162 / 255, green: 231 / 255, blue: 249 / 255, alpha: 1),
-        NSColor(srgbRed: 237 / 255, green: 129 / 255, blue: 195 / 255, alpha: 1),
-        NSColor(srgbRed: 232 / 255, green: 162 / 255, blue: 61 / 255, alpha: 1),
-        NSColor(srgbRed: 95 / 255, green: 212 / 255, blue: 200 / 255, alpha: 1),
-        NSColor(srgbRed: 120 / 255, green: 169 / 255, blue: 255 / 255, alpha: 1),
+    static let ink = srgb(240, 240, 244)
+    static let inkNav = srgb(176, 176, 186)
+    static let inkSecondary = srgb(194, 194, 203)
+    static let inkTertiary = srgb(154, 154, 164)
+    static let inkFile = srgb(232, 232, 238)
+    static let inkFolder = srgb(220, 220, 226)
+    static let inkMuted = srgb(101, 101, 111)
+    static let inkFaint = srgb(92, 92, 102)
+    static let inkFainter = srgb(74, 74, 83)
+    static let inkTerminal = srgb(226, 226, 232)
+
+    static let accent = srgb(139, 149, 255)
+    static let accentBright = srgb(167, 175, 255)
+    static let accentSoft = srgb(139, 149, 255, 0.16)
+    static let accentSelection = srgb(139, 149, 255, 0.14)
+    static let accentIconTile = srgb(139, 149, 255, 0.28)
+    static let accentRail = srgb(139, 149, 255, 0.35)
+
+    static let green = srgb(78, 201, 122)
+    static let amber = srgb(240, 180, 70)
+    static let red = srgb(242, 85, 90)
+    static let blue = srgb(95, 157, 255)
+    static let idle = srgb(85, 85, 94)
+
+    static let folderGlyph = srgb(127, 139, 216)
+    static let fileGlyph = srgb(139, 139, 149)
+    static let chevron = srgb(124, 124, 134)
+    static let chevronSoft = srgb(201, 201, 210)
+
+    static let hairline = NSColor(white: 1, alpha: 0.06)
+    static let hairlineStrong = NSColor(white: 1, alpha: 0.07)
+    static let hover = NSColor(white: 1, alpha: 0.06)
+    static let hoverSoft = NSColor(white: 1, alpha: 0.045)
+    static let hoverFile = NSColor(white: 1, alpha: 0.05)
+    static let rowSelected = NSColor(white: 1, alpha: 0.055)
+    static let iconTile = NSColor(white: 1, alpha: 0.06)
+    static let cardFill = NSColor(white: 1, alpha: 0.04)
+    static let cardFillHover = NSColor(white: 1, alpha: 0.085)
+    static let cardStroke = NSColor(white: 1, alpha: 0.09)
+    static let cardStrokeHover = NSColor(white: 1, alpha: 0.2)
+    static let backRowFill = NSColor(white: 1, alpha: 0.03)
+    static let accountFill = NSColor(white: 1, alpha: 0.02)
+    static let fieldFill = NSColor(white: 1, alpha: 0.05)
+    static let dashedStroke = NSColor(white: 1, alpha: 0.16)
+
+    private static func srgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> NSColor {
+        NSColor(srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: a)
+    }
+
+    /// The design gives every workspace a 150° two-stop gradient tile. The pair
+    /// is picked by the same stable hash `ui/src/state/projectColors.ts` uses,
+    /// so a workspace keeps its colour across the two implementations and
+    /// across relaunches without anything being persisted.
+    static let avatarGradients: [(NSColor, NSColor)] = [
+        (srgb(125, 136, 255), srgb(74, 91, 216)),
+        (srgb(255, 155, 115), srgb(217, 96, 63)),
+        (srgb(99, 209, 168), srgb(47, 143, 109)),
+        (srgb(182, 150, 242), srgb(116, 86, 184)),
+        (srgb(162, 231, 249), srgb(74, 160, 168)),
+        (srgb(237, 129, 195), srgb(174, 71, 134)),
     ]
 
     /// `Int32` arithmetic with explicit wrapping, matching the JS `| 0` the
-    /// TypeScript version relies on — plain `Int` would overflow-trap on a
-    /// long id instead of wrapping, and would pick a different colour.
-    static func avatarColor(forID id: String) -> NSColor {
+    /// TypeScript version relies on — plain `Int` would overflow-trap on a long
+    /// id instead of wrapping, and would pick a different colour.
+    static func avatarGradient(forID id: String) -> (NSColor, NSColor) {
         var hash: Int32 = 0
         for scalar in id.unicodeScalars {
             hash = hash &* 31 &+ Int32(truncatingIfNeeded: scalar.value)
         }
-        let index = Int(hash.magnitude % Int32.Magnitude(avatarColors.count))
-        return avatarColors[index]
+        let index = Int(hash.magnitude % Int32.Magnitude(avatarGradients.count))
+        return avatarGradients[index]
     }
 
     /// "OmniAgent ADE" -> "OA", "voice" -> "VO". One letter reads as an
-    /// accident at the design's 32pt tile.
+    /// accident at the design's 34pt tile.
     static func initials(_ label: String) -> String {
         let words = label.split(whereSeparator: { " -_./".contains($0) })
         if words.count >= 2, let a = words[0].first, let b = words[1].first {
@@ -124,9 +158,26 @@ enum ShellPalette {
     }
 }
 
+/// Sizes the design states directly. Named rather than inlined because several
+/// of them have to agree across view classes (the nav row's 3pt bar and the
+/// sessions rail's 18pt indent line up by construction, not by coincidence).
+enum ShellMetrics {
+    static let sidebarWidth: CGFloat = 238
+    static let navRowInset = NSEdgeInsets(top: 8, left: 9, bottom: 8, right: 9)
+    static let navBarWidth: CGFloat = 3
+    static let navIconTile: CGFloat = 22
+    static let sessionRail: CGFloat = 18
+    static let sessionRailInset: CGFloat = 10
+    static let fileRowHeight: CGFloat = 23
+    static let cardTile: CGFloat = 34
+    static let backTile: CGFloat = 28
+    static let accountAvatar: CGFloat = 22
+}
+
 /// The design's slide, and the system's opinion about whether to play it.
 enum ShellMotion {
-    static let duration: TimeInterval = 0.34
+    /// `transition:transform .44s cubic-bezier(.22,.85,.25,1)` on the track.
+    static let duration: TimeInterval = 0.44
     static let timing = CAMediaTimingFunction(controlPoints: 0.22, 0.85, 0.25, 1)
 
     static var reduced: Bool {
@@ -134,21 +185,426 @@ enum ShellMotion {
     }
 }
 
+// MARK: - Typography
+
+enum ShellFont {
+    static func ui(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
+        .systemFont(ofSize: size, weight: weight)
+    }
+
+    static func mono(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
+        .monospacedSystemFont(ofSize: size, weight: weight)
+    }
+
+    /// A non-editable, non-drawing `NSTextField` — the only way to get plain
+    /// text in AppKit without a cell that paints a background or steals clicks.
+    static func label(
+        _ text: String = "",
+        font: NSFont,
+        color: NSColor,
+        tracking: CGFloat? = nil
+    ) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = font
+        field.textColor = color
+        field.lineBreakMode = .byTruncatingTail
+        field.cell?.truncatesLastVisibleLine = true
+        // Every label in this sidebar is one line. Saying so is load-bearing:
+        // a wrapping field derives its intrinsic width from
+        // `preferredMaxLayoutWidth`, which is 0 here, so a kerned attributed
+        // string collapsed to the width of an ellipsis.
+        field.usesSingleLineMode = true
+        field.cell?.wraps = false
+        field.isSelectable = false
+        field.translatesAutoresizingMaskIntoConstraints = false
+        if let tracking {
+            field.attributedStringValue = NSAttributedString(
+                string: text,
+                attributes: [.font: font, .foregroundColor: color, .kern: tracking]
+            )
+        }
+        return field
+    }
+
+    /// Re-applies text to a label built with `tracking:` — plain `stringValue`
+    /// would drop the kerning the section headers depend on.
+    static func setTracked(_ field: NSTextField, _ text: String, tracking: CGFloat) {
+        guard let font = field.font, let color = field.textColor else {
+            field.stringValue = text
+            return
+        }
+        field.attributedStringValue = NSAttributedString(
+            string: text,
+            attributes: [.font: font, .foregroundColor: color, .kern: tracking]
+        )
+    }
+}
+
+// MARK: - Glyphs
+
+/// The design's inline SVGs, drawn rather than bundled. They are all a handful
+/// of strokes on a 16 or 24 unit grid, and drawing them keeps the stroke widths
+/// and end caps exactly as specified at every size — an exported PNG would not,
+/// and an SF Symbol is a different shape.
+enum ShellGlyph {
+    case chevronRight
+    case chevronLeft
+    case plus
+    case bars
+    case columns
+    case terminal
+    case folder
+    case file
+    case magnifier
+    case gear
+
+    /// - Parameter box: the SVG's own viewBox side (16 or 24), so the path can
+    ///   be written in the document's coordinates and scaled once here.
+    func draw(in rect: NSRect, color: NSColor, lineWidth: CGFloat = 1.6) {
+        let box: CGFloat = (self == .bars || self == .columns || self == .terminal) ? 24 : 16
+        let scale = min(rect.width, rect.height) / box
+        let transform = NSAffineTransform()
+        transform.translateX(by: rect.minX, yBy: rect.minY)
+        transform.scaleX(by: scale, yBy: -scale)
+        transform.translateX(by: 0, yBy: -box)
+
+        NSGraphicsContext.saveGraphicsState()
+        transform.concat()
+        color.set()
+        let path = NSBezierPath()
+        path.lineWidth = lineWidth
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+
+        switch self {
+        case .chevronRight:
+            path.move(to: NSPoint(x: 6, y: 3.5))
+            path.line(to: NSPoint(x: 10.5, y: 8))
+            path.line(to: NSPoint(x: 6, y: 12.5))
+            path.stroke()
+        case .chevronLeft:
+            path.move(to: NSPoint(x: 10, y: 3.5))
+            path.line(to: NSPoint(x: 5.5, y: 8))
+            path.line(to: NSPoint(x: 10, y: 12.5))
+            path.stroke()
+        case .plus:
+            path.move(to: NSPoint(x: 8, y: 3.4))
+            path.line(to: NSPoint(x: 8, y: 12.6))
+            path.move(to: NSPoint(x: 3.4, y: 8))
+            path.line(to: NSPoint(x: 12.6, y: 8))
+            path.stroke()
+        case .bars:
+            for (x, y, h) in [(3.0, 12.5, 8.0), (9.8, 7.0, 13.5), (16.6, 3.5, 17.0)] {
+                NSBezierPath(
+                    roundedRect: NSRect(x: x, y: y, width: 4.4, height: h),
+                    xRadius: 1.5,
+                    yRadius: 1.5
+                ).fill()
+            }
+        case .columns:
+            for (x, h) in [(3.0, 17.2), (9.5, 11.0), (16.0, 14.4)] {
+                NSBezierPath(
+                    roundedRect: NSRect(x: x, y: 3.4, width: 5, height: h),
+                    xRadius: 1.7,
+                    yRadius: 1.7
+                ).fill()
+            }
+        case .terminal:
+            let frame = NSBezierPath(
+                roundedRect: NSRect(x: 3, y: 4, width: 18, height: 16),
+                xRadius: 2.4,
+                yRadius: 2.4
+            )
+            frame.lineWidth = 2
+            frame.stroke()
+            path.lineWidth = 2
+            path.move(to: NSPoint(x: 8, y: 9))
+            path.line(to: NSPoint(x: 11, y: 12))
+            path.line(to: NSPoint(x: 8, y: 15))
+            path.move(to: NSPoint(x: 13, y: 15))
+            path.line(to: NSPoint(x: 16, y: 15))
+            path.stroke()
+        case .folder:
+            path.move(to: NSPoint(x: 2, y: 4.6))
+            path.curve(
+                to: NSPoint(x: 3.2, y: 3.4),
+                controlPoint1: NSPoint(x: 2, y: 3.9),
+                controlPoint2: NSPoint(x: 2.5, y: 3.4)
+            )
+            path.line(to: NSPoint(x: 5.6, y: 3.4))
+            path.line(to: NSPoint(x: 6.8, y: 4.8))
+            path.line(to: NSPoint(x: 11.7, y: 4.8))
+            path.curve(
+                to: NSPoint(x: 13, y: 6.1),
+                controlPoint1: NSPoint(x: 12.4, y: 4.8),
+                controlPoint2: NSPoint(x: 13, y: 5.4)
+            )
+            path.line(to: NSPoint(x: 13, y: 11.4))
+            path.curve(
+                to: NSPoint(x: 11.7, y: 12.6),
+                controlPoint1: NSPoint(x: 13, y: 12.1),
+                controlPoint2: NSPoint(x: 12.4, y: 12.6)
+            )
+            path.line(to: NSPoint(x: 3.2, y: 12.6))
+            path.curve(
+                to: NSPoint(x: 2, y: 11.4),
+                controlPoint1: NSPoint(x: 2.5, y: 12.6),
+                controlPoint2: NSPoint(x: 2, y: 12.1)
+            )
+            path.close()
+            path.fill()
+        case .file:
+            path.lineWidth = 1.1
+            path.move(to: NSPoint(x: 3.5, y: 2.4))
+            path.line(to: NSPoint(x: 8.7, y: 2.4))
+            path.line(to: NSPoint(x: 12.5, y: 6.2))
+            path.line(to: NSPoint(x: 12.5, y: 13.6))
+            path.line(to: NSPoint(x: 3.5, y: 13.6))
+            path.close()
+            NSColor(white: 1, alpha: 0.05).setFill()
+            path.fill()
+            color.set()
+            path.stroke()
+            let fold = NSBezierPath()
+            fold.lineWidth = 1.1
+            fold.move(to: NSPoint(x: 8.7, y: 2.4))
+            fold.line(to: NSPoint(x: 8.7, y: 6.2))
+            fold.line(to: NSPoint(x: 12.5, y: 6.2))
+            fold.stroke()
+        case .magnifier:
+            path.lineWidth = 1.3
+            path.appendOval(in: NSRect(x: 2.7, y: 2.7, width: 8.6, height: 8.6))
+            path.move(to: NSPoint(x: 10.4, y: 10.4))
+            path.line(to: NSPoint(x: 13.4, y: 13.4))
+            path.stroke()
+        case .gear:
+            path.lineWidth = 1.2
+            path.appendOval(in: NSRect(x: 5.8, y: 5.8, width: 4.4, height: 4.4))
+            path.stroke()
+            let spokes = NSBezierPath()
+            spokes.lineWidth = 1.1
+            spokes.lineCapStyle = .round
+            let pairs: [(CGFloat, CGFloat, CGFloat, CGFloat)] = [
+                (8, 1.8, 8, 3.4), (8, 12.6, 8, 14.2),
+                (1.8, 8, 3.4, 8), (12.6, 8, 14.2, 8),
+                (3.6, 3.6, 4.7, 4.7), (11.3, 11.3, 12.4, 12.4),
+                (12.4, 3.6, 11.3, 4.7), (4.7, 11.3, 3.6, 12.4),
+            ]
+            for (x1, y1, x2, y2) in pairs {
+                spokes.move(to: NSPoint(x: x1, y: y1))
+                spokes.line(to: NSPoint(x: x2, y: y2))
+            }
+            spokes.stroke()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
+/// A glyph as a view, so it can sit in a stack next to labels.
+final class ShellGlyphView: NSView {
+    var glyph: ShellGlyph { didSet { needsDisplay = true } }
+    var color: NSColor { didSet { needsDisplay = true } }
+    var lineWidth: CGFloat = 1.6 { didSet { needsDisplay = true } }
+    /// The design rotates the disclosure chevron rather than swapping the art.
+    var rotated = false { didSet { needsDisplay = true } }
+
+    init(_ glyph: ShellGlyph, color: NSColor, size: CGFloat, lineWidth: CGFloat = 1.6) {
+        self.glyph = glyph
+        self.color = color
+        self.lineWidth = lineWidth
+        super.init(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: size),
+            heightAnchor.constraint(equalToConstant: size),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard rotated else {
+            glyph.draw(in: bounds, color: color, lineWidth: lineWidth)
+            return
+        }
+        NSGraphicsContext.saveGraphicsState()
+        let spin = NSAffineTransform()
+        spin.translateX(by: bounds.midX, yBy: bounds.midY)
+        spin.rotate(byDegrees: -90)
+        spin.translateX(by: -bounds.midX, yBy: -bounds.midY)
+        spin.concat()
+        glyph.draw(in: bounds, color: color, lineWidth: lineWidth)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
+/// The rounded gradient tile behind a workspace's initials.
+final class ShellTileView: NSView {
+    private let initialsField: NSTextField
+    private var colors: (NSColor, NSColor) = (ShellPalette.accent, ShellPalette.accent)
+    private let circular: Bool
+
+    init(size: CGFloat, radius: CGFloat, fontSize: CGFloat, circular: Bool = false) {
+        self.circular = circular
+        initialsField = ShellFont.label(
+            font: ShellFont.ui(fontSize, .bold),
+            color: .white
+        )
+        initialsField.alignment = .center
+        initialsField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = circular ? size / 2 : radius
+        layer?.cornerCurve = .continuous
+        translatesAutoresizingMaskIntoConstraints = false
+        addSubview(initialsField)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: size),
+            heightAnchor.constraint(equalToConstant: size),
+            initialsField.centerXAnchor.constraint(equalTo: centerXAnchor),
+            initialsField.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(initials: String, gradient: (NSColor, NSColor)) {
+        initialsField.stringValue = initials
+        colors = gradient
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = circular
+            ? NSBezierPath(ovalIn: bounds)
+            : NSBezierPath(
+                roundedRect: bounds,
+                xRadius: layer?.cornerRadius ?? 10,
+                yRadius: layer?.cornerRadius ?? 10
+            )
+        path.addClip()
+        // 150° in CSS runs top-left to bottom-right; `NSGradient`'s angle is
+        // measured counter-clockwise from east, which puts the same ramp at -60.
+        NSGradient(starting: colors.0, ending: colors.1)?.draw(in: bounds, angle: -60)
+    }
+}
+
+/// The row of 5pt status dots the design puts on every session row.
+final class ShellDotsView: NSView {
+    private var colors: [NSColor] = []
+    /// Indices that breathe — the design animates only the "thinking" dot.
+    private var pulsing: Set<Int> = []
+    private var widthConstraint: NSLayoutConstraint!
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        widthConstraint = widthAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            widthConstraint,
+            heightAnchor.constraint(equalToConstant: 5),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(_ colors: [NSColor], pulsing: Set<Int> = []) {
+        self.colors = colors
+        self.pulsing = pulsing
+        widthConstraint.constant = colors.isEmpty
+            ? 0
+            : CGFloat(colors.count) * 5 + CGFloat(colors.count - 1) * 2
+        rebuildLayers()
+        needsDisplay = true
+    }
+
+    private func rebuildLayers() {
+        layer?.sublayers?.forEach { $0.removeFromSuperlayer() }
+        guard !ShellMotion.reduced else { return }
+        for index in pulsing where index < colors.count {
+            let dot = CALayer()
+            dot.frame = NSRect(x: CGFloat(index) * 7, y: 0, width: 5, height: 5)
+            dot.cornerRadius = 2.5
+            dot.backgroundColor = colors[index].cgColor
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.45
+            pulse.toValue = 1
+            pulse.duration = 0.9
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            dot.add(pulse, forKey: "om-pulse")
+            layer?.addSublayer(dot)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        for (index, color) in colors.enumerated() {
+            // The pulsing ones are real layers so they can animate; skip them
+            // here or they would show through at full opacity underneath.
+            if pulsing.contains(index) && !ShellMotion.reduced { continue }
+            color.setFill()
+            NSBezierPath(ovalIn: NSRect(x: CGFloat(index) * 7, y: 0, width: 5, height: 5)).fill()
+        }
+    }
+
+    /// The design's dot colours, by live session status.
+    static func color(for status: RemoteSessionStatus?) -> NSColor {
+        switch status {
+        case .thinking: return ShellPalette.blue
+        case .toolExecution, .awaitingApproval: return ShellPalette.amber
+        case .ready: return ShellPalette.green
+        case .error: return ShellPalette.red
+        case nil: return ShellPalette.idle
+        }
+    }
+
+    static func pulses(_ status: RemoteSessionStatus?) -> Bool {
+        status == .thinking
+    }
+}
+
+/// An `NSClipView` whose origin is top-left. Without this a short document
+/// view sits at the *bottom* of a tall scroll view, which is how the workspace
+/// cards ended up pinned to the floor of the picker.
+final class ShellFlippedClipView: NSClipView {
+    override var isFlipped: Bool { true }
+}
+
+/// A one-pixel rule. `.5px` in the design; AppKit will land it on the nearest
+/// device pixel, which on Retina is exactly the hairline the design wants.
+final class ShellSeparator: NSView {
+    init(color: NSColor = ShellPalette.hairline) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = color.cgColor
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 1 / max(1, NSScreen.main?.backingScaleFactor ?? 2)).isActive = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
 // MARK: - Clickable row base
 
 /// A row that behaves like a button without being one: `NSButton` cannot hold
 /// the multi-line, multi-colour content these rows need without a custom cell,
-/// and a custom cell is more code than press handling. Keyboard activation,
-/// the accessibility role and `accessibilityPerformPress` are all wired so
-/// this stays a real control for VoiceOver and Full Keyboard Access.
+/// and a custom cell is more code than press handling. Keyboard activation, the
+/// accessibility role and `accessibilityPerformPress` are all wired so this
+/// stays a real control for VoiceOver and Full Keyboard Access.
 class ShellRowView: NSView {
     var onPress: (() -> Void)?
     /// Painted under the row on hover, unless the row is already selected.
     var hoverEnabled = true
+    var hoverFill: NSColor = ShellPalette.hover
     private(set) var isHovered = false
     private var tracking: NSTrackingArea?
 
-    override var acceptsFirstResponder: Bool { true }
+    override var acceptsFirstResponder: Bool { onPress != nil }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -173,157 +629,172 @@ class ShellRowView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        // Only a click that both started and ended inside the row counts —
-        // a drag that wandered off it is not a press.
         guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
         onPress?()
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 36 || event.charactersIgnoringModifiers == " " {
+        let key = event.charactersIgnoringModifiers
+        if key == "\r" || key == " " {
             onPress?()
             return
         }
         super.keyDown(with: event)
     }
 
-    /// Subclasses paint here; the base only tells them when.
-    func refreshBackground() {}
+    /// Override point: subclasses paint their own selected/hover states.
+    func refreshBackground() {
+        guard hoverEnabled else { return }
+        layer?.backgroundColor = isHovered ? hoverFill.cgColor : NSColor.clear.cgColor
+    }
 
-    override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func isAccessibilityElement() -> Bool { onPress != nil }
     override func accessibilityPerformPress() -> Bool {
         onPress?()
-        return true
+        return onPress != nil
     }
 }
 
 // MARK: - Level 1 · workspace picker
 
-/// One workspace card: colour tile with initials, name, path, session count.
+/// One workspace card in the picker.
 final class WorkspaceCardView: ShellRowView {
     let workspace: BrainProjectSummary
+    private let tile = ShellTileView(size: ShellMetrics.cardTile, radius: 10, fontSize: 14)
+    private let nameField: NSTextField
+    private let folderField: NSTextField
+    private let metaField: NSTextField
 
-    private let tile = NSTextField(labelWithString: "")
-    private let name = NSTextField(labelWithString: "")
-    private let path = NSTextField(labelWithString: "")
-    private let meta = NSTextField(labelWithString: "")
-
-    init(workspace: BrainProjectSummary, sessionCount: Int) {
+    init(workspace: BrainProjectSummary, meta: String) {
         self.workspace = workspace
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = 12
-        layer?.borderWidth = 1
-        layer?.borderColor = ShellPalette.cardStroke.cgColor
-        refreshBackground()
-
-        tile.stringValue = ShellPalette.initials(workspace.label)
-        tile.alignment = .center
-        tile.font = .systemFont(ofSize: 12, weight: .bold)
-        tile.textColor = .white
-        tile.wantsLayer = true
-        tile.layer?.cornerRadius = 9
-        tile.layer?.backgroundColor = ShellPalette.avatarColor(forID: workspace.id).cgColor
-        // A label draws its text at the top of its frame by default; the tile
-        // needs it centred in a 32pt square.
-        tile.isBezeled = false
-        tile.usesSingleLineMode = true
-        tile.cell?.lineBreakMode = .byClipping
-
-        name.stringValue = workspace.label
-        name.font = .systemFont(ofSize: 13, weight: .semibold)
-        name.textColor = ShellPalette.ink
-        name.lineBreakMode = .byTruncatingTail
-
-        path.stringValue = workspace.path ?? ""
-        path.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        path.textColor = ShellPalette.inkFaint
-        path.lineBreakMode = .byTruncatingHead
-        path.isHidden = (workspace.path ?? "").isEmpty
-
-        meta.stringValue = ShellPalette.sessionCountLabel(sessionCount)
-        meta.font = .systemFont(ofSize: 10, weight: .medium)
-        meta.textColor = ShellPalette.inkDim
-
-        let chevron = NSImageView()
-        chevron.image = NSImage(
-            systemSymbolName: "chevron.right",
-            accessibilityDescription: nil
+        nameField = ShellFont.label(
+            workspace.label,
+            font: ShellFont.ui(15, .semibold),
+            color: ShellPalette.ink
         )
-        chevron.contentTintColor = ShellPalette.inkDim
-        chevron.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
+        folderField = ShellFont.label(
+            WorkspaceCardView.folderName(workspace.path),
+            font: ShellFont.mono(11.5),
+            color: ShellPalette.inkMuted
+        )
+        metaField = ShellFont.label(
+            meta,
+            font: ShellFont.ui(11.5, .medium),
+            color: NSColor(srgbRed: 139 / 255, green: 139 / 255, blue: 149 / 255, alpha: 1)
+        )
+        super.init(frame: .zero)
 
-        let text = NSStackView(views: [name, path, meta])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 2
-        text.setHuggingPriority(.defaultLow, for: .horizontal)
+        wantsLayer = true
+        layer?.cornerRadius = 13
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 1
+        hoverEnabled = false
 
-        let row = NSStackView(views: [tile, text, chevron])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 10
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
+        tile.apply(
+            initials: ShellPalette.initials(workspace.label),
+            gradient: ShellPalette.avatarGradient(forID: workspace.id)
+        )
+        // The design's tile carries its own drop shadow, which is what lifts
+        // the card off a panel this dark.
+        tile.shadow = {
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor(white: 0, alpha: 0.35)
+            shadow.shadowBlurRadius = 8
+            shadow.shadowOffset = NSSize(width: 0, height: -2)
+            return shadow
+        }()
 
+        let chevron = ShellGlyphView(.chevronRight, color: ShellPalette.chevronSoft, size: 18)
+        chevron.alphaValue = 0.4
+
+        let text = NSView()
+        text.translatesAutoresizingMaskIntoConstraints = false
+        for field in [nameField, folderField, metaField] { text.addSubview(field) }
+
+        for view in [tile, text, chevron] { addSubview(view) }
         NSLayoutConstraint.activate([
-            tile.widthAnchor.constraint(equalToConstant: 32),
-            tile.heightAnchor.constraint(equalToConstant: 32),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-        ])
+            tile.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            tile.centerYAnchor.constraint(equalTo: centerYAnchor),
 
-        setAccessibilityLabel("Open workspace \(workspace.label)")
+            text.leadingAnchor.constraint(equalTo: tile.trailingAnchor, constant: 10),
+            text.trailingAnchor.constraint(equalTo: chevron.leadingAnchor, constant: -6),
+            text.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            text.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+
+            nameField.topAnchor.constraint(equalTo: text.topAnchor),
+            nameField.leadingAnchor.constraint(equalTo: text.leadingAnchor),
+            nameField.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+
+            folderField.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 2),
+            folderField.leadingAnchor.constraint(equalTo: text.leadingAnchor),
+            folderField.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+
+            metaField.topAnchor.constraint(equalTo: folderField.bottomAnchor, constant: 4),
+            metaField.leadingAnchor.constraint(equalTo: text.leadingAnchor),
+            metaField.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+            metaField.bottomAnchor.constraint(equalTo: text.bottomAnchor),
+
+            chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        for field in [nameField, folderField, metaField] {
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        refreshBackground()
+        setAccessibilityLabel("\(workspace.label), \(meta)")
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is unavailable")
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func setMeta(_ meta: String) {
+        metaField.stringValue = meta
+        setAccessibilityLabel("\(workspace.label), \(meta)")
     }
 
     override func refreshBackground() {
-        let fill = isHovered && hoverEnabled
-            ? NSColor(white: 1, alpha: 0.085)
-            : ShellPalette.cardFill
-        layer?.backgroundColor = fill.cgColor
+        layer?.backgroundColor = (isHovered ? ShellPalette.cardFillHover : ShellPalette.cardFill).cgColor
+        layer?.borderColor = (isHovered ? ShellPalette.cardStrokeHover : ShellPalette.cardStroke).cgColor
+    }
+
+    /// The design prints the last path component, not the whole path — the full
+    /// one is what Level 2's header shows.
+    static func folderName(_ path: String?) -> String {
+        guard let path, !path.isEmpty else { return "—" }
+        return (path as NSString).lastPathComponent
     }
 }
 
-/// Level 1: "Workspaces / Open one to see its agents", one card each, and the
-/// dashed "New workspace" the design ends the list with.
+/// Level 1: pick a workspace.
 final class WorkspacePickerView: NSView {
     var onPick: ((BrainProjectSummary) -> Void)?
     var onNewWorkspace: (() -> Void)?
 
     private let list = NSStackView()
-    private let empty = NSTextField(labelWithString: "No workspaces yet.")
+    private let emptyLabel: NSTextField
     private(set) var cards: [WorkspaceCardView] = []
 
     override init(frame frameRect: NSRect) {
+        emptyLabel = ShellFont.label(
+            "No workspaces yet.",
+            font: ShellFont.ui(12.5),
+            color: ShellPalette.inkMuted
+        )
         super.init(frame: frameRect)
 
-        let title = NSTextField(labelWithString: "Workspaces")
-        title.font = .systemFont(ofSize: 15, weight: .bold)
-        title.textColor = ShellPalette.ink
-
-        let subtitle = NSTextField(labelWithString: "Open one to see its agents")
-        subtitle.font = .systemFont(ofSize: 11)
-        subtitle.textColor = ShellPalette.inkFaint
-
-        let header = NSStackView(views: [title, subtitle])
-        header.orientation = .vertical
-        header.alignment = .leading
-        header.spacing = 3
-        header.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 11, right: 14)
-
-        let rule = NSBox()
-        rule.boxType = .separator
-
-        empty.font = .systemFont(ofSize: 11)
-        empty.textColor = ShellPalette.inkFaint
+        let title = ShellFont.label(
+            "Workspaces",
+            font: ShellFont.ui(17, .bold),
+            color: ShellPalette.ink,
+            tracking: -0.25
+        )
+        let subtitle = ShellFont.label(
+            "Open one to see its agents",
+            font: ShellFont.ui(12.5),
+            color: ShellPalette.inkMuted
+        )
+        let separator = ShellSeparator()
 
         list.orientation = .vertical
         list.alignment = .leading
@@ -334,172 +805,334 @@ final class WorkspacePickerView: NSView {
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.contentView = ShellFlippedClipView()
         scroll.documentView = list
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [header, rule, scroll])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 0
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-
+        for view in [title, subtitle, separator, scroll] { addSubview(view) }
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            header.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            rule.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            // The list is as wide as the clip view, so cards stretch rather
-            // than sizing to their longest path string.
-            list.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            title.topAnchor.constraint(equalTo: topAnchor, constant: 14),
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            title.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 3),
+            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            subtitle.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+
+            separator.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 11),
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            scroll.topAnchor.constraint(equalTo: separator.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            list.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            list.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
         ])
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is unavailable")
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
-    /// Rebuilt wholesale: the list is a handful of rows read from one
-    /// `listProjects` response, so diffing it would be more moving parts than
-    /// the thing it optimises.
     func setWorkspaces(_ workspaces: [BrainProjectSummary], sessionCounts: [String: Int]) {
         for view in list.arrangedSubviews {
             list.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
-        cards = workspaces.map { workspace in
+        cards = []
+
+        for workspace in workspaces {
             let card = WorkspaceCardView(
                 workspace: workspace,
-                sessionCount: sessionCounts[workspace.id] ?? 0
+                meta: ShellPalette.sessionCountLabel(sessionCounts[workspace.id] ?? 0)
             )
             card.onPress = { [weak self] in self?.onPick?(workspace) }
-            return card
-        }
-        for card in cards {
             list.addArrangedSubview(card)
             card.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -16).isActive = true
+            cards.append(card)
         }
-        if workspaces.isEmpty { list.addArrangedSubview(empty) }
 
-        let new = NSButton(title: "New workspace", target: self, action: #selector(newWorkspace))
-        new.bezelStyle = .rounded
-        new.controlSize = .large
-        list.addArrangedSubview(new)
-        new.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -16).isActive = true
-    }
+        if workspaces.isEmpty {
+            list.addArrangedSubview(emptyLabel)
+        }
 
-    @objc private func newWorkspace() {
-        onNewWorkspace?()
+        let newButton = WorkspaceDashedButton(title: "New workspace")
+        newButton.onPress = { [weak self] in self?.onNewWorkspace?() }
+        list.addArrangedSubview(newButton)
+        newButton.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -16).isActive = true
     }
 }
 
-// MARK: - Level 2 · workspace nav
+/// The picker's dashed "New workspace" affordance.
+final class WorkspaceDashedButton: ShellRowView {
+    init(title: String) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 13
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 1
+        hoverEnabled = false
 
-/// One destination row: icon tile, title, subtitle, optional count, and the
-/// design's 3pt accent bar down the leading edge when selected.
+        let plus = ShellGlyphView(.plus, color: ShellPalette.accent, size: 18, lineWidth: 1.5)
+        let label = ShellFont.label(title, font: ShellFont.ui(14, .semibold), color: ShellPalette.accent)
+
+        let row = NSStackView(views: [plus, label])
+        row.orientation = .horizontal
+        row.spacing = 7
+        row.alignment = .centerY
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.centerXAnchor.constraint(equalTo: centerXAnchor),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -11),
+        ])
+        refreshBackground()
+        setAccessibilityLabel(title)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func refreshBackground() {
+        layer?.backgroundColor = isHovered
+            ? NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.1).cgColor
+            : NSColor.clear.cgColor
+        layer?.borderColor = (isHovered
+            ? NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.45)
+            : ShellPalette.dashedStroke).cgColor
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // A dashed border is not a `CALayer` property; draw it and keep the
+        // layer's own border clear.
+        super.draw(dirtyRect)
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 13, yRadius: 13)
+        path.lineWidth = 1
+        path.setLineDash([4, 3], count: 2, phase: 0)
+        (isHovered
+            ? NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.45)
+            : ShellPalette.dashedStroke).setStroke()
+        path.stroke()
+    }
+}
+
+// MARK: - Level 2 · back row and navigation
+
+/// Level 2's header: the open workspace, and the way back to the picker.
+final class WorkspaceBackRowView: ShellRowView {
+    private let tile = ShellTileView(size: ShellMetrics.backTile, radius: 8, fontSize: 12.5)
+    private let nameField = ShellFont.label(
+        font: ShellFont.ui(15, .semibold),
+        color: ShellPalette.ink
+    )
+    private let pathField = ShellFont.label(
+        font: ShellFont.mono(11.5),
+        color: ShellPalette.inkMuted
+    )
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        hoverFill = NSColor(white: 1, alpha: 0.075)
+
+        let chevron = ShellGlyphView(.chevronLeft, color: ShellPalette.chevronSoft, size: 18, lineWidth: 1.7)
+        chevron.alphaValue = 0.6
+
+        let text = NSView()
+        text.translatesAutoresizingMaskIntoConstraints = false
+        text.addSubview(nameField)
+        text.addSubview(pathField)
+
+        for view in [chevron, tile, text] { addSubview(view) }
+        NSLayoutConstraint.activate([
+            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            tile.leadingAnchor.constraint(equalTo: chevron.trailingAnchor, constant: 9),
+            tile.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            text.leadingAnchor.constraint(equalTo: tile.trailingAnchor, constant: 9),
+            text.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            text.topAnchor.constraint(equalTo: topAnchor, constant: 9),
+            text.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
+
+            nameField.topAnchor.constraint(equalTo: text.topAnchor),
+            nameField.leadingAnchor.constraint(equalTo: text.leadingAnchor),
+            nameField.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+
+            pathField.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 2),
+            pathField.leadingAnchor.constraint(equalTo: text.leadingAnchor),
+            pathField.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+            pathField.bottomAnchor.constraint(equalTo: text.bottomAnchor),
+        ])
+        for field in [nameField, pathField] {
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        refreshBackground()
+        setAccessibilityLabel("Switch workspace")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(workspace: BrainProjectSummary?) {
+        nameField.stringValue = workspace?.label ?? "No workspace"
+        pathField.stringValue = WorkspaceBackRowView.abbreviate(workspace?.path)
+        tile.apply(
+            initials: ShellPalette.initials(workspace?.label ?? "?"),
+            gradient: ShellPalette.avatarGradient(forID: workspace?.id ?? "")
+        )
+    }
+
+    override func refreshBackground() {
+        layer?.backgroundColor = (isHovered ? hoverFill : ShellPalette.backRowFill).cgColor
+    }
+
+    /// `/Users/me/Code/x` -> `~/Code/x`, the way the design writes it.
+    static func abbreviate(_ path: String?) -> String {
+        guard let path, !path.isEmpty else { return "—" }
+        return (path as NSString).abbreviatingWithTildeInPath
+    }
+}
+
+/// One of Level 2's four destination rows.
 final class WorkspaceNavRowView: ShellRowView {
     let destination: WorkspaceDestination
 
     private let bar = NSView()
-    private let icon = NSImageView()
-    private let title = NSTextField(labelWithString: "")
-    private let subtitle = NSTextField(labelWithString: "")
-    private let count = NSTextField(labelWithString: "")
-
-    private(set) var isSelected = false
+    private let iconTile = NSView()
+    private let glyph: ShellGlyphView
+    private let titleField: NSTextField
+    private let subtitleField: NSTextField
+    private let countField: NSTextField
+    private var isSelected = false
 
     init(destination: WorkspaceDestination) {
         self.destination = destination
+        glyph = ShellGlyphView(destination.glyph, color: ShellPalette.inkNav, size: 20, lineWidth: 2)
+        titleField = ShellFont.label(
+            destination.title,
+            font: ShellFont.ui(15.5, .semibold),
+            color: ShellPalette.inkNav
+        )
+        subtitleField = ShellFont.label(
+            destination.subtitle,
+            font: ShellFont.ui(12),
+            color: ShellPalette.inkMuted
+        )
+        countField = ShellFont.label(font: ShellFont.mono(12, .medium), color: ShellPalette.inkFaint)
         super.init(frame: .zero)
+
         wantsLayer = true
         layer?.cornerRadius = 8
+        layer?.cornerCurve = .continuous
+        hoverEnabled = false
 
         bar.wantsLayer = true
-        bar.layer?.cornerRadius = 1.5
-        bar.layer?.backgroundColor = NSColor.clear.cgColor
+        bar.layer?.cornerRadius = 2
         bar.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(bar)
 
-        icon.image = NSImage(systemSymbolName: destination.symbolName, accessibilityDescription: nil)
-        icon.symbolConfiguration = .init(pointSize: 12, weight: .semibold)
+        iconTile.wantsLayer = true
+        iconTile.layer?.cornerRadius = 6
+        iconTile.layer?.cornerCurve = .continuous
+        iconTile.translatesAutoresizingMaskIntoConstraints = false
+        iconTile.addSubview(glyph)
 
-        title.stringValue = destination.title
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        let text = NSView()
+        text.translatesAutoresizingMaskIntoConstraints = false
+        for field in [titleField, subtitleField] { text.addSubview(field) }
 
-        subtitle.stringValue = destination.subtitle
-        subtitle.font = .systemFont(ofSize: 10)
-        subtitle.textColor = ShellPalette.inkFaint
-        subtitle.lineBreakMode = .byTruncatingTail
-
-        count.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
-        count.textColor = ShellPalette.inkDim
-        count.isHidden = true
-
-        let text = NSStackView(views: [title, subtitle])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 1
-        text.setHuggingPriority(.defaultLow, for: .horizontal)
-
-        let row = NSStackView(views: [icon, text, count])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 9
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
-
+        for view in [bar, iconTile, text, countField] { addSubview(view) }
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: leadingAnchor),
-            bar.widthAnchor.constraint(equalToConstant: 3),
-            bar.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            bar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-            icon.widthAnchor.constraint(equalToConstant: 20),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 7),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
-        ])
+            bar.widthAnchor.constraint(equalToConstant: ShellMetrics.navBarWidth),
+            bar.topAnchor.constraint(equalTo: topAnchor, constant: 9),
+            bar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
 
+            iconTile.leadingAnchor.constraint(equalTo: leadingAnchor, constant: ShellMetrics.navRowInset.left),
+            iconTile.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconTile.widthAnchor.constraint(equalToConstant: ShellMetrics.navIconTile),
+            iconTile.heightAnchor.constraint(equalToConstant: ShellMetrics.navIconTile),
+            glyph.centerXAnchor.constraint(equalTo: iconTile.centerXAnchor),
+            glyph.centerYAnchor.constraint(equalTo: iconTile.centerYAnchor),
+
+            text.leadingAnchor.constraint(equalTo: iconTile.trailingAnchor, constant: 9),
+            text.trailingAnchor.constraint(equalTo: countField.leadingAnchor, constant: -6),
+            text.topAnchor.constraint(equalTo: topAnchor, constant: ShellMetrics.navRowInset.top),
+            text.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -ShellMetrics.navRowInset.bottom),
+
+            titleField.topAnchor.constraint(equalTo: text.topAnchor),
+            titleField.leadingAnchor.constraint(equalTo: text.leadingAnchor),
+            titleField.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+
+            subtitleField.topAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 1),
+            subtitleField.leadingAnchor.constraint(equalTo: text.leadingAnchor),
+            subtitleField.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+            subtitleField.bottomAnchor.constraint(equalTo: text.bottomAnchor),
+
+            countField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -ShellMetrics.navRowInset.right),
+            countField.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        countField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        countField.setContentHuggingPriority(.required, for: .horizontal)
+        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         apply(selected: false)
+        setAccessibilityLabel(destination.title)
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is unavailable")
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func setCount(_ value: Int?) {
+        countField.stringValue = value.map(String.init) ?? ""
     }
 
-    /// `nil` hides the badge — an empty destination shows nothing rather than
-    /// a zero.
-    func setCount(_ value: Int?) {
-        if let value, value > 0 {
-            count.stringValue = "\(value)"
-            count.isHidden = false
-        } else {
-            count.isHidden = true
-        }
+    func setSubtitle(_ text: String) {
+        subtitleField.stringValue = text
+    }
+
+    /// Internal so the tests can read the live second line without reaching
+    /// through the view hierarchy.
+    var subtitleText: String { subtitleField.stringValue }
+
+    /// Files' second line is a two-colour diff, which one plain label cannot
+    /// hold — so it is the same label carrying attributed text.
+    func setDiff(added: Int, removed: Int) {
+        let font = ShellFont.mono(12, .medium)
+        let string = NSMutableAttributedString(
+            string: "+\(added)",
+            attributes: [.font: font, .foregroundColor: ShellPalette.green]
+        )
+        string.append(NSAttributedString(
+            string: " −\(removed)",
+            attributes: [.font: font, .foregroundColor: ShellPalette.red]
+        ))
+        subtitleField.attributedStringValue = string
     }
 
     func apply(selected: Bool) {
         isSelected = selected
-        title.textColor = selected ? ShellPalette.ink : ShellPalette.inkDim
-        icon.contentTintColor = selected ? ShellPalette.accent : ShellPalette.inkDim
+        titleField.textColor = selected ? ShellPalette.ink : ShellPalette.inkNav
+        glyph.color = selected ? ShellPalette.ink : ShellPalette.inkNav
+        countField.textColor = selected ? ShellPalette.accentBright : ShellPalette.inkFaint
         bar.layer?.backgroundColor = (selected ? ShellPalette.accent : .clear).cgColor
-        setAccessibilityLabel(destination.title)
-        // AppKit has no "tab" role that carries selection on a plain view;
-        // the selected state is what VoiceOver reads instead.
-        setAccessibilityValue(selected ? "selected" : "")
+        iconTile.layer?.backgroundColor = (selected ? ShellPalette.accentIconTile : ShellPalette.iconTile).cgColor
         refreshBackground()
+        setAccessibilityValue(selected ? "selected" : "")
     }
 
     override func refreshBackground() {
         let fill: NSColor
         if isSelected {
-            fill = ShellPalette.selected
-        } else if isHovered && hoverEnabled {
+            fill = ShellPalette.accentSoft
+        } else if isHovered {
             fill = ShellPalette.hover
         } else {
             fill = .clear
@@ -508,126 +1141,1038 @@ final class WorkspaceNavRowView: ShellRowView {
     }
 }
 
-/// The back row that names the open workspace and returns to the picker.
-final class WorkspaceBackRowView: ShellRowView {
-    private let tile = NSTextField(labelWithString: "")
-    private let name = NSTextField(labelWithString: "")
-    private let path = NSTextField(labelWithString: "")
+// MARK: - Level 2 · sessions tree
+
+/// A session row — the collapsible parent of a set of terminals.
+final class SessionRowView: ShellRowView, NSTextFieldDelegate {
+    let session: SessionGroupNode
+    /// Double-click to rename, the affordance `SessionOutlineView` used to
+    /// provide. The design does not draw a rename control, but dropping the
+    /// capability along with the outline would be a silent regression.
+    var onRename: ((String) -> Void)?
+
+    private let chevron: ShellGlyphView
+    private let titleField: NSTextField
+    private let dots = ShellDotsView()
+    private let badgeField: NSTextField
+    private let bar = NSView()
+    private let isCurrent: Bool
+
+    init(session: SessionGroupNode, expanded: Bool, statuses: [RemoteSessionStatus?]) {
+        self.session = session
+        isCurrent = session.isCurrent
+        chevron = ShellGlyphView(
+            .chevronRight,
+            color: session.isCurrent ? ShellPalette.accentBright : ShellPalette.chevron,
+            size: 15,
+            lineWidth: 1.8
+        )
+        titleField = ShellFont.label(
+            session.label,
+            font: ShellFont.ui(14.5, session.isCurrent ? .semibold : .medium),
+            color: session.isCurrent ? ShellPalette.ink : ShellPalette.inkSecondary
+        )
+        badgeField = ShellFont.label(
+            SessionRowView.badgeText(paneCount: session.paneIDs.count),
+            font: ShellFont.mono(12, .medium),
+            color: session.isCurrent ? ShellPalette.accent : ShellPalette.inkFaint
+        )
+        super.init(frame: .zero)
+
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        layer?.cornerCurve = .continuous
+        hoverEnabled = false
+        chevron.rotated = expanded
+
+        bar.wantsLayer = true
+        bar.layer?.cornerRadius = 2
+        bar.layer?.backgroundColor = (session.isCurrent ? ShellPalette.accent : .clear).cgColor
+        bar.translatesAutoresizingMaskIntoConstraints = false
+
+        dots.apply(
+            statuses.map(ShellDotsView.color(for:)),
+            pulsing: Set(statuses.enumerated().compactMap { ShellDotsView.pulses($1) ? $0 : nil })
+        )
+
+        for view in [bar, chevron, titleField, dots, badgeField] { addSubview(view) }
+        NSLayoutConstraint.activate([
+            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            bar.widthAnchor.constraint(equalToConstant: 2.5),
+            bar.topAnchor.constraint(equalTo: topAnchor, constant: 7),
+            bar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
+
+            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            titleField.leadingAnchor.constraint(equalTo: chevron.trailingAnchor, constant: 8),
+            titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            titleField.trailingAnchor.constraint(equalTo: dots.leadingAnchor, constant: -8),
+
+            dots.trailingAnchor.constraint(equalTo: badgeField.leadingAnchor, constant: -8),
+            dots.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            badgeField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            badgeField.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            topAnchor.constraint(equalTo: titleField.topAnchor, constant: -6),
+            bottomAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 6),
+        ])
+        dots.setContentCompressionResistancePriority(.init(751), for: .horizontal)
+        badgeField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        badgeField.setContentHuggingPriority(.required, for: .horizontal)
+        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        refreshBackground()
+        setAccessibilityLabel("Session \(session.label)")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func setExpanded(_ expanded: Bool) {
+        chevron.rotated = expanded
+    }
+
+    override func refreshBackground() {
+        let fill: NSColor
+        if isCurrent {
+            fill = ShellPalette.accentSelection
+        } else if isHovered {
+            fill = NSColor(white: 1, alpha: 0.055)
+        } else {
+            fill = .clear
+        }
+        layer?.backgroundColor = fill.cgColor
+    }
+
+    /// The design prints the pane count for a lone terminal and the grid shape
+    /// otherwise, rows first: 4 panes ladder to 2 columns × 2 rows and read
+    /// "2×2", 2 panes read "1×2".
+    static func badgeText(paneCount: Int) -> String {
+        guard paneCount > 1 else { return "\(max(0, paneCount))" }
+        let shape = PaneGrid.shape(count: paneCount)
+        return "\(shape.rows)×\(shape.cols)"
+    }
+
+    // MARK: Rename
+
+    private(set) var isRenaming = false
+
+    /// The label doubles as the rename editor; exposed for the tests.
+    var renameField: NSTextField { titleField }
+
+    /// Commits whatever is in the editor, the way Return does.
+    func commitRenameForTesting() { endRenaming(commit: true) }
+
+    override func mouseDown(with event: NSEvent) {
+        guard event.clickCount == 2, onRename != nil else {
+            super.mouseDown(with: event)
+            return
+        }
+        beginRenaming()
+    }
+
+    /// A press that lands while the editor is up must not also select the row,
+    /// or committing a rename would re-focus the session underneath it.
+    override func mouseUp(with event: NSEvent) {
+        guard !isRenaming else { return }
+        super.mouseUp(with: event)
+    }
+
+    func beginRenaming() {
+        guard !isRenaming else { return }
+        isRenaming = true
+        titleField.isEditable = true
+        titleField.isSelectable = true
+        titleField.isBordered = false
+        titleField.drawsBackground = true
+        titleField.backgroundColor = NSColor(white: 1, alpha: 0.1)
+        titleField.focusRingType = .none
+        titleField.delegate = self
+        titleField.stringValue = session.name ?? session.label
+        window?.makeFirstResponder(titleField)
+        titleField.currentEditor()?.selectAll(nil)
+    }
+
+    private func endRenaming(commit: Bool) {
+        guard isRenaming else { return }
+        let typed = titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        isRenaming = false
+        titleField.isEditable = false
+        titleField.isSelectable = false
+        titleField.drawsBackground = false
+        titleField.delegate = nil
+        window?.makeFirstResponder(nil)
+
+        // An empty name is a cancel, not a request to clear the label — the
+        // derived "Session N" would come back and look like data loss.
+        guard commit, !typed.isEmpty, typed != session.label else {
+            titleField.stringValue = session.label
+            return
+        }
+        onRename?(typed)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            endRenaming(commit: true)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            endRenaming(commit: false)
+            return true
+        default:
+            return false
+        }
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        endRenaming(commit: true)
+    }
+}
+
+/// A terminal row under its session.
+final class TerminalRowView: ShellRowView {
+    let paneID: String
+
+    private let statusGlyph = NSImageView()
+    private var isFocused: Bool
+
+    init(pane: PaneDescriptor, focused: Bool, status: RemoteSessionStatus?) {
+        paneID = pane.sessionID
+        isFocused = focused
+        super.init(frame: .zero)
+
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.cornerCurve = .continuous
+        hoverEnabled = false
+        hoverFill = ShellPalette.hoverSoft
+
+        let icon = TerminalRowView.engineIcon(for: pane.engine)
+        let title = ShellFont.label(
+            SessionOutline.paneLabel(pane),
+            font: ShellFont.ui(14),
+            color: focused
+                ? ShellPalette.inkTerminal
+                : (pane.engine == .shell ? ShellPalette.inkTertiary : ShellPalette.inkSecondary)
+        )
+
+        // The design tints the OmniAgent mark per status and puts a matching
+        // glow behind it; a template image is what lets one asset do that.
+        let tint = ShellDotsView.color(for: status)
+        statusGlyph.image = OmniAgentMark.image
+        statusGlyph.contentTintColor = tint
+        statusGlyph.translatesAutoresizingMaskIntoConstraints = false
+        if status != nil {
+            statusGlyph.shadow = {
+                let shadow = NSShadow()
+                shadow.shadowColor = tint.withAlphaComponent(0.53)
+                shadow.shadowBlurRadius = 4
+                shadow.shadowOffset = .zero
+                return shadow
+            }()
+        }
+        if ShellDotsView.pulses(status), !ShellMotion.reduced {
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.45
+            pulse.toValue = 1
+            pulse.duration = 0.9
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            statusGlyph.wantsLayer = true
+            statusGlyph.layer?.add(pulse, forKey: "om-pulse")
+        }
+
+        for view in [icon, title, statusGlyph] { addSubview(view) }
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 18),
+            icon.heightAnchor.constraint(equalToConstant: 18),
+
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            title.trailingAnchor.constraint(equalTo: statusGlyph.leadingAnchor, constant: -7),
+
+            statusGlyph.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            statusGlyph.centerYAnchor.constraint(equalTo: centerYAnchor),
+            statusGlyph.widthAnchor.constraint(equalToConstant: 12),
+            statusGlyph.heightAnchor.constraint(equalToConstant: 12),
+
+            topAnchor.constraint(equalTo: title.topAnchor, constant: -4),
+            bottomAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
+        ])
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        refreshBackground()
+        setAccessibilityLabel(SessionOutline.paneLabel(pane))
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func refreshBackground() {
+        let fill: NSColor = (isFocused || isHovered) ? ShellPalette.hoverSoft : .clear
+        layer?.backgroundColor = fill.cgColor
+    }
+
+    /// The engine's own logo, falling back to the design's stroked terminal
+    /// glyph when the asset is missing so a row is never blank.
+    private static func engineIcon(for engine: Engine) -> NSView {
+        if let image = engine.iconImage {
+            let view = NSImageView(image: image)
+            view.translatesAutoresizingMaskIntoConstraints = false
+            view.imageScaling = .scaleProportionallyUpOrDown
+            if image.isTemplate { view.contentTintColor = ShellPalette.inkTertiary }
+            return view
+        }
+        return ShellGlyphView(.terminal, color: ShellPalette.inkTertiary, size: 18, lineWidth: 2.2)
+    }
+}
+
+/// The design's "+ New terminal  ⌘T" row.
+final class NewTerminalRowView: ShellRowView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.cornerCurve = .continuous
+        hoverEnabled = false
+
+        let plus = ShellGlyphView(.plus, color: ShellPalette.accent, size: 18, lineWidth: 1.5)
+        let label = ShellFont.label("New terminal", font: ShellFont.ui(14, .medium), color: ShellPalette.accent)
+        let shortcut = ShellFont.label("⌘T", font: ShellFont.mono(12, .medium), color: ShellPalette.inkFaint)
+
+        for view in [plus, label, shortcut] { addSubview(view) }
+        NSLayoutConstraint.activate([
+            plus.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
+            plus.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            label.leadingAnchor.constraint(equalTo: plus.trailingAnchor, constant: 7),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            shortcut.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            shortcut.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            topAnchor.constraint(equalTo: label.topAnchor, constant: -4),
+            bottomAnchor.constraint(equalTo: label.bottomAnchor, constant: 4),
+        ])
+        refreshBackground()
+        setAccessibilityLabel("New terminal")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func refreshBackground() {
+        layer?.backgroundColor = (isHovered ? ShellPalette.accentSelection : .clear).cgColor
+    }
+}
+
+/// The sessions tree that hangs off the Terminals row, accent rail and all.
+final class SessionsTreeView: NSView {
+    var onSelectPane: ((String) -> Void)?
+    var onSelectSession: ((SessionGroupNode) -> Void)?
+    var onNewSession: (() -> Void)?
+    var onNewTerminal: (() -> Void)?
+    var onRenameSession: ((SessionGroupNode, String) -> Void)?
+
+    private let countField = ShellFont.label(font: ShellFont.mono(12, .semibold), color: ShellPalette.inkFainter)
+    private let rows = NSStackView()
+    private let rail = NSView()
+    /// What the last `reload` actually drew, so a test can assert scoping
+    /// without walking the stack view.
+    private(set) var renderedSessionIDs: [String] = []
+    /// The terminal rows currently on screen, in order.
+    var renderedPaneIDs: [String] {
+        rows.arrangedSubviews.compactMap { ($0 as? TerminalRowView)?.paneID }
+    }
+    /// Sessions the user has collapsed. Absent means expanded, so a brand new
+    /// session shows its terminals without anyone having to opt in.
+    private var collapsed: Set<String> = []
+
+    /// What `reload` was last handed, so toggling a disclosure can re-render
+    /// without the controller having to push the whole tree again.
+    private struct Render {
+        var sessions: [SessionGroupNode] = []
+        var panes: [String: PaneDescriptor] = [:]
+        var focusedPaneID: String?
+        var statuses: [String: RemoteSessionStatus] = [:]
+    }
+
+    private var lastRender = Render()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        let header = ShellFont.label(
+            "SESSIONS",
+            font: ShellFont.ui(12, .semibold),
+            color: ShellPalette.inkMuted,
+            tracking: 1.2
+        )
+        let add = ShellRowView()
+        add.wantsLayer = true
+        add.layer?.cornerRadius = 5
+        add.hoverFill = NSColor(white: 1, alpha: 0.1)
+        add.onPress = { [weak self] in self?.onNewSession?() }
+        add.setAccessibilityLabel("New session")
+        let addGlyph = ShellGlyphView(.plus, color: ShellPalette.chevron, size: 19, lineWidth: 1.4)
+        add.addSubview(addGlyph)
+        add.translatesAutoresizingMaskIntoConstraints = false
+
+        rail.wantsLayer = true
+        rail.layer?.backgroundColor = ShellPalette.accentRail.cgColor
+        rail.translatesAutoresizingMaskIntoConstraints = false
+
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 1
+        rows.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 6, right: 6)
+        rows.translatesAutoresizingMaskIntoConstraints = false
+
+        for field in [header, countField] {
+            field.setContentCompressionResistancePriority(.required, for: .horizontal)
+            field.setContentHuggingPriority(.required, for: .horizontal)
+        }
+        for view in [rail, header, countField, add, rows] { addSubview(view) }
+        NSLayoutConstraint.activate([
+            // The design draws a 1.5pt accent rail 18pt in, with the tree's
+            // content another 10pt to its right.
+            rail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: ShellMetrics.sessionRail),
+            rail.widthAnchor.constraint(equalToConstant: 1.5),
+            rail.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            rail.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+
+            header.leadingAnchor.constraint(equalTo: rail.trailingAnchor, constant: 14),
+            header.topAnchor.constraint(equalTo: topAnchor, constant: 9),
+
+            countField.leadingAnchor.constraint(equalTo: header.trailingAnchor, constant: 6),
+            countField.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+
+            add.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            add.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            add.widthAnchor.constraint(equalToConstant: 18),
+            add.heightAnchor.constraint(equalToConstant: 18),
+            addGlyph.centerXAnchor.constraint(equalTo: add.centerXAnchor),
+            addGlyph.centerYAnchor.constraint(equalTo: add.centerYAnchor),
+
+            rows.leadingAnchor.constraint(equalTo: rail.trailingAnchor, constant: ShellMetrics.sessionRailInset),
+            rows.trailingAnchor.constraint(equalTo: trailingAnchor),
+            rows.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
+            rows.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func reload(
+        sessions: [SessionGroupNode],
+        panes: [String: PaneDescriptor],
+        focusedPaneID: String?,
+        statuses: [String: RemoteSessionStatus]
+    ) {
+        lastRender = Render(
+            sessions: sessions,
+            panes: panes,
+            focusedPaneID: focusedPaneID,
+            statuses: statuses
+        )
+        renderedSessionIDs = sessions.map(\.id)
+        countField.stringValue = "\(sessions.count)"
+
+        for view in rows.arrangedSubviews {
+            rows.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+
+        for session in sessions {
+            let expanded = !collapsed.contains(session.id)
+            let row = SessionRowView(
+                session: session,
+                expanded: expanded,
+                statuses: session.paneIDs.map { statuses[$0] }
+            )
+            row.onPress = { [weak self] in
+                guard let self else { return }
+                // The design's chevron collapses; selecting is what the row as
+                // a whole does. Both on one press would fight each other, so
+                // the current session toggles and any other one is selected.
+                if session.isCurrent {
+                    if self.collapsed.contains(session.id) {
+                        self.collapsed.remove(session.id)
+                    } else {
+                        self.collapsed.insert(session.id)
+                    }
+                    self.rerender()
+                } else {
+                    self.onSelectSession?(session)
+                }
+            }
+            row.onRename = { [weak self] name in self?.onRenameSession?(session, name) }
+            rows.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
+
+            guard expanded else { continue }
+            for paneID in session.paneIDs {
+                guard let pane = panes[paneID] else { continue }
+                let terminal = TerminalRowView(
+                    pane: pane,
+                    focused: paneID == focusedPaneID,
+                    status: statuses[paneID]
+                )
+                terminal.onPress = { [weak self] in self?.onSelectPane?(paneID) }
+                rows.addArrangedSubview(terminal)
+                terminal.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
+            }
+
+            if session.isCurrent {
+                let add = NewTerminalRowView()
+                add.onPress = { [weak self] in self?.onNewTerminal?() }
+                rows.addArrangedSubview(add)
+                add.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
+            }
+        }
+    }
+
+    private func rerender() {
+        reload(
+            sessions: lastRender.sessions,
+            panes: lastRender.panes,
+            focusedPaneID: lastRender.focusedPaneID,
+            statuses: lastRender.statuses
+        )
+    }
+}
+
+// MARK: - Level 2 · files tree
+
+/// One row of the design's Finder-like tree.
+final class WorkspaceFileRowView: ShellRowView {
+    let node: WorkspaceFileNode
+
+    private let chevron: ShellGlyphView?
+    private var isSelected: Bool
+
+    init(node: WorkspaceFileNode, depth: Int, expanded: Bool, selected: Bool) {
+        self.node = node
+        isSelected = selected
+        chevron = node.isDirectory
+            ? ShellGlyphView(.chevronRight, color: ShellPalette.chevron, size: 15, lineWidth: 1.6)
+            : nil
+        super.init(frame: .zero)
+
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.cornerCurve = .continuous
+        hoverEnabled = false
+        chevron?.rotated = expanded
+
+        // The design indents 13pt for the first level and 21pt after it, which
+        // is what keeps a file's icon aligned under its folder's name rather
+        // than under its folder's chevron.
+        let indent: CGFloat = depth == 0 ? 8 : 8 + 13 + CGFloat(depth - 1) * 21
+
+        let icon = ShellGlyphView(
+            node.isDirectory ? .folder : .file,
+            color: node.isDirectory ? ShellPalette.folderGlyph : ShellPalette.fileGlyph,
+            size: node.isDirectory ? 20 : 19,
+            lineWidth: 1.1
+        )
+        icon.alphaValue = node.isDirectory ? (depth <= 1 ? 0.85 : 0.7) : 1
+
+        let name = ShellFont.label(
+            node.name,
+            font: ShellFont.ui(14.5, node.isDirectory ? .medium : .regular),
+            color: WorkspaceFileRowView.nameColor(node: node, depth: depth, selected: selected)
+        )
+
+        let badge = ShellFont.label(
+            WorkspaceFileRowView.badgeText(node),
+            font: ShellFont.mono(node.isDirectory ? 11.5 : 12, .semibold),
+            color: WorkspaceFileRowView.badgeColor(node)
+        )
+
+        var leading: NSLayoutXAxisAnchor = leadingAnchor
+        var offset = indent
+        if let chevron {
+            addSubview(chevron)
+            NSLayoutConstraint.activate([
+                chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: indent),
+                chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ])
+            leading = chevron.trailingAnchor
+            offset = 5
+        } else {
+            // The design reserves the chevron's width on leaf rows so names
+            // still line up in a column.
+            offset = indent + 9
+        }
+
+        for view in [icon, name, badge] { addSubview(view) }
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leading, constant: offset),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
+            name.centerYAnchor.constraint(equalTo: centerYAnchor),
+            name.trailingAnchor.constraint(equalTo: badge.leadingAnchor, constant: -5),
+
+            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            heightAnchor.constraint(equalToConstant: ShellMetrics.fileRowHeight),
+        ])
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        refreshBackground()
+        setAccessibilityLabel(node.name)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func setExpanded(_ expanded: Bool) { chevron?.rotated = expanded }
+
+    override func refreshBackground() {
+        let fill: NSColor
+        if isSelected {
+            fill = ShellPalette.rowSelected
+        } else if isHovered {
+            fill = ShellPalette.hoverFile
+        } else {
+            fill = .clear
+        }
+        layer?.backgroundColor = fill.cgColor
+    }
+
+    private static func nameColor(node: WorkspaceFileNode, depth: Int, selected: Bool) -> NSColor {
+        if selected { return ShellPalette.inkFile }
+        if node.isDirectory { return depth == 0 ? ShellPalette.inkFolder : ShellPalette.inkSecondary }
+        return node.gitBadge == nil ? ShellPalette.inkTertiary : ShellPalette.inkSecondary
+    }
+
+    static func badgeText(_ node: WorkspaceFileNode) -> String {
+        if node.isDirectory { return node.changedCount == 0 ? "" : "\(node.changedCount)" }
+        switch node.gitBadge {
+        case .modified: return "M"
+        case .added: return "A"
+        case .deleted: return "D"
+        case .renamed: return "R"
+        case .untracked: return "U"
+        case .conflicted: return "!"
+        case nil: return ""
+        }
+    }
+
+    static func badgeColor(_ node: WorkspaceFileNode) -> NSColor {
+        if node.isDirectory { return ShellPalette.green }
+        switch node.gitBadge {
+        case .modified, .renamed: return ShellPalette.amber
+        case .added, .untracked: return ShellPalette.green
+        case .deleted, .conflicted: return ShellPalette.red
+        case nil: return .clear
+        }
+    }
+}
+
+/// The design's FILES section: header with the diff counts, a filter field, and
+/// a lazily expanded tree with git state on the right.
+final class WorkspaceFilesTreeView: NSView {
+    var onOpenFile: ((URL) -> Void)?
+    /// Reported up so the Files nav row can print the same numbers as the
+    /// section header without running `git` a second time.
+    var onDiffTotals: ((Int, Int, Int) -> Void)?
+
+    private let diffField = ShellFont.label(font: ShellFont.mono(12, .semibold), color: ShellPalette.green)
+    private let filterField = NSTextField()
+    private let rows = NSStackView()
+    private var root: URL?
+    /// The last `git status`. Kept whole rather than reduced to its badge map
+    /// so path math goes through `GitStatus`, which resolves the `/var` vs
+    /// `/private/var` symlink case a string prefix silently gets wrong.
+    private var gitStatus: GitStatus?
+    private var expanded: Set<URL> = []
+    private var selected: URL?
+    /// Children already listed, so re-rendering a collapse does not re-hit the
+    /// filesystem for every level.
+    private var children: [URL: [WorkspaceFileNode]] = [:]
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        let header = ShellFont.label(
+            "FILES",
+            font: ShellFont.ui(12, .semibold),
+            color: ShellPalette.inkMuted,
+            tracking: 1.2
+        )
+
+        filterField.font = ShellFont.ui(14)
+        filterField.textColor = ShellPalette.inkSecondary
+        filterField.placeholderString = "Filter files"
+        filterField.isBordered = false
+        filterField.drawsBackground = false
+        filterField.focusRingType = .none
+        filterField.translatesAutoresizingMaskIntoConstraints = false
+        filterField.target = self
+        filterField.action = #selector(filterChanged)
+
+        let fieldBox = NSView()
+        fieldBox.wantsLayer = true
+        fieldBox.layer?.backgroundColor = ShellPalette.fieldFill.cgColor
+        fieldBox.layer?.cornerRadius = 6
+        fieldBox.layer?.cornerCurve = .continuous
+        fieldBox.layer?.borderWidth = 1
+        fieldBox.layer?.borderColor = ShellPalette.hairline.cgColor
+        fieldBox.translatesAutoresizingMaskIntoConstraints = false
+        let magnifier = ShellGlyphView(.magnifier, color: ShellPalette.chevronSoft, size: 18, lineWidth: 1.3)
+        magnifier.alphaValue = 0.45
+        fieldBox.addSubview(magnifier)
+        fieldBox.addSubview(filterField)
+
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 0
+        rows.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 8, right: 6)
+        rows.translatesAutoresizingMaskIntoConstraints = false
+
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.contentView = ShellFlippedClipView()
+        scroll.documentView = rows
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+
+        for view in [header, diffField, fieldBox, scroll] { addSubview(view) }
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            header.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+
+            diffField.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            diffField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+
+            fieldBox.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
+            fieldBox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
+            fieldBox.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
+            fieldBox.heightAnchor.constraint(equalToConstant: 24),
+
+            magnifier.leadingAnchor.constraint(equalTo: fieldBox.leadingAnchor, constant: 8),
+            magnifier.centerYAnchor.constraint(equalTo: fieldBox.centerYAnchor),
+
+            filterField.leadingAnchor.constraint(equalTo: magnifier.trailingAnchor, constant: 6),
+            filterField.trailingAnchor.constraint(equalTo: fieldBox.trailingAnchor, constant: -8),
+            filterField.centerYAnchor.constraint(equalTo: fieldBox.centerYAnchor),
+
+            scroll.topAnchor.constraint(equalTo: fieldBox.bottomAnchor, constant: 7),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            rows.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            rows.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+        ])
+        setDiff(added: 0, removed: 0)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    @objc private func filterChanged() { render() }
+
+    func setDiff(added: Int, removed: Int) {
+        let font = ShellFont.mono(12, .semibold)
+        let string = NSMutableAttributedString(
+            string: "+\(added)",
+            attributes: [.font: font, .foregroundColor: ShellPalette.green]
+        )
+        string.append(NSAttributedString(
+            string: "−\(removed)",
+            attributes: [.font: font, .foregroundColor: ShellPalette.red]
+        ))
+        diffField.attributedStringValue = string
+    }
+
+    /// Point the tree at a workspace. Listing, `git status` and the diff totals
+    /// all happen off the main thread — a cold `git status` on a large repo is
+    /// tens of milliseconds and must never land on a keystroke.
+    func setRoot(_ url: URL?) {
+        root = url
+        gitStatus = nil
+        expanded = []
+        children = [:]
+        selected = nil
+        setDiff(added: 0, removed: 0)
+        render()
+        guard let url else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let listing = WorkspaceFiles.children(of: url)
+            let repo = GitStatus.repoRoot(for: url)
+            let status = repo.flatMap { GitStatus.load(repoRoot: $0) }
+            let totals = repo.flatMap { WorkspaceFilesTreeView.diffTotals(repoRoot: $0) } ?? (0, 0)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.root == url else { return }
+                self.children[url] = listing
+                self.gitStatus = status
+                self.setDiff(added: totals.added, removed: totals.removed)
+                self.render()
+                self.onDiffTotals?(totals.added, totals.removed, status?.badges.count ?? 0)
+            }
+        }
+    }
+
+    /// `git status --porcelain` says *which* files changed but not by how much,
+    /// and the design's header prints lines. One extra `--shortstat` is cheaper
+    /// than parsing a full diff, and it covers staged and unstaged together.
+    static func diffTotals(repoRoot: URL) -> (added: Int, removed: Int)? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git", "-C", repoRoot.path, "diff", "--shortstat", "HEAD"]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let text = String(data: data, encoding: .utf8)
+        else { return nil }
+
+        func number(before keyword: String) -> Int {
+            guard let range = text.range(of: keyword) else { return 0 }
+            let head = text[text.startIndex..<range.lowerBound]
+            let digits = head.reversed().drop(while: { $0 == " " }).prefix(while: \.isNumber)
+            return Int(String(digits.reversed())) ?? 0
+        }
+        return (number(before: "insertion"), number(before: "deletion"))
+    }
+
+    private func render() {
+        for view in rows.arrangedSubviews {
+            rows.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        guard let root else { return }
+        let needle = filterField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+        appendRows(of: root, depth: 0, filter: needle)
+    }
+
+    private func appendRows(of directory: URL, depth: Int, filter: String) {
+        let listing = children[directory] ?? []
+        for node in listing {
+            let matches = filter.isEmpty || node.name.lowercased().contains(filter)
+            let isOpen = expanded.contains(node.url)
+            // A filtered-out directory still shows when something under it
+            // matches, otherwise the match would be unreachable.
+            if !matches && !node.isDirectory { continue }
+
+            let row = WorkspaceFileRowView(
+                node: annotate(node),
+                depth: depth,
+                expanded: isOpen,
+                selected: node.url == selected
+            )
+            row.onPress = { [weak self] in self?.activate(node) }
+            rows.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
+
+            if node.isDirectory && isOpen {
+                appendRows(of: node.url, depth: depth + 1, filter: filter)
+            }
+        }
+    }
+
+    /// Git state is looked up at render time from the porcelain map, so one
+    /// `git status` annotates every level without re-walking.
+    private func annotate(_ node: WorkspaceFileNode) -> WorkspaceFileNode {
+        guard let gitStatus else { return node }
+        var copy = node
+        if node.isDirectory {
+            copy.changedCount = gitStatus.relativePath(for: node.url)
+                .map(gitStatus.changedCount(under:)) ?? 0
+        } else {
+            copy.gitBadge = gitStatus.badge(for: node.url)
+        }
+        return copy
+    }
+
+    private func activate(_ node: WorkspaceFileNode) {
+        guard node.isDirectory else {
+            selected = node.url
+            onOpenFile?(node.url)
+            render()
+            return
+        }
+        if expanded.contains(node.url) {
+            expanded.remove(node.url)
+            render()
+            return
+        }
+        expanded.insert(node.url)
+        guard children[node.url] == nil else {
+            render()
+            return
+        }
+        // Expanding is the only thing that touches the disk after the first
+        // load, and a cold directory on a network volume can block.
+        WorkspaceFiles.list(node.url) { [weak self] listing in
+            guard let self, self.expanded.contains(node.url) else { return }
+            self.children[node.url] = listing
+            self.render()
+        }
+        render()
+    }
+}
+
+// MARK: - Level 2 · account row
+
+/// The sidebar's footer. Outside the sliding track in the design, so it stays
+/// put while the levels move behind it.
+final class WorkspaceAccountRowView: NSView {
+    var onOpenSettings: (() -> Void)?
+
+    private let statusField = ShellFont.label(
+        "Brain ready",
+        font: ShellFont.ui(12),
+        color: ShellPalette.green
+    )
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        layer?.backgroundColor = ShellPalette.accountFill.cgColor
 
-        let chevron = NSImageView()
-        chevron.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: nil)
-        chevron.contentTintColor = ShellPalette.inkDim
-        chevron.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
+        let name = NSFullUserName()
+        let avatar = ShellTileView(
+            size: ShellMetrics.accountAvatar,
+            radius: ShellMetrics.accountAvatar / 2,
+            fontSize: 12,
+            circular: true
+        )
+        avatar.apply(
+            initials: ShellPalette.initials(name),
+            gradient: (
+                NSColor(srgbRed: 74 / 255, green: 91 / 255, blue: 216 / 255, alpha: 1),
+                NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 1)
+            )
+        )
+        let nameField = ShellFont.label(
+            name,
+            font: ShellFont.ui(14, .medium),
+            color: NSColor(srgbRed: 216 / 255, green: 216 / 255, blue: 222 / 255, alpha: 1)
+        )
 
-        tile.alignment = .center
-        tile.font = .systemFont(ofSize: 10.5, weight: .bold)
-        tile.textColor = .white
-        tile.wantsLayer = true
-        tile.layer?.cornerRadius = 7
-        tile.usesSingleLineMode = true
+        let gear = ShellRowView()
+        gear.wantsLayer = true
+        gear.layer?.cornerRadius = 5
+        gear.hoverFill = NSColor(white: 1, alpha: 0.09)
+        gear.onPress = { [weak self] in self?.onOpenSettings?() }
+        gear.setAccessibilityLabel("Settings")
+        gear.translatesAutoresizingMaskIntoConstraints = false
+        let gearGlyph = ShellGlyphView(.gear, color: ShellPalette.chevron, size: 20)
+        gear.addSubview(gearGlyph)
 
-        name.font = .systemFont(ofSize: 13, weight: .semibold)
-        name.textColor = ShellPalette.ink
-        name.lineBreakMode = .byTruncatingTail
+        let separator = ShellSeparator(color: ShellPalette.hairlineStrong)
+        let text = NSView()
+        text.translatesAutoresizingMaskIntoConstraints = false
+        text.addSubview(nameField)
+        text.addSubview(statusField)
 
-        path.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        path.textColor = ShellPalette.inkFaint
-        path.lineBreakMode = .byTruncatingHead
-
-        let text = NSStackView(views: [name, path])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 2
-        text.setHuggingPriority(.defaultLow, for: .horizontal)
-
-        let row = NSStackView(views: [chevron, tile, text])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 9
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
-
+        for view in [separator, avatar, text, gear] { addSubview(view) }
         NSLayoutConstraint.activate([
-            tile.widthAnchor.constraint(equalToConstant: 26),
-            tile.heightAnchor.constraint(equalToConstant: 26),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 9),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
+            separator.topAnchor.constraint(equalTo: topAnchor),
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            text.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: 8),
+            text.trailingAnchor.constraint(equalTo: gear.leadingAnchor, constant: -6),
+            text.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            text.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+
+            nameField.topAnchor.constraint(equalTo: text.topAnchor),
+            nameField.leadingAnchor.constraint(equalTo: text.leadingAnchor),
+            nameField.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+
+            statusField.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 1),
+            statusField.leadingAnchor.constraint(equalTo: text.leadingAnchor),
+            statusField.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+            statusField.bottomAnchor.constraint(equalTo: text.bottomAnchor),
+
+            gear.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            gear.centerYAnchor.constraint(equalTo: centerYAnchor),
+            gear.widthAnchor.constraint(equalToConstant: 20),
+            gear.heightAnchor.constraint(equalToConstant: 20),
+            gearGlyph.centerXAnchor.constraint(equalTo: gear.centerXAnchor),
+            gearGlyph.centerYAnchor.constraint(equalTo: gear.centerYAnchor),
         ])
-        refreshBackground()
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is unavailable")
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
-    func apply(workspace: BrainProjectSummary?) {
-        let label = workspace?.label ?? "No workspace"
-        tile.stringValue = ShellPalette.initials(label)
-        tile.layer?.backgroundColor = workspace
-            .map { ShellPalette.avatarColor(forID: $0.id) }
-            .unwrapped(or: ShellPalette.inkFaint)
-            .cgColor
-        name.stringValue = label
-        path.stringValue = workspace?.path ?? ""
-        path.isHidden = (workspace?.path ?? "").isEmpty
-        setAccessibilityLabel("Switch workspace, currently \(label)")
-    }
-
-    override func refreshBackground() {
-        layer?.backgroundColor = (isHovered ? ShellPalette.hover : NSColor(white: 1, alpha: 0.03)).cgColor
+    func setBrainStatus(_ text: String, healthy: Bool = true) {
+        statusField.stringValue = text
+        statusField.textColor = healthy ? ShellPalette.green : ShellPalette.amber
     }
 }
 
-private extension Optional where Wrapped == NSColor {
-    func unwrapped(or fallback: NSColor) -> NSColor { self ?? fallback }
-}
+// MARK: - Sidebar
 
-// MARK: - The sliding sidebar
-
-/// Levels 1 and 2 side by side on a track twice the sidebar's width, with the
-/// track's leading constant animated between `0` and `-width`.
+/// The sidebar itself: a two-level track that slides, with the account row
+/// pinned underneath it.
 ///
-/// AppKit offers `NSViewController.transition(from:to:options:.slideForward)`,
-/// which would be free — but it swaps one child for another with the system's
-/// own timing, and the design specifies both panes existing at once and its
-/// own easing. Recomputing the constant in `layout()` is what keeps the track
-/// correct across a sidebar resize, which a one-shot animation would not.
+/// The slide is a constant on the track's leading constraint rather than a
+/// `CATransform3D`, because the constant has to be re-derived in `layout()` —
+/// the sidebar's width is fixed by the design but the window can still be
+/// resized before the first pass, and a transform captured once would leave the
+/// track half a level over.
 final class WorkspaceSidebarView: NSView {
     var onSelectWorkspace: ((BrainProjectSummary) -> Void)?
     var onSelectDestination: ((WorkspaceDestination) -> Void)?
     var onNewWorkspace: (() -> Void)?
+    var onSelectPane: ((String) -> Void)?
+    var onSelectSession: ((SessionGroupNode) -> Void)?
+    var onNewSession: (() -> Void)?
+    var onNewTerminal: (() -> Void)?
+    var onRenameSession: ((SessionGroupNode, String) -> Void)?
+    var onOpenSettings: (() -> Void)?
 
     let picker = WorkspacePickerView()
     let backRow = WorkspaceBackRowView()
-    /// The existing session outline, hosted under Terminals. Injected rather
-    /// than owned: `WorkspaceWindowController` already wires every one of its
-    /// callbacks, and this view has no business in that.
-    let outline: SessionOutlineView
+    let sessionsTree = SessionsTreeView()
+    let filesTree = WorkspaceFilesTreeView()
+    let accountRow = WorkspaceAccountRowView()
 
     private(set) var isShowingPicker = true
     private(set) var destination: WorkspaceDestination = .terminals
     private(set) var selectedWorkspace: BrainProjectSummary?
+    private(set) var navRows: [WorkspaceNavRowView] = []
 
     private let track = NSView()
-    private var trackLeading: NSLayoutConstraint!
-    /// Internal, not private, so the tests can assert which destination row is
-    /// lit and whether the sessions tree is showing without reaching through
-    /// `NSStackView`'s visibility priorities.
-    private(set) var navRows: [WorkspaceNavRowView] = []
-    private(set) var outlineContainer = NSView()
-    private let spacer = NSView()
+    /// The two rest positions, as constraints rather than a constant computed
+    /// from `bounds`. The track is exactly twice the sidebar's width, so
+    /// pinning its leading edge shows Level 1 and pinning its trailing edge
+    /// shows Level 2 — neither depends on knowing the width during a layout
+    /// pass, which is what previously left the track parked half a level over.
+    private var pickerPin: NSLayoutConstraint!
+    private var workspacePin: NSLayoutConstraint!
     private let navStack = NSStackView()
+    private let sessionsContainer = NSView()
 
-    init(outline: SessionOutlineView) {
-        self.outline = outline
-        super.init(frame: .zero)
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = ShellPalette.panel.cgColor
         // The off-screen level must not paint outside the sidebar.
@@ -637,18 +2182,37 @@ final class WorkspaceSidebarView: NSView {
         picker.onPick = { [weak self] workspace in self?.onSelectWorkspace?(workspace) }
         picker.onNewWorkspace = { [weak self] in self?.onNewWorkspace?() }
         backRow.onPress = { [weak self] in self?.showPicker() }
+        accountRow.onOpenSettings = { [weak self] in self?.onOpenSettings?() }
+        sessionsTree.onSelectPane = { [weak self] id in self?.onSelectPane?(id) }
+        sessionsTree.onSelectSession = { [weak self] session in self?.onSelectSession?(session) }
+        sessionsTree.onNewSession = { [weak self] in self?.onNewSession?() }
+        sessionsTree.onNewTerminal = { [weak self] in self?.onNewTerminal?() }
+        sessionsTree.onRenameSession = { [weak self] session, name in
+            self?.onRenameSession?(session, name)
+        }
+        // The tree already paid for `git status`; the nav row shows the same
+        // numbers rather than running it again.
+        filesTree.onDiffTotals = { [weak self] added, removed, changed in
+            self?.setFilesSummary(added: added, removed: removed, changed: changed)
+        }
 
-        for view in [track, picker, level2] { view.translatesAutoresizingMaskIntoConstraints = false }
+        for view in [track, picker, level2, accountRow] { view.translatesAutoresizingMaskIntoConstraints = false }
         addSubview(track)
+        addSubview(accountRow)
         track.addSubview(picker)
         track.addSubview(level2)
 
-        trackLeading = track.leadingAnchor.constraint(equalTo: leadingAnchor)
+        pickerPin = track.leadingAnchor.constraint(equalTo: leadingAnchor)
+        workspacePin = track.trailingAnchor.constraint(equalTo: trailingAnchor)
+        pickerPin.isActive = true
         NSLayoutConstraint.activate([
-            trackLeading,
             track.topAnchor.constraint(equalTo: topAnchor),
-            track.bottomAnchor.constraint(equalTo: bottomAnchor),
+            track.bottomAnchor.constraint(equalTo: accountRow.topAnchor),
             track.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 2),
+
+            accountRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            accountRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            accountRow.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             picker.leadingAnchor.constraint(equalTo: track.leadingAnchor),
             picker.widthAnchor.constraint(equalTo: widthAnchor),
@@ -665,9 +2229,7 @@ final class WorkspaceSidebarView: NSView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is unavailable")
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
     private func buildLevel2() -> NSView {
         navRows = WorkspaceDestination.allCases.map { destination in
@@ -679,94 +2241,86 @@ final class WorkspaceSidebarView: NSView {
             return row
         }
 
-        outline.translatesAutoresizingMaskIntoConstraints = false
-        outlineContainer.translatesAutoresizingMaskIntoConstraints = false
-        outlineContainer.addSubview(outline)
+        sessionsContainer.translatesAutoresizingMaskIntoConstraints = false
+        sessionsTree.translatesAutoresizingMaskIntoConstraints = false
+        sessionsContainer.addSubview(sessionsTree)
         NSLayoutConstraint.activate([
-            // Indented under Terminals, exactly as the design nests the
-            // sessions tree beneath its own nav row.
-            outline.leadingAnchor.constraint(equalTo: outlineContainer.leadingAnchor, constant: 18),
-            outline.trailingAnchor.constraint(equalTo: outlineContainer.trailingAnchor),
-            outline.topAnchor.constraint(equalTo: outlineContainer.topAnchor),
-            outline.bottomAnchor.constraint(equalTo: outlineContainer.bottomAnchor),
+            sessionsTree.leadingAnchor.constraint(equalTo: sessionsContainer.leadingAnchor),
+            sessionsTree.trailingAnchor.constraint(equalTo: sessionsContainer.trailingAnchor),
+            sessionsTree.topAnchor.constraint(equalTo: sessionsContainer.topAnchor, constant: 2),
+            sessionsTree.bottomAnchor.constraint(equalTo: sessionsContainer.bottomAnchor, constant: -4),
         ])
 
         navStack.orientation = .vertical
         navStack.alignment = .leading
         navStack.spacing = 2
-        navStack.edgeInsets = NSEdgeInsets(top: 0, left: 7, bottom: 8, right: 7)
+        navStack.edgeInsets = NSEdgeInsets(top: 8, left: 7, bottom: 9, right: 7)
         navStack.translatesAutoresizingMaskIntoConstraints = false
 
-        navStack.addArrangedSubview(backRow)
         // The design's order: Dashboard, Board, Terminals, [sessions tree],
         // Files — the tree hangs off Terminals, so it sits between them.
         for row in navRows {
             navStack.addArrangedSubview(row)
-            if row.destination == .terminals { navStack.addArrangedSubview(outlineContainer) }
+            if row.destination == .terminals { navStack.addArrangedSubview(sessionsContainer) }
         }
-        navStack.addArrangedSubview(spacer)
-
-        // The tree absorbs the slack when it is visible; the spacer does when
-        // it is not, so the nav rows never stretch.
-        outlineContainer.setContentHuggingPriority(.init(1), for: .vertical)
-        spacer.setContentHuggingPriority(.init(1), for: .vertical)
-
-        let container = NSView()
-        container.addSubview(navStack)
-        NSLayoutConstraint.activate([
-            navStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            navStack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            navStack.topAnchor.constraint(equalTo: container.topAnchor),
-            navStack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
-        for view in [backRow, outlineContainer, spacer] + navRows {
+        for view in navRows + [sessionsContainer] {
             view.widthAnchor.constraint(equalTo: navStack.widthAnchor, constant: -14).isActive = true
         }
+
+        let navSeparator = ShellSeparator()
+        let treeSeparator = ShellSeparator()
+        let container = NSView()
+        for view in [backRow, navStack, navSeparator, treeSeparator, filesTree] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            backRow.topAnchor.constraint(equalTo: container.topAnchor),
+            backRow.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            backRow.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            navSeparator.topAnchor.constraint(equalTo: backRow.bottomAnchor),
+            navSeparator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            navSeparator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            navStack.topAnchor.constraint(equalTo: navSeparator.bottomAnchor),
+            navStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            navStack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            treeSeparator.topAnchor.constraint(equalTo: navStack.bottomAnchor),
+            treeSeparator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            treeSeparator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            filesTree.topAnchor.constraint(equalTo: treeSeparator.bottomAnchor, constant: 2),
+            filesTree.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            filesTree.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            filesTree.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
         return container
     }
 
     // MARK: Slide
 
-    override func layout() {
-        // Re-derived rather than remembered: the sidebar is user-resizable,
-        // and a stale constant would leave the track half a level over.
-        //
-        // **Before** `super.layout()`, not after: the constant has to be in
-        // place for the pass that is about to run, or the new width lands one
-        // pass late and a drag of the split divider drags Level 2 off-screen
-        // behind it. It settles because the second pass computes the same
-        // value and stops marking the view dirty.
-        trackLeading.constant = isShowingPicker ? 0 : -bounds.width
-        super.layout()
-    }
-
     func showPicker(animated: Bool = true) {
         guard !isShowingPicker else { return }
         isShowingPicker = true
-        slide(to: 0, animated: animated)
+        slide(animated: animated)
     }
 
-    /// Opens a workspace: names it on the back row and slides to its nav.
     func showWorkspace(_ workspace: BrainProjectSummary?, animated: Bool = true) {
         selectedWorkspace = workspace
         backRow.apply(workspace: workspace)
-        guard workspace != nil else {
-            // Nothing to show a nav for — the picker is the only honest state,
-            // and it is also exactly the first-run screen the design draws.
-            if !isShowingPicker {
-                isShowingPicker = true
-                slide(to: 0, animated: animated)
-            }
-            return
-        }
         guard isShowingPicker else { return }
         isShowingPicker = false
-        slide(to: -bounds.width, animated: animated)
+        slide(animated: animated)
     }
 
-    private func slide(to constant: CGFloat, animated: Bool) {
+    private func slide(animated: Bool) {
+        workspacePin.isActive = false
+        pickerPin.isActive = false
+        (isShowingPicker ? pickerPin : workspacePin).isActive = true
+
         guard animated, !ShellMotion.reduced else {
-            trackLeading.constant = constant
             layoutSubtreeIfNeeded()
             return
         }
@@ -774,7 +2328,6 @@ final class WorkspaceSidebarView: NSView {
             context.duration = ShellMotion.duration
             context.timingFunction = ShellMotion.timing
             context.allowsImplicitAnimation = true
-            trackLeading.animator().constant = constant
             layoutSubtreeIfNeeded()
         }
     }
@@ -788,41 +2341,78 @@ final class WorkspaceSidebarView: NSView {
     func applyDestination(_ destination: WorkspaceDestination) {
         self.destination = destination
         for row in navRows { row.apply(selected: row.destination == destination) }
-        let showTree = destination == .terminals
-        navStack.setVisibilityPriority(showTree ? .mustHold : .notVisible, for: outlineContainer)
-        navStack.setVisibilityPriority(showTree ? .notVisible : .mustHold, for: spacer)
+        // The design shows the sessions tree for every destination that is not
+        // one of the standalone screens.
+        sessionsContainer.isHidden = destination != .terminals
     }
 
-    /// The badge on Terminals — how many sessions the open workspace has.
-    func setSessionCount(_ count: Int) {
-        navRows.first { $0.destination == .terminals }?.setCount(count)
+    /// Everything the sessions half of Level 2 renders.
+    func reloadSessions(
+        panes: [PaneDescriptor],
+        focusedPaneID: String?,
+        statuses: [String: RemoteSessionStatus],
+        project: String?
+    ) {
+        let scoped = project.map { id in panes.filter { $0.project == id } } ?? panes
+        let sessions = SessionOutline.group(scoped, focusedPaneID: focusedPaneID)
+            .flatMap(\.sessions)
+        var byID: [String: PaneDescriptor] = [:]
+        for pane in scoped { byID[pane.sessionID] = pane }
+
+        sessionsTree.reload(
+            sessions: sessions,
+            panes: byID,
+            focusedPaneID: focusedPaneID,
+            statuses: statuses
+        )
+
+        if let terminals = navRows.first(where: { $0.destination == .terminals }) {
+            terminals.setCount(scoped.isEmpty ? nil : scoped.count)
+            let current = sessions.first(where: \.isCurrent)
+            let shape = PaneGrid.shape(count: max(1, current?.paneIDs.count ?? 0))
+            terminals.setSubtitle(
+                current.map { "\($0.label) · \(shape.rows)×\(shape.cols)" } ?? "no session"
+            )
+        }
+    }
+
+    func setFilesSummary(added: Int, removed: Int, changed: Int) {
+        guard let files = navRows.first(where: { $0.destination == .files }) else { return }
+        files.setDiff(added: added, removed: removed)
+        files.setCount(changed == 0 ? nil : changed)
+    }
+
+    /// Points the FILES tree at the open workspace's directory.
+    func setFilesRoot(_ url: URL?) {
+        filesTree.setRoot(url)
+    }
+
+    func setDashboardCount(_ value: Int?) {
+        navRows.first(where: { $0.destination == .dashboard })?.setCount(value)
+    }
+
+    func setBoardCount(_ value: Int?) {
+        navRows.first(where: { $0.destination == .board })?.setCount(value)
     }
 }
 
-// MARK: - Placeholder content
+// MARK: - Placeholder
 
-/// What Dashboard, Board and Files show in step 1.
+/// What the content half shows for a destination that has no screen yet.
+/// Dashboard and Board are deliberately empty in this step.
 final class WorkspacePlaceholderView: NSView {
-    private let title = NSTextField(labelWithString: "")
-    private let hint = NSTextField(labelWithString: "Coming in a later step.")
+    private let titleField = ShellFont.label(font: ShellFont.ui(16, .semibold), color: ShellPalette.ink)
+    private let subtitleField = ShellFont.label(font: ShellFont.ui(12.5), color: ShellPalette.inkMuted)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = ShellPalette.content.cgColor
 
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
-        title.textColor = ShellPalette.inkDim
-        title.alignment = .center
-
-        hint.font = .systemFont(ofSize: 11.5)
-        hint.textColor = ShellPalette.inkFaint
-        hint.alignment = .center
-
-        let stack = NSStackView(views: [title, hint])
+        let stack = NSStackView(views: [titleField, subtitleField])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 6
+        stack.spacing = 4
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -832,11 +2422,10 @@ final class WorkspacePlaceholderView: NSView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is unavailable")
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
     func show(_ destination: WorkspaceDestination) {
-        title.stringValue = destination.title
+        titleField.stringValue = destination.title
+        subtitleField.stringValue = "Coming in a later step."
     }
 }

@@ -594,16 +594,16 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 ])
             )
         )
-        XCTAssertEqual(controller.outline.outlineView.numberOfRows, 3, "project, session, pane")
+        let tree = controller.shellSidebar.sessionsTree
+        XCTAssertEqual(tree.renderedSessionIDs, ["g1"])
+        XCTAssertEqual(tree.renderedPaneIDs, ["sess-a"])
 
         controller.newTerminalPane(nil)
 
-        XCTAssertEqual(controller.outline.outlineView.numberOfRows, 4, "the new pane appears in its session")
+        XCTAssertEqual(tree.renderedSessionIDs, ["g1"], "the new pane joins the open session")
         let focused = try XCTUnwrap(controller.workspaceView.focusedPaneID)
-        XCTAssertEqual(
-            controller.outline.outlineView.selectedRow,
-            controller.outline.outlineView.row(forItem: SessionOutlineView.OutlineItem.pane(focused))
-        )
+        XCTAssertEqual(tree.renderedPaneIDs.count, 2, "the new pane appears in its session")
+        XCTAssertTrue(tree.renderedPaneIDs.contains(focused))
     }
 
     func testRenamingASessionWritesTheNameOntoEveryPaneInIt() throws {
