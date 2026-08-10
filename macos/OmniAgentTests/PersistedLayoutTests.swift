@@ -65,6 +65,24 @@ final class PersistedLayoutTests: XCTestCase {
         XCTAssertNil(restored[1].id)
     }
 
+    /// The serialized row must be **byte-identical** for equal input, because
+    /// `WorkspaceWindowController.write(_:to:)` compares this string against
+    /// the last one it wrote to decide whether the row changed at all.
+    /// `Dictionary` iteration order is not stable across two dictionaries
+    /// holding the same pairs, so without `.sortedKeys` an unchanged layout
+    /// re-serializes with its fields shuffled, the guard reads it as a change,
+    /// and a shell repainting its OSC title rewrites the row several times a
+    /// second against a database the web app is also reading.
+    func testSerializingIsByteStableSoTheUnchangedRowGuardHolds() {
+        let tabs = [
+            PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1"),
+        ]
+        XCTAssertEqual(
+            PersistedLayoutCodec.serialize(tabs),
+            #"{"tabs":[{"cwd":"\/a","engine":"shell","group":"g1","id":"sess-a","project":"alpha"}]}"#
+        )
+    }
+
     func testDeserializingNilOrGarbageNeverThrowsAndReturnsEmpty() {
         XCTAssertEqual(PersistedLayoutCodec.deserialize(nil), [])
         XCTAssertEqual(PersistedLayoutCodec.deserialize(""), [])

@@ -197,7 +197,10 @@ enum NotificationFeedCodec {
         ]
         guard
             JSONSerialization.isValidJSONObject(payload),
-            let data = try? JSONSerialization.data(withJSONObject: payload),
+            // Stable key order, for the same reason as
+            // `PersistedLayoutCodec.serialize` — this row goes through the
+            // same "only write when it actually changed" guard.
+            let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
             let json = String(data: data, encoding: .utf8)
         else {
             return #"{"entries":[]}"#

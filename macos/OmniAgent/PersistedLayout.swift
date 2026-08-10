@@ -99,7 +99,17 @@ enum PersistedLayoutCodec {
         let payload: [String: Any] = ["tabs": tabs.map(encodedTab)]
         guard
             JSONSerialization.isValidJSONObject(payload),
-            let data = try? JSONSerialization.data(withJSONObject: payload),
+            // `.sortedKeys` is load-bearing, not cosmetic.
+            // `WorkspaceWindowController.write(_:to:)` decides whether a
+            // settings row changed by comparing this string to the last one it
+            // wrote, and `Dictionary` iteration order is not stable across two
+            // dictionaries holding the same pairs. Without it, serializing an
+            // unchanged layout can emit the same fields in a different order,
+            // the guard reads that as a change, and a shell repainting its OSC
+            // title rewrites the row several times a second — exactly what the
+            // guard exists to stop. Purely a property of the bytes we write:
+            // the web app parses this row, so key order is nothing to it.
+            let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
             let json = String(data: data, encoding: .utf8)
         else {
             return #"{"tabs":[]}"#
