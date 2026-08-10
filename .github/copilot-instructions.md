@@ -64,7 +64,9 @@ Release cutover (retiring the web terminal hot path)
 - Runtime: Tauri app (UI + Rust core) and/or the native macOS app (UI), a persistent `omniagent-pty-daemon` process, a graph ingest process, and an MCP server process; they share retrieval crates and storage layers.
 - Storage: SQLite "brain" DB (rebuildable) + durable Markdown memory under:
   `~/Library/Application Support/OmniAgent-ADE/brain/` — override with `OMNIAGENT_ADE_DATA_DIR`.
-- **Native macOS migration status** (`docs/plans/native-macos-migration.md`): the native app is built and passes its own test suite (Tasks 1–6 complete — persistent daemon protocol, Tauri compatibility client, AppKit pane workspace, daemon-routed settings/brain/roots, SMAppService persistence, universal build/signing/notarization). The web/Tauri app remains production, unchanged, pending the Task 7 cutover gate (`scripts/cutover.sh status`) — do not treat the native app as a replacement for the Tauri app's terminal hot path until that gate opens.
+- **Native macOS migration status** (`docs/plans/native-macos-migration.md`): the native app is built and passes its own test suite (Tasks 1–6 complete — persistent daemon protocol, Tauri compatibility client, AppKit pane workspace, daemon-routed settings/brain/roots, SMAppService persistence, universal build/signing/notarization).
+- **`macos/` is where UI work goes.** Standing decision (2026-08-03, recorded in `scripts/rebuild-app.sh`): the native app is the only artifact Bruno builds and runs day-to-day, and `scripts/rebuild-app.sh` deliberately does not build the Tauri app at all. New product/design work targets `macos/`; `ui/` is legacy. Reconfirmed 2026-08-10 ("it all must be native macOS") after design step 1 was mistakenly built in `ui/` first and reverted.
+  - This is **not** the same thing as the Task 7 cutover. That gate (`scripts/cutover.sh status`, 0/2, CLOSED) governs *deleting* the web terminal hot path, which still may not be hand-removed — it says nothing about where new work lands. The two used to be conflated here; they are separate.
 
 See `docs/DESIGN.md` and `docs/PLAN.md` for architecture and product principles.
 
