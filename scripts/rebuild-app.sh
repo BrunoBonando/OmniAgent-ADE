@@ -17,7 +17,7 @@ app="$ROOT_DIR/macos/.build/Build/Products/Release/OmniAgent.app"
 dist="$ROOT_DIR/target/native-macos-dist"
 mkdir -p "$dist"
 dmg="$dist/OmniAgent_${version}_universal.dmg"
-hdiutil create -volname OmniAgent -srcfolder "$app" -ov -format UDZO "$dmg"
+./macos/make-dmg.sh "$app" "$dmg"
 
 rm -rf /Applications/OmniAgent.app
 ditto "$app" /Applications/OmniAgent.app
