@@ -73,6 +73,8 @@
 		10000000000000000000045 /* persisted-layout.json in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000046 /* persisted-layout.json */; };
 		10000000000000000000046 /* rust-session-models.json in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000047 /* rust-session-models.json */; };
 		10000000000000000000047 /* status-end-events.json in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000048 /* status-end-events.json */; };
+		10000000000000000000050 /* WorkspaceShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000050 /* WorkspaceShell.swift */; };
+		10000000000000000000051 /* WorkspaceShellTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000051 /* WorkspaceShellTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -175,6 +177,8 @@
 		20000000000000000000047 /* rust-session-models.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "rust-session-models.json"; path = "../fixtures/native-macos-compat/rust-session-models.json"; sourceTree = SOURCE_ROOT; };
 		20000000000000000000048 /* status-end-events.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "status-end-events.json"; path = "../fixtures/native-macos-compat/status-end-events.json"; sourceTree = SOURCE_ROOT; };
 		20000000000000000000049 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		20000000000000000000050 /* WorkspaceShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceShell.swift; sourceTree = "<group>"; };
+		20000000000000000000051 /* WorkspaceShellTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceShellTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -227,6 +231,7 @@
 				20000000000000000000001E /* CommandPalette.swift */,
 				20000000000000000000001F /* CommandPaletteController.swift */,
 				200000000000000000000020 /* WorkspaceToolbar.swift */,
+				20000000000000000000050 /* WorkspaceShell.swift */,
 				20000000000000000000022 /* SettingsStore.swift */,
 				20000000000000000000023 /* BrainClients.swift */,
 				20000000000000000000024 /* AuthGateState.swift */,
@@ -280,6 +285,7 @@
 				2000000000000000000003F /* DaemonPersistenceTests.swift */,
 				20000000000000000000041 /* DaemonPersistenceControllerTests.swift */,
 				20000000000000000000043 /* DaemonServiceRegistrarTests.swift */,
+				20000000000000000000051 /* WorkspaceShellTests.swift */,
 			);
 			path = OmniAgentTests;
 			sourceTree = "<group>";
@@ -423,6 +429,7 @@
 				10000000000000000000001D /* CommandPalette.swift in Sources */,
 				10000000000000000000001E /* CommandPaletteController.swift in Sources */,
 				10000000000000000000001F /* WorkspaceToolbar.swift in Sources */,
+				10000000000000000000050 /* WorkspaceShell.swift in Sources */,
 				10000000000000000000021 /* SettingsStore.swift in Sources */,
 				10000000000000000000022 /* BrainClients.swift in Sources */,
 				10000000000000000000023 /* AuthGateState.swift in Sources */,
@@ -471,6 +478,7 @@
 				1000000000000000000003E /* DaemonPersistenceTests.swift in Sources */,
 				10000000000000000000040 /* DaemonPersistenceControllerTests.swift in Sources */,
 				10000000000000000000042 /* DaemonServiceRegistrarTests.swift in Sources */,
+				10000000000000000000051 /* WorkspaceShellTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -512,7 +520,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_TESTABILITY = YES;
@@ -541,7 +549,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -609,7 +617,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;

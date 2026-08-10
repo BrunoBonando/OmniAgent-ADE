@@ -38,6 +38,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// a split view — the workspace is one half of it, not the whole thing.
     var workspaceView: PaneWorkspaceView { workspace }
     let outline = SessionOutlineView()
+    /// The design's two-level sidebar (step 1, 2026-08-10). `lazy` so it can
+    /// take `outline` — a `self` read that is only legal once phase-1 init has
+    /// finished, which is also why the split view is assembled after
+    /// `super.init` rather than inline with the window.
+    private(set) lazy var shellSidebar = WorkspaceSidebarView(outline: outline)
+    /// The content half of the split: the pane workspace and the placeholder
+    /// both live here permanently, and the destination only toggles which is
+    /// hidden. Unmounting `PaneWorkspaceView` would tear down live SwiftTerm
+    /// views and their PTY attachment along with it.
+    private let contentContainer = NSView()
+    private let placeholder = WorkspacePlaceholderView()
+    /// Everything `listProjects` last returned — the picker's rows, and where
+    /// a selected id is resolved back to a label and path.
+    private(set) var workspaces: [BrainProjectSummary] = []
+    /// The workspace Level 2 is about. `nil` means "none open", which pins the
+    /// sidebar on the picker.
+    private(set) var selectedProjectID: String?
     let palette = CommandPaletteController()
     private var readySessions: Set<String> = []
     /// The `layout` read has been sent — a later reconnect must re-attach the
@@ -151,25 +168,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             alpha: 1
         )
         window.minSize = NSSize(width: 520, height: 320)
-        // An `NSSplitViewController` rather than a hand-rolled `NSSplitView`:
-        // the sidebar item is what gives the outline the system's own
-        // translucency, its collapse animation, its remembered width, and the
-        // standard `toggleSidebar:` responder action — all behaviour this
-        // task would otherwise be re-implementing.
-        let sidebar = NSViewController()
-        sidebar.view = outline
-        let content = NSViewController()
-        content.view = workspace
-        let split = NSSplitViewController()
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
-        sidebarItem.minimumThickness = 180
-        sidebarItem.maximumThickness = 340
-        sidebarItem.canCollapse = true
-        split.addSplitViewItem(sidebarItem)
-        split.addSplitViewItem(NSSplitViewItem(viewController: content))
-        window.contentViewController = split
 
         super.init(window: window)
+        installSplitView(on: window)
         installToolbar(on: window)
         window.delegate = self
         window.onFirstResponderChange = { [weak self] responder in
@@ -197,9 +198,103 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.renameSession(session, to: name)
         }
         for pane in panes { addPane(pane, startSession: false) }
+        selectInitialWorkspaceIfNeeded(animated: false)
         reloadOutline()
         window.initialFirstResponder = workspace.focusedPaneID
             .flatMap { workspace.surface(for: $0)?.terminalView }
+    }
+
+    /// The split: sidebar item on the left (kept, so the outline still gets
+    /// the system's translucency, collapse animation, remembered width and the
+    /// standard `toggleSidebar:` action), the destination container on the
+    /// right. Only the sidebar's *content* changed in step 1 — the outline is
+    /// now nested inside `WorkspaceSidebarView`'s Level 2 rather than being
+    /// the whole pane.
+    private func installSplitView(on window: NSWindow) {
+        workspace.translatesAutoresizingMaskIntoConstraints = false
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        contentContainer.addSubview(workspace)
+        contentContainer.addSubview(placeholder)
+        for view in [workspace, placeholder] as [NSView] {
+            NSLayoutConstraint.activate([
+                view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+                view.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+                view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
+            ])
+        }
+
+        shellSidebar.onSelectWorkspace = { [weak self] chosen in
+            self?.selectWorkspace(id: chosen.id)
+        }
+        shellSidebar.onSelectDestination = { [weak self] destination in
+            self?.applyDestination(destination)
+        }
+        // The design's "New workspace" opens a folder picker and starts there.
+        // `newSession` is exactly that flow natively (choose a directory, open
+        // a session in it); a separate new-workspace dialog is not part of the
+        // foundation step.
+        shellSidebar.onNewWorkspace = { [weak self] in self?.newSession(nil) }
+        applyDestination(.terminals)
+
+        let sidebar = NSViewController()
+        sidebar.view = shellSidebar
+        let content = NSViewController()
+        content.view = contentContainer
+        let split = NSSplitViewController()
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        // Raised from 180: the design's Level 1 cards carry a 32pt tile plus a
+        // path, and below ~220 the path is all ellipsis.
+        sidebarItem.minimumThickness = 220
+        sidebarItem.maximumThickness = 340
+        sidebarItem.canCollapse = true
+        split.addSplitViewItem(sidebarItem)
+        split.addSplitViewItem(NSSplitViewItem(viewController: content))
+        window.contentViewController = split
+    }
+
+    /// Swaps the destination. `isHidden`, never add/remove: see
+    /// `contentContainer`'s own doc for why the pane workspace must stay
+    /// mounted.
+    func applyDestination(_ destination: WorkspaceDestination) {
+        shellSidebar.applyDestination(destination)
+        let isTerminals = destination == .terminals
+        workspace.isHidden = !isTerminals
+        placeholder.isHidden = isTerminals
+        if !isTerminals { placeholder.show(destination) }
+    }
+
+    /// Opens a workspace in Level 2 and scopes the outline to it.
+    func selectWorkspace(id: String, animated: Bool = true) {
+        selectedProjectID = id
+        let summary = workspaces.first { $0.id == id }
+            ?? BrainProjectSummary(
+                id: id,
+                label: SessionOutline.projectLabel(id, labels: projectLabels),
+                path: nil
+            )
+        shellSidebar.showWorkspace(summary, animated: animated)
+        reloadOutline()
+    }
+
+    /// With panes already restored there is a workspace to be in, so the app
+    /// opens on Level 2 rather than making the user pick what is already
+    /// there. With no panes at all the picker stays up — the design's own
+    /// first-run screen.
+    private func selectInitialWorkspaceIfNeeded(animated: Bool) {
+        guard selectedProjectID == nil else { return }
+        let focused = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0)?.project }
+        let anyPane = workspace.paneIDs.compactMap { workspace.descriptor(for: $0)?.project }.first
+        guard let project = focused ?? anyPane, !project.isEmpty else { return }
+        selectWorkspace(id: project, animated: animated)
+    }
+
+    /// Sessions per project id — the picker's card meta line, and the count
+    /// badge on the Terminals row.
+    private func sessionCounts() -> [String: Int] {
+        let panes = workspace.paneIDs.compactMap { workspace.descriptor(for: $0) }
+        return SessionOutline.group(panes, focusedPaneID: nil)
+            .reduce(into: [:]) { counts, node in counts[node.project] = node.sessions.count }
     }
 
     /// One pane, one fresh session — the Task 4/5 shape, kept for callers
@@ -631,12 +726,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     // MARK: - Session outline
 
+    /// Scoped to the open workspace since step 1: Level 2 is *about* one
+    /// workspace, so its tree shows that workspace's sessions and no one
+    /// else's. With none open (the picker is up) the unfiltered tree is kept
+    /// — it is off-screen, and filtering it to nothing would only make the
+    /// slide back reveal an empty pane for a frame.
     private func reloadOutline() {
+        let all = workspace.paneIDs.compactMap { workspace.descriptor(for: $0) }
+        let scoped = selectedProjectID.map { id in all.filter { $0.project == id } } ?? all
         outline.reload(
-            panes: workspace.paneIDs.compactMap { workspace.descriptor(for: $0) },
+            panes: scoped,
             focusedPaneID: workspace.focusedPaneID,
             projectLabels: projectLabels
         )
+        let counts = sessionCounts()
+        shellSidebar.setSessionCount(selectedProjectID.flatMap { counts[$0] } ?? 0)
+        shellSidebar.setWorkspaces(workspaces, sessionCounts: counts)
     }
 
     /// The project directory every project-label-aware surface
@@ -647,6 +752,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connection.listProjects { [weak self] result in
             guard let self, case let .success(projects) = result else { return }
             projectLabels = Dictionary(projects.map { ($0.id, $0.label) }, uniquingKeysWith: { _, newest in newest })
+            workspaces = projects
+            // A workspace already open keeps its back row, but now with the
+            // real label and path this read just supplied instead of the id
+            // `selectWorkspace` had to fall back to.
+            if let selectedProjectID { selectWorkspace(id: selectedProjectID, animated: false) }
+            selectInitialWorkspaceIfNeeded(animated: false)
             reloadOutline()
         }
     }
