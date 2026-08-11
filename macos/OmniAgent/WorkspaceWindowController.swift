@@ -37,14 +37,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The pane rectangle. Reachable because the window's content view is now
     /// a split view — the workspace is one half of it, not the whole thing.
     var workspaceView: PaneWorkspaceView { workspace }
-    /// The design's two-level sidebar. It draws the sessions tree itself now
-    /// rather than hosting `SessionOutlineView` — the design's rows carry
-    /// engine logos, per-pane status dots and a grid badge, none of which an
-    /// `NSOutlineView` cell can lay out the way the drawing does.
-    ///
-    /// `SessionOutlineView` is consequently no longer part of the shell. It is
-    /// left in the tree with its own tests until a follow-up removes it, so
-    /// this change stays a UI change.
+    /// The design's two-level sidebar. It draws the sessions tree itself —
+    /// the design's rows carry engine logos, per-pane status dots and a grid
+    /// badge, none of which an `NSOutlineView` cell can lay out that way, so
+    /// the old `SessionOutlineView` is gone. `SessionOutline`'s grouping rules
+    /// live on and are what the tree is built from.
     let shellSidebar = WorkspaceSidebarView()
     /// The content half of the split: the pane workspace and the placeholder
     /// both live here permanently, and the destination only toggles which is
@@ -210,6 +207,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self.newPane(in: current)
         }
         shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
+        // Asking the login shell for its PATH spawns a shell; do it now, off
+        // the main thread, so the first terminal does not wait for it.
+        EngineLauncher.prewarm()
         for pane in panes { addPane(pane, startSession: false) }
         selectInitialWorkspaceIfNeeded(animated: false)
         reloadOutline()
@@ -460,13 +460,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             seed.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
         } ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         let template = WorkspaceRestoration.bootstrapPane()
+        let project = sibling?.project ?? session?.project ?? template.project
+        let inherited = sibling?.cwd.isEmpty == false ? sibling!.cwd : (session?.cwd ?? "")
         addPane(
             RestoredPane(
                 sessionID: template.sessionID,
                 reattaches: false,
-                project: sibling?.project ?? session?.project ?? template.project,
-                engine: .shell,
-                cwd: sibling?.cwd.isEmpty == false ? sibling!.cwd : (session?.cwd ?? template.cwd),
+                project: project,
+                engine: EngineLauncher.defaultEngine(),
+                cwd: startingDirectory(
+                    for: PaneDescriptor(
+                        sessionID: template.sessionID,
+                        group: session?.id ?? sibling?.group ?? template.group,
+                        title: "",
+                        project: project,
+                        engine: .shell,
+                        cwd: inherited
+                    )
+                ),
                 label: nil,
                 themeId: sibling?.themeId,
                 group: session?.id ?? sibling?.group ?? template.group,
@@ -490,9 +501,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @objc func newSession(_ sender: Any?) {
         guard workspace.paneIDs.count < PaneGrid.maxPanes else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
-        let seedDirectory = current?.cwd.isEmpty == false
-            ? current!.cwd
-            : FileManager.default.homeDirectoryForCurrentUser.path
+        let seedDirectory = startingDirectory(for: current)
         chooseSessionDirectory(startingAt: seedDirectory) { [weak self] chosen in
             guard let self, let chosen else { return }
             startSession(inDirectory: chosen, project: current?.project ?? "")
@@ -514,7 +523,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 sessionID: UUID().uuidString,
                 reattaches: false,
                 project: project,
-                engine: .shell,
+                engine: EngineLauncher.defaultEngine(),
                 cwd: cwd,
                 label: nil,
                 themeId: nil,
@@ -1017,21 +1026,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     /// Starts the PTY behind one pane.
     ///
-    /// **Only a `shell` pane can be started here.** Everything a non-shell
-    /// engine needs to launch — `PATH` resolution, MCP wiring, pre-briefing —
-    /// lives in `src-tauri/src/sessions.rs`'s `build_command`, which no
-    /// protocol message exposes; the daemon takes an already-built argv. A
-    /// restored `claude`/`codex` pane whose daemon session is still alive
-    /// therefore reattaches normally (the common case — the daemon outlives
-    /// the app, which is the whole point of the persistent protocol), and one
-    /// whose session is gone says so instead of quietly starting a login
-    /// shell under the other engine's name.
+    /// Every engine launches here now. The daemon has always taken an
+    /// arbitrary argv, cwd and environment; what was missing was the half that
+    /// builds them, which `EngineLauncher` now ports from
+    /// `src-tauri/src/sessions.rs`. An engine whose CLI is not installed says
+    /// so, rather than quietly starting a login shell under that engine's name.
     private func createSession(_ sessionID: String) {
         let descriptor = workspace.descriptor(for: sessionID)
         let engine = descriptor?.engine ?? .shell
-        guard engine == .shell else {
+        guard let command = EngineLauncher.command(for: engine) else {
             applySessionStatus(
-                "\(engine.rawValue) session ended — start it from the web app",
+                "\(engine.rawValue) is not installed — \(EngineLauncher.binaryName(for: engine)) is not on your PATH",
                 for: sessionID
             )
             return
@@ -1043,18 +1048,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             name: "Create Session",
             signpostID: signpost
         )
-        let cwd = descriptor?.cwd.isEmpty == false
-            ? descriptor!.cwd
-            : FileManager.default.homeDirectoryForCurrentUser.path
+        let cwd = startingDirectory(for: descriptor)
         connection.createSession(
             CreateSessionRequest(
                 id: sessionID,
-                command: ["/bin/zsh", "-l"],
+                command: command,
                 cwd: cwd,
-                environment: [
-                    "TERM": "xterm-256color",
-                    "COLORTERM": "truecolor",
-                ],
+                environment: EngineLauncher.environment(),
                 cols: 80,
                 rows: 24,
                 transcriptPath: nil
@@ -1074,6 +1074,46 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 applySessionStatus(error.localizedDescription, for: sessionID)
             }
         }
+    }
+
+    /// The directory a pane's process starts in.
+    ///
+    /// A terminal belongs to its workspace, so the workspace's folder is the
+    /// answer unless the pane already sits *inside* it — a pane that was in
+    /// `…/OmniAgent-ADE/macos` keeps that, a pane carrying a stale `~` from an
+    /// older layout does not. Without that rule a workspace opened today
+    /// inherits last week's home directory and every agent starts in the wrong
+    /// tree.
+    func startingDirectory(for descriptor: PaneDescriptor?) -> String {
+        let carried = descriptor?.cwd ?? ""
+        guard let folder = workspaceDirectory(for: descriptor?.project) else {
+            return carried.isEmpty
+                ? FileManager.default.homeDirectoryForCurrentUser.path
+                : carried
+        }
+        return WorkspaceWindowController.isInside(carried, folder) ? carried : folder
+    }
+
+    /// `true` when `path` is the folder itself or below it.
+    static func isInside(_ path: String, _ folder: String) -> Bool {
+        guard !path.isEmpty, !folder.isEmpty else { return false }
+        let a = (path as NSString).standardizingPath
+        let b = (folder as NSString).standardizingPath
+        return a == b || a.hasPrefix(b.hasSuffix("/") ? b : b + "/")
+    }
+
+    /// A project id resolved to the folder the brain recorded for it.
+    func workspaceDirectory(for project: String?) -> String? {
+        let id = (project?.isEmpty == false) ? project : selectedProjectID
+        guard let id else { return nil }
+        if let path = workspaces.first(where: { $0.id == id })?.path, !path.isEmpty {
+            return path
+        }
+        // Nothing recorded — fall back to a live pane in the same project.
+        return workspace.paneIDs
+            .compactMap { workspace.descriptor(for: $0) }
+            .first { $0.project == id && !$0.cwd.isEmpty }?
+            .cwd
     }
 
     private func attach(_ sessionID: String) {

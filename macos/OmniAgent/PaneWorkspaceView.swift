@@ -576,7 +576,10 @@ final class PaneContainerView: NSView, NSDraggingSource {
         self.paneID = paneID
         self.surface = surface
         self.workspace = workspace
-        header = PaneHeaderView(title: paneID)
+        // Seeded blank rather than with the pane id: `descriptorChanged`
+        // fills it in, and a UUID flashing in the header first is the bug this
+        // header had.
+        header = PaneHeaderView(title: "")
         super.init(frame: .zero)
         wantsLayer = true
         header.onDragOut = { [weak self] event in self?.beginPaneDrag(with: event) }
@@ -630,7 +633,12 @@ final class PaneContainerView: NSView, NSDraggingSource {
     }
 
     func descriptorChanged(_ descriptor: PaneDescriptor) {
-        header.title = descriptor.title.isEmpty ? descriptor.sessionID : descriptor.title
+        // Never the session id. A pane that has not emitted an OSC title yet —
+        // which is most of a login shell's life, and all of an agent's before
+        // its first prompt — was rendering a raw UUID in its header.
+        // `SessionOutline.paneLabel` is the one place that decides what a pane
+        // is called, and the sidebar already used it.
+        header.title = SessionOutline.paneLabel(descriptor)
     }
 
     func updateAccessibilityLabel(index: Int, of total: Int) {

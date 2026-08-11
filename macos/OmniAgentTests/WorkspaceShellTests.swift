@@ -253,6 +253,23 @@ final class WorkspaceShellTests: XCTestCase {
         )
     }
 
+    // MARK: - Where a terminal starts
+
+    /// A pane already inside the workspace keeps exactly where it is.
+    func testAPaneInsideTheWorkspaceKeepsItsDirectory() {
+        XCTAssertTrue(WorkspaceWindowController.isInside("/w/api/macos", "/w/api"))
+        XCTAssertTrue(WorkspaceWindowController.isInside("/w/api", "/w/api"))
+        XCTAssertTrue(WorkspaceWindowController.isInside("/w/api/", "/w/api"))
+    }
+
+    /// A stale home directory from an older layout is not "in the workspace",
+    /// and neither is a sibling folder with a shared prefix.
+    func testAStaleOrSiblingDirectoryIsNotInsideTheWorkspace() {
+        XCTAssertFalse(WorkspaceWindowController.isInside("/Users/me", "/w/api"))
+        XCTAssertFalse(WorkspaceWindowController.isInside("/w/api-old", "/w/api"))
+        XCTAssertFalse(WorkspaceWindowController.isInside("", "/w/api"))
+    }
+
     // MARK: - Files tree rows
 
     func testFileBadgesMatchTheDesignsLetters() {

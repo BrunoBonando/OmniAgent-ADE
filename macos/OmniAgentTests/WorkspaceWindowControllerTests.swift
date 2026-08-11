@@ -250,8 +250,12 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(added.group, "grp-1")
         XCTAssertEqual(added.groupLabel, "Build")
         XCTAssertEqual(added.project, "alpha")
-        XCTAssertEqual(added.cwd, "/a")
-        XCTAssertEqual(added.engine, .shell, "the native build can only launch a shell today")
+        XCTAssertEqual(added.cwd, "/a", "a new terminal inherits its session's directory")
+        XCTAssertEqual(
+            added.engine,
+            EngineLauncher.defaultEngine(),
+            "a new terminal comes up on an installed agent, not a bare shell"
+        )
     }
 
     // MARK: - Persistence

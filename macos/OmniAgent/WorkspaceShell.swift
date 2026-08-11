@@ -1146,9 +1146,9 @@ final class WorkspaceNavRowView: ShellRowView {
 /// A session row — the collapsible parent of a set of terminals.
 final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     let session: SessionGroupNode
-    /// Double-click to rename, the affordance `SessionOutlineView` used to
-    /// provide. The design does not draw a rename control, but dropping the
-    /// capability along with the outline would be a silent regression.
+    /// Double-click to rename, the affordance the old outline used to provide.
+    /// The design does not draw a rename control, but dropping the capability
+    /// along with the outline would be a silent regression.
     var onRename: ((String) -> Void)?
 
     private let chevron: ShellGlyphView
