@@ -382,6 +382,38 @@ final class WorkspaceFilesTests: XCTestCase {
         return url
     }
 
+    // MARK: - Branch
+
+    /// The pane header's branch badge. Read straight out of `.git/HEAD` rather
+    /// than by spawning `git`, so the shapes that file can take are the thing
+    /// worth pinning down.
+    func testTheBranchComesFromHeadAndDetachedHeadHasNone() throws {
+        try makeGitRepository()
+        let root = try XCTUnwrap(tempDirectory)
+
+        XCTAssertEqual(GitBranch.current(repoRoot: root), "main")
+
+        // A branch name may contain slashes; only the `refs/heads/` prefix goes.
+        try "ref: refs/heads/feat/voice-latency\n".write(
+            to: root.appendingPathComponent(".git/HEAD"),
+            atomically: true,
+            encoding: .utf8
+        )
+        XCTAssertEqual(GitBranch.current(repoRoot: root), "feat/voice-latency")
+
+        // A detached HEAD stores a bare SHA — not a branch, so no badge.
+        try "9fceb02c9f1d3e0c8b5a7d6e4f3a2b1c0d9e8f77\n".write(
+            to: root.appendingPathComponent(".git/HEAD"),
+            atomically: true,
+            encoding: .utf8
+        )
+        XCTAssertNil(GitBranch.current(repoRoot: root))
+
+        // Outside a repository there is nothing to report and nothing to crash on.
+        XCTAssertNil(GitBranch.forDirectory("/"))
+        XCTAssertNil(GitBranch.forDirectory(""))
+    }
+
     private func makeGitRepository() throws {
         try skipUnlessGitIsAvailable()
         XCTAssertEqual(runGit(["init", "-q", tempDirectory.path]), 0, "git init failed")

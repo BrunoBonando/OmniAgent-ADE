@@ -397,7 +397,12 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.pane(inGroup: second)?.groupLabel, "Session 3")
     }
 
-    func testNewSessionAsksForItsDirectoryAndRespectsTheEightPaneCap() throws {
+    /// A new session starts in the workspace's own folder and asks nothing.
+    /// The chooser is reserved for opening a *different* folder as a new
+    /// workspace — asking on every new session meant answering a question whose
+    /// answer was already known, and on a workspace under `~/Documents` it put
+    /// a system folder-access prompt in front of a routine action.
+    func testNewSessionStartsInTheWorkspaceFolderWithoutAsking() throws {
         let controller = makeEmptyController()
         defer { controller.close() }
         controller.showWindow(nil)
@@ -416,16 +421,38 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
         controller.newSession(nil)
 
-        XCTAssertEqual(seeds, ["/a"], "the chooser opens at the current session's own root")
+        XCTAssertEqual(seeds, [], "a new session never opens a folder chooser")
         XCTAssertEqual(controller.workspaceView.paneIDs.count, 2)
-        XCTAssertEqual(controller.workspaceView.paneIDs.last.flatMap { controller.workspaceView.descriptor(for: $0)?.cwd }, "/chosen")
+        XCTAssertEqual(
+            controller.workspaceView.paneIDs.last.flatMap { controller.workspaceView.descriptor(for: $0)?.cwd },
+            "/a",
+            "it starts in the workspace's own folder"
+        )
+        XCTAssertEqual(
+            controller.workspaceView.paneIDs
+                .compactMap { controller.workspaceView.descriptor(for: $0)?.group }
+                .count,
+            2
+        )
+
+        // "New workspace" is the one flow that still asks, because the folder
+        // is the new thing.
+        controller.openWorkspaceFolder(nil)
+        XCTAssertEqual(seeds, ["/a"], "the chooser opens at the current workspace's root")
+        // By membership, not by position: `paneIDs` is the grid's column-major
+        // order, in which the newest pane is not necessarily the last one.
+        XCTAssertTrue(
+            controller.workspaceView.paneIDs
+                .compactMap { controller.workspaceView.descriptor(for: $0)?.cwd }
+                .contains("/chosen")
+        )
 
         // Cancelling the chooser starts nothing.
         controller.directoryChooser = { _, completion in completion(nil) }
-        controller.newSession(nil)
-        XCTAssertEqual(controller.workspaceView.paneIDs.count, 2)
+        let before = controller.workspaceView.paneIDs.count
+        controller.openWorkspaceFolder(nil)
+        XCTAssertEqual(controller.workspaceView.paneIDs.count, before)
 
-        controller.directoryChooser = { _, completion in completion("/chosen") }
         while controller.workspaceView.paneIDs.count < PaneGrid.maxPanes { controller.newTerminalPane(nil) }
         controller.newSession(nil)
         XCTAssertEqual(controller.workspaceView.paneIDs.count, PaneGrid.maxPanes, "the cap holds")
@@ -465,6 +492,29 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(added.group, "g2", "the row that was clicked, not the row that had focus")
         XCTAssertEqual(added.groupLabel, "Two")
         XCTAssertEqual(added.cwd, "/b")
+    }
+
+    /// The window opens sized to the display it lands on. The old fixed
+    /// 1040x680 predates the 238pt sidebar and read as cramped everywhere.
+    func testTheFirstLaunchWindowSizeFollowsTheScreenWithinBounds() {
+        let ultrawide = WorkspaceWindowController.defaultContentRect(
+            visibleFrame: NSRect(x: 0, y: 0, width: 5120, height: 2160)
+        )
+        XCTAssertLessThanOrEqual(ultrawide.width, 1760, "a huge display does not get a huge window")
+
+        let laptop = WorkspaceWindowController.defaultContentRect(
+            visibleFrame: NSRect(x: 0, y: 0, width: 1512, height: 916)
+        )
+        XCTAssertGreaterThan(laptop.width, 1040, "and a normal one gets more than the old fixed size")
+        XCTAssertLessThanOrEqual(laptop.width, 1512)
+        XCTAssertLessThanOrEqual(laptop.height, 916)
+
+        // The floor must never win over the screen itself.
+        let small = WorkspaceWindowController.defaultContentRect(
+            visibleFrame: NSRect(x: 0, y: 0, width: 900, height: 600)
+        )
+        XCTAssertLessThanOrEqual(small.width, 900)
+        XCTAssertLessThanOrEqual(small.height, 600)
     }
 
     // MARK: - Command palette and toolbar

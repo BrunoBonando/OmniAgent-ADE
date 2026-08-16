@@ -47,11 +47,41 @@ daemon="$app/Contents/MacOS/omniagent-pty-daemon"
 
 # --- sign: hardened-runtime codesign, app + embedded daemon, same identity ---
 
+# The identity to sign with when OMNIAGENT_CODESIGN_IDENTITY is not set: the
+# keychain's Developer ID Application certificate, when there is exactly one.
+#
+# This fallback exists because an unsigned build is not just unshippable, it is
+# hostile to daily use. macOS keys folder-access (TCC) grants -- Documents,
+# Desktop, Downloads -- to an app's code-signing identity. An ad-hoc or
+# linker-signed bundle has no stable one, so its identity is effectively its
+# cdhash, which changes on every single build: every rebuild looks like a
+# brand-new app and macOS asks for folder access all over again. A real
+# Developer ID gives the bundle a designated requirement that survives
+# rebuilds, so the grant is given once and kept.
+#
+# Exactly one, deliberately: with several Developer IDs in the keychain there is
+# no obviously right answer, and silently picking the first would sign releases
+# with whichever certificate happened to sort first.
+default_identity() {
+  found=$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep -F "Developer ID Application" \
+    | sed -n 's/.*"\(.*\)".*/\1/p' \
+    | sort -u)
+  [ -n "$found" ] || return 1
+  [ "$(printf '%s\n' "$found" | wc -l | tr -d ' ')" = "1" ] || return 1
+  printf '%s\n' "$found"
+}
+
 sign() {
   identity=${OMNIAGENT_CODESIGN_IDENTITY:-}
   if [ -z "$identity" ]; then
+    identity=$(default_identity || true)
+    [ -n "$identity" ] && echo "$0 sign: using keychain identity \"$identity\"." >&2
+  fi
+  if [ -z "$identity" ]; then
     cat >&2 <<EOF
-$0 sign: OMNIAGENT_CODESIGN_IDENTITY is not set.
+$0 sign: OMNIAGENT_CODESIGN_IDENTITY is not set, and the keychain does not
+hold exactly one "Developer ID Application" identity to fall back on.
 
 Signing needs a Developer ID Application (or Apple Development, for local
 testing) identity from your keychain. Find one with:

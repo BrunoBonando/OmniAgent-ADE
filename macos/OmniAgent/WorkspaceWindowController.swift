@@ -154,7 +154,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
 
         let window = WorkspaceWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1040, height: 680),
+            contentRect: WorkspaceWindowController.defaultContentRect(),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -172,6 +172,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         super.init(window: window)
         installSplitView(on: window)
         installToolbar(on: window)
+        restoreWindowFrame(window)
         window.delegate = self
         window.onFirstResponderChange = { [weak self] responder in
             self?.workspace.adoptFocus(from: responder)
@@ -182,6 +183,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.refreshInspectorIfVisible(for: paneID)
         }
         workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
+        workspace.onRequestClosePane = { [weak self] paneID in
+            guard let self else { return }
+            // Route through focus so the header's close button ends *that*
+            // pane, not whichever one happened to be focused.
+            workspace.focusPane(paneID)
+            closePane(nil)
+        }
         workspace.onPanesChanged = { [weak self] in
             self?.persistLayout()
             self?.reloadOutline()
@@ -217,6 +225,43 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             .flatMap { workspace.surface(for: $0)?.terminalView }
     }
 
+    // MARK: - Window frame
+
+    static let frameAutosaveName = "OmniAgentWorkspaceWindow"
+
+    /// The size the window opens at the very first time, before there is a
+    /// remembered frame.
+    ///
+    /// This used to be a flat 1040x680, chosen when the window was a bare pane
+    /// grid. With a 238pt sidebar taking a fifth of it, that leaves a four-pane
+    /// grid about 400pt wide per terminal — narrower than most prompts — so the
+    /// app opened looking cramped on every display it has ever run on. Asking
+    /// the screen instead, with a ceiling so an ultra-wide does not get a
+    /// 5000pt window, and a floor so a small laptop still gets a usable one.
+    static func defaultContentRect(visibleFrame: NSRect? = NSScreen.main?.visibleFrame) -> NSRect {
+        guard let visible = visibleFrame, visible.width > 0, visible.height > 0 else {
+            return NSRect(x: 0, y: 0, width: 1440, height: 900)
+        }
+        // The outer `min` is the one that matters on a small display: the floor
+        // below must never hand back a window larger than the screen it opens
+        // on.
+        let width = min(visible.width, min(1760, max(1040, visible.width * 0.86)))
+        let height = min(visible.height, min(1100, max(680, visible.height * 0.88)))
+        return NSRect(x: 0, y: 0, width: width.rounded(), height: height.rounded())
+    }
+
+    /// Restores where the user last put the window, and centres the default on
+    /// first launch. Skipped under XCTest, where an autosaved frame would make
+    /// every window-controller test inherit whatever size the developer's own
+    /// app happens to be at.
+    private func restoreWindowFrame(_ window: NSWindow) {
+        guard NSClassFromString("XCTestCase") == nil else { return }
+        if !window.setFrameUsingName(Self.frameAutosaveName) {
+            window.center()
+        }
+        window.setFrameAutosaveName(Self.frameAutosaveName)
+    }
+
     /// The split: sidebar item on the left (kept, so the outline still gets
     /// the system's translucency, collapse animation, remembered width and the
     /// standard `toggleSidebar:` action), the destination container on the
@@ -243,11 +288,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.onSelectDestination = { [weak self] destination in
             self?.applyDestination(destination)
         }
-        // The design's "New workspace" opens a folder picker and starts there.
-        // `newSession` is exactly that flow natively (choose a directory, open
-        // a session in it); a separate new-workspace dialog is not part of the
-        // foundation step.
-        shellSidebar.onNewWorkspace = { [weak self] in self?.newSession(nil) }
+        // The design's "New workspace" opens a folder picker and starts there —
+        // the one flow that still asks, because the folder is the new thing.
+        shellSidebar.onNewWorkspace = { [weak self] in self?.openWorkspaceFolder(nil) }
         applyDestination(.terminals)
 
         let sidebar = NSViewController()
@@ -373,6 +416,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let self, workspace.container(for: event.id) != nil else { return }
             applySessionStatus(event.status.title, for: event.id)
             recordNotification(for: event)
+            // The pane's own header and the sidebar's session tree read the
+            // same status, and both have to move the moment it changes — a
+            // terminal that has stopped to ask something is useless if the
+            // only place that says so is a window title.
+            workspace.setStatus(event.status, for: event.id)
+            reloadOutline()
             usageRecorder.recordStatus(
                 sessionID: event.id,
                 project: workspace.descriptor(for: event.id)?.project ?? "",
@@ -393,6 +442,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             readySessions.remove(event.id)
             lastStatus.removeValue(forKey: event.id)
             applySessionStatus("Session ended", for: event.id)
+            workspace.setStatus(nil, for: event.id)
+            reloadOutline()
             notifier.recordExit(
                 sessionID: event.id,
                 paneTitle: workspace.descriptor(for: event.id)?.title ?? "",
@@ -462,22 +513,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let template = WorkspaceRestoration.bootstrapPane()
         let project = sibling?.project ?? session?.project ?? template.project
         let inherited = sibling?.cwd.isEmpty == false ? sibling!.cwd : (session?.cwd ?? "")
+        // A session's own root is the answer when it has one. This used to run
+        // it back through `startingDirectory`, which re-derives the folder from
+        // the *project* — and that fallback is "the first pane in this
+        // project", so the outline's per-session "+" opened its new terminal in
+        // whichever sibling session happened to come first.
+        let cwd = inherited.isEmpty
+            ? startingDirectory(for: workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) })
+            : inherited
         addPane(
             RestoredPane(
                 sessionID: template.sessionID,
                 reattaches: false,
                 project: project,
                 engine: EngineLauncher.defaultEngine(),
-                cwd: startingDirectory(
-                    for: PaneDescriptor(
-                        sessionID: template.sessionID,
-                        group: session?.id ?? sibling?.group ?? template.group,
-                        title: "",
-                        project: project,
-                        engine: .shell,
-                        cwd: inherited
-                    )
-                ),
+                cwd: cwd,
                 label: nil,
                 themeId: sibling?.themeId,
                 group: session?.id ?? sibling?.group ?? template.group,
@@ -488,21 +538,44 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         return true
     }
 
-    /// ⌘N — a **second, independent session**: a new pane in a brand-new
-    /// session group, named by the same lowest-free-number rule the web build
-    /// uses (`SessionOutline.nextSessionName`).
+    /// ⌘N, and the "+" beside SESSIONS in the sidebar — a **second,
+    /// independent session**: a new pane in a brand-new session group, named by
+    /// the same lowest-free-number rule the web build uses
+    /// (`SessionOutline.nextSessionName`).
     ///
-    /// The web's `NewSessionModal` asks for the session's own directory,
-    /// validated as the project folder or a subfolder of it. The native
-    /// equivalent of that one real decision is a directory chooser seeded
-    /// with the current session's own root; everything else about the session
-    /// (its project, a shell pane to start it) follows from where it lands,
-    /// because this build has no project picker or engine launcher yet.
+    /// It starts in the open workspace's own folder, with no folder chooser.
+    /// The chooser used to be here on the theory that a session picks its own
+    /// directory, but a session belongs to the workspace that owns it: the
+    /// answer was already known, the question was asked every single time, and
+    /// on a workspace under `~/Documents` each panel was one more chance for
+    /// macOS to ask about folder access. Choosing a *different* folder means
+    /// opening a different workspace, which is `openWorkspaceFolder(_:)`.
     @objc func newSession(_ sender: Any?) {
         guard workspace.paneIDs.count < PaneGrid.maxPanes else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
-        let seedDirectory = startingDirectory(for: current)
-        chooseSessionDirectory(startingAt: seedDirectory) { [weak self] chosen in
+        startSession(
+            inDirectory: workspaceRoot(),
+            project: current?.project ?? selectedProjectID ?? ""
+        )
+    }
+
+    /// The folder a new session starts in: the open workspace's own directory,
+    /// falling back to the focused pane's when no workspace is selected.
+    func workspaceRoot() -> String {
+        let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
+        if let folder = workspaceDirectory(for: current?.project ?? selectedProjectID) {
+            return folder
+        }
+        return startingDirectory(for: current)
+    }
+
+    /// The sidebar's "New workspace" — the one flow where a folder chooser is
+    /// the whole point, because a new workspace *is* a folder the app has not
+    /// been told about yet.
+    @objc func openWorkspaceFolder(_ sender: Any?) {
+        guard workspace.paneIDs.count < PaneGrid.maxPanes else { return }
+        let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
+        chooseSessionDirectory(startingAt: workspaceRoot()) { [weak self] chosen in
             guard let self, let chosen else { return }
             startSession(inDirectory: chosen, project: current?.project ?? "")
         }

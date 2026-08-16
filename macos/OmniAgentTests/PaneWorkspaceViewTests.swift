@@ -28,14 +28,16 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let workspace = makeWorkspace(panes: 3)
         let frames = workspace.paneIDs.compactMap { workspace.container(for: $0)?.frame }
         XCTAssertEqual(frames.count, 3)
-        XCTAssertEqual(frames[0].minX, 0)
-        XCTAssertEqual(frames[0].minY, 0)
+        // The grid is inset by `gridInset` on every side (the design's 7px
+        // padding), so the outermost panes stop short of the view's own bounds.
+        XCTAssertEqual(frames[0].minX, PaneWorkspaceView.gridInset)
+        XCTAssertEqual(frames[0].minY, PaneWorkspaceView.gridInset)
         // Column-major: pane 2 sits under pane 1, pane 3 tops the right column.
         XCTAssertEqual(frames[1].minX, frames[0].minX)
         XCTAssertGreaterThan(frames[1].minY, frames[0].minY)
         XCTAssertGreaterThan(frames[2].minX, frames[0].minX)
-        XCTAssertEqual(frames[2].minY, 0)
-        XCTAssertEqual(frames[2].maxX, workspace.bounds.maxX)
+        XCTAssertEqual(frames[2].minY, PaneWorkspaceView.gridInset)
+        XCTAssertEqual(frames[2].maxX, workspace.gridBounds.maxX)
     }
 
     func testHolesGetAnAddTerminalPlaceholderInTheEmptyCell() {
@@ -45,8 +47,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         XCTAssertEqual(workspace.holePlaceholders.count, 1, "3 panes leave one hole in the 2x2 rung")
         let hole = workspace.holePlaceholders[0]
-        XCTAssertEqual(hole.frame.maxX, workspace.bounds.maxX, "the hole is the lower-right cell")
-        XCTAssertEqual(hole.frame.maxY, workspace.bounds.maxY)
+        XCTAssertEqual(hole.frame.maxX, workspace.gridBounds.maxX, "the hole is the lower-right cell")
+        XCTAssertEqual(hole.frame.maxY, workspace.gridBounds.maxY)
         XCTAssertEqual(hole.accessibilityRole(), .button)
         XCTAssertEqual(hole.accessibilityLabel(), "Add terminal")
 
@@ -232,25 +234,28 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let workspace = makeWorkspace(panes: 4)
         // pane-4 was added last and therefore holds focus; pane-1 starts idle.
         let target = workspace.container(for: "pane-1")!
-        // The header and the terminal surface tile the container exactly and are
-        // both opaque, so the ring has to be a layer border (composites above
-        // sublayers) and the tint a top-most subview — not a draw(_:) fill.
+        // The header and the terminal surface are both opaque and tile the
+        // container inset by the border width — that 1pt gap, showing the
+        // container's own background, *is* the border, and it is what lets the
+        // rounded corner and the working ring live on one layer. The drop tint
+        // stays a top-most subview rather than a draw(_:) fill.
         XCTAssertEqual(target.header.frame.maxY, target.surface.frame.minY)
-        XCTAssertEqual(target.surface.frame.maxY, target.bounds.maxY)
-        XCTAssertEqual(target.layer?.borderWidth, 1)
-        XCTAssertEqual(target.layer?.borderColor, PaneContainerView.idleBorderColor.cgColor)
+        XCTAssertEqual(target.surface.frame.maxY, target.bounds.maxY - PaneContainerView.borderWidth)
+        XCTAssertEqual(target.header.frame.minY, PaneContainerView.borderWidth)
+        XCTAssertEqual(target.layer?.cornerRadius, PaneContainerView.cornerRadius)
+        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.idleBorderColor.cgColor)
         XCTAssertTrue(target.dropHighlight.isHidden)
 
         workspace.focusPane("pane-1")
-        XCTAssertEqual(target.layer?.borderColor, PaneContainerView.focusedBorderColor.cgColor)
+        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.focusedBorderColor.cgColor)
         workspace.focusPane("pane-4")
-        XCTAssertEqual(target.layer?.borderColor, PaneContainerView.idleBorderColor.cgColor)
+        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.idleBorderColor.cgColor)
 
         XCTAssertEqual(target.draggingEntered(StubDraggingInfo(paneID: "pane-4")), .move)
         XCTAssertFalse(target.dropHighlight.isHidden, "the hovered pane is visibly the swap target")
         XCTAssertEqual(target.dropHighlight.frame, target.bounds)
         XCTAssertTrue(target.subviews.last === target.dropHighlight, "the tint sits above the terminal")
-        XCTAssertEqual(target.layer?.borderColor, PaneContainerView.dropTargetBorderColor.cgColor)
+        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.dropTargetBorderColor.cgColor)
         XCTAssertNil(
             target.dropHighlight.hitTest(NSPoint(x: 5, y: 5)),
             "the tint never swallows a click meant for the pane"
@@ -258,7 +263,53 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         target.draggingExited(nil)
         XCTAssertTrue(target.dropHighlight.isHidden)
-        XCTAssertEqual(target.layer?.borderColor, PaneContainerView.idleBorderColor.cgColor)
+        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.idleBorderColor.cgColor)
+    }
+
+    // MARK: - Header chrome
+
+    /// The border says what the pane is doing, and "I have stopped to ask you
+    /// something" outranks "you are looking at me" — a focused pane already
+    /// reads as focused from everything else on screen.
+    func testThePaneBorderFollowsStatusAndUrgencyOutranksFocus() {
+        let workspace = makeWorkspace(panes: 2)
+        let target = workspace.container(for: "pane-1")!
+        workspace.focusPane("pane-1")
+        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.focusedBorderColor.cgColor)
+
+        workspace.setStatus(.awaitingApproval, for: "pane-1")
+        XCTAssertEqual(target.status, .awaitingApproval)
+        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.awaitingBorderColor.cgColor)
+
+        workspace.setStatus(.error, for: "pane-1")
+        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.errorBorderColor.cgColor)
+
+        workspace.setStatus(.ready, for: "pane-1")
+        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.focusedBorderColor.cgColor)
+
+        // An unfocused pane still shows urgency; that is the whole point of
+        // being able to see it from the other side of the grid.
+        workspace.focusPane("pane-2")
+        workspace.setStatus(.awaitingApproval, for: "pane-1")
+        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.awaitingBorderColor.cgColor)
+    }
+
+    /// One mapping, not two: the header's mark and the sidebar's session dots
+    /// must never disagree about what a session is doing.
+    func testTheHeaderMarkUsesTheSameStatusColoursAsTheSidebar() {
+        for status: RemoteSessionStatus? in [.ready, .thinking, .toolExecution, .awaitingApproval, .error, nil] {
+            XCTAssertEqual(PaneStatusMarkView.color(for: status), ShellDotsView.color(for: status))
+        }
+        XCTAssertNotEqual(PaneStatusMarkView.color(for: .ready), PaneStatusMarkView.color(for: nil))
+    }
+
+    /// Four panes side by side are told apart by colour before their labels are
+    /// read, so no two engines may share a badge colour.
+    func testEveryEngineBadgeIsItsOwnColour() {
+        XCTAssertEqual(Engine.claude.badgeTitle, "Claude Code")
+        XCTAssertEqual(Engine.antigravity.badgeTitle, "AntiGravity")
+        let foregrounds = Set(Engine.allCases.map(\.badgeForeground.description))
+        XCTAssertEqual(foregrounds.count, Engine.allCases.count)
     }
 
     // MARK: - Accessibility

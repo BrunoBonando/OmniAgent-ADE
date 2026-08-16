@@ -397,3 +397,29 @@ struct GitStatus {
         url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 }
+
+/// The branch a terminal is sitting on, for its header badge.
+///
+/// Read straight off `.git/HEAD` rather than by running `git`: this is asked
+/// once per pane and again on every directory change, and spawning a process
+/// for a single line of a file is the kind of cost that only shows up once
+/// eight panes are open. A detached HEAD stores a bare SHA, which is not a
+/// branch and so reports `nil` — the badge simply does not appear.
+enum GitBranch {
+    static func current(repoRoot: URL) -> String? {
+        let head = repoRoot.appendingPathComponent(".git/HEAD")
+        guard let contents = try? String(contentsOf: head, encoding: .utf8) else { return nil }
+        let line = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let ref = line.split(separator: " ").last, line.hasPrefix("ref:") else { return nil }
+        return String(ref.replacingOccurrences(of: "refs/heads/", with: ""))
+    }
+
+    /// The branch for whatever repository `path` lives in, or `nil` when it is
+    /// not in one.
+    static func forDirectory(_ path: String) -> String? {
+        guard !path.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        guard let root = GitStatus.repoRoot(for: url) else { return nil }
+        return current(repoRoot: root)
+    }
+}

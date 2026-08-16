@@ -107,6 +107,17 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     static let paneDragType = NSPasteboard.PasteboardType("digital.bruno.omniagent.pane")
     static let dividerThickness: CGFloat = 6
     static let minimumPaneSize = CGSize(width: 160, height: 96)
+    /// `padding:7px` around the design's pane grid — without it the outermost
+    /// panes' rounded corners are cut off by the window edge.
+    static let gridInset: CGFloat = 7
+
+    /// The rect the grid is actually laid out in. Every calculation that reads
+    /// geometry — the frames, a divider drag, the divider currently under the
+    /// pointer — has to use this same rect or a drag drifts against the panes
+    /// it is moving.
+    var gridBounds: NSRect {
+        bounds.insetBy(dx: Self.gridInset, dy: Self.gridInset)
+    }
 
     private(set) var grid: PaneGrid?
     private(set) var focusedPaneID: String?
@@ -115,6 +126,9 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// Raised when a pane wants to exist or stop existing — the window
     /// controller owns session lifecycle, this view owns layout and identity.
     var onRequestNewPane: (() -> Void)?
+    /// The header's close button. Closing a pane ends its PTY, which only the
+    /// window controller may do — this view never kills a session itself.
+    var onRequestClosePane: ((String) -> Void)?
     var onFocusedPaneChanged: ((String?) -> Void)?
     /// Raised when the set of panes, their order, or one pane's metadata
     /// changed — i.e. exactly when the `layout` settings row would no longer
@@ -189,6 +203,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         container.surface.resizeCoalescer = resizeCoalescer
         container.surface.suspendsDrawing = suspendsDrawing
         containers[descriptor.sessionID] = container
+        // The header's engine and branch come from the descriptor, and until
+        // this was here they arrived only when something later *mutated* it —
+        // so a freshly opened pane showed no engine badge at all, which is the
+        // one piece of chrome that says what the terminal is actually running.
+        container.descriptorChanged(descriptor)
         addSubview(container)
         grid = PaneGrid.synced(grid, desiredIDs: paneIDs + [descriptor.sessionID])
         updateLayout()
@@ -235,6 +254,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         updateLayout()
         onPanesChanged?()
         return true
+    }
+
+    /// Publishes one pane's live agent status to its chrome. The window
+    /// controller owns the status feed; this is the only way it reaches a pane.
+    func setStatus(_ status: RemoteSessionStatus?, for sessionID: String) {
+        containers[sessionID]?.status = status
     }
 
     func updateDescriptor(for sessionID: String, _ mutate: (inout PaneDescriptor) -> Void) {
@@ -372,7 +397,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             dividerViews = []
             return
         }
-        let layout = grid.layout(in: bounds, dividerThickness: Self.dividerThickness)
+        let layout = grid.layout(in: gridBounds, dividerThickness: Self.dividerThickness)
         for (id, container) in containers {
             guard let frame = layout.frames[id] else { continue }
             guard container.frame != frame else { continue }
@@ -420,7 +445,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         grid.moveDivider(
             divider,
             by: delta,
-            in: bounds,
+            in: gridBounds,
             dividerThickness: Self.dividerThickness,
             minimumPaneSize: Self.minimumPaneSize
         )
@@ -431,7 +456,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// The seam matching an in-flight drag, re-read after each step so the view
     /// tracks the pointer rather than a stale frame.
     func currentDivider(matching divider: PaneDivider) -> PaneDivider? {
-        grid?.layout(in: bounds, dividerThickness: Self.dividerThickness)
+        grid?.layout(in: gridBounds, dividerThickness: Self.dividerThickness)
             .dividers
             .first { $0.axis == divider.axis && $0.column == divider.column && $0.row == divider.row }
     }
@@ -543,18 +568,38 @@ final class PaneContainerView: NSView, NSDraggingSource {
     let surface: TerminalSurfaceView
     let header: PaneHeaderView
 
-    /// Border colours live on the container's own layer, which composites
-    /// ABOVE its sublayers — the header and the terminal surface tile the
-    /// container exactly and are both opaque, so anything drawn in `draw(_:)`
-    /// would be buried under them.
-    static let idleBorderColor = NSColor(srgbRed: 30 / 255, green: 36 / 255, blue: 48 / 255, alpha: 1)
-    static let focusedBorderColor = NSColor(srgbRed: 65 / 255, green: 132 / 255, blue: 255 / 255, alpha: 0.85)
-    static let dropTargetBorderColor = NSColor(srgbRed: 65 / 255, green: 132 / 255, blue: 255 / 255, alpha: 1)
+    /// The pane's border, drawn as the container's own background showing
+    /// through a 1pt gap around the header and terminal rather than as a
+    /// `borderWidth`. Both children are opaque and tile the container, so a
+    /// real border would be buried under them — and this way the rounded
+    /// corner, the border and the "working" animation are all one layer.
+    static let cornerRadius: CGFloat = 9
+    static let borderWidth: CGFloat = 1
+
+    /// `#0c0c0f` — the pane body behind the terminal, from the design's grid.
+    static let paneBackgroundColor = NSColor(srgbRed: 12 / 255, green: 12 / 255, blue: 15 / 255, alpha: 1)
+    static let idleBorderColor = NSColor(white: 1, alpha: 0.08)
+    static let focusedBorderColor = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.45)
+    /// `box-shadow:0 0 0 1px rgba(240,180,70,.35)` — a pane that has stopped to
+    /// ask something outranks focus, because it is the one the user must act on.
+    static let awaitingBorderColor = NSColor(srgbRed: 240 / 255, green: 180 / 255, blue: 70 / 255, alpha: 0.55)
+    static let errorBorderColor = NSColor(srgbRed: 242 / 255, green: 85 / 255, blue: 90 / 255, alpha: 0.55)
+    static let dropTargetBorderColor = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 1)
 
     var isFocused = false {
         didSet {
             guard isFocused != oldValue else { return }
             header.isFocused = isFocused
+            updateChrome()
+        }
+    }
+
+    /// The pane's live agent status, which drives the header's mark and the
+    /// border. `nil` is "nothing reported yet", drawn as idle.
+    var status: RemoteSessionStatus? {
+        didSet {
+            guard status != oldValue else { return }
+            header.status = status
             updateChrome()
         }
     }
@@ -571,6 +616,10 @@ final class PaneContainerView: NSView, NSDraggingSource {
     let dropHighlight = PaneDropOverlayView()
 
     private weak var workspace: PaneWorkspaceView?
+    private var workingRing: CAGradientLayer?
+    /// The cwd the header's branch was last resolved for, so a repeated OSC 7
+    /// carrying the same directory does not re-read `.git/HEAD`.
+    private var branchDirectory: String?
 
     init(paneID: String, surface: TerminalSurfaceView, workspace: PaneWorkspaceView) {
         self.paneID = paneID
@@ -583,7 +632,20 @@ final class PaneContainerView: NSView, NSDraggingSource {
         super.init(frame: .zero)
         wantsLayer = true
         header.onDragOut = { [weak self] event in self?.beginPaneDrag(with: event) }
+        header.onFocusRequested = { [weak self] in
+            guard let self else { return }
+            self.workspace?.focusPane(self.paneID)
+        }
+        header.onCloseRequested = { [weak self] in
+            guard let self else { return }
+            self.workspace?.onRequestClosePane?(self.paneID)
+        }
         addSubview(header)
+        // Opaque for the same reason the header is: the container's background
+        // is the border colour, and a terminal theme with any transparency
+        // would let it wash across the whole pane.
+        surface.wantsLayer = true
+        surface.layer?.backgroundColor = Self.paneBackgroundColor.cgColor
         addSubview(surface)
         addSubview(dropHighlight, positioned: .above, relativeTo: nil)
         updateChrome()
@@ -611,25 +673,88 @@ final class PaneContainerView: NSView, NSDraggingSource {
     }
 
     private func applyLayout() {
+        // Inset by the border width on every side: the gap this leaves is the
+        // border (see `borderWidth`), and it keeps both children clear of the
+        // rounded corners the container's layer mask cuts.
+        let inset = Self.borderWidth
         let headerHeight = PaneHeaderView.height
-        header.frame = CGRect(x: 0, y: 0, width: bounds.width, height: min(headerHeight, bounds.height))
+        let width = max(0, bounds.width - inset * 2)
+        header.frame = CGRect(
+            x: inset,
+            y: inset,
+            width: width,
+            height: min(headerHeight, max(0, bounds.height - inset * 2))
+        )
         surface.frame = CGRect(
-            x: 0,
-            y: headerHeight,
-            width: bounds.width,
-            height: max(0, bounds.height - headerHeight)
+            x: inset,
+            y: inset + headerHeight,
+            width: width,
+            height: max(0, bounds.height - headerHeight - inset * 2)
         )
         dropHighlight.frame = bounds
+        workingRing?.frame = bounds
     }
 
     private func updateChrome() {
-        layer?.borderWidth = 1
-        layer?.borderColor = (
-            isDropTarget ? Self.dropTargetBorderColor
-                : isFocused ? Self.focusedBorderColor
-                : Self.idleBorderColor
-        ).cgColor
+        layer?.cornerRadius = Self.cornerRadius
+        layer?.cornerCurve = .continuous
+        // The mask is what rounds the terminal's own square corners. It costs
+        // one offscreen pass per pane, which is why nothing else here (no
+        // shadow, no filter) adds a second one.
+        layer?.masksToBounds = true
+        layer?.backgroundColor = borderColor.cgColor
         dropHighlight.isHidden = !isDropTarget
+        updateWorkingRing()
+    }
+
+    /// Which colour the 1pt ring takes. Ordered by urgency: a drop in flight,
+    /// then a question the agent is blocked on, then an error, then focus.
+    private var borderColor: NSColor {
+        if isDropTarget { return Self.dropTargetBorderColor }
+        switch status {
+        case .awaitingApproval: return Self.awaitingBorderColor
+        case .error: return Self.errorBorderColor
+        default: return isFocused ? Self.focusedBorderColor : Self.idleBorderColor
+        }
+    }
+
+    /// The design's signature: while an agent is actually thinking, a bright
+    /// arc travels around the pane's edge (`animation:om-spin 3s linear
+    /// infinite` over a conic gradient). It exists only for that state, only on
+    /// the focused pane, and not at all under Reduce Motion — an animation that
+    /// never stops is the one thing that would make eight open panes expensive.
+    private func updateWorkingRing() {
+        let wanted = status == .thinking && isFocused && !ShellMotion.reduced
+        guard wanted else {
+            workingRing?.removeFromSuperlayer()
+            workingRing = nil
+            return
+        }
+        guard workingRing == nil else { return }
+        let ring = CAGradientLayer()
+        ring.type = .conic
+        ring.frame = bounds
+        ring.startPoint = CGPoint(x: 0.5, y: 0.5)
+        ring.endPoint = CGPoint(x: 0.5, y: 0)
+        ring.colors = [
+            NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0).cgColor,
+            NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0).cgColor,
+            NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.35).cgColor,
+            NSColor(srgbRed: 167 / 255, green: 175 / 255, blue: 255 / 255, alpha: 1).cgColor,
+            NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0).cgColor,
+        ]
+        ring.locations = [0, 0.69, 0.875, 0.97, 1]
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = 2 * Double.pi
+        spin.duration = 3
+        spin.repeatCount = .infinity
+        spin.isRemovedOnCompletion = false
+        ring.add(spin, forKey: "om-spin")
+        // Below the header and the surface, which cover everything but the 1pt
+        // ring the inset in `applyLayout` leaves exposed.
+        layer?.insertSublayer(ring, at: 0)
+        workingRing = ring
     }
 
     func descriptorChanged(_ descriptor: PaneDescriptor) {
@@ -639,6 +764,23 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // `SessionOutline.paneLabel` is the one place that decides what a pane
         // is called, and the sidebar already used it.
         header.title = SessionOutline.paneLabel(descriptor)
+        header.engine = descriptor.engine
+        updateBranch(for: descriptor.cwd)
+    }
+
+    /// Resolves the pane's branch off the main thread and hands it to the
+    /// header. Repeats for the same directory are dropped — a pane's cwd is
+    /// re-published on every OSC 7, which for a shell is every prompt.
+    private func updateBranch(for cwd: String) {
+        guard cwd != branchDirectory else { return }
+        branchDirectory = cwd
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let branch = GitBranch.forDirectory(cwd)
+            DispatchQueue.main.async {
+                guard let self, self.branchDirectory == cwd else { return }
+                self.header.branch = branch
+            }
+        }
     }
 
     func updateAccessibilityLabel(index: Int, of total: Int) {
@@ -732,21 +874,114 @@ final class PaneDropOverlayView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
-/// The pane's drag handle and label. Deliberately thin: the session outline,
-/// per-pane menus and rename all belong to Task 6.
+/// The pane's chrome, from the design's terminal grid: a status mark that says
+/// what the agent is doing, the terminal's name, which engine is driving it,
+/// the branch it is on, and the two controls. Also the drag handle — the whole
+/// bar is grabbable except where a button sits.
 final class PaneHeaderView: NSView {
-    static let height: CGFloat = 22
+    static let height: CGFloat = 30
 
-    var title: String { didSet { needsDisplay = true } }
-    var isFocused = false { didSet { needsDisplay = true } }
+    private static let leadingInset: CGFloat = 10
+    private static let trailingInset: CGFloat = 6
+    private static let gap: CGFloat = 8
+    private static let markSize: CGFloat = 15
+    private static let buttonSize: CGFloat = 20
+
+    var title: String {
+        didSet {
+            guard title != oldValue else { return }
+            titleLabel.stringValue = title
+            needsLayout = true
+        }
+    }
+
+    var isFocused = false {
+        didSet {
+            guard isFocused != oldValue else { return }
+            applyEmphasis()
+            needsDisplay = true
+        }
+    }
+
+    var status: RemoteSessionStatus? {
+        didSet {
+            guard status != oldValue else { return }
+            mark.status = status
+        }
+    }
+
+    var engine: Engine? {
+        didSet {
+            guard engine != oldValue else { return }
+            engineBadge.isHidden = engine == nil
+            if let engine {
+                engineBadge.configure(
+                    icon: engine.iconImage,
+                    text: engine.badgeTitle,
+                    foreground: engine.badgeForeground,
+                    fill: engine.badgeFill,
+                    stroke: engine.badgeStroke,
+                    font: ShellFont.ui(12, .semibold)
+                )
+            }
+            needsLayout = true
+        }
+    }
+
+    /// The git branch, or `nil` outside a repository — in which case the badge
+    /// simply is not there, rather than showing an empty pill.
+    var branch: String? {
+        didSet {
+            guard branch != oldValue else { return }
+            branchBadge.isHidden = branch == nil
+            if let branch {
+                branchBadge.configure(
+                    icon: nil,
+                    text: branch,
+                    foreground: NSColor(srgbRed: 154 / 255, green: 154 / 255, blue: 164 / 255, alpha: 1),
+                    fill: NSColor(white: 1, alpha: 0.055),
+                    stroke: .clear,
+                    font: ShellFont.mono(12, .medium)
+                )
+            }
+            needsLayout = true
+        }
+    }
+
     var onDragOut: ((NSEvent) -> Void)?
+    var onFocusRequested: (() -> Void)?
+    var onCloseRequested: (() -> Void)?
+
+    private let mark = PaneStatusMarkView()
+    private let titleLabel: NSTextField
+    private let engineBadge = PaneBadgeView()
+    private let branchBadge = PaneBadgeView()
+    private let focusButton: PaneHeaderButton
+    private let closeButton: PaneHeaderButton
 
     private var mouseDownEvent: NSEvent?
 
     init(title: String) {
         self.title = title
+        titleLabel = ShellFont.label(
+            title,
+            font: ShellFont.ui(14.5, .medium),
+            color: NSColor(srgbRed: 208 / 255, green: 208 / 255, blue: 216 / 255, alpha: 1)
+        )
+        focusButton = PaneHeaderButton(glyph: .focus)
+        closeButton = PaneHeaderButton(glyph: .close)
         super.init(frame: .zero)
         wantsLayer = true
+        titleLabel.translatesAutoresizingMaskIntoConstraints = true
+        engineBadge.isHidden = true
+        branchBadge.isHidden = true
+        focusButton.onClick = { [weak self] in self?.onFocusRequested?() }
+        closeButton.onClick = { [weak self] in self?.onCloseRequested?() }
+        closeButton.hoverTint = NSColor(srgbRed: 255 / 255, green: 138 / 255, blue: 142 / 255, alpha: 1)
+        closeButton.hoverFill = NSColor(srgbRed: 242 / 255, green: 85 / 255, blue: 90 / 255, alpha: 0.18)
+        for view in [mark, titleLabel, engineBadge, branchBadge, focusButton, closeButton] as [NSView] {
+            addSubview(view)
+        }
         setAccessibilityElement(false)
     }
 
@@ -757,26 +992,76 @@ final class PaneHeaderView: NSView {
 
     override var isFlipped: Bool { true }
 
+    private func applyEmphasis() {
+        titleLabel.textColor = isFocused
+            ? NSColor(srgbRed: 234 / 255, green: 234 / 255, blue: 240 / 255, alpha: 1)
+            : NSColor(srgbRed: 208 / 255, green: 208 / 255, blue: 216 / 255, alpha: 1)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        (isFocused
-            ? NSColor(srgbRed: 20 / 255, green: 28 / 255, blue: 44 / 255, alpha: 1)
-            : NSColor(srgbRed: 14 / 255, green: 17 / 255, blue: 23 / 255, alpha: 1)
-        ).setFill()
+        // Opaque, because the container's own background is now the pane's
+        // border colour and would otherwise show straight through.
+        PaneContainerView.paneBackgroundColor.setFill()
         bounds.fill()
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-            .foregroundColor: isFocused
-                ? NSColor(srgbRed: 224 / 255, green: 229 / 255, blue: 237 / 255, alpha: 1)
-                : NSColor(srgbRed: 140 / 255, green: 150 / 255, blue: 168 / 255, alpha: 1),
-        ]
-        let text = title as NSString
-        let size = text.size(withAttributes: attributes)
-        text.draw(
-            at: NSPoint(x: 8, y: (bounds.height - size.height) / 2),
-            withAttributes: attributes
+        NSColor(white: 1, alpha: isFocused ? 0.045 : 0.03).setFill()
+        bounds.fill()
+        NSColor(white: 1, alpha: 0.07).setFill()
+        NSRect(x: 0, y: bounds.maxY - 0.5, width: bounds.width, height: 0.5).fill()
+    }
+
+    override func layout() {
+        super.layout()
+        let middle = (bounds.height - Self.markSize) / 2
+        mark.frame = CGRect(
+            x: Self.leadingInset,
+            y: middle,
+            width: Self.markSize,
+            height: Self.markSize
+        )
+
+        // Right to left: the controls first, then whichever badges still fit.
+        // The title takes what is left, which is what makes a narrow pane drop
+        // the branch and then the engine rather than clipping its own name.
+        var right = bounds.maxX - Self.trailingInset
+        for button in [closeButton, focusButton] {
+            right -= Self.buttonSize
+            button.frame = CGRect(
+                x: right,
+                y: (bounds.height - Self.buttonSize) / 2,
+                width: Self.buttonSize,
+                height: Self.buttonSize
+            )
+        }
+
+        let titleLeft = mark.frame.maxX + Self.gap
+        let minimumTitleWidth: CGFloat = 40
+        for badge in [branchBadge, engineBadge] where !badge.isHidden {
+            let size = badge.intrinsicContentSize
+            let candidate = right - Self.gap - size.width
+            guard candidate - titleLeft >= minimumTitleWidth else {
+                badge.frame = .zero
+                continue
+            }
+            right = candidate
+            badge.frame = CGRect(
+                x: right,
+                y: (bounds.height - size.height) / 2,
+                width: size.width,
+                height: size.height
+            )
+        }
+
+        let titleHeight = ceil(titleLabel.intrinsicContentSize.height)
+        titleLabel.frame = CGRect(
+            x: titleLeft,
+            y: (bounds.height - titleHeight) / 2,
+            width: max(0, right - Self.gap - titleLeft),
+            height: titleHeight
         )
     }
+
+    // MARK: - Dragging
 
     override func mouseDown(with event: NSEvent) {
         mouseDownEvent = event
@@ -796,6 +1081,240 @@ final class PaneHeaderView: NSView {
     override func mouseUp(with event: NSEvent) {
         mouseDownEvent = nil
         (superview as? PaneContainerView).map { $0.surface.focus() }
+    }
+}
+
+/// The OmniAgent mark, tinted by what the agent is doing and glowing faintly in
+/// that colour — the design's `filter:drop-shadow(0 0 5px …)`. It pulses while
+/// the agent is busy, which is the one place in a pane where "something is
+/// happening" has to read from across the room.
+final class PaneStatusMarkView: NSView {
+    var status: RemoteSessionStatus? {
+        didSet {
+            guard status != oldValue else { return }
+            apply()
+        }
+    }
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        setAccessibilityElement(false)
+        apply()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    /// Literally the sidebar's own mapping, not a copy of it: a session that
+    /// reads amber in the tree has to read amber in its terminal's header, and
+    /// two switch statements over the same enum are how that stops being true.
+    static func color(for status: RemoteSessionStatus?) -> NSColor {
+        ShellDotsView.color(for: status)
+    }
+
+    private func apply() {
+        let color = Self.color(for: status)
+        layer?.contents = OmniAgentMark.image?.tinted(color)
+        layer?.contentsGravity = .resizeAspect
+        layer?.shadowColor = color.cgColor
+        layer?.shadowRadius = 2.5
+        layer?.shadowOpacity = status == nil ? 0 : 0.55
+        layer?.shadowOffset = .zero
+        layer?.removeAnimation(forKey: "om-pulse")
+        let busy = status == .thinking || status == .toolExecution || status == .awaitingApproval
+        guard busy, !ShellMotion.reduced else {
+            layer?.opacity = 1
+            return
+        }
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1
+        pulse.toValue = 0.45
+        pulse.duration = status == .thinking ? 0.9 : 1.1
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        layer?.add(pulse, forKey: "om-pulse")
+    }
+}
+
+/// One pill in the pane header — the engine badge and the branch badge are the
+/// same shape with different contents.
+final class PaneBadgeView: NSView {
+    private static let height: CGFloat = 19
+    private static let iconSize: CGFloat = 15
+    private static let horizontalInset: CGFloat = 7
+    private static let gap: CGFloat = 5
+
+    private var icon: NSImage?
+    private var text = ""
+    private var foreground: NSColor = .labelColor
+    private var fill: NSColor = .clear
+    private var stroke: NSColor = .clear
+    private var font: NSFont = .systemFont(ofSize: 12)
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    override var isFlipped: Bool { true }
+
+    func configure(
+        icon: NSImage?,
+        text: String,
+        foreground: NSColor,
+        fill: NSColor,
+        stroke: NSColor,
+        font: NSFont
+    ) {
+        self.icon = icon
+        self.text = text
+        self.foreground = foreground
+        self.fill = fill
+        self.stroke = stroke
+        self.font = font
+        invalidateIntrinsicContentSize()
+        needsDisplay = true
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let textWidth = (text as NSString).size(withAttributes: [.font: font]).width
+        let iconWidth = icon == nil ? 0 : Self.iconSize + Self.gap
+        return NSSize(
+            width: ceil(Self.horizontalInset * 2 + iconWidth + textWidth),
+            height: Self.height
+        )
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.25, dy: 0.25), xRadius: 5, yRadius: 5)
+        fill.setFill()
+        path.fill()
+        if stroke != .clear {
+            stroke.setStroke()
+            path.lineWidth = 0.5
+            path.stroke()
+        }
+        var left = Self.horizontalInset
+        if let icon {
+            let box = NSRect(
+                x: left,
+                y: (bounds.height - Self.iconSize) / 2,
+                width: Self.iconSize,
+                height: Self.iconSize
+            )
+            icon.tinted(foreground).draw(in: box)
+            left = box.maxX + Self.gap
+        }
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: foreground]
+        let size = (text as NSString).size(withAttributes: attributes)
+        (text as NSString).draw(
+            at: NSPoint(x: left, y: (bounds.height - size.height) / 2),
+            withAttributes: attributes
+        )
+    }
+}
+
+/// A 20pt icon button in the pane header. Hand-drawn rather than an
+/// `NSButton` + SF Symbol so the glyphs match the design's own strokes, the
+/// same way `ShellGlyph` does for the sidebar.
+final class PaneHeaderButton: NSView {
+    enum Glyph { case focus, close }
+
+    var onClick: (() -> Void)?
+    var hoverTint = NSColor(srgbRed: 223 / 255, green: 226 / 255, blue: 255 / 255, alpha: 1)
+    var hoverFill = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.22)
+
+    private let glyph: Glyph
+    private var isHovered = false { didSet { needsDisplay = true } }
+    private var tracking: NSTrackingArea?
+
+    init(glyph: Glyph) {
+        self.glyph = glyph
+        super.init(frame: .zero)
+        wantsLayer = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(glyph == .focus ? "Focus this terminal" : "Close this terminal")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        tracking.map(removeTrackingArea)
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        onClick?()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if isHovered {
+            hoverFill.setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+        }
+        let color = isHovered
+            ? hoverTint
+            : NSColor(srgbRed: 130 / 255, green: 130 / 255, blue: 140 / 255, alpha: 1)
+        color.setStroke()
+        let path = NSBezierPath()
+        path.lineWidth = 1.4
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        // Both glyphs are drawn in the design's own 16x16 box and scaled to fit.
+        let scale = bounds.width / 16
+        func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+            NSPoint(x: x * scale, y: y * scale)
+        }
+        switch glyph {
+        case .focus:
+            // Four corner brackets — "zoom this pane".
+            let corners: [[(CGFloat, CGFloat)]] = [
+                [(6.2, 2.4), (2.4, 2.4), (2.4, 6.2)],
+                [(9.8, 2.4), (13.6, 2.4), (13.6, 6.2)],
+                [(13.6, 9.8), (13.6, 13.6), (9.8, 13.6)],
+                [(6.2, 13.6), (2.4, 13.6), (2.4, 9.8)],
+            ]
+            for corner in corners {
+                path.move(to: point(corner[0].0, corner[0].1))
+                for step in corner.dropFirst() { path.line(to: point(step.0, step.1)) }
+            }
+        case .close:
+            path.move(to: point(4.2, 4.2))
+            path.line(to: point(11.8, 11.8))
+            path.move(to: point(11.8, 4.2))
+            path.line(to: point(4.2, 11.8))
+        }
+        path.stroke()
     }
 }
 
