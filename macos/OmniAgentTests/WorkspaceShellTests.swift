@@ -17,6 +17,70 @@ final class WorkspaceShellTests: XCTestCase {
         BrainProjectSummary(id: id, label: label, path: path)
     }
 
+    // MARK: - The FILES divider
+
+    /// Dragging the seam up must stop while every nav row is still on screen —
+    /// the user's rule is "the highest it can go is where Dash, Board,
+    /// Terminals and Files are still visible".
+    func testTheDividerStopsWhileEveryNavRowIsStillVisible() {
+        let sidebar = makeSidebar()
+        let floor = sidebar.minimumMenuHeight
+        XCTAssertGreaterThan(floor, 0)
+
+        // Shove it far past the top.
+        sidebar.splitter.onDrag?(-10_000)
+        sidebar.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(sidebar.menuHeight.constant, floor, accuracy: 0.5)
+        // And that floor really does account for all four rows, not just some.
+        let rowHeights = sidebar.navRows.reduce(0.0) { total, row in
+            total + max(row.fittingSize.height, row.intrinsicContentSize.height)
+        }
+        XCTAssertEqual(sidebar.navRows.count, WorkspaceDestination.allCases.count)
+        XCTAssertGreaterThanOrEqual(floor, rowHeights)
+    }
+
+    /// And dragging it down must leave the FILES half something to show.
+    func testTheDividerAlwaysLeavesRoomForTheFilesList() {
+        let sidebar = makeSidebar()
+        sidebar.splitter.onDrag?(10_000)
+        sidebar.layoutSubtreeIfNeeded()
+
+        let available = sidebar.bounds.height
+            - sidebar.backRow.fittingSize.height
+            - ShellSplitterView.grabThickness
+        XCTAssertLessThanOrEqual(
+            sidebar.menuHeight.constant,
+            available - WorkspaceSidebarView.minimumFilesHeight + 0.5
+        )
+    }
+
+    /// Shrinking the window must not leave the divider parked below a floor
+    /// that was legal when it was dragged there.
+    func testShrinkingTheSidebarReClampsTheDivider() {
+        let sidebar = makeSidebar()
+        sidebar.splitter.onDrag?(10_000)
+        sidebar.layoutSubtreeIfNeeded()
+        let tall = sidebar.menuHeight.constant
+
+        sidebar.frame = NSRect(x: 0, y: 0, width: ShellMetrics.sidebarWidth, height: 320)
+        sidebar.layoutSubtreeIfNeeded()
+
+        XCTAssertLessThan(sidebar.menuHeight.constant, tall, "the divider moved up with the window")
+        let available = 320.0 - sidebar.backRow.fittingSize.height - ShellSplitterView.grabThickness
+        XCTAssertLessThanOrEqual(
+            sidebar.menuHeight.constant,
+            max(sidebar.minimumMenuHeight, available - WorkspaceSidebarView.minimumFilesHeight) + 0.5
+        )
+    }
+
+    /// The seam is a handle, not a hairline: a 1pt hit target is unusable.
+    func testTheDividerIsGrabbableAndSaysSo() {
+        let sidebar = makeSidebar()
+        XCTAssertGreaterThan(ShellSplitterView.grabThickness, ShellSplitterView.visualThickness)
+        XCTAssertEqual(sidebar.splitter.accessibilityRole(), .splitter)
+    }
+
     private func pane(
         _ id: String,
         group: String,

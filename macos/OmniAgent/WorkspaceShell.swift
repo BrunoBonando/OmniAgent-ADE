@@ -567,6 +567,96 @@ final class ShellDotsView: NSView {
     }
 }
 
+/// The draggable seam above FILES.
+///
+/// Reads as the design's hairline, but owns a taller invisible grab strip — a
+/// 1pt target is not something anyone can reliably hit, and the cursor has to
+/// change slightly before the pointer is exactly on the line for the handle to
+/// feel like a handle at all.
+final class ShellSplitterView: NSView {
+    /// How far the pointer moved since the last event. The sidebar owns the
+    /// clamping; the splitter only reports motion.
+    var onDrag: ((CGFloat) -> Void)?
+
+    static let visualThickness: CGFloat = 1
+    static let grabThickness: CGFloat = 9
+
+    private let line = NSView()
+    private var lastY: CGFloat?
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        line.wantsLayer = true
+        line.layer?.backgroundColor = ShellPalette.hairlineStrong.cgColor
+        line.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(line)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: Self.grabThickness),
+            line.leadingAnchor.constraint(equalTo: leadingAnchor),
+            line.trailingAnchor.constraint(equalTo: trailingAnchor),
+            line.centerYAnchor.constraint(equalTo: centerYAnchor),
+            line.heightAnchor.constraint(equalToConstant: Self.visualThickness),
+        ])
+        setAccessibilityElement(true)
+        setAccessibilityRole(.splitter)
+        setAccessibilityLabel("Resize the files list")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeUpDown)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        lastY = convert(event.locationInWindow, from: nil).y
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let lastY else { return }
+        let current = convert(event.locationInWindow, from: nil).y
+        // Reported, not applied: this view has no idea what the limits are.
+        onDrag?(current - lastY)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        lastY = nil
+    }
+}
+
+/// A scroll view for one half of the sidebar's split. Top-anchored content,
+/// scrollers only when the content genuinely does not fit.
+final class ShellScrollView: NSScrollView {
+    init(documentView content: NSView) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        drawsBackground = false
+        hasVerticalScroller = true
+        autohidesScrollers = true
+        scrollerStyle = .overlay
+        verticalScrollElasticity = .allowed
+        horizontalScrollElasticity = .none
+        contentView = ShellFlippedClipView()
+        contentView.drawsBackground = false
+        content.translatesAutoresizingMaskIntoConstraints = false
+        self.documentView = content
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            content.topAnchor.constraint(equalTo: contentView.topAnchor),
+            // Width pinned, height free — that is what makes it scroll
+            // vertically and never sideways.
+            content.widthAnchor.constraint(equalTo: contentView.widthAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
 /// An `NSClipView` whose origin is top-left. Without this a short document
 /// view sits at the *bottom* of a tall scroll view, which is how the workspace
 /// cards ended up pinned to the floor of the picker.
@@ -2170,6 +2260,13 @@ final class WorkspaceSidebarView: NSView {
     private var workspacePin: NSLayoutConstraint!
     private let navStack = NSStackView()
     private let sessionsContainer = NSView()
+    /// The seam above FILES, and the height it controls.
+    let splitter = ShellSplitterView()
+    private(set) var menuHeight: NSLayoutConstraint!
+    private(set) var sessionsScroll: ShellScrollView?
+    /// Once the user has moved the seam it is theirs; before that it follows
+    /// the content.
+    private(set) var hasUserAdjustedDivider = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -2231,6 +2328,14 @@ final class WorkspaceSidebarView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+    /// Re-clamps on every resize. Shrinking the window can otherwise leave the
+    /// divider below the floor it was legal at when the user dragged it,
+    /// squeezing the FILES half out of existence.
+    override func layout() {
+        super.layout()
+        clampMenuHeight()
+    }
+
     private func buildLevel2() -> NSView {
         navRows = WorkspaceDestination.allCases.map { destination in
             let row = WorkspaceNavRowView(destination: destination)
@@ -2259,21 +2364,50 @@ final class WorkspaceSidebarView: NSView {
 
         // The design's order: Dashboard, Board, Terminals, [sessions tree],
         // Files — the tree hangs off Terminals, so it sits between them.
+        //
+        // Only the *tree* scrolls. Files sits below it, so scrolling the whole
+        // stack would push Files off the top the moment the divider was raised
+        // — and "the highest it can go is where Dashboard, Board, Terminals and
+        // Files are still visible" is exactly the rule that forbids. The rows
+        // stay put and the sessions list absorbs every bit of give.
+        let sessionsScroll = ShellScrollView(documentView: sessionsContainer)
+        self.sessionsScroll = sessionsScroll
+        sessionsScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        sessionsScroll.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         for row in navRows {
             navStack.addArrangedSubview(row)
-            if row.destination == .terminals { navStack.addArrangedSubview(sessionsContainer) }
+            if row.destination == .terminals { navStack.addArrangedSubview(sessionsScroll) }
         }
-        for view in navRows + [sessionsContainer] {
-            view.widthAnchor.constraint(equalTo: navStack.widthAnchor, constant: -14).isActive = true
+        for row in navRows {
+            row.widthAnchor.constraint(equalTo: navStack.widthAnchor, constant: -14).isActive = true
+            row.setContentHuggingPriority(.required, for: .vertical)
+            row.setContentCompressionResistancePriority(.required, for: .vertical)
         }
+        sessionsScroll.widthAnchor.constraint(equalTo: navStack.widthAnchor, constant: -14).isActive = true
 
         let navSeparator = ShellSeparator()
-        let treeSeparator = ShellSeparator()
         let container = NSView()
-        for view in [backRow, navStack, navSeparator, treeSeparator, filesTree] {
+
+        // The seam above FILES is a real divider now, not a decoration that
+        // floated wherever the sessions list happened to end. Both halves
+        // scroll, because a draggable split whose contents can be squeezed has
+        // to have somewhere for the overflow to go.
+        // `filesTree` already owns an internal scroll view for its rows, so it
+        // is pinned to the region and compresses into it. Wrapping it in a
+        // second scroll view let it keep its natural height and clipped the
+        // filter field off the bottom instead.
+        for view in [backRow, navSeparator, navStack, splitter, filesTree] {
             view.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(view)
         }
+
+        menuHeight = navStack.heightAnchor.constraint(equalToConstant: 0)
+        // Below `.required` on purpose: the very first layout runs before
+        // `clampMenuHeight` has a container height to work with, and a required
+        // constraint carrying a placeholder 0 would be an unsatisfiable
+        // conflict rather than a value to be corrected a moment later.
+        menuHeight.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
             backRow.topAnchor.constraint(equalTo: container.topAnchor),
             backRow.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -2286,18 +2420,79 @@ final class WorkspaceSidebarView: NSView {
             navStack.topAnchor.constraint(equalTo: navSeparator.bottomAnchor),
             navStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             navStack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            menuHeight,
 
-            treeSeparator.topAnchor.constraint(equalTo: navStack.bottomAnchor),
-            treeSeparator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            treeSeparator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            splitter.topAnchor.constraint(equalTo: navStack.bottomAnchor),
+            splitter.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            splitter.trailingAnchor.constraint(equalTo: container.trailingAnchor),
 
-            filesTree.topAnchor.constraint(equalTo: treeSeparator.bottomAnchor, constant: 2),
+            filesTree.topAnchor.constraint(equalTo: splitter.bottomAnchor, constant: 2),
             filesTree.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             filesTree.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             filesTree.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
+
+        splitter.onDrag = { [weak self] delta in
+            guard let self else { return }
+            // The splitter's own coordinates are flipped-view coordinates, so
+            // dragging down is a *larger* menu.
+            hasUserAdjustedDivider = true
+            menuHeight.constant += delta
+            clampMenuHeight()
+        }
         return container
     }
+
+    /// The shortest the menu half is allowed to be: every nav row still on
+    /// screen, plus the stack's own insets. That is the user's rule — "the
+    /// highest it can go is where Dash, Board, Terminals and Files are still
+    /// visible" — expressed as a number rather than a guess, so it stays true
+    /// if a row's height or the insets ever change.
+    var minimumMenuHeight: CGFloat {
+        let rows = navRows.reduce(0) { total, row in
+            total + max(row.fittingSize.height, row.intrinsicContentSize.height)
+        }
+        let spacing = navStack.spacing * CGFloat(max(0, navRows.count - 1))
+        return rows + spacing + navStack.edgeInsets.top + navStack.edgeInsets.bottom
+    }
+
+    /// Keeps the divider inside its limits, and seeds it on the first layout
+    /// that has a real height to divide.
+    func clampMenuHeight() {
+        let available = bounds.height - backRow.fittingSize.height - ShellSplitterView.grabThickness
+        guard available > 0 else { return }
+        let lowest = minimumMenuHeight
+        // Always leave room for something under the divider, or the FILES half
+        // becomes a scroll view with no visible rows.
+        let highest = max(lowest, available - Self.minimumFilesHeight)
+        if !hasUserAdjustedDivider {
+            // Until the user takes hold of it, the seam sits where the content
+            // ends — the sidebar behaves exactly as it did before it could be
+            // dragged, including as sessions arrive after the first layout.
+            menuHeight.constant = naturalMenuHeight
+        }
+        // A flag rather than a "constant is still 0" sentinel: a drag to the
+        // very top drives the constant negative, which such a sentinel read as
+        // "never laid out" and answered by snapping the divider back to the
+        // content height instead of holding it at the floor.
+        menuHeight.constant = min(max(menuHeight.constant, lowest), highest)
+    }
+
+    /// Where the seam sits before anyone drags it: every nav row, plus however
+    /// tall the sessions list actually is.
+    ///
+    /// Measured from the sessions *content*, not from `navStack.fittingSize` —
+    /// the list lives in a scroll view now, and a scroll view's fitting size
+    /// reports its frame rather than its document, so seeding from the stack
+    /// collapsed the sessions list to nothing on every launch.
+    var naturalMenuHeight: CGFloat {
+        minimumMenuHeight + max(0, sessionsContainer.fittingSize.height)
+    }
+
+    /// Enough for the FILES header, its diff summary and the filter field —
+    /// the parts that are always there. Below this the half stops being a
+    /// files list and becomes a clipped label.
+    static let minimumFilesHeight: CGFloat = 124
 
     // MARK: Slide
 
