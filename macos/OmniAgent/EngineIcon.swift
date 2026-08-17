@@ -55,6 +55,20 @@ extension Engine {
         }
     }
 
+    /// What a *terminal* running this engine is called — "Claude 2", "Shell 1".
+    /// Deliberately shorter than `badgeTitle`: the header prints the engine
+    /// badge right beside the name, and "Claude Code 2 [Claude Code]" says it
+    /// twice.
+    var displayName: String {
+        switch self {
+        case .claude: return "Claude"
+        case .codex: return "Codex"
+        case .antigravity: return "AntiGravity"
+        case .copilot: return "Copilot"
+        case .shell: return "Shell"
+        }
+    }
+
     var badgeForeground: NSColor {
         switch self {
         case .claude: return srgb(240, 138, 93)

@@ -209,7 +209,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.onNewSession = { [weak self] in self?.newSession(nil) }
         shellSidebar.onNewTerminal = { [weak self] in
             guard let self else { return }
-            let panes = self.workspace.paneIDs.compactMap { self.workspace.descriptor(for: $0) }
+            let panes = self.workspace.allPaneIDs.compactMap { self.workspace.descriptor(for: $0) }
             let current = SessionOutline.group(panes, focusedPaneID: self.workspace.focusedPaneID)
                 .flatMap(\.sessions)
                 .first(where: \.isCurrent)
@@ -337,7 +337,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // The FILES tree follows the workspace. Prefer the brain's recorded
         // path; fall back to the cwd of a pane in this project, which is what
         // a session opened by folder picker will have.
-        let paneCwd = workspace.paneIDs
+        let paneCwd = workspace.allPaneIDs
             .compactMap { workspace.descriptor(for: $0) }
             .first { $0.project == id }?
             .cwd
@@ -353,7 +353,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func selectInitialWorkspaceIfNeeded(animated: Bool) {
         guard selectedProjectID == nil else { return }
         let focused = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0)?.project }
-        let anyPane = workspace.paneIDs.compactMap { workspace.descriptor(for: $0)?.project }.first
+        let anyPane = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0)?.project }.first
         guard let project = focused ?? anyPane, !project.isEmpty else { return }
         selectWorkspace(id: project, animated: animated)
     }
@@ -361,7 +361,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Sessions per project id — the picker's card meta line, and the count
     /// badge on the Terminals row.
     private func sessionCounts() -> [String: Int] {
-        let panes = workspace.paneIDs.compactMap { workspace.descriptor(for: $0) }
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
         return SessionOutline.group(panes, focusedPaneID: nil)
             .reduce(into: [:]) { counts, node in counts[node.project] = node.sessions.count }
     }
@@ -508,7 +508,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// holding the focused pane.
     @discardableResult
     func newPane(in session: SessionGroupNode?) -> Bool {
-        guard workspace.paneIDs.count < PaneGrid.maxPanes else { return false }
+        guard workspace.allPaneIDs.count < PaneGrid.maxPanes else { return false }
         let sibling = session.map { seed in
             seed.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
         } ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
@@ -553,7 +553,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// macOS to ask about folder access. Choosing a *different* folder means
     /// opening a different workspace, which is `openWorkspaceFolder(_:)`.
     @objc func newSession(_ sender: Any?) {
-        guard workspace.paneIDs.count < PaneGrid.maxPanes else { return }
+        guard workspace.allPaneIDs.count < PaneGrid.maxPanes else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         startSession(
             inDirectory: workspaceRoot(),
@@ -575,7 +575,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// the whole point, because a new workspace *is* a folder the app has not
     /// been told about yet.
     @objc func openWorkspaceFolder(_ sender: Any?) {
-        guard workspace.paneIDs.count < PaneGrid.maxPanes else { return }
+        guard workspace.allPaneIDs.count < PaneGrid.maxPanes else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         chooseSessionDirectory(startingAt: workspaceRoot()) { [weak self] chosen in
             guard let self, let chosen else { return }
@@ -587,10 +587,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// so the naming and grouping rules are testable without a panel.
     @discardableResult
     func startSession(inDirectory cwd: String, project: String) -> String? {
-        guard workspace.paneIDs.count < PaneGrid.maxPanes else { return nil }
+        guard workspace.allPaneIDs.count < PaneGrid.maxPanes else { return nil }
         let group = SessionOutline.newSessionGroupID()
         let name = SessionOutline.nextSessionName(
-            workspace.paneIDs.compactMap { workspace.descriptor(for: $0) },
+            workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
             project: project
         )
         addPane(
@@ -659,7 +659,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(newTerminalPane(_:)), #selector(newSession(_:)):
-            return workspace.paneIDs.count < PaneGrid.maxPanes
+            return workspace.allPaneIDs.count < PaneGrid.maxPanes
         case #selector(closePane(_:)):
             return workspace.focusedPaneID != nil
         default:
@@ -676,7 +676,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func restoreWorkspaceIfNeeded() {
         restoreNotificationsIfNeeded()
         guard !layoutReadDispatched else {
-            for id in workspace.paneIDs { ensureSession(id) }
+            for id in workspace.allPaneIDs { ensureSession(id) }
             return
         }
         layoutReadDispatched = true
@@ -715,13 +715,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Only here, with the row's contents actually in hand, does writing
         // back become safe.
         layoutReadCompleted = true
-        let plan = panes.isEmpty && workspace.paneIDs.isEmpty
+        let plan = panes.isEmpty && workspace.allPaneIDs.isEmpty
             ? [WorkspaceRestoration.bootstrapPane()]
             : panes
         for pane in plan where workspace.descriptor(for: pane.sessionID) == nil {
             addPane(pane, startSession: false)
         }
-        for id in workspace.paneIDs { ensureSession(id) }
+        for id in workspace.allPaneIDs { ensureSession(id) }
         workspace.restoreFocus()
         // The plan came *from* the row, so re-writing it is normally a no-op;
         // it matters when restoration repaired something (a capped ninth
@@ -753,7 +753,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         reapDispatched = true
         let orphans = Self.orphanedSessions(
             daemonSessions: daemonSessions,
-            owned: Set(workspace.paneIDs)
+            owned: Set(workspace.allPaneIDs)
         )
         for id in orphans {
             connection.kill(sessionID: id)
@@ -784,12 +784,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         palette.onRun = { [weak self] action in self?.run(action) }
         palette.present(
             commands: CommandPaletteModel.build(
-                panes: workspace.paneIDs.compactMap { workspace.descriptor(for: $0) },
-                paneOrder: workspace.paneIDs,
+                panes: workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
+                paneOrder: workspace.allPaneIDs,
                 focusedPaneID: workspace.focusedPaneID,
                 unreadNotifications: notifier.unreadCount,
                 nextSessionName: SessionOutline.nextSessionName(
-                    workspace.paneIDs.compactMap { workspace.descriptor(for: $0) },
+                    workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
                     project: workspace.focusedPaneID
                         .flatMap { workspace.descriptor(for: $0)?.project } ?? ""
                 ),
@@ -886,7 +886,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// — it is off-screen, and filtering it to nothing would only make the
     /// slide back reveal an empty pane for a frame.
     private func reloadOutline() {
-        let all = workspace.paneIDs.compactMap { workspace.descriptor(for: $0) }
+        let all = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
         shellSidebar.reloadSessions(
             panes: all,
             focusedPaneID: workspace.focusedPaneID,
@@ -1079,7 +1079,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// seen it would overwrite the very panes it is about to restore.
     private func persistLayout() {
         guard layoutReadCompleted else { return }
-        let descriptors = workspace.paneIDs.compactMap { workspace.descriptor(for: $0) }
+        let descriptors = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
         write(
             PersistedLayoutCodec.serialize(WorkspaceRestoration.persistedTabs(from: descriptors)),
             to: SettingsKey.layout
@@ -1107,7 +1107,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     private func addPane(_ pane: RestoredPane, startSession: Bool) {
         let sessionID = pane.sessionID
-        guard workspace.addPane(PaneDescriptor(pane)) else { return }
+        var descriptor = PaneDescriptor(pane)
+        // The one place a terminal gets its name, so a restored pane and a
+        // brand-new one are named by the same rule. Restored panes from before
+        // panes were named have no stored label and would otherwise keep
+        // rendering the engine's raw name — every Claude terminal reading
+        // `claude` is exactly the collision this fixes. Restoration adds panes
+        // one at a time, so each sees the ones already placed and takes the
+        // next free number in its own session.
+        if (descriptor.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty {
+            descriptor.label = SessionOutline.nextPaneName(
+                workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
+                group: descriptor.group,
+                engine: descriptor.engine
+            )
+        }
+        guard workspace.addPane(descriptor) else { return }
         usageRecorder.recordPaneOpened(
             paneID: sessionID,
             sessionKey: pane.group,
@@ -1255,7 +1270,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return path
         }
         // Nothing recorded — fall back to a live pane in the same project.
-        return workspace.paneIDs
+        return workspace.allPaneIDs
             .compactMap { workspace.descriptor(for: $0) }
             .first { $0.project == id && !$0.cwd.isEmpty }?
             .cwd

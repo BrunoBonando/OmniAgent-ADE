@@ -132,6 +132,29 @@ enum SessionOutline {
         return defaultSessionName(lowestFreeSessionNumber(Set(sessions.map(\.label))))
     }
 
+    static func defaultPaneName(_ engine: Engine, _ n: Int) -> String {
+        "\(engine.displayName) \(n)"
+    }
+
+    /// What to call the terminal about to be created in `group`.
+    ///
+    /// The same lowest-free-number rule as `nextSessionName`, scoped to the
+    /// session rather than the project — two terminals sitting in one session
+    /// are the pair that must not read the same.
+    ///
+    /// Naming them at all is the point: `paneLabel` fell back to the engine's
+    /// raw name, so every Claude pane in a session rendered `claude`, and the
+    /// OSC title that would otherwise break the tie does not (agents set the
+    /// same title in every pane, and set none at all until their first
+    /// prompt). The stored name wins over the title from then on; the live
+    /// title still drives the *window* title, so nothing is actually lost.
+    static func nextPaneName(_ panes: [PaneDescriptor], group: String, engine: Engine) -> String {
+        let taken = Set(panes.filter { $0.group == group }.map(paneLabel))
+        var n = 1
+        while taken.contains(defaultPaneName(engine, n)) { n += 1 }
+        return defaultPaneName(engine, n)
+    }
+
     /// What a pane's row says: its own label, else the engine's name — the
     /// port of `ui/src/state/sessions.ts`'s `tabDisplayLabel`.
     static func paneLabel(_ pane: PaneDescriptor) -> String {

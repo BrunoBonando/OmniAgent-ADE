@@ -19,6 +19,38 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    /// Every terminal is named apart, restored ones included: a layout stored
+    /// before terminals were named carries no label at all, and those panes
+    /// would otherwise keep falling back to the engine's name and render
+    /// `claude` in every row.
+    func testEveryTerminalIsNamedApartIncludingRestoredOnes() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .claude, cwd: "/a", id: "sess-a", group: "grp-1"),
+                    PersistedTab(project: "alpha", engine: .claude, cwd: "/a", id: "sess-b", group: "grp-1"),
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-c", group: "grp-1"),
+                ])
+            )
+        )
+
+        // By id rather than by position: `allPaneIDs` is the grid's fill order,
+        // which is not the order the panes were restored in.
+        func name(_ id: String) -> String? {
+            workspace.descriptor(for: id).map(SessionOutline.paneLabel)
+        }
+        XCTAssertEqual(name("sess-a"), "Claude 1")
+        XCTAssertEqual(name("sess-b"), "Claude 2")
+        XCTAssertEqual(name("sess-c"), "Shell 1")
+        let names = workspace.allPaneIDs.compactMap(name)
+        XCTAssertEqual(Set(names).count, names.count, "no two terminals read the same")
+    }
+
     func testNewPaneCommandAddsPanesWithFreshSessionIDsAndStopsAtTheCap() throws {
         let controller = makeController()
         defer { controller.close() }
@@ -422,16 +454,22 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.newSession(nil)
 
         XCTAssertEqual(seeds, [], "a new session never opens a folder chooser")
-        XCTAssertEqual(controller.workspaceView.paneIDs.count, 2)
+        XCTAssertEqual(controller.workspaceView.allPaneIDs.count, 2)
+        XCTAssertEqual(
+            controller.workspaceView.paneIDs.count,
+            1,
+            "a session shows its own terminals and only its own"
+        )
         XCTAssertEqual(
             controller.workspaceView.paneIDs.last.flatMap { controller.workspaceView.descriptor(for: $0)?.cwd },
             "/a",
             "it starts in the workspace's own folder"
         )
         XCTAssertEqual(
-            controller.workspaceView.paneIDs
-                .compactMap { controller.workspaceView.descriptor(for: $0)?.group }
-                .count,
+            Set(
+                controller.workspaceView.allPaneIDs
+                    .compactMap { controller.workspaceView.descriptor(for: $0)?.group }
+            ).count,
             2
         )
 
@@ -449,13 +487,19 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
         // Cancelling the chooser starts nothing.
         controller.directoryChooser = { _, completion in completion(nil) }
-        let before = controller.workspaceView.paneIDs.count
+        let before = controller.workspaceView.allPaneIDs.count
         controller.openWorkspaceFolder(nil)
-        XCTAssertEqual(controller.workspaceView.paneIDs.count, before)
+        XCTAssertEqual(controller.workspaceView.allPaneIDs.count, before)
 
-        while controller.workspaceView.paneIDs.count < PaneGrid.maxPanes { controller.newTerminalPane(nil) }
+        // `allPaneIDs`, not `paneIDs`: the cap counts every terminal the daemon
+        // is holding a session for, and sessions other than the one on screen
+        // still hold theirs. Looping on the visible count never terminates —
+        // it stops growing as soon as a new terminal lands in a new session.
+        while controller.workspaceView.allPaneIDs.count < PaneGrid.maxPanes {
+            controller.newTerminalPane(nil)
+        }
         controller.newSession(nil)
-        XCTAssertEqual(controller.workspaceView.paneIDs.count, PaneGrid.maxPanes, "the cap holds")
+        XCTAssertEqual(controller.workspaceView.allPaneIDs.count, PaneGrid.maxPanes, "the cap holds")
         XCTAssertFalse(
             controller.validateMenuItem(
                 NSMenuItem(title: "New Session", action: #selector(WorkspaceWindowController.newSession(_:)), keyEquivalent: "")
@@ -476,8 +520,10 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             )
         )
         controller.workspaceView.focusPane("sess-a")
+        // From every pane, not just the visible ones: the sidebar draws every
+        // session, and the row being clicked here is one that is off screen.
         let sessions = SessionOutline.group(
-            controller.workspaceView.paneIDs.compactMap { controller.workspaceView.descriptor(for: $0) },
+            controller.workspaceView.allPaneIDs.compactMap { controller.workspaceView.descriptor(for: $0) },
             focusedPaneID: "sess-a"
         ).first?.sessions ?? []
         let secondSession = try XCTUnwrap(sessions.first { $0.id == "g2" })
@@ -485,7 +531,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.newPane(in: secondSession)
 
         let added = try XCTUnwrap(
-            controller.workspaceView.paneIDs
+            controller.workspaceView.allPaneIDs
                 .compactMap { controller.workspaceView.descriptor(for: $0) }
                 .first { $0.sessionID != "sess-a" && $0.sessionID != "sess-b" }
         )

@@ -118,6 +118,48 @@ final class SessionOutlineTests: XCTestCase {
         XCTAssertEqual(SessionOutline.projectLabel("alpha"), "alpha")
     }
 
+    /// Terminals in a session are told apart by name. Without this every
+    /// Claude pane fell back to the engine's own name and a session full of
+    /// them read `claude`, `claude`, `claude`.
+    func testTerminalsInASessionAreNamedApart() {
+        var panes: [PaneDescriptor] = []
+        XCTAssertEqual(SessionOutline.nextPaneName(panes, group: "g1", engine: .claude), "Claude 1")
+
+        panes.append(pane("a", project: "alpha", group: "g1", label: "Claude 1"))
+        XCTAssertEqual(SessionOutline.nextPaneName(panes, group: "g1", engine: .claude), "Claude 2")
+
+        // Engines are numbered independently — a shell does not push Claude on.
+        XCTAssertEqual(SessionOutline.nextPaneName(panes, group: "g1", engine: .shell), "Shell 1")
+    }
+
+    func testPaneNumberingIsPerSessionAndReusesTheLowestFreeNumber() {
+        let panes = [
+            pane("a", project: "alpha", group: "g1", label: "Claude 1"),
+            pane("c", project: "alpha", group: "g1", label: "Claude 3"),
+            pane("b", project: "alpha", group: "g2", label: "Claude 1"),
+        ]
+
+        XCTAssertEqual(
+            SessionOutline.nextPaneName(panes, group: "g1", engine: .claude),
+            "Claude 2",
+            "the gap left by a closed terminal is filled before the count climbs"
+        )
+        XCTAssertEqual(
+            SessionOutline.nextPaneName(panes, group: "g2", engine: .claude),
+            "Claude 2",
+            "and each session numbers its own, so g1's three do not push g2 along"
+        )
+    }
+
+    /// The name has to beat the OSC title, or agents — which set the same
+    /// title in every pane, and none at all until their first prompt — put the
+    /// collision straight back.
+    func testAStoredNameWinsOverTheTitleTheTerminalReports() {
+        var descriptor = pane("a", project: "alpha", group: "g1", label: "Claude 2")
+        descriptor.title = "claude"
+        XCTAssertEqual(SessionOutline.paneLabel(descriptor), "Claude 2")
+    }
+
     private func pane(
         _ id: String,
         project: String,

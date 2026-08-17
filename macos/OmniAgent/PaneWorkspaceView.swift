@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import QuartzCore
 import os.signpost
 
@@ -119,7 +120,30 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         bounds.insetBy(dx: Self.gridInset, dy: Self.gridInset)
     }
 
-    private(set) var grid: PaneGrid?
+    /// One grid per session, plus the session currently on screen.
+    ///
+    /// A session owns its own shape and its own dragged fractions, so coming
+    /// back to one shows the layout you left it in. `containers`/`descriptors`
+    /// hold *every* pane; only the active session's are in a grid, laid out
+    /// and visible. The rest keep running — a PTY belongs to the daemon, not
+    /// to this view — they are simply not on screen. That is the whole of
+    /// "each session holds its own terminals": a second session with one
+    /// terminal shows one terminal, not the first session's as well.
+    private var grids: [String: PaneGrid] = [:]
+    /// Session ids in first-seen order, so `allPaneIDs` — and everything built
+    /// from it, the sidebar tree and the persisted layout included — has a
+    /// stable order rather than a dictionary's.
+    private var groupOrder: [String] = []
+    private(set) var activeGroup: String?
+
+    /// The active session's grid; assigning replaces that session's.
+    var grid: PaneGrid? {
+        get { activeGroup.flatMap { grids[$0] } }
+        set {
+            guard let activeGroup else { return }
+            grids[activeGroup] = newValue
+        }
+    }
     private(set) var focusedPaneID: String?
     let resizeCoalescer = PaneResizeCoalescer()
 
@@ -177,7 +201,19 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 
     // MARK: - Reading the workspace
 
+    /// The panes **on screen**: the active session's, in fill order. Layout,
+    /// focus, ⌘1…⌘8 and drag-and-drop all mean this one.
     var paneIDs: [String] { grid?.paneIDs() ?? [] }
+
+    /// **Every** pane that exists, across every session, in a stable order.
+    /// Persistence, the sidebar tree, the pane cap and session lifecycle all
+    /// mean this one: a pane in another session is off screen, not gone — its
+    /// PTY is still running, and it must still be saved, listed and
+    /// reattached on the next launch.
+    var allPaneIDs: [String] { groupOrder.flatMap { grids[$0]?.paneIDs() ?? [] } }
+
+    /// The sessions that currently hold at least one pane, in first-seen order.
+    var groupIDs: [String] { groupOrder }
 
     func descriptor(for sessionID: String) -> PaneDescriptor? { descriptors[sessionID] }
 
@@ -191,7 +227,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// refused for a session id already on screen.
     @discardableResult
     func addPane(_ descriptor: PaneDescriptor) -> Bool {
-        guard paneIDs.count < PaneGrid.maxPanes, descriptors[descriptor.sessionID] == nil else {
+        // The cap counts every pane, not just the visible ones: it exists
+        // because the daemon refuses a ninth session, and a session hidden
+        // behind another still holds one of its slots.
+        guard allPaneIDs.count < PaneGrid.maxPanes, descriptors[descriptor.sessionID] == nil else {
             return false
         }
         descriptors[descriptor.sessionID] = descriptor
@@ -209,11 +248,130 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // one piece of chrome that says what the terminal is actually running.
         container.descriptorChanged(descriptor)
         addSubview(container)
-        grid = PaneGrid.synced(grid, desiredIDs: paneIDs + [descriptor.sessionID])
+        let group = descriptor.group
+        if !groupOrder.contains(group) { groupOrder.append(group) }
+        grids[group] = PaneGrid.synced(
+            grids[group],
+            desiredIDs: (grids[group]?.paneIDs() ?? []) + [descriptor.sessionID]
+        )
+        // A pane you just opened is one you are about to type in, so its
+        // session comes to the screen. `focusPane` below would switch to it
+        // regardless; doing it here keeps `updateVisibility` from running
+        // against the outgoing session's grid first.
+        activeGroup = group
+        // A terminal you just opened is the one you want to look at, so a
+        // zoom in progress ends here rather than hiding it behind the blur.
+        zoomedPaneID = nil
+        updateVisibility()
         updateLayout()
         focusPane(descriptor.sessionID)
         onPanesChanged?()
         return true
+    }
+
+    // MARK: - Zoom
+
+    /// The pane currently blown up over the others, if any. Never set while
+    /// fewer than two panes are on screen: with one terminal the pane already
+    /// fills the workspace, so there is nothing to zoom away from — which is
+    /// why the control is not even offered.
+    private(set) var zoomedPaneID: String?
+
+    private lazy var zoomBackdrop: PaneZoomBackdropView = {
+        let view = PaneZoomBackdropView()
+        view.onClick = { [weak self] in self?.setZoomed(nil) }
+        return view
+    }()
+
+    @discardableResult
+    func toggleZoom(_ sessionID: String) -> Bool {
+        guard paneIDs.count >= 2, paneIDs.contains(sessionID) else { return false }
+        setZoomed(zoomedPaneID == sessionID ? nil : sessionID)
+        return true
+    }
+
+    func setZoomed(_ sessionID: String?) {
+        guard zoomedPaneID != sessionID else { return }
+        zoomedPaneID = sessionID
+        if let sessionID { focusPane(sessionID) }
+        updateZoomAvailability()
+        updateLayout()
+    }
+
+    /// Zoom only survives while it still means something: the pane has to be
+    /// on screen, and there has to be more than one pane for it to cover.
+    /// Switching sessions, closing its last sibling or opening a new terminal
+    /// all end it — leaving it on would hide the very pane you just asked for
+    /// behind the blur.
+    private func validateZoom() {
+        guard let id = zoomedPaneID else { return }
+        if paneIDs.count < 2 || !paneIDs.contains(id) { zoomedPaneID = nil }
+    }
+
+    private func updateZoomAvailability() {
+        let available = paneIDs.count >= 2
+        for (id, container) in containers {
+            container.isZoomAvailable = available && paneIDs.contains(id)
+            container.isZoomed = id == zoomedPaneID
+        }
+    }
+
+    /// "Almost the entire terminal place": the zoomed pane takes the workspace
+    /// less a margin, so the blurred grid still shows around the edge. It reads
+    /// as one pane lifted off the others rather than a different screen, which
+    /// is the difference between a zoom and a mode you have to find your way
+    /// back out of.
+    private func zoomFrame() -> NSRect {
+        let area = gridBounds
+        let inset = min(30, min(area.width, area.height) * 0.045)
+        return area.insetBy(dx: inset, dy: inset)
+    }
+
+    private func applyZoom() {
+        guard let id = zoomedPaneID, let container = containers[id] else {
+            zoomBackdrop.isHidden = true
+            return
+        }
+        zoomBackdrop.isHidden = false
+        // Re-stacked on every pass because `syncDividerViews`/`addPane` add
+        // their own subviews on top; the backdrop has to stay directly under
+        // the zoomed pane and above everything else.
+        addSubview(zoomBackdrop, positioned: .above, relativeTo: nil)
+        addSubview(container, positioned: .above, relativeTo: zoomBackdrop)
+        zoomBackdrop.frame = bounds
+        let frame = zoomFrame()
+        guard container.frame != frame else { return }
+        container.frame = frame
+        container.surface.scheduleResize()
+    }
+
+    /// Brings one session to the screen, hiding whichever was there. Focus
+    /// follows to that session's first pane, since the focused pane is always
+    /// one of the visible ones.
+    @discardableResult
+    func activateGroup(_ group: String) -> Bool {
+        guard grids[group] != nil, activeGroup != group else { return false }
+        activeGroup = group
+        updateVisibility()
+        updateLayout()
+        if let first = paneIDs.first { focusPane(first) }
+        return true
+    }
+
+    /// Only the active session's panes are on screen. The others are hidden,
+    /// never torn down: closing a pane is what ends a PTY, and switching
+    /// sessions must not. A hidden pane keeps parsing output into SwiftTerm's
+    /// bounded buffer — so its scrollback is intact when you come back — and
+    /// only stops drawing, the same trade an occluded window makes.
+    private func updateVisibility() {
+        validateZoom()
+        updateZoomAvailability()
+        let visible = Set(paneIDs)
+        for (id, container) in containers {
+            let onScreen = visible.contains(id)
+            container.isHidden = !onScreen
+            container.surface.suspendsDrawing = suspendsDrawing || !onScreen
+        }
     }
 
     /// Removes a pane, reflowing the grid down a rung when the count drops. If
@@ -225,14 +383,31 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         let successor = focusSuccessor(after: sessionID)
         resizeCoalescer.cancel(sessionID)
         container.removeFromSuperview()
+        let group = descriptors[sessionID]?.group
         containers.removeValue(forKey: sessionID)
         descriptors.removeValue(forKey: sessionID)
-        grid = PaneGrid.synced(grid, desiredIDs: paneIDs.filter { $0 != sessionID })
+        if let group, let existing = grids[group] {
+            let remaining = existing.paneIDs().filter { $0 != sessionID }
+            if remaining.isEmpty {
+                // A session with no panes left is not a session any more —
+                // drop it rather than leaving an empty grid the sidebar would
+                // still draw a row for.
+                grids.removeValue(forKey: group)
+                groupOrder.removeAll { $0 == group }
+                if activeGroup == group { activeGroup = groupOrder.first }
+            } else {
+                grids[group] = PaneGrid.synced(existing, desiredIDs: remaining)
+            }
+        }
+        updateVisibility()
         updateLayout()
         if focusedPaneID == sessionID {
             focusedPaneID = nil
-            if let successor {
-                focusPane(successor)
+            // Its own session first, then whatever session is on screen now —
+            // closing the last pane of one lands you in another rather than
+            // on an empty workspace with a stale focus.
+            if let next = successor ?? paneIDs.first {
+                focusPane(next)
             } else {
                 updateFocusRings()
                 onFocusedPaneChanged?(nil)
@@ -275,7 +450,20 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     // MARK: - Focus
 
     func focusPane(_ sessionID: String) {
-        guard containers[sessionID] != nil, grid?.contains(sessionID) == true else { return }
+        guard
+            containers[sessionID] != nil,
+            let group = descriptors[sessionID]?.group,
+            grids[group]?.contains(sessionID) == true
+        else { return }
+        // Focusing a pane in another session brings that session to the
+        // screen. This is the single rule that makes the sidebar work: its
+        // session rows and pane rows both already call through here, so
+        // selecting either one switches sessions without a second code path.
+        if activeGroup != group {
+            activeGroup = group
+            updateVisibility()
+            updateLayout()
+        }
         let changed = focusedPaneID != sessionID
         focusedPaneID = sessionID
         updateFocusRings()
@@ -334,9 +522,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return true
     }
 
+    /// Within the closing pane's own session — a pane never hands focus to
+    /// another session's terminal while one of its own siblings is still open.
     private func focusSuccessor(after sessionID: String) -> String? {
-        let ids = paneIDs
-        guard let index = ids.firstIndex(of: sessionID) else { return nil }
+        guard
+            let group = descriptors[sessionID]?.group,
+            let ids = grids[group]?.paneIDs(),
+            let index = ids.firstIndex(of: sessionID)
+        else { return nil }
         if index > 0 { return ids[index - 1] }
         return index + 1 < ids.count ? ids[index + 1] : nil
     }
@@ -372,9 +565,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     func setSuspendsDrawing(_ suspends: Bool) {
         guard suspendsDrawing != suspends else { return }
         suspendsDrawing = suspends
-        for container in containers.values {
-            container.surface.suspendsDrawing = suspends
-        }
+        // Through `updateVisibility` rather than straight onto every surface:
+        // an off-screen session's panes must stay suspended when the window
+        // becomes visible again, and assigning the flag directly un-suspended
+        // them.
+        updateVisibility()
     }
 
     // MARK: - Layout
@@ -399,13 +594,17 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
         let layout = grid.layout(in: gridBounds, dividerThickness: Self.dividerThickness)
         for (id, container) in containers {
-            guard let frame = layout.frames[id] else { continue }
+            // The zoomed pane is placed by `applyZoom` instead. Skipped rather
+            // than assigned twice: each assignment schedules a PTY resize, and
+            // this runs on every frame of a divider drag.
+            guard id != zoomedPaneID, let frame = layout.frames[id] else { continue }
             guard container.frame != frame else { continue }
             container.frame = frame
             container.surface.scheduleResize()
         }
         syncDividerViews(layout.dividers)
         syncHolePlaceholders(layout, holeIDs: grid.cells.filter(\.isHole).map(\.id))
+        applyZoom()
         updateAccessibilityLabels()
     }
 
@@ -611,6 +810,22 @@ final class PaneContainerView: NSView, NSDraggingSource {
         }
     }
 
+    /// Whether this pane may be zoomed at all — false with a single terminal
+    /// on screen, which hides the control rather than offering a no-op.
+    var isZoomAvailable = false {
+        didSet {
+            guard isZoomAvailable != oldValue else { return }
+            header.isZoomAvailable = isZoomAvailable
+        }
+    }
+
+    var isZoomed = false {
+        didSet {
+            guard isZoomed != oldValue else { return }
+            header.isZoomed = isZoomed
+        }
+    }
+
     /// The drop tint, as a top-most sibling rather than a fill in `draw(_:)`,
     /// for the same compositing reason.
     let dropHighlight = PaneDropOverlayView()
@@ -632,9 +847,14 @@ final class PaneContainerView: NSView, NSDraggingSource {
         super.init(frame: .zero)
         wantsLayer = true
         header.onDragOut = { [weak self] event in self?.beginPaneDrag(with: event) }
-        header.onFocusRequested = { [weak self] in
+        header.onZoomRequested = { [weak self] in
             guard let self else { return }
+            // Focus first: the button used to *be* the focus control, and a
+            // pane you zoom is one you are about to type in. Clicking anywhere
+            // in a pane already focuses it, but the header's buttons swallow
+            // their own clicks, so this is the one path that would not.
             self.workspace?.focusPane(self.paneID)
+            self.workspace?.toggleZoom(self.paneID)
         }
         header.onCloseRequested = { [weak self] in
             guard let self else { return }
@@ -949,8 +1169,25 @@ final class PaneHeaderView: NSView {
     }
 
     var onDragOut: ((NSEvent) -> Void)?
-    var onFocusRequested: (() -> Void)?
+    var onZoomRequested: (() -> Void)?
     var onCloseRequested: (() -> Void)?
+
+    var isZoomAvailable = false {
+        didSet {
+            guard isZoomAvailable != oldValue else { return }
+            focusButton.isHidden = !isZoomAvailable
+            needsLayout = true
+        }
+    }
+
+    var isZoomed = false {
+        didSet {
+            guard isZoomed != oldValue else { return }
+            focusButton.setAccessibilityLabel(
+                isZoomed ? "Shrink this terminal back into the grid" : "Zoom this terminal"
+            )
+        }
+    }
 
     private let mark = PaneStatusMarkView()
     private let titleLabel: NSTextField
@@ -975,7 +1212,8 @@ final class PaneHeaderView: NSView {
         titleLabel.translatesAutoresizingMaskIntoConstraints = true
         engineBadge.isHidden = true
         branchBadge.isHidden = true
-        focusButton.onClick = { [weak self] in self?.onFocusRequested?() }
+        focusButton.isHidden = true
+        focusButton.onClick = { [weak self] in self?.onZoomRequested?() }
         closeButton.onClick = { [weak self] in self?.onCloseRequested?() }
         closeButton.hoverTint = NSColor(srgbRed: 255 / 255, green: 138 / 255, blue: 142 / 255, alpha: 1)
         closeButton.hoverFill = NSColor(srgbRed: 242 / 255, green: 85 / 255, blue: 90 / 255, alpha: 0.18)
@@ -1024,7 +1262,9 @@ final class PaneHeaderView: NSView {
         // The title takes what is left, which is what makes a narrow pane drop
         // the branch and then the engine rather than clipping its own name.
         var right = bounds.maxX - Self.trailingInset
-        for button in [closeButton, focusButton] {
+        // A hidden zoom button gives its slot back to the title rather than
+        // leaving a gap where a control used to be.
+        for button in [closeButton, focusButton] where !button.isHidden {
             right -= Self.buttonSize
             button.frame = CGRect(
                 x: right,
@@ -1227,6 +1467,43 @@ final class PaneBadgeView: NSView {
 /// A 20pt icon button in the pane header. Hand-drawn rather than an
 /// `NSButton` + SF Symbol so the glyphs match the design's own strokes, the
 /// same way `ShellGlyph` does for the sidebar.
+/// The blurred backdrop a zoomed pane sits on, and the way out of the zoom
+/// that does not require finding the button again.
+///
+/// A layer background filter rather than an `NSVisualEffectView`: the effect
+/// view brings a display-link-backed animation machine with it, and on a
+/// headless test host that spins forever retrying
+/// `CVDisplayLinkCreateWithCGDisplays` — merely constructing one hung the
+/// suite. A Gaussian blur over the layers behind this one is the whole of
+/// what is wanted here, and `backgroundFilters` is exactly that.
+final class PaneZoomBackdropView: NSView {
+    var onClick: (() -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(srgbRed: 4 / 255, green: 6 / 255, blue: 9 / 255, alpha: 0.5)
+            .cgColor
+        if let blur = CIFilter(name: "CIGaussianBlur", parameters: ["inputRadius": 14]) {
+            layer?.backgroundFilters = [blur]
+        }
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Shrink the zoomed terminal back into the grid")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    // Swallowed, so a click meant for "get me out of here" never reaches — or
+    // focuses — the blurred pane underneath it.
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) { onClick?() }
+}
+
 final class PaneHeaderButton: NSView {
     enum Glyph { case focus, close }
 

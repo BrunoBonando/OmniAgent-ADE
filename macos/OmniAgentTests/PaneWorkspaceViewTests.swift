@@ -94,18 +94,33 @@ final class PaneWorkspaceViewTests: XCTestCase {
     }
 
     func testGroupingMetadataTravelsWithThePaneAcrossSwapAndReflow() {
-        let workspace = makeWorkspace(panes: 2)
-        var descriptor = makeDescriptor("pane-3")
+        let workspace = makeWorkspace(panes: 3)
+        var descriptor = makeDescriptor("pane-4")
         descriptor.groupLabel = "Session 2"
         descriptor.group = "sess-grp-2"
         XCTAssertTrue(workspace.addPane(descriptor))
 
+        // Swapping happens inside a session, where both panes are on screen.
+        workspace.focusPane("pane-1")
         XCTAssertTrue(workspace.swapPanes("pane-1", "pane-3"))
         XCTAssertTrue(workspace.closePane("pane-2"))
 
-        XCTAssertEqual(workspace.descriptor(for: "pane-3")?.group, "sess-grp-2")
-        XCTAssertEqual(workspace.descriptor(for: "pane-3")?.groupLabel, "Session 2")
         XCTAssertEqual(workspace.descriptor(for: "pane-1")?.group, "sess-grp-1")
+        XCTAssertEqual(workspace.descriptor(for: "pane-4")?.group, "sess-grp-2")
+        XCTAssertEqual(workspace.descriptor(for: "pane-4")?.groupLabel, "Session 2")
+    }
+
+    /// Two panes in different sessions are never on screen together, so
+    /// trading their cells is not a thing that can be asked for — the grid a
+    /// swap reorders only ever holds one session's panes.
+    func testPanesInDifferentSessionsCannotBeSwapped() {
+        let workspace = makeWorkspace(panes: 2)
+        var descriptor = makeDescriptor("pane-3")
+        descriptor.group = "sess-grp-2"
+        XCTAssertTrue(workspace.addPane(descriptor))
+
+        XCTAssertFalse(workspace.swapPanes("pane-1", "pane-3"))
+        XCTAssertFalse(workspace.canAcceptDrop(from: "pane-1", onto: "pane-3"))
     }
 
     // MARK: - Focus
@@ -429,6 +444,168 @@ final class PaneWorkspaceViewTests: XCTestCase {
                 workspace.surface(for: id)?.requestRendererDraw()
             }
         }
+    }
+
+    // MARK: - A session holds its own terminals
+
+    func testASecondSessionShowsOnlyItsOwnTerminals() throws {
+        let workspace = makeWorkspace(panes: 2)
+        var second = makeDescriptor("pane-3")
+        second.group = "sess-grp-2"
+        XCTAssertTrue(workspace.addPane(second))
+
+        XCTAssertEqual(workspace.paneIDs, ["pane-3"], "one terminal in it, one terminal shown")
+        XCTAssertEqual(workspace.activeGroup, "sess-grp-2")
+        XCTAssertEqual(
+            workspace.allPaneIDs.sorted(),
+            ["pane-1", "pane-2", "pane-3"],
+            "the other session's terminals still exist — they are off screen, not closed"
+        )
+        XCTAssertEqual(workspace.container(for: "pane-1")?.isHidden, true)
+        XCTAssertEqual(workspace.container(for: "pane-2")?.isHidden, true)
+        XCTAssertEqual(workspace.container(for: "pane-3")?.isHidden, false)
+        XCTAssertNotNil(
+            workspace.surface(for: "pane-1"),
+            "and their terminals are alive, so the PTY keeps running"
+        )
+    }
+
+    func testFocusingAPaneInAnotherSessionBringsThatSessionToTheScreen() {
+        let workspace = makeWorkspace(panes: 2)
+        var second = makeDescriptor("pane-3")
+        second.group = "sess-grp-2"
+        XCTAssertTrue(workspace.addPane(second))
+
+        // What the sidebar does for both a session row and a pane row.
+        workspace.focusPane("pane-1")
+
+        XCTAssertEqual(workspace.activeGroup, "sess-grp-1")
+        XCTAssertEqual(workspace.paneIDs, ["pane-1", "pane-2"])
+        XCTAssertEqual(workspace.container(for: "pane-3")?.isHidden, true)
+        XCTAssertEqual(workspace.focusedPaneID, "pane-1")
+    }
+
+    func testEachSessionKeepsItsOwnLayout() {
+        let workspace = makeWorkspace(panes: 2)
+        var second = makeDescriptor("pane-3")
+        second.group = "sess-grp-2"
+        XCTAssertTrue(workspace.addPane(second))
+        XCTAssertEqual(workspace.grid?.cols, 1, "one terminal, one column")
+
+        workspace.focusPane("pane-1")
+        XCTAssertEqual(workspace.grid?.cols, 2, "the first session is still two across")
+
+        workspace.focusPane("pane-3")
+        XCTAssertEqual(workspace.grid?.cols, 1, "and switching back does not reshape either")
+    }
+
+    func testClosingASessionsLastPaneDropsTheSessionAndLandsInAnother() {
+        let workspace = makeWorkspace(panes: 2)
+        var second = makeDescriptor("pane-3")
+        second.group = "sess-grp-2"
+        XCTAssertTrue(workspace.addPane(second))
+
+        XCTAssertTrue(workspace.closePane("pane-3"))
+
+        XCTAssertEqual(workspace.groupIDs, ["sess-grp-1"], "an empty session is not a session")
+        XCTAssertEqual(workspace.activeGroup, "sess-grp-1")
+        XCTAssertEqual(workspace.paneIDs, ["pane-1", "pane-2"])
+        XCTAssertNotNil(workspace.focusedPaneID, "focus lands somewhere real, not on the closed pane")
+    }
+
+    // MARK: - Zoom
+
+    func testZoomIsNotOfferedWithASingleTerminalOnScreen() {
+        let workspace = makeWorkspace(panes: 1)
+
+        XCTAssertFalse(workspace.toggleZoom("pane-1"), "there is nothing to zoom away from")
+        XCTAssertNil(workspace.zoomedPaneID)
+        XCTAssertEqual(workspace.container(for: "pane-1")?.isZoomAvailable, false)
+    }
+
+    func testZoomingCoversAlmostTheWorkspaceAndPutsTheBlurUnderIt() throws {
+        let workspace = makeWorkspace(panes: 2)
+        XCTAssertEqual(workspace.container(for: "pane-1")?.isZoomAvailable, true)
+
+        XCTAssertTrue(workspace.toggleZoom("pane-2"))
+        workspace.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(workspace.zoomedPaneID, "pane-2")
+        let zoomed = try XCTUnwrap(workspace.container(for: "pane-2"))
+        let area = workspace.gridBounds
+        XCTAssertTrue(area.contains(zoomed.frame), "it stays inside the workspace")
+        XCTAssertGreaterThan(
+            zoomed.frame.width * zoomed.frame.height,
+            area.width * area.height * 0.8,
+            "almost the entire terminal place"
+        )
+
+        let backdrop = try XCTUnwrap(
+            workspace.subviews.compactMap { $0 as? PaneZoomBackdropView }.first
+        )
+        XCTAssertFalse(backdrop.isHidden)
+        let order = workspace.subviews
+        let blurIndex = try XCTUnwrap(order.firstIndex(of: backdrop))
+        let zoomedIndex = try XCTUnwrap(order.firstIndex(of: zoomed))
+        let otherIndex = try XCTUnwrap(
+            order.firstIndex(of: try XCTUnwrap(workspace.container(for: "pane-1")))
+        )
+        XCTAssertGreaterThan(zoomedIndex, blurIndex, "the zoomed pane sits above the blur")
+        XCTAssertLessThan(otherIndex, blurIndex, "and everything else behind it, blurred")
+
+        XCTAssertTrue(workspace.toggleZoom("pane-2"), "the same button shrinks it back")
+        XCTAssertNil(workspace.zoomedPaneID)
+        XCTAssertTrue(backdrop.isHidden)
+    }
+
+    func testZoomEndsWhenItWouldOtherwiseHideWhatYouAskedFor() {
+        let workspace = makeWorkspace(panes: 2)
+        XCTAssertTrue(workspace.toggleZoom("pane-1"))
+
+        // Opening a terminal you cannot see would be worse than losing the zoom.
+        XCTAssertTrue(workspace.addPane(makeDescriptor("pane-3")))
+        XCTAssertNil(workspace.zoomedPaneID)
+
+        XCTAssertTrue(workspace.toggleZoom("pane-1"))
+        var elsewhere = makeDescriptor("pane-4")
+        elsewhere.group = "sess-grp-2"
+        XCTAssertTrue(workspace.addPane(elsewhere))
+        XCTAssertNil(workspace.zoomedPaneID, "and a session switch takes it off screen entirely")
+
+        workspace.focusPane("pane-1")
+        XCTAssertTrue(workspace.toggleZoom("pane-1"))
+        XCTAssertTrue(workspace.closePane("pane-2"))
+        XCTAssertTrue(workspace.closePane("pane-3"))
+        XCTAssertNil(workspace.zoomedPaneID, "one terminal left, nothing to zoom over")
+    }
+
+    // MARK: - Click to activate
+
+    /// Clicking anywhere in a terminal makes it the active one. Every click
+    /// inside a pane ends with something in that pane holding the first
+    /// responder, which is the signal `adoptFocus` turns into activation — so
+    /// the terminal body and the pane's own chrome both count, and there is no
+    /// dead region that looks clickable and is not.
+    func testClickingAnywhereInAPaneMakesItTheActiveOne() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 2)
+        defer { window.close() }
+        workspace.focusPane("pane-1")
+        let target = try XCTUnwrap(workspace.container(for: "pane-2"))
+
+        workspace.adoptFocus(from: target.surface)
+        XCTAssertEqual(workspace.focusedPaneID, "pane-2", "a click in the terminal body")
+
+        workspace.focusPane("pane-1")
+        workspace.adoptFocus(from: target.header)
+        XCTAssertEqual(workspace.focusedPaneID, "pane-2", "a click on its header")
+
+        workspace.focusPane("pane-1")
+        workspace.adoptFocus(from: workspace)
+        XCTAssertEqual(
+            workspace.focusedPaneID,
+            "pane-1",
+            "and a responder belonging to no pane changes nothing"
+        )
     }
 
     // MARK: - Helpers
