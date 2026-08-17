@@ -2323,16 +2323,16 @@ final class PaneBadgeView: NSView {
 /// property of the *host*, not of this view — a test host with no display attached
 /// must not construct one.
 final class PaneZoomBackdropView: NSVisualEffectView {
-    /// The design's `rgba(6,6,8,.62)` at a third of that alpha, in a subview
+    /// The design's `rgba(6,6,8,.62)` at a fifth of that alpha, in a subview
     /// because an `NSVisualEffectView` paints its material into its own layer and
     /// a background colour set on that layer lands underneath it.
     ///
-    /// The mock's .62 is a wash over a *CSS* blur; over the system material it
-    /// left the app behind the card as one dark smear — "too strong". The blur
-    /// alone already makes text unreadable, which is the whole job, so the tint
-    /// only has to say "not this part" and can stay light enough that you can
-    /// still see the shape of what is behind.
-    static let tint = NSColor(srgbRed: 6 / 255, green: 6 / 255, blue: 8 / 255, alpha: 0.22)
+    /// The mock's .62 is a wash over a *CSS* blur; over the system material —
+    /// which carries a dark tint of its own — it left the app behind the card as
+    /// one smear. The blur alone already makes text unreadable, which is the
+    /// whole job, so the tint only has to say "not this part". .12 is what that
+    /// took on a real screen: .22 still read as dark.
+    static let tint = NSColor(srgbRed: 6 / 255, green: 6 / 255, blue: 8 / 255, alpha: 0.12)
 
     var onClick: (() -> Void)?
 
