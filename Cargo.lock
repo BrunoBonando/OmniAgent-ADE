@@ -2730,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "omniagent-ade"
-version = "2026.8.17+005"
+version = "2026.8.17+008"
 dependencies = [
  "anyhow",
  "brain-core",
