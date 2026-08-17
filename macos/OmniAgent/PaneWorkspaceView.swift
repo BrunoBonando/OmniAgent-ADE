@@ -254,6 +254,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// the daemon for unbounded PTYs.
     static let maxTerminals = 64
 
+    /// The panes that actually hold a PTY — what `maxTerminals` is measured
+    /// against. Browser panes cost WebKit memory, not daemon slots.
+    var terminalPaneCount: Int {
+        allPaneIDs.filter { descriptors[$0]?.kind == .terminal }.count
+    }
+
     func descriptor(for sessionID: String) -> PaneDescriptor? { descriptors[sessionID] }
 
     func container(for sessionID: String) -> PaneContainerView? { containers[sessionID] }
@@ -269,7 +275,8 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     // MARK: - Mutating the workspace
 
     /// Adds a pane and gives it focus. Refused once its **own session** holds
-    /// `PaneGrid.maxPanes`, once the app as a whole holds `maxTerminals`, and
+    /// `PaneGrid.maxPanes`, once the app as a whole holds `maxTerminals`
+    /// terminal panes (a PTY budget — non-terminal kinds are exempt), and
     /// for a session id already on screen.
     @discardableResult
     func addPane(_ descriptor: PaneDescriptor) -> Bool {
@@ -278,7 +285,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // one from opening a terminal.
         guard
             paneCount(inGroup: descriptor.group) < PaneGrid.maxPanes,
-            allPaneIDs.count < Self.maxTerminals,
+            descriptor.kind != .terminal || terminalPaneCount < Self.maxTerminals,
             descriptors[descriptor.sessionID] == nil
         else {
             return false

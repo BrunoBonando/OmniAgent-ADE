@@ -108,12 +108,16 @@ struct CommandPaletteModel: Equatable {
                     action: .closePane(sessionID: focusedPaneID)
                 )
             )
-            commands.append(
-                PaletteCommand(id: "interrupt", title: "Interrupt \(name)", detail: "⌘.", action: .interruptFocusedPane)
-            )
-            commands.append(
-                PaletteCommand(id: "reattach", title: "Reattach \(name)", detail: "⌘R", action: .reattachFocusedPane)
-            )
+            // Interrupt and reattach are PTY verbs; a non-terminal pane can
+            // be closed but has no session to signal or reattach.
+            if pane.kind == .terminal {
+                commands.append(
+                    PaletteCommand(id: "interrupt", title: "Interrupt \(name)", detail: "⌘.", action: .interruptFocusedPane)
+                )
+                commands.append(
+                    PaletteCommand(id: "reattach", title: "Reattach \(name)", detail: "⌘R", action: .reattachFocusedPane)
+                )
+            }
         }
         commands.append(
             PaletteCommand(id: "toggle-sidebar", title: "Toggle sidebar", detail: "⌃⌘S", action: .toggleSidebar)

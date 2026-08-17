@@ -121,6 +121,41 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    /// The lifecycle invariant behind browser panes: a non-terminal pane id
+    /// must never reach `ensureSession` (a browser id there silently spawns a
+    /// login shell) nor `connection.kill`.
+    func testBrowserPanesNeverEnsureOrKillDaemonSessions() {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var ensured: [String] = []
+        var killed: [String] = []
+        controller.sessionEnsurer = { ensured.append($0) }
+        controller.sessionKiller = { killed.append($0) }
+
+        controller.applyRestoredPanes([
+            RestoredPane(
+                sessionID: "term-1", reattaches: true, project: "p", engine: .shell,
+                cwd: "/tmp", label: nil, themeId: nil, group: "g1", groupLabel: nil
+            ),
+        ])
+        controller.workspaceView.addPane(
+            PaneDescriptor(sessionID: "web-1", group: "g1", kind: .browser, browserURL: "https://example.com")
+        )
+        // A later restore pass (reconnect path) must skip the browser pane.
+        controller.applyRestoredPanes([])
+        XCTAssertFalse(ensured.contains("web-1"))
+        XCTAssertTrue(ensured.contains("term-1"))
+
+        controller.workspaceView.focusPane("web-1")
+        controller.closePane(nil)
+        XCTAssertEqual(killed, [], "closing a browser pane must not kill anything")
+
+        controller.workspaceView.focusPane("term-1")
+        controller.closePane(nil)
+        XCTAssertEqual(killed, ["term-1"])
+    }
+
     func testClosePaneCommandRemovesTheFocusedPaneAndLeavesTheRestAlive() throws {
         let controller = makeController()
         defer { controller.close() }

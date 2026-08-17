@@ -154,6 +154,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// recorder so the write-suppression rule can be asserted without a
     /// socket, and without touching the developer's real `brain.db`.
     var settingsWriter: ((String, String) -> Void)?
+    /// Test seams, `settingsWriter`'s pattern: nil means the real daemon
+    /// call. What lets a test pin the lifecycle invariant — non-terminal
+    /// pane ids never reach `ensureSession` (where a browser id would
+    /// silently spawn a login shell) or `connection.kill` — without a socket.
+    var sessionEnsurer: ((String) -> Void)?
+    var sessionKiller: ((String) -> Void)?
 
     // MARK: - Task 6b-2: settings/onboarding/usage/inspector
 
@@ -611,7 +617,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // daemon agrees to, and nothing a user meets in normal use.
         guard
             workspace.paneCount(inGroup: group) < PaneGrid.maxPanes,
-            workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals
+            workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals
         else { return false }
         let project = sibling?.project ?? session?.project ?? template.project
         let inherited = sibling?.cwd.isEmpty == false ? sibling!.cwd : (session?.cwd ?? "")
@@ -652,7 +658,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// macOS to ask about folder access. Choosing a *different* folder means
     /// opening a different workspace, which is `openWorkspaceFolder(_:)`.
     @objc func newSession(_ sender: Any?) {
-        guard workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals else { return }
+        guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         startSession(
             inDirectory: workspaceRoot(),
@@ -674,7 +680,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// the whole point, because a new workspace *is* a folder the app has not
     /// been told about yet.
     @objc func openWorkspaceFolder(_ sender: Any?) {
-        guard workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals else { return }
+        guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         chooseSessionDirectory(startingAt: workspaceRoot()) { [weak self] chosen in
             guard let self, let chosen else { return }
@@ -686,7 +692,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// so the naming and grouping rules are testable without a panel.
     @discardableResult
     func startSession(inDirectory cwd: String, project: String) -> String? {
-        guard workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals else { return nil }
+        guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return nil }
         let group = SessionOutline.newSessionGroupID()
         let name = SessionOutline.nextSessionName(
             workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
@@ -743,7 +749,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// close is ⇧⌘W.
     @objc func closePane(_ sender: Any?) {
         guard let focused = workspace.focusedPaneID else { return }
-        connection.kill(sessionID: focused)
+        // Only a terminal has a daemon session to kill. The status cleanup
+        // below stays unconditional: it is per-pane bookkeeping, and empty
+        // for a pane kind that never reported any.
+        if workspace.descriptor(for: focused)?.kind == .terminal {
+            killSession(focused)
+        }
         readySessions.remove(focused)
         sessionStatus.removeValue(forKey: focused)
         // `lastStatus` is per-pane too and was the one sibling this never
@@ -761,10 +772,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // The session on screen is the one ⌘T adds to, so its own count
             // is what greys the item out.
             return workspace.paneIDs.count < PaneGrid.maxPanes
-                && workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals
+                && workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals
         case #selector(newSession(_:)):
             // A new session starts empty — a full one cannot refuse it.
-            return workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals
+            return workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals
         case #selector(closePane(_:)):
             return workspace.focusedPaneID != nil
         case #selector(toggleFocusMode(_:)):
@@ -796,7 +807,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func restoreWorkspaceIfNeeded() {
         restoreNotificationsIfNeeded()
         guard !layoutReadDispatched else {
-            for id in workspace.allPaneIDs { ensureSession(id) }
+            for id in workspace.allPaneIDs where workspace.descriptor(for: id)?.kind == .terminal {
+                ensureSession(id)
+            }
             return
         }
         layoutReadDispatched = true
@@ -841,7 +854,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         for pane in plan where workspace.descriptor(for: pane.sessionID) == nil {
             addPane(pane, startSession: false)
         }
-        for id in workspace.allPaneIDs { ensureSession(id) }
+        // Terminals only: an unfiltered browser pane id reaching
+        // `ensureSession` would fall through to `createSession`, whose
+        // missing-engine default is `.shell` — a silent login shell.
+        for id in workspace.allPaneIDs where workspace.descriptor(for: id)?.kind == .terminal {
+            ensureSession(id)
+        }
         workspace.restoreFocus()
         // The plan came *from* the row, so re-writing it is normally a no-op;
         // it matters when restoration repaired something (a capped ninth
@@ -854,7 +872,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     ///
     /// The daemon outliving the app is the feature that keeps terminals
     /// running across a restart — but nothing ever cleaned up the sessions a
-    /// restart left *behind*, and the daemon caps at `MAX_SESSIONS` (8, in
+    /// restart left *behind*, and the daemon caps at `MAX_SESSIONS` (64, in
     /// `crates/omniagent-pty-daemon/src/session.rs`). Orphans accumulate one
     /// abandoned pane at a time until the cap is full, and from then on every
     /// new terminal is refused with "maximum of 8 sessions reached" — which
@@ -876,10 +894,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             owned: Set(workspace.allPaneIDs)
         )
         for id in orphans {
-            connection.kill(sessionID: id)
+            killSession(id)
             readySessions.remove(id)
             lastStatus.removeValue(forKey: id)
         }
+    }
+
+    /// Every daemon kill funnels through here so `sessionKiller` sees them
+    /// all — the seam the "a browser pane is never killed" test watches.
+    private func killSession(_ id: String) {
+        if let sessionKiller { sessionKiller(id) } else { connection.kill(sessionID: id) }
     }
 
     /// Which of the daemon's sessions belong to nobody. Pure, and separate
@@ -1270,37 +1294,45 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             descriptor.label = nil
         }
         guard workspace.addPane(descriptor) else { return false }
-        // A pane that did not come back from the persisted layout has a session
-        // id minted moments ago, so the Claude conversation derived from it
-        // cannot exist yet and is safe to claim. A restored one may already
-        // have written its conversation, and re-claiming that kills the spawn.
-        if !pane.reattaches { allowConversationClaim(for: sessionID) }
-        usageRecorder.recordPaneOpened(
-            paneID: sessionID,
-            sessionKey: pane.group,
-            project: pane.project,
-            at: Date().timeIntervalSince1970 * 1000
-        )
-        let surface = workspace.terminalSurface(for: sessionID)
-        surface?.onTitleChange = { [weak self] title in
-            guard let self else { return }
-            // Stripped here rather than at each place a title is shown: the
-            // pane header, the sidebar row, the window title and the
-            // session-ended notification all read this one stored value, and
-            // nothing wants the spinner frame the engine sent with it.
-            let title = SessionOutline.sanitizedPaneTitle(title)
-            workspace.updateDescriptor(for: sessionID) { $0.title = title }
-            if workspace.focusedPaneID == sessionID { refreshTitle() }
+        // Everything below is PTY-shaped — conversation claim, usage
+        // recording, OSC title/cwd wiring, and above all `ensureSession`,
+        // which for an unknown id falls through to `createSession` and its
+        // `.shell` default. A non-terminal pane must reach none of it.
+        // (Browser-side wiring arrives with `BrowserPaneView`.)
+        if descriptor.kind == .terminal {
+            // A pane that did not come back from the persisted layout has a session
+            // id minted moments ago, so the Claude conversation derived from it
+            // cannot exist yet and is safe to claim. A restored one may already
+            // have written its conversation, and re-claiming that kills the spawn.
+            if !pane.reattaches { allowConversationClaim(for: sessionID) }
+            usageRecorder.recordPaneOpened(
+                paneID: sessionID,
+                sessionKey: pane.group,
+                project: pane.project,
+                at: Date().timeIntervalSince1970 * 1000
+            )
+            let surface = workspace.terminalSurface(for: sessionID)
+            surface?.onTitleChange = { [weak self] title in
+                guard let self else { return }
+                // Stripped here rather than at each place a title is shown: the
+                // pane header, the sidebar row, the window title and the
+                // session-ended notification all read this one stored value, and
+                // nothing wants the spinner frame the engine sent with it.
+                let title = SessionOutline.sanitizedPaneTitle(title)
+                workspace.updateDescriptor(for: sessionID) { $0.title = title }
+                if workspace.focusedPaneID == sessionID { refreshTitle() }
+            }
+            surface?.onDirectoryChange = { [weak self] directory in
+                guard let self, workspace.focusedPaneID == sessionID else { return }
+                window?.representedURL = directory.map(URL.init(fileURLWithPath:))
+            }
+            if startSession { ensureSession(sessionID) }
         }
-        surface?.onDirectoryChange = { [weak self] directory in
-            guard let self, workspace.focusedPaneID == sessionID else { return }
-            window?.representedURL = directory.map(URL.init(fileURLWithPath:))
-        }
-        if startSession { ensureSession(sessionID) }
         return true
     }
 
     private func ensureSession(_ sessionID: String) {
+        if let sessionEnsurer { sessionEnsurer(sessionID); return }
         guard !readySessions.contains(sessionID) else {
             attach(sessionID)
             return
@@ -1311,8 +1343,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             case let .success(sessions):
                 // Free the daemon's abandoned slots *before* asking it for a
                 // new one. This is why the reap lives here rather than after
-                // the restore loop: the daemon caps at 8, so an orphan holding
-                // the last slot makes the very session being started here fail.
+                // the restore loop: the daemon caps at `MAX_SESSIONS`, so an
+                // orphan holding the last slot makes the very session being
+                // started here fail.
                 // Frames are written FIFO on one connection, so the kills below
                 // reach the daemon ahead of this pane's `createSession`.
                 reapOrphanedSessions(daemonSessions: sessions)

@@ -45,6 +45,36 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(focused.first { $0.id == "close-pane" }?.action, .closePane(sessionID: "a"))
     }
 
+    /// Interrupt and reattach are PTY verbs. A focused browser pane still
+    /// offers close — the pane exists — but never the two session actions.
+    func testAFocusedBrowserPaneOffersCloseButNoSessionActions() {
+        let browserFocused = CommandPaletteModel.build(
+            panes: [
+                pane("a", project: "alpha", group: "g1"),
+                pane("web", project: "alpha", group: "g1", kind: .browser),
+            ],
+            paneOrder: ["a", "web"],
+            focusedPaneID: "web",
+            unreadNotifications: 0
+        )
+        XCTAssertNotNil(browserFocused.first { $0.id == "close-pane" })
+        XCTAssertNil(browserFocused.first { $0.id == "interrupt" })
+        XCTAssertNil(browserFocused.first { $0.id == "reattach" })
+
+        let terminalFocused = CommandPaletteModel.build(
+            panes: [
+                pane("a", project: "alpha", group: "g1"),
+                pane("web", project: "alpha", group: "g1", kind: .browser),
+            ],
+            paneOrder: ["a", "web"],
+            focusedPaneID: "a",
+            unreadNotifications: 0
+        )
+        XCTAssertNotNil(terminalFocused.first { $0.id == "close-pane" })
+        XCTAssertNotNil(terminalFocused.first { $0.id == "interrupt" })
+        XCTAssertNotNil(terminalFocused.first { $0.id == "reattach" })
+    }
+
     func testTheNewSessionRowNamesTheSessionItWouldCreate() {
         let named = CommandPaletteModel.build(
             panes: [pane("a", project: "alpha", group: "g1", groupLabel: "Session 1")],
@@ -224,7 +254,8 @@ final class CommandPaletteTests: XCTestCase {
         project: String,
         group: String,
         groupLabel: String? = nil,
-        label: String? = nil
+        label: String? = nil,
+        kind: PaneKind = .terminal
     ) -> PaneDescriptor {
         PaneDescriptor(
             sessionID: id,
@@ -233,7 +264,8 @@ final class CommandPaletteTests: XCTestCase {
             project: project,
             engine: .shell,
             cwd: "/",
-            label: label
+            label: label,
+            kind: kind
         )
     }
 }

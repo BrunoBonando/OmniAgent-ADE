@@ -678,6 +678,18 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(workspace.paneIDs.count, 1, "and it shows only its own")
     }
 
+    /// The 64-terminal backstop mirrors the daemon's `MAX_SESSIONS` — a PTY
+    /// budget. A browser pane holds no PTY, so it must not spend one.
+    func testBrowserPanesDoNotCountAgainstTheTerminalCap() {
+        let workspace = makeWorkspace(panes: 2)
+        XCTAssertEqual(workspace.terminalPaneCount, 2)
+        XCTAssertTrue(workspace.addPane(
+            PaneDescriptor(sessionID: "web-1", group: "sess-grp-1", kind: .browser)
+        ))
+        XCTAssertEqual(workspace.terminalPaneCount, 2, "a browser consumes no PTY budget")
+        XCTAssertEqual(workspace.allPaneIDs.count, 3)
+    }
+
     /// The app-wide ceiling is a backstop, not a limit anyone meets, and it
     /// only works if it stays above what the per-session cap allows — the
     /// mistake being guarded against is exactly the one this replaces, a
