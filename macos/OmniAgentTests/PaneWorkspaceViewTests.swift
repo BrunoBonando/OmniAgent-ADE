@@ -1223,37 +1223,61 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(from.m11, cell.width / card.frame.width, accuracy: 0.02, "from the cell's size")
         XCTAssertEqual(from.m22, cell.height / card.frame.height, accuracy: 0.02)
         XCTAssertEqual(zoom.duration, PaneWorkspaceView.zoomTransitionDuration)
-        XCTAssertNotNil(layer.animation(forKey: "position"), "travelling as it grows")
+
+        // And it starts from where the pane *is*. The card changes superview on
+        // the way up, and until the next commit its presentation layer still
+        // holds the position it had in the grid — read in the overlay host, that
+        // is a point a sidebar's width away, which is where the lift used to
+        // appear to begin. Only a hosted workspace with a sidebar can tell the
+        // two apart, which is why this test builds one.
+        let move = try XCTUnwrap(layer.animation(forKey: "position") as? CABasicAnimation)
+        let origin = try XCTUnwrap((move.fromValue as? NSValue)?.pointValue)
+        let host = try XCTUnwrap(card.superview)
+        let cellInHost = workspace.convert(cell, to: host)
+        // A layer's `position` is wherever its `anchorPoint` sits — the corner,
+        // for these views, not the centre — so the cell is expressed the same way
+        // rather than assumed to be centre-anchored.
+        let anchor = layer.anchorPoint
+        XCTAssertNotEqual(cellInHost.minX, cell.minX, "the two spaces really do differ here")
+        XCTAssertEqual(
+            origin.x,
+            cellInHost.minX + anchor.x * cellInHost.width,
+            accuracy: 1,
+            "from the cell, in the host's space"
+        )
+        XCTAssertEqual(
+            origin.y,
+            cellInHost.minY + anchor.y * cellInHost.height,
+            accuracy: 1
+        )
     }
 
-    /// `backdrop-filter:blur(16px) saturate(70%)` over `rgba(6,6,8,.62)`, as the
-    /// platform's within-window blur. The `CIGaussianBlur` in
-    /// `layer.backgroundFilters` this replaces passed a test just like this one
-    /// and blurred nothing on screen: `backgroundFilters` are not composited for
-    /// a layer-backed view in an ordinary window, so the assertions could only
-    /// ever confirm the filter was *installed*. Hence the blending mode below —
-    /// it is the property that decides whether anything is blurred at all.
-    func testTheBackdropBlursTheAppBehindItUnderTheDesignsTint() throws {
+    /// `backdrop-filter:blur(16px)` as the platform's within-window blur, and
+    /// nothing else over it. The `CIGaussianBlur` in `layer.backgroundFilters`
+    /// this replaces passed a test just like this one and blurred nothing on
+    /// screen: `backgroundFilters` are not composited for a layer-backed view in
+    /// an ordinary window, so the assertions could only ever confirm the filter
+    /// was *installed*. Hence the blending mode below — it is the property that
+    /// decides whether anything is blurred at all.
+    func testTheBackdropBlursTheAppBehindItAndTintsNothing() throws {
         let backdrop = PaneZoomBackdropView()
         backdrop.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
 
         XCTAssertEqual(backdrop.blendingMode, .withinWindow, "the app behind it, not the desktop")
         XCTAssertEqual(backdrop.state, .active, "and blurred whether or not the window is key")
+        XCTAssertEqual(
+            backdrop.material,
+            .headerView,
+            "the thinnest material that blurs: a panel material darkens what is behind it"
+        )
 
         backdrop.setShown(true, duration: 0)
         backdrop.layoutSubtreeIfNeeded()
-        let tint = try XCTUnwrap(backdrop.subviews.first)
-        XCTAssertEqual(tint.frame, backdrop.bounds, "the tint covers the blur")
-        XCTAssertEqual(
-            tint.layer?.backgroundColor.flatMap { NSColor(cgColor: $0)?.alphaComponent },
-            PaneZoomBackdropView.tint.alphaComponent,
-            "light enough to see the shape of what is behind, at the design's colour"
-        )
-        XCTAssertLessThan(
-            PaneZoomBackdropView.tint.alphaComponent,
-            0.35,
-            "the blur is what makes it unreadable; the tint only says 'not this part'"
-        )
+        // The design's `rgba(6,6,8,.62)` is deliberately not reproduced: the blur
+        // is what makes the app unreadable, and every amount of black over it
+        // only took away seeing where everything else is. .62, .22 and .12 were
+        // each too dark on a real screen.
+        XCTAssertEqual(backdrop.subviews, [], "nothing tinting the blur")
         XCTAssertEqual(backdrop.alphaValue, 1)
     }
 

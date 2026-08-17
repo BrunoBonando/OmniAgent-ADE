@@ -583,19 +583,18 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         let lifting = container.superview !== host
         let start = lifting ? convert(container.frame, to: host) : focusCardShadow.frame
         let restacked = stackOverlay(container, in: host)
-        if lifting {
-            // Only the origin changes here — the pane is the same size in the
-            // host as it was in its cell — so the terminal is reflowed once, by
-            // `place`, at the size it actually ends up.
-            container.frame = start
-        }
         // After any move, not just the lift: re-stacking a view that is already
         // there moves it too, and a move is what costs the first responder.
         if restacked { reclaimFirstResponder(container) }
         zoomBackdrop.setShown(true, duration: zoomTransition)
         let card = Self.focusCardFrame(in: host.bounds)
         moveFocusCardShadow(from: start, to: card)
-        place(container, at: card)
+        // The cell it is leaving, handed over rather than left for `place` to
+        // read off the presentation layer: the pane has just changed superview,
+        // and until the next commit that layer still presents the position it
+        // held in the grid. Read in the host, a grid position is a rect a
+        // sidebar's width away — which is where the lift used to appear to begin.
+        place(container, at: card, from: lifting ? start : nil)
     }
 
     /// The overlay's two views as the host's top-most pair — the backdrop
@@ -763,25 +762,39 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// has no need to stress: a CA animation of our own carries no such wrapper,
     /// and adding one under a key that already holds one *replaces* it, which is
     /// defined behaviour.
-    private func place(_ container: PaneContainerView, at frame: NSRect) {
-        guard container.frame != frame else { return }
-        let presented = (container.layer?.presentation() ?? container.layer)
-            .map { (position: $0.position, bounds: $0.bounds, transform: $0.transform) }
-        container.frame = frame
-        if zoomTransition > 0, let layer = container.layer, let presented {
+    ///
+    /// `start` is where the move begins, for the one case the presentation layer
+    /// cannot answer: a pane that has just been reparented, whose presented
+    /// position is still the one it had in the view it left. Everywhere else it
+    /// is `nil` and the presented value is exactly right — including a move that
+    /// begins while another is still in flight.
+    private func place(_ container: PaneContainerView, at frame: NSRect, from start: NSRect? = nil) {
+        guard container.frame != frame || start != nil else { return }
+        let from: (position: CGPoint, size: CGSize)?
+        if let start, let layer = container.layer {
+            // Through the frame rather than by computing a centre: `position` is
+            // the layer's anchor point, and letting AppKit put the layer at
+            // `start` is what makes this right for whatever anchor and whatever
+            // flipped geometry the container happens to have.
+            container.frame = start
+            from = (layer.position, start.size)
+        } else if let presented = (container.layer?.presentation() ?? container.layer) {
             // What is on screen right now: the presented bounds as its transform
             // is currently scaling them, so a move that begins mid-flight starts
             // from the size the eye can actually see.
-            let onScreen = CGSize(
-                width: presented.bounds.width * presented.transform.m11,
-                height: presented.bounds.height * presented.transform.m22
+            from = (
+                presented.position,
+                CGSize(
+                    width: presented.bounds.width * presented.transform.m11,
+                    height: presented.bounds.height * presented.transform.m22
+                )
             )
-            zoomLayer(
-                layer,
-                fromPosition: presented.position,
-                fromSize: onScreen,
-                toSize: frame.size
-            )
+        } else {
+            from = nil
+        }
+        container.frame = frame
+        if zoomTransition > 0, let layer = container.layer, let from {
+            zoomLayer(layer, fromPosition: from.position, fromSize: from.size, toSize: frame.size)
         }
         container.surface.scheduleResize()
     }
@@ -1382,6 +1395,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
         didSet {
             guard status != oldValue else { return }
             header.status = status
+            // The unselected pane's veil is tinted by the same status.
+            surface.wash.status = status
             updateChrome()
         }
     }
@@ -2323,34 +2338,35 @@ final class PaneBadgeView: NSView {
 /// property of the *host*, not of this view — a test host with no display attached
 /// must not construct one.
 final class PaneZoomBackdropView: NSVisualEffectView {
-    /// The design's `rgba(6,6,8,.62)` at a fifth of that alpha, in a subview
-    /// because an `NSVisualEffectView` paints its material into its own layer and
-    /// a background colour set on that layer lands underneath it.
-    ///
-    /// The mock's .62 is a wash over a *CSS* blur; over the system material —
-    /// which carries a dark tint of its own — it left the app behind the card as
-    /// one smear. The blur alone already makes text unreadable, which is the
-    /// whole job, so the tint only has to say "not this part". .12 is what that
-    /// took on a real screen: .22 still read as dark.
-    static let tint = NSColor(srgbRed: 6 / 255, green: 6 / 255, blue: 8 / 255, alpha: 0.12)
+    /// The material the app behind the card is seen through. `.headerView` is
+    /// the thinnest one that still blurs: it is meant to sit *over* window
+    /// content, so it carries almost no tint of its own, where `.hudWindow` —
+    /// which this was — is a dark panel material and darkened everything behind
+    /// the card on top of whatever tint was laid over it.
+    static let material: NSVisualEffectView.Material = .headerView
 
     var onClick: (() -> Void)?
 
     private var isShown = false
-    private let tintView = NSView()
 
-    /// `backdrop-filter:blur(16px) saturate(70%)` as the platform's own
-    /// within-window blur, rather than the `CIGaussianBlur` in
-    /// `layer.backgroundFilters` this used to carry. That is what "the background
-    /// is not blurred" was: `backgroundFilters` are only composited for layers the
-    /// window server can read back through, which a layer-backed view inside an
-    /// ordinary window is not — the filter was installed, ramped, and drew
-    /// nothing, leaving a flat 62% black wash over a perfectly sharp app.
-    /// `NSVisualEffectView` with `.withinWindow` blurs the sibling views behind
-    /// it, which is exactly what the design's overlay does.
+    /// `backdrop-filter:blur(16px)` as the platform's own within-window blur,
+    /// rather than the `CIGaussianBlur` in `layer.backgroundFilters` this used to
+    /// carry. That is what "the background is not blurred" was:
+    /// `backgroundFilters` are only composited for layers the window server can
+    /// read back through, which a layer-backed view inside an ordinary window is
+    /// not — the filter was installed, ramped, and drew nothing, leaving a flat
+    /// 62% black wash over a perfectly sharp app. `NSVisualEffectView` with
+    /// `.withinWindow` blurs the sibling views behind it, which is exactly what
+    /// the design's overlay does.
+    ///
+    /// No tint over it, and the design's `rgba(6,6,8,.62)` is deliberately not
+    /// reproduced. It is a wash meant to carry a CSS blur on its own; here the
+    /// blur already makes the app unreadable, which is the entire job, and every
+    /// amount of black tried on top of it — .62, .22, .12 — only took away the
+    /// one thing focus mode should leave you: seeing where everything else is.
     init() {
         super.init(frame: .zero)
-        material = .hudWindow
+        material = Self.material
         blendingMode = .withinWindow
         // `.followsWindowActiveState` would drop the blur the moment the window
         // stopped being key — including while a sheet or the palette is up.
@@ -2361,10 +2377,6 @@ final class PaneZoomBackdropView: NSVisualEffectView {
         // inserted directly above that layer — with none there, `stackOverlay`
         // silently left the shadow out.
         wantsLayer = true
-        tintView.wantsLayer = true
-        tintView.layer?.backgroundColor = Self.tint.cgColor
-        tintView.autoresizingMask = [.width, .height]
-        addSubview(tintView)
         alphaValue = 0
         isHidden = true
         setAccessibilityElement(true)
@@ -2377,22 +2389,12 @@ final class PaneZoomBackdropView: NSVisualEffectView {
         fatalError("init(coder:) is unavailable")
     }
 
-    override func layout() {
-        super.layout()
-        tintView.frame = bounds
-    }
-
-    /// Fades the whole backdrop, blur and tint together. Hidden only once it has
-    /// faded out, never left invisible-but-present: it swallows clicks.
+    /// Fades the backdrop in and out. Hidden only once it has faded out, never
+    /// left invisible-but-present: it swallows clicks.
     func setShown(_ shown: Bool, duration: TimeInterval) {
         guard isShown != shown else { return }
         isShown = shown
-        if shown {
-            isHidden = false
-            // Sized before the first frame is drawn: the fade starts now, and a
-            // tint still at its zero frame would show one frame of untinted blur.
-            tintView.frame = bounds
-        }
+        if shown { isHidden = false }
         let alpha: CGFloat = shown ? 1 : 0
         guard duration > 0 else {
             alphaValue = alpha
