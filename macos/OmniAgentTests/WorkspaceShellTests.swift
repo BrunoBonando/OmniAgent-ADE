@@ -6,6 +6,18 @@ import XCTest
 /// The design's shell: the two-level slide, the destination switch, the picker
 /// the slide reveals, and the sessions tree that hangs off Terminals.
 final class WorkspaceShellTests: XCTestCase {
+    /// The seam persists to `UserDefaults`, so a dragging test would otherwise
+    /// leave a stored height behind for the next run to inherit.
+    override func setUp() {
+        super.setUp()
+        UserDefaults.standard.removeObject(forKey: WorkspaceSidebarView.dividerDefaultsKey)
+    }
+
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: WorkspaceSidebarView.dividerDefaultsKey)
+        super.tearDown()
+    }
+
     private func makeSidebar() -> WorkspaceSidebarView {
         let sidebar = WorkspaceSidebarView()
         sidebar.frame = NSRect(x: 0, y: 0, width: ShellMetrics.sidebarWidth, height: 700)
@@ -72,6 +84,53 @@ final class WorkspaceShellTests: XCTestCase {
             sidebar.menuHeight.constant,
             max(sidebar.minimumMenuHeight, available - WorkspaceSidebarView.minimumFilesHeight) + 0.5
         )
+    }
+
+    /// Nobody has dragged it yet, so it splits the sidebar down the middle.
+    func testTheDividerStartsHalfway() {
+        let sidebar = makeSidebar()
+        let available = sidebar.bounds.height
+            - sidebar.backRow.fittingSize.height
+            - ShellSplitterView.grabThickness
+        XCTAssertEqual(sidebar.menuHeight.constant, available / 2, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(sidebar.menuHeight.constant, sidebar.minimumMenuHeight)
+    }
+
+    /// And once dragged it is remembered, at the position it was left in.
+    func testTheDividerIsRememberedAcrossLaunches() {
+        let dragged = makeSidebar()
+        drag(dragged.splitter, fromWindowY: 400, toWindowY: 340)
+        dragged.layoutSubtreeIfNeeded()
+        let expected = dragged.menuHeight.constant
+
+        let relaunched = makeSidebar()
+        XCTAssertTrue(relaunched.hasUserAdjustedDivider)
+        XCTAssertEqual(relaunched.menuHeight.constant, expected, accuracy: 0.5)
+    }
+
+    /// At the seam's floor the four nav rows fill the half, so the sessions
+    /// tree only exists at all if the whole menu scrolls.
+    func testTheMenuHalfScrollsSoSessionsAreReachableAtTheFloor() {
+        let sidebar = makeSidebar()
+        sidebar.showWorkspace(project("p1", "Project"), animated: false)
+        sidebar.applyDestination(.terminals)
+        sidebar.reloadSessions(
+            panes: (0..<12).map { index in pane("pane-\(index)", group: "g\(index)") },
+            focusedPaneID: nil,
+            statuses: [:],
+            project: "p1"
+        )
+        sidebar.splitter.onDrag?(-10_000)
+        sidebar.layoutSubtreeIfNeeded()
+
+        guard let scroll = sidebar.menuScroll else { return XCTFail("no menu scroll view") }
+        XCTAssertEqual(sidebar.menuHeight.constant, sidebar.minimumMenuHeight, accuracy: 0.5)
+        XCTAssertGreaterThan(
+            scroll.documentView?.fittingSize.height ?? 0,
+            scroll.contentView.bounds.height,
+            "the menu has more content than height — which is only usable if it scrolls"
+        )
+        XCTAssertTrue(scroll.hasVerticalScroller)
     }
 
     /// The seam is a handle, not a hairline: a 1pt hit target is unusable.
