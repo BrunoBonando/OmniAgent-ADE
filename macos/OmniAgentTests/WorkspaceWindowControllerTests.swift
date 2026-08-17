@@ -517,6 +517,47 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertLessThanOrEqual(small.height, 600)
     }
 
+    // MARK: - Orphaned sessions
+
+    /// The daemon outlives the app so terminals survive a restart, but nothing
+    /// used to clean up the sessions a restart left behind — and it caps at 8.
+    /// Found in the wild holding 8 live sessions against a 2-pane layout, at
+    /// which point every new terminal was refused and drawn as a blank pane.
+    func testOrphanedSessionsAreTheOnesNoPaneOwns() {
+        let owned: Set<String> = ["a", "b"]
+        XCTAssertEqual(
+            WorkspaceWindowController.orphanedSessions(
+                daemonSessions: ["a", "b", "stale-1", "stale-2"],
+                owned: owned
+            ),
+            ["stale-1", "stale-2"]
+        )
+
+        XCTAssertEqual(
+            WorkspaceWindowController.orphanedSessions(daemonSessions: ["a", "b"], owned: owned),
+            [],
+            "a daemon holding exactly what the window owns loses nothing"
+        )
+
+        XCTAssertEqual(
+            WorkspaceWindowController.orphanedSessions(daemonSessions: [], owned: owned),
+            []
+        )
+    }
+
+    /// The dangerous case. Owning nothing means something went wrong upstream
+    /// — a restore always leaves at least one pane — and that is precisely
+    /// when killing every session on the machine would be worst.
+    func testOwningNoPanesReapsNothingRatherThanEverything() {
+        XCTAssertEqual(
+            WorkspaceWindowController.orphanedSessions(
+                daemonSessions: ["live-1", "live-2", "live-3"],
+                owned: []
+            ),
+            []
+        )
+    }
+
     // MARK: - Command palette and toolbar
 
     func testTheCommandPaletteAndSidebarToggleAreOnTheMenuAndTravelTheResponderChain() throws {

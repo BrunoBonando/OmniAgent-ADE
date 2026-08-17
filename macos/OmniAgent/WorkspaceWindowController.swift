@@ -62,6 +62,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// rebuilding them on top. Cleared again if the read *fails*, so the next
     /// reconnect retries rather than leaving the window degraded forever.
     private var layoutReadDispatched = false
+    /// Orphan reaping is a once-per-launch cleanup, not a per-pane one.
+    private var reapDispatched = false
     /// The `layout` read came back **successfully**. This, not
     /// `layoutReadDispatched`, is the write gate: the read is asynchronous,
     /// and a pane opened while it is in flight would otherwise derive a
@@ -728,6 +730,52 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         persistLayout()
     }
 
+    /// Kills daemon sessions this window no longer references.
+    ///
+    /// The daemon outliving the app is the feature that keeps terminals
+    /// running across a restart — but nothing ever cleaned up the sessions a
+    /// restart left *behind*, and the daemon caps at `MAX_SESSIONS` (8, in
+    /// `crates/omniagent-pty-daemon/src/session.rs`). Orphans accumulate one
+    /// abandoned pane at a time until the cap is full, and from then on every
+    /// new terminal is refused with "maximum of 8 sessions reached" — which
+    /// this app rendered as a pane containing nothing but a blinking cursor.
+    /// Observed in the wild at 8 live sessions against a 2-pane layout, one of
+    /// the orphans five days old.
+    ///
+    /// Deliberately gated on a *successful* layout restore. The restored panes
+    /// are the definition of "sessions this window owns", so reaping against a
+    /// layout that failed to load would kill the user's live terminals — the
+    /// same reasoning that gates the layout write.
+    /// Runs once per launch, off the session list `ensureSession` already
+    /// fetches — no extra round trip, and early enough to matter.
+    private func reapOrphanedSessions(daemonSessions: [String]) {
+        guard layoutReadCompleted, !reapDispatched else { return }
+        reapDispatched = true
+        let orphans = Self.orphanedSessions(
+            daemonSessions: daemonSessions,
+            owned: Set(workspace.paneIDs)
+        )
+        for id in orphans {
+            connection.kill(sessionID: id)
+            readySessions.remove(id)
+            lastStatus.removeValue(forKey: id)
+        }
+    }
+
+    /// Which of the daemon's sessions belong to nobody. Pure, and separate
+    /// from the call that kills them, because this is the decision that must
+    /// not be wrong.
+    ///
+    /// An empty `owned` reaps nothing rather than everything. A restore always
+    /// leaves at least one pane (it bootstraps when the layout is empty), so
+    /// owning nothing means something went wrong upstream — and "the app knows
+    /// about no sessions" is exactly the state in which killing every session
+    /// on the machine would be the worst possible move.
+    static func orphanedSessions(daemonSessions: [String], owned: Set<String>) -> [String] {
+        guard !owned.isEmpty else { return [] }
+        return daemonSessions.filter { !owned.contains($0) }
+    }
+
     // MARK: - Command palette
 
     /// ⌘K. The list is rebuilt from the live workspace on every open, so it
@@ -1087,12 +1135,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connection.listSessions { [weak self] result in
             guard let self else { return }
             switch result {
-            case let .success(sessions) where sessions.contains(sessionID):
-                attach(sessionID)
-            case .success:
-                createSession(sessionID)
+            case let .success(sessions):
+                // Free the daemon's abandoned slots *before* asking it for a
+                // new one. This is why the reap lives here rather than after
+                // the restore loop: the daemon caps at 8, so an orphan holding
+                // the last slot makes the very session being started here fail.
+                // Frames are written FIFO on one connection, so the kills below
+                // reach the daemon ahead of this pane's `createSession`.
+                reapOrphanedSessions(daemonSessions: sessions)
+                if sessions.contains(sessionID) {
+                    attach(sessionID)
+                } else {
+                    createSession(sessionID)
+                }
             case let .failure(error):
                 applySessionStatus(error.localizedDescription, for: sessionID)
+                reportSessionFailure(error.localizedDescription, for: sessionID)
             }
         }
     }
@@ -1108,10 +1166,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let descriptor = workspace.descriptor(for: sessionID)
         let engine = descriptor?.engine ?? .shell
         guard let command = EngineLauncher.command(for: engine) else {
-            applySessionStatus(
-                "\(engine.rawValue) is not installed — \(EngineLauncher.binaryName(for: engine)) is not on your PATH",
-                for: sessionID
-            )
+            let message = "\(engine.rawValue) is not installed — \(EngineLauncher.binaryName(for: engine)) is not on your PATH"
+            applySessionStatus(message, for: sessionID)
+            reportSessionFailure(message, for: sessionID)
             return
         }
         let signpost = OSSignpostID(log: Instrumentation.log)
@@ -1145,8 +1202,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 attach(sessionID)
             case let .failure(error):
                 applySessionStatus(error.localizedDescription, for: sessionID)
+                reportSessionFailure(error.localizedDescription, for: sessionID)
             }
         }
+    }
+
+    /// Puts the reason a terminal never started into the terminal itself.
+    ///
+    /// `applySessionStatus` reaches the window title and nothing else, and
+    /// only while that pane holds focus — so a refused session looked exactly
+    /// like a working one that had not printed yet: an empty pane with a
+    /// blinking cursor. Now the pane's border goes red and the pane says what
+    /// happened, in the one place the user is already looking.
+    func reportSessionFailure(_ message: String, for sessionID: String) {
+        workspace.setStatus(.error, for: sessionID)
+        guard let surface = workspace.surface(for: sessionID) else { return }
+        let text = "\r\n\u{1B}[1;31m▲ This terminal could not start\u{1B}[0m\r\n  \(message)\r\n"
+        surface.feed(Data(text.utf8), isSnapshot: false)
     }
 
     /// The directory a pane's process starts in.
