@@ -281,6 +281,39 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.idleBorderColor.cgColor)
     }
 
+    /// Exactly one cursor blinks at a time. Every other pane holds a steady
+    /// cursor of the same shape, so a grid of eight has one thing moving in it
+    /// and it is the pane you are typing into.
+    func testOnlyTheSelectedPaneBlinksItsCursor() {
+        let workspace = makeWorkspace(panes: 3)
+        func style(_ id: String) -> CursorStyle {
+            workspace.container(for: id)!.surface.terminalView.terminal.options.cursorStyle
+        }
+
+        workspace.focusPane("pane-2")
+        XCTAssertEqual(style("pane-2"), .blinkBlock)
+        XCTAssertEqual(style("pane-1"), .steadyBlock)
+        XCTAssertEqual(style("pane-3"), .steadyBlock)
+
+        workspace.focusPane("pane-3")
+        XCTAssertEqual(style("pane-3"), .blinkBlock)
+        XCTAssertEqual(style("pane-2"), .steadyBlock, "the pane you left stops blinking at you")
+    }
+
+    /// A program that sets its own cursor style while in the background keeps
+    /// it — the deselect override only ever puts back what it took away.
+    func testDeselectDoesNotClobberACursorStyleTheProgramChose() {
+        let workspace = makeWorkspace(panes: 2)
+        let background = workspace.container(for: "pane-1")!.surface
+        workspace.focusPane("pane-2")
+        XCTAssertEqual(background.terminalView.terminal.options.cursorStyle, .steadyBlock)
+
+        // DECSCUSR 5: blinking bar, sent while the pane is unselected.
+        background.terminalView.terminal.setCursorStyle(.blinkBar)
+        workspace.focusPane("pane-1")
+        XCTAssertEqual(background.terminalView.terminal.options.cursorStyle, .blinkBar)
+    }
+
     // MARK: - Header chrome
 
     /// The border says what the pane is doing, and "I have stopped to ask you

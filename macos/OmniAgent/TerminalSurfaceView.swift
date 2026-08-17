@@ -58,6 +58,23 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         }
     }
 
+    /// Whether this is the selected pane. Only the selected one blinks its
+    /// cursor: SwiftTerm already draws an unfocused caret hollow, but its blink
+    /// timer runs off the cursor *style* alone, so every open pane sat there
+    /// flashing an outline at you — and, under Metal, woke a frame each to do
+    /// it. Deselecting swaps the style for its steady twin; selecting puts back
+    /// exactly what was swapped out.
+    var isSelected = false {
+        didSet {
+            guard isSelected != oldValue else { return }
+            applyCursorBlink()
+        }
+    }
+
+    /// The blinking style deselection replaced, or `nil` when nothing is
+    /// currently overridden.
+    private var suppressedBlinkStyle: CursorStyle?
+
     private(set) var resizeSendCount = 0
     private(set) var drawRequestCount = 0
 
@@ -114,6 +131,41 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         terminalView.terminalDelegate = self
         addSubview(terminalView)
         terminalView.frame = bounds
+        // A pane is born unselected, and `isSelected`'s didSet cannot fire for
+        // the value it already holds — so the newest pane would have been the
+        // one blinking on its own until it lost focus once.
+        applyCursorBlink()
+    }
+
+    private func applyCursorBlink() {
+        // Annotated because `TerminalView.terminal` is implicitly unwrapped, and
+        // binding it plain would infer `Terminal?`.
+        let terminal: Terminal = terminalView.terminal
+        if isSelected {
+            guard let restored = suppressedBlinkStyle else { return }
+            suppressedBlinkStyle = nil
+            // Only if nothing else moved it meanwhile: a DECSCUSR the program
+            // sent while this pane was in the background outranks our override.
+            guard terminal.options.cursorStyle == Self.steadyTwin(of: restored) else { return }
+            terminal.setCursorStyle(restored)
+        } else {
+            let current = terminal.options.cursorStyle
+            let steady = Self.steadyTwin(of: current)
+            guard steady != current else { return }
+            suppressedBlinkStyle = current
+            terminal.setCursorStyle(steady)
+        }
+    }
+
+    /// The non-blinking cursor of the same shape, or the style itself when it
+    /// already stands still.
+    private static func steadyTwin(of style: CursorStyle) -> CursorStyle {
+        switch style {
+        case .blinkBlock: return .steadyBlock
+        case .blinkBar: return .steadyBar
+        case .blinkUnderline: return .steadyUnderline
+        case .steadyBlock, .steadyBar, .steadyUnderline: return style
+        }
     }
 
     /// Direct frame propagation rather than Auto Layout: the pane workspace

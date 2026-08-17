@@ -836,8 +836,15 @@ final class PaneContainerView: NSView, NSDraggingSource {
 
     /// `#0c0c0f` — the pane body behind the terminal, from the design's grid.
     static let paneBackgroundColor = NSColor(srgbRed: 12 / 255, green: 12 / 255, blue: 15 / 255, alpha: 1)
-    static let idleBorderColor = NSColor(white: 1, alpha: 0.08)
-    static let focusedBorderColor = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.45)
+    /// Focus is the thing you look for most often in a grid of eight, so the
+    /// selected pane's ring is a solid accent line and the rest recede to a
+    /// hairline. At the old 0.45 the two were near enough that you had to hunt
+    /// for the pane you were typing into.
+    static let idleBorderColor = NSColor(white: 1, alpha: 0.06)
+    static let focusedBorderColor = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.85)
+    /// The accent wash the selected pane's header carries, so the highlight is
+    /// legible even where a neighbouring pane's ring sits right beside it.
+    static let focusedHeaderTint = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.11)
     /// `box-shadow:0 0 0 1px rgba(240,180,70,.35)` — a pane that has stopped to
     /// ask something outranks focus, because it is the one the user must act on.
     static let awaitingBorderColor = NSColor(srgbRed: 240 / 255, green: 180 / 255, blue: 70 / 255, alpha: 0.55)
@@ -848,6 +855,9 @@ final class PaneContainerView: NSView, NSDraggingSource {
         didSet {
             guard isFocused != oldValue else { return }
             header.isFocused = isFocused
+            // The cursor is part of "which pane am I typing into": only this
+            // one blinks (see `TerminalSurfaceView.isSelected`).
+            surface.isSelected = isFocused
             updateChrome()
         }
     }
@@ -1279,6 +1289,10 @@ final class PaneHeaderView: NSView {
         for view in [mark, titleLabel, engineBadge, branchBadge, focusButton, closeButton] as [NSView] {
             addSubview(view)
         }
+        // Same reason the surface applies its cursor state up front: the header
+        // starts unfocused, so the didSet that dims the title never fires for
+        // a pane that is never selected.
+        applyEmphasis()
         setAccessibilityElement(false)
     }
 
@@ -1291,8 +1305,10 @@ final class PaneHeaderView: NSView {
 
     private func applyEmphasis() {
         titleLabel.textColor = isFocused
-            ? NSColor(srgbRed: 234 / 255, green: 234 / 255, blue: 240 / 255, alpha: 1)
-            : NSColor(srgbRed: 208 / 255, green: 208 / 255, blue: 216 / 255, alpha: 1)
+            ? NSColor(srgbRed: 240 / 255, green: 241 / 255, blue: 248 / 255, alpha: 1)
+            // The muted grey the branch badge already uses — an unselected pane
+            // stays perfectly readable, it just stops competing.
+            : NSColor(srgbRed: 154 / 255, green: 154 / 255, blue: 164 / 255, alpha: 1)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1301,9 +1317,17 @@ final class PaneHeaderView: NSView {
         // border colour and would otherwise show straight through.
         PaneContainerView.paneBackgroundColor.setFill()
         bounds.fill()
-        NSColor(white: 1, alpha: isFocused ? 0.045 : 0.03).setFill()
+        if isFocused {
+            PaneContainerView.focusedHeaderTint.setFill()
+        } else {
+            NSColor(white: 1, alpha: 0.03).setFill()
+        }
         bounds.fill()
-        NSColor(white: 1, alpha: 0.07).setFill()
+        if isFocused {
+            PaneContainerView.focusedBorderColor.withAlphaComponent(0.4).setFill()
+        } else {
+            NSColor(white: 1, alpha: 0.07).setFill()
+        }
         NSRect(x: 0, y: bounds.maxY - 0.5, width: bounds.width, height: 0.5).fill()
     }
 
