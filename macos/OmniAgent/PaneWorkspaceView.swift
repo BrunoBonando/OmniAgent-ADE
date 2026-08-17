@@ -386,13 +386,19 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// the overlay would be pulled out from under the fade.
     private var zoomTransitionToken = 0
 
-    /// `padding:26px` on the overlay, and the card as a share of the window
-    /// rather than the mock's flat `width:1080px;max-height:720px`. That ceiling
-    /// *was* nearly the whole overlay on the 1440×900 mock it was measured from;
-    /// on a real window it stopped growing and read as a postage stamp floating
-    /// in blur. A fraction reproduces what the mock looks like at every size.
+    /// `padding:26px` on the overlay, and the card as a share of the window with
+    /// a ceiling on it. Neither half alone works: the mock's flat 1080×720 was
+    /// nearly the whole overlay on the 1440×900 it was measured from and a
+    /// postage stamp on anything bigger, while a pure fraction of a large display
+    /// is so wide there is nothing to focus *on*. So the card takes
+    /// `focusCardScale` of the window until that would exceed `focusCardMaxSize`,
+    /// and never more than that.
+    ///
+    /// One scale for both axes, so the card keeps the window's own proportions
+    /// rather than being letterboxed into a fixed shape.
     static let focusOverlayPadding: CGFloat = 26
-    static let focusCardScale: CGFloat = 0.88
+    static let focusCardScale: CGFloat = 0.82
+    static let focusCardMaxSize = NSSize(width: 1280, height: 800)
     /// `0 40px 100px`: 40pt of downward offset, and a CSS blur radius is about
     /// twice a layer's shadow radius, so 100px of spread is 50 here.
     static let focusCardShadowDrop: CGFloat = 40
@@ -492,17 +498,26 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
     }
 
-    /// The card's rect inside the overlay: `focusCardScale` of the host, centred,
-    /// and never closer than 26 to an edge. A window too small for the padding
-    /// gives up the card's size rather than the padding, and never goes negative —
-    /// the padding is what keeps the blur reading as a surround rather than a
-    /// frame the card is jammed into.
+    /// The card's rect inside the overlay: the host scaled down by one factor —
+    /// so it keeps the window's proportions — centred, capped at
+    /// `focusCardMaxSize`, and never closer than 26 to an edge. A window too
+    /// small for the padding gives up the card's size rather than the padding,
+    /// and never goes negative: the padding is what keeps the blur reading as a
+    /// surround rather than a frame the card is jammed into.
     ///
     /// Static and pure so the geometry can be checked without a window.
     static func focusCardFrame(in host: NSRect) -> NSRect {
-        let width = min(host.width * focusCardScale, max(0, host.width - focusOverlayPadding * 2))
+        // The most the card may take of this host on either axis, as one factor
+        // applied to both. A per-axis cap would stretch the card away from the
+        // window's shape on any display that is not 16:10.
+        let fit = min(
+            focusCardScale,
+            host.width > 0 ? focusCardMaxSize.width / host.width : focusCardScale,
+            host.height > 0 ? focusCardMaxSize.height / host.height : focusCardScale
+        )
+        let width = min(host.width * fit, max(0, host.width - focusOverlayPadding * 2))
             .rounded(.down)
-        let height = min(host.height * focusCardScale, max(0, host.height - focusOverlayPadding * 2))
+        let height = min(host.height * fit, max(0, host.height - focusOverlayPadding * 2))
             .rounded(.down)
         return NSRect(
             x: (host.midX - width / 2).rounded(),
@@ -1506,7 +1521,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
     }
 
     private func updateChrome() {
-        layer?.cornerRadius = isZoomed ? Self.focusedCornerRadius : Self.cornerRadius
+        let radius = isZoomed ? Self.focusedCornerRadius : Self.cornerRadius
+        layer?.cornerRadius = radius
         layer?.cornerCurve = .continuous
         // The mask is what rounds the terminal's own square corners. It costs
         // one offscreen pass per pane, which is why nothing else here (no
@@ -1515,8 +1531,34 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // since this mask would clip a shadow of its own away.
         layer?.masksToBounds = true
         layer?.backgroundColor = borderColor.cgColor
+        roundChildren(inside: radius)
         dropHighlight.isHidden = !isDropTarget
         updateWorkingRing()
+    }
+
+    /// The two children get the corner the container's mask would otherwise cut
+    /// out of the ring. Both are square and inset by exactly `borderWidth`, so
+    /// along a straight edge the container's background shows through as a 1pt
+    /// border — but at a corner the child's square corner runs straight into the
+    /// mask's arc and the ring pinches out to nothing there. Rounding each child
+    /// one radius smaller, concentric inside the container's, keeps the gap the
+    /// same 1pt the whole way round.
+    ///
+    /// `MinY` is the **top** corner pair here: this view is flipped, and a
+    /// flipped superview flips its sublayers' geometry with it.
+    private func roundChildren(inside radius: CGFloat) {
+        let inner = max(0, radius - Self.borderWidth)
+        header.wantsLayer = true
+        surface.wantsLayer = true
+        for (child, corners) in [
+            (header, CACornerMask([.layerMinXMinYCorner, .layerMaxXMinYCorner])),
+            (surface, CACornerMask([.layerMinXMaxYCorner, .layerMaxXMaxYCorner])),
+        ] {
+            child.layer?.cornerRadius = inner
+            child.layer?.cornerCurve = .continuous
+            child.layer?.maskedCorners = corners
+            child.layer?.masksToBounds = true
+        }
     }
 
     /// Which colour the 1pt ring takes. Ordered by urgency: a drop in flight,
@@ -2281,10 +2323,16 @@ final class PaneBadgeView: NSView {
 /// property of the *host*, not of this view — a test host with no display attached
 /// must not construct one.
 final class PaneZoomBackdropView: NSVisualEffectView {
-    /// `background:rgba(6,6,8,.62)`, the overlay's own tint over the blur, in a
-    /// subview because an `NSVisualEffectView` paints its material into its own
-    /// layer and a background colour set on that layer lands underneath it.
-    static let tint = NSColor(srgbRed: 6 / 255, green: 6 / 255, blue: 8 / 255, alpha: 0.62)
+    /// The design's `rgba(6,6,8,.62)` at a third of that alpha, in a subview
+    /// because an `NSVisualEffectView` paints its material into its own layer and
+    /// a background colour set on that layer lands underneath it.
+    ///
+    /// The mock's .62 is a wash over a *CSS* blur; over the system material it
+    /// left the app behind the card as one dark smear — "too strong". The blur
+    /// alone already makes text unreadable, which is the whole job, so the tint
+    /// only has to say "not this part" and can stay light enough that you can
+    /// still see the shape of what is behind.
+    static let tint = NSColor(srgbRed: 6 / 255, green: 6 / 255, blue: 8 / 255, alpha: 0.22)
 
     var onClick: (() -> Void)?
 

@@ -315,6 +315,25 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(background.terminalView.terminal.options.cursorStyle, .blinkBar)
     }
 
+    /// Every pane but the selected one has its background washed out a shade,
+    /// and the veil never swallows a click meant for the terminal under it.
+    func testOnlyTheSelectedPaneIsUnwashed() {
+        let workspace = makeWorkspace(panes: 3)
+        func wash(_ id: String) -> TerminalWashOverlayView {
+            workspace.container(for: id)!.surface.wash
+        }
+
+        workspace.focusPane("pane-2")
+        XCTAssertTrue(wash("pane-2").isHidden)
+        XCTAssertFalse(wash("pane-1").isHidden)
+        XCTAssertFalse(wash("pane-3").isHidden)
+
+        workspace.focusPane("pane-3")
+        XCTAssertFalse(wash("pane-2").isHidden, "the pane you left recedes")
+        XCTAssertEqual(wash("pane-2").frame, workspace.container(for: "pane-2")!.surface.bounds)
+        XCTAssertNil(wash("pane-2").hitTest(NSPoint(x: 5, y: 5)))
+    }
+
     // MARK: - Header chrome
 
     /// The border says what the pane is doing, and "I have stopped to ask you
@@ -341,6 +360,41 @@ final class PaneWorkspaceViewTests: XCTestCase {
         workspace.focusPane("pane-2")
         workspace.setStatus(.awaitingApproval, for: "pane-1")
         XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.awaitingBorderColor.cgColor)
+    }
+
+    /// The ring has to survive the corners. It is the container's background
+    /// showing through a 1pt inset around two square children — so at a corner
+    /// the child ran straight into the arc the container's mask cuts and the ring
+    /// pinched out to nothing there, most visibly on the focused card, where the
+    /// radius is 12 and the ring is a bright accent. Each child is rounded one
+    /// radius smaller, concentric inside the container's.
+    func testThePaneRingSurvivesTheCorners() throws {
+        let workspace = makeWorkspace(panes: 2)
+        let pane = try XCTUnwrap(workspace.container(for: "pane-1"))
+        let header = try XCTUnwrap(pane.header.layer)
+        let surface = try XCTUnwrap(pane.surface.layer)
+
+        for child in [header, surface] {
+            XCTAssertEqual(
+                child.cornerRadius,
+                PaneContainerView.cornerRadius - PaneContainerView.borderWidth,
+                "concentric inside the container's 9, one border width in"
+            )
+            XCTAssertTrue(child.masksToBounds, "or the radius rounds nothing")
+        }
+        // Only the corners each child actually owns: rounding the header's
+        // bottom or the terminal's top would cut a notch out of the seam between
+        // them, in the middle of the pane. `MinY` is the top pair — the
+        // container is flipped, and that flips its sublayers' geometry with it.
+        XCTAssertEqual(header.maskedCorners, [.layerMinXMinYCorner, .layerMaxXMinYCorner])
+        XCTAssertEqual(surface.maskedCorners, [.layerMinXMaxYCorner, .layerMaxXMaxYCorner])
+
+        XCTAssertTrue(workspace.toggleZoom("pane-1"))
+        XCTAssertEqual(
+            surface.cornerRadius,
+            PaneContainerView.focusedCornerRadius - PaneContainerView.borderWidth,
+            "and the card's bigger corner is followed inwards too"
+        )
     }
 
     /// One mapping, not two: the header's mark and the sidebar's session dots
@@ -664,41 +718,52 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertNil(workspace.zoomedPaneID, "one terminal left, nothing to zoom over")
     }
 
-    /// The card as a share of the overlay it is centred in, which has `padding:26px`.
-    /// Pure geometry, so it is asked directly rather than through a window.
-    func testFocusCardFrameIsAShareOfTheOverlayItIsCentredIn() {
+    /// The card as a share of the overlay it is centred in, capped, keeping the
+    /// window's proportions. Pure geometry, so it is asked directly rather than
+    /// through a window.
+    func testFocusCardFrameIsACappedShareOfTheOverlayItIsCentredIn() {
         let padding = PaneWorkspaceView.focusOverlayPadding
         let scale = PaneWorkspaceView.focusCardScale
+        let cap = PaneWorkspaceView.focusCardMaxSize
         let roomy = PaneWorkspaceView.focusCardFrame(
-            in: NSRect(x: 0, y: 0, width: 1600, height: 1000)
+            in: NSRect(x: 0, y: 0, width: 1400, height: 900)
         )
         XCTAssertEqual(
             roomy.size,
-            NSSize(width: (1600 * scale).rounded(.down), height: (1000 * scale).rounded(.down))
+            NSSize(width: (1400 * scale).rounded(.down), height: (900 * scale).rounded(.down)),
+            "a share of the window while that share fits the cap"
         )
-        XCTAssertEqual(roomy.midX, 800, "centred in the overlay")
-        XCTAssertEqual(roomy.midY, 500)
-        // The point of the change: it keeps growing with the window instead of
-        // stopping at the mock's 1080x720 and shrinking, relatively, from there.
-        let bigger = PaneWorkspaceView.focusCardFrame(
-            in: NSRect(x: 0, y: 0, width: 2400, height: 1500)
+        XCTAssertEqual(roomy.midX, 700, "centred in the overlay")
+        XCTAssertEqual(roomy.midY, 450)
+
+        // A big display is the case the cap exists for: a fraction of it is so
+        // wide there is nothing left to focus *on*.
+        let huge = NSRect(x: 0, y: 0, width: 3840, height: 1600)
+        let capped = PaneWorkspaceView.focusCardFrame(in: huge)
+        XCTAssertEqual(capped.width, cap.width, "capped on the axis that hits the cap first")
+        XCTAssertLessThan(capped.height, cap.height)
+        XCTAssertEqual(
+            capped.width / capped.height,
+            huge.width / huge.height,
+            accuracy: 0.01,
+            "and still the window's own proportions, not letterboxed into the cap's"
         )
-        XCTAssertGreaterThan(bigger.width, roomy.width)
-        XCTAssertGreaterThan(bigger.height, roomy.height)
+        XCTAssertEqual(capped.midX, huge.midX, accuracy: 1, "still centred")
+        XCTAssertEqual(capped.midY, huge.midY, accuracy: 1)
 
         // Small enough that the share would come within 26 of an edge: the card
         // gives up its own size rather than the padding that keeps the blur
         // reading as a surround.
         let cramped = PaneWorkspaceView.focusCardFrame(
-            in: NSRect(x: 0, y: 0, width: 300, height: 200)
+            in: NSRect(x: 0, y: 0, width: 200, height: 120)
         )
         XCTAssertEqual(
             cramped,
             NSRect(
                 x: padding,
                 y: padding,
-                width: 300 - padding * 2,
-                height: 200 - padding * 2
+                width: 200 - padding * 2,
+                height: 120 - padding * 2
             )
         )
 
@@ -1181,8 +1246,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(tint.frame, backdrop.bounds, "the tint covers the blur")
         XCTAssertEqual(
             tint.layer?.backgroundColor.flatMap { NSColor(cgColor: $0)?.alphaComponent },
-            0.62,
-            "at the design's rgba(6,6,8,.62)"
+            PaneZoomBackdropView.tint.alphaComponent,
+            "light enough to see the shape of what is behind, at the design's colour"
+        )
+        XCTAssertLessThan(
+            PaneZoomBackdropView.tint.alphaComponent,
+            0.35,
+            "the blur is what makes it unreadable; the tint only says 'not this part'"
         )
         XCTAssertEqual(backdrop.alphaValue, 1)
     }
