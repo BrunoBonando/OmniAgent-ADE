@@ -42,36 +42,42 @@ for dst in "${ALLOWED[@]}"; do
   fi
 
   echo "Generating $dst from $src"
+  # mktemp, not "/tmp/generated_$dst": a destination name may contain a slash
+  # (.github/copilot-instructions.md), which named a file inside a directory
+  # that does not exist -- so promoting an agent file as authoritative always
+  # died here. It also keeps two concurrent runs off the same path.
+  tmp=$(mktemp)
   {
     echo "<!-- GENERATED from $src — do not edit directly. To change this content, edit $src or run: scripts/sync-instructions.sh $src -->"
     echo
     echo "$SRC_CONTENT"
-  } > "/tmp/generated_$dst"
+  } > "$tmp"
 
-  if [ ! -f "$dst" ] || ! cmp -s "/tmp/generated_$dst" "$dst"; then
-    mv "/tmp/generated_$dst" "$dst"
+  if [ ! -f "$dst" ] || ! cmp -s "$tmp" "$dst"; then
+    mv "$tmp" "$dst"
     git add "$dst" || true
     echo "$dst updated and staged"
   else
-    rm "/tmp/generated_$dst"
+    rm "$tmp"
   fi
 done
 
 # If an agent file was used as source (not the default), also update the authoritative file
 if [ "$src" != "$DEFAULT_AUTH" ]; then
   echo "Updating authoritative file $DEFAULT_AUTH from $src"
+  tmp=$(mktemp)
   {
     echo "<!-- GENERATED from $src — promoted as authoritative by sync script. Edit $src to change. -->"
     echo
     echo "$SRC_CONTENT"
-  } > "/tmp/generated_auth.md"
+  } > "$tmp"
 
-  if [ ! -f "$DEFAULT_AUTH" ] || ! cmp -s "/tmp/generated_auth.md" "$DEFAULT_AUTH"; then
-    mv "/tmp/generated_auth.md" "$DEFAULT_AUTH"
+  if [ ! -f "$DEFAULT_AUTH" ] || ! cmp -s "$tmp" "$DEFAULT_AUTH"; then
+    mv "$tmp" "$DEFAULT_AUTH"
     git add "$DEFAULT_AUTH" || true
     echo "$DEFAULT_AUTH updated and staged"
   else
-    rm "/tmp/generated_auth.md"
+    rm "$tmp"
   fi
 fi
 

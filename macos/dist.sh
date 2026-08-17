@@ -31,15 +31,25 @@ action=${1:-}
 case "$action" in
   sign|notarize|verify|verify-smoke) ;;
   *)
-    echo "usage: $0 sign|notarize|verify|verify-smoke <path-to-OmniAgent.app>" >&2
+    echo "usage: $0 sign|verify|verify-smoke <path-to-OmniAgent.app>" >&2
+    echo "       $0 notarize <path-to-OmniAgent.app|path-to.dmg>" >&2
     echo "  (verify-smoke is a known-broken harness check, opt-in only -- see this script's comments)" >&2
     exit 2
     ;;
 esac
 
 app=${2:-}
-[ -n "$app" ] || { echo "usage: $0 $action <path-to-OmniAgent.app>" >&2; exit 2; }
-[ -d "$app" ] || { echo "$0: no such app bundle: $app" >&2; exit 1; }
+[ -n "$app" ] || { echo "usage: $0 $action <path>" >&2; exit 2; }
+# `notarize` is the one subcommand that also takes a disk image; everything
+# else operates on the bundle itself.
+case "$action:$app" in
+  notarize:*.dmg)
+    [ -f "$app" ] || { echo "$0: no such disk image: $app" >&2; exit 1; }
+    ;;
+  *)
+    [ -d "$app" ] || { echo "$0: no such app bundle: $app" >&2; exit 1; }
+    ;;
+esac
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 entitlements="$root/macos/OmniAgent/OmniAgent.entitlements"
@@ -175,15 +185,45 @@ EOF
     exit 1
   fi
 
-  zip="${app%.app}.zip"
-  echo "$0 notarize: zipping $app -> $zip..." >&2
-  ditto -c -k --keepParent "$app" "$zip"
+  case "$app" in
+    *.dmg)
+      # A disk image must be SIGNED as well as notarized, and this is the step
+      # that is easy to miss: `stapler staple` reports "The staple and validate
+      # action worked!" on an *unsigned* .dmg, and notarization accepts it too,
+      # because both are judging the app inside. Only `spctl -a -t open`
+      # notices, as "source=no usable signature" -- i.e. the artifact looks
+      # finished by every check you are likely to run, and still trips
+      # Gatekeeper on the machine you sent it to. So sign first, always.
+      identity=${OMNIAGENT_CODESIGN_IDENTITY:-}
+      [ -n "$identity" ] || identity=$(default_identity || true)
+      if [ -z "$identity" ]; then
+        echo "$0 notarize: no signing identity for the disk image (set OMNIAGENT_CODESIGN_IDENTITY)." >&2
+        exit 1
+      fi
+      echo "$0 notarize: signing disk image ($app)..." >&2
+      codesign --force --timestamp --sign "$identity" "$app"
+      submission=$app
+      ;;
+    *)
+      submission="${app%.app}.zip"
+      echo "$0 notarize: zipping $app -> $submission..." >&2
+      ditto -c -k --keepParent "$app" "$submission"
+      ;;
+  esac
 
   echo "$0 notarize: submitting to Apple notary service..." >&2
-  xcrun notarytool submit "$zip" --keychain-profile "$profile" --wait
+  xcrun notarytool submit "$submission" --keychain-profile "$profile" --wait
 
   echo "$0 notarize: stapling ticket to $app..." >&2
   xcrun stapler staple "$app"
+
+  # Prove it rather than trust it. `stapler` succeeding is not evidence that
+  # Gatekeeper will accept the artifact -- see the disk-image note above.
+  echo "$0 notarize: asking Gatekeeper..." >&2
+  case "$app" in
+    *.dmg) spctl -a -vv -t open --context context:primary-signature "$app" ;;
+    *) spctl -a -vv "$app" ;;
+  esac
   echo "$0 notarize: done." >&2
 }
 
