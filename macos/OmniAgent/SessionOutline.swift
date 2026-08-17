@@ -136,33 +136,58 @@ enum SessionOutline {
         "\(engine.displayName) \(n)"
     }
 
-    /// What to call the terminal about to be created in `group`.
+    /// Whether a stored label is one this app generated rather than one the
+    /// user typed.
     ///
-    /// The same lowest-free-number rule as `nextSessionName`, scoped to the
-    /// session rather than the project — two terminals sitting in one session
-    /// are the pair that must not read the same.
-    ///
-    /// Naming them at all is the point: `paneLabel` fell back to the engine's
-    /// raw name, so every Claude pane in a session rendered `claude`, and the
-    /// OSC title that would otherwise break the tie does not (agents set the
-    /// same title in every pane, and set none at all until their first
-    /// prompt). The stored name wins over the title from then on; the live
-    /// title still drives the *window* title, so nothing is actually lost.
-    static func nextPaneName(_ panes: [PaneDescriptor], group: String, engine: Engine) -> String {
-        let taken = Set(panes.filter { $0.group == group }.map(paneLabel))
-        var n = 1
-        while taken.contains(defaultPaneName(engine, n)) { n += 1 }
-        return defaultPaneName(engine, n)
+    /// Terminals were briefly *stored* under their generated name, which made
+    /// every one of them look hand-named and permanently outrank the summary
+    /// the agent reports. Panes carrying those labels are still out there in
+    /// saved layouts, so they are recognised and dropped on the way in — a
+    /// user who deliberately typed "Claude 2" loses a name they would have got
+    /// for free anyway.
+    static func isGeneratedPaneName(_ name: String) -> Bool {
+        let parts = name.split(separator: " ")
+        guard parts.count == 2, Int(parts[1]) != nil else { return false }
+        return Engine.allCases.contains { $0.displayName == parts[0] }
     }
 
-    /// What a pane's row says: its own label, else the engine's name — the
-    /// port of `ui/src/state/sessions.ts`'s `tabDisplayLabel`.
+    /// The number a new terminal takes in its session — the lowest free one,
+    /// so terminals opened and closed out of order never collide and never
+    /// climb forever.
+    ///
+    /// A number, not a name: the name is only a placeholder until the agent
+    /// says what it is working on, and storing it would make it permanent.
+    static func nextPaneNumber(_ panes: [PaneDescriptor], group: String, engine: Engine) -> Int {
+        let taken = Set(
+            panes
+                .filter { $0.group == group && $0.engine == engine }
+                .map(\.autoNumber)
+        )
+        var n = 1
+        while taken.contains(n) { n += 1 }
+        return n
+    }
+
+    /// What a terminal is called, in order of who has the better claim:
+    ///
+    /// 1. **the name the user typed** — nothing outranks it, and nothing
+    ///    overwrites it afterwards;
+    /// 2. **what the agent says it is doing** — the title the engine reports
+    ///    (Claude publishes a summary of the task in flight), which is the
+    ///    whole point of showing a name rather than a number;
+    /// 3. **a numbered placeholder** — "Claude 2", until the agent has said
+    ///    anything. Per session and per engine, so two terminals never read
+    ///    the same while they are all still starting up.
+    ///
+    /// Only (1) is stored. (2) is live and (3) is derived, so a terminal is
+    /// never stuck wearing a name it was given before it had anything to say.
     static func paneLabel(_ pane: PaneDescriptor) -> String {
         if let label = pane.label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
             return label
         }
-        if !pane.title.isEmpty { return pane.title }
-        return pane.engine.rawValue
+        let title = pane.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty { return title }
+        return defaultPaneName(pane.engine, pane.autoNumber)
     }
 
     /// What a project row says: the label `listProjects` returned for this

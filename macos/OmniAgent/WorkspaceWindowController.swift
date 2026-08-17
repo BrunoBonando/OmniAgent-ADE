@@ -206,6 +206,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.onRenameSession = { [weak self] session, name in
             self?.renameSession(session, to: name)
         }
+        shellSidebar.onRenamePane = { [weak self] paneID, name in
+            self?.renamePane(paneID, to: name)
+        }
         shellSidebar.onNewSession = { [weak self] in self?.newSession(nil) }
         shellSidebar.onNewTerminal = { [weak self] in
             guard let self else { return }
@@ -301,13 +304,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         content.view = contentContainer
         let split = NSSplitViewController()
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
-        // The design fixes the sidebar at 238pt (`flex:none;width:238px`), and
-        // every inset inside it is measured against that. Pinning both bounds
-        // is what makes the drawing and the app agree; the pane grid takes all
-        // the resizing.
-        sidebarItem.minimumThickness = ShellMetrics.sidebarWidth
-        sidebarItem.maximumThickness = ShellMetrics.sidebarWidth
+        // The design draws the sidebar at 238pt (`flex:none;width:238px`), and
+        // that is where it opens — but it is a starting width, not a cage.
+        // Both bounds used to be pinned to it, which made the divider
+        // immovable: a sidebar holding session names and a file tree is
+        // exactly the thing a user wants wider or narrower depending on what
+        // they are doing.
+        //
+        // The floor is the design's own width less what the widest nav row can
+        // give up; the ceiling keeps the pane grid the larger half on any
+        // window this app opens at.
+        sidebarItem.minimumThickness = ShellMetrics.sidebarMinimumWidth
+        sidebarItem.maximumThickness = ShellMetrics.sidebarMaximumWidth
         sidebarItem.canCollapse = true
+        // AppKit remembers the dragged position under this name, so the width
+        // survives a relaunch without anything here persisting it.
+        split.splitView.autosaveName = "OmniAgentWorkspaceSidebar"
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
         window.contentViewController = split
@@ -930,6 +942,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Renames a session — the name is stored on every pane in the group,
     /// exactly as `session/renamed` does in the web build, which is what
     /// makes one array the whole restore story.
+    /// A name the user typed for one terminal. Stored on the pane, which is
+    /// what makes it outrank the summary the agent keeps reporting — the whole
+    /// point of renaming one is that it stops moving.
+    func renamePane(_ paneID: String, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        workspace.updateDescriptor(for: paneID) { $0.label = trimmed }
+    }
+
     func renameSession(_ session: SessionGroupNode, to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -1125,19 +1146,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func addPane(_ pane: RestoredPane, startSession: Bool) -> Bool {
         let sessionID = pane.sessionID
         var descriptor = PaneDescriptor(pane)
-        // The one place a terminal gets its name, so a restored pane and a
-        // brand-new one are named by the same rule. Restored panes from before
-        // panes were named have no stored label and would otherwise keep
-        // rendering the engine's raw name — every Claude terminal reading
-        // `claude` is exactly the collision this fixes. Restoration adds panes
+        // The one place a terminal gets its placeholder number, so a restored
+        // pane and a brand-new one are numbered by the same rule. Panes arrive
         // one at a time, so each sees the ones already placed and takes the
         // next free number in its own session.
-        if (descriptor.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty {
-            descriptor.label = SessionOutline.nextPaneName(
-                workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
-                group: descriptor.group,
-                engine: descriptor.engine
-            )
+        descriptor.autoNumber = SessionOutline.nextPaneNumber(
+            workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
+            group: descriptor.group,
+            engine: descriptor.engine
+        )
+        // A label this app generated is not a name the user chose, and leaving
+        // it stored would outrank the summary the agent reports for the rest
+        // of the pane's life. Dropped on the way in, so layouts saved while
+        // those names were being stored heal themselves on the next launch.
+        if let stored = descriptor.label, SessionOutline.isGeneratedPaneName(stored) {
+            descriptor.label = nil
         }
         guard workspace.addPane(descriptor) else { return false }
         // A pane that did not come back from the persisted layout has a session

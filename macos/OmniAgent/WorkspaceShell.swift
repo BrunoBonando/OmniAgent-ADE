@@ -163,6 +163,12 @@ enum ShellPalette {
 /// sessions rail's 18pt indent line up by construction, not by coincidence).
 enum ShellMetrics {
     static let sidebarWidth: CGFloat = 238
+    /// How far the sidebar may be dragged. `sidebarWidth` is where it opens;
+    /// these are the limits it may be dragged between, chosen so the nav rows
+    /// still read at the floor and the terminals keep the larger half at the
+    /// ceiling.
+    static let sidebarMinimumWidth: CGFloat = 190
+    static let sidebarMaximumWidth: CGFloat = 460
     static let navRowInset = NSEdgeInsets(top: 8, left: 9, bottom: 8, right: 9)
     static let navBarWidth: CGFloat = 3
     static let navIconTile: CGFloat = 22
@@ -1433,15 +1439,32 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
 }
 
 /// A terminal row under its session.
-final class TerminalRowView: ShellRowView {
+final class TerminalRowView: ShellRowView, NSTextFieldDelegate {
     let paneID: String
+
+    /// Double-click to rename, the same affordance a session row has. A
+    /// terminal normally wears whatever the agent says it is working on; this
+    /// is how the user pins a name of their own over the top of it.
+    var onRename: ((String) -> Void)?
 
     private let statusGlyph = NSImageView()
     private var isFocused: Bool
+    private let titleField: NSTextField
+    /// What the row shows now — the editor opens on this, and a cancelled or
+    /// empty rename puts it back.
+    private let displayedName: String
 
     init(pane: PaneDescriptor, focused: Bool, status: RemoteSessionStatus?) {
         paneID = pane.sessionID
         isFocused = focused
+        displayedName = SessionOutline.paneLabel(pane)
+        titleField = ShellFont.label(
+            displayedName,
+            font: ShellFont.ui(14),
+            color: focused
+                ? ShellPalette.inkTerminal
+                : (pane.engine == .shell ? ShellPalette.inkTertiary : ShellPalette.inkSecondary)
+        )
         super.init(frame: .zero)
 
         wantsLayer = true
@@ -1451,13 +1474,7 @@ final class TerminalRowView: ShellRowView {
         hoverFill = ShellPalette.hoverSoft
 
         let icon = TerminalRowView.engineIcon(for: pane.engine)
-        let title = ShellFont.label(
-            SessionOutline.paneLabel(pane),
-            font: ShellFont.ui(14),
-            color: focused
-                ? ShellPalette.inkTerminal
-                : (pane.engine == .shell ? ShellPalette.inkTertiary : ShellPalette.inkSecondary)
-        )
+        let title = titleField
 
         // The design tints the OmniAgent mark per status and puts a matching
         // glow behind it; a template image is what lets one asset do that.
@@ -1519,6 +1536,83 @@ final class TerminalRowView: ShellRowView {
 
     /// The engine's own logo, falling back to the design's stroked terminal
     /// glyph when the asset is missing so a row is never blank.
+    // MARK: - Rename
+
+    private(set) var isRenaming = false
+
+    /// The label doubles as the rename editor; exposed for the tests.
+    var renameField: NSTextField { titleField }
+
+    /// Commits whatever is in the editor, the way Return does.
+    func commitRenameForTesting() { endRenaming(commit: true) }
+
+    override func mouseDown(with event: NSEvent) {
+        guard event.clickCount == 2, onRename != nil else {
+            super.mouseDown(with: event)
+            return
+        }
+        beginRenaming()
+    }
+
+    /// A press that lands while the editor is up must not also select the row,
+    /// or committing a rename would focus the terminal underneath it.
+    override func mouseUp(with event: NSEvent) {
+        guard !isRenaming else { return }
+        super.mouseUp(with: event)
+    }
+
+    func beginRenaming() {
+        guard !isRenaming else { return }
+        isRenaming = true
+        titleField.isEditable = true
+        titleField.isSelectable = true
+        titleField.isBordered = false
+        titleField.drawsBackground = true
+        titleField.backgroundColor = NSColor(white: 1, alpha: 0.1)
+        titleField.focusRingType = .none
+        titleField.delegate = self
+        titleField.stringValue = displayedName
+        window?.makeFirstResponder(titleField)
+        titleField.currentEditor()?.selectAll(nil)
+    }
+
+    private func endRenaming(commit: Bool) {
+        guard isRenaming else { return }
+        let typed = titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        isRenaming = false
+        titleField.isEditable = false
+        titleField.isSelectable = false
+        titleField.drawsBackground = false
+        titleField.delegate = nil
+        window?.makeFirstResponder(nil)
+
+        // Empty is a cancel, not "clear the name": clearing would hand the row
+        // straight back to the agent's title, which reads as the rename having
+        // been thrown away.
+        guard commit, !typed.isEmpty, typed != displayedName else {
+            titleField.stringValue = displayedName
+            return
+        }
+        onRename?(typed)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            endRenaming(commit: true)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            endRenaming(commit: false)
+            return true
+        default:
+            return false
+        }
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        endRenaming(commit: true)
+    }
+
     private static func engineIcon(for engine: Engine) -> NSView {
         if let image = engine.iconImage {
             let view = NSImageView(image: image)
@@ -1577,6 +1671,7 @@ final class SessionsTreeView: NSView {
     var onNewSession: (() -> Void)?
     var onNewTerminal: (() -> Void)?
     var onRenameSession: ((SessionGroupNode, String) -> Void)?
+    var onRenamePane: ((String, String) -> Void)?
 
     private let countField = ShellFont.label(font: ShellFont.mono(12, .semibold), color: ShellPalette.inkFainter)
     private let rows = NSStackView()
@@ -1724,6 +1819,7 @@ final class SessionsTreeView: NSView {
                     status: statuses[paneID]
                 )
                 terminal.onPress = { [weak self] in self?.onSelectPane?(paneID) }
+                terminal.onRename = { [weak self] name in self?.onRenamePane?(paneID, name) }
                 rows.addArrangedSubview(terminal)
                 terminal.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
             }
@@ -2248,6 +2344,7 @@ final class WorkspaceSidebarView: NSView {
     var onNewSession: (() -> Void)?
     var onNewTerminal: (() -> Void)?
     var onRenameSession: ((SessionGroupNode, String) -> Void)?
+    var onRenamePane: ((String, String) -> Void)?
     var onOpenSettings: (() -> Void)?
 
     let picker = WorkspacePickerView()
@@ -2270,7 +2367,8 @@ final class WorkspaceSidebarView: NSView {
     private var pickerPin: NSLayoutConstraint!
     private var workspacePin: NSLayoutConstraint!
     private let navStack = NSStackView()
-    private let sessionsContainer = NSView()
+    /// Exposed so the suite can pin where it sits in the menu.
+    private(set) var sessionsContainer = NSView()
     /// The seam above FILES, and the height it controls.
     let splitter = ShellSplitterView()
     private(set) var menuHeight: NSLayoutConstraint!
@@ -2309,6 +2407,9 @@ final class WorkspaceSidebarView: NSView {
         sessionsTree.onSelectSession = { [weak self] session in self?.onSelectSession?(session) }
         sessionsTree.onNewSession = { [weak self] in self?.onNewSession?() }
         sessionsTree.onNewTerminal = { [weak self] in self?.onNewTerminal?() }
+        sessionsTree.onRenamePane = { [weak self] paneID, name in
+            self?.onRenamePane?(paneID, name)
+        }
         sessionsTree.onRenameSession = { [weak self] session, name in
             self?.onRenameSession?(session, name)
         }
@@ -2397,8 +2498,18 @@ final class WorkspaceSidebarView: NSView {
         // whole half, so a tree that is the only scroller has nowhere to put
         // the sessions. One scroller over the lot means the user can always
         // reach them, at any seam position.
-        for row in navRows { navStack.addArrangedSubview(row) }
-        navStack.addArrangedSubview(sessionsContainer)
+        // The sessions overview belongs to Terminals, so it hangs directly off
+        // that row rather than trailing the whole menu. Files is a destination
+        // *below* the terminals, and the tree it opens is below that again —
+        // with the sessions last, the Files button sat above the very list it
+        // has nothing to do with, reading as though the sessions were part of
+        // Files. `applyDestination` hides the container off the terminals
+        // destination, and a hidden arranged subview collapses, so Files
+        // follows Terminals directly whenever the list is not showing.
+        for row in navRows {
+            navStack.addArrangedSubview(row)
+            if row.destination == .terminals { navStack.addArrangedSubview(sessionsContainer) }
+        }
         for row in navRows {
             row.widthAnchor.constraint(equalTo: navStack.widthAnchor, constant: -14).isActive = true
             row.setContentHuggingPriority(.required, for: .vertical)

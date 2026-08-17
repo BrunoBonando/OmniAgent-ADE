@@ -23,8 +23,16 @@ struct PaneDescriptor: Equatable {
     var project: String
     var engine: Engine
     var cwd: String
+    /// The name the **user** typed, and only that. A generated placeholder is
+    /// never stored here: `SessionOutline.paneLabel` derives one when this is
+    /// empty, so a terminal that has not been named by hand is free to show
+    /// whatever the agent reports it is working on.
     var label: String?
     var themeId: TerminalThemeId?
+    /// Which "Claude 2" this terminal is, within its session. Derived on the
+    /// way in and never persisted — the number is a placeholder, and storing
+    /// it would make it outlive the moment it is useful for.
+    var autoNumber: Int = 1
 
     init(
         sessionID: String,

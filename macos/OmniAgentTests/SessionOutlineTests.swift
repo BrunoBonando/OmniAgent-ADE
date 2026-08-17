@@ -102,7 +102,7 @@ final class SessionOutlineTests: XCTestCase {
         XCTAssertEqual(SessionOutline.nextSessionName([], project: "alpha"), "Session 1")
     }
 
-    func testAPaneRowPrefersItsOwnNameThenItsLiveTitleThenItsEngine() {
+    func testAPaneRowPrefersItsOwnNameThenItsLiveTitleThenAPlaceholder() {
         XCTAssertEqual(
             SessionOutline.paneLabel(pane("a", project: "p", group: "g", label: "migrate")),
             "migrate"
@@ -110,7 +110,10 @@ final class SessionOutlineTests: XCTestCase {
         var titled = pane("a", project: "p", group: "g")
         titled.title = "~/src"
         XCTAssertEqual(SessionOutline.paneLabel(titled), "~/src")
-        XCTAssertEqual(SessionOutline.paneLabel(pane("a", project: "p", group: "g")), "shell")
+        // Was the engine's raw name, `shell`, which every unnamed terminal of
+        // that engine shared. The numbered placeholder is per session, so two
+        // of them never read the same while they are still starting up.
+        XCTAssertEqual(SessionOutline.paneLabel(pane("a", project: "p", group: "g")), "Shell 1")
     }
 
     func testAPaneWithNoProjectIsNamedRatherThanShownAsABlankRow() {
@@ -118,46 +121,67 @@ final class SessionOutlineTests: XCTestCase {
         XCTAssertEqual(SessionOutline.projectLabel("alpha"), "alpha")
     }
 
-    /// Terminals in a session are told apart by name. Without this every
-    /// Claude pane fell back to the engine's own name and a session full of
-    /// them read `claude`, `claude`, `claude`.
-    func testTerminalsInASessionAreNamedApart() {
-        var panes: [PaneDescriptor] = []
-        XCTAssertEqual(SessionOutline.nextPaneName(panes, group: "g1", engine: .claude), "Claude 1")
+    /// A terminal wears what the agent says it is doing. The number is only a
+    /// placeholder for the gap before the agent has said anything — Claude
+    /// publishes a summary of the task in flight as the terminal title, and
+    /// that is the name worth showing.
+    func testATerminalShowsWhatTheAgentIsWorkingOn() {
+        var descriptor = pane("a", project: "alpha", group: "g1")
+        descriptor.engine = .claude
+        descriptor.autoNumber = 2
 
-        panes.append(pane("a", project: "alpha", group: "g1", label: "Claude 1"))
-        XCTAssertEqual(SessionOutline.nextPaneName(panes, group: "g1", engine: .claude), "Claude 2")
+        XCTAssertEqual(SessionOutline.paneLabel(descriptor), "Claude 2", "nothing reported yet")
 
-        // Engines are numbered independently — a shell does not push Claude on.
-        XCTAssertEqual(SessionOutline.nextPaneName(panes, group: "g1", engine: .shell), "Shell 1")
+        descriptor.title = "Fixing the sidebar order"
+        XCTAssertEqual(SessionOutline.paneLabel(descriptor), "Fixing the sidebar order")
+
+        // And a name the user typed outranks both, permanently.
+        descriptor.label = "Release prep"
+        XCTAssertEqual(SessionOutline.paneLabel(descriptor), "Release prep")
+        descriptor.title = "Something else entirely"
+        XCTAssertEqual(SessionOutline.paneLabel(descriptor), "Release prep")
     }
 
-    func testPaneNumberingIsPerSessionAndReusesTheLowestFreeNumber() {
-        let panes = [
-            pane("a", project: "alpha", group: "g1", label: "Claude 1"),
-            pane("c", project: "alpha", group: "g1", label: "Claude 3"),
-            pane("b", project: "alpha", group: "g2", label: "Claude 1"),
-        ]
-
-        XCTAssertEqual(
-            SessionOutline.nextPaneName(panes, group: "g1", engine: .claude),
-            "Claude 2",
-            "the gap left by a closed terminal is filled before the count climbs"
-        )
-        XCTAssertEqual(
-            SessionOutline.nextPaneName(panes, group: "g2", engine: .claude),
-            "Claude 2",
-            "and each session numbers its own, so g1's three do not push g2 along"
-        )
+    /// Regression: terminals were briefly *stored* under their generated name,
+    /// which made every one of them look hand-named and outrank the agent's
+    /// summary forever. Layouts carrying those names heal on the way in.
+    func testAGeneratedNameIsRecognisedSoItCanBeDroppedOnRestore() {
+        XCTAssertTrue(SessionOutline.isGeneratedPaneName("Claude 1"))
+        XCTAssertTrue(SessionOutline.isGeneratedPaneName("Shell 12"))
+        XCTAssertTrue(SessionOutline.isGeneratedPaneName("AntiGravity 3"))
+        XCTAssertFalse(SessionOutline.isGeneratedPaneName("Release prep"))
+        XCTAssertFalse(SessionOutline.isGeneratedPaneName("Claude"))
+        XCTAssertFalse(SessionOutline.isGeneratedPaneName("Claude 1 backup"))
+        XCTAssertFalse(SessionOutline.isGeneratedPaneName("Fixing Claude 1"))
     }
 
-    /// The name has to beat the OSC title, or agents — which set the same
-    /// title in every pane, and none at all until their first prompt — put the
-    /// collision straight back.
-    func testAStoredNameWinsOverTheTitleTheTerminalReports() {
-        var descriptor = pane("a", project: "alpha", group: "g1", label: "Claude 2")
-        descriptor.title = "claude"
-        XCTAssertEqual(SessionOutline.paneLabel(descriptor), "Claude 2")
+    func testPlaceholderNumbersArePerSessionPerEngineAndReuseTheLowestFree() {
+        var first = pane("a", project: "alpha", group: "g1")
+        first.engine = .claude
+        first.autoNumber = 1
+        var third = pane("c", project: "alpha", group: "g1")
+        third.engine = .claude
+        third.autoNumber = 3
+        var other = pane("b", project: "alpha", group: "g2")
+        other.engine = .claude
+        other.autoNumber = 1
+        let panes = [first, third, other]
+
+        XCTAssertEqual(
+            SessionOutline.nextPaneNumber(panes, group: "g1", engine: .claude),
+            2,
+            "the gap a closed terminal left is filled before the count climbs"
+        )
+        XCTAssertEqual(
+            SessionOutline.nextPaneNumber(panes, group: "g2", engine: .claude),
+            2,
+            "each session numbers its own"
+        )
+        XCTAssertEqual(
+            SessionOutline.nextPaneNumber(panes, group: "g1", engine: .shell),
+            1,
+            "and a shell does not push Claude along"
+        )
     }
 
     private func pane(

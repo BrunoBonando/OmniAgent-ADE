@@ -18,7 +18,7 @@ final class CommandPaletteTests: XCTestCase {
         let switches = commands.filter { if case .focusPane = $0.action { return true } else { return false } }
         XCTAssertEqual(switches.map(\.title), [
             "Switch to alpha — Build — migrate",
-            "Switch to beta — Session 1 — shell",
+            "Switch to beta — Session 1 — Shell 1",
         ])
         XCTAssertEqual(switches.map(\.detail), ["shell", "shell"])
     }
@@ -93,7 +93,7 @@ final class CommandPaletteTests: XCTestCase {
             focusedPaneID: nil,
             unreadNotifications: 0
         )
-        XCTAssertEqual(noLabels.first { $0.id == "focus:a" }?.title, "Switch to alpha — Session 1 — shell")
+        XCTAssertEqual(noLabels.first { $0.id == "focus:a" }?.title, "Switch to alpha — Session 1 — Shell 1")
 
         let withLabels = CommandPaletteModel.build(
             panes: [pane("a", project: "alpha", group: "g1")],
@@ -102,7 +102,7 @@ final class CommandPaletteTests: XCTestCase {
             unreadNotifications: 0,
             projectLabels: ["alpha": "Alpha Project"]
         )
-        XCTAssertEqual(withLabels.first { $0.id == "focus:a" }?.title, "Switch to Alpha Project — Session 1 — shell")
+        XCTAssertEqual(withLabels.first { $0.id == "focus:a" }?.title, "Switch to Alpha Project — Session 1 — Shell 1")
     }
 
     // MARK: - brain search (Task 6a-2/6b-2)

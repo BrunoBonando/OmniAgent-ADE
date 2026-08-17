@@ -133,6 +133,41 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertTrue(scroll.hasVerticalScroller)
     }
 
+    /// The sessions overview belongs to Terminals, so it hangs directly off
+    /// that row — with Files, a destination *below* the terminals, after it.
+    /// It used to trail the whole menu, which put the Files button above the
+    /// very list it has nothing to do with.
+    func testTheSessionsListSitsUnderTerminalsAndAboveFiles() throws {
+        let sidebar = makeSidebar()
+        sidebar.showWorkspace(project("p1", "Project"), animated: false)
+        sidebar.applyDestination(.terminals)
+        sidebar.reloadSessions(
+            panes: [pane("pane-1", group: "g1")],
+            focusedPaneID: "pane-1",
+            statuses: [:],
+            project: "p1"
+        )
+        sidebar.layoutSubtreeIfNeeded()
+
+        func position(_ view: NSView) -> CGFloat { view.convert(view.bounds, to: sidebar).midY }
+        let dash = try XCTUnwrap(sidebar.navRows.first { $0.destination == .dashboard })
+        let terminals = try XCTUnwrap(sidebar.navRows.first { $0.destination == .terminals })
+        let files = try XCTUnwrap(sidebar.navRows.first { $0.destination == .files })
+        XCTAssertFalse(sidebar.sessionsContainer.isHidden, "terminals is the active destination")
+
+        // Which way "further down the menu" runs in this coordinate space is
+        // read off a pair whose order is not in question, rather than assumed.
+        let downwards: (CGFloat, CGFloat) -> Bool = position(terminals) > position(dash) ? (>) : (<)
+        XCTAssertTrue(
+            downwards(position(sidebar.sessionsContainer), position(terminals)),
+            "the sessions list hangs off Terminals"
+        )
+        XCTAssertTrue(
+            downwards(position(files), position(sidebar.sessionsContainer)),
+            "and Files sits below the sessions, not above them"
+        )
+    }
+
     /// The seam is a handle, not a hairline: a 1pt hit target is unusable.
     func testTheDividerIsGrabbableAndSaysSo() {
         let sidebar = makeSidebar()
