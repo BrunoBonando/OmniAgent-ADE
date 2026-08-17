@@ -13,9 +13,10 @@ protocol DaemonStatusProviding {
 }
 
 /// Owns the whole Task 6c mechanism end to end: attempts `SMAppService`
-/// registration once at launch, falls back to spawning the daemon itself
-/// when registration isn't (yet) `.enabled`, and collects restart-loss
-/// reports fed from `SessionConnection.onReattachFailed`.
+/// registration once at launch, spawns the daemon itself whenever nothing
+/// is listening on the socket (registered or not — see
+/// `DaemonPersistence.shouldSpawn`), and collects restart-loss reports fed
+/// from `SessionConnection.onReattachFailed`.
 ///
 /// Deliberately thin — every actual decision (`resolveMode`,
 /// `shouldAttemptRegistration`, `shouldSpawn`) lives in the pure
@@ -84,9 +85,10 @@ final class DaemonPersistenceController {
 
     /// Call once at launch, before connecting. Registers (or reads back an
     /// already-registered status without re-prompting), resolves the mode,
-    /// and — only in app-owned mode, only when nothing is actually
-    /// reachable on the socket (a real probe, not a file check) — spawns
-    /// the daemon.
+    /// and — whenever nothing is actually reachable on the socket (a real
+    /// probe, not a file check) — spawns the daemon, in either mode. See
+    /// `DaemonPersistence.shouldSpawn` for why a registered service is no
+    /// guarantee that a daemon is listening.
     func start() {
         let status = registrar.currentStatus()
         let outcome: DaemonRegistrationOutcome =
@@ -97,9 +99,7 @@ final class DaemonPersistenceController {
         mode = DaemonPersistence.resolveMode(from: outcome)
         onModeChanged?(mode)
 
-        guard
-            DaemonPersistence.shouldSpawn(mode: mode, socketReachable: socketReachable())
-        else { return }
+        guard DaemonPersistence.shouldSpawn(socketReachable: socketReachable()) else { return }
         guard let binaryPath = resolveBinaryPath() else { return }
         ownedProcess = try? processLauncher.launch(
             binaryPath: binaryPath,

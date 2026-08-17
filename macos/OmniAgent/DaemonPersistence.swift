@@ -156,16 +156,30 @@ enum DaemonPersistence {
         return .appOwned
     }
 
-    /// Degraded mode must not pile a second daemon process on top of one
-    /// already listening (dev-started manually, or spawned by an earlier
-    /// launch of this same app). `socketReachable` must come from an actual
-    /// liveness probe (`DaemonSocketProbe.isReachable`), not file
-    /// existence — a Unix domain socket file survives its owning process
-    /// dying uncleanly, and trusting the file alone would leave a stale
-    /// crash permanently unrecoverable in app-owned mode (no launchd to
-    /// notice and restart it). See `DaemonSocketProbe`'s doc comment.
-    static func shouldSpawn(mode: DaemonPersistenceMode, socketReachable: Bool) -> Bool {
-        mode == .appOwned && !socketReachable
+    /// Nothing answering on the socket means no daemon, whatever the
+    /// registration says — so the liveness probe alone decides, and the
+    /// probe alone also stops us piling a second daemon on top of one
+    /// already listening (dev-started by hand, or spawned by an earlier
+    /// launch of this same app).
+    ///
+    /// This deliberately ignores the mode. `.enabled` is launchd's promise
+    /// to own the daemon's lifecycle, not evidence that anything is
+    /// listening, and the two come apart in an ordinary install: replacing
+    /// the bundle (`scripts/rebuild-app.sh` does `rm -rf` then `ditto`)
+    /// leaves the registration `.enabled` while launchd can no longer
+    /// resolve its bundle-relative `Program`, so every spawn fails with
+    /// `EX_CONFIG`. Gating on the mode meant the app declined to start a
+    /// daemon that launchd could not start either — and since the running
+    /// daemon survives the install, that stays invisible until it next
+    /// exits, at which point no terminal can ever open again.
+    ///
+    /// `socketReachable` must come from an actual liveness probe
+    /// (`DaemonSocketProbe.isReachable`), not file existence — a Unix
+    /// domain socket file survives its owning process dying uncleanly, and
+    /// trusting the file alone would leave a stale crash permanently
+    /// unrecoverable. See `DaemonSocketProbe`'s doc comment.
+    static func shouldSpawn(socketReachable: Bool) -> Bool {
+        !socketReachable
     }
 
     static func statusDescription(

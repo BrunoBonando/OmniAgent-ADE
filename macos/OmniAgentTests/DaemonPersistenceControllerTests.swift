@@ -67,13 +67,17 @@ final class DaemonPersistenceControllerTests: XCTestCase {
         )
     }
 
-    func testStartResolvesRegisteredServiceModeAndDoesNotSpawn() {
+    func testStartResolvesRegisteredServiceModeAndLeavesALiveDaemonAlone() {
         let registrar = FakeDaemonServiceRegistrar(
             status: .notRegistered,
             registerOutcome: .registered(.enabled)
         )
         let launcher = FakeDaemonProcessLauncher()
-        let controller = makeController(registrar: registrar, launcher: launcher)
+        let controller = makeController(
+            registrar: registrar,
+            launcher: launcher,
+            socketReachable: true
+        )
         var observedModes: [DaemonPersistenceMode] = []
         controller.onModeChanged = { observedModes.append($0) }
 
@@ -83,6 +87,32 @@ final class DaemonPersistenceControllerTests: XCTestCase {
         XCTAssertEqual(observedModes, [.registeredService])
         XCTAssertEqual(registrar.registerCallCount, 1)
         XCTAssertEqual(launcher.launchCallCount, 0)
+    }
+
+    /// Regression: spawning used to be gated on `.appOwned` mode, which
+    /// treated an `.enabled` registration as proof a daemon was listening.
+    /// It is no such thing — replacing the app bundle (`rm -rf` + `ditto`,
+    /// what every `scripts/rebuild-app.sh` install does) leaves the job
+    /// `.enabled` while launchd can no longer resolve its bundle-relative
+    /// `Program`, so it fails every spawn with `EX_CONFIG`. The app then
+    /// declined to start a daemon nothing else was going to start either.
+    /// The already-running daemon survives the install, so this stayed
+    /// invisible until one exited — after which no terminal could open at
+    /// all, with the daemon settings still cheerfully reporting a healthy
+    /// login item.
+    func testStartSpawnsForARegisteredServiceLaunchdIsNotActuallyRunning() {
+        let registrar = FakeDaemonServiceRegistrar(status: .enabled, registerOutcome: .failed)
+        let launcher = FakeDaemonProcessLauncher()
+        let controller = makeController(
+            registrar: registrar,
+            launcher: launcher,
+            socketReachable: false
+        )
+
+        controller.start()
+
+        XCTAssertEqual(controller.mode, .registeredService, "the registration really is enabled")
+        XCTAssertEqual(launcher.launchCallCount, 1, "but nothing answered, so we start one anyway")
     }
 
     func testStartFallsBackToAppOwnedAndSpawnsWhenRegistrationFails() {
