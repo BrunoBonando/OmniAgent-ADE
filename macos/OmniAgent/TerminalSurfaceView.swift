@@ -4,6 +4,19 @@ import os.signpost
 import SwiftTerm
 
 final class NativeTerminalView: TerminalView, NSMenuItemValidation {
+    /// AppKit does not hand the first responder to a clicked view on its own,
+    /// and SwiftTerm's `mouseDown` only starts a selection — so without this a
+    /// click in the terminal body left focus wherever it was, and only the
+    /// pane header (which focuses on `mouseUp`) activated a pane.
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
+    }
+
+    /// A click into a background window activates its pane in the same click
+    /// rather than being spent on raising the window.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func accessibilityPerformPress() -> Bool {
         window?.makeFirstResponder(self)
         return true

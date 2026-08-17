@@ -663,6 +663,37 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
     }
 
+    /// The assumption above, actually exercised: a real click in the terminal
+    /// body — not `adoptFocus` called by hand — activates that pane.
+    func testMouseDownInTheTerminalBodyActivatesThePane() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 2)
+        defer { window.close() }
+        workspace.focusPane("pane-1")
+        let target = try XCTUnwrap(workspace.container(for: "pane-2"))
+        workspace.layoutSubtreeIfNeeded()
+
+        let middle = target.surface.terminalView.convert(
+            CGPoint(x: target.surface.bounds.midX, y: target.surface.bounds.midY),
+            from: target.surface
+        )
+        let click = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: target.surface.terminalView.convert(middle, to: nil),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            )
+        )
+        target.surface.terminalView.mouseDown(with: click)
+
+        XCTAssertEqual(workspace.focusedPaneID, "pane-2")
+    }
+
     // MARK: - Helpers
 
     /// Panes are added one at a time, exactly as ⌘T does, so the fill order
@@ -691,6 +722,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
             defer: false
         )
         window.contentView = workspace
+        // Exactly the controller's wiring, so a click routes to focus here too.
+        window.onFirstResponderChange = { [weak workspace] in workspace?.adoptFocus(from: $0) }
         window.makeKeyAndOrderFront(nil)
         return (workspace, window)
     }

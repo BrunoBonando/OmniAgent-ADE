@@ -972,6 +972,38 @@ type SpawnedSession = (
     Option<Transcript>,
 );
 
+/// Whether an inherited variable is a *parent agent session's* identity
+/// rather than configuration a pane should keep.
+///
+/// Prefix-matched, not enumerated: `CLAUDE_CODE_CHILD_SESSION` was only the
+/// symptom Bruno could see. `CLAUDE_CODE_SESSION_ID` is the one that actually
+/// hurts, and the next release can add another. A caller that genuinely wants
+/// one of these sets it in `CreateSession::env`, which is applied after this
+/// and wins.
+fn is_inherited_agent_identity(name: &str) -> bool {
+    // ponytail: Claude only — Codex/agy don't export session markers today.
+    // Add a prefix here if one starts to.
+    name == "CLAUDECODE" || name.starts_with("CLAUDE_")
+}
+
+/// Drop the launching Claude session's identity from a pane's environment.
+///
+/// The daemon is long-lived and inherits whatever launched it — and it is
+/// routinely launched from inside a Claude Code terminal, because that is what
+/// `scripts/rebuild-app.sh` does. Left in place, every pane the daemon spawns
+/// believes it *is* the launching session: `claude` sees
+/// `CLAUDE_CODE_CHILD_SESSION` and refuses to save a transcript, and it adopts
+/// the parent's `CLAUDE_CODE_SESSION_ID` — so every terminal in every window
+/// lands on one shared conversation under one shared name, which is the exact
+/// collision `--session-id` exists to prevent.
+fn strip_inherited_agent_identity(command: &mut CommandBuilder) {
+    for (key, _) in std::env::vars_os() {
+        if is_inherited_agent_identity(&key.to_string_lossy()) {
+            command.env_remove(&key);
+        }
+    }
+}
+
 fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
     let engine = infer_engine(&request.command);
     let pair = NativePtySystem::default()
@@ -992,6 +1024,7 @@ fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
     if let Some(cwd) = &request.cwd {
         command.cwd(cwd);
     }
+    strip_inherited_agent_identity(&mut command);
     for (key, value) in &request.env {
         command.env(key, value);
     }
@@ -1050,6 +1083,18 @@ fn infer_engine(command: &[String]) -> String {
 #[cfg(test)]
 mod status_tests {
     use super::*;
+
+    /// The two markers that actually broke a pane — transcript saving and
+    /// conversation identity — plus proof the filter is not just "anything
+    /// with CLAUDE in it".
+    #[test]
+    fn parent_claude_session_markers_are_stripped_but_config_is_not() {
+        assert!(is_inherited_agent_identity("CLAUDE_CODE_CHILD_SESSION"));
+        assert!(is_inherited_agent_identity("CLAUDE_CODE_SESSION_ID"));
+        assert!(is_inherited_agent_identity("CLAUDECODE"));
+        assert!(!is_inherited_agent_identity("ANTHROPIC_API_KEY"));
+        assert!(!is_inherited_agent_identity("PATH"));
+    }
 
     #[test]
     fn antigravity_is_recognised_by_its_real_binary_name() {
