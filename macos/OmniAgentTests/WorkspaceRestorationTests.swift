@@ -54,15 +54,29 @@ final class WorkspaceRestorationTests: XCTestCase {
         XCTAssertTrue(rejected.allSatisfy { SessionIdentifier.isValid($0.sessionID) })
     }
 
-    func testMoreTabsThanPanesRestoresTheFirstEightRatherThanNothing() {
-        let tabs = (0..<12).map {
+    func testMoreTabsThanTheAppWillRunRestoresAsManyAsItCanRatherThanNothing() {
+        let cap = PaneWorkspaceView.maxTerminals
+        let tabs = (0..<(cap + 4)).map {
             PersistedTab(project: "p", engine: .shell, cwd: "/p", id: "sess-\($0)")
         }
 
         let panes = WorkspaceRestoration.plan(fromLayout: PersistedLayoutCodec.serialize(tabs))
 
-        XCTAssertEqual(panes.count, PaneGrid.maxPanes)
-        XCTAssertEqual(panes.map(\.sessionID), (0..<PaneGrid.maxPanes).map { "sess-\($0)" })
+        XCTAssertEqual(panes.count, cap)
+        XCTAssertEqual(panes.map(\.sessionID), (0..<cap).map { "sess-\($0)" })
+    }
+
+    /// The eight-per-session cap is not the plan's business: it plans all
+    /// twelve, and `PaneWorkspaceView.addPane` is what keeps eight of them —
+    /// the only place that knows which session each pane is joining.
+    func testThePlanLeavesThePerSessionCapToTheWorkspace() {
+        let tabs = (0..<12).map {
+            PersistedTab(project: "p", engine: .shell, cwd: "/p", id: "sess-\($0)", group: "g1")
+        }
+
+        let panes = WorkspaceRestoration.plan(fromLayout: PersistedLayoutCodec.serialize(tabs))
+
+        XCTAssertEqual(panes.count, 12)
     }
 
     func testAMissingCorruptOrEmptyLayoutPlansNothingRatherThanThrowing() {

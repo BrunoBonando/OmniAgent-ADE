@@ -49,16 +49,18 @@ enum WorkspaceRestoration {
     /// tab) rather than re-implementing any of it. What this adds is the
     /// two repairs that only make sense once tabs become *panes*:
     ///
-    /// - **the eight-pane cap** — a layout claiming more panes than
-    ///   `PaneGrid.maxPanes` restores its first eight rather than being
-    ///   rejected wholesale, matching the cap `PaneWorkspaceView.addPane`
-    ///   enforces at the other end;
+    /// - **the pane cap** — a layout claiming more panes than the app will
+    ///   run restores its first `limit` rather than being rejected wholesale.
+    ///   This is the app-wide `PaneWorkspaceView.maxTerminals`; the
+    ///   eight-per-*session* cap is enforced by `PaneWorkspaceView.addPane`
+    ///   at the other end, which is the only place that knows which session
+    ///   each pane is joining;
     /// - **a fresh id for every tab that lost its own** — the tab still
     ///   restores, as a new session, which is the whole point of
     ///   `deserialize` keeping an id-less tab in the first place.
     static func plan(
         fromLayout raw: String?,
-        limit: Int = PaneGrid.maxPanes,
+        limit: Int = PaneWorkspaceView.maxTerminals,
         makeSessionID: () -> String = { UUID().uuidString }
     ) -> [RestoredPane] {
         plan(from: PersistedLayoutCodec.deserialize(raw), limit: limit, makeSessionID: makeSessionID)
@@ -66,7 +68,7 @@ enum WorkspaceRestoration {
 
     static func plan(
         from tabs: [PersistedTab],
-        limit: Int = PaneGrid.maxPanes,
+        limit: Int = PaneWorkspaceView.maxTerminals,
         makeSessionID: () -> String = { UUID().uuidString }
     ) -> [RestoredPane] {
         guard limit > 0 else { return [] }

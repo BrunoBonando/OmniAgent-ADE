@@ -508,11 +508,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// holding the focused pane.
     @discardableResult
     func newPane(in session: SessionGroupNode?) -> Bool {
-        guard workspace.allPaneIDs.count < PaneGrid.maxPanes else { return false }
         let sibling = session.map { seed in
             seed.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
         } ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         let template = WorkspaceRestoration.bootstrapPane()
+        let group = session?.id ?? sibling?.group ?? template.group
+        // The eight-terminal cap belongs to the session this pane is joining,
+        // not to the app: a session that is full must not stop a different one
+        // from opening a terminal. `maxTerminals` is the app-wide backstop the
+        // daemon agrees to, and nothing a user meets in normal use.
+        guard
+            workspace.paneCount(inGroup: group) < PaneGrid.maxPanes,
+            workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals
+        else { return false }
         let project = sibling?.project ?? session?.project ?? template.project
         let inherited = sibling?.cwd.isEmpty == false ? sibling!.cwd : (session?.cwd ?? "")
         // A session's own root is the answer when it has one. This used to run
@@ -523,7 +531,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let cwd = inherited.isEmpty
             ? startingDirectory(for: workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) })
             : inherited
-        addPane(
+        return addPane(
             RestoredPane(
                 sessionID: template.sessionID,
                 reattaches: false,
@@ -532,12 +540,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 cwd: cwd,
                 label: nil,
                 themeId: sibling?.themeId,
-                group: session?.id ?? sibling?.group ?? template.group,
+                group: group,
                 groupLabel: sibling?.groupLabel ?? session?.name
             ),
             startSession: true
         )
-        return true
     }
 
     /// ⌘N, and the "+" beside SESSIONS in the sidebar — a **second,
@@ -553,7 +560,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// macOS to ask about folder access. Choosing a *different* folder means
     /// opening a different workspace, which is `openWorkspaceFolder(_:)`.
     @objc func newSession(_ sender: Any?) {
-        guard workspace.allPaneIDs.count < PaneGrid.maxPanes else { return }
+        guard workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         startSession(
             inDirectory: workspaceRoot(),
@@ -575,7 +582,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// the whole point, because a new workspace *is* a folder the app has not
     /// been told about yet.
     @objc func openWorkspaceFolder(_ sender: Any?) {
-        guard workspace.allPaneIDs.count < PaneGrid.maxPanes else { return }
+        guard workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         chooseSessionDirectory(startingAt: workspaceRoot()) { [weak self] chosen in
             guard let self, let chosen else { return }
@@ -587,7 +594,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// so the naming and grouping rules are testable without a panel.
     @discardableResult
     func startSession(inDirectory cwd: String, project: String) -> String? {
-        guard workspace.allPaneIDs.count < PaneGrid.maxPanes else { return nil }
+        guard workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals else { return nil }
         let group = SessionOutline.newSessionGroupID()
         let name = SessionOutline.nextSessionName(
             workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
@@ -658,8 +665,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
-        case #selector(newTerminalPane(_:)), #selector(newSession(_:)):
-            return workspace.allPaneIDs.count < PaneGrid.maxPanes
+        case #selector(newTerminalPane(_:)):
+            // The session on screen is the one ⌘T adds to, so its own count
+            // is what greys the item out.
+            return workspace.paneIDs.count < PaneGrid.maxPanes
+                && workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals
+        case #selector(newSession(_:)):
+            // A new session starts empty — a full one cannot refuse it.
+            return workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals
         case #selector(closePane(_:)):
             return workspace.focusedPaneID != nil
         default:
@@ -1105,7 +1118,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     // MARK: - Panes and sessions
 
-    private func addPane(_ pane: RestoredPane, startSession: Bool) {
+    /// Answers whether the pane was actually added. Callers loop on this —
+    /// returning `true` unconditionally made "add until the cap" a loop that
+    /// could never end once the cap stopped being a single global number.
+    @discardableResult
+    private func addPane(_ pane: RestoredPane, startSession: Bool) -> Bool {
         let sessionID = pane.sessionID
         var descriptor = PaneDescriptor(pane)
         // The one place a terminal gets its name, so a restored pane and a
@@ -1122,7 +1139,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 engine: descriptor.engine
             )
         }
-        guard workspace.addPane(descriptor) else { return }
+        guard workspace.addPane(descriptor) else { return false }
         usageRecorder.recordPaneOpened(
             paneID: sessionID,
             sessionKey: pane.group,
@@ -1140,6 +1157,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             window?.representedURL = directory.map(URL.init(fileURLWithPath:))
         }
         if startSession { ensureSession(sessionID) }
+        return true
     }
 
     private func ensureSession(_ sessionID: String) {

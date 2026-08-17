@@ -491,20 +491,34 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.openWorkspaceFolder(nil)
         XCTAssertEqual(controller.workspaceView.allPaneIDs.count, before)
 
-        // `allPaneIDs`, not `paneIDs`: the cap counts every terminal the daemon
-        // is holding a session for, and sessions other than the one on screen
-        // still hold theirs. Looping on the visible count never terminates —
-        // it stops growing as soon as a new terminal lands in a new session.
-        while controller.workspaceView.allPaneIDs.count < PaneGrid.maxPanes {
+        // Eight terminals is a *session's* limit, not the app's. ⌘T adds to
+        // the session on screen, so filling that one greys ⌘T out and leaves
+        // everything else alone.
+        while controller.workspaceView.paneIDs.count < PaneGrid.maxPanes {
             controller.newTerminalPane(nil)
         }
-        controller.newSession(nil)
-        XCTAssertEqual(controller.workspaceView.allPaneIDs.count, PaneGrid.maxPanes, "the cap holds")
+        let full = controller.workspaceView.allPaneIDs.count
+        XCTAssertEqual(controller.workspaceView.paneIDs.count, PaneGrid.maxPanes, "the session is full")
+        XCTAssertGreaterThan(full, PaneGrid.maxPanes, "and other sessions still hold their own")
+
+        controller.newTerminalPane(nil)
+        XCTAssertEqual(controller.workspaceView.allPaneIDs.count, full, "a full session takes no more")
         XCTAssertFalse(
             controller.validateMenuItem(
-                NSMenuItem(title: "New Session", action: #selector(WorkspaceWindowController.newSession(_:)), keyEquivalent: "")
-            )
+                NSMenuItem(title: "New Terminal", action: #selector(WorkspaceWindowController.newTerminalPane(_:)), keyEquivalent: "")
+            ),
+            "⌘T is greyed out for a full session"
         )
+        XCTAssertTrue(
+            controller.validateMenuItem(
+                NSMenuItem(title: "New Session", action: #selector(WorkspaceWindowController.newSession(_:)), keyEquivalent: "")
+            ),
+            "but a full session must not stop a new one from being started"
+        )
+
+        controller.newSession(nil)
+        XCTAssertEqual(controller.workspaceView.paneIDs.count, 1, "which opens with one terminal of its own")
+        XCTAssertEqual(controller.workspaceView.allPaneIDs.count, full + 1)
     }
 
     func testTheOutlinePlusButtonAddsToItsOwnRowNotToWhateverHasFocus() throws {

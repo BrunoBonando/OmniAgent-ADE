@@ -513,6 +513,43 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertNotNil(workspace.focusedPaneID, "focus lands somewhere real, not on the closed pane")
     }
 
+    /// Eight terminals is what one grid can draw, and each session has its
+    /// own grid — so it is a per-session number. Applying it to the whole app
+    /// meant a full session stopped every other session from opening a
+    /// terminal at all.
+    func testEachSessionGetsItsOwnEightTerminals() {
+        let workspace = makeWorkspace(panes: PaneGrid.maxPanes)
+        XCTAssertFalse(workspace.addPane(makeDescriptor("pane-9")), "this session is full")
+
+        var elsewhere = makeDescriptor("other-1")
+        elsewhere.group = "sess-grp-2"
+        XCTAssertTrue(workspace.addPane(elsewhere), "a different session is not")
+
+        XCTAssertEqual(workspace.paneCount(inGroup: "sess-grp-1"), PaneGrid.maxPanes)
+        XCTAssertEqual(workspace.paneCount(inGroup: "sess-grp-2"), 1)
+        XCTAssertEqual(workspace.allPaneIDs.count, PaneGrid.maxPanes + 1)
+        XCTAssertEqual(workspace.paneIDs.count, 1, "and it shows only its own")
+    }
+
+    /// The app-wide ceiling is a backstop, not a limit anyone meets, and it
+    /// only works if it stays above what the per-session cap allows — the
+    /// mistake being guarded against is exactly the one this replaces, a
+    /// whole-app number standing in for a per-session one.
+    ///
+    /// Asserted on the constants rather than by opening that many terminals:
+    /// building `maxTerminals` live `TerminalSurfaceView`s to prove a `guard`
+    /// destabilised the rest of the suite, and crashed an unrelated test two
+    /// runs out of two. `omniagent-pty-daemon`'s
+    /// `session_cap_leaves_room_for_every_pane_the_ui_can_draw` pins the same
+    /// relationship from the daemon's side.
+    func testTheAppWideCeilingLeavesRoomForEverySessionsFullGrid() {
+        XCTAssertGreaterThanOrEqual(
+            PaneWorkspaceView.maxTerminals,
+            PaneGrid.maxPanes * 8,
+            "eight sessions of eight panes has to fit under the app-wide backstop"
+        )
+    }
+
     // MARK: - Zoom
 
     func testZoomIsNotOfferedWithASingleTerminalOnScreen() {

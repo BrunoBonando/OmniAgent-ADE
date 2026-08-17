@@ -215,6 +215,24 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// The sessions that currently hold at least one pane, in first-seen order.
     var groupIDs: [String] { groupOrder }
 
+    /// How many terminals one session is holding — what `PaneGrid.maxPanes`
+    /// is measured against, since eight is what a single grid can draw and a
+    /// session is what a grid holds.
+    func paneCount(inGroup group: String) -> Int {
+        grids[group]?.paneIDs().count ?? 0
+    }
+
+    /// The most terminals the app will run at once across *every* session —
+    /// the mirror of `omniagent-pty-daemon`'s `MAX_SESSIONS`, and the only
+    /// cap that is about the whole app rather than one session. Eight
+    /// sessions of eight panes is the most the UI can draw, so that is the
+    /// number both sides carry.
+    ///
+    /// Not a limit anyone should meet in normal use: the per-session cap is
+    /// `PaneGrid.maxPanes`, and this exists so a runaway client cannot ask
+    /// the daemon for unbounded PTYs.
+    static let maxTerminals = 64
+
     func descriptor(for sessionID: String) -> PaneDescriptor? { descriptors[sessionID] }
 
     func container(for sessionID: String) -> PaneContainerView? { containers[sessionID] }
@@ -223,14 +241,19 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 
     // MARK: - Mutating the workspace
 
-    /// Adds a pane and gives it focus. Refused past `PaneGrid.maxPanes`, and
-    /// refused for a session id already on screen.
+    /// Adds a pane and gives it focus. Refused once its **own session** holds
+    /// `PaneGrid.maxPanes`, once the app as a whole holds `maxTerminals`, and
+    /// for a session id already on screen.
     @discardableResult
     func addPane(_ descriptor: PaneDescriptor) -> Bool {
-        // The cap counts every pane, not just the visible ones: it exists
-        // because the daemon refuses a ninth session, and a session hidden
-        // behind another still holds one of its slots.
-        guard allPaneIDs.count < PaneGrid.maxPanes, descriptors[descriptor.sessionID] == nil else {
+        // Per session, not per app: eight is what one grid can draw, and each
+        // session has its own grid. A full session must not stop a different
+        // one from opening a terminal.
+        guard
+            paneCount(inGroup: descriptor.group) < PaneGrid.maxPanes,
+            allPaneIDs.count < Self.maxTerminals,
+            descriptors[descriptor.sessionID] == nil
+        else {
             return false
         }
         descriptors[descriptor.sessionID] = descriptor
