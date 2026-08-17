@@ -19,12 +19,20 @@
 # Usage:
 #   ./scripts/rebuild-app.sh                 # notarize when credentials exist
 #   ./scripts/rebuild-app.sh --no-notarize   # skip the two Apple round-trips
+#   ./scripts/rebuild-app.sh --keep-daemon   # leave the running PTY daemon up
+#
+# The PTY daemon is restarted along with the app. It is a binary inside the
+# bundle being replaced, so leaving it running means the install silently keeps
+# the old one -- see the comment above the install step. This ends live
+# terminal sessions; --keep-daemon opts out.
 set -euo pipefail
 
 notarize=auto
+keep_daemon=no
 for arg in "$@"; do
   case "$arg" in
     --no-notarize) notarize=no ;;
+    --keep-daemon) keep_daemon=yes ;;
     -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "$0: unknown option: $arg" >&2; exit 2 ;;
   esac
@@ -90,8 +98,20 @@ fi
 
 # Quit a running copy first: replacing the bundle underneath a live process
 # leaves it running from an unlinked inode, so the app on screen is no longer
-# the app on disk. The PTY daemon is deliberately NOT touched -- it outlives the
-# app by design, which is what keeps terminal sessions alive across a reinstall.
+# the app on disk.
+#
+# The PTY daemon goes with it. It outlives the app by design -- that is what
+# keeps terminal sessions alive -- and this script used to leave it alone for
+# exactly that reason. But it is a *binary in the bundle being replaced*, so
+# leaving it up means every install silently keeps running the old daemon:
+# every daemon-side change (agent status detection, the session cap) looked
+# like it had shipped and had not, and the surviving process kept running from
+# an unlinked inode. Bruno's call, and the right one -- a reinstall you have to
+# remember to finish by hand is not an install.
+#
+# Terminal sessions do not survive this. --keep-daemon opts out for a rebuild
+# that changes nothing daemon-side and would rather not interrupt a running
+# agent.
 was_running=no
 if pgrep -f "/Applications/OmniAgent.app/Contents/MacOS/OmniAgent$" >/dev/null 2>&1; then
   was_running=yes
@@ -101,6 +121,19 @@ if pgrep -f "/Applications/OmniAgent.app/Contents/MacOS/OmniAgent$" >/dev/null 2
     pgrep -f "/Applications/OmniAgent.app/Contents/MacOS/OmniAgent$" >/dev/null 2>&1 || break
     sleep 1
   done
+fi
+
+if [ "$keep_daemon" = yes ]; then
+  echo "Leaving the running PTY daemon alone (--keep-daemon)."
+else
+  if pgrep -f "/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon$" >/dev/null 2>&1; then
+    echo "Stopping the PTY daemon so the new one is the one that runs..."
+    pkill -f "/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon$" || true
+    for _ in 1 2 3 4 5; do
+      pgrep -f "/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon$" >/dev/null 2>&1 || break
+      sleep 1
+    done
+  fi
 fi
 
 rm -rf /Applications/OmniAgent.app
