@@ -15,7 +15,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
         controller.focusTerminal(nil)
         XCTAssertTrue(
-            controller.window?.firstResponder === workspace?.surface(for: "native-terminal")?.terminalView
+            controller.window?.firstResponder === workspace?.terminalSurface(for: "native-terminal")?.terminalView
         )
     }
 
@@ -129,13 +129,13 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.newTerminalPane(nil)
         controller.newTerminalPane(nil)
         let survivors = workspace.paneIDs.filter { $0 != workspace.focusedPaneID }
-        let survivingTerminals = survivors.map { ObjectIdentifier(workspace.surface(for: $0)!.terminalView) }
+        let survivingTerminals = survivors.map { ObjectIdentifier(workspace.terminalSurface(for: $0)!.terminalView) }
 
         controller.closePane(nil)
 
         XCTAssertEqual(workspace.paneIDs.count, 2)
         XCTAssertEqual(
-            survivors.map { ObjectIdentifier(workspace.surface(for: $0)!.terminalView) },
+            survivors.map { ObjectIdentifier(workspace.terminalSurface(for: $0)!.terminalView) },
             survivingTerminals
         )
     }
@@ -560,7 +560,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             )
         )
         let workspace = controller.workspaceView
-        let surface = try XCTUnwrap(workspace.surface(for: "sess-a"))
+        let surface = try XCTUnwrap(workspace.terminalSurface(for: "sess-a"))
 
         surface.onTitleChange?("✳ Fixing the parser")
         XCTAssertEqual(workspace.descriptor(for: "sess-a")?.title, "Fixing the parser")

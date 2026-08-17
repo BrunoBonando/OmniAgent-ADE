@@ -210,8 +210,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             notifier: notifier,
             daemonStatus: daemonPersistence
         )
-        workspace = PaneWorkspaceView { id in
-            TerminalSurfaceView(connection: connection, sessionID: id)
+        workspace = PaneWorkspaceView { descriptor in
+            TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
         }
 
         let window = WorkspaceWindow(
@@ -293,7 +293,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         selectInitialWorkspaceIfNeeded(animated: false)
         reloadOutline()
         window.initialFirstResponder = workspace.focusedPaneID
-            .flatMap { workspace.surface(for: $0)?.terminalView }
+            .flatMap { workspace.surface(for: $0)?.primaryResponderView }
     }
 
     // MARK: - Window frame
@@ -484,7 +484,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             }
         }
         connection.onTerminalData = { [weak self] id, bytes, sequence, isSnapshot in
-            guard let self, let surface = workspace.surface(for: id) else { return }
+            guard let self, let surface = workspace.terminalSurface(for: id) else { return }
             if !observedFirstOutput {
                 observedFirstOutput = true
                 os_signpost(.event, log: Instrumentation.log, name: "First Terminal Output")
@@ -938,9 +938,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // re-implemented, so the palette runs the identical code the ⌘. and
         // ⌘R menu items do.
         case .interruptFocusedPane:
-            workspace.focusedPaneID.flatMap { workspace.surface(for: $0) }?.interruptSession(nil)
+            workspace.focusedPaneID.flatMap { workspace.terminalSurface(for: $0) }?.interruptSession(nil)
         case .reattachFocusedPane:
-            workspace.focusedPaneID.flatMap { workspace.surface(for: $0) }?.reattachSession(nil)
+            workspace.focusedPaneID.flatMap { workspace.terminalSurface(for: $0) }?.reattachSession(nil)
         case .toggleSidebar:
             toggleSidebar(nil)
         case .clearNotifications:
@@ -1281,7 +1281,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             project: pane.project,
             at: Date().timeIntervalSince1970 * 1000
         )
-        let surface = workspace.surface(for: sessionID)
+        let surface = workspace.terminalSurface(for: sessionID)
         surface?.onTitleChange = { [weak self] title in
             guard let self else { return }
             // Stripped here rather than at each place a title is shown: the
@@ -1418,7 +1418,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// happened, in the one place the user is already looking.
     func reportSessionFailure(_ message: String, for sessionID: String) {
         workspace.setStatus(.error, for: sessionID)
-        guard let surface = workspace.surface(for: sessionID) else { return }
+        guard let surface = workspace.terminalSurface(for: sessionID) else { return }
         let text = "\r\n\u{1B}[1;31m▲ This terminal could not start\u{1B}[0m\r\n  \(message)\r\n"
         surface.feed(Data(text.utf8), isSnapshot: false)
     }
@@ -1464,7 +1464,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     private func attach(_ sessionID: String) {
-        guard let surface = workspace.surface(for: sessionID) else { return }
+        guard let surface = workspace.terminalSurface(for: sessionID) else { return }
         readySessions.insert(sessionID)
         connection.attach(sessionID: sessionID, afterSequence: nil)
         surface.syncSize()

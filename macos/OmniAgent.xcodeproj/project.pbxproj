@@ -16,6 +16,7 @@
 		100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000008 /* WorkspaceWindowControllerTests.swift */; };
 		100000000000000000000008 /* Instrumentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* Instrumentation.swift */; };
 		100000000000000000000009 /* TerminalSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000A /* TerminalSurfaceView.swift */; };
+		10000000000000000000080 /* PaneContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000080 /* PaneContentView.swift */; };
 		10000000000000000000000A /* WorkspaceWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* WorkspaceWindowController.swift */; };
 		10000000000000000000000B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* AppDelegate.swift */; };
 		10000000000000000000000C /* PaneGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* PaneGrid.swift */; };
@@ -124,6 +125,7 @@
 		200000000000000000000008 /* WorkspaceWindowControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowControllerTests.swift; sourceTree = "<group>"; };
 		200000000000000000000009 /* Instrumentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Instrumentation.swift; sourceTree = "<group>"; };
 		20000000000000000000000A /* TerminalSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSurfaceView.swift; sourceTree = "<group>"; };
+		20000000000000000000080 /* PaneContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentView.swift; sourceTree = "<group>"; };
 		20000000000000000000000B /* WorkspaceWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowController.swift; sourceTree = "<group>"; };
 		20000000000000000000000C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		20000000000000000000000D /* PaneGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneGrid.swift; sourceTree = "<group>"; };
@@ -226,6 +228,7 @@
 				200000000000000000000009 /* Instrumentation.swift */,
 				20000000000000000000000D /* PaneGrid.swift */,
 				20000000000000000000000F /* PaneWorkspaceView.swift */,
+				20000000000000000000080 /* PaneContentView.swift */,
 				20000000000000000000000A /* TerminalSurfaceView.swift */,
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
 				20000000000000000000000C /* AppDelegate.swift */,
@@ -428,6 +431,7 @@
 				100000000000000000000008 /* Instrumentation.swift in Sources */,
 				10000000000000000000000C /* PaneGrid.swift in Sources */,
 				10000000000000000000000E /* PaneWorkspaceView.swift in Sources */,
+				10000000000000000000080 /* PaneContentView.swift in Sources */,
 				100000000000000000000009 /* TerminalSurfaceView.swift in Sources */,
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
 				10000000000000000000000B /* AppDelegate.swift in Sources */,

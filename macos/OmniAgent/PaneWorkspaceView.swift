@@ -33,6 +33,10 @@ struct PaneDescriptor: Equatable {
     /// way in and never persisted — the number is a placeholder, and storing
     /// it would make it outlive the moment it is useful for.
     var autoNumber: Int = 1
+    /// What this pane holds. `engine`/`cwd` describe a `.terminal`;
+    /// `browserURL` takes cwd's role for a `.browser`.
+    var kind: PaneKind
+    var browserURL: String
 
     init(
         sessionID: String,
@@ -43,7 +47,9 @@ struct PaneDescriptor: Equatable {
         engine: Engine = .shell,
         cwd: String = "",
         label: String? = nil,
-        themeId: TerminalThemeId? = nil
+        themeId: TerminalThemeId? = nil,
+        kind: PaneKind = .terminal,
+        browserURL: String = ""
     ) {
         self.sessionID = sessionID
         self.group = group
@@ -54,6 +60,8 @@ struct PaneDescriptor: Equatable {
         self.cwd = cwd
         self.label = label
         self.themeId = themeId
+        self.kind = kind
+        self.browserURL = browserURL
     }
 
     /// The pane's own restored shape, so a plan can be applied without the
@@ -68,7 +76,9 @@ struct PaneDescriptor: Equatable {
             engine: pane.engine,
             cwd: pane.cwd,
             label: pane.label,
-            themeId: pane.themeId
+            themeId: pane.themeId,
+            kind: pane.kind,
+            browserURL: pane.browserURL
         )
     }
 }
@@ -169,7 +179,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// pixel geometry the persisted shape does not carry anyway.
     var onPanesChanged: (() -> Void)?
 
-    private let makeSurface: (String) -> TerminalSurfaceView
+    private let makeSurface: (PaneDescriptor) -> any PaneContentView
     private var containers: [String: PaneContainerView] = [:]
     private var descriptors: [String: PaneDescriptor] = [:]
     private var dividerViews: [PaneDividerView] = []
@@ -182,7 +192,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     private var occlusionObserver: NSObjectProtocol?
     private var suspendsDrawing = false
 
-    init(makeSurface: @escaping (String) -> TerminalSurfaceView) {
+    init(makeSurface: @escaping (PaneDescriptor) -> any PaneContentView) {
         self.makeSurface = makeSurface
         super.init(frame: .zero)
         wantsLayer = true
@@ -248,7 +258,13 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 
     func container(for sessionID: String) -> PaneContainerView? { containers[sessionID] }
 
-    func surface(for sessionID: String) -> TerminalSurfaceView? { containers[sessionID]?.surface }
+    func surface(for sessionID: String) -> (any PaneContentView)? { containers[sessionID]?.surface }
+
+    /// The concrete terminal behind a pane, for the PTY-shaped call sites
+    /// (feed, resize counts, interrupt/reattach). `nil` for any other kind.
+    func terminalSurface(for sessionID: String) -> TerminalSurfaceView? {
+        containers[sessionID]?.surface as? TerminalSurfaceView
+    }
 
     // MARK: - Mutating the workspace
 
@@ -270,7 +286,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         descriptors[descriptor.sessionID] = descriptor
         let container = PaneContainerView(
             paneID: descriptor.sessionID,
-            surface: makeSurface(descriptor.sessionID),
+            surface: makeSurface(descriptor),
             workspace: self
         )
         container.surface.resizeCoalescer = resizeCoalescer
@@ -721,7 +737,13 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// card never takes the keyboard off another.
     private func reclaimFirstResponder(_ container: PaneContainerView) {
         guard let window, focusedPaneID == container.paneID else { return }
-        guard window.firstResponder !== container.surface.terminalView else { return }
+        // A descendant check rather than identity against one known view: a
+        // WKWebView's actual responder is an internal content view, so identity
+        // could never hold for it — and the terminal's `terminalView` is a
+        // descendant of its surface, so the same rule covers both kinds.
+        if let view = window.firstResponder as? NSView, view.isDescendant(of: container.surface) {
+            return
+        }
         container.surface.focus()
     }
 
@@ -1347,7 +1369,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 /// pane on it to trade places).
 final class PaneContainerView: NSView, NSDraggingSource {
     let paneID: String
-    let surface: TerminalSurfaceView
+    let surface: any PaneContentView
     let header: PaneHeaderView
 
     /// The pane's border, drawn as the container's own background showing
@@ -1396,7 +1418,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
             guard status != oldValue else { return }
             header.status = status
             // The unselected pane's veil is tinted by the same status.
-            surface.wash.status = status
+            (surface as? TerminalSurfaceView)?.wash.status = status
             updateChrome()
         }
     }
@@ -1436,7 +1458,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// carrying the same directory does not re-read `.git/HEAD`.
     private var branchDirectory: String?
 
-    init(paneID: String, surface: TerminalSurfaceView, workspace: PaneWorkspaceView) {
+    init(paneID: String, surface: any PaneContentView, workspace: PaneWorkspaceView) {
         self.paneID = paneID
         self.surface = surface
         self.workspace = workspace
@@ -1566,8 +1588,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
         header.wantsLayer = true
         surface.wantsLayer = true
         for (child, corners) in [
-            (header, CACornerMask([.layerMinXMinYCorner, .layerMaxXMinYCorner])),
-            (surface, CACornerMask([.layerMinXMaxYCorner, .layerMaxXMaxYCorner])),
+            (header as NSView, CACornerMask([.layerMinXMinYCorner, .layerMaxXMinYCorner])),
+            (surface as NSView, CACornerMask([.layerMinXMaxYCorner, .layerMaxXMaxYCorner])),
         ] {
             child.layer?.cornerRadius = inner
             child.layer?.cornerCurve = .continuous

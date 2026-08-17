@@ -84,13 +84,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let last = workspace.container(for: "pane-4")!
         let firstFrame = first.frame
         let lastFrame = last.frame
-        let firstTerminal = ObjectIdentifier(first.surface.terminalView)
+        let firstTerminal = ObjectIdentifier(first.terminalSurface.terminalView)
 
         XCTAssertTrue(workspace.swapPanes("pane-1", "pane-4"))
 
         XCTAssertEqual(first.frame, lastFrame)
         XCTAssertEqual(last.frame, firstFrame)
-        XCTAssertEqual(ObjectIdentifier(workspace.container(for: "pane-1")!.surface.terminalView), firstTerminal)
+        XCTAssertEqual(ObjectIdentifier(workspace.container(for: "pane-1")!.terminalSurface.terminalView), firstTerminal)
         XCTAssertEqual(workspace.paneIDs, ["pane-4", "pane-3", "pane-2", "pane-1"])
     }
 
@@ -185,13 +185,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let (workspace, window) = makeAttachedWorkspace(panes: 4)
         defer { window.close() }
         workspace.focusPane("pane-3")
-        XCTAssertTrue(window.firstResponder === workspace.surface(for: "pane-3")?.terminalView)
+        XCTAssertTrue(window.firstResponder === workspace.terminalSurface(for: "pane-3")?.terminalView)
 
         XCTAssertTrue(window.makeFirstResponder(window))
         workspace.restoreFocus()
 
         XCTAssertEqual(workspace.focusedPaneID, "pane-3")
-        XCTAssertTrue(window.firstResponder === workspace.surface(for: "pane-3")?.terminalView)
+        XCTAssertTrue(window.firstResponder === workspace.terminalSurface(for: "pane-3")?.terminalView)
     }
 
     func testFocusSurvivesASwapAndAReflow() {
@@ -201,11 +201,11 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         XCTAssertTrue(workspace.swapPanes("pane-2", "pane-3"))
         XCTAssertEqual(workspace.focusedPaneID, "pane-2")
-        XCTAssertTrue(window.firstResponder === workspace.surface(for: "pane-2")?.terminalView)
+        XCTAssertTrue(window.firstResponder === workspace.terminalSurface(for: "pane-2")?.terminalView)
 
         XCTAssertTrue(workspace.addPane(makeDescriptor("pane-5")))
         XCTAssertEqual(workspace.focusedPaneID, "pane-5", "a new pane takes focus")
-        XCTAssertTrue(window.firstResponder === workspace.surface(for: "pane-5")?.terminalView)
+        XCTAssertTrue(window.firstResponder === workspace.terminalSurface(for: "pane-5")?.terminalView)
     }
 
     // MARK: - Drag and drop
@@ -214,7 +214,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let workspace = makeWorkspace(panes: 4)
         let source = workspace.container(for: "pane-1")!
         let target = workspace.container(for: "pane-4")!
-        let sourceTerminal = ObjectIdentifier(source.surface.terminalView)
+        let sourceTerminal = ObjectIdentifier(source.terminalSurface.terminalView)
         let info = StubDraggingInfo(paneID: "pane-1")
 
         XCTAssertEqual(target.draggingEntered(info), .move)
@@ -223,7 +223,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         XCTAssertFalse(target.isDropTarget)
         XCTAssertEqual(workspace.paneIDs, ["pane-4", "pane-3", "pane-2", "pane-1"])
-        XCTAssertEqual(ObjectIdentifier(workspace.container(for: "pane-1")!.surface.terminalView), sourceTerminal)
+        XCTAssertEqual(ObjectIdentifier(workspace.container(for: "pane-1")!.terminalSurface.terminalView), sourceTerminal)
     }
 
     func testDroppingAPaneOnItselfOrCarryingAnUnknownIDIsRefused() {
@@ -288,7 +288,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
     func testOnlyTheSelectedPaneBlinksItsCursor() {
         let workspace = makeWorkspace(panes: 3)
         func style(_ id: String) -> CursorStyle {
-            workspace.container(for: id)!.surface.terminalView.terminal.options.cursorStyle
+            workspace.container(for: id)!.terminalSurface.terminalView.terminal.options.cursorStyle
         }
 
         workspace.focusPane("pane-2")
@@ -305,7 +305,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
     /// it — the deselect override only ever puts back what it took away.
     func testDeselectDoesNotClobberACursorStyleTheProgramChose() {
         let workspace = makeWorkspace(panes: 2)
-        let background = workspace.container(for: "pane-1")!.surface
+        let background = workspace.container(for: "pane-1")!.terminalSurface
         workspace.focusPane("pane-2")
         XCTAssertEqual(background.terminalView.terminal.options.cursorStyle, .steadyBlock)
 
@@ -320,7 +320,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
     func testOnlyTheSelectedPaneIsUnwashed() {
         let workspace = makeWorkspace(panes: 3)
         func wash(_ id: String) -> TerminalWashOverlayView {
-            workspace.container(for: id)!.surface.wash
+            workspace.container(for: id)!.terminalSurface.wash
         }
 
         workspace.focusPane("pane-2")
@@ -332,6 +332,65 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertFalse(wash("pane-2").isHidden, "the pane you left recedes")
         XCTAssertEqual(wash("pane-2").frame, workspace.container(for: "pane-2")!.surface.bounds)
         XCTAssertNil(wash("pane-2").hitTest(NSPoint(x: 5, y: 5)))
+    }
+
+    /// The veil is that pane's status colour at the top falling away to the
+    /// neutral wash at the bottom. Which way up it runs is the whole point and
+    /// nothing in the code reads as up or down — a gradient's unit space is y-up
+    /// while the pane container it sits in is flipped — so it is rendered, with
+    /// a green marker at the container's `y = 0` as the anchor for which end of
+    /// the bitmap is the top of the screen.
+    func testTheWashRunsTheStatusColourFromTheTopDown() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 2)
+        defer { window.close() }
+        workspace.focusPane("pane-2")
+        let container = try XCTUnwrap(workspace.container(for: "pane-1"))
+        container.status = .error
+        let marker = NSView(frame: NSRect(x: 0, y: 0, width: container.bounds.width, height: 12))
+        marker.wantsLayer = true
+        marker.layer?.backgroundColor = NSColor.green.cgColor
+        container.addSubview(marker, positioned: .above, relativeTo: nil)
+        window.displayIfNeeded()
+        container.layoutSubtreeIfNeeded()
+
+        let image = try XCTUnwrap(render(container))
+        let column = image.pixelsWide / 2
+        func pixel(_ row: Int) -> NSColor {
+            image.colorAt(x: column, y: row)?.usingColorSpace(.sRGB) ?? .black
+        }
+        let anchor = try XCTUnwrap(
+            (0..<image.pixelsHigh).first { pixel($0).greenComponent > 0.8 },
+            "the marker has to show up, or the render proves nothing"
+        )
+        let rows = anchor < image.pixelsHigh / 2
+            ? Array(0..<image.pixelsHigh)
+            : Array((0..<image.pixelsHigh).reversed())
+
+        // Red over the near-black terminal, against the blue it has none of.
+        func redness(_ row: Int) -> CGFloat { pixel(row).redComponent - pixel(row).blueComponent }
+        let near = redness(rows[rows.count / 5])
+        let far = redness(rows[rows.count - rows.count / 20])
+        XCTAssertGreaterThan(near, 0.05, "the top of an errored pane carries its red")
+        XCTAssertGreaterThan(near, far + 0.05, "and it fades on the way down")
+    }
+
+    /// Renders a view's whole layer tree, gradients included — `cacheDisplay`
+    /// draws `draw(_:)` output only, which is nothing here.
+    private func render(_ view: NSView) -> NSBitmapImageRep? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(view.bounds.width),
+            pixelsHigh: Int(view.bounds.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .calibratedRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        view.layer?.render(in: context.cgContext)
+        return rep
     }
 
     // MARK: - Header chrome
@@ -431,7 +490,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let second = workspace.container(for: "pane-2")!
         XCTAssertEqual(second.accessibilityRole(), .group)
         XCTAssertEqual(second.accessibilityLabel(), "Terminal pane 3 of 5")
-        XCTAssertEqual(second.surface.terminalView.accessibilityLabel(), "Terminal")
+        XCTAssertEqual(second.terminalSurface.terminalView.accessibilityLabel(), "Terminal")
 
         let grouped = workspace.container(for: "pane-5")!
         XCTAssertEqual(grouped.accessibilityLabel(), "Session 2, terminal pane 5 of 5")
@@ -450,7 +509,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(workspace.resizeCoalescer.flushCount, 0, "nothing is sent mid-drag")
         XCTAssertEqual(workspace.resizeCoalescer.pending, Set(workspace.paneIDs))
         for id in workspace.paneIDs {
-            XCTAssertEqual(workspace.surface(for: id)?.resizeSendCount, 0, id)
+            XCTAssertEqual(workspace.terminalSurface(for: id)?.resizeSendCount, 0, id)
         }
 
         workspace.resizeCoalescer.flush()
@@ -458,7 +517,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(workspace.resizeCoalescer.flushCount, 1)
         XCTAssertTrue(workspace.resizeCoalescer.pending.isEmpty)
         for id in workspace.paneIDs {
-            XCTAssertEqual(workspace.surface(for: id)?.resizeSendCount, 1, "\(id): 20 drag steps, one send")
+            XCTAssertEqual(workspace.terminalSurface(for: id)?.resizeSendCount, 1, "\(id): 20 drag steps, one send")
         }
     }
 
@@ -480,7 +539,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
     func testSuspendedPanesStopRequestingDrawsButKeepParsingOutput() {
         let (workspace, window) = makeAttachedWorkspace(panes: 1)
         defer { window.close() }
-        let surface = workspace.surface(for: "pane-1")!
+        let surface = workspace.terminalSurface(for: "pane-1")!
 
         workspace.setSuspendsDrawing(true)
         surface.feed(Data("hidden-output".utf8), isSnapshot: false)
@@ -529,7 +588,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
             }
             workspace.resizeCoalescer.flush()
             for id in workspace.paneIDs {
-                workspace.surface(for: id)?.requestRendererDraw()
+                workspace.terminalSurface(for: id)?.requestRendererDraw()
             }
         }
     }
@@ -927,7 +986,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         workspace.focusPane("pane-1")
         XCTAssertTrue(workspace.toggleZoom("pane-1"))
         let card = try XCTUnwrap(workspace.container(for: "pane-1"))
-        XCTAssertTrue(window.makeFirstResponder(card.surface.terminalView))
+        XCTAssertTrue(window.makeFirstResponder(card.terminalSurface.terminalView))
 
         // The hazard itself: the plain chain from inside the overlay misses it.
         var chain: [NSResponder] = []
@@ -1319,14 +1378,14 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let target = try XCTUnwrap(workspace.container(for: "pane-2"))
         workspace.layoutSubtreeIfNeeded()
 
-        let middle = target.surface.terminalView.convert(
+        let middle = target.terminalSurface.terminalView.convert(
             CGPoint(x: target.surface.bounds.midX, y: target.surface.bounds.midY),
             from: target.surface
         )
         let click = try XCTUnwrap(
             NSEvent.mouseEvent(
                 with: .leftMouseDown,
-                location: target.surface.terminalView.convert(middle, to: nil),
+                location: target.terminalSurface.terminalView.convert(middle, to: nil),
                 modifierFlags: [],
                 timestamp: 0,
                 windowNumber: window.windowNumber,
@@ -1336,7 +1395,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
                 pressure: 1
             )
         )
-        target.surface.terminalView.mouseDown(with: click)
+        target.terminalSurface.terminalView.mouseDown(with: click)
 
         XCTAssertEqual(workspace.focusedPaneID, "pane-2")
     }
@@ -1571,8 +1630,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let connection = SessionConnection(
             socketURL: URL(fileURLWithPath: "/tmp/omniagent-pane-workspace-test.sock")
         )
-        let workspace = PaneWorkspaceView { id in
-            TerminalSurfaceView(connection: connection, sessionID: id)
+        let workspace = PaneWorkspaceView { descriptor in
+            TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
         }
         workspace.frame = CGRect(x: 0, y: 0, width: 1200, height: 800)
         for index in 1...panes {
@@ -1659,7 +1718,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
     private func identities(in workspace: PaneWorkspaceView) -> [String: ObjectIdentifier] {
         var result: [String: ObjectIdentifier] = [:]
         for id in workspace.paneIDs {
-            result[id] = workspace.surface(for: id).map(ObjectIdentifier.init)
+            result[id] = workspace.surface(for: id).map { ObjectIdentifier($0) }
         }
         return result
     }
@@ -1759,4 +1818,11 @@ private final class StubDraggingInfo: NSObject, NSDraggingInfo {
         searchOptions: [NSPasteboard.ReadingOptionKey: Any],
         using block: @escaping (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void
     ) {}
+}
+
+/// Task-1 seam helper: everything in this file drives terminal panes, so the
+/// concrete surface is one force-cast away — a crash here means a test built a
+/// pane kind it does not handle, which deserves to fail loudly.
+private extension PaneContainerView {
+    var terminalSurface: TerminalSurfaceView { surface as! TerminalSurfaceView }
 }
