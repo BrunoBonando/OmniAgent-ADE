@@ -166,6 +166,33 @@ final class WorkspaceRestorationTests: XCTestCase {
         XCTAssertEqual(PersistedLayoutCodec.serialize(WorkspaceRestoration.persistedTabs(from: [])), #"{"tabs":[]}"#)
     }
 
+    /// The shared-row regression test the spec demands: a browser pane in
+    /// the grid must never make the `"layout"` row differ from what it would
+    /// have been with terminals alone — the web codec drops unknown-engine
+    /// tabs and strips unknown fields on rewrite, so a browser tab persisted
+    /// there would be destroyed by the next web-side save.
+    func testPersistedTabsExcludesBrowserPanesSoTheSharedLayoutRowIsByteIdentical() {
+        let terminal = PaneDescriptor(
+            sessionID: "sess-a",
+            group: "grp-1",
+            project: "alpha",
+            engine: .shell,
+            cwd: "/a"
+        )
+        let browser = PaneDescriptor(
+            sessionID: "web-1",
+            group: "grp-1",
+            kind: .browser,
+            browserURL: "https://example.com"
+        )
+
+        let mixed = PersistedLayoutCodec.serialize(WorkspaceRestoration.persistedTabs(from: [terminal, browser]))
+        let terminalsOnly = PersistedLayoutCodec.serialize(WorkspaceRestoration.persistedTabs(from: [terminal]))
+
+        XCTAssertEqual(mixed, terminalsOnly, "a browser pane must never change the shared layout row")
+        XCTAssertFalse(mixed.contains("web-1"))
+    }
+
     // MARK: - bootstrap
 
     func testTheBootstrapPaneIsOneUngroupedShellInTheHomeDirectory() {

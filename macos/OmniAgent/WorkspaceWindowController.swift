@@ -148,6 +148,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// two above exist.
     private var notificationsReadDispatched = false
     private var notificationsReadCompleted = false
+    /// The `browser_panes_native` row's two flags, same shape and same
+    /// reasons as `layoutReadDispatched`/`layoutReadCompleted` — it is a
+    /// separate row (see `SettingsKey.browserPanes`), read and armed
+    /// independently of the shared `layout` row.
+    private var browserPanesReadDispatched = false
+    private var browserPanesReadCompleted = false
     /// The last value written to each settings row — see `write(_:to:)`.
     private var lastPersisted: [String: String] = [:]
     /// Where settings writes go. `nil` means the daemon; a test substitutes a
@@ -272,6 +278,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         workspace.onPanesChanged = { [weak self] in
             self?.persistLayout()
+            self?.persistBrowserPanes()
             self?.reloadOutline()
         }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
@@ -923,6 +930,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // pane, a minted id) — the repair is what the next launch should see,
         // and when a pane was opened while the read was still in flight.
         persistLayout()
+        // Terminals restore first, so the grid's fill order favors them —
+        // browser panes only ever land on the cells terminals left empty.
+        restoreBrowserPanesIfNeeded()
     }
 
     /// Kills daemon sessions this window no longer references.
@@ -1308,6 +1318,76 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             PersistedLayoutCodec.serialize(WorkspaceRestoration.persistedTabs(from: descriptors)),
             to: SettingsKey.layout
         )
+    }
+
+    // MARK: - Browser pane persistence (Task 5)
+
+    /// Reads the native-only `browser_panes_native` row once, alongside the
+    /// `layout` row. Same one-shot/re-arm-on-failure shape as
+    /// `restoreNotificationsIfNeeded`: a row that could not be read is not
+    /// an empty one, so the write gate stays shut and the read re-arms for
+    /// the next reconnect.
+    private func restoreBrowserPanesIfNeeded() {
+        guard !browserPanesReadDispatched else { return }
+        browserPanesReadDispatched = true
+        connection.getSetting(key: SettingsKey.browserPanes) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                applyRestoredBrowserPanes(BrowserPanesCodec.deserialize(raw))
+            case .failure:
+                browserPanesReadDispatched = false
+            }
+        }
+    }
+
+    /// Adds every restored browser pane the grid has room for. Split out
+    /// from `restoreBrowserPanesIfNeeded` so a plan can be applied in a test
+    /// without a socket — same shape as `applyRestoredPanes`. Browser panes
+    /// never touch `ensureSession`: `addPane`'s kind branch (Task 2) is what
+    /// keeps them off the daemon.
+    func applyRestoredBrowserPanes(_ panes: [PersistedBrowserPane]) {
+        browserPanesReadCompleted = true
+        for pane in panes
+        where workspace.paneCount(inGroup: pane.group ?? WorkspaceRestoration.ungroupedSessionID) < PaneGrid.maxPanes {
+            addPane(
+                RestoredPane(
+                    sessionID: UUID().uuidString,
+                    reattaches: false,
+                    project: "",
+                    engine: .shell,
+                    cwd: "",
+                    label: nil,
+                    themeId: nil,
+                    group: pane.group ?? WorkspaceRestoration.ungroupedSessionID,
+                    groupLabel: pane.groupLabel,
+                    kind: .browser,
+                    browserURL: pane.url
+                ),
+                startSession: false
+            )
+        }
+    }
+
+    /// Writes the live browser panes back to their own row. Refused until
+    /// that row has actually been read — `persistLayout`'s reasoning,
+    /// applied to the other row. `browserURL` updates already flow through
+    /// `updateDescriptor` -> `onPanesChanged` (Task 4's `onURLChange`
+    /// wiring), so navigating a browser pane persists its new URL with zero
+    /// extra plumbing.
+    private func persistBrowserPanes() {
+        guard browserPanesReadCompleted else { return }
+        let panes = workspace.allPaneIDs
+            .compactMap { workspace.descriptor(for: $0) }
+            .filter { $0.kind == .browser }
+            .map {
+                PersistedBrowserPane(
+                    url: $0.browserURL,
+                    group: $0.group == WorkspaceRestoration.ungroupedSessionID ? nil : $0.group,
+                    groupLabel: $0.groupLabel
+                )
+            }
+        write(BrowserPanesCodec.serialize(panes), to: SettingsKey.browserPanes)
     }
 
     /// Writes a settings row only when its value actually changed.

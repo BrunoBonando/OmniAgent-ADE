@@ -188,6 +188,72 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(ensured.isEmpty)
     }
 
+    /// The native-only restore path: browser panes come back from their own
+    /// settings row, not the shared `layout` one, and never touch the daemon.
+    func testApplyRestoredBrowserPanesAddsBrowserPanesWithoutEnsuringADaemonSession() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var ensured: [String] = []
+        controller.sessionEnsurer = { ensured.append($0) }
+
+        controller.applyRestoredBrowserPanes([
+            PersistedBrowserPane(url: "https://x", group: "g1", groupLabel: nil),
+        ])
+
+        let workspace = controller.workspaceView
+        let browserID = try XCTUnwrap(
+            workspace.allPaneIDs.first { workspace.descriptor(for: $0)?.kind == .browser }
+        )
+        let descriptor = try XCTUnwrap(workspace.descriptor(for: browserID))
+        XCTAssertEqual(descriptor.browserURL, "https://x")
+        XCTAssertEqual(descriptor.group, "g1")
+        XCTAssertTrue(ensured.isEmpty, "a restored browser pane never reaches ensureSession")
+    }
+
+    /// The shared-row invariant, from the controller's own write path this
+    /// time: adding/closing a browser pane writes `SettingsKey.browserPanes`
+    /// and never changes the `SettingsKey.layout` value.
+    func testBrowserPanesPersistToTheirOwnRowAndNeverTouchTheSharedLayoutRow() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+        controller.showWindow(nil)
+
+        // Arm both write gates the way a real launch would once both rows
+        // have actually been read.
+        controller.applyRestoredPanes([])
+        controller.applyRestoredBrowserPanes([])
+        let layoutValueBeforeBrowser = writes.last { $0.0 == SettingsKey.layout }?.1
+
+        XCTAssertTrue(controller.newBrowser(in: nil))
+
+        XCTAssertTrue(
+            writes.contains { $0.0 == SettingsKey.browserPanes },
+            "adding a browser pane persists its own row"
+        )
+        XCTAssertEqual(
+            writes.last { $0.0 == SettingsKey.layout }?.1,
+            layoutValueBeforeBrowser,
+            "a browser pane must never change the shared layout row"
+        )
+
+        let browserWritesAfterAdd = writes.filter { $0.0 == SettingsKey.browserPanes }.count
+        controller.closePane(nil)
+
+        XCTAssertGreaterThan(
+            writes.filter { $0.0 == SettingsKey.browserPanes }.count,
+            browserWritesAfterAdd,
+            "closing a browser pane persists the row too"
+        )
+        XCTAssertEqual(
+            writes.last { $0.0 == SettingsKey.layout }?.1,
+            layoutValueBeforeBrowser,
+            "closing a browser pane must not touch the shared layout row either"
+        )
+    }
+
     func testClosePaneCommandRemovesTheFocusedPaneAndLeavesTheRestAlive() throws {
         let controller = makeController()
         defer { controller.close() }

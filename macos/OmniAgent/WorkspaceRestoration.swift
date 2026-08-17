@@ -156,9 +156,15 @@ enum WorkspaceRestoration {
     /// database the two apps share; dropping the pane instead keeps the row
     /// truthful and costs only that pane's restoration, which is a session
     /// the native build could not have restored into a project anyway.
+    ///
+    /// **A `.browser` pane is never persisted here.** The shared `layout`
+    /// row only ever describes terminals — see `SettingsKey.browserPanes`'s
+    /// doc comment for why a browser tab in this row would be destroyed by
+    /// the next web-side save. Browser panes restore from their own
+    /// native-only row instead (`BrowserPanesCodec`).
     static func persistedTabs(from panes: [PaneDescriptor]) -> [PersistedTab] {
         panes.compactMap { pane in
-            guard !pane.project.isEmpty else { return nil }
+            guard pane.kind == .terminal, !pane.project.isEmpty else { return nil }
             return PersistedTab(
                 project: pane.project,
                 engine: pane.engine,
