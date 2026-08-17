@@ -91,6 +91,16 @@ final class SettingsViewModel: ObservableObject {
     /// production wires the real `SystemLoginItemsSettings.open`, tests
     /// substitute a recorder.
     var openLoginItemsSettings: () -> Void
+    /// The server-side half of "Log out". Production's default fires
+    /// `AuthClient.logout()` — which revokes the refresh token, receives the
+    /// cookie-clearing `Set-Cookie` on its 204, and drops the in-memory
+    /// access token. Without it, `signOut()` only cleared the five brain.db
+    /// rows while the 30-day refresh cookie stayed valid in the persistent
+    /// jar and the server-side session was never revoked. Injectable (and
+    /// already best-effort inside `logout()`) so tests record the call
+    /// instead of hitting the network, and an offline logout still resolves
+    /// locally.
+    private let revokeServerSession: () -> Void
 
     init(
         settings: SettingsStore,
@@ -99,7 +109,8 @@ final class SettingsViewModel: ObservableObject {
         notifier: SessionNotifier,
         version: String?,
         daemonStatus: DaemonStatusProviding = DaemonPersistenceController(),
-        openLoginItemsSettings: @escaping () -> Void = SystemLoginItemsSettings.open
+        openLoginItemsSettings: @escaping () -> Void = SystemLoginItemsSettings.open,
+        revokeServerSession: @escaping () -> Void = { Task { await AuthClient.shared.logout() } }
     ) {
         self.settings = settings
         self.authGate = authGate
@@ -107,6 +118,7 @@ final class SettingsViewModel: ObservableObject {
         self.notifier = notifier
         self.daemonStatus = daemonStatus
         self.openLoginItemsSettings = openLoginItemsSettings
+        self.revokeServerSession = revokeServerSession
         versionLine = version.map { "v\($0) — dogfood build" }
         refreshAccount()
         refreshReview()
@@ -125,6 +137,7 @@ final class SettingsViewModel: ObservableObject {
     }
 
     func signOut() {
+        revokeServerSession()
         authGate.reset { [weak self] in self?.refreshAccount() }
     }
 

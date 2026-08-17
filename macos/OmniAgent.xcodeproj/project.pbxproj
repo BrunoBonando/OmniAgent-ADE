@@ -79,6 +79,8 @@
 		10000000000000000000070 /* EngineLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000070 /* EngineLauncher.swift */; };
 		10000000000000000000061 /* WorkspaceFilesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000061 /* WorkspaceFilesTests.swift */; };
 		10000000000000000000071 /* EngineLauncherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000071 /* EngineLauncherTests.swift */; };
+		10000000000000000000080 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000080 /* AuthClient.swift */; };
+		10000000000000000000081 /* AuthClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000081 /* AuthClientTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -187,6 +189,8 @@
 		20000000000000000000070 /* EngineLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineLauncher.swift; sourceTree = "<group>"; };
 		20000000000000000000061 /* WorkspaceFilesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFilesTests.swift; sourceTree = "<group>"; };
 		20000000000000000000071 /* EngineLauncherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineLauncherTests.swift; sourceTree = "<group>"; };
+		20000000000000000000080 /* AuthClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthClient.swift; sourceTree = "<group>"; };
+		20000000000000000000081 /* AuthClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthClientTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -242,6 +246,7 @@
 				20000000000000000000052 /* EngineIcon.swift */,
 				20000000000000000000022 /* SettingsStore.swift */,
 				20000000000000000000023 /* BrainClients.swift */,
+				20000000000000000000080 /* AuthClient.swift */,
 				20000000000000000000024 /* AuthGateState.swift */,
 				20000000000000000000025 /* AuthGateView.swift */,
 				20000000000000000000026 /* OnboardingState.swift */,
@@ -281,6 +286,7 @@
 				20000000000000000000001D /* SessionOutlineTests.swift */,
 				200000000000000000000021 /* CommandPaletteTests.swift */,
 				2000000000000000000002D /* SettingsStoreTests.swift */,
+				20000000000000000000081 /* AuthClientTests.swift */,
 				2000000000000000000002E /* AuthGateStateTests.swift */,
 				2000000000000000000002F /* AuthGateCoordinatorTests.swift */,
 				20000000000000000000030 /* OnboardingStateTests.swift */,
@@ -444,6 +450,7 @@
 				10000000000000000000052 /* EngineIcon.swift in Sources */,
 				10000000000000000000021 /* SettingsStore.swift in Sources */,
 				10000000000000000000022 /* BrainClients.swift in Sources */,
+				10000000000000000000080 /* AuthClient.swift in Sources */,
 				10000000000000000000023 /* AuthGateState.swift in Sources */,
 				10000000000000000000024 /* AuthGateView.swift in Sources */,
 				10000000000000000000025 /* OnboardingState.swift in Sources */,
@@ -478,6 +485,7 @@
 				10000000000000000000001C /* SessionOutlineTests.swift in Sources */,
 				100000000000000000000020 /* CommandPaletteTests.swift in Sources */,
 				1000000000000000000002C /* SettingsStoreTests.swift in Sources */,
+				10000000000000000000081 /* AuthClientTests.swift in Sources */,
 				1000000000000000000002D /* AuthGateStateTests.swift in Sources */,
 				1000000000000000000002E /* AuthGateCoordinatorTests.swift in Sources */,
 				1000000000000000000002F /* OnboardingStateTests.swift in Sources */,
