@@ -1,4 +1,59 @@
+import CryptoKit
 import Foundation
+
+/// Which Claude conversation an OmniAgent terminal owns.
+///
+/// The native port of `src-tauri/src/sessions.rs`'s `claude_conversation_uuid`
+/// — and of the bug that produced it, which this app had reintroduced by
+/// launching `claude` stock. Claude's own conversation picking is *directory
+/// scoped*: several Claude terminals in one project folder end up talking
+/// about the same conversation, so `/rename` inside one renames what every
+/// other one is showing, and they all read the same. This app's whole shape
+/// encourages several Claude terminals in one folder, so it is not an edge
+/// case here — it is the normal case.
+///
+/// The fix is to stop letting "most recent in this directory" decide:
+/// `--session-id <uuid>` hands Claude the conversation the pane owns.
+///
+/// **Derived, never stored.** A UUIDv5 (RFC 4122, SHA-1) of the OmniAgent
+/// session id under a fixed namespace, so the same terminal always maps to
+/// the same conversation, on any machine, with nothing new persisted. The
+/// namespace is deliberately byte-identical to the Rust one: a pane opened in
+/// either app has to land on the same conversation, and changing it would
+/// orphan every conversation already written.
+enum ClaudeConversation {
+    /// `uuid5(NAMESPACE_URL, "https://omni-agent.ai/ade/claude-conversation")`
+    /// = `9337750e-5a2b-59c8-82f3-650bc0f53cfa`, the same literal
+    /// `CLAUDE_CONVERSATION_NAMESPACE` carries on the Rust side. Written out
+    /// as bytes rather than parsed from a string so there is no optional to
+    /// unwrap and no way for it to be silently wrong at runtime.
+    static let namespace: [UInt8] = [
+        0x93, 0x37, 0x75, 0x0E, 0x5A, 0x2B, 0x59, 0xC8,
+        0x82, 0xF3, 0x65, 0x0B, 0xC0, 0xF5, 0x3C, 0xFA,
+    ]
+
+    /// The `<uuid>` for `claude --session-id` / `claude --resume`.
+    static func uuid(forSessionID sessionID: String) -> String {
+        uuid5(namespace: namespace, name: sessionID)
+    }
+
+    /// RFC 4122 name-based (SHA-1) UUID. Generic so the suite can rederive
+    /// `namespace` itself from the URL it is documented as, rather than
+    /// trusting the literal above because a comment says so.
+    static func uuid5(namespace: [UInt8], name: String) -> String {
+        var input = Data(namespace)
+        input.append(contentsOf: Array(name.utf8))
+        var digest = Array(Insecure.SHA1.hash(data: input).prefix(16))
+        digest[6] = (digest[6] & 0x0F) | 0x50 // version 5
+        digest[8] = (digest[8] & 0x3F) | 0x80 // RFC 4122 variant
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        let groups = [0..<8, 8..<12, 12..<16, 16..<20, 20..<32].map { range in
+            String(hex[hex.index(hex.startIndex, offsetBy: range.lowerBound)
+                    ..< hex.index(hex.startIndex, offsetBy: range.upperBound)])
+        }
+        return groups.joined(separator: "-")
+    }
+}
 
 /// Turns an `Engine` into something the PTY daemon can exec.
 ///
@@ -64,14 +119,33 @@ enum EngineLauncher {
     /// (`Contents/Resources` holds only the icon, assets and SwiftTerm). Adding
     /// the flag without the binary would make every agent fail to start, so the
     /// agents launch stock here until the helper is bundled.
-    static func command(for engine: Engine, resolve: (String) -> String? = resolveBinary) -> [String]? {
+    /// `conversationID` claims a specific Claude conversation for this
+    /// terminal (see `ClaudeConversation`). Pass it only for a spawn that
+    /// cannot already own one: `--session-id` naming a conversation that
+    /// exists makes `claude` exit 1 with "Session ID … is already in use",
+    /// which turns opening a terminal into a terminal that is instantly dead —
+    /// strictly worse than a stock `claude`. Recovering from that needs the
+    /// liveness-probed `--resume` → `--session-id` → stock ladder the Tauri
+    /// build carries (`ClaudeIdentity::ladder`), which this app does not have
+    /// yet, so it only claims identities it knows are free.
+    ///
+    /// `codex`/`shell`/`agy` have no conversation concept and are untouched.
+    /// `copilot` takes the same flag as `claude`.
+    static func command(
+        for engine: Engine,
+        conversationID: String? = nil,
+        resolve: (String) -> String? = resolveBinary
+    ) -> [String]? {
         guard let program = resolve(binaryName(for: engine)) else { return nil }
         switch engine {
         case .shell:
             // Login shell, so the user's own rc files and PATH apply inside the
             // terminal exactly as they would in Terminal.app.
             return [program, "-l"]
-        case .claude, .codex, .copilot, .antigravity:
+        case .claude, .copilot:
+            guard let conversationID else { return [program] }
+            return [program, "--session-id", conversationID]
+        case .codex, .antigravity:
             return [program]
         }
     }

@@ -51,6 +51,28 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(Set(names).count, names.count, "no two terminals read the same")
     }
 
+    /// A terminal claims its Claude conversation exactly once. Claiming twice
+    /// is what `--session-id` punishes: naming a conversation that already
+    /// exists makes `claude` exit 1 immediately, so a respawn after the daemon
+    /// lost a session has to fall back to a stock `claude` rather than
+    /// re-claim an id it has already written under.
+    func testAConversationIsClaimedOncePerTerminalAndNeverForARestoredOne() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        controller.allowConversationClaim(for: "fresh")
+        XCTAssertEqual(
+            controller.claimConversation(for: "fresh"),
+            ClaudeConversation.uuid(forSessionID: "fresh")
+        )
+        XCTAssertNil(controller.claimConversation(for: "fresh"), "a second spawn goes stock")
+        XCTAssertNil(
+            controller.claimConversation(for: "restored"),
+            "a pane back from the persisted layout may already own a conversation"
+        )
+    }
+
     func testNewPaneCommandAddsPanesWithFreshSessionIDsAndStopsAtTheCap() throws {
         let controller = makeController()
         defer { controller.close() }

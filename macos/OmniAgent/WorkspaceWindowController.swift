@@ -1140,6 +1140,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             )
         }
         guard workspace.addPane(descriptor) else { return false }
+        // A pane that did not come back from the persisted layout has a session
+        // id minted moments ago, so the Claude conversation derived from it
+        // cannot exist yet and is safe to claim. A restored one may already
+        // have written its conversation, and re-claiming that kills the spawn.
+        if !pane.reattaches { allowConversationClaim(for: sessionID) }
         usageRecorder.recordPaneOpened(
             paneID: sessionID,
             sessionKey: pane.group,
@@ -1195,10 +1200,39 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// builds them, which `EngineLauncher` now ports from
     /// `src-tauri/src/sessions.rs`. An engine whose CLI is not installed says
     /// so, rather than quietly starting a login shell under that engine's name.
+    /// Terminals whose Claude conversation is provably unclaimed — freshly
+    /// minted session ids, whose derived conversation uuid therefore names
+    /// nothing yet. See `claimConversation(for:)`.
+    private var claimableConversations: Set<String> = []
+
+    /// The conversation id this spawn may claim, consuming the claim.
+    ///
+    /// One claim per terminal, ever. `--session-id` for a conversation that
+    /// already exists kills the spawn outright, so a second attempt for the
+    /// same terminal — a reconnect after the daemon lost its session, say —
+    /// must fall back to a stock `claude` rather than re-claim an id it has
+    /// already written a conversation under.
+    func claimConversation(for sessionID: String) -> String? {
+        guard claimableConversations.remove(sessionID) != nil else { return nil }
+        return ClaudeConversation.uuid(forSessionID: sessionID)
+    }
+
+    /// Only a session id minted this run can claim a conversation: one
+    /// restored from the persisted layout may already have written one, and
+    /// claiming it again would kill the terminal.
+    func allowConversationClaim(for sessionID: String) {
+        claimableConversations.insert(sessionID)
+    }
+
     private func createSession(_ sessionID: String) {
         let descriptor = workspace.descriptor(for: sessionID)
         let engine = descriptor?.engine ?? .shell
-        guard let command = EngineLauncher.command(for: engine) else {
+        guard
+            let command = EngineLauncher.command(
+                for: engine,
+                conversationID: claimConversation(for: sessionID)
+            )
+        else {
             let message = "\(engine.rawValue) is not installed — \(EngineLauncher.binaryName(for: engine)) is not on your PATH"
             applySessionStatus(message, for: sessionID)
             reportSessionFailure(message, for: sessionID)

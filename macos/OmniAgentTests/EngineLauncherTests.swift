@@ -100,4 +100,81 @@ final class EngineLauncherTests: XCTestCase {
             XCTAssertTrue(path.contains(expected), "expected \(expected) in \(path)")
         }
     }
+
+    // MARK: - Claude conversation identity
+
+    /// The namespace is not a magic constant: it is the UUIDv5 of a documented
+    /// URL under the standard URL namespace, and it must stay byte-identical
+    /// to `CLAUDE_CONVERSATION_NAMESPACE` in `src-tauri/src/sessions.rs`.
+    /// Changing it orphans every conversation already written.
+    func testTheNamespaceIsTheDocumentedDerivationNotAMagicConstant() {
+        // RFC 4122's URL namespace, 6ba7b811-9dad-11d1-80b4-00c04fd430c8.
+        let urlNamespace: [UInt8] = [
+            0x6B, 0xA7, 0xB8, 0x11, 0x9D, 0xAD, 0x11, 0xD1,
+            0x80, 0xB4, 0x00, 0xC0, 0x4F, 0xD4, 0x30, 0xC8,
+        ]
+        let derived = ClaudeConversation.uuid5(
+            namespace: urlNamespace,
+            name: "https://omni-agent.ai/ade/claude-conversation"
+        )
+        XCTAssertEqual(derived, "9337750e-5a2b-59c8-82f3-650bc0f53cfa")
+
+        let literal = ClaudeConversation.namespace
+            .map { String(format: "%02x", $0) }
+            .joined()
+        XCTAssertEqual(literal, derived.replacingOccurrences(of: "-", with: ""))
+    }
+
+    /// Cross-checked against an independent UUIDv5 implementation, so this
+    /// pins the actual bytes rather than only agreeing with itself — the
+    /// Rust side derives the same values for the same session ids, and a pane
+    /// has to land on one conversation whichever app opened it.
+    func testConversationUUIDsMatchAnIndependentImplementation() {
+        XCTAssertEqual(
+            ClaudeConversation.uuid(forSessionID: "sess-a"),
+            "8a0239e0-70ec-5c0f-ac2b-d872ad014fc4"
+        )
+        XCTAssertEqual(
+            ClaudeConversation.uuid(forSessionID: "DBF86AF7-5273-4449-B554-8675F0E35244"),
+            "603d527c-29ae-507d-bcac-aa9a1358e137"
+        )
+    }
+
+    func testConversationUUIDsAreStableAndDistinctPerTerminal() {
+        let first = ClaudeConversation.uuid(forSessionID: "pane-1")
+        XCTAssertEqual(first, ClaudeConversation.uuid(forSessionID: "pane-1"), "same terminal, same conversation")
+        XCTAssertNotEqual(first, ClaudeConversation.uuid(forSessionID: "pane-2"))
+        // Shape `claude --session-id` validates: 8-4-4-4-12 hex, version 5.
+        XCTAssertEqual(first.count, 36)
+        XCTAssertEqual(first.split(separator: "-").map(\.count), [8, 4, 4, 4, 12])
+        XCTAssertTrue(first.split(separator: "-")[2].hasPrefix("5"), "version 5")
+    }
+
+    /// The bug this exists for: launched stock, several Claude terminals in
+    /// one folder share whatever conversation Claude thinks is most recent, so
+    /// `/rename` in one renames what the others show. `--session-id` is what
+    /// makes a terminal own its own.
+    func testClaudeIsHandedTheConversationTheTerminalOwns() {
+        let resolve: (String) -> String? = { "/bin/\($0)" }
+        XCTAssertEqual(
+            EngineLauncher.command(for: .claude, conversationID: "abc", resolve: resolve),
+            ["/bin/claude", "--session-id", "abc"]
+        )
+        XCTAssertEqual(
+            EngineLauncher.command(for: .copilot, conversationID: "abc", resolve: resolve),
+            ["/bin/copilot", "--session-id", "abc"],
+            "copilot takes the same flag"
+        )
+        // No claim to make: stock, rather than a flag that would kill the spawn.
+        XCTAssertEqual(EngineLauncher.command(for: .claude, resolve: resolve), ["/bin/claude"])
+        // Engines with no conversation concept are untouched.
+        XCTAssertEqual(
+            EngineLauncher.command(for: .codex, conversationID: "abc", resolve: resolve),
+            ["/bin/codex"]
+        )
+        XCTAssertEqual(
+            EngineLauncher.command(for: .antigravity, conversationID: "abc", resolve: resolve),
+            ["/bin/agy"]
+        )
+    }
 }
