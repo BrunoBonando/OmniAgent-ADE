@@ -314,6 +314,16 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return view
     }()
 
+    /// How long a pane takes to grow into the zoom or shrink back out of it,
+    /// with the backdrop's blur ramping over the same span. Slow enough to read
+    /// as one pane lifting off the others rather than as a cut.
+    static let zoomTransitionDuration: TimeInterval = 0.32
+
+    /// Non-zero only for the one layout pass a zoom change kicks off, so the
+    /// pane's move is animated there and nowhere else: every other pass (window
+    /// resize, divider drag, session switch) has to land instantly.
+    private var zoomTransition: TimeInterval = 0
+
     @discardableResult
     func toggleZoom(_ sessionID: String) -> Bool {
         guard paneIDs.count >= 2, paneIDs.contains(sessionID) else { return false }
@@ -326,7 +336,17 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         zoomedPaneID = sessionID
         if let sessionID { focusPane(sessionID) }
         updateZoomAvailability()
-        updateLayout()
+        // Reduced motion still zooms, it just lands instantly.
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            return updateLayout()
+        }
+        zoomTransition = Self.zoomTransitionDuration
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = zoomTransition
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            updateLayout()
+        }
+        zoomTransition = 0
     }
 
     /// Zoom only survives while it still means something: the pane has to be
@@ -360,19 +380,29 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 
     private func applyZoom() {
         guard let id = zoomedPaneID, let container = containers[id] else {
-            zoomBackdrop.isHidden = true
+            zoomBackdrop.setShown(false, duration: zoomTransition)
             return
         }
-        zoomBackdrop.isHidden = false
+        zoomBackdrop.setShown(true, duration: zoomTransition)
         // Re-stacked on every pass because `syncDividerViews`/`addPane` add
         // their own subviews on top; the backdrop has to stay directly under
         // the zoomed pane and above everything else.
         addSubview(zoomBackdrop, positioned: .above, relativeTo: nil)
         addSubview(container, positioned: .above, relativeTo: zoomBackdrop)
         zoomBackdrop.frame = bounds
-        let frame = zoomFrame()
+        place(container, at: zoomFrame())
+    }
+
+    /// Moves a pane, animating the move only during a zoom transition — where
+    /// AppKit's animator lands the frame in the model at once (so the terminal
+    /// reflows once, at its final size) and animates the layer into it.
+    private func place(_ container: PaneContainerView, at frame: NSRect) {
         guard container.frame != frame else { return }
-        container.frame = frame
+        if zoomTransition > 0 {
+            container.animator().frame = frame
+        } else {
+            container.frame = frame
+        }
         container.surface.scheduleResize()
     }
 
@@ -629,9 +659,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             // than assigned twice: each assignment schedules a PTY resize, and
             // this runs on every frame of a divider drag.
             guard id != zoomedPaneID, let frame = layout.frames[id] else { continue }
-            guard container.frame != frame else { continue }
-            container.frame = frame
-            container.surface.scheduleResize()
+            place(container, at: frame)
         }
         syncDividerViews(layout.dividers)
         syncHolePlaceholders(layout, holeIDs: grid.cells.filter(\.isHole).map(\.id))
@@ -1508,16 +1536,30 @@ final class PaneBadgeView: NSView {
 /// suite. A Gaussian blur over the layers behind this one is the whole of
 /// what is wanted here, and `backgroundFilters` is exactly that.
 final class PaneZoomBackdropView: NSView {
+    /// The blur the grid ends up under. Ramped up from zero on the way in and
+    /// back down on the way out, so the background blurs in and out with the
+    /// pane rather than snapping — a plain alpha fade would cross-dissolve a
+    /// sharp grid with a blurred one, which reads as double vision on text.
+    static let blurRadius: CGFloat = 14
+    /// The filter is named so this key path can address it; `CIFilter.name`
+    /// exists for exactly this.
+    private static let blurKeyPath = "backgroundFilters.blur.inputRadius"
+
     var onClick: (() -> Void)?
+
+    private var isShown = false
 
     init() {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(srgbRed: 4 / 255, green: 6 / 255, blue: 9 / 255, alpha: 0.5)
             .cgColor
-        if let blur = CIFilter(name: "CIGaussianBlur", parameters: ["inputRadius": 14]) {
+        if let blur = CIFilter(name: "CIGaussianBlur", parameters: ["inputRadius": 0]) {
+            blur.name = "blur"
             layer?.backgroundFilters = [blur]
         }
+        alphaValue = 0
+        isHidden = true
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel("Shrink the zoomed terminal back into the grid")
@@ -1526,6 +1568,40 @@ final class PaneZoomBackdropView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is unavailable")
+    }
+
+    /// Fades the tint and ramps the blur with it. Hidden only once it has faded
+    /// out, never left invisible-but-present: it swallows clicks.
+    func setShown(_ shown: Bool, duration: TimeInterval) {
+        guard isShown != shown else { return }
+        isShown = shown
+        if shown { isHidden = false }
+        let radius = shown ? Self.blurRadius : 0
+        let alpha: CGFloat = shown ? 1 : 0
+        guard duration > 0 else {
+            layer?.setValue(radius, forKeyPath: Self.blurKeyPath)
+            alphaValue = alpha
+            isHidden = !shown
+            return
+        }
+        if let layer {
+            let ramp = CABasicAnimation(keyPath: Self.blurKeyPath)
+            ramp.fromValue = layer.value(forKeyPath: Self.blurKeyPath)
+            ramp.toValue = radius
+            ramp.duration = duration
+            ramp.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.setValue(radius, forKeyPath: Self.blurKeyPath)
+            layer.add(ramp, forKey: "blur")
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            animator().alphaValue = alpha
+        }, completionHandler: { [weak self] in
+            // Checked again: a zoom started mid-fade-out must not be hidden.
+            guard let self, !self.isShown else { return }
+            self.isHidden = true
+        })
     }
 
     // Swallowed, so a click meant for "get me out of here" never reaches — or

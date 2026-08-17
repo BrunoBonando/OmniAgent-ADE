@@ -590,9 +590,27 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertGreaterThan(zoomedIndex, blurIndex, "the zoomed pane sits above the blur")
         XCTAssertLessThan(otherIndex, blurIndex, "and everything else behind it, blurred")
 
+        XCTAssertEqual(
+            backdrop.layer?.value(forKeyPath: "backgroundFilters.blur.inputRadius") as? CGFloat,
+            PaneZoomBackdropView.blurRadius,
+            "the blur ramps to its full radius rather than being faded in sharp"
+        )
+
         XCTAssertTrue(workspace.toggleZoom("pane-2"), "the same button shrinks it back")
         XCTAssertNil(workspace.zoomedPaneID)
-        XCTAssertTrue(backdrop.isHidden)
+        // Both back to zero at once — the eased animation is what takes time,
+        // the model values land immediately.
+        XCTAssertEqual(backdrop.alphaValue, 0)
+        XCTAssertEqual(
+            backdrop.layer?.value(forKeyPath: "backgroundFilters.blur.inputRadius") as? CGFloat,
+            0
+        )
+        // Hidden only once it has faded out, since it swallows clicks.
+        let deadline = Date().addingTimeInterval(2)
+        while !backdrop.isHidden, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(backdrop.isHidden, "once the fade has landed")
     }
 
     func testZoomEndsWhenItWouldOtherwiseHideWhatYouAskedFor() {
