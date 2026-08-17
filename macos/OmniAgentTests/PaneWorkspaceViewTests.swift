@@ -603,11 +603,9 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         XCTAssertEqual(workspace.zoomedPaneID, "pane-2")
         let zoomed = try XCTUnwrap(workspace.container(for: "pane-2"))
-        // The design's card, exactly: 1080x720 centred in an overlay padded by
-        // 26. This used to assert an area floor of 0.8 x the grid, from the first
-        // pass where the zoomed pane took nearly the whole workspace — a capped
-        // card fails that on any window bigger than about 1200x800, which is the
-        // direction windows go.
+        // The card, centred in an overlay padded by 26 — and a real share of the
+        // window at any size, which the mock's flat 1080x720 ceiling stopped
+        // being the moment the window grew past it.
         XCTAssertEqual(zoomed.frame, PaneWorkspaceView.focusCardFrame(in: workspace.bounds))
 
         let backdrop = try XCTUnwrap(
@@ -624,20 +622,16 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertLessThan(otherIndex, blurIndex, "and everything else behind it, blurred")
 
         XCTAssertEqual(
-            backdrop.layer?.value(forKeyPath: "backgroundFilters.blur.inputRadius") as? CGFloat,
-            PaneZoomBackdropView.blurRadius,
-            "the blur ramps to its full radius rather than being faded in sharp"
+            backdrop.blendingMode,
+            .withinWindow,
+            "blurring the app behind it rather than the desktop behind the window"
         )
 
         XCTAssertTrue(workspace.toggleZoom("pane-2"), "the same button shrinks it back")
         XCTAssertNil(workspace.zoomedPaneID)
-        // Both back to zero at once — the eased animation is what takes time,
-        // the model values land immediately.
+        // Back to zero at once — the eased animation is what takes time, the
+        // model value lands immediately.
         XCTAssertEqual(backdrop.alphaValue, 0)
-        XCTAssertEqual(
-            backdrop.layer?.value(forKeyPath: "backgroundFilters.blur.inputRadius") as? CGFloat,
-            0
-        )
         // Hidden only once it has faded out, since it swallows clicks.
         let deadline = Date().addingTimeInterval(2)
         while !backdrop.isHidden || backdrop.superview != nil, Date() < deadline {
@@ -670,30 +664,41 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertNil(workspace.zoomedPaneID, "one terminal left, nothing to zoom over")
     }
 
-    /// The design's card: `width:1080px;height:100%;max-height:720px`, centred in
-    /// an overlay with `padding:26px`. Pure geometry, so it is asked directly
-    /// rather than through a window.
-    func testFocusCardFrameIsTheDesignsCardCentredInTheOverlay() {
+    /// The card as a share of the overlay it is centred in, which has `padding:26px`.
+    /// Pure geometry, so it is asked directly rather than through a window.
+    func testFocusCardFrameIsAShareOfTheOverlayItIsCentredIn() {
         let padding = PaneWorkspaceView.focusOverlayPadding
+        let scale = PaneWorkspaceView.focusCardScale
         let roomy = PaneWorkspaceView.focusCardFrame(
             in: NSRect(x: 0, y: 0, width: 1600, height: 1000)
         )
-        XCTAssertEqual(roomy.size, PaneWorkspaceView.focusCardSize, "1080x720 is the ceiling")
+        XCTAssertEqual(
+            roomy.size,
+            NSSize(width: (1600 * scale).rounded(.down), height: (1000 * scale).rounded(.down))
+        )
         XCTAssertEqual(roomy.midX, 800, "centred in the overlay")
         XCTAssertEqual(roomy.midY, 500)
+        // The point of the change: it keeps growing with the window instead of
+        // stopping at the mock's 1080x720 and shrinking, relatively, from there.
+        let bigger = PaneWorkspaceView.focusCardFrame(
+            in: NSRect(x: 0, y: 0, width: 2400, height: 1500)
+        )
+        XCTAssertGreaterThan(bigger.width, roomy.width)
+        XCTAssertGreaterThan(bigger.height, roomy.height)
 
-        // Narrower and shorter than 1080+52 / 720+52: the card gives up its own
-        // size rather than the padding that keeps the blur reading as a surround.
+        // Small enough that the share would come within 26 of an edge: the card
+        // gives up its own size rather than the padding that keeps the blur
+        // reading as a surround.
         let cramped = PaneWorkspaceView.focusCardFrame(
-            in: NSRect(x: 0, y: 0, width: 800, height: 600)
+            in: NSRect(x: 0, y: 0, width: 300, height: 200)
         )
         XCTAssertEqual(
             cramped,
             NSRect(
                 x: padding,
                 y: padding,
-                width: 800 - padding * 2,
-                height: 600 - padding * 2
+                width: 300 - padding * 2,
+                height: 200 - padding * 2
             )
         )
 
@@ -1130,29 +1135,56 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
     }
 
-    /// `backdrop-filter:blur(16px) saturate(70%)` — both stages, chained in that
-    /// order, with only the blur ramping.
-    func testTheBackdropCarriesTheDesignsBlurAndDesaturation() throws {
-        let backdrop = PaneZoomBackdropView()
-        XCTAssertEqual(PaneZoomBackdropView.blurRadius, 16)
-        XCTAssertEqual(PaneZoomBackdropView.saturation, 0.7)
+    /// The card *scales* into focus and back out: the pane, its header and its
+    /// terminal text all grow together from the cell it left. Animating the
+    /// container's `bounds` instead — which this used to do — moves nothing
+    /// inside it, because its subviews are laid out at the final size the
+    /// instant the frame lands: a full-size pane revealed through a widening
+    /// window, with the text sitting still, rather than a zoom.
+    func testEnteringFocusScalesTheCardUpFromItsCell() throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            throw XCTSkip("under Reduce Motion the card lands instantly")
+        }
+        let (workspace, window, _) = makeSplitHostedWorkspace(panes: 2)
+        defer { window.close() }
+        let card = try XCTUnwrap(workspace.container(for: "pane-2"))
+        let cell = card.frame
 
-        let filters = try XCTUnwrap(backdrop.layer?.backgroundFilters as? [CIFilter])
-        XCTAssertEqual(filters.count, 2)
-        XCTAssertEqual(filters.first?.name, "blur")
-        XCTAssertEqual(filters.last?.name, "saturate")
+        XCTAssertTrue(workspace.toggleZoom("pane-2"))
+        let layer = try XCTUnwrap(card.layer)
+        XCTAssertNil(layer.animation(forKey: "bounds"), "not a resize of the container alone")
+        let zoom = try XCTUnwrap(layer.animation(forKey: "transform") as? CABasicAnimation)
+        let from = try XCTUnwrap((zoom.fromValue as? NSValue)?.caTransform3DValue)
+        XCTAssertEqual(from.m11, cell.width / card.frame.width, accuracy: 0.02, "from the cell's size")
+        XCTAssertEqual(from.m22, cell.height / card.frame.height, accuracy: 0.02)
+        XCTAssertEqual(zoom.duration, PaneWorkspaceView.zoomTransitionDuration)
+        XCTAssertNotNil(layer.animation(forKey: "position"), "travelling as it grows")
+    }
+
+    /// `backdrop-filter:blur(16px) saturate(70%)` over `rgba(6,6,8,.62)`, as the
+    /// platform's within-window blur. The `CIGaussianBlur` in
+    /// `layer.backgroundFilters` this replaces passed a test just like this one
+    /// and blurred nothing on screen: `backgroundFilters` are not composited for
+    /// a layer-backed view in an ordinary window, so the assertions could only
+    /// ever confirm the filter was *installed*. Hence the blending mode below —
+    /// it is the property that decides whether anything is blurred at all.
+    func testTheBackdropBlursTheAppBehindItUnderTheDesignsTint() throws {
+        let backdrop = PaneZoomBackdropView()
+        backdrop.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+
+        XCTAssertEqual(backdrop.blendingMode, .withinWindow, "the app behind it, not the desktop")
+        XCTAssertEqual(backdrop.state, .active, "and blurred whether or not the window is key")
 
         backdrop.setShown(true, duration: 0)
+        backdrop.layoutSubtreeIfNeeded()
+        let tint = try XCTUnwrap(backdrop.subviews.first)
+        XCTAssertEqual(tint.frame, backdrop.bounds, "the tint covers the blur")
         XCTAssertEqual(
-            backdrop.layer?.value(forKeyPath: "backgroundFilters.blur.inputRadius") as? CGFloat,
-            PaneZoomBackdropView.blurRadius
+            tint.layer?.backgroundColor.flatMap { NSColor(cgColor: $0)?.alphaComponent },
+            0.62,
+            "at the design's rgba(6,6,8,.62)"
         )
-        XCTAssertEqual(
-            backdrop.layer?.value(forKeyPath: "backgroundFilters.saturate.inputSaturation")
-                as? CGFloat,
-            PaneZoomBackdropView.saturation,
-            "set once rather than ramped with the blur"
-        )
+        XCTAssertEqual(backdrop.alphaValue, 1)
     }
 
     // MARK: - Click to activate

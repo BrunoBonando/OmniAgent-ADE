@@ -386,19 +386,29 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// the overlay would be pulled out from under the fade.
     private var zoomTransitionToken = 0
 
-    /// `padding:26px` on the overlay and `width:1080px;max-height:720px` on the
-    /// card — the design's whole geometry for focus mode.
+    /// `padding:26px` on the overlay, and the card as a share of the window
+    /// rather than the mock's flat `width:1080px;max-height:720px`. That ceiling
+    /// *was* nearly the whole overlay on the 1440×900 mock it was measured from;
+    /// on a real window it stopped growing and read as a postage stamp floating
+    /// in blur. A fraction reproduces what the mock looks like at every size.
     static let focusOverlayPadding: CGFloat = 26
-    static let focusCardSize = NSSize(width: 1080, height: 720)
+    static let focusCardScale: CGFloat = 0.88
     /// `0 40px 100px`: 40pt of downward offset, and a CSS blur radius is about
     /// twice a layer's shadow radius, so 100px of spread is 50 here.
     static let focusCardShadowDrop: CGFloat = 40
     static let focusCardShadowBlur: CGFloat = 50
 
     /// How long a pane takes to grow into the zoom or shrink back out of it,
-    /// with the backdrop's blur ramping over the same span. Slow enough to read
-    /// as one pane lifting off the others rather than as a cut.
-    static let zoomTransitionDuration: TimeInterval = 0.32
+    /// with the backdrop fading over the same span. Slow enough to read as one
+    /// pane lifting off the others rather than as a cut.
+    static let zoomTransitionDuration: TimeInterval = 0.38
+
+    /// The curve every part of the transition shares — the card, its shadow and
+    /// the backdrop's fade. Front-loaded: about 85% of the distance is covered in
+    /// the first third, then it eases out long and flat, so the card leaves fast
+    /// and *settles* the way the Dock's genie does. The symmetric `easeInEaseOut`
+    /// it replaces spent as long arriving as leaving, which reads as a slide.
+    static let zoomTimingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
 
     /// Non-zero only for the one layout pass a zoom change kicks off, so the
     /// pane's move is animated there and nowhere else: every other pass (window
@@ -482,18 +492,17 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
     }
 
-    /// The card's rect inside the overlay: the design's
-    /// `width:1080px;height:100%;max-height:720px`, centred in an overlay padded
-    /// by 26 on all four sides. A window too small for 1080×720 gives up the
-    /// card's size rather than the padding, and never goes negative — the
-    /// padding is what keeps the blur reading as a surround rather than a frame
-    /// the card is jammed into.
+    /// The card's rect inside the overlay: `focusCardScale` of the host, centred,
+    /// and never closer than 26 to an edge. A window too small for the padding
+    /// gives up the card's size rather than the padding, and never goes negative —
+    /// the padding is what keeps the blur reading as a surround rather than a
+    /// frame the card is jammed into.
     ///
     /// Static and pure so the geometry can be checked without a window.
     static func focusCardFrame(in host: NSRect) -> NSRect {
-        let width = min(focusCardSize.width, max(0, host.width - focusOverlayPadding * 2))
+        let width = min(host.width * focusCardScale, max(0, host.width - focusOverlayPadding * 2))
             .rounded(.down)
-        let height = min(focusCardSize.height, max(0, host.height - focusOverlayPadding * 2))
+        let height = min(host.height * focusCardScale, max(0, host.height - focusOverlayPadding * 2))
             .rounded(.down)
         return NSRect(
             x: (host.midX - width / 2).rounded(),
@@ -593,18 +602,20 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return true
     }
 
-    /// Keeps the shadow on the card: the same rect, the same 0.32s, the same
-    /// curve. Spelled out because a hand-added sublayer gets none of AppKit's
-    /// view animation, exactly as `PaneZoomBackdropView` spells out its blur
-    /// ramp. Without it the shadow would sit at the card's final size while the
-    /// card was still small — an opaque black rectangle around a growing pane.
+    /// Keeps the shadow on the card: the same rect, the same duration, the same
+    /// curve, the same scale. Spelled out because a hand-added sublayer gets none
+    /// of AppKit's view animation. Without it the shadow would sit at the card's
+    /// final size while the card was still small — an opaque black rectangle
+    /// around a growing pane. Scaled rather than resized for the same reason the
+    /// card is, and so the two interpolate identically and stay locked together.
     private func moveFocusCardShadow(from start: NSRect, to card: NSRect) {
         focusCardShadow.frame = card
         guard zoomTransition > 0, !start.isEmpty, start != card else { return }
-        animateTransition(
+        zoomLayer(
             focusCardShadow,
             fromPosition: CGPoint(x: start.midX, y: start.midY),
-            fromBounds: CGRect(origin: .zero, size: start.size)
+            fromSize: start.size,
+            toSize: card.size
         )
     }
 
@@ -668,7 +679,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // only ones this code adds, and yanking whatever else a layer happens to
         // be running is how you break something you did not write.
         container.layer?.removeAnimation(forKey: "position")
-        container.layer?.removeAnimation(forKey: "bounds")
+        container.layer?.removeAnimation(forKey: "transform")
         if container.superview !== self { addSubview(container) }
         if let cell = gridFrame(for: id) { container.frame = cell }
         container.surface.scheduleResize()
@@ -740,30 +751,60 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     private func place(_ container: PaneContainerView, at frame: NSRect) {
         guard container.frame != frame else { return }
         let presented = (container.layer?.presentation() ?? container.layer)
-            .map { (position: $0.position, bounds: $0.bounds) }
+            .map { (position: $0.position, bounds: $0.bounds, transform: $0.transform) }
         container.frame = frame
         if zoomTransition > 0, let layer = container.layer, let presented {
-            animateTransition(layer, fromPosition: presented.position, fromBounds: presented.bounds)
+            // What is on screen right now: the presented bounds as its transform
+            // is currently scaling them, so a move that begins mid-flight starts
+            // from the size the eye can actually see.
+            let onScreen = CGSize(
+                width: presented.bounds.width * presented.transform.m11,
+                height: presented.bounds.height * presented.transform.m22
+            )
+            zoomLayer(
+                layer,
+                fromPosition: presented.position,
+                fromSize: onScreen,
+                toSize: frame.size
+            )
         }
         container.surface.scheduleResize()
     }
 
     /// One move of the transition, as the pair of layer animations that expresses
-    /// it: the design's 0.32s and curve, starting from wherever the layer is
-    /// presented right now so a move that begins mid-flight carries on from what
-    /// the eye can see instead of snapping back to the model value.
-    private func animateTransition(
+    /// it: the transition's duration and curve, starting from wherever the layer
+    /// is presented right now so a move that begins mid-flight carries on from
+    /// what the eye can see instead of snapping back to the model value.
+    ///
+    /// A **scale**, not the `bounds` animation this used to be, and that is the
+    /// whole of "the animation is off". Animating a container's bounds resizes
+    /// only the container: its header and its terminal are laid out at the final
+    /// size the instant the frame lands, so the card did not grow — a
+    /// full-size pane was revealed through a widening window, with the terminal's
+    /// text sitting still at its final position throughout. Scaling the layer
+    /// carries everything drawn inside it, which is what reads as a zoom.
+    ///
+    /// Position comes from the presented value rather than a computed centre, so
+    /// this is right for any `anchorPoint`: a scale is about the anchor and the
+    /// position *is* the anchor, so the two interpolate the same rect either way.
+    private func zoomLayer(
         _ layer: CALayer,
         fromPosition: CGPoint,
-        fromBounds: CGRect
+        fromSize: CGSize,
+        toSize: CGSize
     ) {
         let move = CABasicAnimation(keyPath: "position")
         move.fromValue = NSValue(point: fromPosition)
-        let resize = CABasicAnimation(keyPath: "bounds")
-        resize.fromValue = NSValue(rect: fromBounds)
-        for animation in [move, resize] {
+        let zoom = CABasicAnimation(keyPath: "transform")
+        zoom.fromValue = NSValue(caTransform3D: CATransform3DMakeScale(
+            toSize.width > 0 ? fromSize.width / toSize.width : 1,
+            toSize.height > 0 ? fromSize.height / toSize.height : 1,
+            1
+        ))
+        zoom.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        for animation in [move, zoom] {
             animation.duration = zoomTransition
-            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            animation.timingFunction = Self.zoomTimingFunction
             layer.add(animation, forKey: animation.keyPath)
         }
     }
@@ -2232,47 +2273,50 @@ final class PaneBadgeView: NSView {
 /// The blurred backdrop a zoomed pane sits on, and the way out of the zoom
 /// that does not require finding the button again.
 ///
-/// A layer background filter rather than an `NSVisualEffectView`: the effect
-/// view brings a display-link-backed animation machine with it, and on a
-/// headless test host that spins forever retrying
-/// `CVDisplayLinkCreateWithCGDisplays` — merely constructing one hung the
-/// suite. A blur and a desaturation over the layers behind this one are the
-/// whole of what is wanted here, and `backgroundFilters` is exactly that.
-final class PaneZoomBackdropView: NSView {
-    /// `backdrop-filter:blur(16px)` — the blur the app ends up under. Ramped up
-    /// from zero on the way in and back down on the way out, so the background
-    /// blurs in and out with the pane rather than snapping — a plain alpha fade
-    /// would cross-dissolve a sharp grid with a blurred one, which reads as
-    /// double vision on text.
-    static let blurRadius: CGFloat = 16
-    /// `saturate(70%)` from the same filter. Set once rather than ramped: the
-    /// colour draining out is not what the eye follows across the transition,
-    /// the blur is.
-    static let saturation: CGFloat = 0.7
-    /// The filters are named so these key paths can address them;
-    /// `CIFilter.name` exists for exactly this.
-    private static let blurKeyPath = "backgroundFilters.blur.inputRadius"
+/// This was a layer background filter, to keep `NSVisualEffectView`'s
+/// display-link-backed animation machine out of the test host — one that had
+/// been seen spinning forever retrying `CVDisplayLinkCreateWithCGDisplays` where
+/// no display exists. It bought a suite that never blurred anything: see `init`.
+/// The effect view is back, and the constraint it was avoided for is now a
+/// property of the *host*, not of this view — a test host with no display attached
+/// must not construct one.
+final class PaneZoomBackdropView: NSVisualEffectView {
+    /// `background:rgba(6,6,8,.62)`, the overlay's own tint over the blur, in a
+    /// subview because an `NSVisualEffectView` paints its material into its own
+    /// layer and a background colour set on that layer lands underneath it.
+    static let tint = NSColor(srgbRed: 6 / 255, green: 6 / 255, blue: 8 / 255, alpha: 0.62)
 
     var onClick: (() -> Void)?
 
     private var isShown = false
+    private let tintView = NSView()
 
+    /// `backdrop-filter:blur(16px) saturate(70%)` as the platform's own
+    /// within-window blur, rather than the `CIGaussianBlur` in
+    /// `layer.backgroundFilters` this used to carry. That is what "the background
+    /// is not blurred" was: `backgroundFilters` are only composited for layers the
+    /// window server can read back through, which a layer-backed view inside an
+    /// ordinary window is not — the filter was installed, ramped, and drew
+    /// nothing, leaving a flat 62% black wash over a perfectly sharp app.
+    /// `NSVisualEffectView` with `.withinWindow` blurs the sibling views behind
+    /// it, which is exactly what the design's overlay does.
     init() {
         super.init(frame: .zero)
+        material = .hudWindow
+        blendingMode = .withinWindow
+        // `.followsWindowActiveState` would drop the blur the moment the window
+        // stopped being key — including while a sheet or the palette is up.
+        state = .active
+        appearance = NSAppearance(named: .darkAqua)
+        // Explicit, though an effect view is layer-backed anyway: it does not
+        // *have* a `layer` until it joins a hierarchy, and the card's shadow is
+        // inserted directly above that layer — with none there, `stackOverlay`
+        // silently left the shadow out.
         wantsLayer = true
-        // `background:rgba(6,6,8,.62)`, the overlay's own tint over the blur.
-        layer?.backgroundColor = NSColor(srgbRed: 6 / 255, green: 6 / 255, blue: 8 / 255, alpha: 0.62)
-            .cgColor
-        // Blurred first, then desaturated — the order the design's
-        // `blur(16px) saturate(70%)` composes them in.
-        let blur = CIFilter(name: "CIGaussianBlur", parameters: ["inputRadius": 0])
-        blur?.name = "blur"
-        let saturate = CIFilter(
-            name: "CIColorControls",
-            parameters: ["inputSaturation": Self.saturation]
-        )
-        saturate?.name = "saturate"
-        layer?.backgroundFilters = [blur, saturate].compactMap { $0 }
+        tintView.wantsLayer = true
+        tintView.layer?.backgroundColor = Self.tint.cgColor
+        tintView.autoresizingMask = [.width, .height]
+        addSubview(tintView)
         alphaValue = 0
         isHidden = true
         setAccessibilityElement(true)
@@ -2285,32 +2329,31 @@ final class PaneZoomBackdropView: NSView {
         fatalError("init(coder:) is unavailable")
     }
 
-    /// Fades the tint and ramps the blur with it. Hidden only once it has faded
-    /// out, never left invisible-but-present: it swallows clicks.
+    override func layout() {
+        super.layout()
+        tintView.frame = bounds
+    }
+
+    /// Fades the whole backdrop, blur and tint together. Hidden only once it has
+    /// faded out, never left invisible-but-present: it swallows clicks.
     func setShown(_ shown: Bool, duration: TimeInterval) {
         guard isShown != shown else { return }
         isShown = shown
-        if shown { isHidden = false }
-        let radius = shown ? Self.blurRadius : 0
+        if shown {
+            isHidden = false
+            // Sized before the first frame is drawn: the fade starts now, and a
+            // tint still at its zero frame would show one frame of untinted blur.
+            tintView.frame = bounds
+        }
         let alpha: CGFloat = shown ? 1 : 0
         guard duration > 0 else {
-            layer?.setValue(radius, forKeyPath: Self.blurKeyPath)
             alphaValue = alpha
             isHidden = !shown
             return
         }
-        if let layer {
-            let ramp = CABasicAnimation(keyPath: Self.blurKeyPath)
-            ramp.fromValue = layer.value(forKeyPath: Self.blurKeyPath)
-            ramp.toValue = radius
-            ramp.duration = duration
-            ramp.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            layer.setValue(radius, forKeyPath: Self.blurKeyPath)
-            layer.add(ramp, forKey: "blur")
-        }
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = duration
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.timingFunction = PaneWorkspaceView.zoomTimingFunction
             animator().alphaValue = alpha
         }, completionHandler: { [weak self] in
             // Checked again: a zoom started mid-fade-out must not be hidden.
