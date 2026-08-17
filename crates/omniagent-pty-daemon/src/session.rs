@@ -17,6 +17,143 @@ const OUTPUT_HISTORY_CHUNKS: usize = 256;
 const EXITED_SESSION_RETENTION: Duration = Duration::from_secs(10);
 const MAX_EXITED_SESSIONS: usize = MAX_SESSIONS * 2;
 
+// ---------------------------------------------------------------------------
+// Agent status derivation
+//
+// Until now `refresh_shell_status` returned immediately unless the engine was
+// `shell`, so a `claude`/`codex`/`copilot` session never reported a status at
+// all -- which left every agent terminal's status light stuck on idle grey for
+// its whole life.
+//
+// The thresholds and markers below are NOT new guesses. They are the values
+// measured against real engines for the Tauri build and documented at length in
+// `src-tauri/src/sessions.rs` ("Five-state session status"); this is a port of
+// that research onto the daemon, not a second opinion about it.
+//
+// One thing does change, in this port's favour. That module had to reach for
+// tmux because matching markers on a raw PTY stream "would match essentially
+// nothing" -- Claude's TUI interleaves cursor-position escapes between
+// individual words, so `Running 1 shell command` arrives as
+// `Running\x1b[11G1\x1b[13Gshell\x1b[19Gcommand`. The daemon already keeps a
+// `vt100::Parser`, so it has the same resolved screen tmux was being used for,
+// and can match against `screen().contents()` directly.
+
+/// Prompts an engine renders when it is blocked on the user's decision.
+const ATTENTION_MARKERS: &[&str] = &["Do you want to", "Would you like to"];
+
+/// On screen while Claude runs a Bash tool. Deliberately screen state rather
+/// than a stream latch: a running tool is a state that *ends*, and a latch
+/// would leave the light stuck on after it did.
+const TOOL_EXECUTION_SCREEN_MARKERS: &[&str] = &["to run in background)"];
+
+/// The label Claude prints for a failed Bash tool. Matched with a following
+/// non-zero value, which is what separates a rendered result field from prose.
+const ERROR_MARKER: &str = "Exit code";
+
+/// Longer than this without output and the engine is considered quiet.
+const OUTPUT_QUIET_THRESHOLD: Duration = Duration::from_millis(700);
+
+/// How long an unbroken run of output must last before it counts as work
+/// rather than an idle TUI twitching. An idle `claude` is not silent: it emits
+/// a tight burst every few seconds, which this is what rejects.
+const SUSTAINED_ACTIVITY_MIN: Duration = Duration::from_millis(1000);
+
+/// The engines echo, so typing alone produces sustained output. Within this
+/// long of a keystroke the session is never called busy.
+const TYPING_ECHO_GRACE: Duration = Duration::from_millis(1000);
+
+/// Output/input timing behind the activity heuristic.
+#[derive(Default)]
+struct ActivityState {
+    last_output_at: Option<Instant>,
+    /// Start of the current unbroken run of output, reset by any gap longer
+    /// than `OUTPUT_QUIET_THRESHOLD`.
+    run_started_at: Option<Instant>,
+    last_input_at: Option<Instant>,
+}
+
+impl ActivityState {
+    fn record_output(&mut self, now: Instant) {
+        let broken = self
+            .last_output_at
+            .map(|last| now.duration_since(last) > OUTPUT_QUIET_THRESHOLD)
+            .unwrap_or(true);
+        if broken {
+            self.run_started_at = Some(now);
+        }
+        self.last_output_at = Some(now);
+    }
+
+    /// True when output is both *current* and has been going long enough to be
+    /// work rather than a redraw twitch, and the user is not mid-keystroke.
+    fn is_busy(&self, now: Instant) -> bool {
+        if let Some(typed) = self.last_input_at {
+            if now.duration_since(typed) < TYPING_ECHO_GRACE {
+                return false;
+            }
+        }
+        let Some(last) = self.last_output_at else {
+            return false;
+        };
+        let Some(started) = self.run_started_at else {
+            return false;
+        };
+        now.duration_since(last) <= OUTPUT_QUIET_THRESHOLD
+            && now.duration_since(started) >= SUSTAINED_ACTIVITY_MIN
+    }
+}
+
+fn contains_attention_marker(text: &str) -> bool {
+    ATTENTION_MARKERS.iter().any(|marker| text.contains(marker))
+}
+
+fn contains_tool_execution_marker(text: &str) -> bool {
+    TOOL_EXECUTION_SCREEN_MARKERS
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+/// True when `text` reports a *non-zero* `Exit code`. The value may be
+/// separated from the label by a colon and styling, so the first digit after
+/// the label is what decides -- and `Exit code 0` is a success, not an error.
+fn contains_error_marker(text: &str) -> bool {
+    text.match_indices(ERROR_MARKER).any(|(index, _)| {
+        match first_value_char_after(&text[index + ERROR_MARKER.len()..]) {
+            Some(value) => value.is_ascii_digit() && value != '0',
+            None => false,
+        }
+    })
+}
+
+/// The first character that could be a rendered *value*, skipping whitespace,
+/// punctuation and any ANSI escape sequence in between.
+///
+/// Skipping escapes is the whole job. `Exit code: \x1b[1m0\x1b[0m` is a
+/// success, but the first digit in that string is the `1` inside `\x1b[1m` —
+/// so a naive "first digit after the label" reads every successful command as
+/// a failure and paints a healthy terminal red. This matters even though the
+/// caller normally passes `vt100` screen text (already free of escapes),
+/// because being wrong here is silent and permanent-looking.
+fn first_value_char_after(rest: &str) -> Option<char> {
+    let mut chars = rest.chars();
+    while let Some(candidate) = chars.next() {
+        if candidate == '\u{1b}' {
+            // A CSI sequence runs until its final byte, which is a letter (or
+            // `~` for the editing keys).
+            for skipped in chars.by_ref() {
+                if skipped.is_ascii_alphabetic() || skipped == '~' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if candidate.is_ascii_digit() || candidate.is_alphabetic() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 struct Transcript {
     file: std::fs::File,
     pending: Vec<u8>,
@@ -243,6 +380,7 @@ pub struct ManagedSession {
     engine: String,
     status: Mutex<SessionStatus>,
     shell_command_state: AtomicU8,
+    activity: Mutex<ActivityState>,
     exit_code: Mutex<Option<Option<u32>>>,
 }
 
@@ -256,6 +394,12 @@ impl ManagedSession {
         writer.flush().context("flush master PTY")?;
         if self.engine == "shell" && data.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
             self.shell_command_state.store(1, Ordering::Release);
+        }
+        // The engines echo, so a keystroke produces output. Remember when the
+        // user last typed so the activity heuristic does not read their typing
+        // as the agent working.
+        if let Ok(mut activity) = self.activity.lock() {
+            activity.last_input_at = Some(Instant::now());
         }
         Ok(())
     }
@@ -331,7 +475,7 @@ impl ManagedSession {
                 0,
             ),
         };
-        if self.engine == "shell" {
+        {
             let status = self
                 .status
                 .lock()
@@ -421,6 +565,9 @@ impl ManagedSession {
             }
             event
         };
+        if let Ok(mut activity) = self.activity.lock() {
+            activity.record_output(Instant::now());
+        }
         self.broadcast(event);
     }
 
@@ -445,32 +592,55 @@ impl ManagedSession {
         }
     }
 
-    fn refresh_shell_status(&self) {
-        if self.engine != "shell" {
-            return;
-        }
-        let foreground = self
-            .master
-            .lock()
-            .ok()
-            .and_then(|master| master.process_group_leader());
-        let shell = self
-            .child
-            .lock()
-            .ok()
-            .and_then(|child| child.process_id())
-            .map(i64::from);
-        let next = match (foreground, shell) {
-            (Some(foreground), Some(shell)) if i64::from(foreground) != shell => {
-                self.shell_command_state.store(2, Ordering::Release);
-                SessionStatus::ToolExecution
-            }
-            _ if self.shell_command_state.load(Ordering::Acquire) == 2 => {
-                self.shell_command_state.store(0, Ordering::Release);
-                SessionStatus::Ready
-            }
-            _ => return,
+    /// Recomputes this session's status and broadcasts it when it changed.
+    /// A shell is judged by what is in its foreground process group; an agent
+    /// by what is on its screen and how it is behaving.
+    fn refresh_status(&self) {
+        let next = if self.engine == "shell" {
+            self.shell_status()
+        } else {
+            self.agent_status()
         };
+        let Some(next) = next else { return };
+        self.publish_status(next);
+    }
+
+    /// What an agent engine is doing, in urgency order: a question it is
+    /// blocked on, then a failure, then a tool, then thinking, then ready.
+    ///
+    /// Screen state rather than stream latches. A latch is right for an event
+    /// but wrong for a *state* that ends -- the engine repaints constantly, so
+    /// a latched marker would re-fire forever and the light would never go
+    /// back. Reading the live screen means a prompt that is answered, or a
+    /// failure that scrolls off, clears itself with no extra bookkeeping.
+    fn agent_status(&self) -> Option<SessionStatus> {
+        let screen = self
+            .terminal
+            .lock()
+            .ok()
+            .map(|terminal| terminal.parser.screen().contents())?;
+        if contains_attention_marker(&screen) {
+            return Some(SessionStatus::AwaitingApproval);
+        }
+        if contains_error_marker(&screen) {
+            return Some(SessionStatus::Error);
+        }
+        if contains_tool_execution_marker(&screen) {
+            return Some(SessionStatus::ToolExecution);
+        }
+        let busy = self
+            .activity
+            .lock()
+            .map(|activity| activity.is_busy(Instant::now()))
+            .unwrap_or(false);
+        Some(if busy {
+            SessionStatus::Thinking
+        } else {
+            SessionStatus::Ready
+        })
+    }
+
+    fn publish_status(&self, next: SessionStatus) {
         let changed = self
             .status
             .lock()
@@ -494,6 +664,31 @@ impl ManagedSession {
                 status: next,
                 engine: self.engine.clone(),
             });
+        }
+    }
+
+    fn shell_status(&self) -> Option<SessionStatus> {
+        let foreground = self
+            .master
+            .lock()
+            .ok()
+            .and_then(|master| master.process_group_leader());
+        let shell = self
+            .child
+            .lock()
+            .ok()
+            .and_then(|child| child.process_id())
+            .map(i64::from);
+        match (foreground, shell) {
+            (Some(foreground), Some(shell)) if i64::from(foreground) != shell => {
+                self.shell_command_state.store(2, Ordering::Release);
+                Some(SessionStatus::ToolExecution)
+            }
+            _ if self.shell_command_state.load(Ordering::Acquire) == 2 => {
+                self.shell_command_state.store(0, Ordering::Release);
+                Some(SessionStatus::Ready)
+            }
+            _ => None,
         }
     }
 
@@ -671,7 +866,7 @@ impl SessionRegistry {
         if let Ok(mut handle) = session.reader_thread.lock() {
             *handle = Some(reader_thread);
         }
-        if session.engine == "shell" {
+        {
             let status_session = Arc::downgrade(&session);
             std::thread::spawn(move || loop {
                 std::thread::sleep(Duration::from_millis(75));
@@ -686,7 +881,7 @@ impl SessionRegistry {
                 {
                     return;
                 }
-                session.refresh_shell_status();
+                session.refresh_status();
             });
         }
 
@@ -803,6 +998,7 @@ fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
             subscribers: Mutex::new(Vec::new()),
             engine,
             status: Mutex::new(SessionStatus::Ready),
+            activity: Mutex::new(ActivityState::default()),
             shell_command_state: AtomicU8::new(0),
             exit_code: Mutex::new(None),
         }),
@@ -819,6 +1015,100 @@ fn infer_engine(command: &[String]) -> String {
         .unwrap_or_default();
     match binary {
         "claude" | "codex" | "copilot" | "antigravity" => binary.to_string(),
+        // AntiGravity's CLI is `agy`; without this it fell through to "shell"
+        // and got the shell's status rules, which are wrong for an agent.
+        "agy" => "antigravity".to_string(),
         _ => "shell".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn antigravity_is_recognised_by_its_real_binary_name() {
+        assert_eq!(infer_engine(&["/usr/local/bin/agy".into()]), "antigravity");
+        assert_eq!(infer_engine(&["/usr/local/bin/claude".into()]), "claude");
+        assert_eq!(infer_engine(&["/bin/zsh".into(), "-l".into()]), "shell");
+    }
+
+    #[test]
+    fn an_approval_prompt_is_recognised() {
+        assert!(contains_attention_marker("Do you want to create notes.txt?"));
+        assert!(contains_attention_marker("Would you like to continue?"));
+        assert!(!contains_attention_marker("Reading src/main.rs"));
+    }
+
+    /// `Exit code 0` is a success. Getting this wrong paints a healthy
+    /// terminal red for every command that succeeds.
+    #[test]
+    fn only_a_non_zero_exit_code_is_an_error() {
+        assert!(contains_error_marker("Exit code 1"));
+        assert!(contains_error_marker("Exit code 127"));
+        assert!(!contains_error_marker("Exit code 0"));
+        assert!(!contains_error_marker("no failure here"));
+    }
+
+    /// Claude renders the value differently at different pane widths: inline
+    /// at 120 columns, and as a colon-label with styling between label and
+    /// digit at the 80 a pane actually opens at.
+    #[test]
+    fn the_exit_code_value_is_found_through_styling() {
+        assert!(contains_error_marker("Exit code: \u{1b}[1m2\u{1b}[0m"));
+        assert!(!contains_error_marker("Exit code: \u{1b}[1m0\u{1b}[0m"));
+    }
+
+    #[test]
+    fn a_tool_run_is_recognised_on_screen() {
+        assert!(contains_tool_execution_marker(
+            "Bash(cargo test)  ctrl-b to run in background)"
+        ));
+        assert!(!contains_tool_execution_marker("nothing running"));
+    }
+
+    /// The measurement this heuristic exists for: an idle `claude` emits a
+    /// tight burst every few seconds. A burst is not work.
+    #[test]
+    fn an_idle_burst_is_not_busy() {
+        let start = Instant::now();
+        let mut activity = ActivityState::default();
+        activity.record_output(start);
+        activity.record_output(start + Duration::from_millis(50));
+        assert!(!activity.is_busy(start + Duration::from_millis(60)));
+    }
+
+    #[test]
+    fn sustained_output_is_busy_until_it_goes_quiet() {
+        let start = Instant::now();
+        let mut activity = ActivityState::default();
+        for step in 0..20 {
+            activity.record_output(start + Duration::from_millis(step * 100));
+        }
+        let last = start + Duration::from_millis(1_900);
+        assert!(activity.is_busy(last));
+        // Quiet for longer than the threshold and it is no longer working.
+        assert!(!activity.is_busy(last + Duration::from_millis(800)));
+    }
+
+    /// The engines echo, so typing produces sustained output. It must not read
+    /// as the agent working.
+    #[test]
+    fn typing_never_reads_as_the_agent_working() {
+        let start = Instant::now();
+        let mut activity = ActivityState::default();
+        for step in 0..20 {
+            activity.record_output(start + Duration::from_millis(step * 100));
+        }
+        let last = start + Duration::from_millis(1_900);
+        activity.last_input_at = Some(last);
+        assert!(!activity.is_busy(last));
+
+        // And it recovers once they stop typing but output keeps coming — the
+        // agent really is working now.
+        for step in 20..40 {
+            activity.record_output(start + Duration::from_millis(step * 100));
+        }
+        assert!(activity.is_busy(start + Duration::from_millis(3_900)));
     }
 }
