@@ -8,7 +8,62 @@ final class WorkspaceWindow: NSWindow {
     /// for the mouse event.
     var onFirstResponderChange: ((NSResponder?) -> Void)?
 
+    /// Returns true when the window consumed the key.
+    var onEscape: (() -> Bool)?
+
+    /// `NSEvent.keyCode` for the escape key — AppKit has no named constant.
+    /// Not `private`: `isPlainEscape` below is exercised directly from
+    /// tests, since a realistic key-down `NSEvent` paired with a real
+    /// field-editor first responder is not something worth synthesising.
+    static let escapeKeyCode: UInt16 = 53
+
+    /// The pure predicate behind the interception below, kept free of
+    /// `NSEvent`/first-responder so it is directly testable. `isEditingText`
+    /// is the field-editor exclusion `sendEvent`'s comment explains: an
+    /// active sidebar rename or the files-tree filter field already forwards
+    /// a bare esc to its own `cancelOperation`, and must keep it.
+    static func isPlainEscape(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags,
+        isEditingText: Bool
+    ) -> Bool {
+        !isEditingText
+            && keyCode == escapeKeyCode
+            && modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
+    }
+
     override func sendEvent(_ event: NSEvent) {
+        // esc never reaches the responder chain as `cancelOperation(_:)`
+        // here: the first responder is SwiftTerm's `TerminalView`, which
+        // consumes the key itself and writes `\u{1b}` straight to the PTY.
+        // Catching it one level up, in `sendEvent`, is the only place left
+        // to ask before SwiftTerm does. `onEscape` returning false lets the
+        // event fall through to the terminal exactly as before — a terminal
+        // that cannot send escape is a broken terminal, and that is the
+        // whole risk of this feature.
+        //
+        // But `sendEvent` runs *before* the responder chain, so left
+        // unguarded it would just as happily steal esc from anything else
+        // with focus — including an active field editor. A sidebar rename
+        // (`SessionRowView`/`TerminalRowView` in `WorkspaceShell.swift`) and
+        // the files tree's filter field (`WorkspaceFilesTreeView.filterField`,
+        // same file) both call `window.makeFirstResponder` on a plain
+        // `NSTextField`, which installs the shared field editor — a genuine
+        // `NSTextView` with `isFieldEditor == true` — as `firstResponder` and
+        // routes esc to their own `control(_:textView:doCommandBy:)` to
+        // cancel the edit. Stolen here instead, the edit stays live and a
+        // later click commits whatever the user tried to discard.
+        // `TerminalView` never sets `isFieldEditor`, so this exclusion is
+        // specific to real editors, not to any one view or file — the
+        // command palette's own search field, for contrast, lives in its own
+        // `NSPanel` and is never reached through this window's `sendEvent`
+        // at all, so it was never at risk here.
+        let isEditingText = (firstResponder as? NSTextView)?.isFieldEditor == true
+        if event.type == .keyDown,
+           Self.isPlainEscape(keyCode: event.keyCode, modifierFlags: event.modifierFlags, isEditingText: isEditingText),
+           onEscape?() == true {
+            return
+        }
         if event.type == .keyDown, firstResponder is TerminalView {
             os_signpost(
                 .event,
@@ -49,6 +104,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// views and their PTY attachment along with it.
     private let contentContainer = NSView()
     private let placeholder = WorkspacePlaceholderView()
+    /// Which destination is on screen. `applyDestination` is the only writer;
+    /// ⌘↩ reads it because focus mode is about a terminal, and off Terminals the
+    /// pane workspace is hidden entirely.
+    private(set) var destination: WorkspaceDestination = .terminals
     /// Everything `listProjects` last returned — the picker's rows, and where
     /// a selected id is resolved back to a label and path.
     private(set) var workspaces: [BrainProjectSummary] = []
@@ -178,6 +237,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         window.delegate = self
         window.onFirstResponderChange = { [weak self] responder in
             self?.workspace.adoptFocus(from: responder)
+        }
+        // esc leaves focus mode when something is zoomed; returning false
+        // otherwise leaves the terminal receiving it exactly as before.
+        window.onEscape = { [weak self] in
+            guard let self, workspace.zoomedPaneID != nil else { return false }
+            workspace.setZoomed(nil)
+            return true
         }
         workspace.onFocusedPaneChanged = { [weak self] paneID in
             self?.refreshTitle()
@@ -329,6 +395,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// `contentContainer`'s own doc for why the pane workspace must stay
     /// mounted.
     func applyDestination(_ destination: WorkspaceDestination) {
+        self.destination = destination
         shellSidebar.applyDestination(destination)
         let isTerminals = destination == .terminals
         workspace.isHidden = !isTerminals
@@ -499,6 +566,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     @objc func focusTerminal(_ sender: Any?) {
         workspace.restoreFocus()
+    }
+
+    /// ⌘↩ — focus *mode*, the pane blown up over the others, not
+    /// `focusTerminal` above, which only moves keyboard focus into the
+    /// terminal. Toggles zoom on whichever pane is focused; does nothing
+    /// with no focused pane, and `toggleZoom` itself already refuses below
+    /// two panes on screen.
+    @objc func toggleFocusMode(_ sender: Any?) {
+        // Guarded here as well as in validation, so the palette and any future
+        // caller are held to the same rule: focus mode blows up a terminal, and
+        // off the Terminals destination the terminals are not even on screen.
+        guard destination == .terminals, let focused = workspace.focusedPaneID else { return }
+        workspace.toggleZoom(focused)
     }
 
     /// ⌘T — a new pane on a new PTY, inside an existing session.
@@ -687,6 +767,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals
         case #selector(closePane(_:)):
             return workspace.focusedPaneID != nil
+        case #selector(toggleFocusMode(_:)):
+            // `toggleZoom` already refuses below two panes; disabled here
+            // too, since an item that visibly does nothing is worse than a
+            // greyed-out one. The title flips so the menu tells the truth
+            // about what ⌘↩ is about to do — which is decided by the *focused*
+            // pane, not by whether anything is zoomed. With a card up and focus
+            // moved off it (⌘1…⌘8, ⌥arrows), ⌘↩ hands the card to the focused
+            // pane; an item reading "Exit Focus" there was describing the
+            // opposite of what it does.
+            menuItem.title = workspace.zoomedPaneID != nil
+                && workspace.zoomedPaneID == workspace.focusedPaneID
+                ? "Exit Focus" : "Focus This Terminal"
+            return destination == .terminals
+                && workspace.focusedPaneID != nil
+                && workspace.paneIDs.count >= 2
         default:
             return true
         }
@@ -970,6 +1065,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         workspace.focusPane(sessionID)
+        // In focus mode the card is the only terminal the user can see, so
+        // revealing another pane has to move the *card*, not just the caret.
+        // Focusing behind the blur is how an approval typed in answer to a
+        // notification ends up in a terminal nobody is looking at.
+        //
+        // After `focusPane`, not before: that is what brings the pane's session
+        // to the screen, and a pane off screen is one `setZoomed` refuses. If its
+        // session was a different one, `validateZoom` has already ended the zoom
+        // by now — which is the same outcome by a shorter route, the revealed
+        // pane visible and focused. And here rather than inside `focusPane`,
+        // which `setZoomed` calls itself: that would recurse.
+        if workspace.zoomedPaneID != nil { workspace.setZoomed(sessionID) }
         return true
     }
 

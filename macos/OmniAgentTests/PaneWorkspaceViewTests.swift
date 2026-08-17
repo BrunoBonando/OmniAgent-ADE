@@ -1,4 +1,5 @@
 import XCTest
+import CoreImage
 import SwiftTerm
 @testable import OmniAgent
 
@@ -602,13 +603,12 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         XCTAssertEqual(workspace.zoomedPaneID, "pane-2")
         let zoomed = try XCTUnwrap(workspace.container(for: "pane-2"))
-        let area = workspace.gridBounds
-        XCTAssertTrue(area.contains(zoomed.frame), "it stays inside the workspace")
-        XCTAssertGreaterThan(
-            zoomed.frame.width * zoomed.frame.height,
-            area.width * area.height * 0.8,
-            "almost the entire terminal place"
-        )
+        // The design's card, exactly: 1080x720 centred in an overlay padded by
+        // 26. This used to assert an area floor of 0.8 x the grid, from the first
+        // pass where the zoomed pane took nearly the whole workspace — a capped
+        // card fails that on any window bigger than about 1200x800, which is the
+        // direction windows go.
+        XCTAssertEqual(zoomed.frame, PaneWorkspaceView.focusCardFrame(in: workspace.bounds))
 
         let backdrop = try XCTUnwrap(
             workspace.subviews.compactMap { $0 as? PaneZoomBackdropView }.first
@@ -640,10 +640,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
         // Hidden only once it has faded out, since it swallows clicks.
         let deadline = Date().addingTimeInterval(2)
-        while !backdrop.isHidden, Date() < deadline {
+        while !backdrop.isHidden || backdrop.superview != nil, Date() < deadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
         XCTAssertTrue(backdrop.isHidden, "once the fade has landed")
+        // And taken out of the grid rather than parked in it: with no window this
+        // view is the overlay host, so removing the host alone left it behind.
+        XCTAssertNil(backdrop.superview, "the backdrop does not stay in the grid")
     }
 
     func testZoomEndsWhenItWouldOtherwiseHideWhatYouAskedFor() {
@@ -665,6 +668,491 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(workspace.closePane("pane-2"))
         XCTAssertTrue(workspace.closePane("pane-3"))
         XCTAssertNil(workspace.zoomedPaneID, "one terminal left, nothing to zoom over")
+    }
+
+    /// The design's card: `width:1080px;height:100%;max-height:720px`, centred in
+    /// an overlay with `padding:26px`. Pure geometry, so it is asked directly
+    /// rather than through a window.
+    func testFocusCardFrameIsTheDesignsCardCentredInTheOverlay() {
+        let padding = PaneWorkspaceView.focusOverlayPadding
+        let roomy = PaneWorkspaceView.focusCardFrame(
+            in: NSRect(x: 0, y: 0, width: 1600, height: 1000)
+        )
+        XCTAssertEqual(roomy.size, PaneWorkspaceView.focusCardSize, "1080x720 is the ceiling")
+        XCTAssertEqual(roomy.midX, 800, "centred in the overlay")
+        XCTAssertEqual(roomy.midY, 500)
+
+        // Narrower and shorter than 1080+52 / 720+52: the card gives up its own
+        // size rather than the padding that keeps the blur reading as a surround.
+        let cramped = PaneWorkspaceView.focusCardFrame(
+            in: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        XCTAssertEqual(
+            cramped,
+            NSRect(
+                x: padding,
+                y: padding,
+                width: 800 - padding * 2,
+                height: 600 - padding * 2
+            )
+        )
+
+        // A host with no room for the padding at all still has to describe a
+        // drawable rect.
+        let sliver = PaneWorkspaceView.focusCardFrame(in: NSRect(x: 0, y: 0, width: 30, height: 10))
+        XCTAssertEqual(sliver.width, 0, "never a negative dimension")
+        XCTAssertEqual(sliver.height, 0)
+
+        // Centred in the host it is given, not in one that happens to start at
+        // the origin — the overlay host is a subview of the window's content
+        // view, and its bounds are not the window's.
+        let offset = PaneWorkspaceView.focusCardFrame(
+            in: NSRect(x: 100, y: 50, width: 1600, height: 1000)
+        )
+        XCTAssertEqual(offset.midX, 900)
+        XCTAssertEqual(offset.midY, 550)
+    }
+
+    /// The overlay is the design's full-bleed one
+    /// (`top:30px;left:0;right:0;bottom:24px`, the app frame less its title bar
+    /// and status strip): it covers the window's whole **content view** — the
+    /// sidebar with it — rather than the pane grid alone, so while a pane is
+    /// focused neither the blur nor the card is a subview of the workspace. Both
+    /// come back out of the window when focus ends: a plain view left over the
+    /// content view would swallow every click in the app.
+    ///
+    /// Driven through a window shaped like the real one — a content view holding
+    /// a sidebar beside the pane grid — because that is the only arrangement in
+    /// which "covers the content view" and "covers the grid" are different
+    /// claims, and the bug this fixes was the overlay covering only the grid.
+    func testFocusOverlayCoversTheContentViewAndOwnsTheCardWhileFocused() throws {
+        let (workspace, window, sidebar) = makeSplitHostedWorkspace(panes: 2)
+        defer { window.close() }
+        let content = try XCTUnwrap(window.contentView)
+        XCTAssertFalse(content === workspace, "the content view is not the pane grid")
+        XCTAssertLessThan(workspace.frame.width, content.bounds.width, "the sidebar takes its share")
+
+        XCTAssertTrue(workspace.toggleZoom("pane-2"))
+        workspace.layoutSubtreeIfNeeded()
+
+        let card = try XCTUnwrap(workspace.container(for: "pane-2"))
+        let host = try XCTUnwrap(card.superview)
+        XCTAssertFalse(host === workspace, "the card leaves the grid it is covering")
+        XCTAssertTrue(host.superview === content, "for a host over the whole content view")
+        XCTAssertEqual(host.frame, content.bounds, "the sidebar's rect included")
+        XCTAssertTrue(host.frame.contains(sidebar.frame), "so the sidebar is inside the blur")
+        let contentOrder = content.subviews
+        XCTAssertGreaterThan(
+            try XCTUnwrap(contentOrder.firstIndex(of: host)),
+            try XCTUnwrap(contentOrder.firstIndex(of: sidebar)),
+            "and under the overlay rather than beside it"
+        )
+        // The card is centred in the whole content view, which — with a sidebar
+        // on one side — is a different rect from centred in the grid.
+        XCTAssertEqual(card.frame, PaneWorkspaceView.focusCardFrame(in: host.bounds))
+        XCTAssertNotEqual(
+            card.frame,
+            PaneWorkspaceView.focusCardFrame(in: workspace.bounds),
+            "not centred in the grid alone"
+        )
+        XCTAssertEqual(
+            card.layer?.cornerRadius,
+            PaneContainerView.focusedCornerRadius,
+            "and rounds to the card's 12 rather than the grid pane's 9"
+        )
+
+        let backdrop = try XCTUnwrap(
+            host.subviews.compactMap { $0 as? PaneZoomBackdropView }.first
+        )
+        XCTAssertFalse(backdrop.isHidden, "the blur is shown")
+        XCTAssertEqual(backdrop.frame, host.bounds, "over the same rect the host covers")
+        let order = host.subviews
+        XCTAssertGreaterThan(
+            try XCTUnwrap(order.firstIndex(of: card)),
+            try XCTUnwrap(order.firstIndex(of: backdrop)),
+            "with the card on top of it"
+        )
+
+        // The shadow cannot be the card's own layer's — `masksToBounds` rounds
+        // the terminal's corners and would clip it — so it is a layer of the
+        // host, on the card's rect.
+        let shadow = try XCTUnwrap(host.layer?.sublayers?.first { $0.shadowOpacity > 0 })
+        XCTAssertEqual(shadow.frame, card.frame)
+        XCTAssertEqual(shadow.cornerRadius, PaneContainerView.focusedCornerRadius)
+
+        // The design's spinning accent ring belongs to the card the same way it
+        // belongs to a grid pane — `updateWorkingRing` draws it as a sublayer of
+        // the container, so it survives the reparent and tracks the card's own
+        // bounds rather than the cell it came from.
+        if !ShellMotion.reduced { // the ring is not drawn at all under Reduce Motion
+            workspace.setStatus(.thinking, for: "pane-2")
+            card.layoutSubtreeIfNeeded()
+            let ring = try XCTUnwrap(
+                card.layer?.sublayers?.compactMap { $0 as? CAGradientLayer }.first,
+                "the working ring travels with the card"
+            )
+            XCTAssertEqual(ring.frame, card.bounds, "sized to the card, not to its old cell")
+            XCTAssertNotNil(ring.animation(forKey: "om-spin"), "and is still spinning")
+            workspace.setStatus(nil, for: "pane-2")
+        }
+
+        // Cleared first, so what the exit schedules is the only thing in here: this
+        // is what pins the resize to the *shrink* rather than to the landing.
+        // `landCard` schedules one too, and while that was the only assertion
+        // deleting `place(_:at:)` from `collapseZoom` still passed.
+        workspace.resizeCoalescer.flush()
+        XCTAssertFalse(workspace.resizeCoalescer.pending.contains("pane-2"))
+
+        workspace.setZoomed(nil)
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            // Inside the exit's 0.32s, which is the state the app is actually in
+            // when someone clicks straight after leaving focus: the card is still
+            // flying, and the overlay is still mounted because the transition's
+            // completion has not run yet.
+            XCTAssertTrue(host.superview === content, "the overlay is still mounted")
+            let overSidebar = sidebar.convert(NSPoint(x: 5, y: 5), to: nil)
+            XCTAssertNil(
+                host.hitTest(content.convert(overSidebar, from: nil)),
+                "the host answers for nothing on its own account"
+            )
+            XCTAssertTrue(
+                content.hitTest(overSidebar) === sidebar,
+                "so a click over the sidebar reaches the sidebar, not the overlay"
+            )
+            XCTAssertTrue(
+                workspace.resizeCoalescer.pending.contains("pane-2"),
+                "and the PTY hears its cell size when the shrink starts, not when it lands"
+            )
+        }
+        // The card shrinks home in the host's coordinates and is reparented once
+        // the transition's own completion fires, so the grid owns its frame again.
+        let deadline = Date().addingTimeInterval(2)
+        while card.superview !== workspace, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(card.superview === workspace, "and comes back into the grid")
+        XCTAssertTrue(workspace.gridBounds.contains(card.frame), "in its cell")
+        XCTAssertEqual(card.layer?.cornerRadius, PaneContainerView.cornerRadius)
+        XCTAssertNil(host.superview, "leaving nothing of the overlay over the app")
+        XCTAssertNil(shadow.superlayer)
+        XCTAssertEqual(backdrop.alphaValue, 0)
+        // Alpha 0 is not enough on its own: for the 0.32s of the fade the
+        // backdrop is invisible and still covers the whole window, so it must
+        // stop hit-testing or it eats every click, sidebar included.
+        XCTAssertNil(
+            backdrop.hitTest(NSPoint(x: backdrop.bounds.midX, y: backdrop.bounds.midY)),
+            "and stops swallowing clicks the moment it stops being shown"
+        )
+    }
+
+    /// Every Panes-menu command has to keep working while a card is up. The nine
+    /// selectors live on the workspace and the menu items carry no target, so
+    /// AppKit resolves them along the responder chain from the first responder —
+    /// and while zoomed that chain runs terminal → card → overlay host → content
+    /// view, with the workspace nowhere on it. Sixteen items (⌘⌥arrows, ⌃⌘arrows,
+    /// ⌘1…⌘8) silently greyed out, which they do not do with no card up.
+    func testThePanesMenuCommandsStayReachableAndEnabledWhileACardIsUp() throws {
+        let (workspace, window, _) = makeSplitHostedWorkspace(panes: 4)
+        defer { window.close() }
+        workspace.focusPane("pane-1")
+        XCTAssertTrue(workspace.toggleZoom("pane-1"))
+        let card = try XCTUnwrap(workspace.container(for: "pane-1"))
+        XCTAssertTrue(window.makeFirstResponder(card.surface.terminalView))
+
+        // The hazard itself: the plain chain from inside the overlay misses it.
+        var chain: [NSResponder] = []
+        var walk: NSResponder? = window.firstResponder
+        while let current = walk {
+            chain.append(current)
+            walk = current.nextResponder
+        }
+        XCTAssertFalse(
+            chain.contains { $0 === workspace },
+            "the workspace is off the plain responder chain while zoomed"
+        )
+
+        // And what AppKit does about it: anything on the chain that does not
+        // handle the action is asked for a supplemental target, which must be
+        // the workspace — and the item must then validate as enabled.
+        let commands: [(Selector, Int)] = [
+            (#selector(PaneWorkspaceView.focusPaneRight(_:)), 0),
+            (#selector(PaneWorkspaceView.focusPaneDown(_:)), 0),
+            (#selector(PaneWorkspaceView.swapPaneRight(_:)), 0),
+            (#selector(PaneWorkspaceView.selectPane(_:)), 3),
+        ]
+        for (action, tag) in commands {
+            let resolved = try XCTUnwrap(
+                target(for: action, from: window.firstResponder),
+                "nothing answers \(action) while a card is up"
+            )
+            XCTAssertTrue(resolved === workspace, "\(action) has to land on the workspace")
+            let item = NSMenuItem(title: "", action: action, keyEquivalent: "")
+            item.tag = tag
+            XCTAssertTrue(workspace.validateMenuItem(item), "\(action) greys out while zoomed")
+        }
+
+        // Narrow on purpose: the terminal's own Edit-menu actions must keep
+        // resolving to the terminal, which is earlier in the chain either way.
+        let host = try XCTUnwrap(card.superview)
+        XCTAssertNil(
+            host.supplementalTarget(forAction: #selector(NSText.copy(_:)), sender: nil),
+            "the host offers the workspace for pane commands and nothing else"
+        )
+        // And the half that an open `responds(to:)` forward would have got wrong:
+        // `print:` is implemented by every `NSView`, so a Print item added later
+        // would have resolved to the pane grid while a card was up and to the
+        // window the rest of the time.
+        let printAction = Selector(("print:"))
+        XCTAssertTrue(workspace.responds(to: printAction), "the premise of this assertion")
+        XCTAssertNil(
+            host.supplementalTarget(forAction: printAction, sender: nil),
+            "a selector the workspace merely inherits is not a pane command"
+        )
+    }
+
+    /// `setZoomed` is reached by ⌘↩, the palette and `revealPane`, so it owes the
+    /// same two refusals `toggleZoom` makes — and must never refuse the way out.
+    func testSetZoomedRefusesAPaneItCannotZoomOverButNeverRefusesTheWayOut() {
+        let workspace = makeWorkspace(panes: 1)
+        workspace.setZoomed("pane-1")
+        XCTAssertNil(workspace.zoomedPaneID, "one terminal has nothing to zoom over")
+
+        XCTAssertTrue(workspace.addPane(makeDescriptor("pane-2")))
+        var elsewhere = makeDescriptor("pane-3")
+        elsewhere.group = "sess-grp-2"
+        XCTAssertTrue(workspace.addPane(elsewhere))
+        workspace.setZoomed("pane-1")
+        XCTAssertNil(workspace.zoomedPaneID, "and a pane off screen is not on the grid to cover")
+
+        XCTAssertTrue(workspace.activateGroup("sess-grp-1"))
+        workspace.setZoomed("pane-1")
+        XCTAssertEqual(workspace.zoomedPaneID, "pane-1")
+        workspace.setZoomed(nil)
+        XCTAssertNil(workspace.zoomedPaneID, "and nil is always taken")
+    }
+
+    /// The card's subtitle names its session, and the derived `Session N` is a
+    /// position in a list — so naming *another* session renumbers this one, with
+    /// no layout pass to re-derive it. An engine can rename a session on its own,
+    /// so nobody has to touch anything for the card to start lying.
+    func testNamingAnotherSessionRefreshesTheCardsSubtitle() throws {
+        // Two unnamed sessions: the first derives `Session 1`, the second
+        // `Session 2`. The card is in the second, because naming a session only
+        // renumbers the unnamed ones *after* it.
+        let workspace = makeWorkspace(panes: 2)
+        for id in ["pane-3", "pane-4"] {
+            var pane = makeDescriptor(id)
+            pane.group = "sess-grp-2"
+            XCTAssertTrue(workspace.addPane(pane))
+        }
+        XCTAssertTrue(workspace.toggleZoom("pane-3"))
+        let card = try XCTUnwrap(workspace.container(for: "pane-3"))
+        XCTAssertEqual(card.header.subtitle, "Session 2 · terminal 1 of 2")
+
+        // An engine naming the *first* session — no user action on this card at
+        // all — takes `Session 1` and pushes this one up into it.
+        workspace.updateDescriptor(for: "pane-1") { $0.groupLabel = "Token rotation" }
+
+        XCTAssertEqual(
+            card.header.subtitle,
+            "Session 1 · terminal 1 of 2",
+            "the card re-derives the name rather than keeping the number it was born with"
+        )
+    }
+
+    /// The card shows the focused pane, whichever command moved focus. ⌘1…⌘8 and
+    /// ⌥arrows leave the zoom alone by themselves, which used to leave the caret
+    /// behind the blur — an approval typed in answer to a notification going into
+    /// a terminal the user cannot see. `revealPane` already obeyed this on its own
+    /// path; these are the other two doors.
+    func testAFocusCommandCarriesTheCardWithIt() throws {
+        let (workspace, window, _) = makeSplitHostedWorkspace(panes: 4)
+        defer { window.close() }
+        workspace.focusPane("pane-1")
+        XCTAssertTrue(workspace.toggleZoom("pane-1"))
+
+        // ⌘3 — fill order is 1, 3, 2, 4, so the third is pane-2.
+        XCTAssertTrue(workspace.focusPane(at: 3))
+        XCTAssertEqual(workspace.focusedPaneID, "pane-2")
+        XCTAssertEqual(workspace.zoomedPaneID, "pane-2", "the card follows ⌘3")
+
+        // ⌥← — back across the grid to pane-1.
+        XCTAssertTrue(workspace.focusNeighbor(.left))
+        XCTAssertEqual(workspace.focusedPaneID, "pane-1")
+        XCTAssertEqual(workspace.zoomedPaneID, "pane-1", "and follows ⌥arrow")
+
+        // The pane the user is typing into is the one on screen, and every hand-over
+        // put the pane it replaced back in the grid.
+        let card = try XCTUnwrap(workspace.container(for: "pane-1"))
+        XCTAssertFalse(card.superview === workspace, "the focused pane is the one in the overlay")
+        for id in workspace.paneIDs where id != "pane-1" {
+            XCTAssertTrue(
+                workspace.container(for: id)?.superview === workspace,
+                "\(id) is back in the grid"
+            )
+        }
+    }
+
+    /// Closing a pane re-homes focus, which is a focus move by another door — the
+    /// palette's "close pane" arm focuses the pane it is about to close, so focus
+    /// lands on a neighbour afterwards and the card has to follow that too.
+    func testClosingAPaneCarriesTheCardToWhereFocusLands() throws {
+        let (workspace, window, _) = makeSplitHostedWorkspace(panes: 4)
+        defer { window.close() }
+        workspace.focusPane("pane-1")
+        XCTAssertTrue(workspace.toggleZoom("pane-1"))
+
+        // Exactly what the palette does: focus it, then close it.
+        workspace.focusPane("pane-4")
+        XCTAssertTrue(workspace.closePane("pane-4"))
+
+        XCTAssertEqual(workspace.focusedPaneID, "pane-2", "focus falls to its fill-order neighbour")
+        XCTAssertEqual(
+            workspace.zoomedPaneID,
+            "pane-2",
+            "and the card shows whoever has focus now, not the pane it started on"
+        )
+    }
+
+    /// ⌘↩ on one pane, ⌘2 to another, ⌘↩ again. Focus commands deliberately leave
+    /// the zoom alone, so the second ⌘↩ hands the overlay straight from one card
+    /// to the next with no exit in between — and the pane being replaced has to
+    /// come back to the grid on that hand-over. Left in the overlay it is a pane
+    /// nobody owns: the grid feeds it cell rects in the host's coordinates, and
+    /// the next teardown carries it out of the window with nothing to re-add it,
+    /// which loses a live terminal and its session with no way back.
+    func testHandingTheCardStraightToAnotherPaneReturnsTheFirstToTheGrid() throws {
+        let (workspace, window, _) = makeSplitHostedWorkspace(panes: 2)
+        defer { window.close() }
+        let first = try XCTUnwrap(workspace.container(for: "pane-1"))
+        let second = try XCTUnwrap(workspace.container(for: "pane-2"))
+
+        XCTAssertTrue(workspace.toggleZoom("pane-1"))
+        XCTAssertFalse(first.superview === workspace, "pane-1 is the card")
+
+        // ⌘2, which now carries the card with it: the hand-over happens with no
+        // exit in between, which is the sequence that used to orphan pane-1.
+        XCTAssertTrue(workspace.focusPane(at: 2))
+
+        XCTAssertEqual(workspace.zoomedPaneID, "pane-2")
+        XCTAssertFalse(second.superview === workspace, "pane-2 is the card now")
+        XCTAssertTrue(first.superview === workspace, "and pane-1 is back in the grid")
+        XCTAssertTrue(workspace.gridBounds.contains(first.frame), "at a cell, not a host rect")
+        XCTAssertEqual(first.layer?.animationKeys() ?? [], [], "with nothing animating it")
+        XCTAssertEqual(first.layer?.cornerRadius, PaneContainerView.cornerRadius)
+
+        // And it is still there after the teardown that used to take it away.
+        workspace.setZoomed(nil)
+        let deadline = Date().addingTimeInterval(2)
+        while second.superview !== workspace, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(first.superview === workspace, "still in the grid once the overlay goes")
+        XCTAssertNotNil(first.window, "and still in the window")
+        XCTAssertTrue(second.superview === workspace)
+    }
+
+    /// Two ⌘↩ inside one transition's 0.32s. Both directions' animation groups end
+    /// at the same completion, so without a token the *entry* group's completion
+    /// arrives partway through the exit that followed it and finishes that exit
+    /// early — the card snaps home instead of shrinking and the overlay is pulled
+    /// out from under the fade. Timed rather than inspected: the exit either ran
+    /// its own duration or it was cut short, and only the elapsed time tells them
+    /// apart. Slow machines can only make this wait longer, never shorter.
+    func testAnEntrysCompletionCannotFinishTheExitThatFollowedIt() throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            throw XCTSkip("under Reduce Motion both directions land instantly")
+        }
+        let (workspace, window, _) = makeSplitHostedWorkspace(panes: 2)
+        defer { window.close() }
+        let card = try XCTUnwrap(workspace.container(for: "pane-2"))
+
+        let entered = Date()
+        XCTAssertTrue(workspace.toggleZoom("pane-2"))
+        // Halfway into the entry, so its completion is still to come when the exit
+        // starts and lands mid-shrink if it is allowed to act. Timed from the
+        // entry rather than from "now" so the wait cannot drift past the entry's
+        // own completion — a wait that overshot would mean the entry's completion
+        // had already been spent harmlessly, and the assertion below would hold
+        // for a reason that has nothing to do with the token.
+        RunLoop.current.run(
+            until: entered.addingTimeInterval(PaneWorkspaceView.zoomTransitionDuration / 2)
+        )
+        XCTAssertLessThan(
+            Date().timeIntervalSince(entered),
+            PaneWorkspaceView.zoomTransitionDuration,
+            "the entry's completion has to still be pending, or this proves nothing"
+        )
+
+        let exitStarted = Date()
+        workspace.setZoomed(nil)
+        let deadline = exitStarted.addingTimeInterval(3)
+        while card.superview !== workspace, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertTrue(card.superview === workspace, "the card came home")
+        XCTAssertGreaterThan(
+            Date().timeIntervalSince(exitStarted),
+            PaneWorkspaceView.zoomTransitionDuration * 0.75,
+            "and took its own transition to do it rather than the entry's leftover"
+        )
+    }
+
+    /// Opening a terminal in the 0.32s a card is still shrinking (⌘↩ then ⌘T)
+    /// has to land that card in its cell at once. Both halves matter: the grid
+    /// must not hand a cell to a pane that still lives in the overlay — its frame
+    /// is in the host's coordinates, so it would slide the width of the sidebar —
+    /// and the in-flight animation must be cancelled, or it replays that move
+    /// after the reparent and the pane visibly snaps back.
+    func testOpeningATerminalMidShrinkLandsTheCardAtOnce() throws {
+        let (workspace, window, _) = makeSplitHostedWorkspace(panes: 2)
+        defer { window.close() }
+
+        XCTAssertTrue(workspace.toggleZoom("pane-2"))
+        let card = try XCTUnwrap(workspace.container(for: "pane-2"))
+        XCTAssertFalse(card.superview === workspace, "the card is in the overlay")
+
+        workspace.setZoomed(nil)
+        // No run loop turn: the shrink is in flight and its completion has not
+        // fired, which is exactly the window ⌘T lands in.
+        XCTAssertTrue(workspace.addPane(makeDescriptor("pane-3")))
+
+        XCTAssertNil(workspace.zoomedPaneID)
+        XCTAssertTrue(card.superview === workspace, "the card is back in the grid")
+        XCTAssertEqual(card.layer?.animationKeys() ?? [], [], "with nothing left animating it")
+        XCTAssertTrue(workspace.gridBounds.contains(card.frame), "at a grid cell, not a host rect")
+        XCTAssertEqual(card.layer?.cornerRadius, PaneContainerView.cornerRadius)
+        // Leaving focus resizes the terminal: the card is cell-sized now, and a
+        // PTY still told it has the card's ~1080 columns tears its output.
+        XCTAssertTrue(
+            workspace.resizeCoalescer.pending.contains("pane-2"),
+            "and its PTY told about the size it actually has"
+        )
+    }
+
+    /// `backdrop-filter:blur(16px) saturate(70%)` — both stages, chained in that
+    /// order, with only the blur ramping.
+    func testTheBackdropCarriesTheDesignsBlurAndDesaturation() throws {
+        let backdrop = PaneZoomBackdropView()
+        XCTAssertEqual(PaneZoomBackdropView.blurRadius, 16)
+        XCTAssertEqual(PaneZoomBackdropView.saturation, 0.7)
+
+        let filters = try XCTUnwrap(backdrop.layer?.backgroundFilters as? [CIFilter])
+        XCTAssertEqual(filters.count, 2)
+        XCTAssertEqual(filters.first?.name, "blur")
+        XCTAssertEqual(filters.last?.name, "saturate")
+
+        backdrop.setShown(true, duration: 0)
+        XCTAssertEqual(
+            backdrop.layer?.value(forKeyPath: "backgroundFilters.blur.inputRadius") as? CGFloat,
+            PaneZoomBackdropView.blurRadius
+        )
+        XCTAssertEqual(
+            backdrop.layer?.value(forKeyPath: "backgroundFilters.saturate.inputSaturation")
+                as? CGFloat,
+            PaneZoomBackdropView.saturation,
+            "set once rather than ramped with the blur"
+        )
     }
 
     // MARK: - Click to activate
@@ -727,6 +1215,227 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(workspace.focusedPaneID, "pane-2")
     }
 
+    // MARK: - Focus-mode header
+
+    /// The bar has to *change* when a pane is focused, or the control that got
+    /// you in still looks like the control that gets you in. The design's
+    /// focused card carries a taller header, a bigger name, the
+    /// `session · terminal N of M` subtitle and one labelled way out — and none
+    /// of it may survive the trip back into the grid.
+    func testTheFocusHeaderWearsTheDesignsTallerBarAndItsOwnControls() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 4)
+        defer { window.close() }
+        for id in workspace.paneIDs {
+            workspace.updateDescriptor(for: id) { $0.groupLabel = "session restore" }
+        }
+        let card = try XCTUnwrap(workspace.container(for: "pane-2"))
+        XCTAssertEqual(card.header.currentHeight, 30, "the grid bar is the design's 30px")
+        XCTAssertNil(card.header.subtitle, "the grid header has no subtitle to show")
+        XCTAssertEqual(controls(in: card.header), ["Zoom this terminal", "Close this terminal"])
+
+        XCTAssertTrue(workspace.toggleZoom("pane-2"))
+        card.layoutSubtreeIfNeeded()
+
+        // 34, not "the grid's height plus a bit": bumping the grid bar must not
+        // quietly redefine what the focused card's own `height:34px` means.
+        XCTAssertEqual(card.header.currentHeight, 34, "the focused card's bar is 34px")
+        XCTAssertEqual(card.header.frame.height, 34, "and the pane gives it that")
+        XCTAssertEqual(
+            card.surface.frame.minY,
+            PaneContainerView.borderWidth + 34,
+            "with the terminal starting under the taller bar rather than behind it"
+        )
+        // pane-2 sits in the third cell — fill order is 1, 3, 2, 4.
+        XCTAssertEqual(card.header.subtitle, "session restore · terminal 3 of 4")
+        XCTAssertEqual(
+            controls(in: card.header),
+            [Self.exitFocusText],
+            "one labelled way out, and no close button beside it"
+        )
+
+        // Out the way the design says you get out — by pressing the pill, not by
+        // calling the toggle it happens to be wired to.
+        let pill = try XCTUnwrap(button(labelled: Self.exitFocusText, in: card.header))
+        click(pill, in: window)
+        XCTAssertNil(workspace.zoomedPaneID, "the pill is the way out, not a picture of one")
+
+        card.layoutSubtreeIfNeeded()
+        XCTAssertEqual(card.header.currentHeight, 30)
+        XCTAssertEqual(card.header.frame.height, 30)
+        XCTAssertNil(card.header.subtitle)
+        XCTAssertEqual(controls(in: card.header), ["Zoom this terminal", "Close this terminal"])
+    }
+
+    /// Every number the focused card's header is built from, pinned to the
+    /// design's own values (line 1070 onward) rather than to the grid's plus a
+    /// delta — the grid header is free to move without dragging the card's with
+    /// it, and if it ever does move, this is the test that says so.
+    func testTheFocusHeaderIsBuiltFromTheDesignsOwnMetrics() throws {
+        let header = PaneHeaderView(title: "token rotation")
+        header.isZoomAvailable = true
+        header.subtitleProvider = { "session restore · terminal 1 of 4" }
+
+        XCTAssertEqual(PaneHeaderView.height, 30, "grid `height:30px`")
+        XCTAssertEqual(PaneHeaderView.focusHeight, 34, "focused card `height:34px`")
+
+        // Focus first, because the subtitle only has text to be found by while
+        // the bar is wearing it: `padding:0 7px 0 12px`, `gap:9px`,
+        // `600 15.5px` / `#f0f0f4` title, `400 14px` / `#5c5c66` subtitle, and
+        // the pill in place of both icons — `padding:5px 9px` around a 16pt
+        // glyph is 26pt tall.
+        header.isZoomed = true
+        layOut(header, width: 1080)
+        let fields = header.subviews.compactMap { $0 as? NSTextField }
+        let subtitle = try XCTUnwrap(fields.first { $0.stringValue == "session restore · terminal 1 of 4" })
+        let title = try XCTUnwrap(fields.first { $0 !== subtitle })
+        let mark = try XCTUnwrap(header.subviews.compactMap { $0 as? PaneStatusMarkView }.first)
+        let pill = try XCTUnwrap(button(labelled: Self.exitFocusText, in: header))
+        XCTAssertEqual(mark.frame.size, CGSize(width: 15, height: 15), "the 15px status mark, both modes")
+        XCTAssertEqual(mark.frame.minX, 12)
+        XCTAssertEqual(title.frame.minX - mark.frame.maxX, 9, "focus `gap:9px`")
+        XCTAssertEqual(subtitle.frame.minX - title.frame.maxX, 9)
+        XCTAssertEqual(pill.frame.maxX, 1080 - 7, "focus `padding-right:7px`")
+        XCTAssertEqual(pill.frame.height, 26, "5pt of padding above and below a 16pt glyph")
+        XCTAssertEqual(title.font?.pointSize, 15.5, "focus title `15.5px`")
+        XCTAssertEqual(title.font, ShellFont.ui(15.5, .semibold), "at `600`, through this file's own font helper")
+        XCTAssertEqual(
+            title.textColor,
+            NSColor(srgbRed: 240 / 255, green: 240 / 255, blue: 244 / 255, alpha: 1),
+            "`#f0f0f4`"
+        )
+        XCTAssertEqual(subtitle.font?.pointSize, 14, "subtitle `14px`")
+        XCTAssertEqual(subtitle.font, ShellFont.ui(14), "at `400`")
+        XCTAssertEqual(
+            subtitle.textColor,
+            NSColor(srgbRed: 92 / 255, green: 92 / 255, blue: 102 / 255, alpha: 1),
+            "`#5c5c66`"
+        )
+
+        // And back to the grid's own numbers: `padding:0 6px 0 10px`, `gap:8px`,
+        // `500 14.5px`, two 20pt icon squares, no subtitle.
+        header.isZoomed = false
+        layOut(header, width: 620)
+        let zoom = try XCTUnwrap(button(labelled: "Zoom this terminal", in: header))
+        let close = try XCTUnwrap(button(labelled: "Close this terminal", in: header))
+        XCTAssertEqual(mark.frame.minX, 10)
+        XCTAssertEqual(title.frame.minX - mark.frame.maxX, 8, "grid `gap:8px`")
+        XCTAssertEqual(close.frame.maxX, 620 - 6, "grid `padding-right:6px`")
+        XCTAssertEqual(zoom.frame.size, CGSize(width: 20, height: 20))
+        XCTAssertEqual(close.frame.size, CGSize(width: 20, height: 20))
+        XCTAssertEqual(title.font, ShellFont.ui(14.5, .medium), "grid title `500 14.5px`")
+        XCTAssertTrue(subtitle.isHidden, "and nothing left of the subtitle")
+    }
+
+    /// The exit control is not the grid's icon with a tooltip on it: it is the
+    /// design's bordered pill, labelled `Exit focus · esc` — the label is the
+    /// only place the escape hatch is spelled out, in the app *and* to Voice
+    /// Control, which resolves a command by what a control says.
+    func testTheExitControlIsALabelledPillThatSaysHowToLeave() throws {
+        let header = PaneHeaderView(title: "token rotation")
+        header.isZoomAvailable = true
+        header.isZoomed = true
+        let pill = try XCTUnwrap(button(labelled: Self.exitFocusText, in: header))
+        let zoom = try XCTUnwrap(button(labelled: "Zoom this terminal", in: header))
+
+        XCTAssertEqual(pill.label, "Exit focus · esc", "the words the button draws")
+        XCTAssertEqual(pill.accessibilityLabel(), pill.label, "and the name it answers to")
+        XCTAssertNil(zoom.label, "while the grid's control stays a bare icon")
+        XCTAssertEqual(
+            zoom.intrinsicContentSize,
+            NSSize(width: PaneHeaderButton.iconSize, height: PaneHeaderButton.iconSize)
+        )
+        XCTAssertGreaterThan(
+            pill.intrinsicContentSize.width,
+            zoom.intrinsicContentSize.width * 3,
+            "a glyph, a gap and a label, not a 20pt square"
+        )
+        XCTAssertEqual(pill.intrinsicContentSize.height, 26)
+        XCTAssertLessThan(
+            pill.intrinsicContentSize.height,
+            PaneHeaderView.focusHeight,
+            "and it fits inside the bar it sits in"
+        )
+
+        // Pressed by assistive technology, not only by a mouse: an `NSView` with
+        // a button role does nothing on press unless it says otherwise.
+        var presses = 0
+        pill.onClick = { presses += 1 }
+        XCTAssertTrue(pill.accessibilityPerformPress())
+        XCTAssertEqual(presses, 1)
+    }
+
+    func testPaneOrdinalCountsAPanesPlaceAmongItsOwnSessionsTerminals() {
+        let workspace = makeWorkspace(panes: 4) // fill order: 1, 3, 2, 4
+        XCTAssertEqual(ordinal(workspace, "pane-1"), [1, 4])
+        XCTAssertEqual(ordinal(workspace, "pane-3"), [2, 4])
+        XCTAssertEqual(ordinal(workspace, "pane-2"), [3, 4])
+        XCTAssertEqual(ordinal(workspace, "pane-4"), [4, 4])
+
+        XCTAssertTrue(workspace.closePane("pane-3"))
+        XCTAssertEqual(ordinal(workspace, "pane-2"), [2, 3], "a sibling closing renumbers the rest")
+
+        var elsewhere = makeDescriptor("pane-5")
+        elsewhere.group = "sess-grp-2"
+        XCTAssertTrue(workspace.addPane(elsewhere))
+        XCTAssertEqual(ordinal(workspace, "pane-5"), [1, 1], "counted within its own session")
+        XCTAssertNil(
+            ordinal(workspace, "pane-2"),
+            "and a pane whose session is off screen has no place in what you are looking at"
+        )
+    }
+
+    /// The count in the subtitle is resolved every time the panes move, not
+    /// stored when focus starts: closing a sibling while a card is up must not
+    /// leave it claiming "terminal 3 of 4" with three terminals left.
+    func testTheFocusSubtitleFollowsASiblingClosingUnderIt() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 4)
+        defer { window.close() }
+        let card = try XCTUnwrap(workspace.container(for: "pane-2"))
+
+        XCTAssertTrue(workspace.toggleZoom("pane-2"))
+        XCTAssertEqual(
+            card.header.subtitle,
+            "Session 1 · terminal 3 of 4",
+            "an unnamed session still gets both halves — the name the sidebar derives for it"
+        )
+
+        XCTAssertTrue(workspace.closePane("pane-3"))
+        XCTAssertEqual(workspace.zoomedPaneID, "pane-2", "two siblings left, so the card stays up")
+        XCTAssertEqual(card.header.subtitle, "Session 1 · terminal 2 of 3")
+
+        workspace.updateDescriptor(for: "pane-2") { $0.groupLabel = "session restore" }
+        XCTAssertEqual(
+            card.header.subtitle,
+            "session restore · terminal 2 of 3",
+            "and a rename reaches the bar you are looking at"
+        )
+    }
+
+    /// A narrow window has to give up the subtitle before it gives up the
+    /// terminal's own name — the subtitle describes where the pane sits, which
+    /// is worth less than what it is.
+    func testANarrowFocusHeaderDropsTheSubtitleRatherThanTheName() throws {
+        let header = PaneHeaderView(title: "token rotation")
+        header.subtitleProvider = { "session restore · terminal 1 of 4" }
+        header.isZoomed = true
+        let fields = header.subviews.compactMap { $0 as? NSTextField }
+        let subtitle = try XCTUnwrap(fields.first { $0.stringValue == header.subtitle })
+        let title = try XCTUnwrap(fields.first { $0 !== subtitle })
+
+        layOut(header, width: 900)
+        XCTAssertEqual(
+            title.frame.width,
+            ceil(title.fittingSize.width),
+            "with room, the name takes exactly the width it draws in — never less, or it ellipsises"
+        )
+        XCTAssertEqual(subtitle.frame.width, ceil(subtitle.fittingSize.width))
+        XCTAssertEqual(subtitle.frame.minX, title.frame.maxX + 9, "directly after the name, at the design's 9pt gap")
+
+        layOut(header, width: 300)
+        XCTAssertEqual(subtitle.frame, .zero, "dropped whole, the way the badges are")
+        XCTAssertGreaterThanOrEqual(title.frame.width, 40, "and the name keeps its share")
+    }
+
     // MARK: - Helpers
 
     /// Panes are added one at a time, exactly as ⌘T does, so the fill order
@@ -754,11 +1463,67 @@ final class PaneWorkspaceViewTests: XCTestCase {
             backing: .buffered,
             defer: false
         )
+        // `NSWindow` defaults to releasing itself when closed, and every helper
+        // here closes its window in a `defer` while ARC still holds this
+        // reference — an over-release that frees the window early. AppKit and
+        // CoreAnimation keep window-scoped registrations (an
+        // `_NSWindowTransformAnimation` per animated view among them), so a freed
+        // window leaves dangling pointers that the next autorelease-pool drain
+        // inside a CA commit dereferences: SIGSEGV in that class's `dealloc`, in
+        // whichever *later* test happens to turn the run loop. The app itself
+        // never had this — `NSWindowController` owns its window and clears the
+        // flag — and every other window in the app sets it explicitly.
+        window.isReleasedWhenClosed = false
         window.contentView = workspace
         // Exactly the controller's wiring, so a click routes to focus here too.
         window.onFirstResponderChange = { [weak workspace] in workspace?.adoptFocus(from: $0) }
         window.makeKeyAndOrderFront(nil)
         return (workspace, window)
+    }
+
+    /// A window shaped like the real one: a plain content view holding the
+    /// sidebar's 238pt column beside the pane grid, which is what
+    /// `WorkspaceWindowController` builds with an `NSSplitViewController`. The
+    /// overlay's whole point is that it covers this content view rather than the
+    /// grid, and `makeAttachedWorkspace` cannot show that — there the workspace
+    /// *is* the content view.
+    private func makeSplitHostedWorkspace(
+        panes: Int
+    ) -> (PaneWorkspaceView, NSWindow, NSView) {
+        let workspace = makeWorkspace(panes: panes)
+        let window = WorkspaceWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 1200, height: 800),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false // see `makeAttachedWorkspace`
+        let content = NSView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        let sidebar = NSView(frame: CGRect(x: 0, y: 0, width: 238, height: 800))
+        workspace.frame = CGRect(x: 238, y: 0, width: 1200 - 238, height: 800)
+        content.addSubview(sidebar)
+        content.addSubview(workspace)
+        window.contentView = content
+        window.onFirstResponderChange = { [weak workspace] in workspace?.adoptFocus(from: $0) }
+        window.makeKeyAndOrderFront(nil)
+        return (workspace, window, sidebar)
+    }
+
+    /// AppKit's own rule for finding an action's target, in the two steps
+    /// `NSApplication.targetForAction(_:to:from:)` takes: walk the responder
+    /// chain, and ask anything that does not respond itself for a supplemental
+    /// target.
+    private func target(for action: Selector, from start: NSResponder?) -> AnyObject? {
+        var responder = start
+        while let current = responder {
+            if current.responds(to: action) { return current }
+            if let supplemental = current.supplementalTarget(forAction: action, sender: nil)
+                as AnyObject?, supplemental.responds(to: action) {
+                return supplemental
+            }
+            responder = current.nextResponder
+        }
+        return nil
     }
 
     private func makeDescriptor(_ id: String) -> PaneDescriptor {
@@ -775,6 +1540,63 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
     private func spinRunLoop() {
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+
+    /// What the exit pill says, which is also the name it answers to and how
+    /// these tests tell the header's three controls apart without the header
+    /// exposing them.
+    private static let exitFocusText = "Exit focus · esc"
+
+    /// Which trailing controls the bar is currently offering, named by what they
+    /// say they do, in the order the header lays them out.
+    private func controls(in header: PaneHeaderView) -> [String] {
+        header.subviews
+            .compactMap { $0 as? PaneHeaderButton }
+            .filter { !$0.isHidden }
+            .compactMap { $0.accessibilityLabel() }
+    }
+
+    private func button(labelled label: String, in header: PaneHeaderView) -> PaneHeaderButton? {
+        header.subviews
+            .compactMap { $0 as? PaneHeaderButton }
+            .first { $0.accessibilityLabel() == label }
+    }
+
+    /// A header laid out at a given width, on its own. `needsLayout` by hand
+    /// because nothing owns this one: in the app its pane sets the frame and
+    /// AppKit runs the pass.
+    private func layOut(_ header: PaneHeaderView, width: CGFloat) {
+        header.frame = CGRect(x: 0, y: 0, width: width, height: header.currentHeight)
+        header.needsLayout = true
+        header.layoutSubtreeIfNeeded()
+    }
+
+    /// A real click on a header control: the mouse path the user takes, rather
+    /// than reaching for the closure behind it.
+    private func click(_ button: PaneHeaderButton, in window: NSWindow) {
+        let centre = button.convert(
+            CGPoint(x: button.bounds.midX, y: button.bounds.midY),
+            to: nil
+        )
+        guard
+            let event = NSEvent.mouseEvent(
+                with: .leftMouseUp,
+                location: centre,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            )
+        else { return XCTFail("could not synthesize a click") }
+        button.mouseUp(with: event)
+    }
+
+    /// `paneOrdinal` as a comparable pair — a tuple is not `Equatable`.
+    private func ordinal(_ workspace: PaneWorkspaceView, _ sessionID: String) -> [Int]? {
+        workspace.paneOrdinal(of: sessionID).map { [$0.index, $0.total] }
     }
 }
 

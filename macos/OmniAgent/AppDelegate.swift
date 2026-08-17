@@ -132,6 +132,11 @@ enum ApplicationMenus {
         )
         session.addItem(item("Reattach", Selector(("reattachSession:")), "r"))
         session.addItem(item("Focus Terminal", Selector(("focusTerminal:")), "l"))
+        // Focus *mode* — the pane blown up over the others on a blurred
+        // backdrop — not the item above, which only moves keyboard focus
+        // into the terminal. ⌘↩ is Bruno's own binding, chosen over the
+        // design hint text's ⌃⌘F.
+        session.addItem(item("Focus This Terminal", Selector(("toggleFocusMode:")), "\r"))
         session.addItem(.separator())
         session.addItem(
             item(

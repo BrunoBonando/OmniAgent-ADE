@@ -190,6 +190,9 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Terminal panes")
+        // The overlay host carries the pane commands back to this view while a
+        // card is up — see `PaneFocusOverlayView.commandTarget`.
+        focusOverlay.commandTarget = self
         resizeCoalescer.onSchedule = { [weak self] in self?.resizeScheduled() }
         resizeCoalescer.onFlush = { [weak self] sessions in
             guard let self else { return }
@@ -314,6 +317,84 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return view
     }()
 
+    /// The design's overlay is full-bleed over the app frame —
+    /// `position:absolute;top:30px;left:0;right:0;bottom:24px` in
+    /// `design/OmniAgent ADE.dc.html`, the whole 1440×900 mock less its title
+    /// bar and its status strip — and the sidebar sits *inside* it, blurred. So
+    /// neither the backdrop nor the card can be a subview of this view, which is
+    /// only the pane grid: they go in this host, installed over the window's
+    /// entire content view. With no full-size content view and no status strip
+    /// of our own, `contentView.bounds` is that rect exactly, and nothing needs
+    /// the mock's manual 30/24 inset.
+    ///
+    /// Installed only while a pane is focused and taken back out on the way down
+    /// (`teardownOverlay`): a plain view over the content view hit-tests as
+    /// itself, so one left behind would swallow every click meant for the
+    /// sidebar or a pane.
+    private let focusOverlay: PaneFocusOverlayView = {
+        let view = PaneFocusOverlayView()
+        view.wantsLayer = true
+        view.autoresizingMask = [.width, .height]
+        // A container, not somewhere to land: the backdrop inside it is the
+        // element that offers the way out of focus.
+        view.setAccessibilityElement(false)
+        return view
+    }()
+
+    /// The card's drop shadow (`box-shadow:0 40px 100px rgba(0,0,0,.75)`), as a
+    /// layer of the overlay host under the card rather than the card's own
+    /// shadow: `PaneContainerView` masks to bounds — that mask is what rounds
+    /// the terminal's corners, so it stays — and a mask clips a shadow away with
+    /// everything else outside the layer. Opaque black because a layer casts the
+    /// shadow of what it actually paints; the card covers it completely.
+    private lazy var focusCardShadow: CALayer = {
+        let layer = CALayer()
+        layer.backgroundColor = NSColor.black.cgColor
+        layer.cornerRadius = PaneContainerView.focusedCornerRadius
+        layer.cornerCurve = .continuous
+        layer.shadowColor = NSColor.black.cgColor
+        layer.shadowOpacity = 0.75
+        layer.shadowRadius = Self.focusCardShadowBlur
+        // `0 40px` is 40pt *down*, and down is negative here whatever the host's
+        // geometry: rendering a shadowed layer offscreen with
+        // `isGeometryFlipped` both ways puts -40 below the layer either time, so
+        // the offset is *not* flipped with a flipped view's sublayer frames.
+        // Same reason CALayer's own (0,-3) default falls downward on macOS.
+        layer.shadowOffset = CGSize(width: 0, height: -Self.focusCardShadowDrop)
+        return layer
+    }()
+
+    /// The pane parented in the overlay host — the card, or the pane that was
+    /// the card until its shrink started. Kept apart from `zoomedPaneID` because
+    /// the view hierarchy outlives the state by one animation, and it is
+    /// *parentage* rather than zoom state that says whose frame the grid may
+    /// set: while a pane is in here its frame is in the host's coordinates, and
+    /// a layout pass applying grid geometry to it would tear the transition in
+    /// half.
+    private var overlayPaneID: String?
+
+    /// Whether that pane's shrink back into the grid is already in flight, so a
+    /// second layout pass does not start it again and the transition's
+    /// completion knows there is a card to land.
+    private var overlayIsCollapsing = false
+
+    /// Which transition is current. Every zoom change takes the next number, and
+    /// a transition's completion does nothing unless the number it was given is
+    /// still this one — the completions are indistinguishable otherwise, and an
+    /// *entry* transition's completion arriving after a later exit had started would
+    /// finish that exit early: the card would snap home instead of shrinking and
+    /// the overlay would be pulled out from under the fade.
+    private var zoomTransitionToken = 0
+
+    /// `padding:26px` on the overlay and `width:1080px;max-height:720px` on the
+    /// card — the design's whole geometry for focus mode.
+    static let focusOverlayPadding: CGFloat = 26
+    static let focusCardSize = NSSize(width: 1080, height: 720)
+    /// `0 40px 100px`: 40pt of downward offset, and a CSS blur radius is about
+    /// twice a layer's shadow radius, so 100px of spread is 50 here.
+    static let focusCardShadowDrop: CGFloat = 40
+    static let focusCardShadowBlur: CGFloat = 50
+
     /// How long a pane takes to grow into the zoom or shrink back out of it,
     /// with the backdrop's blur ramping over the same span. Slow enough to read
     /// as one pane lifting off the others rather than as a cut.
@@ -332,21 +413,55 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     }
 
     func setZoomed(_ sessionID: String?) {
+        // The two conditions `toggleZoom` refuses on, checked here too because
+        // this is the entry point ⌘↩, the palette and `revealPane` all reach:
+        // a pane that is not on screen has nothing to be zoomed over, and with
+        // one terminal the pane already fills the workspace. `nil` always goes
+        // through — it is the way out, and must never be refusable.
+        if let sessionID, paneIDs.count < 2 || !paneIDs.contains(sessionID) { return }
         guard zoomedPaneID != sessionID else { return }
+        // Before anything else, so a transition still in flight — animated or the
+        // instant Reduce Motion kind — can no longer finish on this one's behalf.
+        zoomTransitionToken += 1
+        let token = zoomTransitionToken
         zoomedPaneID = sessionID
         if let sessionID { focusPane(sessionID) }
         updateZoomAvailability()
-        // Reduced motion still zooms, it just lands instantly.
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+        // Reduced motion still zooms, it just lands instantly — and so does a zoom
+        // in a view with no window, where there is nothing on screen to animate
+        // and an animation group's completion is not guaranteed to arrive at all.
+        // Sequencing the landing behind one that never comes would strand the
+        // transition half-done: the card left in the overlay, the backdrop parked
+        // in the grid. True of the windowless tests, and of a window closed from
+        // under a card.
+        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
             return updateLayout()
         }
         zoomTransition = Self.zoomTransitionDuration
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = zoomTransition
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            updateLayout()
-        }
+        // No `NSAnimationContext` group: every frame in the transition is animated
+        // on its own layer instead (see `place`), and the transition's end is
+        // scheduled below rather than handed to a group's completion handler.
+        updateLayout()
         zoomTransition = 0
+        // The end of the transition is scheduled rather than handed to an
+        // animation group's completion, because there is no group left to hand it
+        // to. A stale timer is harmless: `finishZoomTransition` refuses any token
+        // but the current one.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.zoomTransitionDuration) {
+            [weak self] in
+            self?.finishZoomTransition(token)
+        }
+    }
+
+    /// The end of one transition's 0.32s: the card that was shrinking is back in
+    /// the grid, and with nothing focused any more the overlay comes out of the
+    /// window. Both directions end up here, so it acts only for the transition it
+    /// was created by — see `zoomTransitionToken`.
+    private func finishZoomTransition(_ token: Int) {
+        guard token == zoomTransitionToken, overlayIsCollapsing, let id = overlayPaneID
+        else { return }
+        landCard(id)
+        teardownOverlay()
     }
 
     /// Zoom only survives while it still means something: the pane has to be
@@ -367,43 +482,290 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
     }
 
-    /// "Almost the entire terminal place": the zoomed pane takes the workspace
-    /// less a margin, so the blurred grid still shows around the edge. It reads
-    /// as one pane lifted off the others rather than a different screen, which
-    /// is the difference between a zoom and a mode you have to find your way
-    /// back out of.
-    private func zoomFrame() -> NSRect {
-        let area = gridBounds
-        let inset = min(30, min(area.width, area.height) * 0.045)
-        return area.insetBy(dx: inset, dy: inset)
+    /// The card's rect inside the overlay: the design's
+    /// `width:1080px;height:100%;max-height:720px`, centred in an overlay padded
+    /// by 26 on all four sides. A window too small for 1080×720 gives up the
+    /// card's size rather than the padding, and never goes negative — the
+    /// padding is what keeps the blur reading as a surround rather than a frame
+    /// the card is jammed into.
+    ///
+    /// Static and pure so the geometry can be checked without a window.
+    static func focusCardFrame(in host: NSRect) -> NSRect {
+        let width = min(focusCardSize.width, max(0, host.width - focusOverlayPadding * 2))
+            .rounded(.down)
+        let height = min(focusCardSize.height, max(0, host.height - focusOverlayPadding * 2))
+            .rounded(.down)
+        return NSRect(
+            x: (host.midX - width / 2).rounded(),
+            y: (host.midY - height / 2).rounded(),
+            width: width,
+            height: height
+        )
+    }
+
+    /// Puts the overlay over the window's whole content view — the sidebar
+    /// included — and hands back the view the backdrop and the card go in. A
+    /// function rather than a computed property because reading it *installs*
+    /// something, and only the zoom paths may ask for that.
+    ///
+    /// Falls back to this view when there is no window, which only happens in
+    /// tests: the geometry is the same and the reparenting becomes a no-op.
+    private func installOverlayHost() -> NSView {
+        guard let content = window?.contentView else { return self }
+        // Re-stacked only when something has landed on top of it, because
+        // `addSubview` *moves* a view that is already there and moving one
+        // resigns any first responder inside it — and the card in here holds the
+        // terminal being typed into.
+        if content.subviews.last !== focusOverlay {
+            content.addSubview(focusOverlay, positioned: .above, relativeTo: nil)
+        }
+        // Re-asserted rather than left to the autoresizing mask alone: the
+        // overlay is a subview the content view knows nothing about — that view
+        // is the plain wrapper AppKit puts around the window's content view
+        // controller, and the split view it manages is its own single child.
+        focusOverlay.frame = content.bounds
+        return focusOverlay
     }
 
     private func applyZoom() {
         guard let id = zoomedPaneID, let container = containers[id] else {
-            zoomBackdrop.setShown(false, duration: zoomTransition)
-            return
+            return collapseZoom()
         }
+        // Whatever card is in the overlay goes back to the grid before this one
+        // lifts — unconditionally, whether it was shrinking or not.
+        //
+        // Gating this on `overlayIsCollapsing` covered only one of the two ways a
+        // second pane can be focused. The other: ⌘↩ on pane A, then ⌘1…⌘8 or
+        // ⌥arrow to move focus, neither of which clears the zoom, then ⌘↩ on pane
+        // B. A is not collapsing, so it was skipped — and once `overlayPaneID`
+        // named B instead, A was a pane nobody owned: the grid fed it cell rects
+        // in the host's coordinates, and the next `teardownOverlay` carried it out
+        // of the window for good, since nothing re-adds a container as a subview.
+        // A live terminal and its session, off screen with no way back.
+        //
+        // This pane, if it is the one that was shrinking, is taken over mid-flight
+        // rather than landed and lifted again: `leaving != id` leaves it alone and
+        // the frame animation below picks it up from wherever the shrink got to.
+        if let leaving = overlayPaneID, leaving != id {
+            landCard(leaving)
+        }
+        overlayIsCollapsing = false
+        let host = installOverlayHost()
+        overlayPaneID = id
+        // The lift starts where the pane already is, read in the host's
+        // coordinates: the grid and the overlay are different views in the real
+        // window, and a frame carried across unconverted would jump the length
+        // of the sidebar.
+        let lifting = container.superview !== host
+        let start = lifting ? convert(container.frame, to: host) : focusCardShadow.frame
+        let restacked = stackOverlay(container, in: host)
+        if lifting {
+            // Only the origin changes here — the pane is the same size in the
+            // host as it was in its cell — so the terminal is reflowed once, by
+            // `place`, at the size it actually ends up.
+            container.frame = start
+        }
+        // After any move, not just the lift: re-stacking a view that is already
+        // there moves it too, and a move is what costs the first responder.
+        if restacked { reclaimFirstResponder(container) }
         zoomBackdrop.setShown(true, duration: zoomTransition)
-        // Re-stacked on every pass because `syncDividerViews`/`addPane` add
-        // their own subviews on top; the backdrop has to stay directly under
-        // the zoomed pane and above everything else.
-        addSubview(zoomBackdrop, positioned: .above, relativeTo: nil)
-        addSubview(container, positioned: .above, relativeTo: zoomBackdrop)
-        zoomBackdrop.frame = bounds
-        place(container, at: zoomFrame())
+        let card = Self.focusCardFrame(in: host.bounds)
+        moveFocusCardShadow(from: start, to: card)
+        place(container, at: card)
     }
 
-    /// Moves a pane, animating the move only during a zoom transition — where
-    /// AppKit's animator lands the frame in the model at once (so the terminal
-    /// reflows once, at its final size) and animates the layer into it.
+    /// The overlay's two views as the host's top-most pair — the backdrop
+    /// directly under the card, everything else behind both — with the card's
+    /// shadow re-seated between them, since AppKit rebuilds the sublayer order
+    /// from the subview order whenever that changes. Re-stacked only when
+    /// something has landed on top, for the first-responder reason above.
+    @discardableResult
+    private func stackOverlay(_ container: PaneContainerView, in host: NSView) -> Bool {
+        zoomBackdrop.frame = host.bounds
+        guard Array(host.subviews.suffix(2)) != [zoomBackdrop, container] as [NSView] else {
+            return false
+        }
+        host.addSubview(zoomBackdrop, positioned: .above, relativeTo: nil)
+        host.addSubview(container, positioned: .above, relativeTo: zoomBackdrop)
+        if let backdrop = zoomBackdrop.layer {
+            host.layer?.insertSublayer(focusCardShadow, above: backdrop)
+        }
+        return true
+    }
+
+    /// Keeps the shadow on the card: the same rect, the same 0.32s, the same
+    /// curve. Spelled out because a hand-added sublayer gets none of AppKit's
+    /// view animation, exactly as `PaneZoomBackdropView` spells out its blur
+    /// ramp. Without it the shadow would sit at the card's final size while the
+    /// card was still small — an opaque black rectangle around a growing pane.
+    private func moveFocusCardShadow(from start: NSRect, to card: NSRect) {
+        focusCardShadow.frame = card
+        guard zoomTransition > 0, !start.isEmpty, start != card else { return }
+        animateTransition(
+            focusCardShadow,
+            fromPosition: CGPoint(x: start.midX, y: start.midY),
+            fromBounds: CGRect(origin: .zero, size: start.size)
+        )
+    }
+
+    /// Undoes the overlay: the backdrop fades, the card shrinks back to its grid
+    /// cell — still in the host's coordinates, so the whole move happens in one
+    /// space — and only once it has landed does it go back into this view, where
+    /// `updateLayout` owns its frame again. Cheap and idempotent: every layout
+    /// pass with nothing focused comes through here.
+    private func collapseZoom() {
+        zoomBackdrop.setShown(false, duration: zoomTransition)
+        guard let id = overlayPaneID else { return }
+        guard
+            let container = containers[id],
+            let host = container.superview,
+            let cell = gridFrame(for: id),
+            zoomTransition > 0 || overlayIsCollapsing
+        else {
+            // Nothing to shrink: the pane was closed out from under the card, or
+            // its session left the screen and has no cell on this one to shrink
+            // into, or motion is reduced and a zoom lands instantly.
+            landCard(id)
+            return teardownOverlay()
+        }
+        let target = convert(cell, to: host)
+        if overlayIsCollapsing {
+            // A shrink already in flight. It is aimed at the cell it was started
+            // for, and the frame `place` left in the model *is* that aim, so an
+            // unchanged target means this pass changed nothing the animation
+            // cares about and it is left to finish. A changed one means the grid
+            // reflowed under it — ⌘T in the 0.32s the card is still flying — and
+            // the card goes home now rather than gliding to a cell that has
+            // moved.
+            guard container.frame != target else { return }
+            landCard(id)
+            return teardownOverlay()
+        }
+        // `place` rather than a frame assignment of its own: it animates inside
+        // the transition's one animation group, and it schedules the PTY resize
+        // the shrink needs — without it a full-screen TUI stays at the card's
+        // ~1080 columns for 0.32s while the view is already cell-sized, and every
+        // exit tears its output.
+        overlayIsCollapsing = true
+        moveFocusCardShadow(from: focusCardShadow.frame, to: target)
+        place(container, at: target)
+    }
+
+    /// Puts the card back where the grid can have it: a subview of this view
+    /// again, at its cell, reflowed, with the first responder the move cost it
+    /// asked back. The completion of the shrink, and the direct path wherever
+    /// there is nothing to animate.
+    private func landCard(_ id: String) {
+        if overlayPaneID == id {
+            overlayPaneID = nil
+            overlayIsCollapsing = false
+        }
+        guard let container = containers[id] else { return }
+        // The shrink is over the moment the grid owns this frame again, so the
+        // animation still in flight has to go with it — a surviving one replays the
+        // host-space move after the reparent and slides the pane the width of the
+        // sidebar. By key rather than `removeAllAnimations()`: these two are the
+        // only ones this code adds, and yanking whatever else a layer happens to
+        // be running is how you break something you did not write.
+        container.layer?.removeAnimation(forKey: "position")
+        container.layer?.removeAnimation(forKey: "bounds")
+        if container.superview !== self { addSubview(container) }
+        if let cell = gridFrame(for: id) { container.frame = cell }
+        container.surface.scheduleResize()
+        reclaimFirstResponder(container)
+    }
+
+    /// Takes the overlay back out of the window once nothing is focused: the
+    /// card's shadow, and the host with the backdrop still inside it. Nothing
+    /// may be left over the app while the grid is unfocused — a plain view
+    /// covering the content view hit-tests as itself, and would swallow every
+    /// click meant for the sidebar or a pane.
+    private func teardownOverlay() {
+        focusCardShadow.removeFromSuperlayer()
+        // The backdrop explicitly, not only with the host: where there is no
+        // window the host is never installed and this view *is* the host, so
+        // removing the host alone left a hidden backdrop parked in the grid for
+        // the rest of the process. `stackOverlay` adds it back on the next zoom.
+        zoomBackdrop.removeFromSuperview()
+        focusOverlay.removeFromSuperview()
+    }
+
+    /// Moving a view between superviews resigns the first responder if it or a
+    /// descendant held it. The card carries the terminal being typed into, so it
+    /// is asked back — and only for the focused pane, so lifting or landing one
+    /// card never takes the keyboard off another.
+    private func reclaimFirstResponder(_ container: PaneContainerView) {
+        guard let window, focusedPaneID == container.paneID else { return }
+        guard window.firstResponder !== container.surface.terminalView else { return }
+        container.surface.focus()
+    }
+
+    /// The cell a pane occupies in the grid as it stands — where a card being
+    /// shrunk out of focus is heading, and the only thing the overlay needs from
+    /// the grid it is covering.
+    private func gridFrame(for sessionID: String) -> NSRect? {
+        grid?.layout(in: gridBounds, dividerThickness: Self.dividerThickness).frames[sessionID]
+    }
+
+    /// The overlay lives in the window rather than in this view, so it does not
+    /// go away when this view does: the shell hides the whole pane workspace
+    /// when it switches away from Terminals (`applyDestination`), and a
+    /// full-window blur left over a hidden grid would cover the app. The zoom
+    /// itself is untouched, so coming back to Terminals shows the card again.
+    override func viewDidHide() {
+        super.viewDidHide()
+        focusOverlay.isHidden = true
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        focusOverlay.isHidden = false
+    }
+
+    /// Moves a pane. The frame lands in the model immediately either way — so the
+    /// terminal reflows once, at the size it ends up — and during a zoom
+    /// transition the *layer* is animated into it from where it is currently
+    /// presented.
+    ///
+    /// Deliberately not `NSView.animator()`, which is what this used to be, and
+    /// this is hardening rather than a fix for anything that was failing. The
+    /// animator wraps each group's frame change in an
+    /// `_NSWindowTransformAnimation`, and instrumenting the transitions showed two
+    /// of those alive on one view whenever a second transition began inside the
+    /// first's 0.32s — a second ⌘↩, a ⌘2 hand-over, or a close. Nothing was
+    /// observed to go wrong because of it, but it is AppKit bookkeeping this code
+    /// has no need to stress: a CA animation of our own carries no such wrapper,
+    /// and adding one under a key that already holds one *replaces* it, which is
+    /// defined behaviour.
     private func place(_ container: PaneContainerView, at frame: NSRect) {
         guard container.frame != frame else { return }
-        if zoomTransition > 0 {
-            container.animator().frame = frame
-        } else {
-            container.frame = frame
+        let presented = (container.layer?.presentation() ?? container.layer)
+            .map { (position: $0.position, bounds: $0.bounds) }
+        container.frame = frame
+        if zoomTransition > 0, let layer = container.layer, let presented {
+            animateTransition(layer, fromPosition: presented.position, fromBounds: presented.bounds)
         }
         container.surface.scheduleResize()
+    }
+
+    /// One move of the transition, as the pair of layer animations that expresses
+    /// it: the design's 0.32s and curve, starting from wherever the layer is
+    /// presented right now so a move that begins mid-flight carries on from what
+    /// the eye can see instead of snapping back to the model value.
+    private func animateTransition(
+        _ layer: CALayer,
+        fromPosition: CGPoint,
+        fromBounds: CGRect
+    ) {
+        let move = CABasicAnimation(keyPath: "position")
+        move.fromValue = NSValue(point: fromPosition)
+        let resize = CABasicAnimation(keyPath: "bounds")
+        resize.fromValue = NSValue(rect: fromBounds)
+        for animation in [move, resize] {
+            animation.duration = zoomTransition
+            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.add(animation, forKey: animation.keyPath)
+        }
     }
 
     /// Brings one session to the screen, hiding whichever was there. Focus
@@ -469,6 +831,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             // on an empty workspace with a stale focus.
             if let next = successor ?? paneIDs.first {
                 focusPane(next)
+                // Closing re-homes focus, which is the same moment as a focus
+                // command by another door — the palette closes a pane that is not
+                // the card, and focus lands on a neighbour the card is not
+                // showing. Where the *card* was closed, `validateZoom` has already
+                // ended the zoom above and this does nothing.
+                carryCardToFocusedPane()
             } else {
                 updateFocusRings()
                 onFocusedPaneChanged?(nil)
@@ -505,6 +873,13 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         descriptors[sessionID] = descriptor
         containers[sessionID]?.descriptorChanged(descriptor)
         updateAccessibilityLabels()
+        // The card's subtitle names its *session*, and the derived `Session N`
+        // for unnamed ones is a position in a list — so naming any session
+        // renumbers the rest, and a card showing one of those was left saying
+        // the old number. Nothing else here refreshes it: this path changes one
+        // pane's descriptor without a layout pass, and the layout pass is the
+        // other place the subtitle is re-derived.
+        refreshFocusSubtitles()
         onPanesChanged?()
     }
 
@@ -564,6 +939,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         guard let focusedPaneID, let neighbor = grid?.neighbor(of: focusedPaneID, direction: direction)
         else { return false }
         focusPane(neighbor)
+        carryCardToFocusedPane()
         return true
     }
 
@@ -580,7 +956,31 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         let ids = paneIDs
         guard index >= 1, index <= ids.count else { return false }
         focusPane(ids[index - 1])
+        carryCardToFocusedPane()
         return true
+    }
+
+    /// In focus mode the card is the only terminal on screen, so a command that
+    /// moves *focus* moves the card with it: ask for pane 3 and you get pane 3, in
+    /// the card. Without it the caret goes behind the blur and what the user types
+    /// lands in a terminal they cannot see — the same harm `revealPane` fixes on
+    /// its own path, so this makes "the card shows the focused pane" one rule
+    /// everywhere rather than true on one path and not another.
+    ///
+    /// Called from the command entry points, never from `focusPane(_:)`, which
+    /// `setZoomed` calls itself and would re-enter. Off-screen and cross-session
+    /// targets need nothing extra: `setZoomed`'s own refusal and `validateZoom`
+    /// already decide those, and this adds no third behaviour.
+    ///
+    /// The card is not the only thing riding on this. The blinking cursor follows
+    /// `PaneContainerView.isFocused` into `TerminalSurfaceView.isSelected`, so
+    /// "the terminal whose cursor blinks" and "the terminal in the card" are the
+    /// same one *because* this holds — a focus-moving path that skips this helper
+    /// leaves the blink behind the blur on a pane nobody can see, and reads as a
+    /// cursor bug rather than a focus-mode one.
+    private func carryCardToFocusedPane() {
+        guard zoomedPaneID != nil, let focusedPaneID, zoomedPaneID != focusedPaneID else { return }
+        setZoomed(focusedPaneID)
     }
 
     /// Within the closing pane's own session — a pane never hands focus to
@@ -599,6 +999,36 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         for (id, container) in containers {
             container.isFocused = id == focusedPaneID
         }
+    }
+
+    /// The name the sidebar prints for a session: the one stored on its panes,
+    /// else the same derived `Session N` the tree derives. Asked through
+    /// `SessionOutline` rather than read off a descriptor, because the derived
+    /// number is chosen against every *other* session's name in the project —
+    /// a header that numbered sessions on its own would sooner or later
+    /// disagree with the row the user picked the terminal from.
+    func sessionLabel(forGroup group: String) -> String? {
+        let panes = allPaneIDs.compactMap { descriptors[$0] }
+        return SessionOutline.group(panes, focusedPaneID: focusedPaneID)
+            .flatMap(\.sessions)
+            .first { $0.id == group }?
+            .label
+    }
+
+    /// The pane's 1-based position among the on-screen panes of its own session,
+    /// and how many there are — the design's "terminal 1 of 4".
+    ///
+    /// Fill order, so the number matches what the eye counts across the grid.
+    /// `nil` for a pane that is not on screen: a session sitting behind another
+    /// one has no position in what you are looking at.
+    func paneOrdinal(of sessionID: String) -> (index: Int, total: Int)? {
+        guard let group = descriptors[sessionID]?.group else { return nil }
+        // The filter is about the *session*, not the grid: a grid holds one
+        // session's panes today, and reading the group here means this number
+        // stays right if that ever stops being true.
+        let siblings = paneIDs.filter { descriptors[$0]?.group == group }
+        guard let index = siblings.firstIndex(of: sessionID) else { return nil }
+        return (index + 1, siblings.count)
     }
 
     // MARK: - Drag and drop
@@ -655,16 +1085,41 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
         let layout = grid.layout(in: gridBounds, dividerThickness: Self.dividerThickness)
         for (id, container) in containers {
-            // The zoomed pane is placed by `applyZoom` instead. Skipped rather
-            // than assigned twice: each assignment schedules a PTY resize, and
-            // this runs on every frame of a divider drag.
-            guard id != zoomedPaneID, let frame = layout.frames[id] else { continue }
+            // Whatever is in the overlay host — the card, or one still shrinking
+            // out of it — has a frame in that host's coordinates, and `applyZoom`
+            // is what sets it. Guarded on parentage rather than on zoom state,
+            // which changes one layout pass earlier: `addPane` nils
+            // `zoomedPaneID`, and a grid cell assigned to a pane still living in
+            // the overlay slides it the width of the sidebar. Skipped rather than
+            // assigned twice: each assignment schedules a PTY resize, and this
+            // runs on every frame of a divider drag.
+            guard id != overlayPaneID, let frame = layout.frames[id] else { continue }
             place(container, at: frame)
         }
         syncDividerViews(layout.dividers)
         syncHolePlaceholders(layout, holeIDs: grid.cells.filter(\.isHole).map(\.id))
         applyZoom()
         updateAccessibilityLabels()
+        refreshFocusSubtitles()
+    }
+
+    /// The focused card's subtitle counts panes ("terminal 3 of 4"), so it goes
+    /// stale whenever the on-screen set changes without anything touching the
+    /// zoomed pane's own descriptor — closing a sibling renumbers the rest.
+    ///
+    /// Hooked to the layout pass, which is the pass that *means* "the panes
+    /// changed", rather than to `updateAccessibilityLabels`: that one exists to
+    /// serve assistive clients and is the sort of work a future author might
+    /// reasonably skip when none is listening, which would take the subtitle
+    /// quietly down with it.
+    ///
+    /// Only the zoomed pane, because only it can be showing a subtitle — and
+    /// this runs on every frame of a divider drag or a live window resize, where
+    /// re-deriving every session's name eight times a frame would be work for
+    /// nothing.
+    private func refreshFocusSubtitles() {
+        guard let zoomedPaneID else { return }
+        containers[zoomedPaneID]?.header.refreshSubtitle()
     }
 
     private func syncHolePlaceholders(_ layout: PaneLayout, holeIDs: [String]) {
@@ -832,6 +1287,9 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// real border would be buried under them — and this way the rounded
     /// corner, the border and the "working" animation are all one layer.
     static let cornerRadius: CGFloat = 9
+    /// `border-radius:12px` on the design's focused card, against 9 in the grid:
+    /// the corner grows with the card it is rounding.
+    static let focusedCornerRadius: CGFloat = 12
     static let borderWidth: CGFloat = 1
 
     /// `#0c0c0f` — the pane body behind the terminal, from the design's grid.
@@ -892,6 +1350,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
         didSet {
             guard isZoomed != oldValue else { return }
             header.isZoomed = isZoomed
+            // The card's corner is the design's 12, the grid pane's is 9.
+            updateChrome()
         }
     }
 
@@ -928,6 +1388,24 @@ final class PaneContainerView: NSView, NSDraggingSource {
         header.onCloseRequested = { [weak self] in
             guard let self else { return }
             self.workspace?.onRequestClosePane?(self.paneID)
+        }
+        // The design's `session restore · terminal 1 of 4`. A closure rather
+        // than a stored string because the ordinal is a fact about the
+        // workspace, not about this pane: a sibling closing while this one is
+        // zoomed changes "of 4" and nothing would tell the header to rewrite it.
+        header.subtitleProvider = { [weak self] in
+            guard
+                let self,
+                let workspace = self.workspace,
+                let ordinal = workspace.paneOrdinal(of: self.paneID),
+                let group = workspace.descriptor(for: self.paneID)?.group,
+                // Whatever the sidebar calls this session, including the derived
+                // `Session N` for one nobody has named: the subtitle is two
+                // parts in the design, and a card that dropped the name half
+                // for unnamed sessions would show it for hardly any of them.
+                let session = workspace.sessionLabel(forGroup: group)
+            else { return nil }
+            return "\(session) · terminal \(ordinal.index) of \(ordinal.total)"
         }
         addSubview(header)
         // Opaque for the same reason the header is: the container's background
@@ -966,7 +1444,9 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // border (see `borderWidth`), and it keeps both children clear of the
         // rounded corners the container's layer mask cuts.
         let inset = Self.borderWidth
-        let headerHeight = PaneHeaderView.height
+        // The header's own height, not the grid constant: focus mode makes the
+        // bar taller, and only the header knows which treatment it is wearing.
+        let headerHeight = header.currentHeight
         let width = max(0, bounds.width - inset * 2)
         header.frame = CGRect(
             x: inset,
@@ -985,11 +1465,13 @@ final class PaneContainerView: NSView, NSDraggingSource {
     }
 
     private func updateChrome() {
-        layer?.cornerRadius = Self.cornerRadius
+        layer?.cornerRadius = isZoomed ? Self.focusedCornerRadius : Self.cornerRadius
         layer?.cornerCurve = .continuous
         // The mask is what rounds the terminal's own square corners. It costs
         // one offscreen pass per pane, which is why nothing else here (no
-        // shadow, no filter) adds a second one.
+        // shadow, no filter) adds a second one — the focused card's
+        // `box-shadow` is a layer of the overlay host for exactly this reason,
+        // since this mask would clip a shadow of its own away.
         layer?.masksToBounds = true
         layer?.backgroundColor = borderColor.cgColor
         dropHighlight.isHidden = !isDropTarget
@@ -1054,6 +1536,9 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // is called, and the sidebar already used it.
         header.title = SessionOutline.paneLabel(descriptor)
         header.engine = descriptor.engine
+        // Its session's name is half the focus subtitle, so a rename has to
+        // reach the bar. A no-op unless this pane is the zoomed one.
+        header.refreshSubtitle()
         updateBranch(for: descriptor.cwd)
     }
 
@@ -1138,6 +1623,61 @@ final class PaneContainerView: NSView, NSDraggingSource {
     }
 }
 
+/// The view the focus overlay's backdrop and card live in, covering the window's
+/// whole content view.
+///
+/// Hit-transparent on its own account: `super.hitTest` still answers with the
+/// backdrop or the card when the point is over one of them, but the host itself
+/// is never the answer. Without that it swallows every click meant for the
+/// sidebar or a pane for the 0.32s of an exit — it stays mounted until the
+/// transition's completion tears it down, and the backdrop stops taking clicks
+/// as soon as the fade starts, so for that third of a second an invisible plain
+/// view is all there is over the app.
+final class PaneFocusOverlayView: NSView {
+    /// The workspace the pane commands belong to.
+    ///
+    /// While a card is up the responder chain from the terminal runs
+    /// `terminalView → card → this host → the window's content view`, and
+    /// `PaneWorkspaceView` is not on it — so the nine pane selectors it
+    /// implements answer to nothing and all sixteen Panes-menu items (⌘⌥arrows,
+    /// ⌃⌘arrows, ⌘1…⌘8) grey out, which they do not do with no card up. AppKit
+    /// asks each responder for a supplemental target when it does not handle an
+    /// action itself, and uses the answer for validation as well as dispatch,
+    /// which is exactly what is wanted here.
+    ///
+    /// Not `nextResponder`: AppKit reassigns that whenever a view is reparented,
+    /// and this host's whole job is to hold a view that is being reparented.
+    weak var commandTarget: PaneWorkspaceView?
+
+    /// The nine pane commands, and nothing else. Forwarding whatever the
+    /// workspace merely *responds to* would also forward the selectors it
+    /// inherits from `NSView` — `print:` is the classic — so a Print item added
+    /// later would resolve to the pane grid while a card is up and to the window
+    /// the rest of the time, which is the kind of difference that gets diagnosed
+    /// slowly. The set is closed, greppable, and cannot drift with the class.
+    private static let forwardedCommands: Set<Selector> = [
+        #selector(PaneWorkspaceView.focusPaneLeft(_:)),
+        #selector(PaneWorkspaceView.focusPaneRight(_:)),
+        #selector(PaneWorkspaceView.focusPaneUp(_:)),
+        #selector(PaneWorkspaceView.focusPaneDown(_:)),
+        #selector(PaneWorkspaceView.swapPaneLeft(_:)),
+        #selector(PaneWorkspaceView.swapPaneRight(_:)),
+        #selector(PaneWorkspaceView.swapPaneUp(_:)),
+        #selector(PaneWorkspaceView.swapPaneDown(_:)),
+        #selector(PaneWorkspaceView.selectPane(_:)),
+    ]
+
+    override func supplementalTarget(forAction action: Selector, sender: Any?) -> Any? {
+        if Self.forwardedCommands.contains(action), let commandTarget { return commandTarget }
+        return super.supplementalTarget(forAction: action, sender: sender)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === self ? nil : hit
+    }
+}
+
 /// The drop tint. A view rather than a `draw(_:)` fill so it composites above
 /// the opaque terminal, and transparent to hit testing so it never swallows a
 /// click or a drag that belongs to the pane underneath.
@@ -1167,14 +1707,34 @@ final class PaneDropOverlayView: NSView {
 /// what the agent is doing, the terminal's name, which engine is driving it,
 /// the branch it is on, and the two controls. Also the drag handle — the whole
 /// bar is grabbable except where a button sits.
+///
+/// It draws two treatments, switched by `isZoomed`: the grid pane's bar, and the
+/// focused card's taller one with a bigger name, a `session · terminal N of M`
+/// subtitle and a labelled way out (design line 1070). The mark, the engine
+/// badge and the branch badge are identical in both — the delta is deliberately
+/// only what tells you *this pane is the one blown up over the others*.
 final class PaneHeaderView: NSView {
+    /// A grid pane's bar is `height:30px`; the focused card's is `34px` (design
+    /// line 1070). A pane reads `currentHeight` rather than either static: the
+    /// header is the only thing that knows which treatment it is wearing.
     static let height: CGFloat = 30
+    static let focusHeight: CGFloat = 34
 
+    /// `padding:0 6px 0 10px;gap:8px` in the grid against `0 7px 0 12px` and
+    /// `gap:9px` on the focused card. The focus bar is not the grid's scaled
+    /// up — it is the same bar with more air in it.
     private static let leadingInset: CGFloat = 10
     private static let trailingInset: CGFloat = 6
     private static let gap: CGFloat = 8
+    private static let focusLeadingInset: CGFloat = 12
+    private static let focusTrailingInset: CGFloat = 7
+    private static let focusGap: CGFloat = 9
     private static let markSize: CGFloat = 15
-    private static let buttonSize: CGFloat = 20
+
+    var currentHeight: CGFloat { isZoomed ? Self.focusHeight : Self.height }
+    private var currentLeadingInset: CGFloat { isZoomed ? Self.focusLeadingInset : Self.leadingInset }
+    private var currentTrailingInset: CGFloat { isZoomed ? Self.focusTrailingInset : Self.trailingInset }
+    private var currentGap: CGFloat { isZoomed ? Self.focusGap : Self.gap }
 
     var title: String {
         didSet {
@@ -1237,6 +1797,26 @@ final class PaneHeaderView: NSView {
         }
     }
 
+    /// The design's `session restore · terminal 1 of 4`, drawn only while
+    /// zoomed. Never assigned from outside: it is resolved through
+    /// `subtitleProvider` every time the bar could be showing it, because the
+    /// count in it goes stale on its own — a sibling closing changes "of 4"
+    /// without touching *this* pane's descriptor, so nothing would tell a
+    /// stored string to update.
+    private(set) var subtitle: String? {
+        didSet {
+            guard subtitle != oldValue else { return }
+            subtitleLabel.stringValue = subtitle ?? ""
+            subtitleLabel.isHidden = subtitle == nil
+            needsLayout = true
+        }
+    }
+
+    /// Asked for the subtitle on the way into focus and whenever the pane's
+    /// metadata moves under it. `PaneContainerView` supplies it, since the
+    /// ordinal is a fact about the workspace and not about one pane.
+    var subtitleProvider: (() -> String?)?
+
     var onDragOut: ((NSEvent) -> Void)?
     var onZoomRequested: (() -> Void)?
     var onCloseRequested: (() -> Void)?
@@ -1244,25 +1824,36 @@ final class PaneHeaderView: NSView {
     var isZoomAvailable = false {
         didSet {
             guard isZoomAvailable != oldValue else { return }
-            focusButton.isHidden = !isZoomAvailable
-            needsLayout = true
+            applyControlVisibility()
         }
     }
 
+    /// The whole focus treatment, from the focused card at design line 1070: a
+    /// taller bar with more air in it, a bigger and brighter title, the
+    /// `session · terminal N of M` subtitle, and the labelled `Exit focus ·
+    /// esc` pill where the 20pt zoom icon sits in the grid. That last swap is
+    /// the point of the exercise — the control that got you in must not look
+    /// like the control that gets you out.
     var isZoomed = false {
         didSet {
             guard isZoomed != oldValue else { return }
-            focusButton.setAccessibilityLabel(
-                isZoomed ? "Shrink this terminal back into the grid" : "Zoom this terminal"
-            )
+            applyEmphasis()
+            applyControlVisibility()
+            refreshSubtitle()
+            // The pane's layout reads `currentHeight`, and a subview growing
+            // does not invalidate its parent's layout by itself.
+            superview?.needsLayout = true
+            needsDisplay = true
         }
     }
 
     private let mark = PaneStatusMarkView()
     private let titleLabel: NSTextField
+    private let subtitleLabel: NSTextField
     private let engineBadge = PaneBadgeView()
     private let branchBadge = PaneBadgeView()
     private let focusButton: PaneHeaderButton
+    private let exitFocusButton: PaneHeaderButton
     private let closeButton: PaneHeaderButton
 
     private var mouseDownEvent: NSEvent?
@@ -1274,25 +1865,40 @@ final class PaneHeaderView: NSView {
             font: ShellFont.ui(14.5, .medium),
             color: NSColor(srgbRed: 208 / 255, green: 208 / 255, blue: 216 / 255, alpha: 1)
         )
+        // `400 14px`, `#5c5c66` — quieter than the title it follows, because it
+        // says where the terminal sits rather than what it is.
+        subtitleLabel = ShellFont.label(
+            "",
+            font: ShellFont.ui(14),
+            color: NSColor(srgbRed: 92 / 255, green: 92 / 255, blue: 102 / 255, alpha: 1)
+        )
         focusButton = PaneHeaderButton(glyph: .focus)
+        exitFocusButton = PaneHeaderButton(glyph: .exitFocus, label: "Exit focus · esc")
         closeButton = PaneHeaderButton(glyph: .close)
         super.init(frame: .zero)
         wantsLayer = true
         titleLabel.translatesAutoresizingMaskIntoConstraints = true
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = true
+        subtitleLabel.isHidden = true
         engineBadge.isHidden = true
         branchBadge.isHidden = true
-        focusButton.isHidden = true
         focusButton.onClick = { [weak self] in self?.onZoomRequested?() }
+        // The same toggle, reached from the other side: the pill exists only
+        // while this pane is zoomed, so "toggle" there can only mean "get out".
+        exitFocusButton.onClick = { [weak self] in self?.onZoomRequested?() }
         closeButton.onClick = { [weak self] in self?.onCloseRequested?() }
         closeButton.hoverTint = NSColor(srgbRed: 255 / 255, green: 138 / 255, blue: 142 / 255, alpha: 1)
         closeButton.hoverFill = NSColor(srgbRed: 242 / 255, green: 85 / 255, blue: 90 / 255, alpha: 0.18)
-        for view in [mark, titleLabel, engineBadge, branchBadge, focusButton, closeButton] as [NSView] {
-            addSubview(view)
-        }
+        let views: [NSView] = [
+            mark, titleLabel, subtitleLabel, engineBadge, branchBadge,
+            focusButton, exitFocusButton, closeButton,
+        ]
+        for view in views { addSubview(view) }
         // Same reason the surface applies its cursor state up front: the header
-        // starts unfocused, so the didSet that dims the title never fires for
-        // a pane that is never selected.
+        // starts unfocused and unzoomed, so the didSets that dim the title and
+        // pick the controls never fire for a pane that is never selected.
         applyEmphasis()
+        applyControlVisibility()
         setAccessibilityElement(false)
     }
 
@@ -1304,11 +1910,38 @@ final class PaneHeaderView: NSView {
     override var isFlipped: Bool { true }
 
     private func applyEmphasis() {
+        // `600 15.5px` / `#f0f0f4` zoomed against `500 14.5px` in the grid: the
+        // focused card's name is the only terminal name on screen, so it stops
+        // being one label among eight and carries the card.
+        titleLabel.font = isZoomed ? ShellFont.ui(15.5, .semibold) : ShellFont.ui(14.5, .medium)
+        if isZoomed {
+            titleLabel.textColor = NSColor(srgbRed: 240 / 255, green: 240 / 255, blue: 244 / 255, alpha: 1)
+            return
+        }
         titleLabel.textColor = isFocused
             ? NSColor(srgbRed: 240 / 255, green: 241 / 255, blue: 248 / 255, alpha: 1)
             // The muted grey the branch badge already uses — an unselected pane
             // stays perfectly readable, it just stops competing.
             : NSColor(srgbRed: 154 / 255, green: 154 / 255, blue: 164 / 255, alpha: 1)
+    }
+
+    /// Which trailing control the bar offers. Exactly one of the zoom icon and
+    /// the exit pill is ever present, and the close button steps aside while
+    /// zoomed (the design's focused card has none): closing the terminal you
+    /// just blew up over the others is not what the card is for, and ⌘W still
+    /// does it.
+    private func applyControlVisibility() {
+        focusButton.isHidden = !isZoomAvailable || isZoomed
+        exitFocusButton.isHidden = !isZoomed
+        closeButton.isHidden = isZoomed
+        needsLayout = true
+    }
+
+    /// Re-asks `subtitleProvider`, which is also how the subtitle is cleared on
+    /// the way out of focus. Cheap enough to call on any metadata change: a
+    /// rename while zoomed has to reach the bar you are looking at.
+    func refreshSubtitle() {
+        subtitle = isZoomed ? subtitleProvider?() : nil
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1317,6 +1950,18 @@ final class PaneHeaderView: NSView {
         // border colour and would otherwise show straight through.
         PaneContainerView.paneBackgroundColor.setFill()
         bounds.fill()
+        // The focused card's own `rgba(255,255,255,.05)` over a `.5px
+        // rgba(255,255,255,.08)` hairline, with the accent wash a selected pane
+        // wears in the grid stepping aside: that wash is there to pick one pane
+        // out of eight, and with a single card on a blurred backdrop the
+        // question answers itself — the pane's own accent ring still says it.
+        if isZoomed {
+            NSColor(white: 1, alpha: 0.05).setFill()
+            bounds.fill()
+            NSColor(white: 1, alpha: 0.08).setFill()
+            NSRect(x: 0, y: bounds.maxY - 0.5, width: bounds.width, height: 0.5).fill()
+            return
+        }
         if isFocused {
             PaneContainerView.focusedHeaderTint.setFill()
         } else {
@@ -1333,9 +1978,10 @@ final class PaneHeaderView: NSView {
 
     override func layout() {
         super.layout()
+        let gap = currentGap
         let middle = (bounds.height - Self.markSize) / 2
         mark.frame = CGRect(
-            x: Self.leadingInset,
+            x: currentLeadingInset,
             y: middle,
             width: Self.markSize,
             height: Self.markSize
@@ -1344,24 +1990,26 @@ final class PaneHeaderView: NSView {
         // Right to left: the controls first, then whichever badges still fit.
         // The title takes what is left, which is what makes a narrow pane drop
         // the branch and then the engine rather than clipping its own name.
-        var right = bounds.maxX - Self.trailingInset
-        // A hidden zoom button gives its slot back to the title rather than
-        // leaving a gap where a control used to be.
-        for button in [closeButton, focusButton] where !button.isHidden {
-            right -= Self.buttonSize
+        var right = bounds.maxX - currentTrailingInset
+        // A hidden control gives its slot back to the title rather than leaving
+        // a gap where a button used to be — which is how the zoom icon's slot,
+        // and the close button's while zoomed, go to the name.
+        for button in [closeButton, focusButton, exitFocusButton] where !button.isHidden {
+            let size = button.intrinsicContentSize
+            right -= size.width
             button.frame = CGRect(
                 x: right,
-                y: (bounds.height - Self.buttonSize) / 2,
-                width: Self.buttonSize,
-                height: Self.buttonSize
+                y: (bounds.height - size.height) / 2,
+                width: size.width,
+                height: size.height
             )
         }
 
-        let titleLeft = mark.frame.maxX + Self.gap
+        let titleLeft = mark.frame.maxX + gap
         let minimumTitleWidth: CGFloat = 40
         for badge in [branchBadge, engineBadge] where !badge.isHidden {
             let size = badge.intrinsicContentSize
-            let candidate = right - Self.gap - size.width
+            let candidate = right - gap - size.width
             guard candidate - titleLeft >= minimumTitleWidth else {
                 badge.frame = .zero
                 continue
@@ -1375,11 +2023,45 @@ final class PaneHeaderView: NSView {
             )
         }
 
-        let titleHeight = ceil(titleLabel.intrinsicContentSize.height)
+        let available = max(0, right - gap - titleLeft)
+        var titleWidth = available
+        if !subtitleLabel.isHidden {
+            // The design has the subtitle directly after the name, with the
+            // flexible span moved to their right — so the title stops
+            // stretching here and takes its natural width. The name is served
+            // first: a subtitle that would leave it under its own width, or
+            // under the 40pt the badges drop against, goes rather than
+            // ellipsising the terminal's name to describe where it sits.
+            // `fittingSize`, not `intrinsicContentSize`: a label reports an
+            // intrinsic width about 4pt narrower than the cell it actually
+            // draws in, so a frame taken from the intrinsic value ellipsises
+            // text that fits. The grid never noticed, because there the title
+            // takes the slack and is never measured.
+            let subtitleSize = subtitleLabel.fittingSize
+            let wanted = ceil(titleLabel.fittingSize.width)
+            let subtitleWidth = ceil(subtitleSize.width)
+            let room = available - gap - subtitleWidth
+            if room >= max(minimumTitleWidth, wanted) {
+                titleWidth = wanted
+                let subtitleHeight = ceil(subtitleSize.height)
+                subtitleLabel.frame = CGRect(
+                    x: titleLeft + titleWidth + gap,
+                    y: (bounds.height - subtitleHeight) / 2,
+                    width: subtitleWidth,
+                    height: subtitleHeight
+                )
+            } else {
+                subtitleLabel.frame = .zero
+            }
+        }
+
+        // `fittingSize` here too, for the same reason as the widths above and so
+        // the next author never has to wonder which of the two this file trusts.
+        let titleHeight = ceil(titleLabel.fittingSize.height)
         titleLabel.frame = CGRect(
             x: titleLeft,
             y: (bounds.height - titleHeight) / 2,
-            width: max(0, right - Self.gap - titleLeft),
+            width: titleWidth,
             height: titleHeight
         )
     }
@@ -1547,9 +2229,6 @@ final class PaneBadgeView: NSView {
     }
 }
 
-/// A 20pt icon button in the pane header. Hand-drawn rather than an
-/// `NSButton` + SF Symbol so the glyphs match the design's own strokes, the
-/// same way `ShellGlyph` does for the sidebar.
 /// The blurred backdrop a zoomed pane sits on, and the way out of the zoom
 /// that does not require finding the button again.
 ///
@@ -1557,16 +2236,21 @@ final class PaneBadgeView: NSView {
 /// view brings a display-link-backed animation machine with it, and on a
 /// headless test host that spins forever retrying
 /// `CVDisplayLinkCreateWithCGDisplays` — merely constructing one hung the
-/// suite. A Gaussian blur over the layers behind this one is the whole of
-/// what is wanted here, and `backgroundFilters` is exactly that.
+/// suite. A blur and a desaturation over the layers behind this one are the
+/// whole of what is wanted here, and `backgroundFilters` is exactly that.
 final class PaneZoomBackdropView: NSView {
-    /// The blur the grid ends up under. Ramped up from zero on the way in and
-    /// back down on the way out, so the background blurs in and out with the
-    /// pane rather than snapping — a plain alpha fade would cross-dissolve a
-    /// sharp grid with a blurred one, which reads as double vision on text.
-    static let blurRadius: CGFloat = 14
-    /// The filter is named so this key path can address it; `CIFilter.name`
-    /// exists for exactly this.
+    /// `backdrop-filter:blur(16px)` — the blur the app ends up under. Ramped up
+    /// from zero on the way in and back down on the way out, so the background
+    /// blurs in and out with the pane rather than snapping — a plain alpha fade
+    /// would cross-dissolve a sharp grid with a blurred one, which reads as
+    /// double vision on text.
+    static let blurRadius: CGFloat = 16
+    /// `saturate(70%)` from the same filter. Set once rather than ramped: the
+    /// colour draining out is not what the eye follows across the transition,
+    /// the blur is.
+    static let saturation: CGFloat = 0.7
+    /// The filters are named so these key paths can address them;
+    /// `CIFilter.name` exists for exactly this.
     private static let blurKeyPath = "backgroundFilters.blur.inputRadius"
 
     var onClick: (() -> Void)?
@@ -1576,12 +2260,19 @@ final class PaneZoomBackdropView: NSView {
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor(srgbRed: 4 / 255, green: 6 / 255, blue: 9 / 255, alpha: 0.5)
+        // `background:rgba(6,6,8,.62)`, the overlay's own tint over the blur.
+        layer?.backgroundColor = NSColor(srgbRed: 6 / 255, green: 6 / 255, blue: 8 / 255, alpha: 0.62)
             .cgColor
-        if let blur = CIFilter(name: "CIGaussianBlur", parameters: ["inputRadius": 0]) {
-            blur.name = "blur"
-            layer?.backgroundFilters = [blur]
-        }
+        // Blurred first, then desaturated — the order the design's
+        // `blur(16px) saturate(70%)` composes them in.
+        let blur = CIFilter(name: "CIGaussianBlur", parameters: ["inputRadius": 0])
+        blur?.name = "blur"
+        let saturate = CIFilter(
+            name: "CIColorControls",
+            parameters: ["inputSaturation": Self.saturation]
+        )
+        saturate?.name = "saturate"
+        layer?.backgroundFilters = [blur, saturate].compactMap { $0 }
         alphaValue = 0
         isHidden = true
         setAccessibilityElement(true)
@@ -1633,26 +2324,85 @@ final class PaneZoomBackdropView: NSView {
     override func mouseDown(with event: NSEvent) {}
 
     override func mouseUp(with event: NSEvent) { onClick?() }
+
+    /// Transparent to the mouse unless it is actually showing. `isHidden` only
+    /// becomes true once the fade-out has landed, and for those 0.32s an
+    /// invisible backdrop would still hit-test as itself and swallow the click —
+    /// which now means every click in the window, sidebar included, since this
+    /// covers the whole content view rather than the pane grid. The same idiom
+    /// `PaneDropOverlayView` uses, conditioned on being shown rather than flat.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        isShown ? super.hitTest(point) : nil
+    }
 }
 
+/// A control in the pane header, in one of two shapes: the grid's bare 20pt icon
+/// square, or — given a `label` — the focused card's bordered pill. Hand-drawn
+/// rather than an `NSButton` + SF Symbol so the glyphs match the design's own
+/// strokes, the same way `ShellGlyph` does for the sidebar.
 final class PaneHeaderButton: NSView {
-    enum Glyph { case focus, close }
+    enum Glyph { case focus, exitFocus, close }
+
+    /// The grid header's controls, `width:20px;height:20px`.
+    static let iconSize: CGFloat = 20
+
+    /// The focused card's pill (design line 1082): `padding:5px 9px`,
+    /// `gap:6px`, `border-radius:6px`, a `.5px` border and a 16pt glyph.
+    private static let labelHorizontalInset: CGFloat = 9
+    private static let labelVerticalInset: CGFloat = 5
+    private static let labelGap: CGFloat = 6
+    private static let labelGlyphSize: CGFloat = 16
+    private static let labelCornerRadius: CGFloat = 6
+    private static let labelFont = ShellFont.ui(13.5, .medium)
+    private static let labelForeground = NSColor(
+        srgbRed: 216 / 255,
+        green: 216 / 255,
+        blue: 222 / 255,
+        alpha: 1
+    )
+    private static let labelFill = NSColor(white: 1, alpha: 0.07)
+    private static let labelHoverFill = NSColor(white: 1, alpha: 0.13)
+    private static let labelStroke = NSColor(white: 1, alpha: 0.14)
 
     var onClick: (() -> Void)?
     var hoverTint = NSColor(srgbRed: 223 / 255, green: 226 / 255, blue: 255 / 255, alpha: 1)
     var hoverFill = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.22)
 
     private let glyph: Glyph
+    /// What the button says, and `nil` for the grid's bare icon square. A label
+    /// makes the button the design's bordered pill instead — same click target,
+    /// but it says what it does and what key does it, which is the whole reason
+    /// the focused card does not simply reuse the icon that got you there.
+    let label: String?
     private var isHovered = false { didSet { needsDisplay = true } }
     private var tracking: NSTrackingArea?
 
-    init(glyph: Glyph) {
+    init(glyph: Glyph, label: String? = nil) {
         self.glyph = glyph
+        self.label = label
         super.init(frame: .zero)
         wantsLayer = true
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel(glyph == .focus ? "Focus this terminal" : "Close this terminal")
+        // A labelled button is named by what it *says*: Voice Control resolves
+        // "Click Exit focus · esc" against the visible text, and a control whose
+        // whole job is teaching the way out must not be the one that cannot be
+        // spoken. Only the bare icons need a described name, having none.
+        if let label {
+            setAccessibilityLabel(label)
+        } else {
+            // No `.exitFocus` here: it exists only as the labelled pill, so
+            // there is no bare form of it left to describe.
+            setAccessibilityLabel(glyph == .focus ? "Zoom this terminal" : "Close this terminal")
+        }
+    }
+
+    /// Assistive presses go the same way a click does. `NSView` gives a view with
+    /// `.button` role no press behaviour of its own, so without this the pill is
+    /// visible and named to VoiceOver and does nothing when it is activated.
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return onClick != nil
     }
 
     @available(*, unavailable)
@@ -1661,6 +2411,29 @@ final class PaneHeaderButton: NSView {
     }
 
     override var isFlipped: Bool { true }
+
+    override var intrinsicContentSize: NSSize {
+        guard let label else { return NSSize(width: Self.iconSize, height: Self.iconSize) }
+        let text = (label as NSString).size(withAttributes: [.font: Self.labelFont])
+        return NSSize(
+            width: ceil(
+                Self.labelHorizontalInset * 2 + Self.labelGlyphSize + Self.labelGap + text.width
+            ),
+            height: ceil(Self.labelVerticalInset * 2 + max(Self.labelGlyphSize, text.height))
+        )
+    }
+
+    /// The 16 unit box the glyph is drawn in: the whole button when it is a bare
+    /// icon, the leading square inside the padding when it is a pill.
+    private var glyphBox: NSRect {
+        guard label != nil else { return bounds }
+        return NSRect(
+            x: Self.labelHorizontalInset,
+            y: (bounds.height - Self.labelGlyphSize) / 2,
+            width: Self.labelGlyphSize,
+            height: Self.labelGlyphSize
+        )
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -1686,36 +2459,82 @@ final class PaneHeaderButton: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        if isHovered {
+        if let label {
+            // The pill is bordered and filled at rest, not only on hover: it is
+            // the card's one control, and the hover fill alone would leave it
+            // invisible until the pointer found it.
+            let pill = NSBezierPath(
+                roundedRect: bounds.insetBy(dx: 0.25, dy: 0.25),
+                xRadius: Self.labelCornerRadius,
+                yRadius: Self.labelCornerRadius
+            )
+            (isHovered ? Self.labelHoverFill : Self.labelFill).setFill()
+            pill.fill()
+            Self.labelStroke.setStroke()
+            pill.lineWidth = 0.5
+            pill.stroke()
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: Self.labelFont,
+                .foregroundColor: Self.labelForeground,
+            ]
+            let size = (label as NSString).size(withAttributes: attributes)
+            (label as NSString).draw(
+                at: NSPoint(
+                    x: glyphBox.maxX + Self.labelGap,
+                    y: (bounds.height - size.height) / 2
+                ),
+                withAttributes: attributes
+            )
+        } else if isHovered {
             hoverFill.setFill()
             NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
         }
-        let color = isHovered
-            ? hoverTint
-            : NSColor(srgbRed: 130 / 255, green: 130 / 255, blue: 140 / 255, alpha: 1)
+        // A pill's glyph keeps the label's colour through hover, where the
+        // design moves only the fill; a bare icon is the thing that lights up.
+        let color: NSColor
+        if label != nil {
+            color = Self.labelForeground
+        } else {
+            color = isHovered
+                ? hoverTint
+                : NSColor(srgbRed: 130 / 255, green: 130 / 255, blue: 140 / 255, alpha: 1)
+        }
         color.setStroke()
         let path = NSBezierPath()
         path.lineWidth = 1.4
         path.lineCapStyle = .round
         path.lineJoinStyle = .round
-        // Both glyphs are drawn in the design's own 16x16 box and scaled to fit.
-        let scale = bounds.width / 16
+        // Every glyph is drawn in the design's own 16x16 box and scaled to fit.
+        let box = glyphBox
+        let scale = box.width / 16
         func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
-            NSPoint(x: x * scale, y: y * scale)
+            NSPoint(x: box.minX + x * scale, y: box.minY + y * scale)
         }
-        switch glyph {
-        case .focus:
-            // Four corner brackets — "zoom this pane".
-            let corners: [[(CGFloat, CGFloat)]] = [
-                [(6.2, 2.4), (2.4, 2.4), (2.4, 6.2)],
-                [(9.8, 2.4), (13.6, 2.4), (13.6, 6.2)],
-                [(13.6, 9.8), (13.6, 13.6), (9.8, 13.6)],
-                [(6.2, 13.6), (2.4, 13.6), (2.4, 9.8)],
-            ]
+        func brackets(_ corners: [[(CGFloat, CGFloat)]]) {
             for corner in corners {
                 path.move(to: point(corner[0].0, corner[0].1))
                 for step in corner.dropFirst() { path.line(to: point(step.0, step.1)) }
             }
+        }
+        switch glyph {
+        case .focus:
+            // Four corner brackets pointing outward — "blow this pane up".
+            brackets([
+                [(6.2, 2.4), (2.4, 2.4), (2.4, 6.2)],
+                [(9.8, 2.4), (13.6, 2.4), (13.6, 6.2)],
+                [(13.6, 9.8), (13.6, 13.6), (9.8, 13.6)],
+                [(6.2, 13.6), (2.4, 13.6), (2.4, 9.8)],
+            ])
+        case .exitFocus:
+            // The same construction mirrored, so the brackets point inward —
+            // "put it back". A reader tells the two apart without the label,
+            // which is why the pill is not just the outward icon with words.
+            brackets([
+                [(2.6, 6.4), (2.6, 2.6), (6.4, 2.6)],
+                [(13.4, 6.4), (13.4, 2.6), (9.6, 2.6)],
+                [(9.6, 13.4), (13.4, 13.4), (13.4, 9.6)],
+                [(6.4, 13.4), (2.6, 13.4), (2.6, 9.6)],
+            ])
         case .close:
             path.move(to: point(4.2, 4.2))
             path.line(to: point(11.8, 11.8))

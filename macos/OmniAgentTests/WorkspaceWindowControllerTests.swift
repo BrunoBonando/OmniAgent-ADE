@@ -233,6 +233,203 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.responds(to: #selector(WorkspaceWindowController.closePane(_:))))
     }
 
+    // MARK: - Focus mode
+
+    /// ⌘↩'s responder-chain action: zooms the focused pane, and the same
+    /// command shrinks it back.
+    func testToggleFocusModeEntersAndLeavesZoomOnTheFocusedPane() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        controller.newTerminalPane(nil)
+        let focused = try XCTUnwrap(workspace.focusedPaneID)
+        XCTAssertEqual(workspace.paneIDs.count, 2)
+
+        controller.toggleFocusMode(nil)
+        XCTAssertEqual(workspace.zoomedPaneID, focused)
+
+        controller.toggleFocusMode(nil)
+        XCTAssertNil(workspace.zoomedPaneID)
+    }
+
+    /// Revealing a pane while a card is up — the palette, or clicking the
+    /// notification an agent raised in another pane — has to move the card, not
+    /// just the caret. Focusing behind the blur is how the approval the
+    /// notification asked for gets typed into a terminal nobody can see.
+    func testRevealingAPaneWhileACardIsUpMovesTheCardToIt() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        controller.newTerminalPane(nil)
+        let panes = workspace.paneIDs
+        XCTAssertEqual(panes.count, 2)
+        workspace.focusPane(panes[0])
+        controller.toggleFocusMode(nil)
+        XCTAssertEqual(workspace.zoomedPaneID, panes[0])
+
+        XCTAssertTrue(controller.revealPane(panes[1]))
+
+        XCTAssertEqual(workspace.focusedPaneID, panes[1])
+        XCTAssertEqual(
+            workspace.zoomedPaneID,
+            panes[1],
+            "the card follows, so what the user types is in the terminal they can see"
+        )
+    }
+
+    /// And with focus moved off the card by ⌘1…⌘8 or ⌥arrows, ⌘↩ hands the card
+    /// to the focused pane — so an item reading "Exit Focus" would be describing
+    /// the opposite of what it is about to do.
+    func testTheFocusMenuItemTellsTheTruthWhenFocusHasLeftTheCard() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        controller.newTerminalPane(nil)
+        let panes = workspace.paneIDs
+        workspace.focusPane(panes[0])
+        controller.toggleFocusMode(nil)
+
+        let item = NSMenuItem(
+            title: "",
+            action: #selector(WorkspaceWindowController.toggleFocusMode(_:)),
+            keyEquivalent: "\r"
+        )
+        XCTAssertTrue(controller.validateMenuItem(item))
+        XCTAssertEqual(item.title, "Exit Focus", "the focused pane is the card")
+
+        // A focus *command* carries the card now, so the divergent state is only
+        // reachable through `focusPane(_:)` itself — which is what the palette's
+        // "close pane" arm and the sidebar's rows call, and which deliberately does
+        // not carry (it is what `setZoomed` calls, so it would re-enter).
+        workspace.focusPane(panes[1])
+        XCTAssertEqual(workspace.zoomedPaneID, panes[0], "the card stayed where it was")
+        XCTAssertTrue(controller.validateMenuItem(item))
+        XCTAssertEqual(
+            item.title,
+            "Focus This Terminal",
+            "focus is off the card, so ⌘↩ moves the card rather than exiting"
+        )
+
+        // And the commands themselves keep the two together.
+        XCTAssertTrue(workspace.focusPane(at: 1))
+        XCTAssertTrue(controller.validateMenuItem(item))
+        XCTAssertEqual(item.title, "Exit Focus", "focus and the card are one again")
+    }
+
+    /// ⌘↩ is about a terminal. Off the Terminals destination the pane workspace
+    /// is hidden entirely, so the item greys out and the action refuses.
+    func testFocusModeIsRefusedOffTheTerminalsDestination() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        controller.newTerminalPane(nil)
+        let item = NSMenuItem(
+            title: "",
+            action: #selector(WorkspaceWindowController.toggleFocusMode(_:)),
+            keyEquivalent: "\r"
+        )
+        XCTAssertTrue(controller.validateMenuItem(item), "enabled on Terminals")
+
+        controller.applyDestination(.dashboard)
+
+        XCTAssertFalse(controller.validateMenuItem(item), "and greyed out off it")
+        controller.toggleFocusMode(nil)
+        XCTAssertNil(workspace.zoomedPaneID, "the action refuses too, not only the item")
+
+        controller.applyDestination(.terminals)
+        XCTAssertTrue(controller.validateMenuItem(item))
+    }
+
+    func testToggleFocusModeWithNoFocusedPaneDoesNothing() {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        XCTAssertNil(controller.workspaceView.focusedPaneID, "nothing restored yet, nothing focused")
+
+        controller.toggleFocusMode(nil)
+
+        XCTAssertNil(controller.workspaceView.zoomedPaneID)
+    }
+
+    /// The menu item that carries ⌘↩: greyed out below two panes, and its
+    /// title tells the truth about what pressing it will do.
+    func testFocusModeMenuItemIsDisabledBelowTwoPanesAndItsTitleFollowsZoomState() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        let menuItem = NSMenuItem(
+            title: "Focus This Terminal",
+            action: #selector(WorkspaceWindowController.toggleFocusMode(_:)),
+            keyEquivalent: ""
+        )
+
+        XCTAssertFalse(controller.validateMenuItem(menuItem), "one pane on screen — nothing to zoom over")
+
+        controller.newTerminalPane(nil)
+        XCTAssertTrue(controller.validateMenuItem(menuItem))
+        XCTAssertEqual(menuItem.title, "Focus This Terminal")
+
+        let focused = try XCTUnwrap(workspace.focusedPaneID)
+        workspace.setZoomed(focused)
+        XCTAssertTrue(controller.validateMenuItem(menuItem))
+        XCTAssertEqual(menuItem.title, "Exit Focus", "the menu tells the truth about what ⌘↩ will do next")
+    }
+
+    /// The window's `onEscape` closure — not a synthesised `NSEvent`, per the
+    /// brief: exercise the handler `WorkspaceWindowController` wires up
+    /// directly.
+    func testEscapeClosureUnzoomsWhileZoomedAndOtherwiseLeavesEscapeToTheTerminal() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        controller.newTerminalPane(nil)
+        let focused = try XCTUnwrap(workspace.focusedPaneID)
+        let window = try XCTUnwrap(controller.window as? WorkspaceWindow)
+        let onEscape = try XCTUnwrap(window.onEscape)
+
+        XCTAssertFalse(onEscape(), "nothing zoomed — the terminal must keep getting escape")
+
+        workspace.setZoomed(focused)
+        XCTAssertTrue(onEscape(), "escape is consumed")
+        XCTAssertNil(workspace.zoomedPaneID, "and focus mode ends")
+    }
+
+    /// The gate that decides whether `sendEvent` even offers a key to
+    /// `onEscape` — a bare escape, none of command/option/control/shift
+    /// held, and not currently typed into a field editor. A realistic
+    /// key-down `NSEvent` paired with a real field-editor first responder
+    /// isn't worth synthesising, so the predicate is exercised directly.
+    func testIsPlainEscapeExcludesModifiedKeysOtherKeysAndAnActiveFieldEditor() {
+        XCTAssertTrue(
+            WorkspaceWindow.isPlainEscape(keyCode: WorkspaceWindow.escapeKeyCode, modifierFlags: [], isEditingText: false)
+        )
+        XCTAssertFalse(
+            WorkspaceWindow.isPlainEscape(keyCode: 36, modifierFlags: [], isEditingText: false),
+            "any other keycode is not escape"
+        )
+        let blockingModifiers: [NSEvent.ModifierFlags] = [.command, .option, .control, .shift]
+        for modifier in blockingModifiers {
+            XCTAssertFalse(
+                WorkspaceWindow.isPlainEscape(
+                    keyCode: WorkspaceWindow.escapeKeyCode,
+                    modifierFlags: modifier,
+                    isEditingText: false
+                ),
+                "\(modifier) held must not count as a plain escape"
+            )
+        }
+        XCTAssertFalse(
+            WorkspaceWindow.isPlainEscape(keyCode: WorkspaceWindow.escapeKeyCode, modifierFlags: [], isEditingText: true),
+            "an active field editor — a sidebar rename, the files-tree filter field — keeps its own escape"
+        )
+    }
+
     // MARK: - Restoration
 
     func testAWindowOpensEmptyAndTheRestoredLayoutFillsIt() throws {
@@ -1001,6 +1198,9 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             backing: .buffered,
             defer: false
         )
+        // Not released on close: see `PaneWorkspaceViewTests.makeAttachedWorkspace`
+        // for what an over-released test window does to a later CA commit.
+        window.isReleasedWhenClosed = false
         window.contentView = surface
         window.makeKeyAndOrderFront(nil)
         return (surface, window)
