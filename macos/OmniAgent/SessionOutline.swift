@@ -190,6 +190,39 @@ enum SessionOutline {
         return defaultPaneName(pane.engine, pane.autoNumber)
     }
 
+    /// The status decoration an engine puts in front of the title it reports.
+    /// Claude cycles `· ✢ ✳ ✶ ✻ ✽` as its spinner and prefixes `◐` while a
+    /// tool is running, so the reported title reads `✳ Fixing the parser` one
+    /// frame and `◐ Fixing the parser` the next.
+    ///
+    /// That is an animation, and a pane header already has one thing that says
+    /// "this agent is busy" — the OmniAgent mark beside the name, in the
+    /// status colour, the same for every engine. A second one, made of text,
+    /// jittering the name it sits in front of, is noise.
+    ///
+    /// Deliberately an explicit set rather than "strip leading punctuation":
+    /// a shell reports `~/src` as its title, and eating that `~` would be a
+    /// worse bug than the one this fixes.
+    private static let titleDecoration: CharacterSet = {
+        var set = CharacterSet.whitespacesAndNewlines
+        set.insert(charactersIn: "*\u{00B7}\u{2217}")
+        set.insert(charactersIn: "\u{2722}"..."\u{2727}")
+        set.insert(charactersIn: "\u{2731}"..."\u{2736}")
+        set.insert(charactersIn: "\u{273A}"..."\u{273D}")
+        // Circles and arcs — ◐◑◒◓ and the quadrant/clock spinners beside them.
+        set.insert(charactersIn: "\u{25CB}"..."\u{25FF}")
+        // Braille spinners, the other common CLI idiom.
+        set.insert(charactersIn: "\u{2800}"..."\u{28FF}")
+        return set
+    }()
+
+    /// The reported title with that decoration taken off the front, so a pane
+    /// wears the task rather than the spinner frame it arrived with.
+    static func sanitizedPaneTitle(_ title: String) -> String {
+        let stripped = title.drop { $0.unicodeScalars.allSatisfy(titleDecoration.contains) }
+        return String(stripped).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// What a project row says: the label `listProjects` returned for this
     /// project id, else the id itself (a project the directory hasn't
     /// loaded yet, or one the brain has never heard of), and the

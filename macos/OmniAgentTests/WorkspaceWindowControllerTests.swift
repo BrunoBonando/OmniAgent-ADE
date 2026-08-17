@@ -347,6 +347,39 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(writes.last?.1).contains("Build"))
     }
 
+    /// The title an engine reports arrives with its spinner attached — Claude
+    /// sends `✳ …` one frame and `◐ …` the next — and it is stripped once, on
+    /// the way in, so the header, the sidebar row, the window title and the
+    /// session-ended notification all read the task rather than the animation.
+    func testAReportedTitleIsStrippedOfItsSpinnerOnTheWayIn() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .claude, cwd: "/a", id: "sess-a", group: "g1"),
+                ])
+            )
+        )
+        let workspace = controller.workspaceView
+        let surface = try XCTUnwrap(workspace.surface(for: "sess-a"))
+
+        surface.onTitleChange?("✳ Fixing the parser")
+        XCTAssertEqual(workspace.descriptor(for: "sess-a")?.title, "Fixing the parser")
+        XCTAssertEqual(
+            workspace.descriptor(for: "sess-a").map(SessionOutline.paneLabel),
+            "Fixing the parser"
+        )
+
+        surface.onTitleChange?("◐ Fixing the parser")
+        XCTAssertEqual(
+            workspace.descriptor(for: "sess-a")?.title,
+            "Fixing the parser",
+            "the next spinner frame is the same name, so nothing downstream even sees a change"
+        )
+    }
+
     func testAFailedLayoutReadNeverWritesAnEmptyLayoutOverTheSavedOne() throws {
         let controller = makeEmptyController()
         defer { controller.close() }

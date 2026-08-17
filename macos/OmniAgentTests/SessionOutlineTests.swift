@@ -116,6 +116,36 @@ final class SessionOutlineTests: XCTestCase {
         XCTAssertEqual(SessionOutline.paneLabel(pane("a", project: "p", group: "g")), "Shell 1")
     }
 
+    /// A terminal wears the task, not the spinner in front of it. Claude
+    /// cycles `· ✢ ✳ ✶ ✻ ✽` and prefixes `◐` while a tool runs, all of it in
+    /// the title it reports, which made every pane header read `✳ …` and
+    /// flicker through the frames while the agent worked.
+    func testAReportedTitleLosesTheEnginesSpinnerButKeepsTheTask() {
+        for frame in ["·", "✢", "✳", "✶", "✻", "✽", "◐", "◓", "⠋", "*"] {
+            XCTAssertEqual(
+                SessionOutline.sanitizedPaneTitle("\(frame) Fixing the parser"),
+                "Fixing the parser",
+                "\(frame) is decoration"
+            )
+        }
+        XCTAssertEqual(
+            SessionOutline.sanitizedPaneTitle("✳ ◐ Fixing the parser"),
+            "Fixing the parser",
+            "however many of them arrive together"
+        )
+        XCTAssertEqual(SessionOutline.sanitizedPaneTitle("✳"), "", "nothing but decoration")
+        XCTAssertEqual(
+            SessionOutline.sanitizedPaneTitle("~/src"),
+            "~/src",
+            "a shell's own title is punctuation too and keeps every character"
+        )
+        XCTAssertEqual(
+            SessionOutline.sanitizedPaneTitle("Fixing ✳ the parser"),
+            "Fixing ✳ the parser",
+            "only the front is decoration"
+        )
+    }
+
     func testAPaneWithNoProjectIsNamedRatherThanShownAsABlankRow() {
         XCTAssertEqual(SessionOutline.projectLabel(""), "No project")
         XCTAssertEqual(SessionOutline.projectLabel("alpha"), "alpha")

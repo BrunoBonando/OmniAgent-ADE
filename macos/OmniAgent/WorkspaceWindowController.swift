@@ -1177,6 +1177,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let surface = workspace.surface(for: sessionID)
         surface?.onTitleChange = { [weak self] title in
             guard let self else { return }
+            // Stripped here rather than at each place a title is shown: the
+            // pane header, the sidebar row, the window title and the
+            // session-ended notification all read this one stored value, and
+            // nothing wants the spinner frame the engine sent with it.
+            let title = SessionOutline.sanitizedPaneTitle(title)
             workspace.updateDescriptor(for: sessionID) { $0.title = title }
             if workspace.focusedPaneID == sessionID { refreshTitle() }
         }
