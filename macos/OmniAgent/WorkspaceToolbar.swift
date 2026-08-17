@@ -12,6 +12,7 @@ extension WorkspaceWindowController: NSToolbarDelegate, NSToolbarItemValidation 
     enum ToolbarItem {
         static let sidebar = NSToolbarItem.Identifier("digital.bruno.omniagent.toolbar.sidebar")
         static let newPane = NSToolbarItem.Identifier("digital.bruno.omniagent.toolbar.new-pane")
+        static let newBrowser = NSToolbarItem.Identifier("digital.bruno.omniagent.toolbar.new-browser")
         static let closePane = NSToolbarItem.Identifier("digital.bruno.omniagent.toolbar.close-pane")
         static let palette = NSToolbarItem.Identifier("digital.bruno.omniagent.toolbar.palette")
     }
@@ -31,6 +32,7 @@ extension WorkspaceWindowController: NSToolbarDelegate, NSToolbarItemValidation 
             ToolbarItem.sidebar,
             .sidebarTrackingSeparator,
             ToolbarItem.newPane,
+            ToolbarItem.newBrowser,
             ToolbarItem.closePane,
             .flexibleSpace,
             ToolbarItem.palette,
@@ -51,6 +53,8 @@ extension WorkspaceWindowController: NSToolbarDelegate, NSToolbarItemValidation 
             return item(identifier, "Sidebar", "sidebar.leading", #selector(toggleSidebar(_:)))
         case ToolbarItem.newPane:
             return item(identifier, "New Pane", "plus.rectangle", #selector(newTerminalPane(_:)))
+        case ToolbarItem.newBrowser:
+            return item(identifier, "New Browser", "globe", #selector(newBrowserPane(_:)))
         case ToolbarItem.closePane:
             return item(identifier, "Close Pane", "xmark.rectangle", #selector(closePane(_:)))
         case ToolbarItem.palette:

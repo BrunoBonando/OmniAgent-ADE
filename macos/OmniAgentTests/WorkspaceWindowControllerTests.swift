@@ -156,6 +156,38 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(killed, ["term-1"])
     }
 
+    /// ⇧⌘T: a browser pane joins the focused pane's session with no PTY
+    /// behind it — only the 8-pane grid geometry can refuse one.
+    func testNewBrowserJoinsTheFocusedSessionWithoutADaemonSessionAndStopsAtTheGrid() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var ensured: [String] = []
+        controller.sessionEnsurer = { ensured.append($0) }
+        let workspace = controller.workspaceView
+        let group = try XCTUnwrap(workspace.descriptor(for: "native-terminal")?.group)
+
+        XCTAssertTrue(controller.newBrowser(in: nil))
+
+        let browserID = try XCTUnwrap(workspace.focusedPaneID)
+        let descriptor = try XCTUnwrap(workspace.descriptor(for: browserID))
+        XCTAssertEqual(descriptor.kind, .browser)
+        XCTAssertEqual(descriptor.group, group, "the browser joins the focused pane's session")
+        XCTAssertTrue(ensured.isEmpty, "a browser pane never reaches ensureSession")
+
+        while workspace.paneIDs.count < PaneGrid.maxPanes {
+            XCTAssertTrue(controller.newBrowser(in: nil))
+        }
+        XCTAssertFalse(controller.newBrowser(in: nil), "the grid geometry is the only bound")
+        let probe = NSMenuItem(
+            title: "New Browser Pane",
+            action: #selector(WorkspaceWindowController.newBrowserPane(_:)),
+            keyEquivalent: ""
+        )
+        XCTAssertFalse(controller.validateMenuItem(probe), "and the menu item says so")
+        XCTAssertTrue(ensured.isEmpty)
+    }
+
     func testClosePaneCommandRemovesTheFocusedPaneAndLeavesTheRestAlive() throws {
         let controller = makeController()
         defer { controller.close() }
@@ -242,6 +274,16 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             #selector(WorkspaceWindowController.newTerminalPane(_:))
         )
         XCTAssertEqual(file.item(withTitle: "New Terminal Pane")?.keyEquivalent, "t")
+        XCTAssertEqual(
+            file.item(withTitle: "New Browser Pane")?.action,
+            #selector(WorkspaceWindowController.newBrowserPane(_:))
+        )
+        XCTAssertEqual(file.item(withTitle: "New Browser Pane")?.keyEquivalent, "t")
+        XCTAssertEqual(
+            file.item(withTitle: "New Browser Pane")?.keyEquivalentModifierMask,
+            [.command, .shift],
+            "⇧⌘T, beside New Terminal Pane's ⌘T"
+        )
         XCTAssertEqual(
             file.item(withTitle: "Close Pane")?.action,
             #selector(WorkspaceWindowController.closePane(_:))
@@ -939,6 +981,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 WorkspaceWindowController.ToolbarItem.sidebar,
                 .sidebarTrackingSeparator,
                 WorkspaceWindowController.ToolbarItem.newPane,
+                WorkspaceWindowController.ToolbarItem.newBrowser,
                 WorkspaceWindowController.ToolbarItem.closePane,
                 .flexibleSpace,
                 WorkspaceWindowController.ToolbarItem.palette,

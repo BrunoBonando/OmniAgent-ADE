@@ -214,6 +214,61 @@ final class SessionOutlineTests: XCTestCase {
         )
     }
 
+    // MARK: - Browser panes
+
+    /// A browser pane's ladder mirrors the terminal's, with the URL where the
+    /// cwd-flavoured fallbacks would be: user label → page title → last URL →
+    /// a numbered `Browser N` placeholder.
+    func testABrowserPaneIsNamedByItsOwnLadder() {
+        var browser = pane("w", project: "alpha", group: "g1")
+        browser.kind = .browser
+        XCTAssertEqual(SessionOutline.defaultPaneName(browser), "Browser 1")
+        XCTAssertEqual(SessionOutline.paneLabel(browser), "Browser 1", "nothing loaded yet")
+
+        browser.browserURL = "https://example.com"
+        XCTAssertEqual(SessionOutline.paneLabel(browser), "https://example.com", "the URL beats the placeholder")
+
+        browser.title = "Example Domain"
+        XCTAssertEqual(SessionOutline.paneLabel(browser), "Example Domain", "the page title beats the URL")
+
+        browser.label = "Docs"
+        XCTAssertEqual(SessionOutline.paneLabel(browser), "Docs", "and the user's own name beats everything")
+
+        var terminal = pane("t", project: "alpha", group: "g1")
+        terminal.autoNumber = 2
+        XCTAssertEqual(SessionOutline.defaultPaneName(terminal), "Shell 2", "terminals keep the engine ladder")
+    }
+
+    func testBrowserNumbersAreIndependentOfTerminalsInTheSameSession() {
+        var shellPane = pane("a", project: "alpha", group: "g1")
+        shellPane.autoNumber = 1
+        var browser = pane("w", project: "alpha", group: "g1")
+        browser.kind = .browser
+        browser.autoNumber = 1
+
+        XCTAssertEqual(
+            SessionOutline.nextPaneNumber([shellPane, browser], group: "g1", engine: .shell),
+            2,
+            "the shell ladder counts only terminals"
+        )
+        XCTAssertEqual(
+            SessionOutline.nextPaneNumber([browser], group: "g1", engine: .shell),
+            1,
+            "a browser does not push shells along"
+        )
+        XCTAssertEqual(
+            SessionOutline.nextPaneNumber([shellPane, browser], group: "g1", engine: .shell, kind: .browser),
+            2,
+            "browsers number their own, whatever engine the descriptor happens to carry"
+        )
+    }
+
+    func testAGeneratedBrowserNameIsRecognisedSoItCanBeDroppedOnRestore() {
+        XCTAssertTrue(SessionOutline.isGeneratedPaneName("Browser 2"))
+        XCTAssertFalse(SessionOutline.isGeneratedPaneName("Browser"))
+        XCTAssertFalse(SessionOutline.isGeneratedPaneName("Browser tab 2"))
+    }
+
     private func pane(
         _ id: String,
         project: String,

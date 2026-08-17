@@ -7,6 +7,7 @@ enum PaletteAction: Equatable {
     case focusPane(sessionID: String)
     case closePane(sessionID: String)
     case newPane
+    case newBrowserPane
     case newSession
     case interruptFocusedPane
     case reattachFocusedPane
@@ -80,7 +81,10 @@ struct CommandPaletteModel: Equatable {
                         PaletteCommand(
                             id: "focus:\(paneID)",
                             title: "Switch to \(SessionOutline.projectLabel(project.project, labels: projectLabels)) — \(session.label) — \(SessionOutline.paneLabel(pane))",
-                            detail: pane.engine.rawValue,
+                            // A browser is a pane kind, not an engine — the
+                            // `.shell` its descriptor carries is a placeholder
+                            // that must not be shown as what the pane runs.
+                            detail: pane.kind == .browser ? "browser" : pane.engine.rawValue,
                             action: .focusPane(sessionID: paneID)
                         )
                     )
@@ -89,6 +93,9 @@ struct CommandPaletteModel: Equatable {
         }
         commands.append(
             PaletteCommand(id: "new-pane", title: "New terminal pane", detail: "⌘T", action: .newPane)
+        )
+        commands.append(
+            PaletteCommand(id: "new-browser", title: "New browser pane", detail: "⇧⌘T", action: .newBrowserPane)
         )
         commands.append(
             PaletteCommand(

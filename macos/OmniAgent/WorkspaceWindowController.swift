@@ -217,7 +217,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             daemonStatus: daemonPersistence
         )
         workspace = PaneWorkspaceView { descriptor in
-            TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
+            switch descriptor.kind {
+            case .terminal:
+                return TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
+            case .browser:
+                return BrowserPaneView(initialURL: descriptor.browserURL)
+            }
         }
 
         let window = WorkspaceWindow(
@@ -257,6 +262,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.refreshInspectorIfVisible(for: paneID)
         }
         workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
+        workspace.onRequestNewBrowserPane = { [weak self] in self?.newBrowserPane(nil) }
         workspace.onRequestClosePane = { [weak self] paneID in
             guard let self else { return }
             // Route through focus so the header's close button ends *that*
@@ -290,6 +296,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 .first(where: \.isCurrent)
             guard let current else { return }
             self.newPane(in: current)
+        }
+        shellSidebar.onNewBrowser = { [weak self] in
+            guard let self else { return }
+            // The same current-session lookup `onNewTerminal` uses: the row
+            // lives under the session it adds to.
+            let panes = self.workspace.allPaneIDs.compactMap { self.workspace.descriptor(for: $0) }
+            let current = SessionOutline.group(panes, focusedPaneID: self.workspace.focusedPaneID)
+                .flatMap(\.sessions)
+                .first(where: \.isCurrent)
+            guard let current else { return }
+            self.newBrowser(in: current)
         }
         shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
         // Asking the login shell for its PATH spawns a shell; do it now, off
@@ -645,6 +662,42 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         )
     }
 
+    /// ⇧⌘T — a browser pane in the focused pane's session. No PTY, no engine,
+    /// no cwd; only the grid geometry can refuse it.
+    @objc func newBrowserPane(_ sender: Any?) {
+        newBrowser(in: nil)
+    }
+
+    /// `newPane(in:)` minus everything PTY-shaped: no cap against
+    /// `maxTerminals` (a browser costs WebKit memory, not a daemon slot), no
+    /// cwd derivation, and `startSession: false` so the id never reaches
+    /// `ensureSession`.
+    @discardableResult
+    func newBrowser(in session: SessionGroupNode?) -> Bool {
+        let sibling = session.map { seed in
+            seed.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
+        } ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
+        let template = WorkspaceRestoration.bootstrapPane()
+        let group = session?.id ?? sibling?.group ?? template.group
+        guard workspace.paneCount(inGroup: group) < PaneGrid.maxPanes else { return false }
+        return addPane(
+            RestoredPane(
+                sessionID: template.sessionID,
+                reattaches: false,
+                project: sibling?.project ?? session?.project ?? "",
+                engine: .shell,
+                cwd: "",
+                label: nil,
+                themeId: nil,
+                group: group,
+                groupLabel: sibling?.groupLabel ?? session?.name,
+                kind: .browser,
+                browserURL: ""
+            ),
+            startSession: false
+        )
+    }
+
     /// ⌘N, and the "+" beside SESSIONS in the sidebar — a **second,
     /// independent session**: a new pane in a brand-new session group, named by
     /// the same lowest-free-number rule the web build uses
@@ -773,6 +826,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // is what greys the item out.
             return workspace.paneIDs.count < PaneGrid.maxPanes
                 && workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals
+        case #selector(newBrowserPane(_:)):
+            // A browser pane costs no PTY, so only the on-screen session's
+            // grid geometry can refuse one.
+            return workspace.paneIDs.count < PaneGrid.maxPanes
         case #selector(newSession(_:)):
             // A new session starts empty — a full one cannot refuse it.
             return workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals
@@ -955,6 +1012,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             closePane(nil)
         case .newPane:
             newTerminalPane(nil)
+        case .newBrowserPane:
+            newBrowserPane(nil)
         case .newSession:
             newSession(nil)
         // Interrupt and reattach are the focused terminal's own responder
@@ -1284,7 +1343,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         descriptor.autoNumber = SessionOutline.nextPaneNumber(
             workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
             group: descriptor.group,
-            engine: descriptor.engine
+            engine: descriptor.engine,
+            kind: descriptor.kind
         )
         // A label this app generated is not a name the user chose, and leaving
         // it stored would outrank the summary the agent reports for the rest
@@ -1327,6 +1387,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 window?.representedURL = directory.map(URL.init(fileURLWithPath:))
             }
             if startSession { ensureSession(sessionID) }
+        } else if let browser = workspace.browserPane(for: sessionID) {
+            // The browser's own title path, mirroring the OSC-title wiring
+            // above: the page title is what the pane wears.
+            browser.onTitleChange = { [weak self] title in
+                guard let self else { return }
+                workspace.updateDescriptor(for: sessionID) { $0.title = title }
+                if workspace.focusedPaneID == sessionID { refreshTitle() }
+            }
+            // Every committed navigation keeps the descriptor's URL current —
+            // `updateDescriptor` fires `onPanesChanged`, which is what the
+            // last-URL persistence hangs off.
+            browser.onURLChange = { [weak self] url in
+                self?.workspace.updateDescriptor(for: sessionID) { $0.browserURL = url }
+            }
         }
         return true
     }

@@ -62,6 +62,56 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(workspace.holePlaceholders.isEmpty, "a full rung has no holes")
     }
 
+    /// The hole's second, fainter line is the one place a click means a
+    /// browser; everywhere else in the cell — and the assistive press — stays
+    /// the primary "new terminal" affordance.
+    func testTheHoleTileAlsoOffersABrowserOnItsOwnLine() {
+        let workspace = makeWorkspace(panes: 3)
+        var terminals = 0
+        var browsers = 0
+        workspace.onRequestNewPane = { terminals += 1 }
+        workspace.onRequestNewBrowserPane = { browsers += 1 }
+        let hole = workspace.holePlaceholders[0]
+
+        hole.dispatch(at: NSPoint(x: hole.browserTextRect.midX, y: hole.browserTextRect.midY))
+        XCTAssertEqual(browsers, 1, "a click on the browser line opens a browser")
+        XCTAssertEqual(terminals, 0)
+
+        hole.dispatch(at: NSPoint(x: hole.bounds.minX + 2, y: hole.bounds.minY + 2))
+        XCTAssertEqual(terminals, 1, "anywhere else is the primary affordance")
+
+        XCTAssertTrue(hole.accessibilityPerformPress())
+        XCTAssertEqual(terminals, 2, "the assistive press stays the single Add terminal action")
+        XCTAssertEqual(browsers, 1)
+        XCTAssertEqual(hole.accessibilityLabel(), "Add terminal")
+    }
+
+    /// The seam pays off: a browser descriptor builds a `BrowserPaneView`
+    /// behind the same container chrome, reachable through its own accessor
+    /// and named by its own noun.
+    func testABrowserPaneGetsKindAwareChromeAndItsOwnAccessor() {
+        let workspace = makeWorkspace(panes: 2)
+        var descriptor = makeDescriptor("web-1")
+        descriptor.kind = .browser
+        XCTAssertTrue(workspace.addPane(descriptor))
+
+        XCTAssertNotNil(workspace.browserPane(for: "web-1"))
+        XCTAssertNil(workspace.terminalSurface(for: "web-1"), "a browser is not a terminal")
+        // By fill-order position, since the 2→3 reshape decides where the
+        // new pane lands.
+        let browserIndex = workspace.paneIDs.firstIndex(of: "web-1")! + 1
+        XCTAssertEqual(
+            workspace.container(for: "web-1")!.accessibilityLabel(),
+            "Browser pane \(browserIndex) of 3"
+        )
+        let terminalIndex = workspace.paneIDs.firstIndex(of: "pane-1")! + 1
+        XCTAssertEqual(
+            workspace.container(for: "pane-1")!.accessibilityLabel(),
+            "Terminal pane \(terminalIndex) of 3",
+            "terminals keep their own noun"
+        )
+    }
+
     // MARK: - Identity
 
     func testTerminalInstancesSurviveEveryLayoutMutation() {
@@ -483,7 +533,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(workspace.addPane(descriptor))
 
         XCTAssertEqual(workspace.accessibilityRole(), .group)
-        XCTAssertEqual(workspace.accessibilityLabel(), "Terminal panes")
+        XCTAssertEqual(workspace.accessibilityLabel(), "Workspace panes")
         XCTAssertEqual(workspace.accessibilityChildren()?.count, 5)
 
         // Fill order is 1, 3, 2, 4, 5 — pane-2 sits in the third cell.
@@ -1428,7 +1478,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let card = try XCTUnwrap(workspace.container(for: "pane-2"))
         XCTAssertEqual(card.header.currentHeight, 30, "the grid bar is the design's 30px")
         XCTAssertNil(card.header.subtitle, "the grid header has no subtitle to show")
-        XCTAssertEqual(controls(in: card.header), ["Zoom this terminal", "Close this terminal"])
+        XCTAssertEqual(controls(in: card.header), ["Zoom this pane", "Close this pane"])
 
         XCTAssertTrue(workspace.toggleZoom("pane-2"))
         card.layoutSubtreeIfNeeded()
@@ -1460,7 +1510,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(card.header.currentHeight, 30)
         XCTAssertEqual(card.header.frame.height, 30)
         XCTAssertNil(card.header.subtitle)
-        XCTAssertEqual(controls(in: card.header), ["Zoom this terminal", "Close this terminal"])
+        XCTAssertEqual(controls(in: card.header), ["Zoom this pane", "Close this pane"])
     }
 
     /// Every number the focused card's header is built from, pinned to the
@@ -1512,8 +1562,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
         // `500 14.5px`, two 20pt icon squares, no subtitle.
         header.isZoomed = false
         layOut(header, width: 620)
-        let zoom = try XCTUnwrap(button(labelled: "Zoom this terminal", in: header))
-        let close = try XCTUnwrap(button(labelled: "Close this terminal", in: header))
+        let zoom = try XCTUnwrap(button(labelled: "Zoom this pane", in: header))
+        let close = try XCTUnwrap(button(labelled: "Close this pane", in: header))
         XCTAssertEqual(mark.frame.minX, 10)
         XCTAssertEqual(title.frame.minX - mark.frame.maxX, 8, "grid `gap:8px`")
         XCTAssertEqual(close.frame.maxX, 620 - 6, "grid `padding-right:6px`")
@@ -1532,7 +1582,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         header.isZoomAvailable = true
         header.isZoomed = true
         let pill = try XCTUnwrap(button(labelled: Self.exitFocusText, in: header))
-        let zoom = try XCTUnwrap(button(labelled: "Zoom this terminal", in: header))
+        let zoom = try XCTUnwrap(button(labelled: "Zoom this pane", in: header))
 
         XCTAssertEqual(pill.label, "Exit focus · esc", "the words the button draws")
         XCTAssertEqual(pill.accessibilityLabel(), pill.label, "and the name it answers to")
@@ -1642,8 +1692,15 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let connection = SessionConnection(
             socketURL: URL(fileURLWithPath: "/tmp/omniagent-pane-workspace-test.sock")
         )
+        // The production factory's shape, so a browser descriptor builds a
+        // real `BrowserPaneView` here too.
         let workspace = PaneWorkspaceView { descriptor in
-            TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
+            switch descriptor.kind {
+            case .terminal:
+                return TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
+            case .browser:
+                return BrowserPaneView(initialURL: descriptor.browserURL)
+            }
         }
         workspace.frame = CGRect(x: 0, y: 0, width: 1200, height: 800)
         for index in 1...panes {
