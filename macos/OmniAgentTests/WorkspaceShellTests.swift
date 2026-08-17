@@ -81,6 +81,71 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(sidebar.splitter.accessibilityRole(), .splitter)
     }
 
+    /// Driven through real mouse events rather than by calling `onDrag`
+    /// directly — the whole bug lived in `mouseDragged`, so every test that
+    /// called the closure agreed with it. The seam measured the drag in its
+    /// own bounds (an origin that moves as the drag resizes the halves) and
+    /// applied it with a flipped view's sign, which this view does not
+    /// have. It therefore travelled away from the pointer, further each
+    /// event, and pinned itself to a limit on the first twitch.
+    func testDraggingTheSeamDownGrowsTheMenuAndShrinksTheFilesList() {
+        let sidebar = makeSidebar()
+        let menuBefore = sidebar.menuHeight.constant
+        let filesBefore = sidebar.filesTree.frame.height
+        XCTAssertGreaterThan(filesBefore, 0, "the files half must actually be laid out")
+
+        drag(sidebar.splitter, fromWindowY: 400, toWindowY: 340) // 60pt down
+        sidebar.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(sidebar.menuHeight.constant, menuBefore + 60, accuracy: 0.5)
+        XCTAssertEqual(
+            sidebar.filesTree.frame.height,
+            filesBefore - 60,
+            accuracy: 1,
+            "the drag has to actually resize the files list, not just a constraint constant"
+        )
+    }
+
+    func testDraggingTheSeamUpShrinksTheMenuAndGrowsTheFilesList() {
+        let sidebar = makeSidebar()
+        // Move it down first so there is room to travel in both directions.
+        drag(sidebar.splitter, fromWindowY: 400, toWindowY: 300)
+        sidebar.layoutSubtreeIfNeeded()
+        let menuBefore = sidebar.menuHeight.constant
+        let filesBefore = sidebar.filesTree.frame.height
+
+        drag(sidebar.splitter, fromWindowY: 300, toWindowY: 340) // 40pt up
+        sidebar.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(sidebar.menuHeight.constant, menuBefore - 40, accuracy: 0.5)
+        XCTAssertEqual(sidebar.filesTree.frame.height, filesBefore + 40, accuracy: 1)
+    }
+
+    private func drag(
+        _ splitter: ShellSplitterView,
+        fromWindowY start: CGFloat,
+        toWindowY end: CGFloat
+    ) {
+        splitter.mouseDown(with: mouseEvent(.leftMouseDown, windowY: start))
+        splitter.mouseDragged(with: mouseEvent(.leftMouseDragged, windowY: end))
+        splitter.mouseUp(with: mouseEvent(.leftMouseUp, windowY: end))
+    }
+
+    private func mouseEvent(_ type: NSEvent.EventType, windowY: CGFloat) -> NSEvent {
+        // swiftlint:disable:next force_unwrapping
+        NSEvent.mouseEvent(
+            with: type,
+            location: NSPoint(x: 10, y: windowY),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        )!
+    }
+
     private func pane(
         _ id: String,
         group: String,

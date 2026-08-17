@@ -612,14 +612,25 @@ final class ShellSplitterView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        lastY = convert(event.locationInWindow, from: nil).y
+        lastY = event.locationInWindow.y
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let lastY else { return }
-        let current = convert(event.locationInWindow, from: nil).y
-        // Reported, not applied: this view has no idea what the limits are.
-        onDrag?(current - lastY)
+        guard let previous = lastY else { return }
+        let current = event.locationInWindow.y
+        lastY = current
+        // Window coordinates, not this view's own, and deliberately so: the
+        // seam moves as the drag resizes the halves, so a delta measured in
+        // its own bounds is measured against an origin that is itself
+        // moving. That, plus a sign taken from a flipped view this one is
+        // not, made every drag push the seam *away* from the pointer — and
+        // since it then moved further from the pointer each event, the
+        // error compounded and it shot to a limit on the first twitch.
+        //
+        // Window coordinates run bottom-up, so a downward drag is a smaller
+        // y. Reported downward-positive; the sidebar owns the clamping,
+        // this view has no idea what the limits are.
+        onDrag?(previous - current)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -2434,8 +2445,9 @@ final class WorkspaceSidebarView: NSView {
 
         splitter.onDrag = { [weak self] delta in
             guard let self else { return }
-            // The splitter's own coordinates are flipped-view coordinates, so
-            // dragging down is a *larger* menu.
+            // Downward-positive (see `ShellSplitterView.mouseDragged`), and
+            // the menu is the half above the seam, so dragging down is a
+            // taller menu and a shorter files list.
             hasUserAdjustedDivider = true
             menuHeight.constant += delta
             clampMenuHeight()
