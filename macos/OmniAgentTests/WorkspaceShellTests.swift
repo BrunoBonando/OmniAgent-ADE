@@ -409,6 +409,32 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(sidebar.sessionsTree.renderedSessionIDs, ["s1"])
     }
 
+    /// The cap is eight terminals per session, and `addPane` refuses a ninth —
+    /// so the "+ New terminal" row must not still be offering one.
+    func testTheNewTerminalRowGoesAwayAtTheCap() {
+        let sidebar = makeSidebar()
+        sidebar.reloadSessions(
+            panes: (1...PaneGrid.maxPanes).map { pane("t\($0)", group: "s1") },
+            focusedPaneID: "t1",
+            statuses: [:],
+            project: "p1"
+        )
+        XCTAssertEqual(sidebar.sessionsTree.renderedPaneIDs.count, PaneGrid.maxPanes)
+        XCTAssertFalse(sidebar.sessionsTree.showsNewTerminalRow)
+    }
+
+    /// One short of the cap it is still there — the row only goes at eight.
+    func testTheNewTerminalRowStaysOneShortOfTheCap() {
+        let sidebar = makeSidebar()
+        sidebar.reloadSessions(
+            panes: (1..<PaneGrid.maxPanes).map { pane("t\($0)", group: "s1") },
+            focusedPaneID: "t1",
+            statuses: [:],
+            project: "p1"
+        )
+        XCTAssertTrue(sidebar.sessionsTree.showsNewTerminalRow)
+    }
+
     /// One pane is printed as a bare count; more than one gets the grid shape.
     func testTheGridBadgeMatchesTheLadder() {
         XCTAssertEqual(SessionRowView.badgeText(paneCount: 1), "1")

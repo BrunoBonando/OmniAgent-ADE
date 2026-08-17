@@ -1683,6 +1683,10 @@ final class SessionsTreeView: NSView {
     var renderedPaneIDs: [String] {
         rows.arrangedSubviews.compactMap { ($0 as? TerminalRowView)?.paneID }
     }
+    /// Whether the "+ New terminal" row is on screen at all.
+    var showsNewTerminalRow: Bool {
+        rows.arrangedSubviews.contains { $0 is NewTerminalRowView }
+    }
     /// Sessions the user has collapsed. Absent means expanded, so a brand new
     /// session shows its terminals without anyone having to opt in.
     private var collapsed: Set<String> = []
@@ -1824,7 +1828,10 @@ final class SessionsTreeView: NSView {
                 terminal.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
             }
 
-            if session.isCurrent {
+            // A session at the eight-terminal cap has nowhere to put a ninth —
+            // `PaneWorkspaceView.addPane` would refuse it — so the row goes
+            // away rather than sitting there doing nothing when pressed.
+            if session.isCurrent, session.paneIDs.count < PaneGrid.maxPanes {
                 let add = NewTerminalRowView()
                 add.onPress = { [weak self] in self?.onNewTerminal?() }
                 rows.addArrangedSubview(add)
