@@ -508,7 +508,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// rather than being letterboxed into a fixed shape.
     static let focusOverlayPadding: CGFloat = 26
     static let focusCardScale: CGFloat = 0.88
-    static let focusCardMaxSize = NSSize(width: 1400, height: 880)
+    static let focusCardMaxSize = NSSize(width: 1760, height: 1100)
     /// `0 40px 100px`: 40pt of downward offset, and a CSS blur radius is about
     /// twice a layer's shadow radius, so 100px of spread is 50 here.
     static let focusCardShadowDrop: CGFloat = 40
@@ -2790,83 +2790,73 @@ final class PaneBadgeView: NSView {
     }
 }
 
-/// The dim tint a zoomed pane sits on, and the whole of focus mode's
-/// background treatment: it dims, it does not blur. Despite
-/// `blendingMode = .withinWindow` below it blurs nothing — confirmed directly
-/// on screen: even the plain, non-Metal sidebar behind it shows no blur, only
-/// this view's own flat material tint, because `.withinWindow` samples sibling
-/// views inside one window's private compositing tree and in this window that
-/// produces nothing visible.
+/// The glass a zoomed pane sits on: one panel the size of the window, with
+/// the card in front of it — macOS 26's own Liquid Glass (`NSGlassEffectView`),
+/// the system material itself rather than a stand-in for it, so what is behind
+/// it in this window is what it refracts: the panes, the sidebar, everything
+/// the card does not cover.
 ///
-/// Real blur needs `.behindWindow`, which needs auxiliary windows of its own —
-/// four of them, tiling the region around the card, since a window covering the
-/// card would blur (and swallow clicks meant for) the card too. That existed
-/// and was removed: seams between independently blurred windows, square corners
-/// against the card's rounded ones, geometry to re-sync on every resize, and a
-/// result that still did not read as blurred. A dim wash does the one job focus
-/// mode needs — say which pane you are in — for one view and no windows.
-///
-/// This was a layer background filter before it was an in-window
-/// `NSVisualEffectView`, to keep `NSVisualEffectView`'s display-link-backed
-/// animation machine out of the test host — one that had been seen spinning
-/// forever retrying `CVDisplayLinkCreateWithCGDisplays` where no display
-/// exists. It bought a suite that never blurred anything: see `init`. The
-/// effect view is back, and the constraint it was avoided for is now a
-/// property of the *host*, not of this view — a test host with no display
-/// attached must not construct one.
-final class PaneZoomBackdropView: NSVisualEffectView {
-    /// The material the app behind the card is seen through. Materials come
-    /// in roughly three blur strengths: `.headerView` — tried first — sits in
-    /// the thinnest tier, meant to sit over window content with barely any
-    /// softening of its own, which read as a dim wash with no actual blur to
-    /// it. `.hudWindow` sits at the other end: a dark panel material that
-    /// darkened everything behind the card on top of whatever tint was laid
-    /// over it. `.sidebar` is the middle tier real apps use for genuine
-    /// frosted glass — visibly blurred, without `.hudWindow`'s dark panel tint.
-    static let material: NSVisualEffectView.Material = .sidebar
-
+/// Before macOS 26 there is no glass to ask for and this stays the dim
+/// `.sidebar` wash it used to be, which blurs nothing — confirmed on screen:
+/// `.withinWindow` blending samples sibling views inside one window's private
+/// compositing tree, and in this window that produces a flat tint and no blur.
+/// Real blur without glass needed auxiliary windows tiling the region around
+/// the card, since a window covering the card would blur the card too and
+/// swallow its clicks; that existed, read as seams and square corners rather
+/// than as blur, and was removed.
+final class PaneZoomBackdropView: NSView {
     var onClick: (() -> Void)?
 
-    /// The blur material alone, at full alpha, reads as near-opaque —
-    /// there is nothing of the sharp background left in the composite, only
-    /// the material's own tint. Landing short of 1 lets a fraction of
-    /// the untinted, unblurred pixels back into the mix, which is what turns
-    /// "blurred" into "blurred but still legible" instead of "blacked out".
-    private static let shownAlpha: CGFloat = 0.78
+    /// Glass is made to be looked through and carries its own translucency, so
+    /// it shows at full strength. The fallback wash is a near-opaque material
+    /// instead, and lands short of 1 on purpose: that fraction of sharp,
+    /// untinted pixels back in the mix is the difference between "dimmed" and
+    /// "blacked out".
+    private let shownAlpha: CGFloat
+
+    /// The panel itself. Sized in `layout` rather than by an autoresizing mask,
+    /// which starts from this view's own zero frame and has nothing to scale.
+    private let effect: NSView
 
     private var isShown = false
 
-    /// `.withinWindow`, tried as the platform's own within-window blur to
-    /// replace the `CIGaussianBlur` in `layer.backgroundFilters` this used to
-    /// carry (`backgroundFilters` are only composited for layers the window
-    /// server can read back through, which a layer-backed view in an ordinary
-    /// window is not — that filter was installed, ramped, and drew nothing,
-    /// leaving a flat 62% black wash over a perfectly sharp app). This
-    /// replacement does blend — the tint below is real — but does not blur:
-    /// see the class doc comment. Left as `.withinWindow` anyway rather than
-    /// switched to `.behindWindow` here too, because a view *inside* the main
-    /// window cannot use `.behindWindow` blending to blur that same window's
-    /// own content — `.behindWindow` blurs whatever is behind the window
-    /// hosting it, and this view's window *is* the main window.
-    ///
-    /// No tint beyond the material's own, and the design's `rgba(6,6,8,.62)`
-    /// is deliberately not reproduced. It is a wash meant to carry a CSS blur
-    /// on its own; every amount of black tried on top of it here — .62, .22,
-    /// .12 — only took away the one thing focus mode should leave you: seeing
-    /// where everything else is.
     init() {
+        let panel: NSView
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            // `.regular` rather than `.clear`: the point of the panel is that
+            // the pane in front of it is the thing in focus, which needs the
+            // app behind it pushed back, not merely tinted.
+            glass.style = .regular
+            panel = glass
+            shownAlpha = 1
+        } else {
+            let wash = NSVisualEffectView()
+            /// Materials come in roughly three blur strengths: `.headerView`
+            /// sits in the thinnest tier, meant to lie over window content with
+            /// barely any softening; `.hudWindow` is a dark panel material that
+            /// darkens everything behind it. `.sidebar` is the middle tier real
+            /// apps use for frosted glass, without `.hudWindow`'s panel tint.
+            wash.material = .sidebar
+            /// `.behindWindow` is not an option for a view *inside* the main
+            /// window: it blurs whatever is behind the window hosting it, and
+            /// this view's window is that window.
+            wash.blendingMode = .withinWindow
+            // `.followsWindowActiveState` would drop it the moment the window
+            // stopped being key — including while a sheet or the palette is up.
+            wash.state = .active
+            panel = wash
+            shownAlpha = 0.78
+        }
+        effect = panel
         super.init(frame: .zero)
-        material = Self.material
-        blendingMode = .withinWindow
-        // `.followsWindowActiveState` would drop the blur the moment the window
-        // stopped being key — including while a sheet or the palette is up.
-        state = .active
         appearance = NSAppearance(named: .darkAqua)
-        // Explicit, though an effect view is layer-backed anyway: it does not
-        // *have* a `layer` until it joins a hierarchy, and the card's shadow is
-        // inserted directly above that layer — with none there, `stackOverlay`
+        // Explicit, though an effect view is layer-backed anyway: this view does
+        // not *have* a `layer` until it joins a hierarchy, and the card's shadow
+        // is inserted directly above that layer — with none there, `stackOverlay`
         // silently left the shadow out.
         wantsLayer = true
+        addSubview(effect)
         alphaValue = 0
         isHidden = true
         setAccessibilityElement(true)
@@ -2879,13 +2869,18 @@ final class PaneZoomBackdropView: NSVisualEffectView {
         fatalError("init(coder:) is unavailable")
     }
 
-    /// Fades the backdrop in and out. Hidden only once it has faded out, never
+    override func layout() {
+        super.layout()
+        effect.frame = bounds
+    }
+
+    /// Fades the panel in and out. Hidden only once it has faded out, never
     /// left invisible-but-present: it swallows clicks.
     func setShown(_ shown: Bool, duration: TimeInterval) {
         guard isShown != shown else { return }
         isShown = shown
         if shown { isHidden = false }
-        let alpha: CGFloat = shown ? Self.shownAlpha : 0
+        let alpha: CGFloat = shown ? shownAlpha : 0
         guard duration > 0 else {
             alphaValue = alpha
             isHidden = !shown
@@ -2903,7 +2898,7 @@ final class PaneZoomBackdropView: NSVisualEffectView {
     }
 
     // Swallowed, so a click meant for "get me out of here" never reaches — or
-    // focuses — the blurred pane underneath it.
+    // focuses — the pane behind it.
     override func mouseDown(with event: NSEvent) {}
 
     override func mouseUp(with event: NSEvent) { onClick?() }

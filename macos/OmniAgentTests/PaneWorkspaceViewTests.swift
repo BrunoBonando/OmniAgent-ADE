@@ -1195,12 +1195,6 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertGreaterThan(zoomedIndex, blurIndex, "the zoomed pane sits above the blur")
         XCTAssertLessThan(otherIndex, blurIndex, "and everything else behind it, blurred")
 
-        XCTAssertEqual(
-            backdrop.blendingMode,
-            .withinWindow,
-            "blurring the app behind it rather than the desktop behind the window"
-        )
-
         XCTAssertTrue(workspace.toggleZoom("pane-2"), "the same button shrinks it back")
         XCTAssertNil(workspace.zoomedPaneID)
         // Back to zero at once — the eased animation is what takes time, the
@@ -1772,22 +1766,39 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
     }
 
-    /// `PaneZoomBackdropView` provides the dim tint alone, not blur — see
-    /// its class doc comment. This confirms the tint's own configuration.
-    func testTheBackdropTintsTheAppBehindItAndDoesNotClaimToBlurIt() throws {
+    /// One panel filling the window the card sits in front of — glass on
+    /// macOS 26, the dim `.sidebar` wash before it; see the class doc comment.
+    /// Configuration and geometry only: an effect view is exactly as
+    /// unrenderable in an offscreen test as it has always been.
+    func testTheBackdropIsOnePanelFillingTheWindowTheCardSitsOn() throws {
         let backdrop = PaneZoomBackdropView()
         backdrop.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
-
-        XCTAssertEqual(backdrop.blendingMode, .withinWindow)
-        XCTAssertEqual(backdrop.state, .active, "tinted whether or not the window is key")
-        XCTAssertEqual(backdrop.material, .sidebar)
-
         backdrop.setShown(true, duration: 0)
         backdrop.layoutSubtreeIfNeeded()
-        XCTAssertEqual(backdrop.subviews, [], "nothing tinting the tint")
-        // Short of 1, on purpose: at full alpha nothing of the sharp app
-        // shows through, only the material's own tint — see `shownAlpha`.
-        XCTAssertEqual(backdrop.alphaValue, 0.78)
+
+        XCTAssertEqual(backdrop.subviews.count, 1, "one panel, nothing layered over it")
+        let panel = try XCTUnwrap(backdrop.subviews.first)
+        XCTAssertEqual(panel.frame, backdrop.bounds, "the size of the window it covers")
+
+        // And keeps covering it: the overlay host is resized on every layout
+        // pass, and a panel that stopped following would leave the app sharp
+        // down one side of the card.
+        backdrop.setFrameSize(NSSize(width: 900, height: 500))
+        backdrop.layoutSubtreeIfNeeded()
+        XCTAssertEqual(panel.frame, backdrop.bounds, "on a resize too")
+
+        if #available(macOS 26.0, *) {
+            XCTAssertTrue(panel is NSGlassEffectView, "the system's own Liquid Glass")
+            XCTAssertEqual(backdrop.alphaValue, 1, "glass is made to be looked through")
+        } else {
+            let wash = try XCTUnwrap(panel as? NSVisualEffectView)
+            XCTAssertEqual(wash.blendingMode, .withinWindow)
+            XCTAssertEqual(wash.state, .active, "tinted whether or not the window is key")
+            XCTAssertEqual(wash.material, .sidebar)
+            // Short of 1, on purpose: at full alpha nothing of the sharp app
+            // shows through, only the material's own tint — see `shownAlpha`.
+            XCTAssertEqual(backdrop.alphaValue, 0.78)
+        }
     }
 
     // MARK: - Click to activate
