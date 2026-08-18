@@ -312,6 +312,49 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(model.matches.map(\.id), ["focus:a"])
     }
 
+    func testEveryOpenFileIsAGoToRowOncePerPathNoMatterHowManyPanesHoldIt() {
+        let tabs = [
+            PersistedEditorTab(path: "/repo/src/main.swift", kind: "file", pinned: true),
+            PersistedEditorTab(path: "/repo/README.md", kind: "file", pinned: false),
+        ]
+        let commands = CommandPaletteModel.build(
+            panes: [
+                pane("e1", project: "alpha", group: "g1", kind: .editor, editorTabs: tabs),
+                pane("e2", project: "alpha", group: "g1", kind: .editor, editorTabs: [tabs[0]]),
+            ],
+            paneOrder: ["e1", "e2"],
+            focusedPaneID: nil,
+            unreadNotifications: 0
+        )
+
+        let files = commands.filter { if case .openFile = $0.action { return true } else { return false } }
+        XCTAssertEqual(files.map(\.title), ["Open main.swift", "Open README.md"])
+        XCTAssertEqual(files.map(\.detail), ["src", "repo"])
+        XCTAssertEqual(files.first?.action, .openFile(path: "/repo/src/main.swift"))
+    }
+
+    func testAPaneIsFoundByWhatIsInItNotOnlyByItsTitle() {
+        var model = CommandPaletteModel(
+            commands: CommandPaletteModel.build(
+                panes: [
+                    pane("b", project: "alpha", group: "g1", label: "docs", kind: .browser, browserURL: "https://reactbits.dev/animations"),
+                    pane("e", project: "alpha", group: "g1", kind: .editor, editorTabs: [
+                        PersistedEditorTab(path: "/repo/src/parser.rs", kind: "file", pinned: true),
+                    ]),
+                ],
+                paneOrder: ["b", "e"],
+                focusedPaneID: nil,
+                unreadNotifications: 0
+            )
+        )
+
+        model.update(query: "reactbits")
+        XCTAssertEqual(model.matches.first?.action, .focusPane(sessionID: "b"), "the URL is searchable, unshown")
+
+        model.update(query: "src/parser")
+        XCTAssertEqual(model.matches.first?.action, .openFile(path: "/repo/src/parser.rs"), "so is a file's full path")
+    }
+
     // MARK: - the panel
 
     func testThePanelRunsTheHighlightedRowAndClosesFirst() {
@@ -359,6 +402,7 @@ final class CommandPaletteTests: XCTestCase {
         groupLabel: String? = nil,
         label: String? = nil,
         kind: PaneKind = .terminal,
+        browserURL: String = "",
         editorTabs: [PersistedEditorTab] = [],
         editorActiveIndex: Int = 0
     ) -> PaneDescriptor {
@@ -371,6 +415,7 @@ final class CommandPaletteTests: XCTestCase {
             cwd: "/",
             label: label,
             kind: kind,
+            browserURL: browserURL,
             editorTabs: editorTabs,
             editorActiveIndex: editorActiveIndex
         )

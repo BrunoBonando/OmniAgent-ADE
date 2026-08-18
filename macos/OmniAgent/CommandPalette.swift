@@ -13,6 +13,9 @@ enum PaletteAction: Equatable {
     /// The focused editor's active file, diffed against HEAD — the palette's
     /// twin of the tab strip's ± toggle.
     case openDiffForCurrentFile(path: String)
+    /// A file open in some editor pane, chosen from the spotlight — reveals
+    /// the pane holding it and brings that tab forward.
+    case openFile(path: String)
     /// The repo-wide Changes overview.
     case showAllChanges
     case interruptFocusedPane
@@ -38,6 +41,24 @@ struct PaletteCommand: Equatable {
     /// The right-aligned hint — an engine name, a key equivalent.
     let detail: String?
     let action: PaletteAction
+    /// Text the query matches but the row never shows: a browser's URL, a
+    /// terminal's cwd, a file's full path. Spotlight has to find a pane by
+    /// what is *in* it, not only by the words its row happens to print.
+    let keywords: String?
+
+    init(id: String, title: String, detail: String?, action: PaletteAction, keywords: String? = nil) {
+        self.id = id
+        self.title = title
+        self.detail = detail
+        self.action = action
+        self.keywords = keywords
+    }
+
+    /// Case-insensitive substring over title *and* keywords. `needle` is
+    /// already lowercased by the caller.
+    func matches(_ needle: String) -> Bool {
+        title.lowercased().contains(needle) || keywords?.lowercased().contains(needle) == true
+    }
 }
 
 /// The ⌘K palette's contents and filtering — the native port of
@@ -101,10 +122,33 @@ struct CommandPaletteModel: Equatable {
                                 case .terminal: return pane.engine.rawValue
                                 }
                             }(),
-                            action: .focusPane(sessionID: paneID)
+                            action: .focusPane(sessionID: paneID),
+                            // A browser is worth finding by its address and a
+                            // terminal by the folder it sits in, neither of
+                            // which the row's title says.
+                            keywords: [pane.browserURL, pane.cwd, pane.title].filter { !$0.isEmpty }
+                                .joined(separator: " ")
                         )
                     )
                 }
+            }
+        }
+        // Every file open in an editor pane, deduped by path: a file open in
+        // two panes is one thing to go to, not two.
+        var seenPaths: Set<String> = []
+        for pane in ordered where pane.kind == .editor {
+            for tab in pane.editorTabs where seenPaths.insert(tab.path).inserted {
+                let name = (tab.path as NSString).lastPathComponent
+                let folder = ((tab.path as NSString).deletingLastPathComponent as NSString).lastPathComponent
+                commands.append(
+                    PaletteCommand(
+                        id: "file:\(tab.path)",
+                        title: "Open \(name)",
+                        detail: folder.isEmpty ? "file" : folder,
+                        action: .openFile(path: tab.path),
+                        keywords: tab.path
+                    )
+                )
             }
         }
         commands.append(
@@ -201,7 +245,7 @@ struct CommandPaletteModel: Equatable {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return commands }
         let needle = trimmed.lowercased()
-        var rows = commands.filter { $0.title.lowercased().contains(needle) }
+        var rows = commands.filter { $0.matches(needle) }
         rows.append(
             PaletteCommand(
                 id: "search-brain",

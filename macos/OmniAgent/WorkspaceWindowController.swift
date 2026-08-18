@@ -1474,6 +1474,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             newEditorPane(nil)
         case let .openDiffForCurrentFile(path):
             openDiffInEditor(URL(fileURLWithPath: path))
+        case let .openFile(path):
+            openFileInEditor(URL(fileURLWithPath: path), pinned: true)
+            // `openFileInEditor` focuses the pane it landed in but knows
+            // nothing about focus mode; without this a file in a second pane
+            // of the *same* session opens behind the zoomed card.
+            if let focused = workspace.focusedPaneID { _ = revealPane(focused) }
         case .showAllChanges:
             openChangesOverview()
         case .newSession:
