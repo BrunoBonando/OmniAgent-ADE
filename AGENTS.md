@@ -66,6 +66,7 @@ Release cutover (retiring the web terminal hot path)
   - `src-tauri` — Tauri Rust core (session manager, app wiring; a client of `omniagent-pty-daemon`, not a PTY owner itself)
   - `ui/` — React + TypeScript + Vite frontend (brain map, terminals, sidebar)
   - `macos/` — native macOS app (`OmniAgent.xcodeproj`): AppKit primary workspace, SwiftUI for low-frequency surfaces (settings/onboarding/usage/inspectors), SwiftTerm for terminals; see "Native macOS app (macos/)" above
+    - Editor panes: `PaneKind.editor` is a tabbed code editor whose internals are Monaco running in a `WKWebView` (vendored under `macos/OmniAgent/Resources/monaco/`) — the one scoped exception to the native-only rule, permitted for the editor pane's internals and nowhere else — with its open/pinned tabs persisted to the native-only `editor_panes_native` settings row rather than the shared `layout` row.
 - Runtime: Tauri app (UI + Rust core) and/or the native macOS app (UI), a persistent `omniagent-pty-daemon` process, a graph ingest process, and an MCP server process; they share retrieval crates and storage layers.
 - Storage: SQLite "brain" DB (rebuildable) + durable Markdown memory under:
   `~/Library/Application Support/OmniAgent-ADE/brain/` — override with `OMNIAGENT_ADE_DATA_DIR`.
