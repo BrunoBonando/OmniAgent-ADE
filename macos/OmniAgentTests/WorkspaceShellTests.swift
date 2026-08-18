@@ -306,6 +306,17 @@ final class WorkspaceShellTests: XCTestCase {
         )
     }
 
+    /// The `.files` destination was a dead end — clicking it blanked the pane
+    /// grid for a "Coming in a later step" placeholder. The editor pane
+    /// replaces it, launched from the FILES *tree* instead, so the destination
+    /// must never come back: nav rows are built straight off `allCases`.
+    func testFilesDestinationIsGone() {
+        XCTAssertEqual(
+            WorkspaceDestination.allCases.map(\.rawValue),
+            ["dashboard", "board", "terminals"]
+        )
+    }
+
     // MARK: - The picker
 
     func testThePickerRendersOneCardPerWorkspace() {
