@@ -452,23 +452,19 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertNil(working.awaitingBadge)
     }
 
-    /// Expanded, the terminal rows underneath carry the badge; collapsed, the
-    /// session row aggregates them at its right edge, next to the dots.
-    func testOnlyACollapsedSessionRowAggregatesTheWaitingCount() {
-        let expanded = SessionRowView(
-            session: sessionNode(label: "s"),
-            expanded: true,
-            statuses: [.awaitingApproval],
-            awaitingCount: 2
-        )
-        XCTAssertNil(expanded.awaitingBadge)
-        let collapsed = SessionRowView(
-            session: sessionNode(label: "s"),
-            expanded: false,
-            statuses: [.awaitingApproval],
-            awaitingCount: 2
-        )
-        XCTAssertEqual(collapsed.awaitingBadge?.count, 2)
+    /// The session row aggregates its blocked terminals expanded or collapsed
+    /// — a session needing attention must be findable from the session list
+    /// alone, whether or not its terminal rows are showing.
+    func testTheSessionRowAggregatesTheWaitingCountInEitherState() {
+        for expanded in [true, false] {
+            let row = SessionRowView(
+                session: sessionNode(label: "s"),
+                expanded: expanded,
+                statuses: [.awaitingApproval],
+                awaitingCount: 2
+            )
+            XCTAssertEqual(row.awaitingBadge?.count, 2)
+        }
         let quiet = SessionRowView(
             session: sessionNode(label: "s"),
             expanded: false,
@@ -491,10 +487,10 @@ final class WorkspaceShellTests: XCTestCase {
             panes: panes, focusedPaneID: "t1", statuses: statuses, project: "p1"
         )
         let row = try XCTUnwrap(sidebar.sessionsTree.descendant(SessionRowView.self))
-        XCTAssertNil(row.awaitingBadge, "expanded: the terminal rows carry it")
+        XCTAssertEqual(row.awaitingBadge?.count, 2, "three asks, one focused")
         row.onPress?()
         let collapsed = try XCTUnwrap(sidebar.sessionsTree.descendant(SessionRowView.self))
-        XCTAssertEqual(collapsed.awaitingBadge?.count, 2, "three asks, one focused")
+        XCTAssertEqual(collapsed.awaitingBadge?.count, 2, "and collapsing keeps the count")
     }
 
     func testStatusDotColoursFollowTheDesign() {

@@ -1301,8 +1301,9 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     private let dots = ShellDotsView()
     private let bar = NSView()
     private let isCurrent: Bool
-    /// The amber waiting-inputs count, worn only while the row is collapsed —
-    /// expanded, the terminal rows underneath carry their own.
+    /// The amber waiting-inputs count, worn whenever a terminal of this
+    /// session is blocked on a question — the session-level "requires
+    /// attention", whether or not the terminal rows are showing.
     private(set) var awaitingBadge: ShellAwaitingBadgeView?
 
     init(
@@ -1361,9 +1362,11 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             topAnchor.constraint(equalTo: titleField.topAnchor, constant: -6),
             bottomAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 6),
         ])
-        // Collapsed, the row is all its terminals get to say — the waiting
-        // count rides the right edge, where the eye already checks the dots.
-        if !expanded, awaitingCount > 0 {
+        // The session-level view of "how many of mine are asking": always on
+        // while something waits, expanded or not, so a session needing
+        // attention is findable from the session list alone — the terminal
+        // rows underneath add *which* one, not *whether*.
+        if awaitingCount > 0 {
             let badge = ShellAwaitingBadgeView(count: awaitingCount)
             awaitingBadge = badge
             addSubview(badge)
