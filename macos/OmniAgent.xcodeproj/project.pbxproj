@@ -20,9 +20,11 @@
 		10000000000000000000090 /* BrowserPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000090 /* BrowserPaneView.swift */; };
 		10000000000000000000091 /* BrowserPaneViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000091 /* BrowserPaneViewTests.swift */; };
 		10000000000000000000092 /* BrowserPanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000092 /* BrowserPanes.swift */; };
+		100000000000000000000B0 /* EditorPaneModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000B0 /* EditorPaneModel.swift */; };
 		10000000000000000000094 /* PaneApprovalBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000094 /* PaneApprovalBar.swift */; };
 		10000000000000000000095 /* PaneApprovalBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000095 /* PaneApprovalBarTests.swift */; };
 		10000000000000000000093 /* BrowserPanesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000093 /* BrowserPanesTests.swift */; };
+		100000000000000000000B1 /* EditorPaneModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000B1 /* EditorPaneModelTests.swift */; };
 		10000000000000000000000A /* WorkspaceWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* WorkspaceWindowController.swift */; };
 		10000000000000000000000B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* AppDelegate.swift */; };
 		10000000000000000000000C /* PaneGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* PaneGrid.swift */; };
@@ -137,7 +139,9 @@
 		20000000000000000000090 /* BrowserPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPaneView.swift; sourceTree = "<group>"; };
 		20000000000000000000091 /* BrowserPaneViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPaneViewTests.swift; sourceTree = "<group>"; };
 		20000000000000000000092 /* BrowserPanes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPanes.swift; sourceTree = "<group>"; };
+		200000000000000000000B0 /* EditorPaneModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneModel.swift; sourceTree = "<group>"; };
 		20000000000000000000093 /* BrowserPanesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPanesTests.swift; sourceTree = "<group>"; };
+		200000000000000000000B1 /* EditorPaneModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneModelTests.swift; sourceTree = "<group>"; };
 		20000000000000000000094 /* PaneApprovalBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBar.swift; sourceTree = "<group>"; };
 		20000000000000000000095 /* PaneApprovalBarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBarTests.swift; sourceTree = "<group>"; };
 		20000000000000000000000B /* WorkspaceWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowController.swift; sourceTree = "<group>"; };
@@ -247,6 +251,7 @@
 				20000000000000000000080 /* PaneContentView.swift */,
 				20000000000000000000090 /* BrowserPaneView.swift */,
 				20000000000000000000092 /* BrowserPanes.swift */,
+				200000000000000000000B0 /* EditorPaneModel.swift */,
 				20000000000000000000094 /* PaneApprovalBar.swift */,
 				20000000000000000000000A /* TerminalSurfaceView.swift */,
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
@@ -293,6 +298,7 @@
 				200000000000000000000010 /* PaneWorkspaceViewTests.swift */,
 				20000000000000000000091 /* BrowserPaneViewTests.swift */,
 				20000000000000000000093 /* BrowserPanesTests.swift */,
+				200000000000000000000B1 /* EditorPaneModelTests.swift */,
 				20000000000000000000095 /* PaneApprovalBarTests.swift */,
 				200000000000000000000011 /* pane-grid.json */,
 				20000000000000000000045 /* NativeMacosCompatibilityFixtureTests.swift */,
@@ -458,6 +464,7 @@
 				10000000000000000000080 /* PaneContentView.swift in Sources */,
 				10000000000000000000090 /* BrowserPaneView.swift in Sources */,
 				10000000000000000000092 /* BrowserPanes.swift in Sources */,
+				100000000000000000000B0 /* EditorPaneModel.swift in Sources */,
 				10000000000000000000094 /* PaneApprovalBar.swift in Sources */,
 				100000000000000000000009 /* TerminalSurfaceView.swift in Sources */,
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
@@ -503,6 +510,7 @@
 				10000000000000000000000F /* PaneWorkspaceViewTests.swift in Sources */,
 				10000000000000000000091 /* BrowserPaneViewTests.swift in Sources */,
 				10000000000000000000093 /* BrowserPanesTests.swift in Sources */,
+				100000000000000000000B1 /* EditorPaneModelTests.swift in Sources */,
 				10000000000000000000095 /* PaneApprovalBarTests.swift in Sources */,
 				100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */,
 				100000000000000000000012 /* PersistedLayoutTests.swift in Sources */,
@@ -572,7 +580,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 22;
+				CURRENT_PROJECT_VERSION = 24;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_TESTABILITY = YES;
@@ -603,7 +611,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 22;
+				CURRENT_PROJECT_VERSION = 24;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -673,7 +681,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 22;
+				CURRENT_PROJECT_VERSION = 24;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
