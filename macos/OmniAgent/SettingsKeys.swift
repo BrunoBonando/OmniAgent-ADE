@@ -92,4 +92,10 @@ enum SettingsKey {
     /// JSON object, `{"panes":[{url, group?, groupLabel?}]}` — see
     /// `BrowserPanesCodec`. No TypeScript twin, by design.
     static let browserPanes = "browser_panes_native"
+
+    /// Native-only — `browserPanes`'s reasoning applied to editor panes: the
+    /// web codec would destroy this shape on its next `layout` rewrite. One
+    /// JSON object, `{"panes":[{tabs:[{path,kind,pinned}],active,group?,groupLabel?}]}`
+    /// — see `EditorPanesCodec`. No TypeScript twin, by design.
+    static let editorPanes = "editor_panes_native"
 }

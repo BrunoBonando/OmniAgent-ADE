@@ -21,10 +21,12 @@
 		10000000000000000000091 /* BrowserPaneViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000091 /* BrowserPaneViewTests.swift */; };
 		10000000000000000000092 /* BrowserPanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000092 /* BrowserPanes.swift */; };
 		100000000000000000000B0 /* EditorPaneModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000B0 /* EditorPaneModel.swift */; };
+		53C290D7733E43F89B368514 /* EditorPanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACAA95FB7844450B021094B /* EditorPanes.swift */; };
 		10000000000000000000094 /* PaneApprovalBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000094 /* PaneApprovalBar.swift */; };
 		10000000000000000000095 /* PaneApprovalBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000095 /* PaneApprovalBarTests.swift */; };
 		10000000000000000000093 /* BrowserPanesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000093 /* BrowserPanesTests.swift */; };
 		100000000000000000000B1 /* EditorPaneModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000B1 /* EditorPaneModelTests.swift */; };
+		69D406BCC81448EF8CA13D9D /* EditorPanesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2639724864074430BA56B5D3 /* EditorPanesTests.swift */; };
 		10000000000000000000000A /* WorkspaceWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* WorkspaceWindowController.swift */; };
 		10000000000000000000000B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* AppDelegate.swift */; };
 		10000000000000000000000C /* PaneGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* PaneGrid.swift */; };
@@ -140,8 +142,10 @@
 		20000000000000000000091 /* BrowserPaneViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPaneViewTests.swift; sourceTree = "<group>"; };
 		20000000000000000000092 /* BrowserPanes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPanes.swift; sourceTree = "<group>"; };
 		200000000000000000000B0 /* EditorPaneModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneModel.swift; sourceTree = "<group>"; };
+		BACAA95FB7844450B021094B /* EditorPanes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPanes.swift; sourceTree = "<group>"; };
 		20000000000000000000093 /* BrowserPanesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPanesTests.swift; sourceTree = "<group>"; };
 		200000000000000000000B1 /* EditorPaneModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneModelTests.swift; sourceTree = "<group>"; };
+		2639724864074430BA56B5D3 /* EditorPanesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPanesTests.swift; sourceTree = "<group>"; };
 		20000000000000000000094 /* PaneApprovalBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBar.swift; sourceTree = "<group>"; };
 		20000000000000000000095 /* PaneApprovalBarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBarTests.swift; sourceTree = "<group>"; };
 		20000000000000000000000B /* WorkspaceWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowController.swift; sourceTree = "<group>"; };
@@ -252,6 +256,7 @@
 				20000000000000000000090 /* BrowserPaneView.swift */,
 				20000000000000000000092 /* BrowserPanes.swift */,
 				200000000000000000000B0 /* EditorPaneModel.swift */,
+				BACAA95FB7844450B021094B /* EditorPanes.swift */,
 				20000000000000000000094 /* PaneApprovalBar.swift */,
 				20000000000000000000000A /* TerminalSurfaceView.swift */,
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
@@ -299,6 +304,7 @@
 				20000000000000000000091 /* BrowserPaneViewTests.swift */,
 				20000000000000000000093 /* BrowserPanesTests.swift */,
 				200000000000000000000B1 /* EditorPaneModelTests.swift */,
+				2639724864074430BA56B5D3 /* EditorPanesTests.swift */,
 				20000000000000000000095 /* PaneApprovalBarTests.swift */,
 				200000000000000000000011 /* pane-grid.json */,
 				20000000000000000000045 /* NativeMacosCompatibilityFixtureTests.swift */,
@@ -465,6 +471,7 @@
 				10000000000000000000090 /* BrowserPaneView.swift in Sources */,
 				10000000000000000000092 /* BrowserPanes.swift in Sources */,
 				100000000000000000000B0 /* EditorPaneModel.swift in Sources */,
+				53C290D7733E43F89B368514 /* EditorPanes.swift in Sources */,
 				10000000000000000000094 /* PaneApprovalBar.swift in Sources */,
 				100000000000000000000009 /* TerminalSurfaceView.swift in Sources */,
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
@@ -511,6 +518,7 @@
 				10000000000000000000091 /* BrowserPaneViewTests.swift in Sources */,
 				10000000000000000000093 /* BrowserPanesTests.swift in Sources */,
 				100000000000000000000B1 /* EditorPaneModelTests.swift in Sources */,
+				69D406BCC81448EF8CA13D9D /* EditorPanesTests.swift in Sources */,
 				10000000000000000000095 /* PaneApprovalBarTests.swift in Sources */,
 				100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */,
 				100000000000000000000012 /* PersistedLayoutTests.swift in Sources */,
