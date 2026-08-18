@@ -584,8 +584,12 @@ final class ShellDotsView: NSView {
         }
     }
 
+    /// The working family pulses, the settled states do not. Tool execution
+    /// belongs with thinking here for the same reason it shares its blue: a
+    /// dot that sits still while the pane header pulses says the two disagree
+    /// about whether the agent is busy.
     static func pulses(_ status: RemoteSessionStatus?) -> Bool {
-        status == .thinking
+        status == .thinking || status == .toolExecution
     }
 }
 

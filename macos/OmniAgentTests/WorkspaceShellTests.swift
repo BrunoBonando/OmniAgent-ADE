@@ -512,9 +512,11 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(ShellDotsView.color(for: nil), ShellPalette.idle)
     }
 
-    /// Only the working agent breathes; a finished one would be noise.
-    func testOnlyThinkingPulses() {
+    /// Only a working agent breathes; a finished one would be noise. Running a
+    /// tool is working, so its dot breathes with thinking's.
+    func testOnlyTheWorkingStatusesPulse() {
         XCTAssertTrue(ShellDotsView.pulses(.thinking))
+        XCTAssertTrue(ShellDotsView.pulses(.toolExecution))
         XCTAssertFalse(ShellDotsView.pulses(.ready))
         XCTAssertFalse(ShellDotsView.pulses(nil))
     }
