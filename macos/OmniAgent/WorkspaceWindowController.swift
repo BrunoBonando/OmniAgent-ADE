@@ -660,10 +660,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // showing) and add it to the aggregated report the Daemon settings
         // tab reads from `daemonPersistence`.
         connection.onReattachFailed = { [weak self] sessionID in
-            guard let self else { return }
-            readySessions.remove(sessionID)
-            applySessionStatus("Session lost — daemon restarted", for: sessionID)
-            daemonPersistence.recordReattachFailure(sessionID: sessionID)
+            self?.handleReattachFailure(sessionID)
         }
         connection.connect()
     }
@@ -1836,6 +1833,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             }
         }
         return true
+    }
+
+    /// The daemon restarted and forgot this session.
+    ///
+    /// Reported *and* rebuilt. Reporting alone (the original Task 6c
+    /// behaviour) left a dead terminal behind every daemon restart, and the
+    /// pane's conversation is not lost with the daemon — it is on disk, keyed
+    /// by the uuid the pane derives. So the pane goes back through
+    /// `ensureSession`, which reaps the daemon's orphans and lands on
+    /// `createSession`'s `--resume` rung: the same agent, its own history,
+    /// rather than a fresh blank Claude per pane.
+    func handleReattachFailure(_ sessionID: String) {
+        guard workspace.container(for: sessionID) != nil else { return }
+        readySessions.remove(sessionID)
+        applySessionStatus("Session lost — daemon restarted", for: sessionID)
+        daemonPersistence.recordReattachFailure(sessionID: sessionID)
+        // Terminals only: a browser pane has no PTY, and `ensureSession` would
+        // silently start a login shell under its id.
+        guard workspace.descriptor(for: sessionID)?.kind == .terminal else { return }
+        ensureSession(sessionID)
     }
 
     private func ensureSession(_ sessionID: String) {

@@ -1649,6 +1649,32 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         return (surface, window)
     }
 
+    /// A daemon restart must not leave dead terminals — nor start a shell
+    /// behind a browser pane.
+    func testReattachFailureRebuildsTerminalPanesOnly() {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var ensured: [String] = []
+        controller.sessionEnsurer = { ensured.append($0) }
+        controller.applyRestoredPanes([
+            RestoredPane(
+                sessionID: "term-1", reattaches: true, project: "p", engine: .claude,
+                cwd: "/tmp", label: nil, themeId: nil, group: "g1", groupLabel: nil
+            ),
+        ])
+        controller.workspaceView.addPane(
+            PaneDescriptor(sessionID: "web-1", group: "g1", kind: .browser, browserURL: "https://example.com")
+        )
+        ensured.removeAll()
+
+        controller.handleReattachFailure("term-1")
+        controller.handleReattachFailure("web-1")
+        controller.handleReattachFailure("gone-1")
+
+        XCTAssertEqual(ensured, ["term-1"])
+    }
+
     // MARK: - `--resume` fallback
 
     func testResumeFailedOnlyForAFastNonZeroExitOfAResumeSpawn() {
