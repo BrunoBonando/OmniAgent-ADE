@@ -1299,43 +1299,53 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// across the glide, so a mover reads as lifted off the grid for the moment
     /// it is crossing it and flat again the instant it lands.
     ///
-    /// A layer of *this* view directly under the pane's own, rather than a
-    /// shadow on the pane: `PaneContainerView` masks to bounds — that mask is
-    /// what rounds its corners — and a mask clips its layer's own shadow away,
-    /// the same reason the focus card's shadow is a separate layer. It carries
-    /// the pane's exact frame and the same animation, so the pane covers its
-    /// body completely and only the blur past the edges is ever seen.
+    /// Its own view sitting directly under the pane, rather than a shadow on
+    /// the pane: `PaneContainerView` masks to bounds — that mask is what rounds
+    /// its corners — and a mask clips its layer's own shadow away, the same
+    /// reason the focus card's shadow is a separate layer. It carries the
+    /// pane's exact frame and the same animation, so the pane covers its body
+    /// completely and only the blur past the edges is ever seen.
     ///
     /// No-op outside a transition, which is what keeps this to the swap.
     private func castGlideShadow(under container: PaneContainerView, from start: NSRect) {
-        guard zoomTransition > 0, let host = layer, let paneLayer = container.layer else { return }
+        guard zoomTransition > 0 else { return }
         let end = container.frame
-        let shadow = CALayer()
-        shadow.frame = end
-        shadow.backgroundColor = NSColor.black.cgColor
-        shadow.cornerRadius = PaneContainerView.cornerRadius
-        shadow.cornerCurve = .continuous
-        shadow.shadowColor = NSColor.black.cgColor
-        shadow.shadowOpacity = 1
-        shadow.shadowRadius = 16
+        // A view rather than a hand-added layer, and inserted by subview order:
+        // AppKit rebuilds the sublayer order from the subview order whenever
+        // that changes, so a layer placed by index is a layer that can end up
+        // anywhere. Below its own pane and above everything under it, which is
+        // where a cast shadow belongs — the mover's falls across the pane it is
+        // crossing, and its own body stays hidden beneath it.
+        let shadow = NSView(frame: end)
+        addSubview(shadow, positioned: .below, relativeTo: container)
+        // In the hierarchy *before* `wantsLayer`, or there is no layer to
+        // configure: a view has none until it joins one, and configuring nothing
+        // is how the focus card's shadow silently went missing once already.
+        shadow.wantsLayer = true
+        guard let layer = shadow.layer else { return }
+        layer.backgroundColor = NSColor.black.cgColor
+        layer.cornerRadius = PaneContainerView.cornerRadius
+        layer.cornerCurve = .continuous
+        layer.shadowColor = NSColor.black.cgColor
+        layer.shadowOpacity = 1
+        layer.shadowRadius = 16
         // Positive is *down*: this view is flipped, so AppKit flips its backing
         // layer's geometry to match, and the shadow is cast in that space.
-        shadow.shadowOffset = CGSize(width: 0, height: 8)
+        layer.shadowOffset = CGSize(width: 0, height: 8)
         // Spelled out rather than derived from the layer's alpha, which would
-        // cost an offscreen pass per frame for both movers.
-        shadow.shadowPath = CGPath(
+        // cost an offscreen pass a frame for both movers.
+        layer.shadowPath = CGPath(
             roundedRect: CGRect(origin: .zero, size: end.size),
             cornerWidth: PaneContainerView.cornerRadius,
             cornerHeight: PaneContainerView.cornerRadius,
             transform: nil
         )
-        // The model value stays 0, so the fade below is the only time it shows —
-        // and it is back to nothing by the time it is torn down, whatever a
-        // dropped frame does to the timing.
-        shadow.opacity = 0
-        host.insertSublayer(shadow, below: paneLayer)
+        // The model value stays 0, so the fade below is the only time this shows
+        // at all — it is back to nothing before the teardown, whatever a dropped
+        // frame does to the timing.
+        layer.opacity = 0
         zoomLayer(
-            shadow,
+            layer,
             fromPosition: CGPoint(x: start.midX, y: start.midY),
             fromSize: start.size,
             toSize: end.size
@@ -1346,13 +1356,13 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         fade.duration = zoomTransition / 2
         fade.autoreverses = true
         fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        shadow.add(fade, forKey: "opacity")
+        layer.add(fade, forKey: "opacity")
         // Scheduled rather than handed to a transaction's completion, for the
         // reason `setZoomed` gives: a completion that never arrives would leave
-        // this behind for good, and a stale timer here can only remove a layer
-        // that is already invisible.
+        // this behind for good, and a stale timer can only take away a view that
+        // is already invisible.
         DispatchQueue.main.asyncAfter(deadline: .now() + zoomTransition) {
-            shadow.removeFromSuperlayer()
+            shadow.removeFromSuperview()
         }
     }
 

@@ -343,24 +343,22 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         XCTAssertTrue(workspace.performPaneDrop(from: "pane-1", onto: "pane-4"))
 
-        let sublayers = try XCTUnwrap(workspace.layer?.sublayers)
-        let shadows = sublayers.filter { $0.shadowOpacity > 0 }
-        XCTAssertEqual(shadows.count, 2, "one per mover, and none for the panes standing still")
+        func shadows(in workspace: PaneWorkspaceView) -> [NSView] {
+            workspace.subviews.filter { ($0.layer?.shadowOpacity ?? 0) > 0 }
+        }
+        XCTAssertEqual(shadows(in: workspace).count, 2, "one per mover, none for the panes standing still")
         for id in ["pane-1", "pane-4"] {
-            let pane = try XCTUnwrap(workspace.container(for: id)?.layer)
-            let index = try XCTUnwrap(sublayers.firstIndex(of: pane))
+            let pane = try XCTUnwrap(workspace.container(for: id))
+            let index = try XCTUnwrap(workspace.subviews.firstIndex(of: pane))
             XCTAssertGreaterThan(index, 0)
-            XCTAssertTrue(
-                shadows.contains(sublayers[index - 1]),
+            XCTAssertGreaterThan(
+                workspace.subviews[index - 1].layer?.shadowOpacity ?? 0, 0,
                 "\(id)'s shadow has to sit directly under it, or it falls on the wrong pane"
             )
         }
 
         RunLoop.current.run(until: Date().addingTimeInterval(PaneWorkspaceView.swapTransitionDuration + 0.1))
-        XCTAssertTrue(
-            (workspace.layer?.sublayers ?? []).allSatisfy { $0.shadowOpacity == 0 },
-            "a shadow left behind is a shadow on every later frame"
-        )
+        XCTAssertEqual(shadows(in: workspace).count, 0, "a shadow left behind is one on every later frame")
     }
 
     // MARK: - Focus
