@@ -539,7 +539,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
-    /// And with focus moved off the card by ⌘1…⌘8 or ⌥arrows, ⌘↩ hands the card
+    /// And with focus moved off the card by ⌘1…⌘9 or ⌥arrows, ⌘↩ hands the card
     /// to the focused pane — so an item reading "Exit Focus" would be describing
     /// the opposite of what it is about to do.
     func testTheFocusMenuItemTellsTheTruthWhenFocusHasLeftTheCard() throws {
@@ -1089,8 +1089,8 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertLessThanOrEqual(small.height, 600)
     }
 
-    /// The grid's shape ladder never grows past two rows, so there are only
-    /// two window sizes to toggle between. `makeController` already opens
+    /// The ladder's row counts map to window sizes through `rowWindowScale`,
+    /// and two and three rows deliberately share one. `makeController` already opens
     /// one pane, so the window has already been through its *first*
     /// row-count transition — and already scaled from whatever raw frame it
     /// started at — by the time this reads `window.frame`; there is no

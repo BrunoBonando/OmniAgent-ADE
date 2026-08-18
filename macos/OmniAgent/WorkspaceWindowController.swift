@@ -375,13 +375,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         return NSRect(x: 0, y: 0, width: width.rounded(), height: height.rounded())
     }
 
-    /// This app's grids never grow past two rows (`PaneGridShape.ladder`
-    /// tops out at 4×2), so there are exactly two sizes to pick between: a
-    /// single row — one pane, or two side by side — reads short and wide
-    /// for what's actually on screen, and two rows benefits from a little
-    /// more room per terminal. Both scale the reference frame uniformly, so
-    /// the window keeps its own proportions rather than being reshaped.
-    private static let rowWindowScale: [Int: CGFloat] = [1: 1.18, 2: 1.08]
+    /// One entry per row count `PaneGridShape.ladder` can produce (it tops out
+    /// at 4×3): a single row — one pane, or two side by side — reads short and
+    /// wide for what's actually on screen, and two or three rows benefit from a
+    /// little more room per terminal. All of them scale the reference frame
+    /// uniformly, so the window keeps its own proportions rather than being
+    /// reshaped.
+    ///
+    /// Two and three rows share a factor deliberately. Growing the window again
+    /// on the eighth-to-ninth pane would shove it around the screen at the exact
+    /// moment the user is placing a pane, and a uniform scale buys height only
+    /// by also buying width the third row does not need. Crossing into the
+    /// third row therefore leaves the window where it is.
+    private static let rowWindowScale: [Int: CGFloat] = [1: 1.18, 2: 1.08, 3: 1.08]
 
     /// Called whenever the on-screen pane set changes. Only acts on an
     /// actual row-count change — not every rename or reorder `onPanesChanged`
@@ -991,7 +997,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // greyed-out one. The title flips so the menu tells the truth
             // about what ⌘↩ is about to do — which is decided by the *focused*
             // pane, not by whether anything is zoomed. With a card up and focus
-            // moved off it (⌘1…⌘8, ⌥arrows), ⌘↩ hands the card to the focused
+            // moved off it (⌘1…⌘9, ⌥arrows), ⌘↩ hands the card to the focused
             // pane; an item reading "Exit Focus" there was describing the
             // opposite of what it does.
             menuItem.title = workspace.zoomedPaneID != nil

@@ -18,28 +18,33 @@ pub const SCROLLBACK_LINES: usize = 3_000;
 /// session*, and the app runs several sessions side by side — so the
 /// daemon's ceiling is the product, not the per-session number. It was 8,
 /// which silently made the UI's per-session cap a whole-app cap: a second
-/// session could not open a terminal once the first held eight.
+/// session could not open a terminal once the first held a full grid.
 ///
 /// This is a backstop against a runaway client, not a UI limit. The limit a
 /// user meets is `PaneGrid.maxPanes` per session, mirrored on the Swift side
 /// by `PaneWorkspaceView.maxTerminals` for this total.
-pub const MAX_SESSIONS: usize = 64;
+///
+/// Was 64 while a grid drew at most eight panes. The 4x3 rung raised the
+/// per-session cap to twelve, and the assertion below is what forces this
+/// number up with it.
+pub const MAX_SESSIONS: usize = 96;
 const OUTPUT_HISTORY_CHUNKS: usize = 256;
 const EXITED_SESSION_RETENTION: Duration = Duration::from_secs(10);
 const MAX_EXITED_SESSIONS: usize = MAX_SESSIONS * 2;
 
-/// The UI draws up to eight panes per workspace session, across several
-/// sessions. A ceiling below that product silently turns the per-session
-/// limit into a whole-app one: the next terminal is refused here whichever
-/// session asked for it, and the user meets a pane that will not start
-/// instead of a limit they can reason about. That was the bug.
+/// The UI draws up to twelve panes per workspace session (`PaneGrid.maxPanes`,
+/// the 4x3 rung's capacity), across several sessions. A ceiling below that
+/// product silently turns the per-session limit into a whole-app one: the next
+/// terminal is refused here whichever session asked for it, and the user meets
+/// a pane that will not start instead of a limit they can reason about. That
+/// was the bug.
 ///
 /// A `const` assertion rather than a test: this can only ever be wrong at
 /// compile time, so it should fail the build rather than a test run.
 const _: () = assert!(
-    MAX_SESSIONS >= 8 * 8,
-    "MAX_SESSIONS must cover eight sessions of eight panes each -- \
-     see PaneWorkspaceView.maxTerminals on the Swift side"
+    MAX_SESSIONS >= 8 * 12,
+    "MAX_SESSIONS must cover eight sessions of twelve panes each -- \
+     see PaneGrid.maxPanes and PaneWorkspaceView.maxTerminals on the Swift side"
 );
 
 // ---------------------------------------------------------------------------

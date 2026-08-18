@@ -85,7 +85,7 @@ enum WorkspaceRestoration {
     /// - **the pane cap** — a layout claiming more panes than the app will
     ///   run restores its first `limit` rather than being rejected wholesale.
     ///   This is the app-wide `PaneWorkspaceView.maxTerminals`; the
-    ///   eight-per-*session* cap is enforced by `PaneWorkspaceView.addPane`
+    ///   twelve-per-*session* cap is enforced by `PaneWorkspaceView.addPane`
     ///   at the other end, which is the only place that knows which session
     ///   each pane is joining;
     /// - **a fresh id for every tab that lost its own** — the tab still

@@ -228,7 +228,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     // MARK: - Reading the workspace
 
     /// The panes **on screen**: the active session's, in fill order. Layout,
-    /// focus, ⌘1…⌘8 and drag-and-drop all mean this one.
+    /// focus, ⌘1…⌘9 and drag-and-drop all mean this one.
     var paneIDs: [String] { grid?.paneIDs() ?? [] }
 
     /// **Every** pane that exists, across every session, in a stable order.
@@ -242,7 +242,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     var groupIDs: [String] { groupOrder }
 
     /// How many terminals one session is holding — what `PaneGrid.maxPanes`
-    /// is measured against, since eight is what a single grid can draw and a
+    /// is measured against, since twelve is what a single grid can draw and a
     /// session is what a grid holds.
     func paneCount(inGroup group: String) -> Int {
         grids[group]?.paneIDs().count ?? 0
@@ -251,13 +251,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// The most terminals the app will run at once across *every* session —
     /// the mirror of `omniagent-pty-daemon`'s `MAX_SESSIONS`, and the only
     /// cap that is about the whole app rather than one session. Eight
-    /// sessions of eight panes is the most the UI can draw, so that is the
-    /// number both sides carry.
+    /// sessions of twelve panes is the most the UI can draw, so that is the
+    /// number both sides carry. (It was 64 while a grid topped out at eight
+    /// panes; the 4x3 rung raised the product, and a ceiling below it would
+    /// silently turn the per-session cap back into a whole-app one.)
     ///
     /// Not a limit anyone should meet in normal use: the per-session cap is
     /// `PaneGrid.maxPanes`, and this exists so a runaway client cannot ask
     /// the daemon for unbounded PTYs.
-    static let maxTerminals = 64
+    static let maxTerminals = 96
 
     /// The panes that actually hold a PTY — what `maxTerminals` is measured
     /// against. Browser panes cost WebKit memory, not daemon slots.
@@ -291,7 +293,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// for a session id already on screen.
     @discardableResult
     func addPane(_ descriptor: PaneDescriptor) -> Bool {
-        // Per session, not per app: eight is what one grid can draw, and each
+        // Per session, not per app: twelve is what one grid can draw, and each
         // session has its own grid. A full session must not stop a different
         // one from opening a terminal.
         guard
@@ -649,7 +651,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // lifts — unconditionally, whether it was shrinking or not.
         //
         // Gating this on `overlayIsCollapsing` covered only one of the two ways a
-        // second pane can be focused. The other: ⌘↩ on pane A, then ⌘1…⌘8 or
+        // second pane can be focused. The other: ⌘↩ on pane A, then ⌘1…⌘9 or
         // ⌥arrow to move focus, neither of which clears the zoom, then ⌘↩ on pane
         // B. A is not collapsing, so it was skipped — and once `overlayPaneID`
         // named B instead, A was a pane nobody owned: the grid fed it cell rects
@@ -1147,7 +1149,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return swapPanes(focusedPaneID, neighbor)
     }
 
-    /// 1-based, in fill order — what ⌘1…⌘8 select.
+    /// 1-based, in fill order — what ⌘1…⌘9 select.
     @discardableResult
     func focusPane(at index: Int) -> Bool {
         let ids = paneIDs
@@ -1450,7 +1452,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     @objc func swapPaneUp(_ sender: Any?) { swapWithNeighbor(.up) }
     @objc func swapPaneDown(_ sender: Any?) { swapWithNeighbor(.down) }
 
-    /// ⌘1…⌘8 — the menu item's `tag` is the 1-based pane index in fill order.
+    /// ⌘1…⌘9 — the menu item's `tag` is the 1-based pane index in fill order.
     @objc func selectPane(_ sender: Any?) {
         guard let tag = (sender as? NSMenuItem)?.tag else { return }
         focusPane(at: tag)
@@ -1982,7 +1984,7 @@ final class PaneFocusOverlayView: NSView {
     /// `terminalView → card → this host → the window's content view`, and
     /// `PaneWorkspaceView` is not on it — so the nine pane selectors it
     /// implements answer to nothing and all sixteen Panes-menu items (⌘⌥arrows,
-    /// ⌃⌘arrows, ⌘1…⌘8) grey out, which they do not do with no card up. AppKit
+    /// ⌃⌘arrows, ⌘1…⌘9) grey out, which they do not do with no card up. AppKit
     /// asks each responder for a supplemental target when it does not handle an
     /// action itself, and uses the answer for validation as well as dispatch,
     /// which is exactly what is wanted here.

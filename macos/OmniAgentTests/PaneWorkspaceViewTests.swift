@@ -10,10 +10,11 @@ import SwiftTerm
 final class PaneWorkspaceViewTests: XCTestCase {
     // MARK: - Shapes
 
-    func testAddingPanesWalksTheApprovedLadderAndCapsAtEight() {
+    func testAddingPanesWalksTheApprovedLadderAndCapsAtTwelve() {
         let workspace = makeWorkspace(panes: 1)
         let expected: [(cols: Int, rows: Int)] = [
             (1, 1), (2, 1), (2, 2), (2, 2), (3, 2), (3, 2), (4, 2), (4, 2),
+            (4, 3), (4, 3), (4, 3), (4, 3),
         ]
         for count in 1...PaneGrid.maxPanes {
             if count > 1 { XCTAssertTrue(workspace.addPane(makeDescriptor("pane-\(count)"))) }
@@ -21,8 +22,41 @@ final class PaneWorkspaceViewTests: XCTestCase {
             XCTAssertEqual(workspace.grid?.cols, expected[count - 1].cols, "\(count) panes")
             XCTAssertEqual(workspace.grid?.rows, expected[count - 1].rows, "\(count) panes")
         }
-        XCTAssertFalse(workspace.addPane(makeDescriptor("pane-9")), "the cap refuses a ninth pane")
+        XCTAssertFalse(
+            workspace.addPane(makeDescriptor("pane-13")),
+            "the cap refuses a thirteenth pane"
+        )
         XCTAssertEqual(workspace.paneIDs.count, PaneGrid.maxPanes)
+    }
+
+    /// The ninth pane opens the third row at column 0 and the three cells
+    /// beside it stay empty, each one an add-a-pane placeholder, until panes
+    /// 10-12 replace them left to right.
+    func testTheNinthPaneOpensAThirdRowWithThreeEmptyCellsBesideIt() {
+        let workspace = makeWorkspace(panes: 8)
+        XCTAssertTrue(workspace.holePlaceholders.isEmpty, "the 4x2 rung is full")
+
+        XCTAssertTrue(workspace.addPane(makeDescriptor("pane-9")))
+        XCTAssertEqual(workspace.grid?.rows, 3)
+        XCTAssertEqual(workspace.grid?.cols, 4)
+        XCTAssertEqual(workspace.holePlaceholders.count, 3, "three empty cells beside it")
+
+        let ninth = try? XCTUnwrap(workspace.container(for: "pane-9"))
+        XCTAssertEqual(ninth?.frame.minX, PaneWorkspaceView.gridInset, "first column")
+        XCTAssertEqual(ninth?.frame.maxY, workspace.gridBounds.maxY, "bottom row")
+        for hole in workspace.holePlaceholders {
+            XCTAssertEqual(hole.frame.maxY, workspace.gridBounds.maxY, "all on the third row")
+            XCTAssertGreaterThan(hole.frame.minX, ninth?.frame.minX ?? 0, "and all to its right")
+        }
+
+        for index in 10...PaneGrid.maxPanes {
+            XCTAssertTrue(workspace.addPane(makeDescriptor("pane-\(index)")))
+            XCTAssertEqual(
+                workspace.holePlaceholders.count,
+                PaneGrid.maxPanes - index,
+                "\(index) panes: each new one takes an empty cell"
+            )
+        }
     }
 
     func testPanesAndHolesTileTheWorkspaceBoundsExactly() {
@@ -477,6 +511,35 @@ final class PaneWorkspaceViewTests: XCTestCase {
         try? png.write(to: directory.appendingPathComponent("\(name).png"))
     }
 
+    /// A render of the third row, for eyeballing rather than for CI: nine
+    /// panes (the ninth alone on the bottom row, three empty cells beside it)
+    /// and a full twelve. Drops PNGs when `PANE_RENDER_DIR` is set; the
+    /// assertions below hold either way.
+    func testThirdRowRendersAsThreeRowsOfFour() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 8)
+        defer { window.close() }
+
+        for index in 9...PaneGrid.maxPanes {
+            XCTAssertTrue(workspace.addPane(makeDescriptor("pane-\(index)")))
+            window.displayIfNeeded()
+            workspace.layoutSubtreeIfNeeded()
+            if index == 9 || index == PaneGrid.maxPanes {
+                let rep = try XCTUnwrap(render(workspace))
+                saveRenderForInspection(rep, named: "grid-\(index)-panes")
+            }
+        }
+
+        // Three distinct row bands, four distinct columns, every cell the same
+        // size — the 3x4 the brief asks for, read off the frames themselves.
+        let cells = workspace.paneIDs.compactMap { workspace.container(for: $0)?.frame }
+        XCTAssertEqual(cells.count, 12)
+        XCTAssertEqual(Set(cells.map(\.minY)).count, 3, "three rows")
+        XCTAssertEqual(Set(cells.map(\.minX)).count, 4, "four columns")
+        XCTAssertEqual(Set(cells.map { [$0.width, $0.height] }).count, 1, "one cell size")
+        XCTAssertEqual(cells.map(\.maxY).max(), workspace.gridBounds.maxY)
+        XCTAssertEqual(cells.map(\.maxX).max(), workspace.gridBounds.maxX)
+    }
+
     // MARK: - Milestone 1: mixed terminal/browser grids
 
     /// The seam's whole point proven at once: a browser pane sitting beside
@@ -900,13 +963,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertNotNil(workspace.focusedPaneID, "focus lands somewhere real, not on the closed pane")
     }
 
-    /// Eight terminals is what one grid can draw, and each session has its
+    /// A full grid is what one session can draw, and each session has its
     /// own grid — so it is a per-session number. Applying it to the whole app
     /// meant a full session stopped every other session from opening a
     /// terminal at all.
-    func testEachSessionGetsItsOwnEightTerminals() {
+    func testEachSessionGetsItsOwnFullGridOfTerminals() {
         let workspace = makeWorkspace(panes: PaneGrid.maxPanes)
-        XCTAssertFalse(workspace.addPane(makeDescriptor("pane-9")), "this session is full")
+        XCTAssertFalse(workspace.addPane(makeDescriptor("pane-over-cap")), "this session is full")
 
         var elsewhere = makeDescriptor("other-1")
         elsewhere.group = "sess-grp-2"
@@ -918,8 +981,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(workspace.paneIDs.count, 1, "and it shows only its own")
     }
 
-    /// The 64-terminal backstop mirrors the daemon's `MAX_SESSIONS` — a PTY
-    /// budget. A browser pane holds no PTY, so it must not spend one.
+    /// The app-wide terminal backstop mirrors the daemon's `MAX_SESSIONS` — a
+    /// PTY budget. A browser pane holds no PTY, so it must not spend one.
     func testBrowserPanesDoNotCountAgainstTheTerminalCap() {
         let workspace = makeWorkspace(panes: 2)
         XCTAssertEqual(workspace.terminalPaneCount, 2)
@@ -945,7 +1008,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(
             PaneWorkspaceView.maxTerminals,
             PaneGrid.maxPanes * 8,
-            "eight sessions of eight panes has to fit under the app-wide backstop"
+            "eight sessions of a full grid each has to fit under the app-wide backstop"
         )
     }
 
@@ -1231,7 +1294,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
     /// AppKit resolves them along the responder chain from the first responder —
     /// and while zoomed that chain runs terminal → card → overlay host → content
     /// view, with the workspace nowhere on it. Sixteen items (⌘⌥arrows, ⌃⌘arrows,
-    /// ⌘1…⌘8) silently greyed out, which they do not do with no card up.
+    /// ⌘1…⌘9) silently greyed out, which they do not do with no card up.
     func testThePanesMenuCommandsStayReachableAndEnabledWhileACardIsUp() throws {
         let (workspace, window, _) = makeSplitHostedWorkspace(panes: 4)
         defer { window.close() }
@@ -1341,7 +1404,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
     }
 
-    /// The card shows the focused pane, whichever command moved focus. ⌘1…⌘8 and
+    /// The card shows the focused pane, whichever command moved focus. ⌘1…⌘9 and
     /// ⌥arrows leave the zoom alone by themselves, which used to leave the caret
     /// behind the blur — an approval typed in answer to a notification going into
     /// a terminal the user cannot see. `revealPane` already obeyed this on its own

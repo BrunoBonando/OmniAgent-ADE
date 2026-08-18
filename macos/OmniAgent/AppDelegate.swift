@@ -167,8 +167,14 @@ enum ApplicationMenus {
             panes.addItem(item("Move Pane \(name)", swap, key, [.command, .control]))
         }
         panes.addItem(.separator())
+        // A key equivalent only up to nine: there is no single keystroke for
+        // "10", and handing AppKit a two-character equivalent gives an item
+        // that draws a nonsense shortcut and never fires. Panes 10-12 are still
+        // here as menu items (and still reachable from the palette and the
+        // grid); they simply have no ⌘ shortcut.
         for index in 1...PaneGrid.maxPanes {
-            let selection = item("Pane \(index)", Selector(("selectPane:")), "\(index)")
+            let key = index <= 9 ? "\(index)" : ""
+            let selection = item("Pane \(index)", Selector(("selectPane:")), key)
             selection.tag = index
             panes.addItem(selection)
         }

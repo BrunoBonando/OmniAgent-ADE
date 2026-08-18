@@ -85,22 +85,58 @@ struct PaneGrid: Equatable {
 
     /// `[cols, rows]`, ascending capacity. A grid is ALWAYS the first rung that
     /// fits its pane count (founder brief, 2026-07-26: "the only layouts
-    /// possible are: 1, 1x2, 2x2, 2x3, 2x4").
+    /// possible are: 1, 1x2, 2x2, 2x3, 2x4"; extended 2026-08-18 with a third
+    /// row on the widest rung: "3 rows and 4 columns").
     static let ladder: [PaneGridShape] = [
         PaneGridShape(cols: 1, rows: 1),
         PaneGridShape(cols: 2, rows: 1),
         PaneGridShape(cols: 2, rows: 2),
         PaneGridShape(cols: 3, rows: 2),
         PaneGridShape(cols: 4, rows: 2),
+        PaneGridShape(cols: 4, rows: 3),
     ]
 
     /// Panes one workspace can hold — the last rung's capacity.
-    static let maxPanes = 8
+    static let maxPanes = 12
+
+    /// The order cells are filled, as indices into `cells` (which is stored
+    /// column-major). Rows 0 and 1 fill column-major, exactly as they always
+    /// have; rows 2 and beyond then fill a row at a time, left to right.
+    ///
+    /// The split exists so the ninth pane does not reshuffle the eight already
+    /// on screen. A straight column-major fill of the 4x3 rung would seat panes
+    /// 1-3 down column 0 and push everybody else sideways; filling the two-row
+    /// band first means every pane keeps the exact cell it held in the 4x2 rung
+    /// and the newcomer opens the third row at column 0, leaving the three cells
+    /// beside it as holes for panes 10, 11 and 12 to claim in turn (founder
+    /// brief, 2026-08-18).
+    ///
+    /// For any rung with two rows or fewer this is the identity — the same
+    /// column-major order the TypeScript oracle and the committed fixture pin.
+    static func fillOrder(cols: Int, rows: Int) -> [Int] {
+        guard cols > 0, rows > 0 else { return [] }
+        let bandRows = min(rows, 2)
+        var order: [Int] = []
+        order.reserveCapacity(cols * rows)
+        for column in 0..<cols {
+            for row in 0..<bandRows {
+                order.append(column * rows + row)
+            }
+        }
+        guard rows > bandRows else { return order }
+        for row in bandRows..<rows {
+            for column in 0..<cols {
+                order.append(column * rows + row)
+            }
+        }
+        return order
+    }
 
     private(set) var cols: Int
     private(set) var rows: Int
-    /// Column-major: column 0 top to bottom, then column 1, … — `buildGrid`'s
-    /// fill order, and therefore `paneIds`' order.
+    /// Storage is column-major: column 0 top to bottom, then column 1, … The
+    /// order panes are *seated* in is `fillOrder`, which is this same order for
+    /// every rung up to 4x2 and differs only on the third row and below.
     private(set) var cells: [PaneCell]
     private(set) var columnFractions: [Double]
     private(set) var rowFractions: [[Double]]
@@ -131,17 +167,22 @@ struct PaneGrid: Equatable {
         return PaneGridShape(cols: cols, rows: max(1, Int(ceil(Double(count) / Double(cols)))))
     }
 
-    /// Arranges `ids` into their approved grid, column-major, padding leftover
+    /// Arranges `ids` into their approved grid in `fillOrder`, padding leftover
     /// cells with holes — always the complete rung's rectangle, never a short
     /// row. The ONLY function here that decides a shape.
     static func build(_ ids: [String]) -> PaneGrid? {
         guard !ids.isEmpty else { return nil }
         let shape = shape(count: ids.count)
-        var cells = ids.map(PaneCell.pane)
+        let order = fillOrder(cols: shape.cols, rows: shape.rows)
+        var cells = [PaneCell](repeating: .hole(0), count: shape.cols * shape.rows)
         var holeIndex = 0
-        while cells.count < shape.cols * shape.rows {
-            cells.append(.hole(holeIndex))
-            holeIndex += 1
+        for (slot, cell) in order.enumerated() {
+            if slot < ids.count {
+                cells[cell] = .pane(ids[slot])
+            } else {
+                cells[cell] = .hole(holeIndex)
+                holeIndex += 1
+            }
         }
         return PaneGrid(cols: shape.cols, rows: shape.rows, cells: cells)
     }
@@ -184,10 +225,15 @@ struct PaneGrid: Equatable {
 
     // MARK: - Identity
 
-    /// Every real (non-hole) id, in fill order — top to bottom within a column,
-    /// columns left to right. Exactly `paneIds`.
+    /// Every real (non-hole) id, in `fillOrder` — top to bottom within a column
+    /// for the first two rows, columns left to right, then a row at a time
+    /// below that. Exactly `paneIds` for every rung the TypeScript oracle knows.
+    ///
+    /// It has to be fill order rather than raw storage order: `synced` feeds
+    /// this straight back into `build` on the next open, so any other order
+    /// would rearrange the grid behind the user on a 3-row rung.
     func paneIDs() -> [String] {
-        cells.compactMap(\.paneID)
+        Self.fillOrder(cols: cols, rows: rows).compactMap { cells[$0].paneID }
     }
 
     func contains(_ id: String) -> Bool {

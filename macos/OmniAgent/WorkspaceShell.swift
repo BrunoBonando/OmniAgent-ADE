@@ -1926,16 +1926,16 @@ final class SessionsTreeView: NSView {
                 terminal.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
             }
 
-            // A session at the eight-terminal cap has nowhere to put a ninth —
-            // `PaneWorkspaceView.addPane` would refuse it — so the row goes
-            // away rather than sitting there doing nothing when pressed.
+            // A session at the twelve-terminal cap has nowhere to put a
+            // thirteenth — `PaneWorkspaceView.addPane` would refuse it — so the
+            // row goes away rather than sitting there doing nothing when pressed.
             if session.isCurrent, session.paneIDs.count < PaneGrid.maxPanes {
                 let add = NewTerminalRowView()
                 add.onPress = { [weak self] in self?.onNewTerminal?() }
                 rows.addArrangedSubview(add)
                 add.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
                 // The browser twin, under the same cap: both rows add to the
-                // same grid, and eight panes is eight panes whatever they hold.
+                // same grid, and a full grid is a full grid whatever it holds.
                 let addBrowser = NewTerminalRowView(title: "New browser", shortcut: "⇧⌘T")
                 addBrowser.onPress = { [weak self] in self?.onNewBrowser?() }
                 rows.addArrangedSubview(addBrowser)

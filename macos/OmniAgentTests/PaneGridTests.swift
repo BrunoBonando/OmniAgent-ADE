@@ -20,6 +20,10 @@ final class PaneGridTests: XCTestCase {
             (3, 2), // 6
             (4, 2), // 7
             (4, 2), // 8
+            (4, 3), // 9
+            (4, 3), // 10
+            (4, 3), // 11
+            (4, 3), // 12
         ]
         for (index, shape) in expected.enumerated() {
             XCTAssertEqual(
@@ -31,14 +35,124 @@ final class PaneGridTests: XCTestCase {
     }
 
     func testMaxPanesIsTheLastRungCapacity() {
-        XCTAssertEqual(PaneGrid.maxPanes, 8)
+        XCTAssertEqual(PaneGrid.maxPanes, 12)
         let shape = PaneGrid.shape(count: PaneGrid.maxPanes)
+        XCTAssertEqual(shape, PaneGridShape(cols: 4, rows: 3), "three rows and four columns")
         XCTAssertEqual(shape.cols * shape.rows, PaneGrid.maxPanes)
     }
 
     func testPastTheCapItKeepsTheWidestShapeAndGrowsRows() {
-        XCTAssertEqual(PaneGrid.shape(count: 9), PaneGridShape(cols: 4, rows: 3))
-        XCTAssertEqual(PaneGrid.build(ids(9))?.paneIDs(), ids(9))
+        XCTAssertEqual(PaneGrid.shape(count: 13), PaneGridShape(cols: 4, rows: 4))
+        XCTAssertEqual(PaneGrid.build(ids(13))?.paneIDs(), ids(13))
+    }
+
+    // MARK: - the third row
+
+    /// The founder's rule for the ninth pane (2026-08-18): it opens the third
+    /// row at the FIRST column, and the three cells beside it stay empty until
+    /// panes 10, 11 and 12 claim them left to right. Nothing already on screen
+    /// moves.
+    func testTheNinthPaneOpensTheThirdRowAtTheFirstColumnAndLeavesThreeHoles() {
+        let eight = PaneGrid.build(ids(8))!
+        let nine = PaneGrid.synced(eight, desiredIDs: ids(9))!
+
+        XCTAssertEqual(nine.cols, 4)
+        XCTAssertEqual(nine.rows, 3)
+        XCTAssertEqual(nine.position(of: "9").map { [$0.column, $0.row] }, [0, 2])
+        XCTAssertEqual(nine.cells.filter(\.isHole).count, 3)
+        for column in 1...3 {
+            XCTAssertTrue(
+                nine.cells[column * 3 + 2].isHole,
+                "column \(column)'s third row is an empty cell"
+            )
+        }
+    }
+
+    func testGrowingIntoTheThirdRowMovesNobodyAlreadyOnScreen() {
+        let eight = PaneGrid.build(ids(8))!
+        let seats = ids(8).map { id in eight.position(of: id).map { [$0.column, $0.row] } }
+        let nine = PaneGrid.synced(eight, desiredIDs: ids(9))!
+        XCTAssertEqual(
+            ids(8).map { id in nine.position(of: id).map { [$0.column, $0.row] } },
+            seats,
+            "every one of the first eight keeps the cell it held in the 4x2 rung"
+        )
+    }
+
+    /// Each further pane replaces the next empty cell along the third row —
+    /// left to right, one at a time, no reshuffle.
+    func testPanesTenElevenAndTwelveFillTheThirdRowLeftToRight() {
+        var grid = PaneGrid.build(ids(8))!
+        for count in 9...12 {
+            grid = PaneGrid.synced(grid, desiredIDs: ids(count))!
+            XCTAssertEqual(grid.rows, 3, "\(count) panes")
+            XCTAssertEqual(
+                grid.position(of: "\(count)").map { [$0.column, $0.row] },
+                [count - 9, 2],
+                "pane \(count) takes column \(count - 9) of the third row"
+            )
+            XCTAssertEqual(grid.cells.filter(\.isHole).count, 12 - count, "\(count) panes")
+        }
+        XCTAssertEqual(grid.paneIDs(), ids(12))
+    }
+
+    /// The layout `build` produces for a full third row, cell by cell, in the
+    /// column-major storage order `cells` uses.
+    func testBuildingTwelvePanesIsALiteralThreeByFourWithNoHoles() {
+        let grid = PaneGrid.build(ids(12))!
+        XCTAssertEqual(
+            grid.cells,
+            [
+                .pane("1"), .pane("2"), .pane("9"), // column 0, top to bottom
+                .pane("3"), .pane("4"), .pane("10"),
+                .pane("5"), .pane("6"), .pane("11"),
+                .pane("7"), .pane("8"), .pane("12"),
+            ]
+        )
+        XCTAssertEqual(grid.paneIDs(), ids(12), "fill order, not storage order")
+    }
+
+    /// The fill order every rung the TypeScript oracle knows about is still
+    /// plain column-major — the third-row rule must not disturb 1 through 8.
+    func testFillOrderIsPlainColumnMajorForEveryTwoRowRung() {
+        for shape in PaneGrid.ladder where shape.rows <= 2 {
+            XCTAssertEqual(
+                PaneGrid.fillOrder(cols: shape.cols, rows: shape.rows),
+                Array(0..<(shape.cols * shape.rows)),
+                "\(shape.cols)x\(shape.rows)"
+            )
+        }
+    }
+
+    func testDirectionalNeighboursReachTheThirdRow() {
+        let grid = PaneGrid.build(ids(12))!
+        XCTAssertEqual(grid.neighbor(of: "2", direction: .down), "9")
+        XCTAssertEqual(grid.neighbor(of: "9", direction: .up), "2")
+        XCTAssertEqual(grid.neighbor(of: "9", direction: .right), "10")
+        XCTAssertNil(grid.neighbor(of: "9", direction: .down), "the grid never wraps")
+        XCTAssertNil(grid.neighbor(of: "9", direction: .left))
+    }
+
+    /// A half-full third row is holes on its right, and a hole is never a focus
+    /// target: a vertical move into one stops, a horizontal move into one falls
+    /// back to the nearest real cell above — the rule the 2x2 rung's single
+    /// bottom-right hole already follows.
+    func testTheThirdRowsHolesAreNeverFocusTargets() {
+        let grid = PaneGrid.build(ids(9))!
+        XCTAssertNil(grid.neighbor(of: "4", direction: .down), "column 1's third row is a hole")
+        XCTAssertEqual(grid.neighbor(of: "9", direction: .right), "4", "never lands on a hole")
+    }
+
+    func testAThreeRowGridTilesItsBoundsExactly() {
+        let layout = PaneGrid.build(ids(12))!.layout(in: bounds, dividerThickness: 6)
+        XCTAssertEqual(layout.frames.count, 12)
+        XCTAssertEqual(layout.dividers.filter { $0.axis == .vertical }.count, 3)
+        XCTAssertEqual(layout.dividers.filter { $0.axis == .horizontal }.count, 8, "two seams per column")
+        for frame in layout.frames.values {
+            XCTAssertEqual(frame, frame.integral)
+        }
+        XCTAssertEqual(layout.frames["9"]?.maxY, bounds.maxY, "the third row reaches the bottom edge")
+        XCTAssertEqual(layout.frames["12"]?.maxX, bounds.maxX, "the last column reaches the right edge")
     }
 
     // MARK: - build
@@ -91,7 +205,7 @@ final class PaneGridTests: XCTestCase {
         XCTAssertEqual(grid?.paneIDs(), ids(8))
     }
 
-    func testBuildKeepsEveryRealIDOnceInOrderAndPadsEveryRungToItsRectangle() {
+    func testBuildKeepsEveryRealIDOnceInFillOrderAndPadsEveryRungToItsRectangle() {
         for count in 1...PaneGrid.maxPanes {
             let grid = PaneGrid.build(ids(count))
             XCTAssertEqual(grid?.paneIDs(), ids(count), "\(count) panes")
