@@ -579,10 +579,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
     /// radius is 12 and the ring is a bright accent. Each child is rounded one
     /// radius smaller, concentric inside the container's.
     func testThePaneRingSurvivesTheCorners() throws {
-        let workspace = makeWorkspace(panes: 2)
+        let (workspace, window) = makeAttachedWorkspace(panes: 2)
+        defer { window.close() }
+        window.displayIfNeeded()
         let pane = try XCTUnwrap(workspace.container(for: "pane-1"))
         let header = try XCTUnwrap(pane.header.layer)
         let surface = try XCTUnwrap(pane.surface.layer)
+        let bar = try XCTUnwrap(pane.approvalBar.layer)
 
         for child in [header, surface] {
             XCTAssertEqual(
@@ -594,10 +597,43 @@ final class PaneWorkspaceViewTests: XCTestCase {
         }
         // Only the corners each child actually owns: rounding the header's
         // bottom or the terminal's top would cut a notch out of the seam between
-        // them, in the middle of the pane. `MinY` is the top pair — the
-        // container is flipped, and that flips its sublayers' geometry with it.
-        XCTAssertEqual(header.maskedCorners, [.layerMinXMinYCorner, .layerMaxXMinYCorner])
-        XCTAssertEqual(surface.maskedCorners, [.layerMinXMaxYCorner, .layerMaxXMaxYCorner])
+        // them, in the middle of the pane. Which *literal* pair that is differs
+        // per child: the compositor resolves `maskedCorners` in the layer's own
+        // space, whose screen orientation is the XOR of `isGeometryFlipped`
+        // down the layer chain — AppKit sets it per backing layer to preserve
+        // each *view's* own coordinate convention, not the container's. The
+        // terminal surface is unflipped, so a literal `MaxY` pair put its
+        // rounding at its top corners on screen: an accent wedge under the
+        // header's hairline, and the ring pinching out to nothing at the pane's
+        // bottom corners. The offscreen render harness cannot see this —
+        // `CALayer.render(in:)` does not apply the compositor's geometry flips
+        // — so this asserts on the layer state the compositor actually consumes.
+        let minY: CACornerMask = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        let maxY: CACornerMask = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+        func rendersMinYAtTheTop(_ layer: CALayer) -> Bool {
+            var flipped = false
+            var current: CALayer? = layer
+            while let step = current {
+                flipped = flipped != step.isGeometryFlipped
+                current = step.superlayer
+            }
+            return flipped
+        }
+        XCTAssertEqual(
+            header.maskedCorners,
+            rendersMinYAtTheTop(header) ? minY : maxY,
+            "the header's rounded pair has to render at the screen top"
+        )
+        XCTAssertEqual(
+            surface.maskedCorners,
+            rendersMinYAtTheTop(surface) ? maxY : minY,
+            "the surface's rounded pair has to render at the screen bottom"
+        )
+        XCTAssertEqual(
+            bar.maskedCorners,
+            rendersMinYAtTheTop(bar) ? maxY : minY,
+            "the approval bar takes over the screen-bottom pair while showing"
+        )
 
         XCTAssertTrue(workspace.toggleZoom("pane-1"))
         XCTAssertEqual(

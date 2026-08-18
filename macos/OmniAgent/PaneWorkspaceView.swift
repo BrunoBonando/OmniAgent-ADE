@@ -1624,19 +1624,36 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// one radius smaller, concentric inside the container's, keeps the gap the
     /// same 1pt the whole way round.
     ///
-    /// `MinY` is the **top** corner pair here: this view is flipped, and a
-    /// flipped superview flips its sublayers' geometry with it.
+    /// `maskedCorners` is resolved in each child's **own** coordinate space —
+    /// AppKit manages the backing layers' geometry flips to preserve every
+    /// view's own convention, so this container being flipped says nothing
+    /// about which literal pair a child needs. Naming `MaxY` "the bottom" for
+    /// every child put the unflipped terminal surface's rounding at its *top*
+    /// on screen: an accent wedge under the header's hairline, and the ring
+    /// pinching out to nothing at the pane's bottom corners — while the same
+    /// literal pair was correct on the flipped browser surface. The offscreen
+    /// render harness cannot show the difference (`CALayer.render(in:)` skips
+    /// the compositor's geometry flips), which is how it went unseen.
     private func roundChildren(inside radius: CGFloat) {
         let inner = max(0, radius - Self.borderWidth)
         header.wantsLayer = true
         surface.wantsLayer = true
-        // The bottom corner pair belongs to whichever child sits on the bottom
-        // edge — the approval bar takes it over while it is showing.
-        let bottom = CACornerMask([.layerMinXMaxYCorner, .layerMaxXMaxYCorner])
+        // The screen-bottom corner pair belongs to whichever child sits on the
+        // bottom edge — the approval bar takes it over while it is showing.
+        func screenBottom(of child: NSView) -> CACornerMask {
+            child.isFlipped
+                ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+                : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        }
+        func screenTop(of child: NSView) -> CACornerMask {
+            child.isFlipped
+                ? [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+                : [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+        }
         for (child, corners) in [
-            (header as NSView, CACornerMask([.layerMinXMinYCorner, .layerMaxXMinYCorner])),
-            (surface as NSView, approvalBar.isHidden ? bottom : []),
-            (approvalBar as NSView, bottom),
+            (header as NSView, screenTop(of: header)),
+            (surface as NSView, approvalBar.isHidden ? screenBottom(of: surface) : []),
+            (approvalBar as NSView, screenBottom(of: approvalBar)),
         ] {
             child.layer?.cornerRadius = inner
             child.layer?.cornerCurve = .continuous
