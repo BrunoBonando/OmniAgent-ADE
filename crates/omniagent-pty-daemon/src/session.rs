@@ -83,6 +83,15 @@ const TOOL_EXECUTION_SCREEN_MARKERS: &[&str] = &["to run in background)"];
 /// non-zero value, which is what separates a rendered result field from prose.
 const ERROR_MARKER: &str = "Exit code";
 
+/// The glyphs Claude cycles through in its working footer.
+///
+/// Measured live against v2.1.234 through this daemon's own parser: a working
+/// pane reads `✽ Brewing… (4m 59s · ↓ 17.2k tokens)`, and the moment the turn
+/// ends the same line becomes `✻ Baked for 6m 32s`. Same glyph, so the glyph
+/// alone decides nothing -- the ellipsis is what separates "still going" from
+/// "took this long".
+const WORKING_SPINNERS: [char; 6] = ['·', '✢', '✳', '✶', '✽', '✻'];
+
 /// Longer than this without output and the engine is considered quiet.
 const OUTPUT_QUIET_THRESHOLD: Duration = Duration::from_millis(700);
 
@@ -138,6 +147,20 @@ impl ActivityState {
 
 fn contains_attention_marker(text: &str) -> bool {
     ATTENTION_MARKERS.iter().any(|marker| text.contains(marker))
+}
+
+/// True when Claude's working footer is on screen.
+///
+/// The activity heuristic below cannot carry this on its own: measured live,
+/// a pane that was visibly `✽ Brewing…` flapped Ready/Thinking six times in ten
+/// seconds, because Claude repaints with gaps wider than
+/// `OUTPUT_QUIET_THRESHOLD` and runs shorter than `SUSTAINED_ACTIVITY_MIN`.
+/// The footer is state, not cadence, so it holds for the whole turn.
+fn contains_working_marker(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with(WORKING_SPINNERS) && line.contains('…')
+    })
 }
 
 fn contains_tool_execution_marker(text: &str) -> bool {
@@ -661,11 +684,15 @@ impl ManagedSession {
         if contains_tool_execution_marker(&screen) {
             return Some(SessionStatus::ToolExecution);
         }
-        let busy = self
-            .activity
-            .lock()
-            .map(|activity| activity.is_busy(Instant::now()))
-            .unwrap_or(false);
+        // Screen first, timing second: the footer is the engine saying it is
+        // working, the heuristic only guesses. The guess stays as the fallback
+        // for engines whose TUI this does not know.
+        let busy = contains_working_marker(&screen)
+            || self
+                .activity
+                .lock()
+                .map(|activity| activity.is_busy(Instant::now()))
+                .unwrap_or(false);
         Some(if busy {
             SessionStatus::Thinking
         } else {
@@ -1142,6 +1169,22 @@ mod status_tests {
     fn the_exit_code_value_is_found_through_styling() {
         assert!(contains_error_marker("Exit code: \u{1b}[1m2\u{1b}[0m"));
         assert!(!contains_error_marker("Exit code: \u{1b}[1m0\u{1b}[0m"));
+    }
+
+    /// Captured live from real v2.1.234 panes through this daemon's parser.
+    /// The finished line is the one that used to be indistinguishable.
+    #[test]
+    fn a_working_footer_is_recognised_and_a_finished_one_is_not() {
+        assert!(contains_working_marker("✽ Brewing… (4m 59s · ↓ 17.2k tokens)"));
+        assert!(contains_working_marker(
+            "✶ Beboppin'… (2m 28s · ↓ 7.4k tokens · thought for 1s)"
+        ));
+        assert!(contains_working_marker("  ✻ Recombobulating… (5s)"));
+        assert!(!contains_working_marker("✻ Baked for 6m 32s"));
+        assert!(!contains_working_marker("⏵⏵ auto mode on (shift+tab to cycle)"));
+        // A truncated command line ends in an ellipsis too, but does not open
+        // with a spinner.
+        assert!(!contains_working_marker("  echo \"=== LOG ===\"; git log --oneli…"));
     }
 
     #[test]

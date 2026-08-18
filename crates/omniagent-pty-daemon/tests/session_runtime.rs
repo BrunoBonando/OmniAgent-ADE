@@ -77,6 +77,62 @@ fn shell_status_tracks_a_silent_foreground_command_without_screen_polling() {
     registry.kill("shell-status");
 }
 
+/// The bug this exists for: a Claude pane that is visibly working reads green
+/// the moment it stops repainting for 700ms. Measured live before the fix --
+/// one `✽ Brewing…` pane flapped Ready/Thinking six times in ten seconds.
+///
+/// A fake `claude` on the argv is what makes the engine inference pick the
+/// agent path; the point is the *silence* after the footer is drawn.
+#[test]
+fn an_agent_showing_its_working_footer_stays_busy_while_it_is_silent() {
+    let dir = std::env::temp_dir().join(format!("omniagent-working-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = dir.join("claude");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nprintf '\\342\\234\\275 Brewing\\342\\200\\246 (4m 59s)\\r\\n'\nsleep 4\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let registry = SessionRegistry::new();
+    let session = registry
+        .create_session(CreateSession {
+            id: "working-footer".into(),
+            command: vec![fake.to_string_lossy().into_owned()],
+            cwd: None,
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+            transcript_path: None,
+        })
+        .unwrap();
+    let (_, subscription) = session.attach_and_subscribe(None, 64);
+
+    let mut saw_busy = false;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        match subscription.recv_timeout(Duration::from_millis(200)) {
+            Ok(SessionEvent::Status { status, .. }) => match status {
+                omniagent_pty_daemon::protocol::SessionStatus::Thinking => saw_busy = true,
+                omniagent_pty_daemon::protocol::SessionStatus::Ready if saw_busy => {
+                    panic!("went Ready while the working footer was still on screen")
+                }
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    assert!(saw_busy, "a visible working footer must read as busy");
+    registry.kill("working-footer");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn real_pty_output_preserves_raw_bytes_and_transcript_is_independent() {
     let temp = tempfile::tempdir().unwrap();
