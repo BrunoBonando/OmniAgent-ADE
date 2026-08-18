@@ -1698,6 +1698,72 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(clicked, "the panel's onClick must forward to its content view's")
     }
 
+    /// `show` in screen coordinates against a real (offscreen, zero-size is
+    /// fine — nothing here needs to be visible) NSWindow, checking the
+    /// bookkeeping `PaneWorkspaceView` will rely on: the right number of
+    /// child windows, at the geometry `blurBands` computed, and cleanly
+    /// removable — this is the level real coverage is possible at; the
+    /// blur itself is exactly as unrenderable offscreen as
+    /// PaneZoomBackdropView's always was.
+    func testZoomBlurOverlayShowsOneChildWindowPerBandAndHideRemovesThem() {
+        let parent = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.borderless], backing: .buffered, defer: true
+        )
+        let overlay = PaneZoomBlurOverlay()
+        let outer = NSRect(x: 0, y: 0, width: 1000, height: 800)
+        let hole = NSRect(x: 300, y: 250, width: 400, height: 300)
+
+        overlay.show(around: hole, in: outer, parent: parent)
+
+        let expectedBands = PaneZoomBlurOverlay.blurBands(around: hole, in: outer)
+        XCTAssertEqual(parent.childWindows?.count, expectedBands.count)
+        XCTAssertEqual(Set(parent.childWindows?.map(\.frame) ?? []), Set(expectedBands))
+        XCTAssertTrue(overlay.isShown)
+
+        overlay.hide()
+
+        XCTAssertEqual(parent.childWindows?.count ?? 0, 0)
+        XCTAssertFalse(overlay.isShown)
+    }
+
+    func testZoomBlurOverlayReusesItsPanelsRatherThanLeakingNewOnesEachShow() {
+        let parent = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.borderless], backing: .buffered, defer: true
+        )
+        let overlay = PaneZoomBlurOverlay()
+        let outer = NSRect(x: 0, y: 0, width: 1000, height: 800)
+
+        overlay.show(around: NSRect(x: 300, y: 250, width: 400, height: 300), in: outer, parent: parent)
+        let firstRun = Set(parent.childWindows?.map(ObjectIdentifier.init) ?? [])
+
+        overlay.show(around: NSRect(x: 100, y: 100, width: 200, height: 200), in: outer, parent: parent)
+        let secondRun = Set(parent.childWindows?.map(ObjectIdentifier.init) ?? [])
+
+        XCTAssertEqual(firstRun, secondRun, "the same panel objects, repositioned, not new ones each call")
+    }
+
+    func testZoomBlurOverlayClickForwardsToOnClick() {
+        let parent = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.borderless], backing: .buffered, defer: true
+        )
+        let overlay = PaneZoomBlurOverlay()
+        var clicked = false
+        overlay.onClick = { clicked = true }
+
+        overlay.show(
+            around: NSRect(x: 300, y: 250, width: 400, height: 300),
+            in: NSRect(x: 0, y: 0, width: 1000, height: 800),
+            parent: parent
+        )
+        let panel = try! XCTUnwrap(parent.childWindows?.first as? PaneZoomBlurPanel)
+        panel.onClick?()
+
+        XCTAssertTrue(clicked)
+    }
+
     // MARK: - Click to activate
 
     /// Clicking anywhere in a terminal makes it the active one. Every click

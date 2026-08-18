@@ -2668,6 +2668,56 @@ final class PaneZoomBackdropView: NSVisualEffectView {
 /// window underneath with no hit-testing or click-passthrough trick
 /// needed: there is simply nothing covering that region.
 final class PaneZoomBlurOverlay {
+    private var panels: [PaneZoomBlurPanel] = []
+    var onClick: (() -> Void)?
+
+    /// True once at least one band is on screen — `PaneWorkspaceView` uses
+    /// this to know a window resize needs to reposition them rather than
+    /// leave stale geometry from before the resize.
+    var isShown: Bool { !panels.isEmpty }
+
+    /// Shows exactly as many panels as `blurBands` computes for this
+    /// `hole`/`outer` pair, reusing whatever panels already exist — a panel
+    /// is a generic rectangle of blur, which band it was last positioned as
+    /// does not matter — creating new ones only if more are needed and
+    /// releasing extras back out rather than leaving them parked offscreen.
+    func show(around hole: NSRect, in outer: NSRect, parent: NSWindow) {
+        let bands = Self.blurBands(around: hole, in: outer)
+        guard !bands.isEmpty else { return hide() }
+
+        while panels.count < bands.count {
+            panels.append(PaneZoomBlurPanel())
+        }
+        while panels.count > bands.count {
+            let panel = panels.removeLast()
+            parent.removeChildWindow(panel)
+            panel.orderOut(nil)
+        }
+
+        for (panel, band) in zip(panels, bands) {
+            panel.onClick = { [weak self] in self?.onClick?() }
+            panel.setFrame(band, display: true)
+            if panel.parent == nil {
+                parent.addChildWindow(panel, ordered: .above)
+            }
+            panel.orderFront(nil)
+        }
+    }
+
+    /// Idempotent: safe to call whether or not anything is currently shown,
+    /// so every call site that ends a zoom transition can call it
+    /// unconditionally rather than tracking whether blur happened to be up.
+    func hide() {
+        guard !panels.isEmpty else { return }
+        for panel in panels {
+            panel.parent?.removeChildWindow(panel)
+            panel.orderOut(nil)
+        }
+        panels.removeAll()
+    }
+
+    // MARK: - Geometry
+
     /// The standard "outer rect minus inner rect" decomposition: a
     /// full-width band above the hole, a full-width band below it, and two
     /// bands exactly as tall as the hole to its left and right. Together
