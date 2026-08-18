@@ -551,9 +551,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             .rounded(.down)
         let height = min(host.height * fit, max(0, host.height - focusOverlayPadding * 2))
             .rounded(.down)
+        // Not rounded: `width`/`height` are already whole, and rounding an
+        // origin derived from an *odd* one would land up to half a point off
+        // true centre — invisible at the old 1280×800 cap, which happened to
+        // divide evenly for every size a test asked for, but not a property
+        // the geometry actually guaranteed.
         return NSRect(
-            x: (host.midX - width / 2).rounded(),
-            y: (host.midY - height / 2).rounded(),
+            x: host.midX - width / 2,
+            y: host.midY - height / 2,
             width: width,
             height: height
         )
@@ -2486,21 +2491,24 @@ final class PaneBadgeView: NSView {
 /// property of the *host*, not of this view — a test host with no display attached
 /// must not construct one.
 final class PaneZoomBackdropView: NSVisualEffectView {
-    /// The material the app behind the card is seen through. `.headerView` is
-    /// the thinnest one that still blurs: it is meant to sit *over* window
-    /// content, so it carries almost no tint of its own, where `.hudWindow` —
-    /// which this was — is a dark panel material and darkened everything behind
-    /// the card on top of whatever tint was laid over it.
-    static let material: NSVisualEffectView.Material = .headerView
+    /// The material the app behind the card is seen through. Materials come
+    /// in roughly three blur strengths: `.headerView` — tried first — sits in
+    /// the thinnest tier, meant to sit over window content with barely any
+    /// softening of its own, which read as a dim wash with no actual blur to
+    /// it. `.hudWindow` sits at the other end: a dark panel material that
+    /// darkened everything behind the card on top of whatever tint was laid
+    /// over it. `.sidebar` is the middle tier real apps use for genuine
+    /// frosted glass — visibly blurred, without `.hudWindow`'s dark panel tint.
+    static let material: NSVisualEffectView.Material = .sidebar
 
     var onClick: (() -> Void)?
 
-    /// The blur material alone, at full alpha, reads as near-opaque black —
+    /// The blur material alone, at full alpha, reads as near-opaque —
     /// there is nothing of the sharp background left in the composite, only
-    /// the material's own dark tint. Landing short of 1 lets a fraction of
+    /// the material's own tint. Landing short of 1 lets a fraction of
     /// the untinted, unblurred pixels back into the mix, which is what turns
     /// "blurred" into "blurred but still legible" instead of "blacked out".
-    private static let shownAlpha: CGFloat = 0.7
+    private static let shownAlpha: CGFloat = 0.78
 
     private var isShown = false
 
@@ -2976,6 +2984,14 @@ final class PaneHolePlaceholderView: NSView {
             options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
             owner: self
         ))
+        // The hit rect is derived from `bounds`, so a resized cell needs its
+        // cursor rect recomputed too — `updateTrackingAreas` is the one hook
+        // that already fires on exactly that.
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(browserHitRect, cursor: .pointingHand)
     }
 
     override func mouseMoved(with event: NSEvent) {
