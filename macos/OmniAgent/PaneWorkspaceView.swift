@@ -1438,6 +1438,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
             header.status = status
             // The unselected pane's veil is tinted by the same status.
             (surface as? TerminalSurfaceView)?.wash.status = status
+            updateApprovalBar()
             updateChrome()
         }
     }
@@ -1470,6 +1471,16 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// The drop tint, as a top-most sibling rather than a fill in `draw(_:)`,
     /// for the same compositing reason.
     let dropHighlight = PaneDropOverlayView()
+
+    /// The design's amber strip along the bottom while the agent is blocked on
+    /// a question — the question text plus one clickable button per on-screen
+    /// option. Only a terminal pane ever shows it.
+    let approvalBar = PaneApprovalBarView()
+
+    /// Re-reads the dialog off the screen while the bar is up: an answered
+    /// AskUserQuestion advances to its next question with the status still
+    /// `awaitingApproval`, and nothing else would tell the buttons to change.
+    private var approvalPollTimer: Timer?
 
     private weak var workspace: PaneWorkspaceView?
     private var workingRing: CAGradientLayer?
@@ -1527,6 +1538,11 @@ final class PaneContainerView: NSView, NSDraggingSource {
         surface.wantsLayer = true
         surface.layer?.backgroundColor = Self.paneBackgroundColor.cgColor
         addSubview(surface)
+        approvalBar.isHidden = true
+        approvalBar.onChoose = { [weak self] input in
+            (self?.surface as? TerminalSurfaceView)?.sendInput(input)
+        }
+        addSubview(approvalBar)
         addSubview(dropHighlight, positioned: .above, relativeTo: nil)
         updateChrome()
         registerForDraggedTypes([PaneWorkspaceView.paneDragType])
@@ -1567,11 +1583,18 @@ final class PaneContainerView: NSView, NSDraggingSource {
             width: width,
             height: min(headerHeight, max(0, bounds.height - inset * 2))
         )
+        let barHeight = approvalBar.isHidden ? 0 : PaneApprovalBarView.height
         surface.frame = CGRect(
             x: inset,
             y: inset + headerHeight,
             width: width,
-            height: max(0, bounds.height - headerHeight - inset * 2)
+            height: max(0, bounds.height - headerHeight - barHeight - inset * 2)
+        )
+        approvalBar.frame = CGRect(
+            x: inset,
+            y: inset + headerHeight + surface.frame.height,
+            width: width,
+            height: barHeight
         )
         dropHighlight.frame = bounds
         workingRing?.frame = bounds
@@ -1607,15 +1630,54 @@ final class PaneContainerView: NSView, NSDraggingSource {
         let inner = max(0, radius - Self.borderWidth)
         header.wantsLayer = true
         surface.wantsLayer = true
+        // The bottom corner pair belongs to whichever child sits on the bottom
+        // edge — the approval bar takes it over while it is showing.
+        let bottom = CACornerMask([.layerMinXMaxYCorner, .layerMaxXMaxYCorner])
         for (child, corners) in [
             (header as NSView, CACornerMask([.layerMinXMinYCorner, .layerMaxXMinYCorner])),
-            (surface as NSView, CACornerMask([.layerMinXMaxYCorner, .layerMaxXMaxYCorner])),
+            (surface as NSView, approvalBar.isHidden ? bottom : []),
+            (approvalBar as NSView, bottom),
         ] {
             child.layer?.cornerRadius = inner
             child.layer?.cornerCurve = .continuous
             child.layer?.maskedCorners = corners
             child.layer?.masksToBounds = true
         }
+    }
+
+    /// Shows the approval bar while a terminal's agent is blocked on a dialog,
+    /// and keeps its buttons matching the screen: a 0.5s re-parse while up,
+    /// because the status event arrives once but the dialog keeps changing
+    /// (an answered question advances to the next one, still awaiting).
+    private func updateApprovalBar() {
+        guard status == .awaitingApproval, surface is TerminalSurfaceView else {
+            guard !approvalBar.isHidden else { return }
+            approvalPollTimer?.invalidate()
+            approvalPollTimer = nil
+            approvalBar.isHidden = true
+            needsLayout = true
+            return
+        }
+        approvalBar.isHidden = false
+        refreshApprovalPrompt()
+        if approvalPollTimer == nil {
+            let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+                self?.refreshApprovalPrompt()
+            }
+            timer.tolerance = 0.2
+            RunLoop.main.add(timer, forMode: .common)
+            approvalPollTimer = timer
+        }
+        needsLayout = true
+    }
+
+    func refreshApprovalPrompt() {
+        guard let terminal = surface as? TerminalSurfaceView else { return }
+        approvalBar.prompt = ApprovalPrompt.parse(lines: terminal.visibleTailLines())
+    }
+
+    deinit {
+        approvalPollTimer?.invalidate()
     }
 
     /// Which colour the 1pt ring takes. Ordered by urgency: a drop in flight,

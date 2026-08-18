@@ -304,6 +304,26 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         connection.write(sessionID: sessionID, bytes: Data(data))
     }
 
+    /// Writes to the PTY exactly as typing would — the approval bar's buttons
+    /// answer a dialog through the same door as the keyboard.
+    func sendInput(_ text: String) {
+        connection.write(sessionID: sessionID, bytes: Data(text.utf8))
+    }
+
+    /// The tail of the terminal's text, trailing blank rows dropped — what
+    /// `ApprovalPrompt.parse` reads the on-screen dialog out of. Trailing
+    /// blanks go first because a fresh screen pads to the viewport height
+    /// below the dialog, and a plain suffix would be all padding.
+    func visibleTailLines(limit: Int = 40) -> [String] {
+        let data = terminalView.terminal.getBufferAsData()
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        while let last = lines.last, last.isEmpty {
+            lines.removeLast()
+        }
+        return lines.suffix(limit).map(String.init)
+    }
+
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
         scheduleResize()
     }
