@@ -1397,8 +1397,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let menu = controller.paneOptionsMenu()
         XCTAssertEqual(
             menu.items.map(\.title),
-            ["Rename Conversation…", "Interrupt", "Kill Session", "Reattach",
-             "Focus This Terminal", "Use Option as Meta", "", "Close Pane"]
+            ["Rename Conversation…", "Use Option as Meta", "", "Close Pane"]
         )
         XCTAssertTrue(
             menu.items.allSatisfy { $0.isSeparatorItem || ($0.action != nil && $0.target == nil) },
@@ -1434,6 +1433,10 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             colors?.submenu?.items.map { $0.representedObject as? String },
             WorkspaceWindowController.claudeColors,
             "the lowercase name is what gets typed at the terminal"
+        )
+        XCTAssertTrue(
+            colors?.submenu?.items.allSatisfy { $0.image != nil } == true,
+            "the swatch is what makes a list of colour words pickable at a glance"
         )
     }
 

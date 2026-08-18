@@ -1130,12 +1130,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     func paneOptionsMenu() -> NSMenu {
         let menu = NSMenu()
         let engine = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }?.engine
+        // Interrupt / Kill / Reattach / Focus live in the main menu with the
+        // keystrokes that are how anyone actually reaches them; repeating them
+        // here made a six-item list you had to read to find the two things the
+        // ⋯ is for.
         let items: [(String, Selector)] = [
             ("Rename Conversation…", #selector(renameConversation(_:))),
-            ("Interrupt", Selector(("interruptSession:"))),
-            ("Kill Session", Selector(("killSession:"))),
-            ("Reattach", Selector(("reattachSession:"))),
-            ("Focus This Terminal", Selector(("toggleFocusMode:"))),
             ("Use Option as Meta", Selector(("toggleOptionAsMeta:"))),
         ]
         for (title, action) in items {
@@ -1194,9 +1194,34 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 keyEquivalent: ""
             )
             item.representedObject = color
+            item.image = Self.swatch(for: color)
             menu.addItem(item)
         }
         return menu
+    }
+
+    /// The dot beside each name. The submenu is a list of colour *words*, and a
+    /// word is a slow way to pick a colour; the swatch is what you actually
+    /// read. `default` is the terminal's own colour rather than one of the
+    /// nine, so it gets the label grey instead of a lie about which hue it is.
+    static func swatch(for color: String) -> NSImage {
+        let fill: NSColor
+        switch color {
+        case "red": fill = .systemRed
+        case "blue": fill = .systemBlue
+        case "green": fill = .systemGreen
+        case "yellow": fill = .systemYellow
+        case "purple": fill = .systemPurple
+        case "orange": fill = .systemOrange
+        case "pink": fill = .systemPink
+        case "cyan": fill = .systemTeal
+        default: fill = .secondaryLabelColor
+        }
+        return NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
+            fill.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+            return true
+        }
     }
 
     /// One name off that submenu, typed at the terminal.
