@@ -1386,6 +1386,25 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertNil(controller.lastFocusedPaneOnLaunch, "spent once, so a reconnect never re-steals focus")
     }
 
+    func testThePaneHeaderMenuButtonHasAMenuToOpen() {
+        let controller = makeController()
+
+        XCTAssertNotNil(
+            controller.workspaceView.onRequestPaneMenu,
+            "the ⋯ button asked and nobody answered, so clicking it did nothing"
+        )
+        let menu = controller.paneOptionsMenu()
+        XCTAssertEqual(
+            menu.items.map(\.title),
+            ["Interrupt", "Kill Session", "Reattach", "Focus This Terminal",
+             "Use Option as Meta", "", "Close Pane"]
+        )
+        XCTAssertTrue(
+            menu.items.allSatisfy { $0.isSeparatorItem || ($0.action != nil && $0.target == nil) },
+            "nil targets are what send each item down the responder chain to the focused pane"
+        )
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(

@@ -299,6 +299,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             workspace.focusPane(paneID)
             closePane(nil)
         }
+        workspace.onRequestPaneMenu = { [weak self] _, anchor in
+            guard let self else { return }
+            // The header focuses the pane before asking, so the items can be
+            // nil-targeted and travel the responder chain to *that* pane —
+            // exactly the route their keystrokes take. Positioned in the
+            // button's own flipped coordinates, so `maxY` is its bottom edge.
+            paneOptionsMenu().popUp(
+                positioning: nil,
+                at: NSPoint(x: 0, y: anchor.bounds.maxY + 4),
+                in: anchor
+            )
+        }
         workspace.onPanesChanged = { [weak self] in
             self?.persistLayout()
             self?.persistBrowserPanes()
@@ -973,6 +985,28 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // where the *user* closes the pane.
         lastStatus.removeValue(forKey: focused)
         workspace.closePane(focused)
+    }
+
+    /// The header's ⋯ menu. Nothing new lives here: it is the pane-scoped half
+    /// of the main menu, so validation, titles and behaviour stay in one place
+    /// and the button is a shortcut rather than a second implementation.
+    func paneOptionsMenu() -> NSMenu {
+        let menu = NSMenu()
+        let items: [(String, Selector)] = [
+            ("Interrupt", Selector(("interruptSession:"))),
+            ("Kill Session", Selector(("killSession:"))),
+            ("Reattach", Selector(("reattachSession:"))),
+            ("Focus This Terminal", Selector(("toggleFocusMode:"))),
+            ("Use Option as Meta", Selector(("toggleOptionAsMeta:"))),
+        ]
+        for (title, action) in items {
+            menu.addItem(NSMenuItem(title: title, action: action, keyEquivalent: ""))
+        }
+        menu.addItem(.separator())
+        menu.addItem(
+            NSMenuItem(title: "Close Pane", action: Selector(("closePane:")), keyEquivalent: "")
+        )
+        return menu
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
