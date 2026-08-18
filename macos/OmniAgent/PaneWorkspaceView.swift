@@ -182,7 +182,8 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     var onRequestNewPane: (() -> Void)?
     /// The hole tile's second, fainter affordance: a browser in that cell.
     var onRequestNewBrowserPane: (() -> Void)?
-    var onRequestFileViewerPane: (() -> Void)?
+    /// The hole tile's third affordance: an editor in that cell.
+    var onRequestNewEditorPane: (() -> Void)?
     /// The header's close button. Closing a pane ends its PTY, which only the
     /// window controller may do — this view never kills a session itself.
     var onRequestClosePane: ((String) -> Void)?
@@ -296,6 +297,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// (title/URL wiring). `nil` for any other kind.
     func browserPane(for sessionID: String) -> BrowserPaneView? {
         containers[sessionID]?.surface as? BrowserPaneView
+    }
+
+    /// The concrete editor behind a pane, for the editor-shaped call sites
+    /// (tab-state/title wiring, drop routing). `nil` for any other kind.
+    func editorPane(for sessionID: String) -> EditorPaneView? {
+        containers[sessionID]?.surface as? EditorPaneView
     }
 
     // MARK: - Mutating the workspace
@@ -1382,7 +1389,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             let placeholder = PaneHolePlaceholderView(
                 onActivate: { [weak self] in self?.onRequestNewPane?() },
                 onActivateBrowser: { [weak self] in self?.onRequestNewBrowserPane?() },
-                onActivateFiles: { [weak self] in self?.onRequestFileViewerPane?() }
+                onActivateEditor: { [weak self] in self?.onRequestNewEditorPane?() }
             )
             holePlaceholders.append(placeholder)
             addSubview(placeholder, positioned: .below, relativeTo: subviews.first)
@@ -3374,7 +3381,7 @@ final class PaneDividerView: NSView {
 
 /// The empty cell of an incomplete rectangle. Visible (so a hole reads as a
 /// deliberate empty slot rather than a rendering bug) and clickable: a row of
-/// icon buttons in the middle of the cell — Terminal, Browser, File Viewer —
+/// icon buttons in the middle of the cell — Terminal, Browser, Editor —
 /// laid out like the Dock, each its own hit target.
 ///
 /// Drawn rather than composed from subviews: three plates and three labels are
@@ -3414,12 +3421,12 @@ final class PaneHolePlaceholderView: NSView {
     init(
         onActivate: @escaping () -> Void,
         onActivateBrowser: (() -> Void)? = nil,
-        onActivateFiles: (() -> Void)? = nil
+        onActivateEditor: (() -> Void)? = nil
     ) {
         items = [
             Item(symbol: "terminal", label: "Terminal", action: onActivate),
             Item(symbol: "globe", label: "Browser", action: onActivateBrowser),
-            Item(symbol: "doc.text", label: "File Viewer", action: onActivateFiles),
+            Item(symbol: "doc.text", label: "Editor", action: onActivateEditor),
         ]
         super.init(frame: .zero)
         wantsLayer = true

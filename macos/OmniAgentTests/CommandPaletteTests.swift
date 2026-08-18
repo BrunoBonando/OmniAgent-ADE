@@ -30,7 +30,10 @@ final class CommandPaletteTests: XCTestCase {
             focusedPaneID: nil,
             unreadNotifications: 0
         )
-        XCTAssertEqual(unfocused.map(\.id), ["focus:a", "new-pane", "new-browser", "new-session", "toggle-sidebar"])
+        XCTAssertEqual(
+            unfocused.map(\.id),
+            ["focus:a", "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar"]
+        )
 
         let focused = CommandPaletteModel.build(
             panes: [pane("a", project: "alpha", group: "g1")],
@@ -40,7 +43,10 @@ final class CommandPaletteTests: XCTestCase {
         )
         XCTAssertEqual(
             focused.map(\.id),
-            ["focus:a", "new-pane", "new-browser", "new-session", "close-pane", "interrupt", "reattach", "toggle-sidebar"]
+            [
+                "focus:a", "new-pane", "new-browser", "new-editor", "new-session",
+                "close-pane", "interrupt", "reattach", "toggle-sidebar",
+            ]
         )
         XCTAssertEqual(focused.first { $0.id == "close-pane" }?.action, .closePane(sessionID: "a"))
     }
@@ -108,7 +114,7 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(
             CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0)
                 .map(\.id),
-            ["new-pane", "new-browser", "new-session", "toggle-sidebar"]
+            ["new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar"]
         )
     }
 

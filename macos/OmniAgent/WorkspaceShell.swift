@@ -1776,6 +1776,7 @@ final class SessionsTreeView: NSView {
     var onNewSession: (() -> Void)?
     var onNewTerminal: (() -> Void)?
     var onNewBrowser: (() -> Void)?
+    var onNewEditor: (() -> Void)?
     var onRenameSession: ((SessionGroupNode, String) -> Void)?
     var onRenamePane: ((String, String) -> Void)?
 
@@ -1953,6 +1954,11 @@ final class SessionsTreeView: NSView {
                 addBrowser.onPress = { [weak self] in self?.onNewBrowser?() }
                 rows.addArrangedSubview(addBrowser)
                 addBrowser.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
+                // And the editor's, under that same cap.
+                let addEditor = NewTerminalRowView(title: "New editor", shortcut: "⇧⌘E")
+                addEditor.onPress = { [weak self] in self?.onNewEditor?() }
+                rows.addArrangedSubview(addEditor)
+                addEditor.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
             }
         }
     }
@@ -2464,6 +2470,7 @@ final class WorkspaceSidebarView: NSView {
     var onNewSession: (() -> Void)?
     var onNewTerminal: (() -> Void)?
     var onNewBrowser: (() -> Void)?
+    var onNewEditor: (() -> Void)?
     var onRenameSession: ((SessionGroupNode, String) -> Void)?
     var onRenamePane: ((String, String) -> Void)?
     var onOpenSettings: (() -> Void)?
@@ -2529,6 +2536,7 @@ final class WorkspaceSidebarView: NSView {
         sessionsTree.onNewSession = { [weak self] in self?.onNewSession?() }
         sessionsTree.onNewTerminal = { [weak self] in self?.onNewTerminal?() }
         sessionsTree.onNewBrowser = { [weak self] in self?.onNewBrowser?() }
+        sessionsTree.onNewEditor = { [weak self] in self?.onNewEditor?() }
         sessionsTree.onRenamePane = { [weak self] paneID, name in
             self?.onRenamePane?(paneID, name)
         }

@@ -1218,6 +1218,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 .sidebarTrackingSeparator,
                 WorkspaceWindowController.ToolbarItem.newPane,
                 WorkspaceWindowController.ToolbarItem.newBrowser,
+                WorkspaceWindowController.ToolbarItem.newEditor,
                 WorkspaceWindowController.ToolbarItem.closePane,
                 .flexibleSpace,
                 WorkspaceWindowController.ToolbarItem.palette,

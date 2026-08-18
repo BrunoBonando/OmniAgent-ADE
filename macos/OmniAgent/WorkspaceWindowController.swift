@@ -166,6 +166,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// independently of the shared `layout` row.
     private var browserPanesReadDispatched = false
     private var browserPanesReadCompleted = false
+    /// The `editor_panes_native` row's two flags — same shape and same
+    /// reasons as the browser pair above, and a separate row again (see
+    /// `SettingsKey.editorPanes`): the web build rewrites the shared
+    /// `layout` row and drops fields it does not know about.
+    private var editorPanesReadDispatched = false
+    private var editorPanesReadCompleted = false
     /// The pane that had focus when the app was last used, so a restart
     /// comes back to that session rather than to whichever pane happened to
     /// restore last. Native-local UI state the web build knows nothing about,
@@ -251,9 +257,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             case .browser:
                 return BrowserPaneView(initialURL: descriptor.browserURL)
             case .editor:
-                // No `.editor` entry point exists yet (Task 10 adds it) —
-                // this inert placeholder only keeps the switch exhaustive.
-                return EditorPanePlaceholderView()
+                return EditorPaneView(
+                    initialTabs: descriptor.editorTabs,
+                    activeIndex: descriptor.editorActiveIndex
+                )
             }
         }
 
@@ -296,7 +303,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
         workspace.onRequestNewBrowserPane = { [weak self] in self?.newBrowserPane(nil) }
-        workspace.onRequestFileViewerPane = { [weak self] in self?.newFileViewerPane(nil) }
+        workspace.onRequestNewEditorPane = { [weak self] in self?.newEditorPane(nil) }
         workspace.onRequestClosePane = { [weak self] paneID in
             guard let self else { return }
             // Route through focus so the header's close button ends *that*
@@ -319,6 +326,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.onPanesChanged = { [weak self] in
             self?.persistLayout()
             self?.persistBrowserPanes()
+            self?.persistEditorPanes()
             self?.reloadOutline()
             self?.adjustWindowForRowCount()
         }
@@ -355,6 +363,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 .first(where: \.isCurrent)
             guard let current else { return }
             self.newBrowser(in: current)
+        }
+        shellSidebar.onNewEditor = { [weak self] in
+            guard let self else { return }
+            // The same current-session lookup the two rows above use.
+            let panes = self.workspace.allPaneIDs.compactMap { self.workspace.descriptor(for: $0) }
+            let current = SessionOutline.group(panes, focusedPaneID: self.workspace.focusedPaneID)
+                .flatMap(\.sessions)
+                .first(where: \.isCurrent)
+            guard let current else { return }
+            self.newEditor(in: current)
         }
         shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
         // Asking the login shell for its PATH spawns a shell; do it now, off
@@ -763,26 +781,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     /// ⇧⌘T — a browser pane in the focused pane's session. No PTY, no engine,
     /// no cwd; only the grid geometry can refuse it.
-    /// The hole tile's File Viewer. ponytail: a browser pane on a `file://`
-    /// URL — WebKit already renders text, images, PDFs and HTML, so viewing a
-    /// file needs a file chooser and nothing else. The tabbed Monaco editor
-    /// pane (docs/superpowers/plans/2026-08-18-editor-pane.md) replaces this
-    /// when it lands; until then the button opens something instead of nothing.
-    @objc func newFileViewerPane(_ sender: Any?) {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = "View"
-        panel.message = "Choose a file to view"
-        if let root = workspace.focusedPaneID.flatMap({ workspace.descriptor(for: $0) })?.cwd,
-           !root.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: root)
-        }
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        newBrowser(in: nil, url: url.absoluteString)
-    }
-
     @objc func newBrowserPane(_ sender: Any?) {
         newBrowser(in: nil)
     }
@@ -813,6 +811,38 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 groupLabel: sibling?.groupLabel ?? session?.name,
                 kind: .browser,
                 browserURL: url
+            ),
+            startSession: false
+        )
+    }
+
+    /// ⇧⌘E — an editor pane in the focused pane's session. `newBrowser(in:)`
+    /// minus the URL: no PTY, `startSession: false`, and only the grid
+    /// geometry can refuse it.
+    @objc func newEditorPane(_ sender: Any?) {
+        newEditor(in: nil)
+    }
+
+    @discardableResult
+    func newEditor(in session: SessionGroupNode?) -> Bool {
+        let sibling = session.map { seed in
+            seed.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
+        } ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
+        let template = WorkspaceRestoration.bootstrapPane()
+        let group = session?.id ?? sibling?.group ?? template.group
+        guard workspace.paneCount(inGroup: group) < PaneGrid.maxPanes else { return false }
+        return addPane(
+            RestoredPane(
+                sessionID: template.sessionID,
+                reattaches: false,
+                project: sibling?.project ?? session?.project ?? "",
+                engine: .shell,
+                cwd: "",
+                label: nil,
+                themeId: nil,
+                group: group,
+                groupLabel: sibling?.groupLabel ?? session?.name,
+                kind: .editor
             ),
             startSession: false
         )
@@ -1147,6 +1177,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // A browser pane costs no PTY, so only the on-screen session's
             // grid geometry can refuse one.
             return workspace.paneIDs.count < PaneGrid.maxPanes
+        case #selector(newEditorPane(_:)):
+            // An editor pane costs no PTY either — same single bound.
+            return workspace.paneIDs.count < PaneGrid.maxPanes
         case #selector(newSession(_:)):
             // A new session starts empty — a full one cannot refuse it.
             return workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals
@@ -1248,8 +1281,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // and when a pane was opened while the read was still in flight.
         persistLayout()
         // Terminals restore first, so the grid's fill order favors them —
-        // browser panes only ever land on the cells terminals left empty.
+        // browser and editor panes only ever land on the cells terminals
+        // left empty.
         restoreBrowserPanesIfNeeded()
+        restoreEditorPanesIfNeeded()
     }
 
     /// Kills daemon sessions this window no longer references.
@@ -1341,6 +1376,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             newTerminalPane(nil)
         case .newBrowserPane:
             newBrowserPane(nil)
+        case .newEditorPane:
+            newEditorPane(nil)
         case .newSession:
             newSession(nil)
         // Interrupt and reattach are the focused terminal's own responder
@@ -1722,6 +1759,87 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         write(BrowserPanesCodec.serialize(panes), to: SettingsKey.browserPanes)
     }
 
+    // MARK: - Editor pane persistence (Task 10)
+
+    /// Reads the native-only `editor_panes_native` row once, alongside the
+    /// `browser_panes_native` one — `restoreBrowserPanesIfNeeded`'s shape and
+    /// its reasons: a row that could not be read is not an empty one, so the
+    /// write gate stays shut and the read re-arms for the next reconnect.
+    private func restoreEditorPanesIfNeeded() {
+        guard !editorPanesReadDispatched else { return }
+        editorPanesReadDispatched = true
+        connection.getSetting(key: SettingsKey.editorPanes) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                applyRestoredEditorPanes(EditorPanesCodec.deserialize(raw))
+            case .failure:
+                editorPanesReadDispatched = false
+            }
+        }
+    }
+
+    /// Adds every restored editor pane the grid has room for. Split out so a
+    /// plan can be applied in a test without a socket, exactly as
+    /// `applyRestoredBrowserPanes` is. Editor panes never touch
+    /// `ensureSession` — `addPane`'s kind branch keeps them off the daemon.
+    func applyRestoredEditorPanes(_ panes: [PersistedEditorPane]) {
+        editorPanesReadCompleted = true
+        // Terminals and browsers are already seated in their saved order;
+        // each editor pane joins the end of it rather than displacing one.
+        var order = workspace.allPaneIDs
+        // `addPane` focuses every pane it adds, and by the time this runs the
+        // browser step has already put focus back where the user left it
+        // (`lastFocusedPaneOnLaunch`). Restoring a pane is not a focus change.
+        let focused = workspace.focusedPaneID
+        for pane in panes
+        where workspace.paneCount(inGroup: pane.group ?? WorkspaceRestoration.ungroupedSessionID) < PaneGrid.maxPanes {
+            let sessionID = UUID().uuidString
+            if addPane(
+                RestoredPane(
+                    sessionID: sessionID,
+                    reattaches: false,
+                    project: "",
+                    engine: .shell,
+                    cwd: "",
+                    label: nil,
+                    themeId: nil,
+                    group: pane.group ?? WorkspaceRestoration.ungroupedSessionID,
+                    groupLabel: pane.groupLabel,
+                    kind: .editor,
+                    editorTabs: pane.tabs,
+                    editorActiveIndex: pane.active
+                ),
+                startSession: false
+            ) {
+                order.append(sessionID)
+            }
+        }
+        workspace.reorderPanes(order)
+        if let focused { workspace.focusPane(focused) }
+    }
+
+    /// Writes the live editor panes back to their own row. Refused until that
+    /// row has actually been read — `persistLayout`'s reasoning again. Tab
+    /// mutations already flow through `onStateChange` -> `updateDescriptor` ->
+    /// `onPanesChanged`, the browser pane's `onURLChange` chain applied to
+    /// tabs, so opening or closing a tab persists with no extra plumbing.
+    private func persistEditorPanes() {
+        guard editorPanesReadCompleted else { return }
+        let panes = workspace.allPaneIDs
+            .compactMap { workspace.descriptor(for: $0) }
+            .filter { $0.kind == .editor }
+            .map {
+                PersistedEditorPane(
+                    tabs: $0.editorTabs,
+                    active: $0.editorActiveIndex,
+                    group: $0.group == WorkspaceRestoration.ungroupedSessionID ? nil : $0.group,
+                    groupLabel: $0.groupLabel
+                )
+            }
+        write(EditorPanesCodec.serialize(panes), to: SettingsKey.editorPanes)
+    }
+
     /// Writes a settings row only when its value actually changed.
     ///
     /// Both rows are re-derived from live state on every mutation, and plenty
@@ -1820,8 +1938,41 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             browser.onURLChange = { [weak self] url in
                 self?.workspace.updateDescriptor(for: sessionID) { $0.browserURL = url }
             }
+        } else if let editor = workspace.editorPane(for: sessionID) {
+            // The active tab's name is what the pane wears — the browser's
+            // page-title path, applied to tabs.
+            editor.onTitleChange = { [weak self] title in
+                guard let self else { return }
+                workspace.updateDescriptor(for: sessionID) { $0.title = title }
+                if workspace.focusedPaneID == sessionID { refreshTitle() }
+            }
+            // Tab mutations flow into the descriptor; `updateDescriptor` fires
+            // `onPanesChanged`, which is what `persistEditorPanes` hangs off —
+            // `onURLChange`'s pattern, applied to the tab list.
+            editor.onStateChange = { [weak self] tabs, active in
+                self?.workspace.updateDescriptor(for: sessionID) {
+                    $0.editorTabs = tabs
+                    $0.editorActiveIndex = active
+                }
+            }
+            editor.onLastTabClosed = { [weak self] in
+                self?.workspace.closePane(sessionID)
+            }
+            editor.onOpenDiffRequest = { [weak self] url in self?.openDiffInEditor(url) }
+            // `workspaceDirectory(for:)` already falls back to the open
+            // workspace when the pane carries no project of its own.
+            editor.workspaceRoot = workspaceDirectory(for: pane.project)
+                .map { URL(fileURLWithPath: $0) }
         }
         return true
+    }
+
+    /// The tab strip's diff toggle asked for a diff of `url`. Task 12 gives
+    /// this a real body (the HEAD blob plus `EditorPaneView.openDiff`); it is
+    /// landed empty now so the editor wiring above is complete rather than
+    /// half-connected.
+    func openDiffInEditor(_ url: URL) {
+        // Task 12.
     }
 
     /// The daemon restarted and forgot this session.

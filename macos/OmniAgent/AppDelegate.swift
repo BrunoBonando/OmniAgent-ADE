@@ -111,6 +111,7 @@ enum ApplicationMenus {
         main.addItem(withSubmenu: file)
         file.addItem(item("New Terminal Pane", Selector(("newTerminalPane:")), "t"))
         file.addItem(item("New Browser Pane", Selector(("newBrowserPane:")), "t", [.command, .shift]))
+        file.addItem(item("New Editor Pane", Selector(("newEditorPane:")), "e", [.command, .shift]))
         file.addItem(item("New Session", Selector(("newSession:")), "n"))
         file.addItem(item("Close Pane", Selector(("closePane:")), "w"))
         file.addItem(

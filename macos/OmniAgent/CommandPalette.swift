@@ -8,6 +8,7 @@ enum PaletteAction: Equatable {
     case closePane(sessionID: String)
     case newPane
     case newBrowserPane
+    case newEditorPane
     case newSession
     case interruptFocusedPane
     case reattachFocusedPane
@@ -103,6 +104,9 @@ struct CommandPaletteModel: Equatable {
         )
         commands.append(
             PaletteCommand(id: "new-browser", title: "New browser pane", detail: "⇧⌘T", action: .newBrowserPane)
+        )
+        commands.append(
+            PaletteCommand(id: "new-editor", title: "New editor pane", detail: "⇧⌘E", action: .newEditorPane)
         )
         commands.append(
             PaletteCommand(

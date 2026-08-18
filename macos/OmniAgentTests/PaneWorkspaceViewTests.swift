@@ -104,11 +104,11 @@ final class PaneWorkspaceViewTests: XCTestCase {
         var browsers = 0
         workspace.onRequestNewPane = { terminals += 1 }
         workspace.onRequestNewBrowserPane = { browsers += 1 }
-        var viewers = 0
-        workspace.onRequestFileViewerPane = { viewers += 1 }
+        var editors = 0
+        workspace.onRequestNewEditorPane = { editors += 1 }
         let hole = workspace.holePlaceholders[0]
 
-        XCTAssertEqual(hole.itemRects.count, 3, "Terminal, Browser, File Viewer")
+        XCTAssertEqual(hole.itemRects.count, 3, "Terminal, Browser, Editor")
         let ys = Set(hole.itemRects.map(\.minY))
         XCTAssertEqual(ys.count, 1, "side by side, like the Dock")
         XCTAssertLessThan(hole.itemRects[0].maxX, hole.itemRects[1].minX)
@@ -128,14 +128,14 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(terminals, 1, "the terminal button opens a terminal")
 
         hole.dispatch(at: NSPoint(x: hole.itemRects[2].midX, y: hole.itemRects[2].midY))
-        XCTAssertEqual(viewers, 1, "the File Viewer button opens a file viewer")
+        XCTAssertEqual(editors, 1, "the Editor button opens an editor pane")
         XCTAssertEqual(terminals, 1)
         XCTAssertEqual(browsers, 1)
 
         hole.dispatch(at: NSPoint(x: hole.bounds.minX + 2, y: hole.bounds.minY + 2))
         XCTAssertEqual(terminals, 1, "the space around the buttons is not a button")
         XCTAssertEqual(browsers, 1)
-        XCTAssertEqual(viewers, 1)
+        XCTAssertEqual(editors, 1)
 
         XCTAssertTrue(hole.accessibilityPerformPress())
         XCTAssertEqual(terminals, 2, "the assistive press stays the single Add terminal action")
@@ -2371,7 +2371,10 @@ final class PaneWorkspaceViewTests: XCTestCase {
             case .browser:
                 return BrowserPaneView(initialURL: descriptor.browserURL)
             case .editor:
-                return EditorPanePlaceholderView()
+                return EditorPaneView(
+                    initialTabs: descriptor.editorTabs,
+                    activeIndex: descriptor.editorActiveIndex
+                )
             }
         }
         workspace.frame = CGRect(x: 0, y: 0, width: 1200, height: 800)
