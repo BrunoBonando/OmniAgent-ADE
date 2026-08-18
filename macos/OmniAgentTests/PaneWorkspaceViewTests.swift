@@ -771,15 +771,16 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertNotEqual(PaneStatusMarkView.color(for: .ready), PaneStatusMarkView.color(for: nil))
     }
 
-    /// Tool execution keeps thinking's blue and is told apart by motion alone:
-    /// a discrete blink where thinking smoothly pulses.
-    func testToolExecutionBlinksWhereThinkingPulses() throws {
+    /// Tool execution keeps thinking's blue and is told apart by tempo alone:
+    /// the same smooth pulse, run faster.
+    func testToolExecutionPulsesFasterThanThinking() throws {
         let mark = PaneStatusMarkView()
         mark.status = .thinking
-        XCTAssertTrue(mark.layer?.animation(forKey: "om-pulse") is CABasicAnimation)
+        let thinking = try XCTUnwrap(mark.layer?.animation(forKey: "om-pulse") as? CABasicAnimation)
         mark.status = .toolExecution
-        let blink = try XCTUnwrap(mark.layer?.animation(forKey: "om-pulse") as? CAKeyframeAnimation)
-        XCTAssertEqual(blink.calculationMode, .discrete)
+        let tool = try XCTUnwrap(mark.layer?.animation(forKey: "om-pulse") as? CABasicAnimation)
+        XCTAssertLessThan(tool.duration, thinking.duration)
+        XCTAssertEqual(tool.autoreverses, thinking.autoreverses)
         XCTAssertEqual(
             PaneStatusMarkView.color(for: .toolExecution),
             PaneStatusMarkView.color(for: .thinking),
@@ -1609,6 +1610,55 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         XCTAssertTrue(blurIsUp(), "a resize must not hide blur that was already settled and showing")
         XCTAssertNotEqual(before, after, "and the bands must follow the window's new size")
+    }
+
+    /// The bands blur what is composited **on screen** behind them — and what
+    /// is on screen behind them, inside the main window, is `zoomBackdrop`: a
+    /// `.sidebar` wash at 78% lying over every pane. Left there under the
+    /// bands it erases the panes before a band ever samples them, and the band
+    /// then lays its own material on top of the result: two dark materials
+    /// stacked, which is a flat dark rectangle where the blurred app should
+    /// be — the whole symptom, "the background is not blurred and I cannot see
+    /// the other terminals". The wash is also completely occluded by then —
+    /// the bands tile every part of the host the card does not cover — so
+    /// taking it out of the composite costs nothing on screen and is the only
+    /// thing that leaves the bands something recognisable to blur. It carries
+    /// the transition alone, before the bands exist, and comes back for the
+    /// next one.
+    func testTheBackdropLeavesTheCompositeOnceTheBlurBandsAreUp() throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            throw XCTSkip("under Reduce Motion there is no grow to settle, so blur never shows")
+        }
+        let (workspace, window, _) = makeSplitHostedWorkspace(panes: 2)
+        defer { window.close() }
+
+        XCTAssertTrue(workspace.toggleZoom("pane-2"))
+        let card = try XCTUnwrap(workspace.container(for: "pane-2"))
+        let host = try XCTUnwrap(card.superview)
+        let backdrop = try XCTUnwrap(
+            host.subviews.compactMap { $0 as? PaneZoomBackdropView }.first
+        )
+        XCTAssertFalse(backdrop.isHidden, "the wash carries the grow on its own")
+
+        func blurIsUp() -> Bool {
+            window.childWindows?.contains { $0 is PaneZoomBlurPanel } ?? false
+        }
+        let deadline = Date().addingTimeInterval(2)
+        while !blurIsUp(), Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(blurIsUp(), "blur must be up once the grow has settled")
+
+        XCTAssertEqual(backdrop.alphaValue, 0, "and steps out of the bands' way once it has")
+        XCTAssertTrue(backdrop.isHidden, "at once, not faded: it is occluded, nothing to animate")
+
+        // And stays out. `applyZoom` runs on every layout pass while a pane is
+        // zoomed, not only when a transition starts, and it re-asserts the
+        // backdrop on each one — a resize must not put the wash back under the
+        // bands.
+        workspace.setFrameSize(NSSize(width: workspace.frame.width - 10, height: workspace.frame.height))
+        XCTAssertEqual(backdrop.alphaValue, 0, "on every later layout pass too")
+        XCTAssertTrue(blurIsUp())
     }
 
     /// Opening a terminal in the 0.32s a card is still shrinking (⌘↩ then ⌘T)
