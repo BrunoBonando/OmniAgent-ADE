@@ -1017,7 +1017,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// and the button is a shortcut rather than a second implementation.
     func paneOptionsMenu() -> NSMenu {
         let menu = NSMenu()
-        let items: [(String, Selector)] = [
+        let engine = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }?.engine
+        var items: [(String, Selector)] = [
+            ("Rename Conversation…", #selector(renameConversation(_:))),
+        ]
+        // `/color` is Claude's slash command and nobody else's, so the item
+        // only exists in front of a Claude terminal rather than being offered
+        // and then greyed out.
+        if engine == .claude {
+            items.append(("Change Claude Color…", #selector(changeClaudeColor(_:))))
+        }
+        items += [
             ("Interrupt", Selector(("interruptSession:"))),
             ("Kill Session", Selector(("killSession:"))),
             ("Reattach", Selector(("reattachSession:"))),
@@ -1032,6 +1042,101 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             NSMenuItem(title: "Close Pane", action: Selector(("closePane:")), keyEquivalent: "")
         )
         return menu
+    }
+
+    /// The ⋯ menu's "Rename Conversation…" — one name for both halves of a
+    /// terminal: the pane the sidebar shows, and the agent's own conversation,
+    /// which only hears about it if `/rename` is typed at it.
+    @objc func renameConversation(_ sender: Any?) {
+        guard let paneID = workspace.focusedPaneID,
+              let descriptor = workspace.descriptor(for: paneID),
+              descriptor.kind == .terminal
+        else { return }
+        askForConversationName(current: descriptor.label ?? descriptor.title) { [weak self] name in
+            guard let self,
+                  let named = name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !named.isEmpty
+            else { return }
+            renamePane(paneID, to: named)
+            // A plain shell has no `/rename`; typing one at it is just a
+            // `command not found` in the user's scrollback.
+            guard descriptor.engine != .shell else { return }
+            workspace.terminalSurface(for: paneID)?.sendInput("/rename \(named)\r")
+        }
+    }
+
+    /// The ⋯ menu's "Change Claude Color…".
+    @objc func changeClaudeColor(_ sender: Any?) {
+        guard let paneID = workspace.focusedPaneID,
+              workspace.descriptor(for: paneID)?.engine == .claude
+        else { return }
+        askForColor { [weak self] color in
+            guard let self, let color else { return }
+            workspace.terminalSurface(for: paneID)?.sendInput("/color \(color)\r")
+        }
+    }
+
+    /// Where the new conversation name comes from. `nil` means "ask with an
+    /// `NSAlert`"; a test substitutes an answer, exactly as `directoryChooser`
+    /// does, so the rename can run without blocking on a modal.
+    var conversationNamePrompt: ((String, @escaping (String?) -> Void) -> Void)?
+
+    private func askForConversationName(current: String, completion: @escaping (String?) -> Void) {
+        if let conversationNamePrompt {
+            conversationNamePrompt(current, completion)
+            return
+        }
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.stringValue = current
+        let alert = NSAlert()
+        alert.messageText = "Rename Conversation"
+        alert.informativeText = "Renames this pane and tells the agent, with /rename."
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        let answer: (NSApplication.ModalResponse) -> Void = { response in
+            completion(response == .alertFirstButtonReturn ? field.stringValue : nil)
+        }
+        guard let window else { return answer(alert.runModal()) }
+        alert.beginSheetModal(for: window, completionHandler: answer)
+    }
+
+    /// Where the colour comes from. Same seam, same reason.
+    var colorPrompt: ((@escaping (String?) -> Void) -> Void)?
+
+    private func askForColor(completion: @escaping (String?) -> Void) {
+        if let colorPrompt {
+            colorPrompt(completion)
+            return
+        }
+        // The well opens the system colour picker; the alert is what commits.
+        // Wiring `/color` to the picker's own action instead would send one
+        // line per drag frame.
+        let well = NSColorWell(frame: NSRect(x: 0, y: 0, width: 64, height: 32))
+        let alert = NSAlert()
+        alert.messageText = "Change Claude Color"
+        alert.informativeText = "Sends /color to this terminal."
+        alert.accessoryView = well
+        alert.addButton(withTitle: "Set Color")
+        alert.addButton(withTitle: "Cancel")
+        let answer: (NSApplication.ModalResponse) -> Void = { response in
+            well.deactivate()
+            completion(response == .alertFirstButtonReturn ? Self.hex(well.color) : nil)
+        }
+        guard let window else { return answer(alert.runModal()) }
+        alert.beginSheetModal(for: window, completionHandler: answer)
+    }
+
+    /// `#RRGGBB` — the one colour spelling a CLI can be expected to read.
+    static func hex(_ color: NSColor) -> String {
+        let rgb = color.usingColorSpace(.sRGB) ?? .white
+        return String(
+            format: "#%02X%02X%02X",
+            Int((rgb.redComponent * 255).rounded()),
+            Int((rgb.greenComponent * 255).rounded()),
+            Int((rgb.blueComponent * 255).rounded())
+        )
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -1050,6 +1155,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals
         case #selector(closePane(_:)):
             return workspace.focusedPaneID != nil
+        case #selector(renameConversation(_:)):
+            // A browser or editor pane has a label but no conversation.
+            return workspace.focusedPaneID
+                .flatMap { workspace.descriptor(for: $0) }?.kind == .terminal
         case #selector(toggleFocusMode(_:)):
             // `toggleZoom` already refuses below two panes; disabled here
             // too, since an item that visibly does nothing is worse than a

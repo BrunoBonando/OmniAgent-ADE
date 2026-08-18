@@ -1396,12 +1396,64 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let menu = controller.paneOptionsMenu()
         XCTAssertEqual(
             menu.items.map(\.title),
-            ["Interrupt", "Kill Session", "Reattach", "Focus This Terminal",
-             "Use Option as Meta", "", "Close Pane"]
+            ["Rename Conversation…", "Interrupt", "Kill Session", "Reattach",
+             "Focus This Terminal", "Use Option as Meta", "", "Close Pane"]
         )
         XCTAssertTrue(
             menu.items.allSatisfy { $0.isSeparatorItem || ($0.action != nil && $0.target == nil) },
             "nil targets are what send each item down the responder chain to the focused pane"
+        )
+    }
+
+    func testTheColorItemIsClaudeOnly() {
+        let controller = makeController()
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-sh", group: "grp-1"),
+                    PersistedTab(project: "alpha", engine: .claude, cwd: "/a", id: "sess-cl", group: "grp-1"),
+                ])
+            )
+        )
+
+        controller.workspaceView.focusPane("sess-sh")
+        XCTAssertFalse(
+            controller.paneOptionsMenu().items.contains { $0.title == "Change Claude Color…" },
+            "a shell terminal has no /color, so offering it is offering nothing"
+        )
+
+        controller.workspaceView.focusPane("sess-cl")
+        XCTAssertTrue(
+            controller.paneOptionsMenu().items.contains { $0.title == "Change Claude Color…" }
+        )
+    }
+
+    func testRenamingTheConversationRenamesThePane() {
+        let controller = makeController()
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .claude, cwd: "/a", id: "sess-cl", group: "grp-1"),
+                ])
+            )
+        )
+        controller.workspaceView.focusPane("sess-cl")
+        controller.conversationNamePrompt = { _, completion in completion("  Ingest rewrite  ") }
+
+        controller.renameConversation(nil)
+
+        XCTAssertEqual(
+            controller.workspaceView.descriptor(for: "sess-cl")?.label,
+            "Ingest rewrite",
+            "the sidebar's half of the rename"
+        )
+    }
+
+    func testTheColorPickerSpellsColoursForACLI() {
+        XCTAssertEqual(WorkspaceWindowController.hex(.white), "#FFFFFF")
+        XCTAssertEqual(
+            WorkspaceWindowController.hex(NSColor(srgbRed: 1, green: 0.5, blue: 0, alpha: 1)),
+            "#FF8000"
         )
     }
 
