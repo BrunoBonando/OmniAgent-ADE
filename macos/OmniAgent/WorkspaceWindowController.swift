@@ -297,9 +297,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         workspace.onFocusedPaneChanged = { [weak self] paneID in
             UserDefaults.standard.set(paneID, forKey: Self.lastFocusedPaneDefaultsKey)
-            self?.refreshTitle()
-            self?.reloadOutline()
-            self?.refreshInspectorIfVisible(for: paneID)
+            guard let self else { return }
+            // Remembered here rather than derived on demand: once focus has
+            // moved on to a terminal, nothing else in the workspace still
+            // knows which editor the user was last looking at.
+            if let paneID, workspace.descriptor(for: paneID)?.kind == .editor {
+                lastFocusedEditorPaneID = paneID
+            }
+            refreshTitle()
+            reloadOutline()
+            refreshInspectorIfVisible(for: paneID)
         }
         workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
         workspace.onRequestNewBrowserPane = { [weak self] in self?.newBrowserPane(nil) }
@@ -373,6 +380,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 .first(where: \.isCurrent)
             guard let current else { return }
             self.newEditor(in: current)
+        }
+        shellSidebar.onOpenFile = { [weak self] url, pinned in
+            self?.openFileInEditor(url, pinned: pinned)
         }
         shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
         // Asking the login shell for its PATH spawns a shell; do it now, off
@@ -846,6 +856,48 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             ),
             startSession: false
         )
+    }
+
+    /// The editor pane the user was last looking at. Maintained by
+    /// `onFocusedPaneChanged`, so it survives focus moving away to a terminal.
+    private var lastFocusedEditorPaneID: String?
+
+    /// Where a file opens: the most recently focused editor pane, then any
+    /// editor pane, then a freshly created one. `nil` only when the grid is
+    /// full and none of it is an editor — the click is then a no-op, which is
+    /// the same answer ⇧⌘E gives.
+    private func targetEditorPane() -> (id: String, pane: EditorPaneView)? {
+        if let id = lastFocusedEditorPaneID, let pane = workspace.editorPane(for: id) {
+            return (id, pane)
+        }
+        for id in workspace.allPaneIDs where workspace.descriptor(for: id)?.kind == .editor {
+            if let pane = workspace.editorPane(for: id) { return (id, pane) }
+        }
+        guard newEditor(in: nil), let id = workspace.focusedPaneID,
+              let pane = workspace.editorPane(for: id)
+        else { return nil }
+        return (id, pane)
+    }
+
+    /// The FILES tree opened `url`: preview on a single click, pinned on a
+    /// double.
+    ///
+    /// A file already open *anywhere* is focused rather than opened twice —
+    /// the no-duplicates rule is workspace-wide, not per pane, which is why
+    /// this scans every pane before choosing a target.
+    func openFileInEditor(_ url: URL, pinned: Bool) {
+        let kind = EditorFileClass.classify(url: url).tabKind
+        for id in workspace.allPaneIDs {
+            guard let pane = workspace.editorPane(for: id),
+                  pane.model.index(of: url.path, kind: kind) != nil
+            else { continue }
+            workspace.focusPane(id)
+            pane.openFile(url, pinned: pinned)
+            return
+        }
+        guard let target = targetEditorPane() else { return }
+        workspace.focusPane(target.id)
+        target.pane.openFile(url, pinned: pinned)
     }
 
     /// ⌘N, and the "+" beside SESSIONS in the sidebar — a **second,

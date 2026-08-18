@@ -257,7 +257,178 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertNil(button.target, "it travels the responder chain, like every other item")
     }
 
+    // MARK: - Opening from the FILES tree (Task 11)
+
+    /// The cold-start case: nothing is open, a single click has to conjure the
+    /// pane as well as the tab, and the tab is a *preview*.
+    func testOpenFileCreatesAPaneAndAPreviewTab() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "x")
+
+        controller.openFileInEditor(file, pinned: false)
+
+        let workspace = controller.workspaceView
+        let editors = workspace.allPaneIDs.filter { workspace.descriptor(for: $0)?.kind == .editor }
+        XCTAssertEqual(editors.count, 1)
+        let pane = try XCTUnwrap(workspace.editorPane(for: editors[0]))
+        XCTAssertEqual(pane.model.tabs.map(\.path), [file.path])
+        XCTAssertEqual(pane.model.tabs.map(\.isPinned), [false], "single click previews")
+    }
+
+    /// VS Code's preview slot: the second single click lands in the same pane
+    /// and recycles the same tab rather than piling up.
+    func testSecondOpenReusesTheSamePaneAndPreviewTab() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: false)
+        let second = try makeTempFile("b.swift", "y")
+        controller.openFileInEditor(second, pinned: false)
+
+        let workspace = controller.workspaceView
+        let editors = workspace.allPaneIDs.filter { workspace.descriptor(for: $0)?.kind == .editor }
+        XCTAssertEqual(editors.count, 1, "no second pane appeared")
+        let pane = try XCTUnwrap(workspace.editorPane(for: editors[0]))
+        XCTAssertEqual(pane.model.tabs.map(\.path), [second.path], "the preview slot was recycled")
+    }
+
+    /// A double click pins, and the pinned tab is no longer the recycling
+    /// slot — the next single click opens beside it.
+    func testDoubleClickPinsAndTheNextPreviewOpensBesideIt() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let pinned = try makeTempFile("a.swift", "x")
+        let preview = try makeTempFile("b.swift", "y")
+
+        controller.openFileInEditor(pinned, pinned: true)
+        controller.openFileInEditor(preview, pinned: false)
+
+        let workspace = controller.workspaceView
+        let editors = workspace.allPaneIDs.filter { workspace.descriptor(for: $0)?.kind == .editor }
+        let pane = try XCTUnwrap(workspace.editorPane(for: editors[0]))
+        XCTAssertEqual(pane.model.tabs.map(\.path), [pinned.path, preview.path])
+        XCTAssertEqual(pane.model.tabs.map(\.isPinned), [true, false])
+    }
+
+    /// A single click on a file that is already open somewhere else focuses
+    /// that pane's tab. It never opens a second copy — the no-duplicates rule
+    /// is workspace-wide, not per pane.
+    func testFileOpenAnywhereIsFocusedNotDuplicated() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "x")
+        controller.openFileInEditor(file, pinned: true)
+        let workspace = controller.workspaceView
+        let holder = try XCTUnwrap(workspace.focusedPaneID)
+        XCTAssertTrue(controller.newEditor(in: nil), "a second, empty editor pane, now focused")
+
+        controller.openFileInEditor(file, pinned: false)
+
+        let panes = workspace.allPaneIDs.compactMap { workspace.editorPane(for: $0) }
+        XCTAssertEqual(panes.count, 2)
+        XCTAssertEqual(
+            panes.map(\.model.tabs.count).sorted(),
+            [0, 1],
+            "no duplicate tab appeared in the empty pane"
+        )
+        XCTAssertEqual(workspace.focusedPaneID, holder, "focus moved to the pane that has it")
+        XCTAssertEqual(
+            workspace.editorPane(for: holder)?.model.tabs.map(\.isPinned),
+            [true],
+            "and a preview open never un-pins what is already pinned"
+        )
+    }
+
+    /// Which pane a file opens into: the most recently focused editor pane,
+    /// not simply the first one in the grid.
+    func testOpenGoesToTheMostRecentlyFocusedEditorPane() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let workspace = controller.workspaceView
+        let first = try XCTUnwrap(workspace.focusedPaneID)
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let second = try XCTUnwrap(workspace.focusedPaneID)
+        XCTAssertNotEqual(first, second)
+
+        controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: false)
+        XCTAssertEqual(workspace.editorPane(for: second)?.model.tabs.count, 1)
+        XCTAssertEqual(workspace.editorPane(for: first)?.model.tabs.count, 0)
+
+        workspace.focusPane(first)
+        controller.openFileInEditor(try makeTempFile("b.swift", "y"), pinned: false)
+        XCTAssertEqual(workspace.editorPane(for: first)?.model.tabs.count, 1, "recency, not order")
+    }
+
+    /// An image opens as a `.media` tab, so the "already open" lookup has to
+    /// ask `EditorFileClass` what kind it would be rather than assuming
+    /// `.file` — otherwise every click on an image opens another tab.
+    func testAnImageOpensOnceAsAMediaTab() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let image = try makeTempFile("a.png", "not really a png")
+
+        controller.openFileInEditor(image, pinned: false)
+        controller.openFileInEditor(image, pinned: false)
+
+        let workspace = controller.workspaceView
+        let editors = workspace.allPaneIDs.filter { workspace.descriptor(for: $0)?.kind == .editor }
+        let pane = try XCTUnwrap(workspace.editorPane(for: editors[0]))
+        XCTAssertEqual(pane.model.tabs.map(\.kind), [.media])
+    }
+
+    /// The chain the sidebar completes: `WorkspaceSidebarView.onOpenFile` is
+    /// wired to the controller, carrying the pinned flag through untouched.
+    func testTheSidebarsOpenFileCallbackReachesTheEditor() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "x")
+
+        try XCTUnwrap(controller.shellSidebar.onOpenFile)(file, true)
+
+        let workspace = controller.workspaceView
+        let editors = workspace.allPaneIDs.filter { workspace.descriptor(for: $0)?.kind == .editor }
+        let pane = try XCTUnwrap(workspace.editorPane(for: editors[0]))
+        XCTAssertEqual(pane.model.tabs.map(\.isPinned), [true], "the pinned flag survives the chain")
+    }
+
+    /// The grid is full and none of it is an editor: there is nowhere to put
+    /// one, and the click has to be a no-op rather than a crash or a 13th pane.
+    func testOpeningWithAFullGridDoesNothing() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        while workspace.paneIDs.count < PaneGrid.maxPanes {
+            XCTAssertTrue(controller.newBrowser(in: nil))
+        }
+
+        controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: false)
+
+        XCTAssertEqual(workspace.paneIDs.count, PaneGrid.maxPanes)
+        XCTAssertTrue(workspace.allPaneIDs.allSatisfy { workspace.descriptor(for: $0)?.kind != .editor })
+    }
+
     // MARK: - Helpers
+
+    /// A real file on disk — `EditorPaneView.openFile` stats and reads it.
+    private func makeTempFile(_ name: String, _ contents: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("editor-open-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(name)
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
 
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(

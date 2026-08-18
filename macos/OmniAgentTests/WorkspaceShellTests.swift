@@ -606,6 +606,79 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(WorkspaceFileRowView.badgeText(directory), "")
     }
 
+    // MARK: - Opening files (Task 11)
+
+    /// VS Code's rule, from the tree's side: one click previews, a second
+    /// click on the same row within the system double-click interval pins.
+    func testSingleClickPreviewsAndDoubleClickPins() throws {
+        let tree = WorkspaceFilesTreeView(frame: NSRect(x: 0, y: 0, width: 280, height: 400))
+        var opened: [(URL, Bool)] = []
+        tree.onOpenFile = { url, pinned in opened.append((url, pinned)) }
+        let directory = try makeTempDirectory(containing: "a.swift")
+        tree.setRoot(directory)
+
+        try pressFileRow(named: "a.swift", in: tree)
+        try pressFileRow(named: "a.swift", in: tree)
+
+        XCTAssertEqual(opened.map(\.0.lastPathComponent), ["a.swift", "a.swift"])
+        XCTAssertEqual(opened.map(\.1), [false, true], "preview, then pinned")
+    }
+
+    /// A click on a *different* row is a fresh single click, never the second
+    /// half of a double — otherwise walking a list with the mouse would pin
+    /// every other file.
+    func testClickingADifferentRowIsAlwaysASingleClick() throws {
+        let tree = WorkspaceFilesTreeView(frame: NSRect(x: 0, y: 0, width: 280, height: 400))
+        var opened: [(URL, Bool)] = []
+        tree.onOpenFile = { url, pinned in opened.append((url, pinned)) }
+        let directory = try makeTempDirectory(containing: "a.swift", "b.swift")
+        tree.setRoot(directory)
+
+        try pressFileRow(named: "a.swift", in: tree)
+        try pressFileRow(named: "b.swift", in: tree)
+
+        XCTAssertEqual(opened.map(\.0.lastPathComponent), ["a.swift", "b.swift"])
+        XCTAssertEqual(opened.map(\.1), [false, false])
+    }
+
+    /// The sidebar is the link between the tree and the controller, and it
+    /// forwards both halves of the callback.
+    func testTheSidebarForwardsTheTreesFileOpens() throws {
+        let sidebar = makeSidebar()
+        var opened: [(URL, Bool)] = []
+        sidebar.onOpenFile = { url, pinned in opened.append((url, pinned)) }
+        let url = URL(fileURLWithPath: "/tmp/a.swift")
+
+        try XCTUnwrap(sidebar.filesTree.onOpenFile)(url, true)
+
+        XCTAssertEqual(opened.map(\.0), [url])
+        XCTAssertEqual(opened.map(\.1), [true])
+    }
+
+    /// Presses the row for `name`, re-finding it each time: activating a row
+    /// re-renders the tree, so the previous row object is already detached.
+    private func pressFileRow(named name: String, in tree: WorkspaceFilesTreeView) throws {
+        let deadline = Date().addingTimeInterval(10)
+        var row: WorkspaceFileRowView?
+        repeat {
+            row = tree.descendants(WorkspaceFileRowView.self).first { $0.node.name == name }
+            if row != nil { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        } while Date() < deadline
+        try XCTUnwrap(XCTUnwrap(row).onPress)()
+    }
+
+    private func makeTempDirectory(containing names: String...) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("files-tree-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        for name in names {
+            try "x".write(to: directory.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        return directory
+    }
+
     private func file(badge: GitBadge?) -> WorkspaceFileNode {
         var node = WorkspaceFileNode(
             name: "token.service.ts",
@@ -626,5 +699,16 @@ private extension NSView {
             if let match = subview.descendant(type) { return match }
         }
         return nil
+    }
+
+    /// Every match, in tree order — the rows are siblings, so `descendant`'s
+    /// first hit is not enough to pick one out by name.
+    func descendants<View: NSView>(_ type: View.Type) -> [View] {
+        var found: [View] = []
+        for subview in subviews {
+            if let match = subview as? View { found.append(match) }
+            found += subview.descendants(type)
+        }
+        return found
     }
 }

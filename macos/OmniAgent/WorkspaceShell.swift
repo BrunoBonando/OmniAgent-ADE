@@ -2108,7 +2108,9 @@ final class WorkspaceFileRowView: ShellRowView {
 /// The design's FILES section: header with the diff counts, a filter field, and
 /// a lazily expanded tree with git state on the right.
 final class WorkspaceFilesTreeView: NSView {
-    var onOpenFile: ((URL) -> Void)?
+    /// `(url, pinned)` — VS Code's rule: a single click previews, a double
+    /// click pins.
+    var onOpenFile: ((URL, Bool) -> Void)?
 
     private let diffField = ShellFont.label(font: ShellFont.mono(12, .semibold), color: ShellPalette.green)
     private let filterField = NSTextField()
@@ -2123,6 +2125,9 @@ final class WorkspaceFilesTreeView: NSView {
     /// Children already listed, so re-rendering a collapse does not re-hit the
     /// filesystem for every level.
     private var children: [URL: [WorkspaceFileNode]] = [:]
+    /// The rows run their own mouse handling, so `NSEvent.clickCount` never
+    /// reaches `activate(_:)`; this stands in for it.
+    private var doublePress = DoublePressDetector()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -2331,7 +2336,10 @@ final class WorkspaceFilesTreeView: NSView {
     private func activate(_ node: WorkspaceFileNode) {
         guard node.isDirectory else {
             selected = node.url
-            onOpenFile?(node.url)
+            // `systemUptime` rather than wall clock: monotonic, so a clock
+            // adjustment between two clicks cannot invent or swallow a double.
+            let pinned = doublePress.register(node.url.path, at: ProcessInfo.processInfo.systemUptime)
+            onOpenFile?(node.url, pinned)
             render()
             return
         }
@@ -2474,6 +2482,8 @@ final class WorkspaceSidebarView: NSView {
     var onRenameSession: ((SessionGroupNode, String) -> Void)?
     var onRenamePane: ((String, String) -> Void)?
     var onOpenSettings: (() -> Void)?
+    /// The FILES tree's `(url, pinned)`, forwarded to the controller.
+    var onOpenFile: ((URL, Bool) -> Void)?
 
     let picker = WorkspacePickerView()
     let backRow = WorkspaceBackRowView()
@@ -2537,6 +2547,7 @@ final class WorkspaceSidebarView: NSView {
         sessionsTree.onNewTerminal = { [weak self] in self?.onNewTerminal?() }
         sessionsTree.onNewBrowser = { [weak self] in self?.onNewBrowser?() }
         sessionsTree.onNewEditor = { [weak self] in self?.onNewEditor?() }
+        filesTree.onOpenFile = { [weak self] url, pinned in self?.onOpenFile?(url, pinned) }
         sessionsTree.onRenamePane = { [weak self] paneID, name in
             self?.onRenamePane?(paneID, name)
         }
