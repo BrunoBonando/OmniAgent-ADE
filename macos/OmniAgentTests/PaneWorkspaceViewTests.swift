@@ -1479,6 +1479,43 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
     }
 
+    /// Regression: `applyZoom()` runs on every `updateLayout()` pass while a
+    /// pane is zoomed, not only when a transition genuinely starts — a
+    /// window resize included. It used to call `zoomBlur.hide()`
+    /// unconditionally right after its first guard, which fired on every
+    /// one of those passes: blur showed once the grow settled, and the very
+    /// next unrelated layout pass hid it again, permanently — `updateLayout`'s
+    /// own resize-reposition guard, checked moments later in that same
+    /// pass, could never see `zoomBlur.isShown` true again, since the
+    /// `hide()` that had just run set it false. Fixed by gating the hide on
+    /// an actual transition start: switching to a different pane, or this
+    /// pane's own fresh lift into the overlay.
+    func testAResizeWhileBlurIsShowingDoesNotHideIt() throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            throw XCTSkip("under Reduce Motion there is no grow to settle, so blur never shows")
+        }
+        let (workspace, window, _) = makeSplitHostedWorkspace(panes: 2)
+        defer { window.close() }
+
+        XCTAssertTrue(workspace.toggleZoom("pane-2"))
+        // Blur only appears once the grow's completion fires, asynchronously
+        // — see `finishZoomTransition`.
+        func blurIsUp() -> Bool {
+            window.childWindows?.contains { $0 is PaneZoomBlurPanel } ?? false
+        }
+        let deadline = Date().addingTimeInterval(2)
+        while !blurIsUp(), Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(blurIsUp(), "blur must be up once the grow has settled")
+
+        // A resize with nothing else changed about the zoom — the exact pass
+        // the unconditional `hide()` this guards against used to break.
+        workspace.setFrameSize(NSSize(width: workspace.frame.width - 10, height: workspace.frame.height))
+
+        XCTAssertTrue(blurIsUp(), "a resize must not hide blur that was already settled and showing")
+    }
+
     /// Opening a terminal in the 0.32s a card is still shrinking (⌘↩ then ⌘T)
     /// has to land that card in its cell at once. Both halves matter: the grid
     /// must not hand a cell to a pane that still lives in the overlay — its frame
@@ -1563,34 +1600,22 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
     }
 
-    /// `backdrop-filter:blur(16px)` as the platform's within-window blur, and
-    /// nothing else over it. The `CIGaussianBlur` in `layer.backgroundFilters`
-    /// this replaces passed a test just like this one and blurred nothing on
-    /// screen: `backgroundFilters` are not composited for a layer-backed view in
-    /// an ordinary window, so the assertions could only ever confirm the filter
-    /// was *installed*. Hence the blending mode below — it is the property that
-    /// decides whether anything is blurred at all.
-    func testTheBackdropBlursTheAppBehindItAndTintsNothing() throws {
+    /// `PaneZoomBackdropView` provides the dim tint alone, not blur — see
+    /// its class doc comment. Real blur is `PaneZoomBlurOverlay`, covered by
+    /// its own tests; this only confirms the tint's own configuration.
+    func testTheBackdropTintsTheAppBehindItAndDoesNotClaimToBlurIt() throws {
         let backdrop = PaneZoomBackdropView()
         backdrop.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
 
-        XCTAssertEqual(backdrop.blendingMode, .withinWindow, "the app behind it, not the desktop")
-        XCTAssertEqual(backdrop.state, .active, "and blurred whether or not the window is key")
-        XCTAssertEqual(
-            backdrop.material,
-            .sidebar,
-            "the middle-tier material real frosted glass uses: headerView barely blurred at all"
-        )
+        XCTAssertEqual(backdrop.blendingMode, .withinWindow)
+        XCTAssertEqual(backdrop.state, .active, "tinted whether or not the window is key")
+        XCTAssertEqual(backdrop.material, .sidebar)
 
         backdrop.setShown(true, duration: 0)
         backdrop.layoutSubtreeIfNeeded()
-        // The design's `rgba(6,6,8,.62)` is deliberately not reproduced: the blur
-        // is what makes the app unreadable, and every amount of black over it
-        // only took away seeing where everything else is. .62, .22 and .12 were
-        // each too dark on a real screen.
-        XCTAssertEqual(backdrop.subviews, [], "nothing tinting the blur")
-        // Short of 1, on purpose: at full alpha nothing of the sharp app shows
-        // through, only the material's own tint — see `shownAlpha`.
+        XCTAssertEqual(backdrop.subviews, [], "nothing tinting the tint")
+        // Short of 1, on purpose: at full alpha nothing of the sharp app
+        // shows through, only the material's own tint — see `shownAlpha`.
         XCTAssertEqual(backdrop.alphaValue, 0.78)
     }
 
@@ -1646,7 +1671,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
     }
 
-    /// Mirrors `testTheBackdropBlursTheAppBehindItAndTintsNothing`'s shape:
+    /// Mirrors `testTheBackdropTintsTheAppBehindItAndDoesNotClaimToBlurIt`'s shape:
     /// configuration only, no pixels — `.behindWindow` blur is exactly as
     /// unrenderable in an offscreen test as `.withinWindow` was, this just
     /// confirms the one property that actually decides whether real blur

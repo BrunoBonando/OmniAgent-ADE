@@ -351,6 +351,17 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return view
     }()
 
+    /// The real blur `zoomBackdrop` cannot provide — see its doc comment.
+    /// Shown only once a zoom's grow animation has settled
+    /// (`finishZoomTransition`) and hidden the instant any transition
+    /// starts (`applyZoom`, `collapseZoom`), so nothing has to track it
+    /// through the ~0.38s the card is actually moving.
+    private lazy var zoomBlur: PaneZoomBlurOverlay = {
+        let overlay = PaneZoomBlurOverlay()
+        overlay.onClick = { [weak self] in self?.setZoomed(nil) }
+        return overlay
+    }()
+
     /// The design's overlay is full-bleed over the app frame —
     /// `position:absolute;top:30px;left:0;right:0;bottom:24px` in
     /// `design/OmniAgent ADE.dc.html`, the whole 1440×900 mock less its title
@@ -503,15 +514,49 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
     }
 
-    /// The end of one transition's 0.32s: the card that was shrinking is back in
-    /// the grid, and with nothing focused any more the overlay comes out of the
-    /// window. Both directions end up here, so it acts only for the transition it
-    /// was created by — see `zoomTransitionToken`.
+    /// The end of one transition's 0.32s. Three outcomes, gated on the token
+    /// so it only ever acts for the transition it was created by — see
+    /// `zoomTransitionToken` — since a second transition starting invalidates
+    /// whichever of these was still pending:
+    /// - Shrink completed: the card that was shrinking lands back in the
+    ///   grid, and with nothing focused any more the overlay comes out of
+    ///   the window.
+    /// - Grow completed, and the zoom it grew into is still the current
+    ///   target: `zoomBlur` shows for the first time, now that the card has
+    ///   stopped moving.
+    /// - Anything else — the target pane changed, or zoom exited, since this
+    ///   transition began: nothing to do, the token guard above would
+    ///   already have caught it.
     private func finishZoomTransition(_ token: Int) {
-        guard token == zoomTransitionToken, overlayIsCollapsing, let id = overlayPaneID
+        guard token == zoomTransitionToken else { return }
+        if overlayIsCollapsing, let id = overlayPaneID {
+            landCard(id)
+            teardownOverlay()
+            return
+        }
+        // A grow just settled, and nothing since has changed the target —
+        // a switch straight to a different pane, or an exit, would have
+        // moved the token on and failed the guard above already.
+        if let zoomedPaneID, overlayPaneID == zoomedPaneID {
+            showZoomBlur(around: zoomedPaneID)
+        }
+    }
+
+    /// Converts the card's current rect — read from the live view, in the
+    /// overlay host's coordinate space — to screen coordinates and shows
+    /// `zoomBlur` around it. Also what `updateLayout` calls to reposition
+    /// the bands if the window resizes while blur is already showing;
+    /// `PaneZoomBlurOverlay.show` is safe to call repeatedly with updated
+    /// geometry, it just repositions its existing panels.
+    private func showZoomBlur(around id: String) {
+        guard
+            let window,
+            let container = containers[id],
+            container.superview === focusOverlay
         else { return }
-        landCard(id)
-        teardownOverlay()
+        let outer = window.convertToScreen(focusOverlay.convert(focusOverlay.bounds, to: nil))
+        let hole = window.convertToScreen(focusOverlay.convert(container.frame, to: nil))
+        zoomBlur.show(around: hole, in: outer, parent: window)
     }
 
     /// Zoom only survives while it still means something: the pane has to be
@@ -611,6 +656,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // the frame animation below picks it up from wherever the shrink got to.
         if let leaving = overlayPaneID, leaving != id {
             landCard(leaving)
+            zoomBlur.hide()
         }
         overlayIsCollapsing = false
         let host = installOverlayHost()
@@ -620,6 +666,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // window, and a frame carried across unconverted would jump the length
         // of the sidebar.
         let lifting = container.superview !== host
+        // Stale geometry from before this pane's own lift must never show
+        // through the grow — but a re-apply of an already-settled zoom (a
+        // window resize passing through updateLayout, say) must leave
+        // blur alone, or `updateLayout`'s reposition guard right after
+        // `applyZoom()` can never fire: `isShown` would already be false.
+        if lifting { zoomBlur.hide() }
         let start = lifting ? convert(container.frame, to: host) : focusCardShadow.frame
         let restacked = stackOverlay(container, in: host)
         // After any move, not just the lift: re-stacking a view that is already
@@ -678,6 +730,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// `updateLayout` owns its frame again. Cheap and idempotent: every layout
     /// pass with nothing focused comes through here.
     private func collapseZoom() {
+        zoomBlur.hide()
         zoomBackdrop.setShown(false, duration: zoomTransition)
         guard let id = overlayPaneID else { return }
         guard
@@ -745,6 +798,9 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// covering the content view hit-tests as itself, and would swallow every
     /// click meant for the sidebar or a pane.
     private func teardownOverlay() {
+        // Idempotent — a safety net covering any path here that did not
+        // already go through applyZoom/collapseZoom's own zoomBlur.hide().
+        zoomBlur.hide()
         focusCardShadow.removeFromSuperlayer()
         // The backdrop explicitly, not only with the host: where there is no
         // window the host is never installed and this view *is* the host, so
@@ -1234,6 +1290,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         syncDividerViews(layout.dividers)
         syncHolePlaceholders(layout, holeIDs: grid.cells.filter(\.isHole).map(\.id))
         applyZoom()
+        // A window resize while blur is already settled and showing has to
+        // move with it — `addChildWindow` tracks the main window's *moves*
+        // automatically, but not its resizes.
+        if zoomBlur.isShown, let zoomedPaneID, overlayPaneID == zoomedPaneID, !overlayIsCollapsing {
+            showZoomBlur(around: zoomedPaneID)
+        }
         updateAccessibilityLabels()
         refreshFocusSubtitles()
     }
@@ -2540,16 +2602,26 @@ final class PaneBadgeView: NSView {
     }
 }
 
-/// The blurred backdrop a zoomed pane sits on, and the way out of the zoom
-/// that does not require finding the button again.
+/// The dim tint a zoomed pane sits on. Despite `blendingMode = .withinWindow`
+/// below, this does **not** blur anything — confirmed directly on screen: even
+/// the plain, non-Metal sidebar behind it shows no blur, only this view's own
+/// flat material tint. `.withinWindow` blending samples sibling views inside
+/// one window's own private compositing tree, and in this window that
+/// sampling produces nothing visible; `.behindWindow` (`PaneZoomBlurOverlay`,
+/// real auxiliary windows) is what actually blurs the panes behind the card.
+/// This view stays for the tint alone, and because it is what animates in
+/// smoothly the instant a zoom starts — `PaneZoomBlurOverlay` only appears
+/// once that animation has settled, to avoid syncing four separate window
+/// frames against an in-flight CALayer animation.
 ///
-/// This was a layer background filter, to keep `NSVisualEffectView`'s
-/// display-link-backed animation machine out of the test host — one that had
-/// been seen spinning forever retrying `CVDisplayLinkCreateWithCGDisplays` where
-/// no display exists. It bought a suite that never blurred anything: see `init`.
-/// The effect view is back, and the constraint it was avoided for is now a
-/// property of the *host*, not of this view — a test host with no display attached
-/// must not construct one.
+/// This was a layer background filter before it was an in-window
+/// `NSVisualEffectView`, to keep `NSVisualEffectView`'s display-link-backed
+/// animation machine out of the test host — one that had been seen spinning
+/// forever retrying `CVDisplayLinkCreateWithCGDisplays` where no display
+/// exists. It bought a suite that never blurred anything: see `init`. The
+/// effect view is back, and the constraint it was avoided for is now a
+/// property of the *host*, not of this view — a test host with no display
+/// attached must not construct one.
 final class PaneZoomBackdropView: NSVisualEffectView {
     /// The material the app behind the card is seen through. Materials come
     /// in roughly three blur strengths: `.headerView` — tried first — sits in
@@ -2572,21 +2644,25 @@ final class PaneZoomBackdropView: NSVisualEffectView {
 
     private var isShown = false
 
-    /// `backdrop-filter:blur(16px)` as the platform's own within-window blur,
-    /// rather than the `CIGaussianBlur` in `layer.backgroundFilters` this used to
-    /// carry. That is what "the background is not blurred" was:
-    /// `backgroundFilters` are only composited for layers the window server can
-    /// read back through, which a layer-backed view inside an ordinary window is
-    /// not — the filter was installed, ramped, and drew nothing, leaving a flat
-    /// 62% black wash over a perfectly sharp app. `NSVisualEffectView` with
-    /// `.withinWindow` blurs the sibling views behind it, which is exactly what
-    /// the design's overlay does.
+    /// `.withinWindow`, tried as the platform's own within-window blur to
+    /// replace the `CIGaussianBlur` in `layer.backgroundFilters` this used to
+    /// carry (`backgroundFilters` are only composited for layers the window
+    /// server can read back through, which a layer-backed view in an ordinary
+    /// window is not — that filter was installed, ramped, and drew nothing,
+    /// leaving a flat 62% black wash over a perfectly sharp app). This
+    /// replacement does blend — the tint below is real — but does not blur:
+    /// see the class doc comment. Left as `.withinWindow` anyway rather than
+    /// switched to `.behindWindow` here too, because a view *inside* the main
+    /// window cannot use `.behindWindow` blending to blur that same window's
+    /// own content — `.behindWindow` blurs whatever is behind the window
+    /// hosting it, and this view's window *is* the main window. Real blur
+    /// needed a window of its own: `PaneZoomBlurOverlay`.
     ///
-    /// No tint over it, and the design's `rgba(6,6,8,.62)` is deliberately not
-    /// reproduced. It is a wash meant to carry a CSS blur on its own; here the
-    /// blur already makes the app unreadable, which is the entire job, and every
-    /// amount of black tried on top of it — .62, .22, .12 — only took away the
-    /// one thing focus mode should leave you: seeing where everything else is.
+    /// No tint beyond the material's own, and the design's `rgba(6,6,8,.62)`
+    /// is deliberately not reproduced. It is a wash meant to carry a CSS blur
+    /// on its own; every amount of black tried on top of it here — .62, .22,
+    /// .12 — only took away the one thing focus mode should leave you: seeing
+    /// where everything else is.
     init() {
         super.init(frame: .zero)
         material = Self.material
