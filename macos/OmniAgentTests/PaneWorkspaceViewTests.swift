@@ -267,6 +267,20 @@ final class PaneWorkspaceViewTests: XCTestCase {
         }
     }
 
+    /// And it glides over the grid, never under it: both movers are the topmost
+    /// panes for the flight, the dragged one topmost of all. Four panes so there
+    /// are bystanders to be hidden behind.
+    func testADropRaisesBothMoversAboveEveryOtherPane() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 4)
+        defer { window.close() }
+        workspace.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(workspace.performPaneDrop(from: "pane-1", onto: "pane-4"))
+
+        let panes = workspace.subviews.compactMap { ($0 as? PaneContainerView)?.paneID }
+        XCTAssertEqual(panes.suffix(2), ["pane-4", "pane-1"], "the movers must be the top two")
+    }
+
     // MARK: - Focus
 
     func testClosingTheFocusedPaneMovesFocusToItsFillOrderNeighbour() {

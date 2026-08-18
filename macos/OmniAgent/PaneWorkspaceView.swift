@@ -1218,6 +1218,19 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             zoomTransition = Self.swapTransitionDuration
         }
         defer { zoomTransition = 0 }
+        // Both movers to the top of the stack first, or the glide passes *under*
+        // whichever panes sit later in the subview order — a pane sliding behind
+        // its neighbours, half of it gone for a quarter second. Source last, so
+        // the pane you dragged is the one on top. They stay raised: settled panes
+        // never overlap, so the order stops mattering the moment they land, and
+        // re-stacking them again afterwards would only cost the terminal its
+        // first responder a second time.
+        for id in [targetID, sourceID] {
+            guard let container = containers[id] else { continue }
+            addSubview(container, positioned: .above, relativeTo: nil)
+            // A moved view is removed and re-added, which is what loses focus.
+            reclaimFirstResponder(container)
+        }
         guard swapPanes(sourceID, targetID) else { return false }
         if let wasFocused { focusPane(wasFocused) }
         return true
