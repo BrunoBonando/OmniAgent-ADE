@@ -292,6 +292,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
         workspace.onRequestNewBrowserPane = { [weak self] in self?.newBrowserPane(nil) }
+        workspace.onRequestFileViewerPane = { [weak self] in self?.newFileViewerPane(nil) }
         workspace.onRequestClosePane = { [weak self] paneID in
             guard let self else { return }
             // Route through focus so the header's close button ends *that*
@@ -744,6 +745,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     /// ⇧⌘T — a browser pane in the focused pane's session. No PTY, no engine,
     /// no cwd; only the grid geometry can refuse it.
+    /// The hole tile's File Viewer. ponytail: a browser pane on a `file://`
+    /// URL — WebKit already renders text, images, PDFs and HTML, so viewing a
+    /// file needs a file chooser and nothing else. The tabbed Monaco editor
+    /// pane (docs/superpowers/plans/2026-08-18-editor-pane.md) replaces this
+    /// when it lands; until then the button opens something instead of nothing.
+    @objc func newFileViewerPane(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "View"
+        panel.message = "Choose a file to view"
+        if let root = workspace.focusedPaneID.flatMap({ workspace.descriptor(for: $0) })?.cwd,
+           !root.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: root)
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        newBrowser(in: nil, url: url.absoluteString)
+    }
+
     @objc func newBrowserPane(_ sender: Any?) {
         newBrowser(in: nil)
     }

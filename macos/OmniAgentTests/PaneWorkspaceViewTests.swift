@@ -97,14 +97,15 @@ final class PaneWorkspaceViewTests: XCTestCase {
     }
 
     /// The hole's dock offers one button per pane kind. Each acts for itself,
-    /// the space around them does nothing, and File Viewer is drawn but inert
-    /// until the editor pane exists.
+    /// and the space around them does nothing.
     func testTheHoleTileOffersADockOfPaneKinds() {
         let workspace = makeWorkspace(panes: 3)
         var terminals = 0
         var browsers = 0
         workspace.onRequestNewPane = { terminals += 1 }
         workspace.onRequestNewBrowserPane = { browsers += 1 }
+        var viewers = 0
+        workspace.onRequestFileViewerPane = { viewers += 1 }
         let hole = workspace.holePlaceholders[0]
 
         XCTAssertEqual(hole.itemRects.count, 3, "Terminal, Browser, File Viewer")
@@ -127,12 +128,14 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(terminals, 1, "the terminal button opens a terminal")
 
         hole.dispatch(at: NSPoint(x: hole.itemRects[2].midX, y: hole.itemRects[2].midY))
-        XCTAssertEqual(terminals, 1, "File Viewer is not wired to anything yet")
+        XCTAssertEqual(viewers, 1, "the File Viewer button opens a file viewer")
+        XCTAssertEqual(terminals, 1)
         XCTAssertEqual(browsers, 1)
 
         hole.dispatch(at: NSPoint(x: hole.bounds.minX + 2, y: hole.bounds.minY + 2))
         XCTAssertEqual(terminals, 1, "the space around the buttons is not a button")
         XCTAssertEqual(browsers, 1)
+        XCTAssertEqual(viewers, 1)
 
         XCTAssertTrue(hole.accessibilityPerformPress())
         XCTAssertEqual(terminals, 2, "the assistive press stays the single Add terminal action")

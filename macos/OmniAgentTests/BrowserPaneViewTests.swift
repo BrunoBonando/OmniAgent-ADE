@@ -14,6 +14,19 @@ final class BrowserPaneViewTests: XCTestCase {
         XCTAssertNil(BrowserPaneView.destination(for: "   "))
     }
 
+    /// A path is a file, not a search — what the File Viewer button hands over.
+    func testDestinationTreatsPathsAsFiles() {
+        XCTAssertEqual(BrowserPaneView.destination(for: "/etc/hosts"), URL(fileURLWithPath: "/etc/hosts"))
+        XCTAssertEqual(
+            BrowserPaneView.destination(for: "~/notes.md"),
+            URL(fileURLWithPath: NSString(string: "~/notes.md").expandingTildeInPath)
+        )
+        XCTAssertEqual(
+            BrowserPaneView.destination(for: "file:///etc/hosts")?.isFileURL,
+            true
+        )
+    }
+
     func testDownloadDestinationAvoidsOverwriting() {
         let dir = URL(fileURLWithPath: "/tmp/dl")
         var existing: Set<String> = [dir.appendingPathComponent("a.zip").path]

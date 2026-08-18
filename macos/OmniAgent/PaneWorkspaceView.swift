@@ -170,6 +170,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     var onRequestNewPane: (() -> Void)?
     /// The hole tile's second, fainter affordance: a browser in that cell.
     var onRequestNewBrowserPane: (() -> Void)?
+    var onRequestFileViewerPane: (() -> Void)?
     /// The header's close button. Closing a pane ends its PTY, which only the
     /// window controller may do — this view never kills a session itself.
     var onRequestClosePane: ((String) -> Void)?
@@ -1368,7 +1369,8 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         while holePlaceholders.count < holeIDs.count {
             let placeholder = PaneHolePlaceholderView(
                 onActivate: { [weak self] in self?.onRequestNewPane?() },
-                onActivateBrowser: { [weak self] in self?.onRequestNewBrowserPane?() }
+                onActivateBrowser: { [weak self] in self?.onRequestNewBrowserPane?() },
+                onActivateFiles: { [weak self] in self?.onRequestFileViewerPane?() }
             )
             holePlaceholders.append(placeholder)
             addSubview(placeholder, positioned: .below, relativeTo: subviews.first)

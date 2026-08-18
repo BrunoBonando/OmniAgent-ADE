@@ -83,7 +83,7 @@ final class BrowserPaneView: NSView, PaneContentView {
 
         if let url = Self.destination(for: initialURL) {
             urlField.stringValue = url.absoluteString
-            webView.load(URLRequest(url: url))
+            load(url)
         }
     }
 
@@ -132,21 +132,38 @@ final class BrowserPaneView: NSView, PaneContentView {
         button.action = action
     }
 
+    /// One door for every load. A `file://` URL cannot go through `URLRequest`:
+    /// WebKit refuses to read it without an explicit read-access grant and
+    /// fails silently, which is why typing a path did nothing. Local files take
+    /// `loadFileURL`, scoped to the file's own folder so its siblings (an
+    /// image's stylesheet, a page's assets) resolve.
+    func load(_ url: URL) {
+        if url.isFileURL {
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        } else {
+            webView.load(URLRequest(url: url))
+        }
+    }
+
     @objc private func goBack() { webView.goBack() }
     @objc private func goForward() { webView.goForward() }
     @objc private func reload() { webView.reload() }
 
     @objc private func commitURL() {
         guard let url = Self.destination(for: urlField.stringValue) else { return }
-        webView.load(URLRequest(url: url))
+        load(url)
         window?.makeFirstResponder(webView)
     }
 
-    /// What typing in the URL bar means: a real URL loads, a hostname gets
-    /// https:// (http:// for localhost/loopback), anything else is a search.
+    /// What typing in the URL bar means: a real URL loads, an absolute or
+    /// tilde path is a local file, a hostname gets https:// (http:// for
+    /// localhost/loopback), anything else is a search.
     static func destination(for input: String) -> URL? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("/") || trimmed.hasPrefix("~") {
+            return URL(fileURLWithPath: (trimmed as NSString).expandingTildeInPath)
+        }
         if let url = URL(string: trimmed),
            let scheme = url.scheme?.lowercased(),
            ["http", "https", "file"].contains(scheme) {
@@ -224,7 +241,7 @@ extension BrowserPaneView: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegat
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
         if let url = navigationAction.request.url {
-            webView.load(URLRequest(url: url))
+            load(url)
         }
         return nil
     }
