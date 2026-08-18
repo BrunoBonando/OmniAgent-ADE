@@ -26,6 +26,39 @@ struct RestoredPane: Equatable {
     /// `tab.group ?? UNGROUPED_SESSION_ID` reads it.
     let group: String
     let groupLabel: String?
+    /// What the pane holds. The shared `layout` row only ever describes
+    /// terminals; a `.browser` pane restores from its own native-only row.
+    let kind: PaneKind
+    /// The URL a `.browser` pane last showed — cwd's role, for a browser.
+    let browserURL: String
+
+    /// Explicit, with defaults on the two kind fields, so every call site
+    /// written against the old memberwise init compiles unchanged.
+    init(
+        sessionID: String,
+        reattaches: Bool,
+        project: String,
+        engine: Engine,
+        cwd: String,
+        label: String?,
+        themeId: TerminalThemeId?,
+        group: String,
+        groupLabel: String?,
+        kind: PaneKind = .terminal,
+        browserURL: String = ""
+    ) {
+        self.sessionID = sessionID
+        self.reattaches = reattaches
+        self.project = project
+        self.engine = engine
+        self.cwd = cwd
+        self.label = label
+        self.themeId = themeId
+        self.group = group
+        self.groupLabel = groupLabel
+        self.kind = kind
+        self.browserURL = browserURL
+    }
 }
 
 /// Reads and writes the `layout` settings row on behalf of the workspace —
@@ -123,9 +156,15 @@ enum WorkspaceRestoration {
     /// database the two apps share; dropping the pane instead keeps the row
     /// truthful and costs only that pane's restoration, which is a session
     /// the native build could not have restored into a project anyway.
+    ///
+    /// **A `.browser` pane is never persisted here.** The shared `layout`
+    /// row only ever describes terminals — see `SettingsKey.browserPanes`'s
+    /// doc comment for why a browser tab in this row would be destroyed by
+    /// the next web-side save. Browser panes restore from their own
+    /// native-only row instead (`BrowserPanesCodec`).
     static func persistedTabs(from panes: [PaneDescriptor]) -> [PersistedTab] {
         panes.compactMap { pane in
-            guard !pane.project.isEmpty else { return nil }
+            guard pane.kind == .terminal, !pane.project.isEmpty else { return nil }
             return PersistedTab(
                 project: pane.project,
                 engine: pane.engine,

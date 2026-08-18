@@ -62,6 +62,56 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(workspace.holePlaceholders.isEmpty, "a full rung has no holes")
     }
 
+    /// The hole's second, fainter line is the one place a click means a
+    /// browser; everywhere else in the cell — and the assistive press — stays
+    /// the primary "new terminal" affordance.
+    func testTheHoleTileAlsoOffersABrowserOnItsOwnLine() {
+        let workspace = makeWorkspace(panes: 3)
+        var terminals = 0
+        var browsers = 0
+        workspace.onRequestNewPane = { terminals += 1 }
+        workspace.onRequestNewBrowserPane = { browsers += 1 }
+        let hole = workspace.holePlaceholders[0]
+
+        hole.dispatch(at: NSPoint(x: hole.browserTextRect.midX, y: hole.browserTextRect.midY))
+        XCTAssertEqual(browsers, 1, "a click on the browser line opens a browser")
+        XCTAssertEqual(terminals, 0)
+
+        hole.dispatch(at: NSPoint(x: hole.bounds.minX + 2, y: hole.bounds.minY + 2))
+        XCTAssertEqual(terminals, 1, "anywhere else is the primary affordance")
+
+        XCTAssertTrue(hole.accessibilityPerformPress())
+        XCTAssertEqual(terminals, 2, "the assistive press stays the single Add terminal action")
+        XCTAssertEqual(browsers, 1)
+        XCTAssertEqual(hole.accessibilityLabel(), "Add terminal")
+    }
+
+    /// The seam pays off: a browser descriptor builds a `BrowserPaneView`
+    /// behind the same container chrome, reachable through its own accessor
+    /// and named by its own noun.
+    func testABrowserPaneGetsKindAwareChromeAndItsOwnAccessor() {
+        let workspace = makeWorkspace(panes: 2)
+        var descriptor = makeDescriptor("web-1")
+        descriptor.kind = .browser
+        XCTAssertTrue(workspace.addPane(descriptor))
+
+        XCTAssertNotNil(workspace.browserPane(for: "web-1"))
+        XCTAssertNil(workspace.terminalSurface(for: "web-1"), "a browser is not a terminal")
+        // By fill-order position, since the 2→3 reshape decides where the
+        // new pane lands.
+        let browserIndex = workspace.paneIDs.firstIndex(of: "web-1")! + 1
+        XCTAssertEqual(
+            workspace.container(for: "web-1")!.accessibilityLabel(),
+            "Browser pane \(browserIndex) of 3"
+        )
+        let terminalIndex = workspace.paneIDs.firstIndex(of: "pane-1")! + 1
+        XCTAssertEqual(
+            workspace.container(for: "pane-1")!.accessibilityLabel(),
+            "Terminal pane \(terminalIndex) of 3",
+            "terminals keep their own noun"
+        )
+    }
+
     // MARK: - Identity
 
     func testTerminalInstancesSurviveEveryLayoutMutation() {
@@ -84,13 +134,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let last = workspace.container(for: "pane-4")!
         let firstFrame = first.frame
         let lastFrame = last.frame
-        let firstTerminal = ObjectIdentifier(first.surface.terminalView)
+        let firstTerminal = ObjectIdentifier(first.terminalSurface.terminalView)
 
         XCTAssertTrue(workspace.swapPanes("pane-1", "pane-4"))
 
         XCTAssertEqual(first.frame, lastFrame)
         XCTAssertEqual(last.frame, firstFrame)
-        XCTAssertEqual(ObjectIdentifier(workspace.container(for: "pane-1")!.surface.terminalView), firstTerminal)
+        XCTAssertEqual(ObjectIdentifier(workspace.container(for: "pane-1")!.terminalSurface.terminalView), firstTerminal)
         XCTAssertEqual(workspace.paneIDs, ["pane-4", "pane-3", "pane-2", "pane-1"])
     }
 
@@ -185,13 +235,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let (workspace, window) = makeAttachedWorkspace(panes: 4)
         defer { window.close() }
         workspace.focusPane("pane-3")
-        XCTAssertTrue(window.firstResponder === workspace.surface(for: "pane-3")?.terminalView)
+        XCTAssertTrue(window.firstResponder === workspace.terminalSurface(for: "pane-3")?.terminalView)
 
         XCTAssertTrue(window.makeFirstResponder(window))
         workspace.restoreFocus()
 
         XCTAssertEqual(workspace.focusedPaneID, "pane-3")
-        XCTAssertTrue(window.firstResponder === workspace.surface(for: "pane-3")?.terminalView)
+        XCTAssertTrue(window.firstResponder === workspace.terminalSurface(for: "pane-3")?.terminalView)
     }
 
     func testFocusSurvivesASwapAndAReflow() {
@@ -201,11 +251,11 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         XCTAssertTrue(workspace.swapPanes("pane-2", "pane-3"))
         XCTAssertEqual(workspace.focusedPaneID, "pane-2")
-        XCTAssertTrue(window.firstResponder === workspace.surface(for: "pane-2")?.terminalView)
+        XCTAssertTrue(window.firstResponder === workspace.terminalSurface(for: "pane-2")?.terminalView)
 
         XCTAssertTrue(workspace.addPane(makeDescriptor("pane-5")))
         XCTAssertEqual(workspace.focusedPaneID, "pane-5", "a new pane takes focus")
-        XCTAssertTrue(window.firstResponder === workspace.surface(for: "pane-5")?.terminalView)
+        XCTAssertTrue(window.firstResponder === workspace.terminalSurface(for: "pane-5")?.terminalView)
     }
 
     // MARK: - Drag and drop
@@ -214,7 +264,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let workspace = makeWorkspace(panes: 4)
         let source = workspace.container(for: "pane-1")!
         let target = workspace.container(for: "pane-4")!
-        let sourceTerminal = ObjectIdentifier(source.surface.terminalView)
+        let sourceTerminal = ObjectIdentifier(source.terminalSurface.terminalView)
         let info = StubDraggingInfo(paneID: "pane-1")
 
         XCTAssertEqual(target.draggingEntered(info), .move)
@@ -223,7 +273,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         XCTAssertFalse(target.isDropTarget)
         XCTAssertEqual(workspace.paneIDs, ["pane-4", "pane-3", "pane-2", "pane-1"])
-        XCTAssertEqual(ObjectIdentifier(workspace.container(for: "pane-1")!.surface.terminalView), sourceTerminal)
+        XCTAssertEqual(ObjectIdentifier(workspace.container(for: "pane-1")!.terminalSurface.terminalView), sourceTerminal)
     }
 
     func testDroppingAPaneOnItselfOrCarryingAnUnknownIDIsRefused() {
@@ -288,7 +338,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
     func testOnlyTheSelectedPaneBlinksItsCursor() {
         let workspace = makeWorkspace(panes: 3)
         func style(_ id: String) -> CursorStyle {
-            workspace.container(for: id)!.surface.terminalView.terminal.options.cursorStyle
+            workspace.container(for: id)!.terminalSurface.terminalView.terminal.options.cursorStyle
         }
 
         workspace.focusPane("pane-2")
@@ -305,7 +355,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
     /// it — the deselect override only ever puts back what it took away.
     func testDeselectDoesNotClobberACursorStyleTheProgramChose() {
         let workspace = makeWorkspace(panes: 2)
-        let background = workspace.container(for: "pane-1")!.surface
+        let background = workspace.container(for: "pane-1")!.terminalSurface
         workspace.focusPane("pane-2")
         XCTAssertEqual(background.terminalView.terminal.options.cursorStyle, .steadyBlock)
 
@@ -317,15 +367,80 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
     /// Every pane but the selected one has its background washed out a shade,
     /// and the veil never swallows a click meant for the terminal under it.
-    ///
-    /// TEMPORARILY STUBBED (uncommitted, real-login worktree only): this test
-    /// landed in 524785d, but the `TerminalWashOverlayView` implementation it
-    /// exercises is still uncommitted in the shared checkout's in-progress
-    /// focus-mode work — so at HEAD the test target does not compile at all.
-    /// Restore the original body (see `git show HEAD -- <this file>`) once
-    /// that implementation lands.
-    func testOnlyTheSelectedPaneIsUnwashed() throws {
-        throw XCTSkip("TerminalWashOverlayView is not committed yet — its implementation is uncommitted in the shared checkout")
+    func testOnlyTheSelectedPaneIsUnwashed() {
+        let workspace = makeWorkspace(panes: 3)
+        func wash(_ id: String) -> TerminalWashOverlayView {
+            workspace.container(for: id)!.terminalSurface.wash
+        }
+
+        workspace.focusPane("pane-2")
+        XCTAssertTrue(wash("pane-2").isHidden)
+        XCTAssertFalse(wash("pane-1").isHidden)
+        XCTAssertFalse(wash("pane-3").isHidden)
+
+        workspace.focusPane("pane-3")
+        XCTAssertFalse(wash("pane-2").isHidden, "the pane you left recedes")
+        XCTAssertEqual(wash("pane-2").frame, workspace.container(for: "pane-2")!.surface.bounds)
+        XCTAssertNil(wash("pane-2").hitTest(NSPoint(x: 5, y: 5)))
+    }
+
+    /// The veil is that pane's status colour at the top falling away to the
+    /// neutral wash at the bottom. Which way up it runs is the whole point and
+    /// nothing in the code reads as up or down — a gradient's unit space is y-up
+    /// while the pane container it sits in is flipped — so it is rendered, with
+    /// a green marker at the container's `y = 0` as the anchor for which end of
+    /// the bitmap is the top of the screen.
+    func testTheWashRunsTheStatusColourFromTheTopDown() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 2)
+        defer { window.close() }
+        workspace.focusPane("pane-2")
+        let container = try XCTUnwrap(workspace.container(for: "pane-1"))
+        container.status = .error
+        let marker = NSView(frame: NSRect(x: 0, y: 0, width: container.bounds.width, height: 12))
+        marker.wantsLayer = true
+        marker.layer?.backgroundColor = NSColor.green.cgColor
+        container.addSubview(marker, positioned: .above, relativeTo: nil)
+        window.displayIfNeeded()
+        container.layoutSubtreeIfNeeded()
+
+        let image = try XCTUnwrap(render(container))
+        let column = image.pixelsWide / 2
+        func pixel(_ row: Int) -> NSColor {
+            image.colorAt(x: column, y: row)?.usingColorSpace(.sRGB) ?? .black
+        }
+        let anchor = try XCTUnwrap(
+            (0..<image.pixelsHigh).first { pixel($0).greenComponent > 0.8 },
+            "the marker has to show up, or the render proves nothing"
+        )
+        let rows = anchor < image.pixelsHigh / 2
+            ? Array(0..<image.pixelsHigh)
+            : Array((0..<image.pixelsHigh).reversed())
+
+        // Red over the near-black terminal, against the blue it has none of.
+        func redness(_ row: Int) -> CGFloat { pixel(row).redComponent - pixel(row).blueComponent }
+        let near = redness(rows[rows.count / 5])
+        let far = redness(rows[rows.count - rows.count / 20])
+        XCTAssertGreaterThan(near, 0.05, "the top of an errored pane carries its red")
+        XCTAssertGreaterThan(near, far + 0.05, "and it fades on the way down")
+    }
+
+    /// Renders a view's whole layer tree, gradients included — `cacheDisplay`
+    /// draws `draw(_:)` output only, which is nothing here.
+    private func render(_ view: NSView) -> NSBitmapImageRep? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(view.bounds.width),
+            pixelsHigh: Int(view.bounds.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .calibratedRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        view.layer?.render(in: context.cgContext)
+        return rep
     }
 
     // MARK: - Header chrome
@@ -418,14 +533,14 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(workspace.addPane(descriptor))
 
         XCTAssertEqual(workspace.accessibilityRole(), .group)
-        XCTAssertEqual(workspace.accessibilityLabel(), "Terminal panes")
+        XCTAssertEqual(workspace.accessibilityLabel(), "Workspace panes")
         XCTAssertEqual(workspace.accessibilityChildren()?.count, 5)
 
         // Fill order is 1, 3, 2, 4, 5 — pane-2 sits in the third cell.
         let second = workspace.container(for: "pane-2")!
         XCTAssertEqual(second.accessibilityRole(), .group)
         XCTAssertEqual(second.accessibilityLabel(), "Terminal pane 3 of 5")
-        XCTAssertEqual(second.surface.terminalView.accessibilityLabel(), "Terminal")
+        XCTAssertEqual(second.terminalSurface.terminalView.accessibilityLabel(), "Terminal")
 
         let grouped = workspace.container(for: "pane-5")!
         XCTAssertEqual(grouped.accessibilityLabel(), "Session 2, terminal pane 5 of 5")
@@ -444,7 +559,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(workspace.resizeCoalescer.flushCount, 0, "nothing is sent mid-drag")
         XCTAssertEqual(workspace.resizeCoalescer.pending, Set(workspace.paneIDs))
         for id in workspace.paneIDs {
-            XCTAssertEqual(workspace.surface(for: id)?.resizeSendCount, 0, id)
+            XCTAssertEqual(workspace.terminalSurface(for: id)?.resizeSendCount, 0, id)
         }
 
         workspace.resizeCoalescer.flush()
@@ -452,7 +567,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(workspace.resizeCoalescer.flushCount, 1)
         XCTAssertTrue(workspace.resizeCoalescer.pending.isEmpty)
         for id in workspace.paneIDs {
-            XCTAssertEqual(workspace.surface(for: id)?.resizeSendCount, 1, "\(id): 20 drag steps, one send")
+            XCTAssertEqual(workspace.terminalSurface(for: id)?.resizeSendCount, 1, "\(id): 20 drag steps, one send")
         }
     }
 
@@ -474,7 +589,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
     func testSuspendedPanesStopRequestingDrawsButKeepParsingOutput() {
         let (workspace, window) = makeAttachedWorkspace(panes: 1)
         defer { window.close() }
-        let surface = workspace.surface(for: "pane-1")!
+        let surface = workspace.terminalSurface(for: "pane-1")!
 
         workspace.setSuspendsDrawing(true)
         surface.feed(Data("hidden-output".utf8), isSnapshot: false)
@@ -523,7 +638,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
             }
             workspace.resizeCoalescer.flush()
             for id in workspace.paneIDs {
-                workspace.surface(for: id)?.requestRendererDraw()
+                workspace.terminalSurface(for: id)?.requestRendererDraw()
             }
         }
     }
@@ -611,6 +726,18 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(workspace.paneCount(inGroup: "sess-grp-2"), 1)
         XCTAssertEqual(workspace.allPaneIDs.count, PaneGrid.maxPanes + 1)
         XCTAssertEqual(workspace.paneIDs.count, 1, "and it shows only its own")
+    }
+
+    /// The 64-terminal backstop mirrors the daemon's `MAX_SESSIONS` — a PTY
+    /// budget. A browser pane holds no PTY, so it must not spend one.
+    func testBrowserPanesDoNotCountAgainstTheTerminalCap() {
+        let workspace = makeWorkspace(panes: 2)
+        XCTAssertEqual(workspace.terminalPaneCount, 2)
+        XCTAssertTrue(workspace.addPane(
+            PaneDescriptor(sessionID: "web-1", group: "sess-grp-1", kind: .browser)
+        ))
+        XCTAssertEqual(workspace.terminalPaneCount, 2, "a browser consumes no PTY budget")
+        XCTAssertEqual(workspace.allPaneIDs.count, 3)
     }
 
     /// The app-wide ceiling is a backstop, not a limit anyone meets, and it
@@ -921,7 +1048,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         workspace.focusPane("pane-1")
         XCTAssertTrue(workspace.toggleZoom("pane-1"))
         let card = try XCTUnwrap(workspace.container(for: "pane-1"))
-        XCTAssertTrue(window.makeFirstResponder(card.surface.terminalView))
+        XCTAssertTrue(window.makeFirstResponder(card.terminalSurface.terminalView))
 
         // The hazard itself: the plain chain from inside the overlay misses it.
         var chain: [NSResponder] = []
@@ -1217,37 +1344,61 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(from.m11, cell.width / card.frame.width, accuracy: 0.02, "from the cell's size")
         XCTAssertEqual(from.m22, cell.height / card.frame.height, accuracy: 0.02)
         XCTAssertEqual(zoom.duration, PaneWorkspaceView.zoomTransitionDuration)
-        XCTAssertNotNil(layer.animation(forKey: "position"), "travelling as it grows")
+
+        // And it starts from where the pane *is*. The card changes superview on
+        // the way up, and until the next commit its presentation layer still
+        // holds the position it had in the grid — read in the overlay host, that
+        // is a point a sidebar's width away, which is where the lift used to
+        // appear to begin. Only a hosted workspace with a sidebar can tell the
+        // two apart, which is why this test builds one.
+        let move = try XCTUnwrap(layer.animation(forKey: "position") as? CABasicAnimation)
+        let origin = try XCTUnwrap((move.fromValue as? NSValue)?.pointValue)
+        let host = try XCTUnwrap(card.superview)
+        let cellInHost = workspace.convert(cell, to: host)
+        // A layer's `position` is wherever its `anchorPoint` sits — the corner,
+        // for these views, not the centre — so the cell is expressed the same way
+        // rather than assumed to be centre-anchored.
+        let anchor = layer.anchorPoint
+        XCTAssertNotEqual(cellInHost.minX, cell.minX, "the two spaces really do differ here")
+        XCTAssertEqual(
+            origin.x,
+            cellInHost.minX + anchor.x * cellInHost.width,
+            accuracy: 1,
+            "from the cell, in the host's space"
+        )
+        XCTAssertEqual(
+            origin.y,
+            cellInHost.minY + anchor.y * cellInHost.height,
+            accuracy: 1
+        )
     }
 
-    /// `backdrop-filter:blur(16px) saturate(70%)` over `rgba(6,6,8,.62)`, as the
-    /// platform's within-window blur. The `CIGaussianBlur` in
-    /// `layer.backgroundFilters` this replaces passed a test just like this one
-    /// and blurred nothing on screen: `backgroundFilters` are not composited for
-    /// a layer-backed view in an ordinary window, so the assertions could only
-    /// ever confirm the filter was *installed*. Hence the blending mode below —
-    /// it is the property that decides whether anything is blurred at all.
-    func testTheBackdropBlursTheAppBehindItUnderTheDesignsTint() throws {
+    /// `backdrop-filter:blur(16px)` as the platform's within-window blur, and
+    /// nothing else over it. The `CIGaussianBlur` in `layer.backgroundFilters`
+    /// this replaces passed a test just like this one and blurred nothing on
+    /// screen: `backgroundFilters` are not composited for a layer-backed view in
+    /// an ordinary window, so the assertions could only ever confirm the filter
+    /// was *installed*. Hence the blending mode below — it is the property that
+    /// decides whether anything is blurred at all.
+    func testTheBackdropBlursTheAppBehindItAndTintsNothing() throws {
         let backdrop = PaneZoomBackdropView()
         backdrop.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
 
         XCTAssertEqual(backdrop.blendingMode, .withinWindow, "the app behind it, not the desktop")
         XCTAssertEqual(backdrop.state, .active, "and blurred whether or not the window is key")
+        XCTAssertEqual(
+            backdrop.material,
+            .headerView,
+            "the thinnest material that blurs: a panel material darkens what is behind it"
+        )
 
         backdrop.setShown(true, duration: 0)
         backdrop.layoutSubtreeIfNeeded()
-        let tint = try XCTUnwrap(backdrop.subviews.first)
-        XCTAssertEqual(tint.frame, backdrop.bounds, "the tint covers the blur")
-        XCTAssertEqual(
-            tint.layer?.backgroundColor.flatMap { NSColor(cgColor: $0)?.alphaComponent },
-            PaneZoomBackdropView.tint.alphaComponent,
-            "light enough to see the shape of what is behind, at the design's colour"
-        )
-        XCTAssertLessThan(
-            PaneZoomBackdropView.tint.alphaComponent,
-            0.35,
-            "the blur is what makes it unreadable; the tint only says 'not this part'"
-        )
+        // The design's `rgba(6,6,8,.62)` is deliberately not reproduced: the blur
+        // is what makes the app unreadable, and every amount of black over it
+        // only took away seeing where everything else is. .62, .22 and .12 were
+        // each too dark on a real screen.
+        XCTAssertEqual(backdrop.subviews, [], "nothing tinting the blur")
         XCTAssertEqual(backdrop.alphaValue, 1)
     }
 
@@ -1289,14 +1440,14 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let target = try XCTUnwrap(workspace.container(for: "pane-2"))
         workspace.layoutSubtreeIfNeeded()
 
-        let middle = target.surface.terminalView.convert(
+        let middle = target.terminalSurface.terminalView.convert(
             CGPoint(x: target.surface.bounds.midX, y: target.surface.bounds.midY),
             from: target.surface
         )
         let click = try XCTUnwrap(
             NSEvent.mouseEvent(
                 with: .leftMouseDown,
-                location: target.surface.terminalView.convert(middle, to: nil),
+                location: target.terminalSurface.terminalView.convert(middle, to: nil),
                 modifierFlags: [],
                 timestamp: 0,
                 windowNumber: window.windowNumber,
@@ -1306,7 +1457,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
                 pressure: 1
             )
         )
-        target.surface.terminalView.mouseDown(with: click)
+        target.terminalSurface.terminalView.mouseDown(with: click)
 
         XCTAssertEqual(workspace.focusedPaneID, "pane-2")
     }
@@ -1327,7 +1478,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let card = try XCTUnwrap(workspace.container(for: "pane-2"))
         XCTAssertEqual(card.header.currentHeight, 30, "the grid bar is the design's 30px")
         XCTAssertNil(card.header.subtitle, "the grid header has no subtitle to show")
-        XCTAssertEqual(controls(in: card.header), ["Zoom this terminal", "Close this terminal"])
+        XCTAssertEqual(controls(in: card.header), ["Zoom this pane", "Close this pane"])
 
         XCTAssertTrue(workspace.toggleZoom("pane-2"))
         card.layoutSubtreeIfNeeded()
@@ -1359,7 +1510,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(card.header.currentHeight, 30)
         XCTAssertEqual(card.header.frame.height, 30)
         XCTAssertNil(card.header.subtitle)
-        XCTAssertEqual(controls(in: card.header), ["Zoom this terminal", "Close this terminal"])
+        XCTAssertEqual(controls(in: card.header), ["Zoom this pane", "Close this pane"])
     }
 
     /// Every number the focused card's header is built from, pinned to the
@@ -1411,8 +1562,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
         // `500 14.5px`, two 20pt icon squares, no subtitle.
         header.isZoomed = false
         layOut(header, width: 620)
-        let zoom = try XCTUnwrap(button(labelled: "Zoom this terminal", in: header))
-        let close = try XCTUnwrap(button(labelled: "Close this terminal", in: header))
+        let zoom = try XCTUnwrap(button(labelled: "Zoom this pane", in: header))
+        let close = try XCTUnwrap(button(labelled: "Close this pane", in: header))
         XCTAssertEqual(mark.frame.minX, 10)
         XCTAssertEqual(title.frame.minX - mark.frame.maxX, 8, "grid `gap:8px`")
         XCTAssertEqual(close.frame.maxX, 620 - 6, "grid `padding-right:6px`")
@@ -1431,7 +1582,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         header.isZoomAvailable = true
         header.isZoomed = true
         let pill = try XCTUnwrap(button(labelled: Self.exitFocusText, in: header))
-        let zoom = try XCTUnwrap(button(labelled: "Zoom this terminal", in: header))
+        let zoom = try XCTUnwrap(button(labelled: "Zoom this pane", in: header))
 
         XCTAssertEqual(pill.label, "Exit focus · esc", "the words the button draws")
         XCTAssertEqual(pill.accessibilityLabel(), pill.label, "and the name it answers to")
@@ -1541,8 +1692,15 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let connection = SessionConnection(
             socketURL: URL(fileURLWithPath: "/tmp/omniagent-pane-workspace-test.sock")
         )
-        let workspace = PaneWorkspaceView { id in
-            TerminalSurfaceView(connection: connection, sessionID: id)
+        // The production factory's shape, so a browser descriptor builds a
+        // real `BrowserPaneView` here too.
+        let workspace = PaneWorkspaceView { descriptor in
+            switch descriptor.kind {
+            case .terminal:
+                return TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
+            case .browser:
+                return BrowserPaneView(initialURL: descriptor.browserURL)
+            }
         }
         workspace.frame = CGRect(x: 0, y: 0, width: 1200, height: 800)
         for index in 1...panes {
@@ -1629,7 +1787,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
     private func identities(in workspace: PaneWorkspaceView) -> [String: ObjectIdentifier] {
         var result: [String: ObjectIdentifier] = [:]
         for id in workspace.paneIDs {
-            result[id] = workspace.surface(for: id).map(ObjectIdentifier.init)
+            result[id] = workspace.surface(for: id).map { ObjectIdentifier($0) }
         }
         return result
     }
@@ -1729,4 +1887,11 @@ private final class StubDraggingInfo: NSObject, NSDraggingInfo {
         searchOptions: [NSPasteboard.ReadingOptionKey: Any],
         using block: @escaping (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void
     ) {}
+}
+
+/// Task-1 seam helper: everything in this file drives terminal panes, so the
+/// concrete surface is one force-cast away — a crash here means a test built a
+/// pane kind it does not handle, which deserves to fail loudly.
+private extension PaneContainerView {
+    var terminalSurface: TerminalSurfaceView { surface as! TerminalSurfaceView }
 }

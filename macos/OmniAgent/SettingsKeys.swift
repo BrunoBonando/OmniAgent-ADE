@@ -84,4 +84,12 @@ enum SettingsKey {
     /// `ui/src/state/usageAnalytics.ts`'s `USAGE_ANALYTICS_SETTING_KEY`. One
     /// JSON object, `{version, projects}` — see `UsageAnalyticsCodec`.
     static let usageAnalytics = "usage_analytics_v1"
+
+    /// Native-only — deliberately NOT shared with the web build. Browser panes
+    /// must stay out of the shared `layout` row: the web codec drops
+    /// unknown-engine tabs and strips unknown fields on rewrite, so a browser
+    /// tab persisted there would be destroyed by the next web-side save. One
+    /// JSON object, `{"panes":[{url, group?, groupLabel?}]}` — see
+    /// `BrowserPanesCodec`. No TypeScript twin, by design.
+    static let browserPanes = "browser_panes_native"
 }

@@ -15,7 +15,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
         controller.focusTerminal(nil)
         XCTAssertTrue(
-            controller.window?.firstResponder === workspace?.surface(for: "native-terminal")?.terminalView
+            controller.window?.firstResponder === workspace?.terminalSurface(for: "native-terminal")?.terminalView
         )
     }
 
@@ -121,6 +121,139 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    /// The lifecycle invariant behind browser panes: a non-terminal pane id
+    /// must never reach `ensureSession` (a browser id there silently spawns a
+    /// login shell) nor `connection.kill`.
+    func testBrowserPanesNeverEnsureOrKillDaemonSessions() {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var ensured: [String] = []
+        var killed: [String] = []
+        controller.sessionEnsurer = { ensured.append($0) }
+        controller.sessionKiller = { killed.append($0) }
+
+        controller.applyRestoredPanes([
+            RestoredPane(
+                sessionID: "term-1", reattaches: true, project: "p", engine: .shell,
+                cwd: "/tmp", label: nil, themeId: nil, group: "g1", groupLabel: nil
+            ),
+        ])
+        controller.workspaceView.addPane(
+            PaneDescriptor(sessionID: "web-1", group: "g1", kind: .browser, browserURL: "https://example.com")
+        )
+        // A later restore pass (reconnect path) must skip the browser pane.
+        controller.applyRestoredPanes([])
+        XCTAssertFalse(ensured.contains("web-1"))
+        XCTAssertTrue(ensured.contains("term-1"))
+
+        controller.workspaceView.focusPane("web-1")
+        controller.closePane(nil)
+        XCTAssertEqual(killed, [], "closing a browser pane must not kill anything")
+
+        controller.workspaceView.focusPane("term-1")
+        controller.closePane(nil)
+        XCTAssertEqual(killed, ["term-1"])
+    }
+
+    /// ⇧⌘T: a browser pane joins the focused pane's session with no PTY
+    /// behind it — only the 8-pane grid geometry can refuse one.
+    func testNewBrowserJoinsTheFocusedSessionWithoutADaemonSessionAndStopsAtTheGrid() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var ensured: [String] = []
+        controller.sessionEnsurer = { ensured.append($0) }
+        let workspace = controller.workspaceView
+        let group = try XCTUnwrap(workspace.descriptor(for: "native-terminal")?.group)
+
+        XCTAssertTrue(controller.newBrowser(in: nil))
+
+        let browserID = try XCTUnwrap(workspace.focusedPaneID)
+        let descriptor = try XCTUnwrap(workspace.descriptor(for: browserID))
+        XCTAssertEqual(descriptor.kind, .browser)
+        XCTAssertEqual(descriptor.group, group, "the browser joins the focused pane's session")
+        XCTAssertTrue(ensured.isEmpty, "a browser pane never reaches ensureSession")
+
+        while workspace.paneIDs.count < PaneGrid.maxPanes {
+            XCTAssertTrue(controller.newBrowser(in: nil))
+        }
+        XCTAssertFalse(controller.newBrowser(in: nil), "the grid geometry is the only bound")
+        let probe = NSMenuItem(
+            title: "New Browser Pane",
+            action: #selector(WorkspaceWindowController.newBrowserPane(_:)),
+            keyEquivalent: ""
+        )
+        XCTAssertFalse(controller.validateMenuItem(probe), "and the menu item says so")
+        XCTAssertTrue(ensured.isEmpty)
+    }
+
+    /// The native-only restore path: browser panes come back from their own
+    /// settings row, not the shared `layout` one, and never touch the daemon.
+    func testApplyRestoredBrowserPanesAddsBrowserPanesWithoutEnsuringADaemonSession() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var ensured: [String] = []
+        controller.sessionEnsurer = { ensured.append($0) }
+
+        controller.applyRestoredBrowserPanes([
+            PersistedBrowserPane(url: "https://x", group: "g1", groupLabel: nil),
+        ])
+
+        let workspace = controller.workspaceView
+        let browserID = try XCTUnwrap(
+            workspace.allPaneIDs.first { workspace.descriptor(for: $0)?.kind == .browser }
+        )
+        let descriptor = try XCTUnwrap(workspace.descriptor(for: browserID))
+        XCTAssertEqual(descriptor.browserURL, "https://x")
+        XCTAssertEqual(descriptor.group, "g1")
+        XCTAssertTrue(ensured.isEmpty, "a restored browser pane never reaches ensureSession")
+    }
+
+    /// The shared-row invariant, from the controller's own write path this
+    /// time: adding/closing a browser pane writes `SettingsKey.browserPanes`
+    /// and never changes the `SettingsKey.layout` value.
+    func testBrowserPanesPersistToTheirOwnRowAndNeverTouchTheSharedLayoutRow() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+        controller.showWindow(nil)
+
+        // Arm both write gates the way a real launch would once both rows
+        // have actually been read.
+        controller.applyRestoredPanes([])
+        controller.applyRestoredBrowserPanes([])
+        let layoutValueBeforeBrowser = writes.last { $0.0 == SettingsKey.layout }?.1
+
+        XCTAssertTrue(controller.newBrowser(in: nil))
+
+        XCTAssertTrue(
+            writes.contains { $0.0 == SettingsKey.browserPanes },
+            "adding a browser pane persists its own row"
+        )
+        XCTAssertEqual(
+            writes.last { $0.0 == SettingsKey.layout }?.1,
+            layoutValueBeforeBrowser,
+            "a browser pane must never change the shared layout row"
+        )
+
+        let browserWritesAfterAdd = writes.filter { $0.0 == SettingsKey.browserPanes }.count
+        controller.closePane(nil)
+
+        XCTAssertGreaterThan(
+            writes.filter { $0.0 == SettingsKey.browserPanes }.count,
+            browserWritesAfterAdd,
+            "closing a browser pane persists the row too"
+        )
+        XCTAssertEqual(
+            writes.last { $0.0 == SettingsKey.layout }?.1,
+            layoutValueBeforeBrowser,
+            "closing a browser pane must not touch the shared layout row either"
+        )
+    }
+
     func testClosePaneCommandRemovesTheFocusedPaneAndLeavesTheRestAlive() throws {
         let controller = makeController()
         defer { controller.close() }
@@ -129,13 +262,13 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.newTerminalPane(nil)
         controller.newTerminalPane(nil)
         let survivors = workspace.paneIDs.filter { $0 != workspace.focusedPaneID }
-        let survivingTerminals = survivors.map { ObjectIdentifier(workspace.surface(for: $0)!.terminalView) }
+        let survivingTerminals = survivors.map { ObjectIdentifier(workspace.terminalSurface(for: $0)!.terminalView) }
 
         controller.closePane(nil)
 
         XCTAssertEqual(workspace.paneIDs.count, 2)
         XCTAssertEqual(
-            survivors.map { ObjectIdentifier(workspace.surface(for: $0)!.terminalView) },
+            survivors.map { ObjectIdentifier(workspace.terminalSurface(for: $0)!.terminalView) },
             survivingTerminals
         )
     }
@@ -207,6 +340,16 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             #selector(WorkspaceWindowController.newTerminalPane(_:))
         )
         XCTAssertEqual(file.item(withTitle: "New Terminal Pane")?.keyEquivalent, "t")
+        XCTAssertEqual(
+            file.item(withTitle: "New Browser Pane")?.action,
+            #selector(WorkspaceWindowController.newBrowserPane(_:))
+        )
+        XCTAssertEqual(file.item(withTitle: "New Browser Pane")?.keyEquivalent, "t")
+        XCTAssertEqual(
+            file.item(withTitle: "New Browser Pane")?.keyEquivalentModifierMask,
+            [.command, .shift],
+            "⇧⌘T, beside New Terminal Pane's ⌘T"
+        )
         XCTAssertEqual(
             file.item(withTitle: "Close Pane")?.action,
             #selector(WorkspaceWindowController.closePane(_:))
@@ -560,7 +703,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             )
         )
         let workspace = controller.workspaceView
-        let surface = try XCTUnwrap(workspace.surface(for: "sess-a"))
+        let surface = try XCTUnwrap(workspace.terminalSurface(for: "sess-a"))
 
         surface.onTitleChange?("✳ Fixing the parser")
         XCTAssertEqual(workspace.descriptor(for: "sess-a")?.title, "Fixing the parser")
@@ -904,6 +1047,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 WorkspaceWindowController.ToolbarItem.sidebar,
                 .sidebarTrackingSeparator,
                 WorkspaceWindowController.ToolbarItem.newPane,
+                WorkspaceWindowController.ToolbarItem.newBrowser,
                 WorkspaceWindowController.ToolbarItem.closePane,
                 .flexibleSpace,
                 WorkspaceWindowController.ToolbarItem.palette,

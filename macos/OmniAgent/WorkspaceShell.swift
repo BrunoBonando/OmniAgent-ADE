@@ -1473,7 +1473,9 @@ final class TerminalRowView: ShellRowView, NSTextFieldDelegate {
         hoverEnabled = false
         hoverFill = ShellPalette.hoverSoft
 
-        let icon = TerminalRowView.engineIcon(for: pane.engine)
+        let icon = pane.kind == .browser
+            ? TerminalRowView.browserIcon()
+            : TerminalRowView.engineIcon(for: pane.engine)
         let title = titleField
 
         // The design tints the OmniAgent mark per status and puts a matching
@@ -1623,20 +1625,35 @@ final class TerminalRowView: ShellRowView, NSTextFieldDelegate {
         }
         return ShellGlyphView(.terminal, color: ShellPalette.inkTertiary, size: 18, lineWidth: 2.2)
     }
+
+    /// A browser pane's row wears a globe, not an engine logo — it has no
+    /// engine, whatever placeholder its descriptor carries.
+    private static func browserIcon() -> NSView {
+        guard let image = NSImage(systemSymbolName: "globe", accessibilityDescription: "Browser") else {
+            return ShellGlyphView(.terminal, color: ShellPalette.inkTertiary, size: 18, lineWidth: 2.2)
+        }
+        let view = NSImageView(image: image)
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.imageScaling = .scaleProportionallyUpOrDown
+        view.contentTintColor = ShellPalette.inkTertiary
+        return view
+    }
 }
 
-/// The design's "+ New terminal  ⌘T" row.
+/// The design's "+ New terminal  ⌘T" row — parameterised so the browser
+/// add-row is the same row wearing different words, not a second class to
+/// keep in step.
 final class NewTerminalRowView: ShellRowView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    init(title: String = "New terminal", shortcut: String = "⌘T") {
+        super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 6
         layer?.cornerCurve = .continuous
         hoverEnabled = false
 
         let plus = ShellGlyphView(.plus, color: ShellPalette.accent, size: 18, lineWidth: 1.5)
-        let label = ShellFont.label("New terminal", font: ShellFont.ui(14, .medium), color: ShellPalette.accent)
-        let shortcut = ShellFont.label("⌘T", font: ShellFont.mono(12, .medium), color: ShellPalette.inkFaint)
+        let label = ShellFont.label(title, font: ShellFont.ui(14, .medium), color: ShellPalette.accent)
+        let shortcut = ShellFont.label(shortcut, font: ShellFont.mono(12, .medium), color: ShellPalette.inkFaint)
 
         for view in [plus, label, shortcut] { addSubview(view) }
         NSLayoutConstraint.activate([
@@ -1653,7 +1670,7 @@ final class NewTerminalRowView: ShellRowView {
             bottomAnchor.constraint(equalTo: label.bottomAnchor, constant: 4),
         ])
         refreshBackground()
-        setAccessibilityLabel("New terminal")
+        setAccessibilityLabel(title)
     }
 
     @available(*, unavailable)
@@ -1670,6 +1687,7 @@ final class SessionsTreeView: NSView {
     var onSelectSession: ((SessionGroupNode) -> Void)?
     var onNewSession: (() -> Void)?
     var onNewTerminal: (() -> Void)?
+    var onNewBrowser: (() -> Void)?
     var onRenameSession: ((SessionGroupNode, String) -> Void)?
     var onRenamePane: ((String, String) -> Void)?
 
@@ -1836,6 +1854,12 @@ final class SessionsTreeView: NSView {
                 add.onPress = { [weak self] in self?.onNewTerminal?() }
                 rows.addArrangedSubview(add)
                 add.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
+                // The browser twin, under the same cap: both rows add to the
+                // same grid, and eight panes is eight panes whatever they hold.
+                let addBrowser = NewTerminalRowView(title: "New browser", shortcut: "⇧⌘T")
+                addBrowser.onPress = { [weak self] in self?.onNewBrowser?() }
+                rows.addArrangedSubview(addBrowser)
+                addBrowser.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
             }
         }
     }
@@ -2350,6 +2374,7 @@ final class WorkspaceSidebarView: NSView {
     var onSelectSession: ((SessionGroupNode) -> Void)?
     var onNewSession: (() -> Void)?
     var onNewTerminal: (() -> Void)?
+    var onNewBrowser: (() -> Void)?
     var onRenameSession: ((SessionGroupNode, String) -> Void)?
     var onRenamePane: ((String, String) -> Void)?
     var onOpenSettings: (() -> Void)?
@@ -2414,6 +2439,7 @@ final class WorkspaceSidebarView: NSView {
         sessionsTree.onSelectSession = { [weak self] session in self?.onSelectSession?(session) }
         sessionsTree.onNewSession = { [weak self] in self?.onNewSession?() }
         sessionsTree.onNewTerminal = { [weak self] in self?.onNewTerminal?() }
+        sessionsTree.onNewBrowser = { [weak self] in self?.onNewBrowser?() }
         sessionsTree.onRenamePane = { [weak self] paneID, name in
             self?.onRenamePane?(paneID, name)
         }

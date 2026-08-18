@@ -30,7 +30,7 @@ final class CommandPaletteTests: XCTestCase {
             focusedPaneID: nil,
             unreadNotifications: 0
         )
-        XCTAssertEqual(unfocused.map(\.id), ["focus:a", "new-pane", "new-session", "toggle-sidebar"])
+        XCTAssertEqual(unfocused.map(\.id), ["focus:a", "new-pane", "new-browser", "new-session", "toggle-sidebar"])
 
         let focused = CommandPaletteModel.build(
             panes: [pane("a", project: "alpha", group: "g1")],
@@ -40,9 +40,39 @@ final class CommandPaletteTests: XCTestCase {
         )
         XCTAssertEqual(
             focused.map(\.id),
-            ["focus:a", "new-pane", "new-session", "close-pane", "interrupt", "reattach", "toggle-sidebar"]
+            ["focus:a", "new-pane", "new-browser", "new-session", "close-pane", "interrupt", "reattach", "toggle-sidebar"]
         )
         XCTAssertEqual(focused.first { $0.id == "close-pane" }?.action, .closePane(sessionID: "a"))
+    }
+
+    /// Interrupt and reattach are PTY verbs. A focused browser pane still
+    /// offers close — the pane exists — but never the two session actions.
+    func testAFocusedBrowserPaneOffersCloseButNoSessionActions() {
+        let browserFocused = CommandPaletteModel.build(
+            panes: [
+                pane("a", project: "alpha", group: "g1"),
+                pane("web", project: "alpha", group: "g1", kind: .browser),
+            ],
+            paneOrder: ["a", "web"],
+            focusedPaneID: "web",
+            unreadNotifications: 0
+        )
+        XCTAssertNotNil(browserFocused.first { $0.id == "close-pane" })
+        XCTAssertNil(browserFocused.first { $0.id == "interrupt" })
+        XCTAssertNil(browserFocused.first { $0.id == "reattach" })
+
+        let terminalFocused = CommandPaletteModel.build(
+            panes: [
+                pane("a", project: "alpha", group: "g1"),
+                pane("web", project: "alpha", group: "g1", kind: .browser),
+            ],
+            paneOrder: ["a", "web"],
+            focusedPaneID: "a",
+            unreadNotifications: 0
+        )
+        XCTAssertNotNil(terminalFocused.first { $0.id == "close-pane" })
+        XCTAssertNotNil(terminalFocused.first { $0.id == "interrupt" })
+        XCTAssertNotNil(terminalFocused.first { $0.id == "reattach" })
     }
 
     func testTheNewSessionRowNamesTheSessionItWouldCreate() {
@@ -78,8 +108,31 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(
             CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0)
                 .map(\.id),
-            ["new-pane", "new-session", "toggle-sidebar"]
+            ["new-pane", "new-browser", "new-session", "toggle-sidebar"]
         )
+    }
+
+    /// ⇧⌘T's palette twin sits beside "New terminal pane", and a browser
+    /// pane's switch-to row says what it is rather than naming an engine it
+    /// does not have.
+    func testTheNewBrowserRowSitsBesideNewPaneAndBrowserRowsSayBrowser() {
+        let commands = CommandPaletteModel.build(
+            panes: [
+                pane("a", project: "alpha", group: "g1"),
+                pane("web", project: "alpha", group: "g1", kind: .browser),
+            ],
+            paneOrder: ["a", "web"],
+            focusedPaneID: nil,
+            unreadNotifications: 0
+        )
+
+        let row = commands.first { $0.id == "new-browser" }
+        XCTAssertEqual(row?.title, "New browser pane")
+        XCTAssertEqual(row?.detail, "⇧⌘T")
+        XCTAssertEqual(row?.action, .newBrowserPane)
+
+        XCTAssertEqual(commands.first { $0.id == "focus:web" }?.detail, "browser", "a browser is not an engine")
+        XCTAssertEqual(commands.first { $0.id == "focus:a" }?.detail, "shell")
     }
 
     /// 6b-1 concern #3: a project row (here, the palette's "Switch to …"
@@ -224,7 +277,8 @@ final class CommandPaletteTests: XCTestCase {
         project: String,
         group: String,
         groupLabel: String? = nil,
-        label: String? = nil
+        label: String? = nil,
+        kind: PaneKind = .terminal
     ) -> PaneDescriptor {
         PaneDescriptor(
             sessionID: id,
@@ -233,7 +287,8 @@ final class CommandPaletteTests: XCTestCase {
             project: project,
             engine: .shell,
             cwd: "/",
-            label: label
+            label: label,
+            kind: kind
         )
     }
 }

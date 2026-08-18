@@ -16,6 +16,11 @@
 		100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000008 /* WorkspaceWindowControllerTests.swift */; };
 		100000000000000000000008 /* Instrumentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* Instrumentation.swift */; };
 		100000000000000000000009 /* TerminalSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000A /* TerminalSurfaceView.swift */; };
+		10000000000000000000080 /* PaneContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000080 /* PaneContentView.swift */; };
+		10000000000000000000090 /* BrowserPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000090 /* BrowserPaneView.swift */; };
+		10000000000000000000091 /* BrowserPaneViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000091 /* BrowserPaneViewTests.swift */; };
+		10000000000000000000092 /* BrowserPanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000092 /* BrowserPanes.swift */; };
+		10000000000000000000093 /* BrowserPanesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000093 /* BrowserPanesTests.swift */; };
 		10000000000000000000000A /* WorkspaceWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* WorkspaceWindowController.swift */; };
 		10000000000000000000000B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* AppDelegate.swift */; };
 		10000000000000000000000C /* PaneGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* PaneGrid.swift */; };
@@ -79,8 +84,8 @@
 		10000000000000000000070 /* EngineLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000070 /* EngineLauncher.swift */; };
 		10000000000000000000061 /* WorkspaceFilesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000061 /* WorkspaceFilesTests.swift */; };
 		10000000000000000000071 /* EngineLauncherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000071 /* EngineLauncherTests.swift */; };
-		10000000000000000000080 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000080 /* AuthClient.swift */; };
-		10000000000000000000081 /* AuthClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000081 /* AuthClientTests.swift */; };
+		100000000000000000000A0 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000A0 /* AuthClient.swift */; };
+		100000000000000000000A1 /* AuthClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000A1 /* AuthClientTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -126,6 +131,11 @@
 		200000000000000000000008 /* WorkspaceWindowControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowControllerTests.swift; sourceTree = "<group>"; };
 		200000000000000000000009 /* Instrumentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Instrumentation.swift; sourceTree = "<group>"; };
 		20000000000000000000000A /* TerminalSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSurfaceView.swift; sourceTree = "<group>"; };
+		20000000000000000000080 /* PaneContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentView.swift; sourceTree = "<group>"; };
+		20000000000000000000090 /* BrowserPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPaneView.swift; sourceTree = "<group>"; };
+		20000000000000000000091 /* BrowserPaneViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPaneViewTests.swift; sourceTree = "<group>"; };
+		20000000000000000000092 /* BrowserPanes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPanes.swift; sourceTree = "<group>"; };
+		20000000000000000000093 /* BrowserPanesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPanesTests.swift; sourceTree = "<group>"; };
 		20000000000000000000000B /* WorkspaceWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowController.swift; sourceTree = "<group>"; };
 		20000000000000000000000C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		20000000000000000000000D /* PaneGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneGrid.swift; sourceTree = "<group>"; };
@@ -189,8 +199,8 @@
 		20000000000000000000070 /* EngineLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineLauncher.swift; sourceTree = "<group>"; };
 		20000000000000000000061 /* WorkspaceFilesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFilesTests.swift; sourceTree = "<group>"; };
 		20000000000000000000071 /* EngineLauncherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineLauncherTests.swift; sourceTree = "<group>"; };
-		20000000000000000000080 /* AuthClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthClient.swift; sourceTree = "<group>"; };
-		20000000000000000000081 /* AuthClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthClientTests.swift; sourceTree = "<group>"; };
+		200000000000000000000A0 /* AuthClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthClient.swift; sourceTree = "<group>"; };
+		200000000000000000000A1 /* AuthClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthClientTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -230,6 +240,9 @@
 				200000000000000000000009 /* Instrumentation.swift */,
 				20000000000000000000000D /* PaneGrid.swift */,
 				20000000000000000000000F /* PaneWorkspaceView.swift */,
+				20000000000000000000080 /* PaneContentView.swift */,
+				20000000000000000000090 /* BrowserPaneView.swift */,
+				20000000000000000000092 /* BrowserPanes.swift */,
 				20000000000000000000000A /* TerminalSurfaceView.swift */,
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
 				20000000000000000000000C /* AppDelegate.swift */,
@@ -246,7 +259,7 @@
 				20000000000000000000052 /* EngineIcon.swift */,
 				20000000000000000000022 /* SettingsStore.swift */,
 				20000000000000000000023 /* BrainClients.swift */,
-				20000000000000000000080 /* AuthClient.swift */,
+				200000000000000000000A0 /* AuthClient.swift */,
 				20000000000000000000024 /* AuthGateState.swift */,
 				20000000000000000000025 /* AuthGateView.swift */,
 				20000000000000000000026 /* OnboardingState.swift */,
@@ -273,6 +286,8 @@
 				200000000000000000000006 /* SessionConnectionTests.swift */,
 				20000000000000000000000E /* PaneGridTests.swift */,
 				200000000000000000000010 /* PaneWorkspaceViewTests.swift */,
+				20000000000000000000091 /* BrowserPaneViewTests.swift */,
+				20000000000000000000093 /* BrowserPanesTests.swift */,
 				200000000000000000000011 /* pane-grid.json */,
 				20000000000000000000045 /* NativeMacosCompatibilityFixtureTests.swift */,
 				20000000000000000000046 /* persisted-layout.json */,
@@ -286,7 +301,7 @@
 				20000000000000000000001D /* SessionOutlineTests.swift */,
 				200000000000000000000021 /* CommandPaletteTests.swift */,
 				2000000000000000000002D /* SettingsStoreTests.swift */,
-				20000000000000000000081 /* AuthClientTests.swift */,
+				200000000000000000000A1 /* AuthClientTests.swift */,
 				2000000000000000000002E /* AuthGateStateTests.swift */,
 				2000000000000000000002F /* AuthGateCoordinatorTests.swift */,
 				20000000000000000000030 /* OnboardingStateTests.swift */,
@@ -434,6 +449,9 @@
 				100000000000000000000008 /* Instrumentation.swift in Sources */,
 				10000000000000000000000C /* PaneGrid.swift in Sources */,
 				10000000000000000000000E /* PaneWorkspaceView.swift in Sources */,
+				10000000000000000000080 /* PaneContentView.swift in Sources */,
+				10000000000000000000090 /* BrowserPaneView.swift in Sources */,
+				10000000000000000000092 /* BrowserPanes.swift in Sources */,
 				100000000000000000000009 /* TerminalSurfaceView.swift in Sources */,
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
 				10000000000000000000000B /* AppDelegate.swift in Sources */,
@@ -450,7 +468,7 @@
 				10000000000000000000052 /* EngineIcon.swift in Sources */,
 				10000000000000000000021 /* SettingsStore.swift in Sources */,
 				10000000000000000000022 /* BrainClients.swift in Sources */,
-				10000000000000000000080 /* AuthClient.swift in Sources */,
+				100000000000000000000A0 /* AuthClient.swift in Sources */,
 				10000000000000000000023 /* AuthGateState.swift in Sources */,
 				10000000000000000000024 /* AuthGateView.swift in Sources */,
 				10000000000000000000025 /* OnboardingState.swift in Sources */,
@@ -476,6 +494,8 @@
 				100000000000000000000005 /* SessionConnectionTests.swift in Sources */,
 				10000000000000000000000D /* PaneGridTests.swift in Sources */,
 				10000000000000000000000F /* PaneWorkspaceViewTests.swift in Sources */,
+				10000000000000000000091 /* BrowserPaneViewTests.swift in Sources */,
+				10000000000000000000093 /* BrowserPanesTests.swift in Sources */,
 				100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */,
 				100000000000000000000012 /* PersistedLayoutTests.swift in Sources */,
 				10000000000000000000044 /* NativeMacosCompatibilityFixtureTests.swift in Sources */,
@@ -485,7 +505,7 @@
 				10000000000000000000001C /* SessionOutlineTests.swift in Sources */,
 				100000000000000000000020 /* CommandPaletteTests.swift in Sources */,
 				1000000000000000000002C /* SettingsStoreTests.swift in Sources */,
-				10000000000000000000081 /* AuthClientTests.swift in Sources */,
+				100000000000000000000A1 /* AuthClientTests.swift in Sources */,
 				1000000000000000000002D /* AuthGateStateTests.swift in Sources */,
 				1000000000000000000002E /* AuthGateCoordinatorTests.swift in Sources */,
 				1000000000000000000002F /* OnboardingStateTests.swift in Sources */,
@@ -544,7 +564,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 23;
+				CURRENT_PROJECT_VERSION = 24;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_TESTABILITY = YES;
@@ -575,7 +595,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 23;
+				CURRENT_PROJECT_VERSION = 24;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -645,7 +665,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 23;
+				CURRENT_PROJECT_VERSION = 24;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;

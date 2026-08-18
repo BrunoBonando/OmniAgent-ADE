@@ -67,9 +67,16 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     var isSelected = false {
         didSet {
             guard isSelected != oldValue else { return }
+            wash.isHidden = isSelected
             applyCursorBlink()
         }
     }
+
+    /// The unselected pane's washed-out background, as a top-most sibling
+    /// rather than a swapped `nativeBackgroundColor`: SwiftTerm caches the
+    /// default background inside its per-attribute run cache, and only its own
+    /// internal `colorsChanged()` clears that.
+    let wash = TerminalWashOverlayView()
 
     /// The blinking style deselection replaced, or `nil` when nothing is
     /// currently overridden.
@@ -131,6 +138,9 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         terminalView.terminalDelegate = self
         addSubview(terminalView)
         terminalView.frame = bounds
+        addSubview(wash, positioned: .above, relativeTo: nil)
+        wash.frame = bounds
+        wash.isHidden = isSelected
         // A pane is born unselected, and `isSelected`'s didSet cannot fire for
         // the value it already holds — so the newest pane would have been the
         // one blinking on its own until it lost focus once.
@@ -174,6 +184,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         terminalView.frame = bounds
+        wash.frame = bounds
     }
 
     @available(*, unavailable)
@@ -322,6 +333,61 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
 
     @objc func focusTerminal(_ sender: Any?) {
         focus()
+    }
+}
+
+extension TerminalSurfaceView: PaneContentView {
+    var primaryResponderView: NSView { terminalView }
+}
+
+/// A pane you are not typing into sits behind a veil that starts as its own
+/// status colour at the top and falls away to a neutral wash by the bottom —
+/// so a glance across the grid says both "not this one" and what each pane is
+/// doing, without reading a single header. It never takes a click meant for
+/// the terminal under it.
+final class TerminalWashOverlayView: NSView {
+    /// What the veil settles to at the bottom: the plain wash, no hue left.
+    static let base = NSColor(white: 1, alpha: 0.05)
+    /// The status colour's strength at the very top. Weak enough that white
+    /// terminal text stays white through it.
+    static let tintAlpha: CGFloat = 0.18
+
+    /// The pane's live agent status, which the top of the gradient takes its
+    /// colour from — the sidebar's mapping, not a second one.
+    var status: RemoteSessionStatus? {
+        didSet {
+            guard status != oldValue else { return }
+            apply()
+        }
+    }
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        setAccessibilityElement(false)
+        apply()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    override func makeBackingLayer() -> CALayer { CAGradientLayer() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private func apply() {
+        guard let gradient = layer as? CAGradientLayer else { return }
+        let tint = ShellDotsView.color(for: status).withAlphaComponent(Self.tintAlpha)
+        gradient.colors = [tint.cgColor, Self.base.cgColor]
+        // Unit coordinates, y up: `1` is the top edge. The flipped pane
+        // container does *not* reach in here — a layer's `geometryFlipped`
+        // moves its sublayers, it does not turn a gradient upside down — so
+        // this reads backwards next to the frames set above and is pinned by a
+        // render in `testTheWashRunsTheStatusColourFromTheTopDown`.
+        gradient.startPoint = CGPoint(x: 0.5, y: 1)
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)
     }
 }
 

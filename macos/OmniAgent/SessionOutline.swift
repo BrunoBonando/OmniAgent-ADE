@@ -136,6 +136,13 @@ enum SessionOutline {
         "\(engine.displayName) \(n)"
     }
 
+    /// The kind-aware placeholder: a browser is not an engine, so it gets its
+    /// own `Browser N` ladder rather than wearing the `.shell` its descriptor
+    /// happens to carry.
+    static func defaultPaneName(_ pane: PaneDescriptor) -> String {
+        pane.kind == .browser ? "Browser \(pane.autoNumber)" : defaultPaneName(pane.engine, pane.autoNumber)
+    }
+
     /// Whether a stored label is one this app generated rather than one the
     /// user typed.
     ///
@@ -148,7 +155,7 @@ enum SessionOutline {
     static func isGeneratedPaneName(_ name: String) -> Bool {
         let parts = name.split(separator: " ")
         guard parts.count == 2, Int(parts[1]) != nil else { return false }
-        return Engine.allCases.contains { $0.displayName == parts[0] }
+        return parts[0] == "Browser" || Engine.allCases.contains { $0.displayName == parts[0] }
     }
 
     /// The number a new terminal takes in its session — the lowest free one,
@@ -157,10 +164,18 @@ enum SessionOutline {
     ///
     /// A number, not a name: the name is only a placeholder until the agent
     /// says what it is working on, and storing it would make it permanent.
-    static func nextPaneNumber(_ panes: [PaneDescriptor], group: String, engine: Engine) -> Int {
+    static func nextPaneNumber(
+        _ panes: [PaneDescriptor],
+        group: String,
+        engine: Engine,
+        kind: PaneKind = .terminal
+    ) -> Int {
+        // Browsers number their own ladder regardless of engine — the
+        // `.shell` a browser descriptor carries is a placeholder, not an
+        // identity — while terminals keep numbering per engine.
         let taken = Set(
             panes
-                .filter { $0.group == group && $0.engine == engine }
+                .filter { $0.group == group && $0.kind == kind && (kind == .browser || $0.engine == engine) }
                 .map(\.autoNumber)
         )
         var n = 1
@@ -187,7 +202,10 @@ enum SessionOutline {
         }
         let title = pane.title.trimmingCharacters(in: .whitespacesAndNewlines)
         if !title.isEmpty { return title }
-        return defaultPaneName(pane.engine, pane.autoNumber)
+        // A browser with no page title yet still has an address worth
+        // showing — the URL is its cwd, and beats a bare `Browser N`.
+        if pane.kind == .browser, !pane.browserURL.isEmpty { return pane.browserURL }
+        return defaultPaneName(pane)
     }
 
     /// The status decoration an engine puts in front of the title it reports.

@@ -148,12 +148,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// two above exist.
     private var notificationsReadDispatched = false
     private var notificationsReadCompleted = false
+    /// The `browser_panes_native` row's two flags, same shape and same
+    /// reasons as `layoutReadDispatched`/`layoutReadCompleted` — it is a
+    /// separate row (see `SettingsKey.browserPanes`), read and armed
+    /// independently of the shared `layout` row.
+    private var browserPanesReadDispatched = false
+    private var browserPanesReadCompleted = false
     /// The last value written to each settings row — see `write(_:to:)`.
     private var lastPersisted: [String: String] = [:]
     /// Where settings writes go. `nil` means the daemon; a test substitutes a
     /// recorder so the write-suppression rule can be asserted without a
     /// socket, and without touching the developer's real `brain.db`.
     var settingsWriter: ((String, String) -> Void)?
+    /// Test seams, `settingsWriter`'s pattern: nil means the real daemon
+    /// call. What lets a test pin the lifecycle invariant — non-terminal
+    /// pane ids never reach `ensureSession` (where a browser id would
+    /// silently spawn a login shell) or `connection.kill` — without a socket.
+    var sessionEnsurer: ((String) -> Void)?
+    var sessionKiller: ((String) -> Void)?
 
     // MARK: - Task 6b-2: settings/onboarding/usage/inspector
 
@@ -210,8 +222,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             notifier: notifier,
             daemonStatus: daemonPersistence
         )
-        workspace = PaneWorkspaceView { id in
-            TerminalSurfaceView(connection: connection, sessionID: id)
+        workspace = PaneWorkspaceView { descriptor in
+            switch descriptor.kind {
+            case .terminal:
+                return TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
+            case .browser:
+                return BrowserPaneView(initialURL: descriptor.browserURL)
+            }
         }
 
         let window = WorkspaceWindow(
@@ -251,6 +268,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.refreshInspectorIfVisible(for: paneID)
         }
         workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
+        workspace.onRequestNewBrowserPane = { [weak self] in self?.newBrowserPane(nil) }
         workspace.onRequestClosePane = { [weak self] paneID in
             guard let self else { return }
             // Route through focus so the header's close button ends *that*
@@ -260,6 +278,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         workspace.onPanesChanged = { [weak self] in
             self?.persistLayout()
+            self?.persistBrowserPanes()
             self?.reloadOutline()
         }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
@@ -285,6 +304,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let current else { return }
             self.newPane(in: current)
         }
+        shellSidebar.onNewBrowser = { [weak self] in
+            guard let self else { return }
+            // The same current-session lookup `onNewTerminal` uses: the row
+            // lives under the session it adds to.
+            let panes = self.workspace.allPaneIDs.compactMap { self.workspace.descriptor(for: $0) }
+            let current = SessionOutline.group(panes, focusedPaneID: self.workspace.focusedPaneID)
+                .flatMap(\.sessions)
+                .first(where: \.isCurrent)
+            guard let current else { return }
+            self.newBrowser(in: current)
+        }
         shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
         // Asking the login shell for its PATH spawns a shell; do it now, off
         // the main thread, so the first terminal does not wait for it.
@@ -293,7 +323,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         selectInitialWorkspaceIfNeeded(animated: false)
         reloadOutline()
         window.initialFirstResponder = workspace.focusedPaneID
-            .flatMap { workspace.surface(for: $0)?.terminalView }
+            .flatMap { workspace.surface(for: $0)?.primaryResponderView }
     }
 
     // MARK: - Window frame
@@ -484,7 +514,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             }
         }
         connection.onTerminalData = { [weak self] id, bytes, sequence, isSnapshot in
-            guard let self, let surface = workspace.surface(for: id) else { return }
+            guard let self, let surface = workspace.terminalSurface(for: id) else { return }
             if !observedFirstOutput {
                 observedFirstOutput = true
                 os_signpost(.event, log: Instrumentation.log, name: "First Terminal Output")
@@ -611,7 +641,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // daemon agrees to, and nothing a user meets in normal use.
         guard
             workspace.paneCount(inGroup: group) < PaneGrid.maxPanes,
-            workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals
+            workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals
         else { return false }
         let project = sibling?.project ?? session?.project ?? template.project
         let inherited = sibling?.cwd.isEmpty == false ? sibling!.cwd : (session?.cwd ?? "")
@@ -639,6 +669,42 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         )
     }
 
+    /// ⇧⌘T — a browser pane in the focused pane's session. No PTY, no engine,
+    /// no cwd; only the grid geometry can refuse it.
+    @objc func newBrowserPane(_ sender: Any?) {
+        newBrowser(in: nil)
+    }
+
+    /// `newPane(in:)` minus everything PTY-shaped: no cap against
+    /// `maxTerminals` (a browser costs WebKit memory, not a daemon slot), no
+    /// cwd derivation, and `startSession: false` so the id never reaches
+    /// `ensureSession`.
+    @discardableResult
+    func newBrowser(in session: SessionGroupNode?) -> Bool {
+        let sibling = session.map { seed in
+            seed.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
+        } ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
+        let template = WorkspaceRestoration.bootstrapPane()
+        let group = session?.id ?? sibling?.group ?? template.group
+        guard workspace.paneCount(inGroup: group) < PaneGrid.maxPanes else { return false }
+        return addPane(
+            RestoredPane(
+                sessionID: template.sessionID,
+                reattaches: false,
+                project: sibling?.project ?? session?.project ?? "",
+                engine: .shell,
+                cwd: "",
+                label: nil,
+                themeId: nil,
+                group: group,
+                groupLabel: sibling?.groupLabel ?? session?.name,
+                kind: .browser,
+                browserURL: ""
+            ),
+            startSession: false
+        )
+    }
+
     /// ⌘N, and the "+" beside SESSIONS in the sidebar — a **second,
     /// independent session**: a new pane in a brand-new session group, named by
     /// the same lowest-free-number rule the web build uses
@@ -652,7 +718,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// macOS to ask about folder access. Choosing a *different* folder means
     /// opening a different workspace, which is `openWorkspaceFolder(_:)`.
     @objc func newSession(_ sender: Any?) {
-        guard workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals else { return }
+        guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         startSession(
             inDirectory: workspaceRoot(),
@@ -674,7 +740,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// the whole point, because a new workspace *is* a folder the app has not
     /// been told about yet.
     @objc func openWorkspaceFolder(_ sender: Any?) {
-        guard workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals else { return }
+        guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         chooseSessionDirectory(startingAt: workspaceRoot()) { [weak self] chosen in
             guard let self, let chosen else { return }
@@ -686,7 +752,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// so the naming and grouping rules are testable without a panel.
     @discardableResult
     func startSession(inDirectory cwd: String, project: String) -> String? {
-        guard workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals else { return nil }
+        guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return nil }
         let group = SessionOutline.newSessionGroupID()
         let name = SessionOutline.nextSessionName(
             workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
@@ -743,7 +809,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// close is ⇧⌘W.
     @objc func closePane(_ sender: Any?) {
         guard let focused = workspace.focusedPaneID else { return }
-        connection.kill(sessionID: focused)
+        // Only a terminal has a daemon session to kill. The status cleanup
+        // below stays unconditional: it is per-pane bookkeeping, and empty
+        // for a pane kind that never reported any.
+        if workspace.descriptor(for: focused)?.kind == .terminal {
+            killSession(focused)
+        }
         readySessions.remove(focused)
         sessionStatus.removeValue(forKey: focused)
         // `lastStatus` is per-pane too and was the one sibling this never
@@ -761,10 +832,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // The session on screen is the one ⌘T adds to, so its own count
             // is what greys the item out.
             return workspace.paneIDs.count < PaneGrid.maxPanes
-                && workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals
+                && workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals
+        case #selector(newBrowserPane(_:)):
+            // A browser pane costs no PTY, so only the on-screen session's
+            // grid geometry can refuse one.
+            return workspace.paneIDs.count < PaneGrid.maxPanes
         case #selector(newSession(_:)):
             // A new session starts empty — a full one cannot refuse it.
-            return workspace.allPaneIDs.count < PaneWorkspaceView.maxTerminals
+            return workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals
         case #selector(closePane(_:)):
             return workspace.focusedPaneID != nil
         case #selector(toggleFocusMode(_:)):
@@ -796,7 +871,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func restoreWorkspaceIfNeeded() {
         restoreNotificationsIfNeeded()
         guard !layoutReadDispatched else {
-            for id in workspace.allPaneIDs { ensureSession(id) }
+            for id in workspace.allPaneIDs where workspace.descriptor(for: id)?.kind == .terminal {
+                ensureSession(id)
+            }
             return
         }
         layoutReadDispatched = true
@@ -841,20 +918,28 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         for pane in plan where workspace.descriptor(for: pane.sessionID) == nil {
             addPane(pane, startSession: false)
         }
-        for id in workspace.allPaneIDs { ensureSession(id) }
+        // Terminals only: an unfiltered browser pane id reaching
+        // `ensureSession` would fall through to `createSession`, whose
+        // missing-engine default is `.shell` — a silent login shell.
+        for id in workspace.allPaneIDs where workspace.descriptor(for: id)?.kind == .terminal {
+            ensureSession(id)
+        }
         workspace.restoreFocus()
         // The plan came *from* the row, so re-writing it is normally a no-op;
         // it matters when restoration repaired something (a capped ninth
         // pane, a minted id) — the repair is what the next launch should see,
         // and when a pane was opened while the read was still in flight.
         persistLayout()
+        // Terminals restore first, so the grid's fill order favors them —
+        // browser panes only ever land on the cells terminals left empty.
+        restoreBrowserPanesIfNeeded()
     }
 
     /// Kills daemon sessions this window no longer references.
     ///
     /// The daemon outliving the app is the feature that keeps terminals
     /// running across a restart — but nothing ever cleaned up the sessions a
-    /// restart left *behind*, and the daemon caps at `MAX_SESSIONS` (8, in
+    /// restart left *behind*, and the daemon caps at `MAX_SESSIONS` (64, in
     /// `crates/omniagent-pty-daemon/src/session.rs`). Orphans accumulate one
     /// abandoned pane at a time until the cap is full, and from then on every
     /// new terminal is refused with "maximum of 8 sessions reached" — which
@@ -876,10 +961,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             owned: Set(workspace.allPaneIDs)
         )
         for id in orphans {
-            connection.kill(sessionID: id)
+            killSession(id)
             readySessions.remove(id)
             lastStatus.removeValue(forKey: id)
         }
+    }
+
+    /// Every daemon kill funnels through here so `sessionKiller` sees them
+    /// all — the seam the "a browser pane is never killed" test watches.
+    private func killSession(_ id: String) {
+        if let sessionKiller { sessionKiller(id) } else { connection.kill(sessionID: id) }
     }
 
     /// Which of the daemon's sessions belong to nobody. Pure, and separate
@@ -931,6 +1022,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             closePane(nil)
         case .newPane:
             newTerminalPane(nil)
+        case .newBrowserPane:
+            newBrowserPane(nil)
         case .newSession:
             newSession(nil)
         // Interrupt and reattach are the focused terminal's own responder
@@ -938,9 +1031,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // re-implemented, so the palette runs the identical code the ⌘. and
         // ⌘R menu items do.
         case .interruptFocusedPane:
-            workspace.focusedPaneID.flatMap { workspace.surface(for: $0) }?.interruptSession(nil)
+            workspace.focusedPaneID.flatMap { workspace.terminalSurface(for: $0) }?.interruptSession(nil)
         case .reattachFocusedPane:
-            workspace.focusedPaneID.flatMap { workspace.surface(for: $0) }?.reattachSession(nil)
+            workspace.focusedPaneID.flatMap { workspace.terminalSurface(for: $0) }?.reattachSession(nil)
         case .toggleSidebar:
             toggleSidebar(nil)
         case .clearNotifications:
@@ -1227,6 +1320,76 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         )
     }
 
+    // MARK: - Browser pane persistence (Task 5)
+
+    /// Reads the native-only `browser_panes_native` row once, alongside the
+    /// `layout` row. Same one-shot/re-arm-on-failure shape as
+    /// `restoreNotificationsIfNeeded`: a row that could not be read is not
+    /// an empty one, so the write gate stays shut and the read re-arms for
+    /// the next reconnect.
+    private func restoreBrowserPanesIfNeeded() {
+        guard !browserPanesReadDispatched else { return }
+        browserPanesReadDispatched = true
+        connection.getSetting(key: SettingsKey.browserPanes) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                applyRestoredBrowserPanes(BrowserPanesCodec.deserialize(raw))
+            case .failure:
+                browserPanesReadDispatched = false
+            }
+        }
+    }
+
+    /// Adds every restored browser pane the grid has room for. Split out
+    /// from `restoreBrowserPanesIfNeeded` so a plan can be applied in a test
+    /// without a socket — same shape as `applyRestoredPanes`. Browser panes
+    /// never touch `ensureSession`: `addPane`'s kind branch (Task 2) is what
+    /// keeps them off the daemon.
+    func applyRestoredBrowserPanes(_ panes: [PersistedBrowserPane]) {
+        browserPanesReadCompleted = true
+        for pane in panes
+        where workspace.paneCount(inGroup: pane.group ?? WorkspaceRestoration.ungroupedSessionID) < PaneGrid.maxPanes {
+            addPane(
+                RestoredPane(
+                    sessionID: UUID().uuidString,
+                    reattaches: false,
+                    project: "",
+                    engine: .shell,
+                    cwd: "",
+                    label: nil,
+                    themeId: nil,
+                    group: pane.group ?? WorkspaceRestoration.ungroupedSessionID,
+                    groupLabel: pane.groupLabel,
+                    kind: .browser,
+                    browserURL: pane.url
+                ),
+                startSession: false
+            )
+        }
+    }
+
+    /// Writes the live browser panes back to their own row. Refused until
+    /// that row has actually been read — `persistLayout`'s reasoning,
+    /// applied to the other row. `browserURL` updates already flow through
+    /// `updateDescriptor` -> `onPanesChanged` (Task 4's `onURLChange`
+    /// wiring), so navigating a browser pane persists its new URL with zero
+    /// extra plumbing.
+    private func persistBrowserPanes() {
+        guard browserPanesReadCompleted else { return }
+        let panes = workspace.allPaneIDs
+            .compactMap { workspace.descriptor(for: $0) }
+            .filter { $0.kind == .browser }
+            .map {
+                PersistedBrowserPane(
+                    url: $0.browserURL,
+                    group: $0.group == WorkspaceRestoration.ungroupedSessionID ? nil : $0.group,
+                    groupLabel: $0.groupLabel
+                )
+            }
+        write(BrowserPanesCodec.serialize(panes), to: SettingsKey.browserPanes)
+    }
+
     /// Writes a settings row only when its value actually changed.
     ///
     /// Both rows are re-derived from live state on every mutation, and plenty
@@ -1260,7 +1423,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         descriptor.autoNumber = SessionOutline.nextPaneNumber(
             workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
             group: descriptor.group,
-            engine: descriptor.engine
+            engine: descriptor.engine,
+            kind: descriptor.kind
         )
         // A label this app generated is not a name the user chose, and leaving
         // it stored would outrank the summary the agent reports for the rest
@@ -1270,37 +1434,59 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             descriptor.label = nil
         }
         guard workspace.addPane(descriptor) else { return false }
-        // A pane that did not come back from the persisted layout has a session
-        // id minted moments ago, so the Claude conversation derived from it
-        // cannot exist yet and is safe to claim. A restored one may already
-        // have written its conversation, and re-claiming that kills the spawn.
-        if !pane.reattaches { allowConversationClaim(for: sessionID) }
-        usageRecorder.recordPaneOpened(
-            paneID: sessionID,
-            sessionKey: pane.group,
-            project: pane.project,
-            at: Date().timeIntervalSince1970 * 1000
-        )
-        let surface = workspace.surface(for: sessionID)
-        surface?.onTitleChange = { [weak self] title in
-            guard let self else { return }
-            // Stripped here rather than at each place a title is shown: the
-            // pane header, the sidebar row, the window title and the
-            // session-ended notification all read this one stored value, and
-            // nothing wants the spinner frame the engine sent with it.
-            let title = SessionOutline.sanitizedPaneTitle(title)
-            workspace.updateDescriptor(for: sessionID) { $0.title = title }
-            if workspace.focusedPaneID == sessionID { refreshTitle() }
+        // Everything below is PTY-shaped — conversation claim, usage
+        // recording, OSC title/cwd wiring, and above all `ensureSession`,
+        // which for an unknown id falls through to `createSession` and its
+        // `.shell` default. A non-terminal pane must reach none of it.
+        // (Browser-side wiring arrives with `BrowserPaneView`.)
+        if descriptor.kind == .terminal {
+            // A pane that did not come back from the persisted layout has a session
+            // id minted moments ago, so the Claude conversation derived from it
+            // cannot exist yet and is safe to claim. A restored one may already
+            // have written its conversation, and re-claiming that kills the spawn.
+            if !pane.reattaches { allowConversationClaim(for: sessionID) }
+            usageRecorder.recordPaneOpened(
+                paneID: sessionID,
+                sessionKey: pane.group,
+                project: pane.project,
+                at: Date().timeIntervalSince1970 * 1000
+            )
+            let surface = workspace.terminalSurface(for: sessionID)
+            surface?.onTitleChange = { [weak self] title in
+                guard let self else { return }
+                // Stripped here rather than at each place a title is shown: the
+                // pane header, the sidebar row, the window title and the
+                // session-ended notification all read this one stored value, and
+                // nothing wants the spinner frame the engine sent with it.
+                let title = SessionOutline.sanitizedPaneTitle(title)
+                workspace.updateDescriptor(for: sessionID) { $0.title = title }
+                if workspace.focusedPaneID == sessionID { refreshTitle() }
+            }
+            surface?.onDirectoryChange = { [weak self] directory in
+                guard let self, workspace.focusedPaneID == sessionID else { return }
+                window?.representedURL = directory.map(URL.init(fileURLWithPath:))
+            }
+            if startSession { ensureSession(sessionID) }
+        } else if let browser = workspace.browserPane(for: sessionID) {
+            // The browser's own title path, mirroring the OSC-title wiring
+            // above: the page title is what the pane wears.
+            browser.onTitleChange = { [weak self] title in
+                guard let self else { return }
+                workspace.updateDescriptor(for: sessionID) { $0.title = title }
+                if workspace.focusedPaneID == sessionID { refreshTitle() }
+            }
+            // Every committed navigation keeps the descriptor's URL current —
+            // `updateDescriptor` fires `onPanesChanged`, which is what the
+            // last-URL persistence hangs off.
+            browser.onURLChange = { [weak self] url in
+                self?.workspace.updateDescriptor(for: sessionID) { $0.browserURL = url }
+            }
         }
-        surface?.onDirectoryChange = { [weak self] directory in
-            guard let self, workspace.focusedPaneID == sessionID else { return }
-            window?.representedURL = directory.map(URL.init(fileURLWithPath:))
-        }
-        if startSession { ensureSession(sessionID) }
         return true
     }
 
     private func ensureSession(_ sessionID: String) {
+        if let sessionEnsurer { sessionEnsurer(sessionID); return }
         guard !readySessions.contains(sessionID) else {
             attach(sessionID)
             return
@@ -1311,8 +1497,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             case let .success(sessions):
                 // Free the daemon's abandoned slots *before* asking it for a
                 // new one. This is why the reap lives here rather than after
-                // the restore loop: the daemon caps at 8, so an orphan holding
-                // the last slot makes the very session being started here fail.
+                // the restore loop: the daemon caps at `MAX_SESSIONS`, so an
+                // orphan holding the last slot makes the very session being
+                // started here fail.
                 // Frames are written FIFO on one connection, so the kills below
                 // reach the daemon ahead of this pane's `createSession`.
                 reapOrphanedSessions(daemonSessions: sessions)
@@ -1418,7 +1605,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// happened, in the one place the user is already looking.
     func reportSessionFailure(_ message: String, for sessionID: String) {
         workspace.setStatus(.error, for: sessionID)
-        guard let surface = workspace.surface(for: sessionID) else { return }
+        guard let surface = workspace.terminalSurface(for: sessionID) else { return }
         let text = "\r\n\u{1B}[1;31m▲ This terminal could not start\u{1B}[0m\r\n  \(message)\r\n"
         surface.feed(Data(text.utf8), isSnapshot: false)
     }
@@ -1464,7 +1651,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     private func attach(_ sessionID: String) {
-        guard let surface = workspace.surface(for: sessionID) else { return }
+        guard let surface = workspace.terminalSurface(for: sessionID) else { return }
         readySessions.insert(sessionID)
         connection.attach(sessionID: sessionID, afterSequence: nil)
         surface.syncSize()

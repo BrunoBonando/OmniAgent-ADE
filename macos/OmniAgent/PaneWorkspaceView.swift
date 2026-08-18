@@ -33,6 +33,10 @@ struct PaneDescriptor: Equatable {
     /// way in and never persisted — the number is a placeholder, and storing
     /// it would make it outlive the moment it is useful for.
     var autoNumber: Int = 1
+    /// What this pane holds. `engine`/`cwd` describe a `.terminal`;
+    /// `browserURL` takes cwd's role for a `.browser`.
+    var kind: PaneKind
+    var browserURL: String
 
     init(
         sessionID: String,
@@ -43,7 +47,9 @@ struct PaneDescriptor: Equatable {
         engine: Engine = .shell,
         cwd: String = "",
         label: String? = nil,
-        themeId: TerminalThemeId? = nil
+        themeId: TerminalThemeId? = nil,
+        kind: PaneKind = .terminal,
+        browserURL: String = ""
     ) {
         self.sessionID = sessionID
         self.group = group
@@ -54,6 +60,8 @@ struct PaneDescriptor: Equatable {
         self.cwd = cwd
         self.label = label
         self.themeId = themeId
+        self.kind = kind
+        self.browserURL = browserURL
     }
 
     /// The pane's own restored shape, so a plan can be applied without the
@@ -68,7 +76,9 @@ struct PaneDescriptor: Equatable {
             engine: pane.engine,
             cwd: pane.cwd,
             label: pane.label,
-            themeId: pane.themeId
+            themeId: pane.themeId,
+            kind: pane.kind,
+            browserURL: pane.browserURL
         )
     }
 }
@@ -158,6 +168,8 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// Raised when a pane wants to exist or stop existing — the window
     /// controller owns session lifecycle, this view owns layout and identity.
     var onRequestNewPane: (() -> Void)?
+    /// The hole tile's second, fainter affordance: a browser in that cell.
+    var onRequestNewBrowserPane: (() -> Void)?
     /// The header's close button. Closing a pane ends its PTY, which only the
     /// window controller may do — this view never kills a session itself.
     var onRequestClosePane: ((String) -> Void)?
@@ -169,7 +181,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// pixel geometry the persisted shape does not carry anyway.
     var onPanesChanged: (() -> Void)?
 
-    private let makeSurface: (String) -> TerminalSurfaceView
+    private let makeSurface: (PaneDescriptor) -> any PaneContentView
     private var containers: [String: PaneContainerView] = [:]
     private var descriptors: [String: PaneDescriptor] = [:]
     private var dividerViews: [PaneDividerView] = []
@@ -182,14 +194,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     private var occlusionObserver: NSObjectProtocol?
     private var suspendsDrawing = false
 
-    init(makeSurface: @escaping (String) -> TerminalSurfaceView) {
+    init(makeSurface: @escaping (PaneDescriptor) -> any PaneContentView) {
         self.makeSurface = makeSurface
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(srgbRed: 4 / 255, green: 6 / 255, blue: 9 / 255, alpha: 1).cgColor
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("Terminal panes")
+        // Kind-neutral: the grid holds browsers as well as terminals now.
+        setAccessibilityLabel("Workspace panes")
         // The overlay host carries the pane commands back to this view while a
         // card is up — see `PaneFocusOverlayView.commandTarget`.
         focusOverlay.commandTarget = self
@@ -244,16 +257,35 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// the daemon for unbounded PTYs.
     static let maxTerminals = 64
 
+    /// The panes that actually hold a PTY — what `maxTerminals` is measured
+    /// against. Browser panes cost WebKit memory, not daemon slots.
+    var terminalPaneCount: Int {
+        allPaneIDs.filter { descriptors[$0]?.kind == .terminal }.count
+    }
+
     func descriptor(for sessionID: String) -> PaneDescriptor? { descriptors[sessionID] }
 
     func container(for sessionID: String) -> PaneContainerView? { containers[sessionID] }
 
-    func surface(for sessionID: String) -> TerminalSurfaceView? { containers[sessionID]?.surface }
+    func surface(for sessionID: String) -> (any PaneContentView)? { containers[sessionID]?.surface }
+
+    /// The concrete terminal behind a pane, for the PTY-shaped call sites
+    /// (feed, resize counts, interrupt/reattach). `nil` for any other kind.
+    func terminalSurface(for sessionID: String) -> TerminalSurfaceView? {
+        containers[sessionID]?.surface as? TerminalSurfaceView
+    }
+
+    /// The concrete browser behind a pane, for the browser-shaped call sites
+    /// (title/URL wiring). `nil` for any other kind.
+    func browserPane(for sessionID: String) -> BrowserPaneView? {
+        containers[sessionID]?.surface as? BrowserPaneView
+    }
 
     // MARK: - Mutating the workspace
 
     /// Adds a pane and gives it focus. Refused once its **own session** holds
-    /// `PaneGrid.maxPanes`, once the app as a whole holds `maxTerminals`, and
+    /// `PaneGrid.maxPanes`, once the app as a whole holds `maxTerminals`
+    /// terminal panes (a PTY budget — non-terminal kinds are exempt), and
     /// for a session id already on screen.
     @discardableResult
     func addPane(_ descriptor: PaneDescriptor) -> Bool {
@@ -262,7 +294,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // one from opening a terminal.
         guard
             paneCount(inGroup: descriptor.group) < PaneGrid.maxPanes,
-            allPaneIDs.count < Self.maxTerminals,
+            descriptor.kind != .terminal || terminalPaneCount < Self.maxTerminals,
             descriptors[descriptor.sessionID] == nil
         else {
             return false
@@ -270,7 +302,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         descriptors[descriptor.sessionID] = descriptor
         let container = PaneContainerView(
             paneID: descriptor.sessionID,
-            surface: makeSurface(descriptor.sessionID),
+            surface: makeSurface(descriptor),
             workspace: self
         )
         container.surface.resizeCoalescer = resizeCoalescer
@@ -583,19 +615,18 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         let lifting = container.superview !== host
         let start = lifting ? convert(container.frame, to: host) : focusCardShadow.frame
         let restacked = stackOverlay(container, in: host)
-        if lifting {
-            // Only the origin changes here — the pane is the same size in the
-            // host as it was in its cell — so the terminal is reflowed once, by
-            // `place`, at the size it actually ends up.
-            container.frame = start
-        }
         // After any move, not just the lift: re-stacking a view that is already
         // there moves it too, and a move is what costs the first responder.
         if restacked { reclaimFirstResponder(container) }
         zoomBackdrop.setShown(true, duration: zoomTransition)
         let card = Self.focusCardFrame(in: host.bounds)
         moveFocusCardShadow(from: start, to: card)
-        place(container, at: card)
+        // The cell it is leaving, handed over rather than left for `place` to
+        // read off the presentation layer: the pane has just changed superview,
+        // and until the next commit that layer still presents the position it
+        // held in the grid. Read in the host, a grid position is a rect a
+        // sidebar's width away — which is where the lift used to appear to begin.
+        place(container, at: card, from: lifting ? start : nil)
     }
 
     /// The overlay's two views as the host's top-most pair — the backdrop
@@ -722,7 +753,13 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// card never takes the keyboard off another.
     private func reclaimFirstResponder(_ container: PaneContainerView) {
         guard let window, focusedPaneID == container.paneID else { return }
-        guard window.firstResponder !== container.surface.terminalView else { return }
+        // A descendant check rather than identity against one known view: a
+        // WKWebView's actual responder is an internal content view, so identity
+        // could never hold for it — and the terminal's `terminalView` is a
+        // descendant of its surface, so the same rule covers both kinds.
+        if let view = window.firstResponder as? NSView, view.isDescendant(of: container.surface) {
+            return
+        }
         container.surface.focus()
     }
 
@@ -763,25 +800,39 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// has no need to stress: a CA animation of our own carries no such wrapper,
     /// and adding one under a key that already holds one *replaces* it, which is
     /// defined behaviour.
-    private func place(_ container: PaneContainerView, at frame: NSRect) {
-        guard container.frame != frame else { return }
-        let presented = (container.layer?.presentation() ?? container.layer)
-            .map { (position: $0.position, bounds: $0.bounds, transform: $0.transform) }
-        container.frame = frame
-        if zoomTransition > 0, let layer = container.layer, let presented {
+    ///
+    /// `start` is where the move begins, for the one case the presentation layer
+    /// cannot answer: a pane that has just been reparented, whose presented
+    /// position is still the one it had in the view it left. Everywhere else it
+    /// is `nil` and the presented value is exactly right — including a move that
+    /// begins while another is still in flight.
+    private func place(_ container: PaneContainerView, at frame: NSRect, from start: NSRect? = nil) {
+        guard container.frame != frame || start != nil else { return }
+        let from: (position: CGPoint, size: CGSize)?
+        if let start, let layer = container.layer {
+            // Through the frame rather than by computing a centre: `position` is
+            // the layer's anchor point, and letting AppKit put the layer at
+            // `start` is what makes this right for whatever anchor and whatever
+            // flipped geometry the container happens to have.
+            container.frame = start
+            from = (layer.position, start.size)
+        } else if let presented = (container.layer?.presentation() ?? container.layer) {
             // What is on screen right now: the presented bounds as its transform
             // is currently scaling them, so a move that begins mid-flight starts
             // from the size the eye can actually see.
-            let onScreen = CGSize(
-                width: presented.bounds.width * presented.transform.m11,
-                height: presented.bounds.height * presented.transform.m22
+            from = (
+                presented.position,
+                CGSize(
+                    width: presented.bounds.width * presented.transform.m11,
+                    height: presented.bounds.height * presented.transform.m22
+                )
             )
-            zoomLayer(
-                layer,
-                fromPosition: presented.position,
-                fromSize: onScreen,
-                toSize: frame.size
-            )
+        } else {
+            from = nil
+        }
+        container.frame = frame
+        if zoomTransition > 0, let layer = container.layer, let from {
+            zoomLayer(layer, fromPosition: from.position, fromSize: from.size, toSize: frame.size)
         }
         container.surface.scheduleResize()
     }
@@ -1183,7 +1234,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             holePlaceholders.removeLast().removeFromSuperview()
         }
         while holePlaceholders.count < holeIDs.count {
-            let placeholder = PaneHolePlaceholderView { [weak self] in self?.onRequestNewPane?() }
+            let placeholder = PaneHolePlaceholderView(
+                onActivate: { [weak self] in self?.onRequestNewPane?() },
+                onActivateBrowser: { [weak self] in self?.onRequestNewBrowserPane?() }
+            )
             holePlaceholders.append(placeholder)
             addSubview(placeholder, positioned: .below, relativeTo: subviews.first)
         }
@@ -1334,7 +1388,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 /// pane on it to trade places).
 final class PaneContainerView: NSView, NSDraggingSource {
     let paneID: String
-    let surface: TerminalSurfaceView
+    let surface: any PaneContentView
     let header: PaneHeaderView
 
     /// The pane's border, drawn as the container's own background showing
@@ -1382,6 +1436,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
         didSet {
             guard status != oldValue else { return }
             header.status = status
+            // The unselected pane's veil is tinted by the same status.
+            (surface as? TerminalSurfaceView)?.wash.status = status
             updateChrome()
         }
     }
@@ -1421,7 +1477,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// carrying the same directory does not re-read `.git/HEAD`.
     private var branchDirectory: String?
 
-    init(paneID: String, surface: TerminalSurfaceView, workspace: PaneWorkspaceView) {
+    init(paneID: String, surface: any PaneContentView, workspace: PaneWorkspaceView) {
         self.paneID = paneID
         self.surface = surface
         self.workspace = workspace
@@ -1454,14 +1510,15 @@ final class PaneContainerView: NSView, NSDraggingSource {
                 let self,
                 let workspace = self.workspace,
                 let ordinal = workspace.paneOrdinal(of: self.paneID),
-                let group = workspace.descriptor(for: self.paneID)?.group,
+                let descriptor = workspace.descriptor(for: self.paneID),
                 // Whatever the sidebar calls this session, including the derived
                 // `Session N` for one nobody has named: the subtitle is two
                 // parts in the design, and a card that dropped the name half
                 // for unnamed sessions would show it for hardly any of them.
-                let session = workspace.sessionLabel(forGroup: group)
+                let session = workspace.sessionLabel(forGroup: descriptor.group)
             else { return nil }
-            return "\(session) · terminal \(ordinal.index) of \(ordinal.total)"
+            let noun = descriptor.kind == .browser ? "browser" : "terminal"
+            return "\(session) · \(noun) \(ordinal.index) of \(ordinal.total)"
         }
         addSubview(header)
         // Opaque for the same reason the header is: the container's background
@@ -1551,8 +1608,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
         header.wantsLayer = true
         surface.wantsLayer = true
         for (child, corners) in [
-            (header, CACornerMask([.layerMinXMinYCorner, .layerMaxXMinYCorner])),
-            (surface, CACornerMask([.layerMinXMaxYCorner, .layerMaxXMaxYCorner])),
+            (header as NSView, CACornerMask([.layerMinXMinYCorner, .layerMaxXMinYCorner])),
+            (surface as NSView, CACornerMask([.layerMinXMaxYCorner, .layerMaxXMaxYCorner])),
         ] {
             child.layer?.cornerRadius = inner
             child.layer?.cornerCurve = .continuous
@@ -1618,11 +1675,16 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // `SessionOutline.paneLabel` is the one place that decides what a pane
         // is called, and the sidebar already used it.
         header.title = SessionOutline.paneLabel(descriptor)
-        header.engine = descriptor.engine
+        // A browser carries `.shell` as a placeholder engine; showing that
+        // badge would claim the pane runs something it does not. `nil`
+        // already hides it.
+        header.engine = descriptor.kind == .browser ? nil : descriptor.engine
         // Its session's name is half the focus subtitle, so a rename has to
         // reach the bar. A no-op unless this pane is the zoomed one.
         header.refreshSubtitle()
-        updateBranch(for: descriptor.cwd)
+        // No branch badge either: a browser's `cwd` is empty and it has no
+        // repository to be on.
+        if descriptor.kind != .browser { updateBranch(for: descriptor.cwd) }
     }
 
     /// Resolves the pane's branch off the main thread and hands it to the
@@ -1641,7 +1703,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
     }
 
     func updateAccessibilityLabel(index: Int, of total: Int) {
-        let position = "terminal pane \(index) of \(total)"
+        let noun = workspace?.descriptor(for: paneID)?.kind == .browser ? "browser" : "terminal"
+        let position = "\(noun) pane \(index) of \(total)"
         if let group = workspace?.descriptor(for: paneID)?.groupLabel, !group.isEmpty {
             setAccessibilityLabel("\(group), \(position)")
         } else {
@@ -2323,34 +2386,35 @@ final class PaneBadgeView: NSView {
 /// property of the *host*, not of this view — a test host with no display attached
 /// must not construct one.
 final class PaneZoomBackdropView: NSVisualEffectView {
-    /// The design's `rgba(6,6,8,.62)` at a fifth of that alpha, in a subview
-    /// because an `NSVisualEffectView` paints its material into its own layer and
-    /// a background colour set on that layer lands underneath it.
-    ///
-    /// The mock's .62 is a wash over a *CSS* blur; over the system material —
-    /// which carries a dark tint of its own — it left the app behind the card as
-    /// one smear. The blur alone already makes text unreadable, which is the
-    /// whole job, so the tint only has to say "not this part". .12 is what that
-    /// took on a real screen: .22 still read as dark.
-    static let tint = NSColor(srgbRed: 6 / 255, green: 6 / 255, blue: 8 / 255, alpha: 0.12)
+    /// The material the app behind the card is seen through. `.headerView` is
+    /// the thinnest one that still blurs: it is meant to sit *over* window
+    /// content, so it carries almost no tint of its own, where `.hudWindow` —
+    /// which this was — is a dark panel material and darkened everything behind
+    /// the card on top of whatever tint was laid over it.
+    static let material: NSVisualEffectView.Material = .headerView
 
     var onClick: (() -> Void)?
 
     private var isShown = false
-    private let tintView = NSView()
 
-    /// `backdrop-filter:blur(16px) saturate(70%)` as the platform's own
-    /// within-window blur, rather than the `CIGaussianBlur` in
-    /// `layer.backgroundFilters` this used to carry. That is what "the background
-    /// is not blurred" was: `backgroundFilters` are only composited for layers the
-    /// window server can read back through, which a layer-backed view inside an
-    /// ordinary window is not — the filter was installed, ramped, and drew
-    /// nothing, leaving a flat 62% black wash over a perfectly sharp app.
-    /// `NSVisualEffectView` with `.withinWindow` blurs the sibling views behind
-    /// it, which is exactly what the design's overlay does.
+    /// `backdrop-filter:blur(16px)` as the platform's own within-window blur,
+    /// rather than the `CIGaussianBlur` in `layer.backgroundFilters` this used to
+    /// carry. That is what "the background is not blurred" was:
+    /// `backgroundFilters` are only composited for layers the window server can
+    /// read back through, which a layer-backed view inside an ordinary window is
+    /// not — the filter was installed, ramped, and drew nothing, leaving a flat
+    /// 62% black wash over a perfectly sharp app. `NSVisualEffectView` with
+    /// `.withinWindow` blurs the sibling views behind it, which is exactly what
+    /// the design's overlay does.
+    ///
+    /// No tint over it, and the design's `rgba(6,6,8,.62)` is deliberately not
+    /// reproduced. It is a wash meant to carry a CSS blur on its own; here the
+    /// blur already makes the app unreadable, which is the entire job, and every
+    /// amount of black tried on top of it — .62, .22, .12 — only took away the
+    /// one thing focus mode should leave you: seeing where everything else is.
     init() {
         super.init(frame: .zero)
-        material = .hudWindow
+        material = Self.material
         blendingMode = .withinWindow
         // `.followsWindowActiveState` would drop the blur the moment the window
         // stopped being key — including while a sheet or the palette is up.
@@ -2361,10 +2425,6 @@ final class PaneZoomBackdropView: NSVisualEffectView {
         // inserted directly above that layer — with none there, `stackOverlay`
         // silently left the shadow out.
         wantsLayer = true
-        tintView.wantsLayer = true
-        tintView.layer?.backgroundColor = Self.tint.cgColor
-        tintView.autoresizingMask = [.width, .height]
-        addSubview(tintView)
         alphaValue = 0
         isHidden = true
         setAccessibilityElement(true)
@@ -2377,22 +2437,12 @@ final class PaneZoomBackdropView: NSVisualEffectView {
         fatalError("init(coder:) is unavailable")
     }
 
-    override func layout() {
-        super.layout()
-        tintView.frame = bounds
-    }
-
-    /// Fades the whole backdrop, blur and tint together. Hidden only once it has
-    /// faded out, never left invisible-but-present: it swallows clicks.
+    /// Fades the backdrop in and out. Hidden only once it has faded out, never
+    /// left invisible-but-present: it swallows clicks.
     func setShown(_ shown: Bool, duration: TimeInterval) {
         guard isShown != shown else { return }
         isShown = shown
-        if shown {
-            isHidden = false
-            // Sized before the first frame is drawn: the fade starts now, and a
-            // tint still at its zero frame would show one frame of untinted blur.
-            tintView.frame = bounds
-        }
+        if shown { isHidden = false }
         let alpha: CGFloat = shown ? 1 : 0
         guard duration > 0 else {
             alphaValue = alpha
@@ -2483,8 +2533,10 @@ final class PaneHeaderButton: NSView {
             setAccessibilityLabel(label)
         } else {
             // No `.exitFocus` here: it exists only as the labelled pill, so
-            // there is no bare form of it left to describe.
-            setAccessibilityLabel(glyph == .focus ? "Zoom this terminal" : "Close this terminal")
+            // there is no bare form of it left to describe. Kind-neutral
+            // wording, since the pane may hold a browser as well as a
+            // terminal.
+            setAccessibilityLabel(glyph == .focus ? "Zoom this pane" : "Close this pane")
         }
     }
 
@@ -2705,22 +2757,67 @@ final class PaneDividerView: NSView {
 
 /// The empty cell of an incomplete rectangle. Visible (so a hole reads as a
 /// deliberate empty slot rather than a rendering bug) and clickable, which is
-/// the same double duty the web grid's hole tile does.
+/// the same double duty the web grid's hole tile does. Two affordances now: a
+/// terminal remains the primary one — a click anywhere in the cell — and the
+/// fainter "+ New browser" line underneath is the one place a click means a
+/// browser instead.
 final class PaneHolePlaceholderView: NSView {
     private let onActivate: () -> Void
+    private let onActivateBrowser: () -> Void
 
-    init(onActivate: @escaping () -> Void) {
+    private static let terminalText = "+ New terminal" as NSString
+    private static let browserText = "+ New browser" as NSString
+    private static let terminalAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+        .foregroundColor: NSColor(srgbRed: 110 / 255, green: 120 / 255, blue: 138 / 255, alpha: 1),
+    ]
+    /// Smaller and fainter: the secondary affordance must not compete with
+    /// the primary one it sits under.
+    private static let browserAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+        .foregroundColor: NSColor(srgbRed: 110 / 255, green: 120 / 255, blue: 138 / 255, alpha: 0.65),
+    ]
+
+    init(onActivate: @escaping () -> Void, onActivateBrowser: @escaping () -> Void = {}) {
         self.onActivate = onActivate
+        self.onActivateBrowser = onActivateBrowser
         super.init(frame: .zero)
         wantsLayer = true
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
+        // The single press stays "Add terminal": browsers remain reachable
+        // through the menu, palette, toolbar and sidebar for assistive users.
         setAccessibilityLabel("Add terminal")
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is unavailable")
+    }
+
+    /// Where the primary line draws — derived from `bounds` rather than
+    /// recorded during `draw(_:)`, so the click dispatch below is testable
+    /// on a view nothing has rendered yet.
+    var terminalTextRect: NSRect {
+        let size = Self.terminalText.size(withAttributes: Self.terminalAttributes)
+        return NSRect(
+            x: bounds.midX - size.width / 2,
+            y: bounds.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    /// The browser line, visually below the terminal one — this view is not
+    /// flipped, so "below" is the smaller y.
+    var browserTextRect: NSRect {
+        let size = Self.browserText.size(withAttributes: Self.browserAttributes)
+        return NSRect(
+            x: bounds.midX - size.width / 2,
+            y: terminalTextRect.minY - 7 - size.height,
+            width: size.width,
+            height: size.height
+        )
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -2731,20 +2828,23 @@ final class PaneHolePlaceholderView: NSView {
         NSColor(srgbRed: 36 / 255, green: 43 / 255, blue: 57 / 255, alpha: 1).setStroke()
         outline.stroke()
 
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-            .foregroundColor: NSColor(srgbRed: 110 / 255, green: 120 / 255, blue: 138 / 255, alpha: 1),
-        ]
-        let text = "+ New terminal" as NSString
-        let size = text.size(withAttributes: attributes)
-        text.draw(
-            at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2),
-            withAttributes: attributes
-        )
+        Self.terminalText.draw(at: terminalTextRect.origin, withAttributes: Self.terminalAttributes)
+        Self.browserText.draw(at: browserTextRect.origin, withAttributes: Self.browserAttributes)
     }
 
     override func mouseUp(with event: NSEvent) {
-        activate()
+        dispatch(at: convert(event.locationInWindow, from: nil))
+    }
+
+    /// The click rule, split from `mouseUp` so it is testable without
+    /// synthesising events: the browser line is the one place a click means a
+    /// browser; anywhere else in the cell stays the primary affordance.
+    func dispatch(at point: NSPoint) {
+        if browserTextRect.insetBy(dx: -4, dy: -4).contains(point) {
+            onActivateBrowser()
+        } else {
+            onActivate()
+        }
     }
 
     override func accessibilityPerformPress() -> Bool {
