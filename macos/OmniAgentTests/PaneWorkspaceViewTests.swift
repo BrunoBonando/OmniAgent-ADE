@@ -1964,11 +1964,11 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
     // MARK: - Focus-mode header
 
-    /// The bar has to *change* when a pane is focused, or the control that got
-    /// you in still looks like the control that gets you in. The design's
-    /// focused card carries a taller header, a bigger name, the
-    /// `session · terminal N of M` subtitle and one labelled way out — and none
-    /// of it may survive the trip back into the grid.
+    /// The bar has to *change* when a pane is focused: the design's focused
+    /// card carries a taller header, a bigger name and the
+    /// `session · terminal N of M` subtitle, and none of it may survive the trip
+    /// back into the grid. What must *not* change is the cluster — all three
+    /// discs stay put in both modes, and only which of them is live moves.
     func testTheFocusHeaderWearsTheDesignsTallerBarAndItsOwnControls() throws {
         let (workspace, window) = makeAttachedWorkspace(panes: 4)
         defer { window.close() }
@@ -1978,7 +1978,19 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let card = try XCTUnwrap(workspace.container(for: "pane-2"))
         XCTAssertEqual(card.header.currentHeight, 30, "the grid bar is the design's 30px")
         XCTAssertNil(card.header.subtitle, "the grid header has no subtitle to show")
-        XCTAssertEqual(controls(in: card.header), ["Zoom this pane", "Close this pane"])
+        XCTAssertEqual(
+            controls(in: card.header),
+            ["Pane options", Self.restoreText, "Zoom this pane", "Close this pane"]
+        )
+        XCTAssertEqual(
+            liveControls(in: card.header),
+            ["Pane options", "Zoom this pane", "Close this pane"],
+            "with nothing to come back from, yellow is the one disc that is off"
+        )
+        // For eyeballing the cluster in both treatments — see
+        // `saveRenderForInspection`. A no-op unless `PANE_RENDER_DIR` is set.
+        window.displayIfNeeded()
+        try saveRenderForInspection(XCTUnwrap(render(card)), named: "header-cluster-grid")
 
         XCTAssertTrue(workspace.toggleZoom("pane-2"))
         card.layoutSubtreeIfNeeded()
@@ -1996,21 +2008,32 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(card.header.subtitle, "session restore · terminal 3 of 4")
         XCTAssertEqual(
             controls(in: card.header),
-            [Self.exitFocusText],
-            "one labelled way out, and no close button beside it"
+            ["Pane options", Self.restoreText, "Zoom this pane", "Close this pane"],
+            "the same four controls in the same places — a zoom moves none of them"
+        )
+        XCTAssertEqual(
+            liveControls(in: card.header),
+            ["Pane options", Self.restoreText],
+            "and the live pair invert: yellow comes on, green and red go off"
         )
 
-        // Out the way the design says you get out — by pressing the pill, not by
-        // calling the toggle it happens to be wired to.
-        let pill = try XCTUnwrap(button(labelled: Self.exitFocusText, in: card.header))
-        click(pill, in: window)
-        XCTAssertNil(workspace.zoomedPaneID, "the pill is the way out, not a picture of one")
+        window.displayIfNeeded()
+        try saveRenderForInspection(XCTUnwrap(render(card)), named: "header-cluster-zoomed")
+
+        // Out by pressing the yellow disc, not by calling the toggle it happens
+        // to be wired to.
+        let restore = try XCTUnwrap(button(labelled: Self.restoreText, in: card.header))
+        click(restore, in: window)
+        XCTAssertNil(workspace.zoomedPaneID, "yellow is the way out, not a picture of one")
 
         card.layoutSubtreeIfNeeded()
         XCTAssertEqual(card.header.currentHeight, 30)
         XCTAssertEqual(card.header.frame.height, 30)
         XCTAssertNil(card.header.subtitle)
-        XCTAssertEqual(controls(in: card.header), ["Zoom this pane", "Close this pane"])
+        XCTAssertEqual(
+            liveControls(in: card.header),
+            ["Pane options", "Zoom this pane", "Close this pane"]
+        )
     }
 
     /// Every number the focused card's header is built from, pinned to the
@@ -2027,22 +2050,19 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         // Focus first, because the subtitle only has text to be found by while
         // the bar is wearing it: `padding:0 7px 0 12px`, `gap:9px`,
-        // `600 15.5px` / `#f0f0f4` title, `400 14px` / `#5c5c66` subtitle, and
-        // the pill in place of both icons — `padding:5px 9px` around a 16pt
-        // glyph is 26pt tall.
+        // `600 15.5px` / `#f0f0f4` title, `400 14px` / `#5c5c66` subtitle.
         header.isZoomed = true
         layOut(header, width: 1080)
         let fields = header.subviews.compactMap { $0 as? NSTextField }
         let subtitle = try XCTUnwrap(fields.first { $0.stringValue == "session restore · terminal 1 of 4" })
         let title = try XCTUnwrap(fields.first { $0 !== subtitle })
         let mark = try XCTUnwrap(header.subviews.compactMap { $0 as? PaneStatusMarkView }.first)
-        let pill = try XCTUnwrap(button(labelled: Self.exitFocusText, in: header))
+        let red = try XCTUnwrap(button(labelled: "Close this pane", in: header))
         XCTAssertEqual(mark.frame.size, CGSize(width: 15, height: 15), "the 15px status mark, both modes")
         XCTAssertEqual(mark.frame.minX, 12)
         XCTAssertEqual(title.frame.minX - mark.frame.maxX, 9, "focus `gap:9px`")
         XCTAssertEqual(subtitle.frame.minX - title.frame.maxX, 9)
-        XCTAssertEqual(pill.frame.maxX, 1080 - 7, "focus `padding-right:7px`")
-        XCTAssertEqual(pill.frame.height, 26, "5pt of padding above and below a 16pt glyph")
+        XCTAssertEqual(red.frame.maxX, 1080 - 7, "focus `padding-right:7px`")
         XCTAssertEqual(title.font?.pointSize, 15.5, "focus title `15.5px`")
         XCTAssertEqual(title.font, ShellFont.ui(15.5, .semibold), "at `600`, through this file's own font helper")
         XCTAssertEqual(
@@ -2059,7 +2079,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
 
         // And back to the grid's own numbers: `padding:0 6px 0 10px`, `gap:8px`,
-        // `500 14.5px`, two 20pt icon squares, no subtitle.
+        // `500 14.5px`, 20pt icon squares, no subtitle.
         header.isZoomed = false
         layOut(header, width: 620)
         let zoom = try XCTUnwrap(button(labelled: "Zoom this pane", in: header))
@@ -2073,42 +2093,91 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(subtitle.isHidden, "and nothing left of the subtitle")
     }
 
-    /// The exit control is not the grid's icon with a tooltip on it: it is the
-    /// design's bordered pill, labelled `Exit focus · esc` — the label is the
-    /// only place the escape hatch is spelled out, in the app *and* to Voice
-    /// Control, which resolves a command by what a control says.
-    func testTheExitControlIsALabelledPillThatSaysHowToLeave() throws {
+    /// The three discs are one cluster, read by position: yellow restores, green
+    /// expands, red closes, always in that order and always all three present.
+    /// A control that cannot act greys out where it stands — if a disabled disc
+    /// were ever hidden instead, the two survivors would slide into new places
+    /// and the position you learned would stop meaning anything.
+    func testTheHeaderCarriesAYellowGreenRedClusterThatNeverReorders() throws {
         let header = PaneHeaderView(title: "token rotation")
         header.isZoomAvailable = true
-        header.isZoomed = true
-        let pill = try XCTUnwrap(button(labelled: Self.exitFocusText, in: header))
+        layOut(header, width: 620)
+
+        let restore = try XCTUnwrap(button(labelled: Self.restoreText, in: header))
         let zoom = try XCTUnwrap(button(labelled: "Zoom this pane", in: header))
+        let close = try XCTUnwrap(button(labelled: "Close this pane", in: header))
+        XCTAssertEqual(restore.trafficLight, .yellow)
+        XCTAssertEqual(zoom.trafficLight, .green)
+        XCTAssertEqual(close.trafficLight, .red)
+        for disc in [restore, zoom, close] {
+            XCTAssertEqual(
+                disc.intrinsicContentSize,
+                NSSize(width: PaneHeaderButton.iconSize, height: PaneHeaderButton.iconSize),
+                "every disc is the grid's 20pt square"
+            )
+            XCTAssertFalse(disc.isHidden, "and none of them ever leaves the bar")
+        }
+        // Abutting 20pt squares, which is macOS's own 20pt between disc centres.
+        XCTAssertEqual(zoom.frame.minX, restore.frame.maxX, "yellow, then green")
+        XCTAssertEqual(close.frame.minX, zoom.frame.maxX, "then red, nearest the edge")
 
-        XCTAssertEqual(pill.label, "Exit focus · esc", "the words the button draws")
-        XCTAssertEqual(pill.accessibilityLabel(), pill.label, "and the name it answers to")
-        XCTAssertNil(zoom.label, "while the grid's control stays a bare icon")
+        // Unzoomed: nothing to come back from, so yellow alone is off.
+        XCTAssertFalse(restore.isEnabled)
+        XCTAssertTrue(zoom.isEnabled)
+        XCTAssertTrue(close.isEnabled)
+
+        // Zoomed: the pair invert, and the cluster keeps its shape. (The card's
+        // taller bar and its own `padding-right:7px` shift the whole cluster —
+        // what may not change is the order and the abutting.)
+        let places = [restore.frame, zoom.frame, close.frame]
+        header.isZoomed = true
+        layOut(header, width: 620)
+        XCTAssertTrue(restore.isEnabled)
+        XCTAssertFalse(zoom.isEnabled, "you are already in — green is the way in")
+        XCTAssertFalse(close.isEnabled, "closing what you just blew up is what ⌘W is for")
+        XCTAssertEqual(zoom.frame.minX, restore.frame.maxX, "still yellow, then green")
+        XCTAssertEqual(close.frame.minX, zoom.frame.maxX, "then red")
+        XCTAssertEqual(close.frame.maxX, 620 - 7, "focus `padding-right:7px`")
+
+        // A single pane on screen has nothing to zoom over, so green goes off
+        // too rather than offering a no-op — and still holds its place.
+        header.isZoomed = false
+        header.isZoomAvailable = false
+        layOut(header, width: 620)
+        XCTAssertFalse(zoom.isEnabled)
+        XCTAssertTrue(close.isEnabled, "which says nothing about closing it")
         XCTAssertEqual(
-            zoom.intrinsicContentSize,
-            NSSize(width: PaneHeaderButton.iconSize, height: PaneHeaderButton.iconSize)
+            [restore.frame, zoom.frame, close.frame],
+            places,
+            "a disc going dark moves nothing"
         )
-        XCTAssertGreaterThan(
-            pill.intrinsicContentSize.width,
-            zoom.intrinsicContentSize.width * 3,
-            "a glyph, a gap and a label, not a 20pt square"
-        )
-        XCTAssertEqual(pill.intrinsicContentSize.height, 26)
-        XCTAssertLessThan(
-            pill.intrinsicContentSize.height,
-            PaneHeaderView.focusHeight,
-            "and it fits inside the bar it sits in"
-        )
+    }
 
-        // Pressed by assistive technology, not only by a mouse: an `NSView` with
-        // a button role does nothing on press unless it says otherwise.
-        var presses = 0
-        pill.onClick = { presses += 1 }
-        XCTAssertTrue(pill.accessibilityPerformPress())
-        XCTAssertEqual(presses, 1)
+    /// A disabled disc has to actually refuse, not merely look grey: it is still
+    /// on screen, still under the pointer, and still reachable by assistive
+    /// technology, so every one of those paths has to be closed.
+    func testADisabledDiscRefusesEveryWayItCanBePressed() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 4)
+        defer { window.close() }
+        let card = try XCTUnwrap(workspace.container(for: "pane-2"))
+        let restore = try XCTUnwrap(button(labelled: Self.restoreText, in: card.header))
+
+        // Yellow, with nothing zoomed: clicking it must not zoom anything.
+        XCTAssertFalse(restore.isEnabled)
+        click(restore, in: window)
+        XCTAssertNil(workspace.zoomedPaneID, "a disabled disc is not a live toggle")
+        XCTAssertFalse(restore.accessibilityPerformPress(), "nor a live one to VoiceOver")
+        XCTAssertFalse(restore.isAccessibilityEnabled(), "which is also what it reports")
+
+        // Red, while zoomed: the pane may not be closed out from under the card.
+        XCTAssertTrue(workspace.toggleZoom("pane-2"))
+        var closes: [String] = []
+        workspace.onRequestClosePane = { closes.append($0) }
+        let close = try XCTUnwrap(button(labelled: "Close this pane", in: card.header))
+        XCTAssertFalse(close.isEnabled)
+        click(close, in: window)
+        XCTAssertEqual(closes, [], "red is off while zoomed, and off means off")
+        XCTAssertEqual(workspace.zoomedPaneID, "pane-2")
     }
 
     func testPaneOrdinalCountsAPanesPlaceAmongItsOwnSessionsTerminals() {
@@ -2296,17 +2365,26 @@ final class PaneWorkspaceViewTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
 
-    /// What the exit pill says, which is also the name it answers to and how
-    /// these tests tell the header's three controls apart without the header
-    /// exposing them.
-    private static let exitFocusText = "Exit focus · esc"
+    /// What the yellow disc answers to — the one place the escape hatch is
+    /// spelled out, and how these tests tell the cluster apart without the
+    /// header exposing its buttons.
+    private static let restoreText = "Restore this pane · esc"
 
-    /// Which trailing controls the bar is currently offering, named by what they
-    /// say they do, in the order the header lays them out.
+    /// Which trailing controls the bar is showing, named by what they say they
+    /// do, in the order the header lays them out.
     private func controls(in header: PaneHeaderView) -> [String] {
         header.subviews
             .compactMap { $0 as? PaneHeaderButton }
             .filter { !$0.isHidden }
+            .compactMap { $0.accessibilityLabel() }
+    }
+
+    /// The same list narrowed to the controls that would do something if you
+    /// pressed them — which is the part a zoom actually changes.
+    private func liveControls(in header: PaneHeaderView) -> [String] {
+        header.subviews
+            .compactMap { $0 as? PaneHeaderButton }
+            .filter { !$0.isHidden && $0.isEnabled }
             .compactMap { $0.accessibilityLabel() }
     }
 

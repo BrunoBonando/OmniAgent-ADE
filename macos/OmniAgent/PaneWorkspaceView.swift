@@ -3254,8 +3254,8 @@ final class PaneHeaderButton: NSView {
             // The same pair pulled off the corners to meet in the middle, which
             // is how macOS says "put it back". Direction is the only difference
             // between the two, and at 8pt this is the difference that survives.
-            wedge([(7.2, 7.2), (7.2, 1.4), (1.4, 7.2)])
-            wedge([(8.8, 8.8), (8.8, 14.6), (14.6, 8.8)])
+            wedge([(6.6, 6.6), (6.6, 1.0), (1.0, 6.6)])
+            wedge([(9.4, 9.4), (9.4, 15.0), (15.0, 9.4)])
         case .close:
             path.move(to: point(4.2, 4.2))
             path.line(to: point(11.8, 11.8))
