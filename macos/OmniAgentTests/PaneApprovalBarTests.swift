@@ -1,3 +1,5 @@
+import AppKit
+import SwiftTerm
 import XCTest
 
 @testable import OmniAgent
@@ -160,4 +162,236 @@ final class PaneContainerApprovalTests: XCTestCase {
 
 private extension PaneContainerView {
     var terminalSurfaceFrame: CGRect { (surface as! TerminalSurfaceView).frame }
+}
+
+/// The fixtures above are tmux captures, where the gaps between words are real
+/// spaces. What reaches the bar in the app is a SwiftTerm buffer, and that is
+/// not the same text: Claude's TUI paints a line by jumping to absolute columns
+/// rather than writing the spaces, and SwiftTerm renders a never-written cell
+/// as U+0000. These drive a real terminal the way Claude drives one.
+final class ApprovalPromptSwiftTermTests: XCTestCase {
+    private final class SilentTerminalDelegate: TerminalDelegate {
+        func send(source: Terminal, data: ArraySlice<UInt8>) {}
+    }
+
+    /// `Enter to select · ↑/↓ to navigate · Esc to cancel` as Claude Code
+    /// 2.1.234 actually writes it, and the option rows likewise.
+    private func terminalShowingADialog() -> Terminal {
+        let terminal = Terminal(
+            delegate: SilentTerminalDelegate(),
+            options: TerminalOptions(cols: 100, rows: 12)
+        )
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J")
+        terminal.feed(text: "\u{1b}[2;1HWhat\u{1b}[2;6Hdo\u{1b}[2;9Hyou\u{1b}[2;13Hwant\u{1b}[2;18Hdone?")
+        terminal.feed(text: "\u{1b}[4;1H❯\u{1b}[4;3H1.\u{1b}[4;6HLeave\u{1b}[4;12Hit\u{1b}[4;15Has-is")
+        terminal.feed(text: "\u{1b}[5;3H2.\u{1b}[5;6HAdd\u{1b}[5;10Hgit\u{1b}[5;14Hbranch")
+        terminal.feed(
+            text: "\u{1b}[7;1HEnter\u{1b}[7;7Hto\u{1b}[7;10Hselect\u{1b}[7;18H·"
+                + "\u{1b}[7;20HEsc\u{1b}[7;24Hto\u{1b}[7;27Hcancel"
+        )
+        return terminal
+    }
+
+    func testTheBufferComesBackWithSpacesNotNulls() {
+        let lines = TerminalSurfaceView.tailLines(of: terminalShowingADialog())
+        XCTAssertFalse(
+            lines.contains { $0.contains("\0") },
+            "a NUL in the text is a gap SwiftTerm never filled: \(lines)"
+        )
+        XCTAssertTrue(
+            lines.contains { $0.contains("Esc to cancel") },
+            "the footer every attention marker keys off: \(lines)"
+        )
+    }
+
+    func testADialogClaudeActuallyPaintedParsesIntoOptions() {
+        let prompt = ApprovalPrompt.parse(
+            lines: TerminalSurfaceView.tailLines(of: terminalShowingADialog())
+        )
+        XCTAssertEqual(prompt?.question, "What do you want done?")
+        XCTAssertEqual(
+            prompt?.options,
+            [
+                ApprovalPrompt.Option(number: 1, label: "Leave it as-is"),
+                ApprovalPrompt.Option(number: 2, label: "Add git branch"),
+            ]
+        )
+    }
+}
+
+/// `accessibilityPerformPress` proves the wiring, not the click: it calls
+/// `onClick` directly and never asks AppKit to route a mouse event. These do,
+/// through a real window, because a button nobody can click is the bug.
+final class PaneApprovalButtonClickTests: XCTestCase {
+    private func barInAWindow() -> (PaneApprovalBarView, NSWindow) {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 200),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let bar = PaneApprovalBarView()
+        bar.frame = NSRect(x: 0, y: 0, width: 600, height: PaneApprovalBarView.height)
+        window.contentView?.addSubview(bar)
+        // On screen, and through `NSApp`: a mouse-up is routed to the view
+        // that took the mouse-down by AppKit's own bookkeeping, and an
+        // unordered window sending its own events never sets that up.
+        window.makeKeyAndOrderFront(nil)
+        bar.layoutSubtreeIfNeeded()
+        return (bar, window)
+    }
+
+    private func click(_ button: PaneApprovalButton, in window: NSWindow) {
+        let center = button.convert(
+            NSPoint(x: button.bounds.midX, y: button.bounds.midY),
+            to: nil
+        )
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = NSEvent.mouseEvent(
+                with: type,
+                location: center,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: type == .leftMouseDown ? 1 : 0
+            )
+            guard let event else {
+                return XCTFail("could not synthesise a \(type) event")
+            }
+            NSApp.sendEvent(event)
+        }
+    }
+
+    func testTheClickLandsOnTheButtonAndNotThroughIt() throws {
+        let (bar, window) = barInAWindow()
+        bar.prompt = ApprovalPrompt(
+            question: "Which color?",
+            options: [ApprovalPrompt.Option(number: 1, label: "Red")]
+        )
+        bar.layoutSubtreeIfNeeded()
+        let button = try XCTUnwrap(bar.subviews.compactMap { $0 as? PaneApprovalButton }.first)
+        let center = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+        let content = try XCTUnwrap(window.contentView)
+        // `hitTest` takes its point in the receiver's *superview* space, which
+        // for a content view is window space — what `center` already is.
+        // Converting into the content view first mirrors the y whenever that
+        // view is flipped, and both of the ones here are.
+        let hit = content.hitTest(center)
+        XCTAssertTrue(hit === button, "hit testing returned \(String(describing: hit))")
+    }
+
+    func testClickingAnOptionSendsItsDigit() {
+        let (bar, window) = barInAWindow()
+        var sent: [String] = []
+        bar.onChoose = { sent.append($0) }
+        bar.prompt = ApprovalPrompt(
+            question: "Which color?",
+            options: [
+                ApprovalPrompt.Option(number: 1, label: "Red"),
+                ApprovalPrompt.Option(number: 2, label: "Blue"),
+            ]
+        )
+        bar.layoutSubtreeIfNeeded()
+        let buttons = bar.subviews.compactMap { $0 as? PaneApprovalButton }
+        click(buttons[1], in: window)
+        XCTAssertEqual(sent, ["2"])
+    }
+
+    func testClickingApproveSendsEnter() {
+        let (bar, window) = barInAWindow()
+        var sent: [String] = []
+        bar.onChoose = { sent.append($0) }
+        bar.prompt = nil
+        bar.layoutSubtreeIfNeeded()
+        let buttons = bar.subviews.compactMap { $0 as? PaneApprovalButton }
+        click(buttons[0], in: window)
+        XCTAssertEqual(sent, ["\r"])
+    }
+}
+
+/// The bar in the place it actually lives. A button that answers a click on a
+/// bench and not in the app is the bug the user reported, so this drives the
+/// whole hierarchy — workspace, container, zoom overlay — through `NSApp`.
+final class PaneApprovalBarInWorkspaceTests: XCTestCase {
+    private func makeWindowedWorkspace() -> (PaneWorkspaceView, NSWindow) {
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: "/tmp/omniagent-approval-click-test.sock")
+        )
+        let workspace = PaneWorkspaceView { descriptor in
+            TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = workspace
+        window.makeKeyAndOrderFront(nil)
+        _ = workspace.addPane(
+            PaneDescriptor(sessionID: "pane-1", group: "sess-grp-1", groupLabel: nil, title: "")
+        )
+        workspace.setStatus(.awaitingApproval, for: "pane-1")
+        workspace.layoutSubtreeIfNeeded()
+        return (workspace, window)
+    }
+
+    private func clickApprove(in workspace: PaneWorkspaceView, window: NSWindow) throws -> NSView? {
+        let container = try XCTUnwrap(workspace.container(for: "pane-1"))
+        container.layoutSubtreeIfNeeded()
+        let button = try XCTUnwrap(
+            container.approvalBar.subviews.compactMap { $0 as? PaneApprovalButton }.first
+        )
+        let center = button.convert(
+            NSPoint(x: button.bounds.midX, y: button.bounds.midY),
+            to: nil
+        )
+        let content = try XCTUnwrap(window.contentView)
+        // Window space already, as in `PaneApprovalButtonClickTests`. The
+        // convert this used to do landed on the header's badges: the workspace
+        // is flipped, so it probed the mirrored y, near the top of the pane.
+        let hit = content.hitTest(center)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = try XCTUnwrap(
+                NSEvent.mouseEvent(
+                    with: type,
+                    location: center,
+                    modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 1,
+                    pressure: type == .leftMouseDown ? 1 : 0
+                )
+            )
+            NSApp.sendEvent(event)
+        }
+        return hit
+    }
+
+    func testAClickOnTheBarReachesTheButton() throws {
+        let (workspace, window) = makeWindowedWorkspace()
+        var sent: [String] = []
+        let container = try XCTUnwrap(workspace.container(for: "pane-1"))
+        container.approvalBar.onChoose = { sent.append($0) }
+        let hit = try clickApprove(in: workspace, window: window)
+        XCTAssertTrue(hit is PaneApprovalButton, "the click landed on \(String(describing: hit))")
+        XCTAssertEqual(sent, ["\r"])
+    }
+
+    func testAClickOnTheBarReachesTheButtonWhileZoomed() throws {
+        let (workspace, window) = makeWindowedWorkspace()
+        _ = workspace.toggleZoom("pane-1")
+        workspace.layoutSubtreeIfNeeded()
+        var sent: [String] = []
+        let container = try XCTUnwrap(workspace.container(for: "pane-1"))
+        container.approvalBar.onChoose = { sent.append($0) }
+        let hit = try clickApprove(in: workspace, window: window)
+        XCTAssertTrue(hit is PaneApprovalButton, "the click landed on \(String(describing: hit))")
+        XCTAssertEqual(sent, ["\r"])
+    }
 }

@@ -178,6 +178,10 @@ final class PaneApprovalButton: NSView {
     var onClick: (() -> Void)?
 
     private var isHovered = false { didSet { needsDisplay = true } }
+    private var isPressed = false { didSet { needsDisplay = true } }
+    /// Set by whichever of the two paths below saw the mouse-up first, so a
+    /// click never fires twice.
+    private var clickHandled = false
     private var tracking: NSTrackingArea?
 
     init(title: String, isPrimary: Bool) {
@@ -205,9 +209,11 @@ final class PaneApprovalButton: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
+        // `.inVisibleRect` keeps the hover region correct through the bar's
+        // relayouts, which move these buttons on every rebuild.
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow],
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
             owner: self
         )
         addTrackingArea(area)
@@ -218,12 +224,46 @@ final class PaneApprovalButton: NSView {
     override func mouseExited(with event: NSEvent) { isHovered = false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// How long the press below waits for its own mouse-up before giving up
+    /// and leaving the job to `mouseUp`. Longer than any click, short enough
+    /// that a lost-up event cannot wedge the view.
+    private static let pressTimeout: TimeInterval = 1.5
+
+    /// The click is swallowed here so it never falls through to pane focus
+    /// handling — and then *tracked* here rather than being left to arrive as
+    /// `mouseUp`, because a view that eats a mouse-down only hears the
+    /// matching mouse-up if AppKit routes it back, and in the app it did not:
+    /// the bar drew, hovered and hit-tested correctly while every click on it
+    /// did nothing. Pulling the rest of the click off the queue is what a real
+    /// button does, and it does not depend on that routing.
     override func mouseDown(with event: NSEvent) {
-        // Swallowed so the click does not fall through to pane focus handling;
-        // the action fires on mouseUp, inside the button, like a button.
+        clickHandled = false
+        isPressed = true
+        var inside = true
+        while let next = NSApp.nextEvent(
+            matching: [.leftMouseUp, .leftMouseDragged],
+            until: Date(timeIntervalSinceNow: Self.pressTimeout),
+            inMode: .eventTracking,
+            dequeue: true
+        ) {
+            inside = bounds.contains(convert(next.locationInWindow, from: nil))
+            isPressed = inside
+            guard next.type == .leftMouseUp else { continue }
+            isPressed = false
+            clickHandled = true
+            if inside { onClick?() }
+            return
+        }
+        isPressed = false
     }
 
+    /// The other half of the pair: the mouse-up AppKit routes back on its own,
+    /// which is the path a synthesised click takes (nothing enqueues an event
+    /// for the loop above to dequeue). `clickHandled` is what stops the two
+    /// paths from both firing on one press.
     override func mouseUp(with event: NSEvent) {
+        guard !clickHandled else { return }
+        clickHandled = true
         guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
         onClick?()
     }
@@ -238,15 +278,17 @@ final class PaneApprovalButton: NSView {
         let textColor: NSColor
         if isPrimary {
             var fill = PaneApprovalBarView.amber
-            if isHovered {
+            if isPressed {
+                fill = fill.blended(withFraction: 0.18, of: .black) ?? fill
+            } else if isHovered {
                 fill = fill.blended(withFraction: 0.1, of: .white) ?? fill
             }
             fill.setFill()
             pill.fill()
             textColor = NSColor(srgbRed: 26 / 255, green: 20 / 255, blue: 0, alpha: 1)
         } else {
-            if isHovered {
-                NSColor(white: 1, alpha: 0.08).setFill()
+            if isPressed || isHovered {
+                NSColor(white: 1, alpha: isPressed ? 0.16 : 0.08).setFill()
                 pill.fill()
             }
             NSColor(white: 1, alpha: 0.16).setStroke()

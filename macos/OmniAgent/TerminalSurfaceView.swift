@@ -319,17 +319,36 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     }
 
     /// The tail of the terminal's text, trailing blank rows dropped — what
-    /// `ApprovalPrompt.parse` reads the on-screen dialog out of. Trailing
-    /// blanks go first because a fresh screen pads to the viewport height
-    /// below the dialog, and a plain suffix would be all padding.
+    /// `ApprovalPrompt.parse` reads the on-screen dialog out of.
     func visibleTailLines(limit: Int = 40) -> [String] {
-        let data = terminalView.terminal.getBufferAsData()
+        Self.tailLines(of: terminalView.terminal, limit: limit)
+    }
+
+    /// Free of the view so it can be driven by a bare `Terminal` in tests —
+    /// which is the only way to see what the parser is really handed.
+    ///
+    /// Trailing blanks go first because a fresh screen pads to the viewport
+    /// height below the dialog, and a plain suffix would be all padding.
+    ///
+    /// The NUL substitution is not cosmetic. Claude's TUI paints a line by
+    /// jumping to absolute columns instead of writing the spaces between the
+    /// words (`Esc\u{1b}[24Gto\u{1b}[27Gcancel` — the same rendering the
+    /// daemon's marker matching documents), and SwiftTerm returns a cell
+    /// nobody ever wrote as U+0000 rather than a space. Left alone, the tail
+    /// reads `Esc\0to\0cancel`: the daemon lights the pane amber (its `vt100`
+    /// screen renders those cells as spaces) while every dialog the bar tried
+    /// to parse came back empty, so the buttons were always the Approve/Deny
+    /// fallback.
+    static func tailLines(of terminal: Terminal, limit: Int = 40) -> [String] {
+        let data = terminal.getBufferAsData()
         guard let text = String(data: data, encoding: .utf8) else { return [] }
-        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        var lines = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.replacingOccurrences(of: "\0", with: " ") }
         while let last = lines.last, last.isEmpty {
             lines.removeLast()
         }
-        return lines.suffix(limit).map(String.init)
+        return Array(lines.suffix(limit))
     }
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
