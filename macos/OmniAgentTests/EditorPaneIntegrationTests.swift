@@ -828,6 +828,40 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertFalse(target.model.tabs[0].isDirty)
     }
 
+    /// Fix round 2, Important. The drag's entry gate read the lagging flag
+    /// too: a keystroke whose `dirtyChanged` post has not landed reads clean,
+    /// and the tab was carried away — disposing the source's Monaco model,
+    /// which is where that keystroke lived — with no prompt at all.
+    func testDraggingATabWhoseDirtyMessageIsStillInFlightStillAsks() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "let x = 1")
+        controller.openFileInEditor(file, pinned: true)
+        let sourceID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let source = try XCTUnwrap(controller.workspaceView.editorPane(for: sourceID))
+        waitUntilReady(source)
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let targetID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let target = try XCTUnwrap(controller.workspaceView.editorPane(for: targetID))
+
+        source.webHost.setContentForTesting(path: file.path, content: "in-flight")
+        XCTAssertFalse(source.model.tabs[0].isDirty, "the posted message cannot have landed yet")
+
+        let asked = expectation(description: "asked before the tab travelled")
+        source.confirmSave = { _, decide in
+            asked.fulfill()
+            decide(.cancel)
+        }
+        controller.handleEditorTabDrop(
+            EditorTabDragPayload(paneID: sourceID, index: 0), intoPane: targetID, at: 0
+        )
+        wait(for: [asked], timeout: 20)
+
+        XCTAssertEqual(source.model.tabs.map(\.path), [file.path], "cancel left the tab where it was")
+        XCTAssertTrue(target.model.tabs.isEmpty)
+    }
+
     /// Fix round 1, Critical. A drag disposes the source's Monaco model just
     /// as finally as a close does, so it is held to the same rule: `save`'s
     /// `true` means the bytes reached disk, not that the buffer is clean. A
@@ -1049,7 +1083,7 @@ final class EditorPaneIntegrationTests: XCTestCase {
             decide(.cancel)
         }
         XCTAssertFalse(controller.windowShouldClose(window), "unsaved work holds the window open")
-        XCTAssertEqual(asked, 1)
+        XCTAssertTrue(pollUntil(timeout: 10) { asked == 1 })
         XCTAssertTrue(window.isVisible)
         XCTAssertEqual(pane.model.tabs.count, 1)
 
@@ -1061,20 +1095,38 @@ final class EditorPaneIntegrationTests: XCTestCase {
             controller.windowShouldClose(window),
             "the delegate still answers no — it closes the window itself once the prompt resolves"
         )
-        XCTAssertEqual(asked, 2)
-        XCTAssertFalse(window.isVisible, "…and the window is gone")
+        XCTAssertTrue(pollUntil(timeout: 10) { asked == 2 })
+        XCTAssertTrue(pollUntilClosed(window), "…and the window is gone")
     }
 
-    /// A workspace with nothing unsaved never delays its own close.
-    func testWindowCloseIsImmediateWhenNothingIsUnsaved() throws {
+    /// A workspace holding no editor buffer at all never delays its own close
+    /// — that is the one case answerable without asking the page.
+    func testWindowCloseIsImmediateWithNoEditorBuffers() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+
+        XCTAssertTrue(controller.windowShouldClose(window))
+        XCTAssertTrue(window.isVisible, "…and it is AppKit that closes it, not us")
+    }
+
+    /// With a buffer on screen the close goes through the asynchronous walk —
+    /// but a clean workspace is never *prompted*, it just closes a run-loop
+    /// turn later.
+    func testWindowCloseWithACleanBufferAsksTheUserNothing() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
         let window = try XCTUnwrap(controller.window)
         controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: true)
+        let id = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: id))
+        waitUntilReady(pane)
+        pane.confirmSave = { _, _ in XCTFail("nothing is unsaved") }
 
-        XCTAssertTrue(controller.windowShouldClose(window))
-        XCTAssertTrue(window.isVisible, "…and it was AppKit that closed it, not us")
+        XCTAssertFalse(controller.windowShouldClose(window), "the answer arrives asynchronously")
+        XCTAssertTrue(pollUntilClosed(window), "…and it closes itself once it has one")
     }
 
     /// ⌘Q walks every window that has something to lose, and one cancel stops
@@ -1088,12 +1140,19 @@ final class EditorPaneIntegrationTests: XCTestCase {
         let id = try XCTUnwrap(controller.workspaceView.focusedPaneID)
         let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: id))
 
+        // Deliberately "could hold unsaved work", not "does": whether a buffer
+        // is dirty is a question only the page can answer, and answering it
+        // synchronously here would mean quitting the app over a stale flag.
+        // A window with no editor buffers is the one case ruled out for free.
+        let empty = makeEmptyController()
+        defer { empty.close() }
+        empty.showWindow(nil)
         XCTAssertTrue(
-            AppDelegate.dirtyWorkspaceControllers(in: [window]).isEmpty,
-            "nothing unsaved, nothing to ask about"
+            AppDelegate.controllersThatMayHaveUnsavedWork(in: [try XCTUnwrap(empty.window)]).isEmpty,
+            "no editor buffers at all, nothing to ask about"
         )
+        XCTAssertEqual(AppDelegate.controllersThatMayHaveUnsavedWork(in: [window]).count, 1)
         pane.modelForTesting { $0.setDirty(true, at: 0) }
-        XCTAssertEqual(AppDelegate.dirtyWorkspaceControllers(in: [window]).count, 1)
 
         let delegate = AppDelegate()
         var replies: [Bool] = []
@@ -1153,6 +1212,23 @@ final class EditorPaneIntegrationTests: XCTestCase {
         // quits — which nobody is there to answer.
         pane.modelForTesting { $0.setDirty(false, at: 0) }
         XCTAssertFalse(controller.hasDirtyEditorTabs)
+    }
+
+    /// Spins the run loop until a Swift-side condition holds. The dirty gates
+    /// ask the page now, so a close or a drag resolves a run-loop turn or two
+    /// after it is asked for.
+    @discardableResult
+    private func pollUntil(timeout: TimeInterval = 10, _ satisfied: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if satisfied() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        return satisfied()
+    }
+
+    private func pollUntilClosed(_ window: NSWindow) -> Bool {
+        pollUntil { !window.isVisible }
     }
 
     private func makeTempFile(_ name: String, _ contents: String) throws -> URL {

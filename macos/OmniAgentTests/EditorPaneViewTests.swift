@@ -729,7 +729,26 @@ final class EditorPaneViewTests: XCTestCase {
         XCTAssertTrue(pollUntil(timeout: 10) { asked.count == 1 })
         XCTAssertEqual(asked, ["a.swift"])
         XCTAssertTrue(pane.model.tabs[0].isDirty)
-        XCTAssertTrue(pollUntilContent(pane, path: url.path, equals: "mine"))
+
+        // Read *after* the prompt callback has returned, so anything it wrongly
+        // dispatched (a `setContent` reload) is already queued ahead of this
+        // read and would show up in it. Polling for "mine" would not: the
+        // buffer already says "mine" on the first iteration, so it passes
+        // whatever happens next.
+        let kept = expectation(description: "kept")
+        pane.webHost.requestContent(path: url.path) { content, _ in
+            XCTAssertEqual(content, "mine")
+            kept.fulfill()
+        }
+        wait(for: [kept], timeout: 10)
+        // The strong half: a reload would have rebased the page's saved
+        // version, so only the Keep Mine path leaves the buffer *unclean*.
+        let stillDirty = expectation(description: "still dirty to the page")
+        pane.webHost.requestIsClean(path: url.path) { clean in
+            XCTAssertFalse(clean, "Keep Mine must not rebase the buffer")
+            stillDirty.fulfill()
+        }
+        wait(for: [stillDirty], timeout: 10)
 
         // The recorded mtime advanced with the prompt, so the *same* disk
         // change must not ask a second time on the next focus.
@@ -960,6 +979,107 @@ final class EditorPaneViewTests: XCTestCase {
         pane.focus()
 
         XCTAssertTrue(pollUntilContent(pane, path: url.path, equals: "v2"))
+    }
+
+    /// Fix round 2, Important. The gate that decides whether to prompt **at
+    /// all** read the same lagging flag: a keystroke whose `dirtyChanged` post
+    /// has not landed reads as clean, and the tab was closed over it with no
+    /// prompt. Staged by typing and closing in the same run-loop turn.
+    func testClosingATabWhoseDirtyMessageIsStillInFlightStillAsks() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+
+        pane.webHost.setContentForTesting(path: url.path, content: "in-flight")
+        XCTAssertFalse(pane.model.tabs[0].isDirty, "the posted message cannot have landed yet")
+
+        let asked = expectation(description: "asked before closing")
+        pane.confirmSave = { _, decide in
+            asked.fulfill()
+            decide(.cancel)
+        }
+        pane.requestCloseTab(at: 0)
+        wait(for: [asked], timeout: 10)
+
+        XCTAssertEqual(pane.model.tabs.count, 1, "cancel kept the tab and the edit")
+    }
+
+    /// The other side of that gate: a tab with nothing to lose still closes,
+    /// and never asks.
+    func testClosingACleanTabStillNeverAsks() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        pane.confirmSave = { _, _ in XCTFail("nothing is unsaved") }
+
+        pane.requestCloseTab(at: 0)
+
+        XCTAssertTrue(pollUntil(timeout: 10) { pane.model.tabs.isEmpty })
+    }
+
+    /// Fix round 2, Minor. A second disk change while a conflict alert is up
+    /// must not stack a nested alert behind it.
+    func testASecondExternalChangeDoesNotStackAConflictAlert() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        makeDirty(pane, path: url.path, content: "mine")
+
+        var open = 0
+        var peak = 0
+        var release: ((Bool) -> Void)?
+        pane.confirmConflict = { _, decide in
+            open += 1
+            peak = max(peak, open)
+            release = decide   // held open, exactly as a modal alert holds
+        }
+
+        try "v2".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)],
+            ofItemAtPath: url.path
+        )
+        pane.checkExternalChanges()
+        XCTAssertTrue(pollUntil(timeout: 10) { open == 1 })
+
+        // A second change, and focus comes back while the first alert is still up.
+        try "v3".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(10)],
+            ofItemAtPath: url.path
+        )
+        pane.checkExternalChanges()
+        pane.focus()
+        XCTAssertFalse(pollUntil(timeout: 2) { open > 1 })
+        XCTAssertEqual(peak, 1, "one conflict alert at a time")
+
+        // And the change that was skipped is still pending, not lost.
+        open = 0
+        release?(false)
+        pane.checkExternalChanges()
+        XCTAssertTrue(pollUntil(timeout: 10) { open == 1 }, "the second change is asked about later")
+        release?(false)
+    }
+
+    /// Fix round 2. `requestIsClean` answers "not clean" when the bridge is
+    /// not ready — deliberately, since unknown must never read as safe to
+    /// discard. Routing the *reconcile* through it unfiltered would turn that
+    /// into a save prompt for a buffer nobody has touched, on every close and
+    /// every drag in a pane's first seconds. With no live page, Swift's flag
+    /// is the authority, not a lagging copy of one.
+    func testClosingATabBeforeTheBridgeIsUpNeverAsks() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        pane.openFile(url, pinned: true)
+        XCTAssertFalse(pane.webHost.isReady, "this test is about the pre-ready window")
+        pane.confirmSave = { _, _ in XCTFail("nothing has been typed — there is nothing to ask about") }
+
+        pane.requestCloseTab(at: 0)
+
+        XCTAssertTrue(pane.model.tabs.isEmpty)
     }
 
     // MARK: - Task 15: the save-acknowledgement window

@@ -741,6 +741,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.allPaneIDs.contains { workspace.editorPane(for: $0)?.hasDirtyTabs == true }
     }
 
+    /// Whether this window holds any editor buffer at all — the question the
+    /// close and quit paths ask, rather than `hasDirtyEditorTabs`.
+    ///
+    /// "Is anything dirty?" cannot be answered synchronously: the flags lag a
+    /// keystroke, and answering "no" here is what lets the window or the app
+    /// go away. So the cheap pre-check is deliberately the *conservative*
+    /// one — a workspace with no editor buffers still closes and quits with
+    /// no delay whatsoever, and anything else goes through the asynchronous
+    /// walk, which reconciles with the page and prompts only if it must.
+    var mayHaveUnsavedEditorWork: Bool {
+        workspace.allPaneIDs.contains { workspace.editorPane(for: $0)?.hasLoadedBuffers == true }
+    }
+
     /// Walks every editor pane's dirty tabs with save prompts, one pane after
     /// another. `true` means everything resolved (saved or deliberately
     /// discarded); `false` means the user cancelled — or a write failed — and
@@ -757,9 +770,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// cannot work here because "Save" *is* an action: the write has to happen
     /// before the answer means anything.
     func promptDirtyEditorTabs(completion: @escaping (Bool) -> Void) {
+        // Every pane holding a buffer, not just those whose *flag* says dirty:
+        // `closeAllTabsAfterConfirmation` reconciles with the page and
+        // completes immediately when there is genuinely nothing to ask about.
         let editors = workspace.allPaneIDs
             .compactMap { workspace.editorPane(for: $0) }
-            .filter(\.hasDirtyTabs)
+            .filter(\.hasLoadedBuffers)
         func step(_ remaining: [EditorPaneView]) {
             guard let next = remaining.first else {
                 completion(true)
@@ -781,7 +797,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// answer. `NSWindow.close()` does not consult this delegate method, so
     /// there is no second pass to guard against.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard hasDirtyEditorTabs else { return true }
+        guard mayHaveUnsavedEditorWork else { return true }
         promptDirtyEditorTabs { proceed in
             guard proceed else { return }
             sender.close()
@@ -2451,12 +2467,32 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         then deliver: @escaping (EditorTab) -> Void
     ) {
         guard let source = workspace.editorPane(for: paneID),
-              let index = source.model.index(of: tab.path, kind: tab.kind)
+              source.model.index(of: tab.path, kind: tab.kind) != nil
         else { return }
-        guard source.model.tabs[index].isDirty else {
-            deliver(tab)
-            return
+        // Ask the page before deciding there is nothing to ask the *user*.
+        // Swift's dirty flag is written only by the posted `dirtyChanged`, so
+        // a keystroke typed a moment before the drop still reads clean — and
+        // delivering disposes the source's Monaco model, which is where that
+        // keystroke lives. This gate is the difference between "prompted and
+        // saved" and "gone without a word".
+        source.reconcileDirtyFlags { [weak self] in
+            guard let source = self?.workspace.editorPane(for: paneID),
+                  let index = source.model.index(of: tab.path, kind: tab.kind)
+            else { return }
+            guard source.model.tabs[index].isDirty else {
+                deliver(tab)
+                return
+            }
+            self?.promptThenDeliver(paneID: paneID, tab: tab, then: deliver)
         }
+    }
+
+    private func promptThenDeliver(
+        paneID: String,
+        tab: EditorTab,
+        then deliver: @escaping (EditorTab) -> Void
+    ) {
+        guard let source = workspace.editorPane(for: paneID) else { return }
         source.confirmSave((tab.path as NSString).lastPathComponent) { [weak self] decision in
             switch decision {
             case .cancel:

@@ -73,7 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// quit. A session with nothing unsaved quits immediately — no deferral,
     /// no run-loop turn.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let dirty = Self.dirtyWorkspaceControllers(in: sender.windows)
+        let dirty = Self.controllersThatMayHaveUnsavedWork(in: sender.windows)
         guard !dirty.isEmpty else { return .terminateNow }
         // Deferred by one run-loop turn, and that is not a detail:
         // `reply(toApplicationShouldTerminate:)` is only valid *after*
@@ -90,15 +90,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
-    /// Every workspace window with something unsaved, in window order and
-    /// deduplicated — a controller can own more than one window, and must be
-    /// asked about its panes exactly once.
-    static func dirtyWorkspaceControllers(in windows: [NSWindow]) -> [WorkspaceWindowController] {
+    /// Every workspace window that *could* be holding unsaved work, in window
+    /// order and deduplicated — a controller can own more than one window, and
+    /// must be asked about its panes exactly once.
+    ///
+    /// Deliberately "could", not "does". Whether a buffer is dirty is a
+    /// question only the page can answer, and asking it is asynchronous; a
+    /// synchronous "nothing is dirty" here would be read off flags that lag a
+    /// keystroke, and would quit the app over it. A window with no editor
+    /// buffers at all is the one case that can be ruled out for free.
+    static func controllersThatMayHaveUnsavedWork(in windows: [NSWindow]) -> [WorkspaceWindowController] {
         var seen = Set<ObjectIdentifier>()
         return windows
             .compactMap { $0.windowController as? WorkspaceWindowController }
             .filter { seen.insert(ObjectIdentifier($0)).inserted }
-            .filter(\.hasDirtyEditorTabs)
+            .filter(\.mayHaveUnsavedEditorWork)
     }
 
     /// One window at a time, chained: each controller's prompts answer on a

@@ -80,6 +80,9 @@ final class EditorPaneView: NSView, PaneContentView {
     /// (re)born" signal rather than a one-shot — and only a rebirth needs the
     /// models put back.
     private var needsModelRestore = false
+    /// A conflict alert is on screen. Stops `checkExternalChanges` stacking a
+    /// second one behind it.
+    private var conflictPromptInFlight = false
 
     // MARK: - PaneContentView
 
@@ -381,6 +384,13 @@ final class EditorPaneView: NSView, PaneContentView {
     /// The recorded mtime advances *before* the prompt, so one disk change
     /// asks exactly once however many times focus comes back.
     func checkExternalChanges() {
+        // One conflict alert at a time. Focus changes freely while a modal is
+        // up (the alert takes key, the pane can be re-focused behind it), and
+        // without this a second disk change stacks a nested alert on the
+        // first. Nothing is lost by returning early: the recorded mtimes are
+        // only advanced past this point, so every unresolved change is still
+        // pending on the next focus.
+        guard !conflictPromptInFlight else { return }
         var markedChanged = false
         for tab in model.tabs where tab.kind == .file {
             let path = tab.path
@@ -418,9 +428,12 @@ final class EditorPaneView: NSView, PaneContentView {
         webHost.requestIsClean(path: path) { [weak self] clean in
             guard let self else { return }
             guard clean else {
+                conflictPromptInFlight = true
                 confirmConflict((path as NSString).lastPathComponent) { [weak self] takeDisk in
+                    guard let self else { return }
+                    conflictPromptInFlight = false
                     guard takeDisk else { return }
-                    self?.reloadFromDisk(path)
+                    reloadFromDisk(path)
                 }
                 return
             }
@@ -763,7 +776,83 @@ final class EditorPaneView: NSView, PaneContentView {
         }
     }
 
+    /// Swift's copy of "is this buffer dirty". **Only meaningful straight
+    /// after `reconcileDirtyFlags`** — see its doc comment. Every gate that
+    /// decides whether to prompt reconciles first.
     var hasDirtyTabs: Bool { model.tabs.contains(where: \.isDirty) }
+
+    /// Whether this pane holds any Monaco buffer at all. Cheap and always
+    /// true-or-safe: a pane with no loaded buffer cannot be hiding unsaved
+    /// work, so the close and quit paths can skip the asynchronous reconcile
+    /// entirely for it.
+    var hasLoadedBuffers: Bool { !loadedPaths.isEmpty }
+
+    /// Brings `model.tabs[…].isDirty` into line with what the page actually
+    /// holds, then answers.
+    ///
+    /// The flags are written **only** by the posted `dirtyChanged`, and a
+    /// posted message is not ordered against anything — so a keystroke typed
+    /// a moment ago can still read as clean. Every gate that decides whether
+    /// to prompt about unsaved work (`requestCloseTab`, `drainDirtyTabs`, the
+    /// controller's drop broker) therefore runs through here first: reading
+    /// the flag without reconciling is how a buffer gets closed, or dragged
+    /// away, with no prompt at all.
+    ///
+    /// `requestIsClean` is an `evaluateJavaScript` reply, which *is* ordered.
+    /// Only loaded `.file` paths are asked — nothing else can be dirty — so a
+    /// pane of media/diff/changes tabs costs nothing.
+    func reconcileDirtyFlags(completion: @escaping () -> Void) {
+        let paths = model.tabs
+            .filter { $0.kind == .file && loadedPaths.contains($0.path) }
+            .map(\.path)
+        reconcile(paths, completion: completion)
+    }
+
+    private func reconcile(_ paths: [String], completion: @escaping () -> Void) {
+        guard let path = paths.first else {
+            completion()
+            return
+        }
+        let rest = Array(paths.dropFirst())
+        reconcileDirty(path: path) { [weak self] _ in
+            guard let self else {
+                completion()
+                return
+            }
+            reconcile(rest, completion: completion)
+        }
+    }
+
+    /// One path, answering the reconciled flag. A path Monaco never received
+    /// cannot be dirty, and answers synchronously.
+    private func reconcileDirty(path: String, completion: @escaping (Bool) -> Void) {
+        guard loadedPaths.contains(path) else {
+            completion(false)
+            return
+        }
+        // With no live page, Swift's flag *is* the authority rather than a
+        // lagging copy of one: nothing can have typed into a buffer that does
+        // not exist yet, and after a renderer death the flag (plus
+        // `dirtySnapshots`) is what carries the unsaved work. Asking anyway
+        // would take `requestIsClean`'s deliberately conservative "not ready
+        // means not clean" and turn it into a save prompt for a buffer nobody
+        // has touched — every close and every drag in a pane's first seconds.
+        guard webHost.isReady else {
+            completion(model.index(of: path, kind: .file).map { model.tabs[$0].isDirty } ?? false)
+            return
+        }
+        webHost.requestIsClean(path: path) { [weak self] clean in
+            guard let self else {
+                completion(!clean)
+                return
+            }
+            if let index = model.index(of: path, kind: .file), model.tabs[index].isDirty != !clean {
+                model.setDirty(!clean, at: index)
+                syncChrome()
+            }
+            completion(!clean)
+        }
+    }
 
     /// Saves every dirty file tab, one after another — the writes are async
     /// (Monaco answers `requestContent` on a callback), so they are chained
@@ -793,13 +882,33 @@ final class EditorPaneView: NSView, PaneContentView {
 
     // MARK: - Closing
 
+    /// Asynchronous **only when there is a buffer to ask about**: a media,
+    /// diff, changes or never-loaded tab closes on the spot, exactly as
+    /// before. A loaded `.file` tab costs one `evaluateJavaScript` round trip
+    /// before it closes, because the alternative is reading a flag that lags
+    /// a keystroke and closing over it with no prompt at all.
     func requestCloseTab(at index: Int) {
         guard model.tabs.indices.contains(index) else { return }
         let tab = model.tabs[index]
-        guard tab.isDirty else {
+        guard tab.kind == .file, loadedPaths.contains(tab.path) else {
+            // Nothing Monaco holds: a media, diff, changes or never-loaded
+            // tab has no buffer that could be dirty.
             performClose(at: index)
             return
         }
+        reconcileDirty(path: tab.path) { [weak self] dirty in
+            guard let self else { return }
+            // The round trip handed control back to the run loop; re-resolve.
+            guard let index = model.index(of: tab.path, kind: tab.kind) else { return }
+            guard dirty else {
+                performClose(at: index)
+                return
+            }
+            promptThenCloseTab(tab: tab, index: index)
+        }
+    }
+
+    private func promptThenCloseTab(tab: EditorTab, index: Int) {
         confirmSave((tab.path as NSString).lastPathComponent) { [weak self] decision in
             guard let self else { return }
             switch decision {
@@ -834,6 +943,10 @@ final class EditorPaneView: NSView, PaneContentView {
     /// Internal: the controller's drop broker is the third caller, and it has
     /// exactly the same reason to wait for the acknowledgement.
     func saveAndConfirmClean(at index: Int, completion: @escaping (EditorSaveAcknowledgement) -> Void) {
+        // An index that no longer exists reports `.failed` along with a write
+        // that did not land. Both callers treat it the same way and must:
+        // there is nothing to write and nothing to close, so the only correct
+        // move either way is to stop and change nothing.
         guard model.tabs.indices.contains(index) else {
             completion(.failed)
             return
@@ -922,7 +1035,20 @@ final class EditorPaneView: NSView, PaneContentView {
         drainDirtyTabs(completion: completion)
     }
 
+    /// Each pass reconciles before it scans: "nothing is dirty" is the answer
+    /// that lets a pane, a window or the whole app go away, so it may not be
+    /// read off a flag that lags a keystroke.
     private func drainDirtyTabs(completion: @escaping (Bool) -> Void) {
+        reconcileDirtyFlags { [weak self] in
+            guard let self else {
+                completion(false)
+                return
+            }
+            drainReconciledDirtyTabs(completion: completion)
+        }
+    }
+
+    private func drainReconciledDirtyTabs(completion: @escaping (Bool) -> Void) {
         guard let index = model.tabs.firstIndex(where: \.isDirty) else {
             completion(true)
             return
