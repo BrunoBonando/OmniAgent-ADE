@@ -75,8 +75,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let dirty = Self.dirtyWorkspaceControllers(in: sender.windows)
         guard !dirty.isEmpty else { return .terminateNow }
-        promptDirtyEditorTabs(in: dirty) { [weak self] proceed in
-            self?.replyToTermination(proceed)
+        // Deferred by one run-loop turn, and that is not a detail:
+        // `reply(toApplicationShouldTerminate:)` is only valid *after*
+        // `.terminateLater` has been returned. The default `confirmSave` is a
+        // synchronous `runModal`, so the whole walk would otherwise finish
+        // inside this call and reply too early — AppKit drops that reply and
+        // then waits for one that never comes, leaving the app unquittable.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            promptDirtyEditorTabs(in: dirty) { [weak self] proceed in
+                self?.replyToTermination(proceed)
+            }
         }
         return .terminateLater
     }

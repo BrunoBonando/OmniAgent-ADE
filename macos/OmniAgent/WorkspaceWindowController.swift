@@ -748,6 +748,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     ///
     /// Chained rather than looped: each prompt answers on a callback, and the
     /// save behind a "Save" answer is a round trip to Monaco.
+    ///
+    /// **Cancel aborts the close, not the walk so far.** Each answer is acted
+    /// on as it is given, so cancelling at pane N leaves panes 1..N-1 already
+    /// drained (saved or discarded, exactly as the user asked) and their rows
+    /// republished. That is what every multi-document macOS app does on quit —
+    /// the alternative, collecting consent for the whole window before acting,
+    /// cannot work here because "Save" *is* an action: the write has to happen
+    /// before the answer means anything.
     func promptDirtyEditorTabs(completion: @escaping (Bool) -> Void) {
         let editors = workspace.allPaneIDs
             .compactMap { workspace.editorPane(for: $0) }
@@ -2422,20 +2430,55 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard let source = workspace.editorPane(for: payload.paneID),
               source.model.tabs.indices.contains(payload.index)
         else { return }
-        let tab = source.model.tabs[payload.index]
-        guard tab.isDirty else {
+        resolveThenDeliver(paneID: payload.paneID, tab: source.model.tabs[payload.index], then: deliver)
+    }
+
+    /// The prompt itself, keyed on the tab's identity so it can ask again.
+    ///
+    /// A "Save" answer is **not** enough to let the tab travel: delivering it
+    /// runs `removeTabForTransfer` -> `discardResources` -> `closeModel`,
+    /// which disposes the Monaco model, and `receiveTransferredTab` then
+    /// forces the arriving copy clean. That is every bit as final as a close,
+    /// so it is held to the same rule the close path is: `save`'s `true` means
+    /// the bytes reached disk, not that the buffer is clean, and a keystroke
+    /// typed inside the write is (correctly) refused by the version-scoped
+    /// `markSaved`. Delivering on `true` alone would drop it silently.
+    /// `.stillDirty` therefore asks again, about the content that is now
+    /// there.
+    private func resolveThenDeliver(
+        paneID: String,
+        tab: EditorTab,
+        then deliver: @escaping (EditorTab) -> Void
+    ) {
+        guard let source = workspace.editorPane(for: paneID),
+              let index = source.model.index(of: tab.path, kind: tab.kind)
+        else { return }
+        guard source.model.tabs[index].isDirty else {
             deliver(tab)
             return
         }
-        source.confirmSave((tab.path as NSString).lastPathComponent) { decision in
+        source.confirmSave((tab.path as NSString).lastPathComponent) { [weak self] decision in
             switch decision {
             case .cancel:
                 break
             case .discard:
                 deliver(tab)
             case .save:
-                guard let index = source.model.index(of: tab.path, kind: tab.kind) else { return }
-                source.save(at: index) { saved in if saved { deliver(tab) } }
+                guard let source = self?.workspace.editorPane(for: paneID),
+                      let index = source.model.index(of: tab.path, kind: tab.kind)
+                else { return }
+                source.saveAndConfirmClean(at: index) { [weak self] acknowledgement in
+                    switch acknowledgement {
+                    case .clean:
+                        deliver(tab)
+                    case .failed:
+                        // `save` already put the error on screen; the tab
+                        // stays where it is, still dirty, and the drop is off.
+                        break
+                    case .stillDirty:
+                        self?.resolveThenDeliver(paneID: paneID, tab: tab, then: deliver)
+                    }
+                }
             }
         }
     }

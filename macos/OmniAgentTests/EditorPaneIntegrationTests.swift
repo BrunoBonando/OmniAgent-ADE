@@ -828,6 +828,56 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertFalse(target.model.tabs[0].isDirty)
     }
 
+    /// Fix round 1, Critical. A drag disposes the source's Monaco model just
+    /// as finally as a close does, so it is held to the same rule: `save`'s
+    /// `true` means the bytes reached disk, not that the buffer is clean. A
+    /// keystroke landing inside the write must be asked about again, never
+    /// carried away and dropped.
+    func testATabDraggedAfterSavingWaitsForTheBufferToGoClean() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "let x = 1")
+        controller.openFileInEditor(file, pinned: true)
+        let sourceID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let source = try XCTUnwrap(controller.workspaceView.editorPane(for: sourceID))
+        waitUntilReady(source)
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let targetID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let target = try XCTUnwrap(controller.workspaceView.editorPane(for: targetID))
+
+        makeDirty(source, path: file.path, content: "edit-1")
+        var prompts = 0
+        source.confirmSave = { _, decide in
+            prompts += 1
+            decide(.save)
+            // `evaluateJavaScript` calls run in the page in order, so this
+            // lands after the `getContent` `decide(.save)` just issued and
+            // before Swift's write comes back — exactly the window.
+            if prompts == 1 {
+                source.webHost.setContentForTesting(path: file.path, content: "typed-during-save")
+            }
+        }
+
+        let travelled = expectation(description: "the tab travelled")
+        travelled.assertForOverFulfill = false
+        let previous = target.onStateChange
+        target.onStateChange = { tabs, active in
+            previous?(tabs, active)
+            if tabs.contains(where: { $0.path == file.path }) { travelled.fulfill() }
+        }
+
+        controller.handleEditorTabDrop(
+            EditorTabDragPayload(paneID: sourceID, index: 0), intoPane: targetID, at: 0
+        )
+        wait(for: [travelled], timeout: 30)
+
+        XCTAssertEqual(prompts, 2, "the edit that landed inside the write is asked about again")
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "typed-during-save")
+        XCTAssertEqual(target.model.tabs.map(\.path), [file.path])
+        XCTAssertTrue(source.model.tabs.isEmpty)
+    }
+
     /// The prompt hands control back to the run loop, so the strip can move
     /// under it — and the payload's index is then pointing at somebody else's
     /// tab. Moving that one would also discard *its* unsaved buffer, so this
@@ -1080,7 +1130,20 @@ final class EditorPaneIntegrationTests: XCTestCase {
             decide(.cancel)
         }
 
+        let replied = expectation(description: "AppKit was answered")
+        replied.assertForOverFulfill = false
+        delegate.replyToTermination = {
+            replies.append($0)
+            replied.fulfill()
+        }
+
         XCTAssertEqual(delegate.applicationShouldTerminate(NSApp), .terminateLater)
+        XCTAssertTrue(
+            replies.isEmpty,
+            "reply(toApplicationShouldTerminate:) is only valid after .terminateLater has been "
+                + "returned — replying inside this call is dropped and the app never quits"
+        )
+        wait(for: [replied], timeout: 10)
         XCTAssertGreaterThanOrEqual(asked, 1)
         XCTAssertEqual(replies, [false])
 

@@ -79,7 +79,11 @@ require(["vs/editor/editor.main"], () => {
 });
 
 window.omniagent = {
-  openModel(path, content, readOnly) {
+  // `show` defaults to true: opening a model is nearly always "put this on
+  // screen". Crash recovery is the exception — it re-opens every model the
+  // pane had, and showing each one in turn is n-1 wasted editor swaps and a
+  // focus steal, all undone by the single `showModel` that follows.
+  openModel(path, content, readOnly, show) {
     let entry = models.get(path);
     if (!entry) {
       const model = monaco.editor.createModel(content, undefined, monaco.Uri.file(path));
@@ -97,7 +101,7 @@ window.omniagent = {
       });
       models.set(path, entry);
     }
-    this.showModel(path);
+    if (show !== false) this.showModel(path);
   },
   // Swift replacing the buffer behind the user (a reload, or the file being
   // rewritten on disk). `onDidChangeContent` fires *synchronously* inside

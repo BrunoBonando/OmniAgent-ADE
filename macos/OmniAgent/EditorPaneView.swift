@@ -3,6 +3,15 @@ import AppKit
 /// What the user chose in the "save before closing?" prompt.
 enum EditorSaveDecision { case save, discard, cancel }
 
+/// What the page said about a buffer *after* a save was written to disk.
+/// `.clean` is the only answer that makes it safe to destroy the buffer —
+/// close the tab, or drag it to a pane that will re-read the file from disk.
+/// `.stillDirty` means a keystroke landed inside the write and the
+/// version-scoped `markSaved` correctly refused it: ask again.
+/// `.failed` means the bytes never reached disk (the error is already on
+/// screen) and whatever bulk walk asked must stop.
+enum EditorSaveAcknowledgement { case clean, stillDirty, failed }
+
 /// An editor pane's content: a native tab strip over a swap container that
 /// shows either the Monaco web surface (file/diff/changes tabs) or a native
 /// media view (image/PDF). The PTY half of `PaneContentView` is a no-op,
@@ -319,32 +328,43 @@ final class EditorPaneView: NSView, PaneContentView {
     func restoreAfterRendererCrash() {
         for tab in model.tabs where tab.kind == .file && loadedPaths.contains(tab.path) {
             let url = URL(fileURLWithPath: tab.path)
+            // The snapshot is the **only** copy of an unsaved edit once the
+            // renderer is gone, so it is restored whatever the file has since
+            // become — deleted, grown past the size cap, or turned binary.
+            // Classification decides `readOnly`, and decides whether to
+            // restore at all only when there is nothing unsaved at stake.
             let snapshot = tab.isDirty ? dirtySnapshots[tab.path] : nil
             var readOnly = false
-            if FileManager.default.fileExists(atPath: tab.path) {
-                guard case let .text(classified) = EditorFileClass.classify(url: url) else { continue }
+            if case let .text(classified) = EditorFileClass.classify(url: url) {
+                // `classify` opens the file itself and answers `.binary` for
+                // anything it cannot read, so this arm also means "still
+                // there, still editable text".
                 readOnly = classified
             } else if snapshot == nil {
-                // The file went away while the renderer was down and there is
-                // no unsaved buffer to put back: there is genuinely nothing to
-                // restore. Forget the model so the tab re-derives itself on
-                // activation rather than showing a blank surface for a Monaco
-                // model that no longer exists.
+                // Nothing unsaved to protect, and nothing editable to show.
+                // Forget the model so the tab re-derives itself on activation
+                // (media placeholder, "too large", "(deleted)") rather than
+                // leaving a blank surface behind a Monaco model that no longer
+                // exists — and drop the dirty flag with it. It is not
+                // protecting anything: the renderer took the buffer with it
+                // and there is no snapshot, so a "Save" prompt could only ask
+                // `getContent` for a model that is gone and fail.
                 loadedPaths.remove(tab.path)
-                deletedPaths.insert(tab.path)
+                if !FileManager.default.fileExists(atPath: tab.path) { deletedPaths.insert(tab.path) }
+                if let index = model.index(of: tab.path, kind: .file) { model.setDirty(false, at: index) }
                 continue
             }
-            // A file that vanished under a *dirty* buffer falls through with
-            // `readOnly` false and an empty disk side — the snapshot below is
-            // the only copy of that work left, and losing it to a crash is
-            // exactly what this method exists to prevent.
             let encoding = encodings[tab.path] ?? .utf8
             let disk = (try? String(contentsOf: url, encoding: encoding)) ?? ""
             // Open at the *disk* text first so the page's saved version is the
             // file's, then put the unsaved edit back on top of it. Opening
             // straight at the snapshot would make the page call that edit
             // saved, and a later close would discard it without asking.
-            webHost.openModel(path: tab.path, content: disk, readOnly: readOnly)
+            //
+            // `show: false` because `openModel` otherwise shows each model as
+            // it lands: n-1 wasted editor swaps and a focus steal, all undone
+            // by the `showActiveContent()` below.
+            webHost.openModel(path: tab.path, content: disk, readOnly: readOnly, show: false)
             if let snapshot { webHost.restoreUnsaved(path: tab.path, content: snapshot) }
         }
         syncAll()
@@ -372,19 +392,40 @@ final class EditorPaneView: NSView, PaneContentView {
             markedChanged = deletedPaths.remove(path) != nil || markedChanged
             let current = modificationDate(of: URL(fileURLWithPath: path)) ?? recorded
             guard current > recorded else { continue }
+            // Nothing can be decided while the page is down: its buffers are
+            // not there to be asked about, and a crash restore is about to
+            // re-apply them. The recorded date is deliberately left alone so
+            // this is re-checked as soon as the bridge is back.
+            guard webHost.isReady else { continue }
             modificationDates[path] = current
-            if tab.isDirty {
-                confirmConflict((path as NSString).lastPathComponent) { [weak self] takeDisk in
-                    guard takeDisk else { return }
-                    self?.reloadFromDisk(path)
-                }
-            } else {
-                reloadFromDisk(path)
-            }
+            resolveExternalChange(path)
         }
         // Chrome only: a title gaining or losing " (deleted)" is not a tab
         // mutation and must not rewrite the persisted row.
         if markedChanged { syncChrome() }
+    }
+
+    /// Clean buffer -> silent reload; dirty buffer -> ask.
+    ///
+    /// "Dirty" is asked of the **page**, not of `model.tabs[…].isDirty`. That
+    /// flag is only ever written by the *posted* `dirtyChanged`, and a posted
+    /// message is not ordered against anything: a keystroke whose message has
+    /// not arrived yet reads as clean, and the reload below would then rebase
+    /// over it and lose the edit with no prompt. `requestIsClean` is an
+    /// `evaluateJavaScript` reply, which is ordered — the same reason the
+    /// close path asks it rather than trusting `save`'s `true`.
+    private func resolveExternalChange(_ path: String) {
+        webHost.requestIsClean(path: path) { [weak self] clean in
+            guard let self else { return }
+            guard clean else {
+                confirmConflict((path as NSString).lastPathComponent) { [weak self] takeDisk in
+                    guard takeDisk else { return }
+                    self?.reloadFromDisk(path)
+                }
+                return
+            }
+            reloadFromDisk(path)
+        }
     }
 
     /// Replaces a buffer with what is on disk. Clearing dirty (and with it the
@@ -777,8 +818,8 @@ final class EditorPaneView: NSView, PaneContentView {
         }
     }
 
-    /// Saves a tab, waits for the page to *acknowledge* the buffer clean, and
-    /// only then closes it.
+    /// Saves tab `index` and reports what the **page** then says about the
+    /// buffer — which is not the question `save`'s own `true` answers.
     ///
     /// This is the load-bearing distinction Task 15 exists to close.
     /// `save`'s `completion(true)` means "the bytes reached disk", **not**
@@ -786,13 +827,39 @@ final class EditorPaneView: NSView, PaneContentView {
     /// protect the gap, because `NSAlert.runModal()` returns *before* the
     /// asynchronous `requestContent -> write -> markSaved` round trip even
     /// begins. A keystroke landing in that window is refused by the
-    /// version-scoped `markSaved` and would then be discarded anyway by a
-    /// close that never re-checks.
+    /// version-scoped `markSaved`, and would then be thrown away by any
+    /// caller that destroys the buffer on `true` alone — a close, or a drag
+    /// to another pane, which disposes the Monaco model just as finally.
     ///
-    /// `completion` reports whether the tab was closed. A failed *write*
-    /// never reaches it: that keeps `false` meaning exactly one thing at each
-    /// call site — "still dirty, ask again" — while a write that cannot land
-    /// stops the walk through `onFailure`.
+    /// Internal: the controller's drop broker is the third caller, and it has
+    /// exactly the same reason to wait for the acknowledgement.
+    func saveAndConfirmClean(at index: Int, completion: @escaping (EditorSaveAcknowledgement) -> Void) {
+        guard model.tabs.indices.contains(index) else {
+            completion(.failed)
+            return
+        }
+        let path = model.tabs[index].path
+        save(at: index) { [weak self] saved in
+            guard let self, saved else {
+                completion(.failed)
+                return
+            }
+            // Ordered behind the `markSaved` the write just issued, which a
+            // posted `dirtyChanged` message is not — so this is the only
+            // decidable answer to "did the page accept the save?".
+            webHost.requestIsClean(path: path) { clean in
+                completion(clean ? .clean : .stillDirty)
+            }
+        }
+    }
+
+    /// Saves a tab, waits for the acknowledgement above, and closes it only if
+    /// the buffer really did go clean.
+    ///
+    /// `completion` reports whether the tab was closed. A failed *write* never
+    /// reaches it: that keeps `false` meaning exactly one thing at each call
+    /// site — "still dirty, ask again" — while a write that cannot land stops
+    /// the walk through `onFailure`.
     private func saveThenCloseIfClean(
         tab: EditorTab,
         index: Int,
@@ -800,27 +867,17 @@ final class EditorPaneView: NSView, PaneContentView {
         onFailure: @escaping () -> Void = {},
         completion: @escaping (Bool) -> Void
     ) {
-        save(at: index) { [weak self] saved in
+        saveAndConfirmClean(at: index) { [weak self] acknowledgement in
             guard let self else {
                 onFailure()
                 return
             }
-            guard saved else {
+            switch acknowledgement {
+            case .failed:
                 onFailure()
-                return
-            }
-            // Ordered behind the `markSaved` the write just issued, which a
-            // posted `dirtyChanged` message is not — so this is the only
-            // decidable answer to "did the page accept the save?".
-            webHost.requestIsClean(path: tab.path) { [weak self] clean in
-                guard let self else {
-                    onFailure()
-                    return
-                }
-                guard clean else {
-                    completion(false)
-                    return
-                }
+            case .stillDirty:
+                completion(false)
+            case .clean:
                 // The prompt handed control back to the run loop; the strip
                 // can have moved under it.
                 performClose(

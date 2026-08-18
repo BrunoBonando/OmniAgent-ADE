@@ -31,6 +31,24 @@ extension XCTestCase {
         pane.webHost.onReadyForTesting = { ready.fulfill() }
         wait(for: [ready], timeout: timeout)
     }
+
+    /// Drives the bridge the way a keystroke would and waits for the tab to
+    /// land dirty. On `XCTestCase` rather than one test class so the
+    /// integration suite can stage a real edit too — a `modelForTesting`
+    /// dirty flag is only Swift's *copy* of the state, and the paths that
+    /// matter here ask the page.
+    func makeDirty(_ pane: EditorPaneView, path: String, content: String) {
+        let dirty = expectation(description: "dirty")
+        dirty.assertForOverFulfill = false
+        let previous = pane.onStateChange
+        pane.onStateChange = { tabs, active in
+            previous?(tabs, active)
+            if pane.model.tabs.first(where: { $0.path == path })?.isDirty == true { dirty.fulfill() }
+        }
+        pane.webHost.setContentForTesting(path: path, content: content)
+        wait(for: [dirty], timeout: 10)
+        pane.onStateChange = previous
+    }
 }
 
 final class EditorPaneViewTests: XCTestCase {
@@ -55,19 +73,6 @@ final class EditorPaneViewTests: XCTestCase {
         let pane = EditorPaneView(initialTabs: [], activeIndex: 0)
         pane.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
         return pane
-    }
-
-    /// Drives the bridge the way a keystroke would and waits for the tab to
-    /// land dirty.
-    private func makeDirty(_ pane: EditorPaneView, path: String, content: String) {
-        let dirty = expectation(description: "dirty")
-        dirty.assertForOverFulfill = false
-        pane.onStateChange = { _, _ in
-            if pane.model.tabs.first(where: { $0.path == path })?.isDirty == true { dirty.fulfill() }
-        }
-        pane.webHost.setContentForTesting(path: path, content: content)
-        wait(for: [dirty], timeout: 10)
-        pane.onStateChange = nil
     }
 
     func testOpenFileAddsPreviewTabAndPublishesState() throws {
@@ -660,6 +665,26 @@ final class EditorPaneViewTests: XCTestCase {
 
     // MARK: - Task 15: external changes
 
+    /// Reads a model's text back, polling. The external-change reload is
+    /// asynchronous — it asks the page whether the buffer is clean before it
+    /// rebases — so one `requestContent` can be dispatched *before* the
+    /// `setContent` it is meant to observe.
+    private func pollUntilContent(_ pane: EditorPaneView, path: String, equals expected: String) -> Bool {
+        var latest: String?
+        let matched = pollUntil(timeout: 15) {
+            let read = expectation(description: "content")
+            pane.webHost.requestContent(path: path) { content, _ in
+                latest = content
+                read.fulfill()
+            }
+            wait(for: [read], timeout: 10)
+            return latest == expected
+        }
+        if !matched { XCTFail("expected \(expected), last read \(latest ?? "nil")") }
+        return matched
+    }
+
+
     /// Spec §2: a clean buffer whose file moved under it reloads silently.
     func testCleanBufferSilentlyReloadsOnExternalChange() throws {
         let url = try write("a.swift", "v1")
@@ -677,12 +702,7 @@ final class EditorPaneViewTests: XCTestCase {
 
         pane.checkExternalChanges()
 
-        let reloaded = expectation(description: "reloaded")
-        pane.webHost.requestContent(path: url.path) { content, _ in
-            XCTAssertEqual(content, "v2")
-            reloaded.fulfill()
-        }
-        wait(for: [reloaded], timeout: 10)
+        XCTAssertTrue(pollUntilContent(pane, path: url.path, equals: "v2"))
     }
 
     /// A dirty buffer is never overwritten without being asked about, and
@@ -706,18 +726,15 @@ final class EditorPaneViewTests: XCTestCase {
 
         pane.checkExternalChanges()
 
+        XCTAssertTrue(pollUntil(timeout: 10) { asked.count == 1 })
         XCTAssertEqual(asked, ["a.swift"])
         XCTAssertTrue(pane.model.tabs[0].isDirty)
-        let kept = expectation(description: "kept")
-        pane.webHost.requestContent(path: url.path) { content, _ in
-            XCTAssertEqual(content, "mine")
-            kept.fulfill()
-        }
-        wait(for: [kept], timeout: 10)
+        XCTAssertTrue(pollUntilContent(pane, path: url.path, equals: "mine"))
 
         // The recorded mtime advanced with the prompt, so the *same* disk
         // change must not ask a second time on the next focus.
         pane.checkExternalChanges()
+        XCTAssertFalse(pollUntil(timeout: 2) { asked.count > 1 })
         XCTAssertEqual(asked, ["a.swift"])
     }
 
@@ -738,17 +755,12 @@ final class EditorPaneViewTests: XCTestCase {
 
         pane.checkExternalChanges()
 
-        let reloaded = expectation(description: "reloaded")
-        pane.webHost.requestContent(path: url.path) { content, _ in
-            XCTAssertEqual(content, "v2")
-            reloaded.fulfill()
-        }
-        wait(for: [reloaded], timeout: 10)
+        XCTAssertTrue(pollUntilContent(pane, path: url.path, equals: "v2"))
         XCTAssertTrue(
             pollUntil { pane.model.tabs[0].isDirty == false },
             "the page rebased, so the dirty flag must come back false"
         )
-        XCTAssertTrue(pane.dirtySnapshots[url.path] == nil)
+        XCTAssertNil(pane.dirtySnapshots[url.path])
     }
 
     /// A file deleted under the editor keeps its buffer and says so in the
@@ -849,6 +861,105 @@ final class EditorPaneViewTests: XCTestCase {
         wait(for: [restored], timeout: 15)
         XCTAssertTrue(pane.model.tabs[0].isDirty)
         XCTAssertTrue(pane.loadedPaths.contains(url.path))
+    }
+
+    /// Fix round 1, Important. Swift's `isDirty` is only written by the
+    /// *posted* `dirtyChanged`, so a keystroke whose message is still in
+    /// flight reads as clean — and the silent-reload branch would then rebase
+    /// over it with no prompt. The check has to ask the page.
+    ///
+    /// Staged exactly that way: type, then call `checkExternalChanges()`
+    /// synchronously, before the message can possibly have arrived.
+    func testAnEditWhoseDirtyMessageIsStillInFlightIsNotOverwritten() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        try "v2".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)],
+            ofItemAtPath: url.path
+        )
+
+        pane.webHost.setContentForTesting(path: url.path, content: "in-flight")
+        XCTAssertFalse(pane.model.tabs[0].isDirty, "the posted message cannot have landed yet")
+
+        let asked = expectation(description: "asked about the conflict")
+        pane.confirmConflict = { _, decide in
+            asked.fulfill()
+            decide(false)
+        }
+        pane.checkExternalChanges()
+        wait(for: [asked], timeout: 10)
+
+        let kept = expectation(description: "kept")
+        pane.webHost.requestContent(path: url.path) { content, _ in
+            XCTAssertEqual(content, "in-flight")
+            kept.fulfill()
+        }
+        wait(for: [kept], timeout: 10)
+    }
+
+    /// Fix round 1, Important. The snapshot is the only copy of an unsaved
+    /// edit once the renderer is gone, so it comes back whatever the file has
+    /// since become — here, a binary blob that `EditorFileClass` would refuse.
+    func testCrashRestoreReplaysASnapshotEvenIfTheFileTurnedBinary() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        pane.injectSnapshotForTesting(path: url.path, content: "only-copy")
+        pane.modelForTesting { $0.setDirty(true, at: 0) }
+        try Data([0x00, 0x01, 0x00, 0x02]).write(to: url)
+
+        pane.simulateRendererCrashForTesting()
+        waitUntilReady(pane)
+
+        let restored = expectation(description: "restored")
+        pane.webHost.requestContent(path: url.path) { content, _ in
+            XCTAssertEqual(content, "only-copy")
+            restored.fulfill()
+        }
+        wait(for: [restored], timeout: 15)
+        XCTAssertTrue(pane.model.tabs[0].isDirty)
+    }
+
+    /// Fix round 1, Minor. Nothing unsaved survives that crash, so the flag
+    /// that claims otherwise has to go: a "Save" prompt on it could only ask
+    /// `getContent` for a model that no longer exists, and fail.
+    func testCrashRestoreClearsADirtyFlagItCannotHonour() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        pane.modelForTesting { $0.setDirty(true, at: 0) }   // dirty, and no snapshot
+        try FileManager.default.removeItem(at: url)
+
+        pane.simulateRendererCrashForTesting()
+        waitUntilReady(pane)
+
+        XCTAssertFalse(pane.model.tabs[0].isDirty, "there is nothing left for the flag to protect")
+        XCTAssertFalse(pane.loadedPaths.contains(url.path))
+        XCTAssertTrue(pane.deletedPaths.contains(url.path))
+        XCTAssertFalse(pane.hasDirtyTabs, "…so the pane closes without a prompt it could not honour")
+    }
+
+    /// Fix round 1, Minor. The check is wired to `focus()`, not merely
+    /// callable by a test.
+    func testFocusItselfChecksForExternalChanges() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        try "v2".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)],
+            ofItemAtPath: url.path
+        )
+
+        pane.focus()
+
+        XCTAssertTrue(pollUntilContent(pane, path: url.path, equals: "v2"))
     }
 
     // MARK: - Task 15: the save-acknowledgement window

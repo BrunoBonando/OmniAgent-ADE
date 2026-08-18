@@ -128,8 +128,14 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
         queuedCharacters = 0
     }
 
-    func openModel(path: String, content: String, readOnly: Bool) {
-        run("window.omniagent.openModel(\(Self.jsLiteral(path)), \(Self.jsLiteral(content)), \(readOnly))")
+    /// `show: false` opens the model without making it the visible one — for
+    /// crash recovery, which re-opens every model the pane held and wants
+    /// exactly one of them shown at the end.
+    func openModel(path: String, content: String, readOnly: Bool, show: Bool = true) {
+        run(
+            "window.omniagent.openModel("
+                + "\(Self.jsLiteral(path)), \(Self.jsLiteral(content)), \(readOnly), \(show))"
+        )
     }
     func setContent(path: String, content: String) {
         run("window.omniagent.setContent(\(Self.jsLiteral(path)), \(Self.jsLiteral(content)))")
