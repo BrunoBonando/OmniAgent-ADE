@@ -1543,8 +1543,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(backdrop.state, .active, "and blurred whether or not the window is key")
         XCTAssertEqual(
             backdrop.material,
-            .headerView,
-            "the thinnest material that blurs: a panel material darkens what is behind it"
+            .sidebar,
+            "the middle-tier material real frosted glass uses: headerView barely blurred at all"
         )
 
         backdrop.setShown(true, duration: 0)
@@ -1554,7 +1554,9 @@ final class PaneWorkspaceViewTests: XCTestCase {
         // only took away seeing where everything else is. .62, .22 and .12 were
         // each too dark on a real screen.
         XCTAssertEqual(backdrop.subviews, [], "nothing tinting the blur")
-        XCTAssertEqual(backdrop.alphaValue, 1)
+        // Short of 1, on purpose: at full alpha nothing of the sharp app shows
+        // through, only the material's own tint — see `shownAlpha`.
+        XCTAssertEqual(backdrop.alphaValue, 0.78)
     }
 
     // MARK: - Click to activate

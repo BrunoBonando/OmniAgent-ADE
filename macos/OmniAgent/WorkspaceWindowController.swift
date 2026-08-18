@@ -130,6 +130,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// nothing has read yet.
     private var layoutReadCompleted = false
     private var observedFirstOutput = false
+    /// The window's frame the first time `adjustWindowForRowCount` ran —
+    /// every row-count size is a scale of *this*, never of whatever the
+    /// window currently measures, so toggling between one row and two
+    /// across any number of pane changes lands on the same two sizes rather
+    /// than compounding a little larger each round trip.
+    ///
+    /// ponytail: resets each launch, so a session quit mid-scale-up starts
+    /// the next launch from an already-scaled frame — bounded by the
+    /// `visibleFrame` clamp below, not unbounded, but worth a real
+    /// persisted baseline if the drift ever gets noticed.
+    private var rowScaleReferenceFrame: NSRect?
+    private var lastGridRowCount: Int?
     /// Status text per session — an exited, erroring or thinking pane keeps its
     /// own line instead of one window-wide string every pane overwrites. The
     /// title shows the *focused* pane's entry, so switching panes tells the
@@ -280,6 +292,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.persistLayout()
             self?.persistBrowserPanes()
             self?.reloadOutline()
+            self?.adjustWindowForRowCount()
         }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
         usageRecorder.onStoreChanged = { [weak self] store in self?.persistUsageAnalytics(store) }
@@ -349,6 +362,33 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let width = min(visible.width, min(1760, max(1040, visible.width * 0.86)))
         let height = min(visible.height, min(1100, max(680, visible.height * 0.88)))
         return NSRect(x: 0, y: 0, width: width.rounded(), height: height.rounded())
+    }
+
+    /// This app's grids never grow past two rows (`PaneGridShape.ladder`
+    /// tops out at 4×2), so there are exactly two sizes to pick between: a
+    /// single row — one pane, or two side by side — reads short and wide
+    /// for what's actually on screen, and two rows benefits from a little
+    /// more room per terminal. Both scale the reference frame uniformly, so
+    /// the window keeps its own proportions rather than being reshaped.
+    private static let rowWindowScale: [Int: CGFloat] = [1: 1.18, 2: 1.08]
+
+    /// Called whenever the on-screen pane set changes. Only acts on an
+    /// actual row-count change — not every rename or reorder `onPanesChanged`
+    /// also fires for — so a manual resize the user makes while the row
+    /// count is unchanged is never fought mid-session.
+    private func adjustWindowForRowCount() {
+        guard let window, let rows = workspace.grid?.rows, rows != lastGridRowCount else { return }
+        lastGridRowCount = rows
+        let reference = rowScaleReferenceFrame ?? window.frame
+        rowScaleReferenceFrame = reference
+        guard let scale = Self.rowWindowScale[rows] else { return }
+        let visible = (window.screen ?? NSScreen.main)?.visibleFrame ?? reference
+        let size = NSSize(
+            width: min(reference.width * scale, visible.width).rounded(),
+            height: min(reference.height * scale, visible.height).rounded()
+        )
+        let origin = NSPoint(x: (visible.midX - size.width / 2).rounded(), y: (visible.midY - size.height / 2).rounded())
+        window.setFrame(NSRect(origin: origin, size: size), display: true, animate: window.isVisible)
     }
 
     /// Restores where the user last put the window, and centres the default on
