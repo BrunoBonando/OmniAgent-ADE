@@ -443,6 +443,107 @@ final class PaneWorkspaceViewTests: XCTestCase {
         return rep
     }
 
+    /// Nothing reads this in CI; it exists so Bruno can eyeball a render.
+    /// `xcodebuild test`'s `TEST_RUNNER_` prefix is stripped and the rest
+    /// handed straight to the test host's environment, so
+    /// `TEST_RUNNER_PANE_RENDER_DIR=/tmp/panes ./macos/build.sh test` drops a
+    /// PNG per named render there; unset, this is a no-op.
+    private func saveRenderForInspection(_ rep: NSBitmapImageRep, named name: String) {
+        guard
+            let dir = ProcessInfo.processInfo.environment["TEST_RUNNER_PANE_RENDER_DIR"],
+            let png = rep.representation(using: .png, properties: [:])
+        else { return }
+        let directory = URL(fileURLWithPath: dir, isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? png.write(to: directory.appendingPathComponent("\(name).png"))
+    }
+
+    // MARK: - Milestone 1: mixed terminal/browser grids
+
+    /// The seam's whole point proven at once: a browser pane sitting beside
+    /// terminals lands at the grid cell like any other pane and lays out its
+    /// own chrome inside it — nothing about the container or the grid needed
+    /// to know a WKWebView was in there.
+    func testMixedGridLaysOutAndRendersTheBrowserPaneAtItsGridCell() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 2)
+        defer { window.close() }
+        var descriptor = makeDescriptor("web-1")
+        descriptor.kind = .browser
+        XCTAssertTrue(workspace.addPane(descriptor))
+        window.displayIfNeeded()
+        workspace.layoutSubtreeIfNeeded()
+
+        let container = try XCTUnwrap(workspace.container(for: "web-1"))
+        let browser = try XCTUnwrap(container.surface as? BrowserPaneView)
+
+        let expectedFrame = try XCTUnwrap(
+            workspace.grid?.layout(
+                in: workspace.gridBounds,
+                dividerThickness: PaneWorkspaceView.dividerThickness
+            ).frames["web-1"]
+        )
+        XCTAssertEqual(container.frame, expectedFrame, "a browser pane sits at its grid cell like any other")
+
+        XCTAssertEqual(
+            browser.webView.frame.minY, BrowserPaneView.toolbarHeight,
+            "the web content starts right under the nav bar"
+        )
+        XCTAssertGreaterThan(browser.urlField.frame.width, 0, "the URL field got real room, not a degenerate layout")
+
+        let image = try XCTUnwrap(render(container), "the container's whole layer tree has to render")
+        XCTAssertGreaterThan(image.pixelsWide, 0)
+        XCTAssertGreaterThan(image.pixelsHigh, 0)
+        saveRenderForInspection(image, named: "mixed-grid-browser-pane")
+    }
+
+    /// Mirrors `testFocusIsRestoredToTheFocusedPaneWhenTheWindowIsActivated`
+    /// for a browser pane, where the terminal test's identity check
+    /// (`=== terminalView`) cannot apply: WKWebView's real first responder is
+    /// an internal `WKContentView`, so this checks descendance instead, the
+    /// same relaxation `reclaimFirstResponder` made for the same reason.
+    func testFocusIsRestoredToABrowserPaneWhenTheWindowIsActivated() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 2)
+        defer { window.close() }
+        var descriptor = makeDescriptor("web-1")
+        descriptor.kind = .browser
+        XCTAssertTrue(workspace.addPane(descriptor))
+
+        let container = try XCTUnwrap(workspace.container(for: "web-1"))
+        workspace.focusPane("web-1")
+        XCTAssertTrue(
+            (window.firstResponder as? NSView)?.isDescendant(of: container) == true,
+            "focusing a browser pane lands the responder inside its container"
+        )
+
+        XCTAssertTrue(window.makeFirstResponder(window))
+        workspace.restoreFocus()
+
+        XCTAssertEqual(workspace.focusedPaneID, "web-1")
+        XCTAssertTrue(
+            (window.firstResponder as? NSView)?.isDescendant(of: container) == true,
+            "restoreFocus reclaims a browser pane the same way it reclaims a terminal"
+        )
+    }
+
+    /// Mirrors `testTerminalInstancesSurviveEveryLayoutMutation`'s identity
+    /// check, for the mutation that is browser-specific: zooming in and back
+    /// must not tear down and rebuild anyone's `PaneContentView`, terminal or
+    /// browser.
+    func testZoomingABrowserPaneInAMixedGridPreservesEveryPaneIdentity() {
+        let workspace = makeWorkspace(panes: 2)
+        var descriptor = makeDescriptor("web-1")
+        descriptor.kind = .browser
+        XCTAssertTrue(workspace.addPane(descriptor))
+        let before = identities(in: workspace)
+
+        XCTAssertTrue(workspace.toggleZoom("web-1"))
+        XCTAssertEqual(workspace.zoomedPaneID, "web-1")
+        XCTAssertTrue(workspace.toggleZoom("web-1"), "the same button shrinks it back")
+        XCTAssertNil(workspace.zoomedPaneID)
+
+        XCTAssertEqual(before, identities(in: workspace), "zooming a browser pane must not recreate any surface")
+    }
+
     // MARK: - Header chrome
 
     /// The border says what the pane is doing, and "I have stopped to ask you
