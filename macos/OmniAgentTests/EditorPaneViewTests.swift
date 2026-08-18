@@ -19,6 +19,20 @@ extension EditorWebView {
     }
 }
 
+extension XCTestCase {
+    /// Blocks until an editor pane's Monaco bridge has booted (~2–5 s hosted).
+    /// Commands issued before that are queued by `EditorWebView`, so only
+    /// tests that read state back need this. On `XCTestCase` rather than one
+    /// test class so every editor-pane suite in the target can use it.
+    func waitUntilReady(_ pane: EditorPaneView, timeout: TimeInterval = 30) {
+        guard !pane.webHost.isReady else { return }
+        let ready = expectation(description: "monaco ready")
+        ready.assertForOverFulfill = false
+        pane.webHost.onReadyForTesting = { ready.fulfill() }
+        wait(for: [ready], timeout: timeout)
+    }
+}
+
 final class EditorPaneViewTests: XCTestCase {
     private var dir: URL!
 
@@ -41,16 +55,6 @@ final class EditorPaneViewTests: XCTestCase {
         let pane = EditorPaneView(initialTabs: [], activeIndex: 0)
         pane.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
         return pane
-    }
-
-    /// Monaco boots in ~2–5 s hosted; commands issued before it does are
-    /// queued by `EditorWebView`, so only tests that read state back need this.
-    private func waitUntilReady(_ pane: EditorPaneView) {
-        guard !pane.webHost.isReady else { return }
-        let ready = expectation(description: "monaco ready")
-        ready.assertForOverFulfill = false
-        pane.webHost.onReadyForTesting = { ready.fulfill() }
-        wait(for: [ready], timeout: 30)
     }
 
     /// Drives the bridge the way a keystroke would and waits for the tab to
@@ -111,13 +115,76 @@ final class EditorPaneViewTests: XCTestCase {
         makeDirty(pane, path: url.path, content: "let x = 2")
 
         let saved = expectation(description: "saved")
+        // The tab going clean is the *bridge's* answer, not Swift's — the page
+        // only rebases when the buffer has not moved past the version that was
+        // written — so it arrives on the message hop after the write.
+        let clean = expectation(description: "clean")
+        clean.assertForOverFulfill = false
+        pane.onStateChange = { _, _ in
+            if pane.model.tabs[0].isDirty == false { clean.fulfill() }
+        }
         pane.saveActiveTab {
             XCTAssertTrue($0)
             saved.fulfill()
         }
-        wait(for: [saved], timeout: 10)
+        wait(for: [saved, clean], timeout: 10)
+        pane.onStateChange = nil
         XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "let x = 2")
         XCTAssertFalse(pane.model.tabs[0].isDirty)
+    }
+
+    /// Important 1's regression: a file rewritten or deleted under a *dirty*
+    /// buffer must not flip the pane to the binary placeholder. The edits are
+    /// still in the model, so hiding them reads as data loss.
+    func testDirtyBufferSurvivesTheFileVanishingUnderIt() throws {
+        let url = try write("a.swift", "let x = 1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        makeDirty(pane, path: url.path, content: "let x = 2")
+
+        try FileManager.default.removeItem(at: url)
+        pane.strip.selectForTesting(index: 0)
+
+        XCTAssertFalse(pane.webHost.isHidden)
+        XCTAssertTrue(pane.mediaHost.isHidden)
+        XCTAssertTrue(pane.model.tabs[0].isDirty)
+        let intact = expectation(description: "buffer intact")
+        pane.webHost.requestContent(path: url.path) { content, _ in
+            XCTAssertEqual(content, "let x = 2")
+            intact.fulfill()
+        }
+        wait(for: [intact], timeout: 10)
+    }
+
+    /// `loadedPaths` is the flag `showActiveContent` trusts: a `.file` tab
+    /// whose text Monaco never received is never marked loaded, never gets the
+    /// web surface, and never acquires a phantom entry on re-activation
+    /// (which would make the Important-1 early return fire on a tab that has
+    /// no model). Restored rather than opened, so the load happens on the
+    /// lazy path.
+    ///
+    /// The reachable instance of "no text" is a binary blob.
+    /// `EditorFileClass.classify(url:)` already answers `.binary` for anything
+    /// it cannot open, so `loadFileTab`'s both-encodings-failed arm only fires
+    /// if the file is swapped out between the classification and the read —
+    /// a race no test can stage deterministically. It stays as a guard.
+    func testUnloadedFileTabIsNeverHandedToMonaco() throws {
+        let url = dir.appendingPathComponent("a.bin")
+        try Data([0x01, 0x00, 0x02, 0x00]).write(to: url)
+        let pane = EditorPaneView(
+            initialTabs: [PersistedEditorTab(path: url.path, kind: "file", pinned: true)],
+            activeIndex: 0
+        )
+        pane.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        XCTAssertEqual(pane.model.tabs.count, 1)
+        XCTAssertTrue(pane.loadedPaths.isEmpty)
+        XCTAssertTrue(pane.webHost.isHidden)
+        XCTAssertFalse(pane.mediaHost.isHidden)
+
+        pane.strip.selectForTesting(index: 0)
+        XCTAssertTrue(pane.loadedPaths.isEmpty)
+        XCTAssertTrue(pane.webHost.isHidden)
     }
 
     /// The global rule: a failed write never silently loses work — the buffer
@@ -276,6 +343,28 @@ final class EditorPaneViewTests: XCTestCase {
         pane.changedPaths = [url.path]
         pane.strip.onDiffToggle?()
         XCTAssertEqual(requested?.path, url.path)
+    }
+
+    /// The other half of eviction: the disposed path must be reopenable. If
+    /// anything still pointed at the disposed model, this reads back nil or
+    /// stale text instead of the file.
+    func testReopeningAnEvictedPreviewPathGetsAFreshModel() throws {
+        let first = try write("a.swift", "one")
+        let second = try write("b.swift", "two")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(first, pinned: false)
+        pane.openFile(second, pinned: false)
+        pane.openFile(first, pinned: false)
+        XCTAssertEqual(pane.model.tabs.map(\.path), [first.path])
+        XCTAssertTrue(pane.loadedPaths.contains(first.path))
+        XCTAssertFalse(pane.loadedPaths.contains(second.path))
+        let reread = expectation(description: "reopened content")
+        pane.webHost.requestContent(path: first.path) { content, _ in
+            XCTAssertEqual(content, "one")
+            reread.fulfill()
+        }
+        wait(for: [reread], timeout: 10)
     }
 
     /// A preview open recycles the preview tab; the evicted file's Monaco

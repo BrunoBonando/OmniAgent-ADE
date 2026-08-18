@@ -61,7 +61,7 @@ final class EditorWebViewTests: XCTestCase {
 
         view.openModel(path: "/tmp/x.swift", content: "let x = 1", readOnly: false)
         let roundTrip = expectation(description: "content")
-        view.requestContent(path: "/tmp/x.swift") { content in
+        view.requestContent(path: "/tmp/x.swift") { content, _ in
             XCTAssertEqual(content, "let x = 1")
             roundTrip.fulfill()
         }
@@ -92,11 +92,65 @@ final class EditorWebViewTests: XCTestCase {
         wait(for: [clean], timeout: 10)
 
         let roundTrip = expectation(description: "content")
-        view.requestContent(path: "/tmp/y.txt") { content in
+        view.requestContent(path: "/tmp/y.txt") { content, _ in
             XCTAssertEqual(content, "two")
             roundTrip.fulfill()
         }
         wait(for: [roundTrip], timeout: 10)
+    }
+
+    /// The save race: `markSaved` rebases the saved version to whatever is
+    /// current *when the message lands*, so a keystroke typed inside the
+    /// save's round trip would be marked clean and later discarded without a
+    /// prompt. Passing the version whose text was actually written makes the
+    /// page refuse.
+    func testMarkSavedRefusesAStaleVersion() {
+        let view = EditorWebView()
+        let ready = expectation(description: "ready")
+        view.onReady = { ready.fulfill() }
+        wait(for: [ready], timeout: 30)
+
+        view.openModel(path: "/tmp/race.txt", content: "one", readOnly: false)
+        let snapshot = expectation(description: "snapshot")
+        var savedVersion: Int?
+        view.requestContent(path: "/tmp/race.txt") { _, versionId in
+            savedVersion = versionId
+            snapshot.fulfill()
+        }
+        wait(for: [snapshot], timeout: 10)
+        XCTAssertNotNil(savedVersion)
+
+        // The keystroke that lands while the write is in flight.
+        let dirty = expectation(description: "dirty")
+        view.onDirtyChanged = { path, isDirty in
+            if path == "/tmp/race.txt", isDirty { dirty.fulfill() }
+        }
+        view.setContentForTesting(path: "/tmp/race.txt", content: "two")
+        wait(for: [dirty], timeout: 10)
+
+        // Stale version: must not clear dirty. Nothing is posted, so assert by
+        // driving a later command through the same queue and checking that no
+        // clean event arrived in between.
+        view.onDirtyChanged = { path, isDirty in
+            if path == "/tmp/race.txt", !isDirty { XCTFail("a stale markSaved cleared the dirty flag") }
+        }
+        view.markSaved(path: "/tmp/race.txt", versionId: savedVersion)
+        let drained = expectation(description: "drained")
+        view.requestContent(path: "/tmp/race.txt") { content, _ in
+            XCTAssertEqual(content, "two")
+            drained.fulfill()
+        }
+        wait(for: [drained], timeout: 10)
+
+        // The current version does rebase.
+        let clean = expectation(description: "clean")
+        view.onDirtyChanged = { path, isDirty in
+            if path == "/tmp/race.txt", !isDirty { clean.fulfill() }
+        }
+        view.requestContent(path: "/tmp/race.txt") { _, versionId in
+            view.markSaved(path: "/tmp/race.txt", versionId: versionId)
+        }
+        wait(for: [clean], timeout: 10)
     }
 
     /// Commands issued before `ready` are queued and replayed in order, so the
@@ -111,7 +165,7 @@ final class EditorWebViewTests: XCTestCase {
         wait(for: [ready], timeout: 30)
 
         let roundTrip = expectation(description: "content")
-        view.requestContent(path: "/tmp/z.md") { content in
+        view.requestContent(path: "/tmp/z.md") { content, _ in
             XCTAssertEqual(content, "# early")
             roundTrip.fulfill()
         }
@@ -306,7 +360,7 @@ final class EditorWebViewTests: XCTestCase {
         view.openModel(path: "/tmp/gone.txt", content: "bye", readOnly: false)
         view.closeModel(path: "/tmp/gone.txt")
         let gone = expectation(description: "gone")
-        view.requestContent(path: "/tmp/gone.txt") { content in
+        view.requestContent(path: "/tmp/gone.txt") { content, _ in
             XCTAssertNil(content)
             gone.fulfill()
         }

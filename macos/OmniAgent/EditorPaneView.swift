@@ -43,22 +43,20 @@ final class EditorPaneView: NSView, PaneContentView {
     /// (Task 15 replays them on renderer death).
     private(set) var dirtySnapshots: [String: String] = [:]
 
-    /// Set only while `closeAllTabsAfterConfirmation` is draining the pane.
-    /// Its caller (Task 15's close/quit path) is already tearing the pane
-    /// down, so the "you closed the last tab, close the pane" reflex would
-    /// fire a second, redundant close underneath it.
-    private var suppressLastTabClosed = false
-
     // MARK: - PaneContentView
 
     var isSelected = false
     var suspendsDrawing = false
     weak var resizeCoalescer: PaneResizeCoalescer?
+    /// Never points at a hidden surface: a *binary* `.file` tab is rendered by
+    /// `mediaHost`, not Monaco, so it focuses the media view like `.media` does.
+    /// `mediaHost.isHidden` is the same answer `showActiveContent` just
+    /// computed, without a second trip to the filesystem.
     var primaryResponderView: NSView {
         switch model.activeTab?.kind {
         case .media: return mediaHost.preferredResponder
         case .none: return self
-        default: return webHost.webView
+        default: return mediaHost.isHidden ? webHost.webView : mediaHost.preferredResponder
         }
     }
     func focus() { window?.makeFirstResponder(primaryResponderView) }
@@ -180,15 +178,12 @@ final class EditorPaneView: NSView, PaneContentView {
         let kind = classified.tabKind
         let hadTab = model.index(of: url.path, kind: kind) != nil
         // A preview open recycles the existing preview tab in place, which
-        // evicts whatever was in it — its Monaco model and bookkeeping have to
-        // go with it or they leak for the life of the pane.
-        let recycled: EditorTab? = (pinned || hadTab)
-            ? nil
-            : model.tabs.first { !$0.isPinned && !$0.isDirty }
-        model.open(path: url.path, kind: kind, asPreview: !pinned)
-        if let recycled, recycled.path != url.path || recycled.kind != kind {
-            discardResources(for: recycled)
-        }
+        // evicts whatever was in it — the evicted file's Monaco model and
+        // bookkeeping have to go with it or they leak for the life of the
+        // pane. Only the model knows which tab it reused, so it reports it;
+        // re-deriving that here would be the same rule written twice.
+        let opened = model.openReportingEviction(path: url.path, kind: kind, asPreview: !pinned)
+        if let evicted = opened.evicted { discardResources(for: evicted) }
         if !hadTab, kind == .file { loadFileTab(url, classified: classified) }
         syncAll()
         showActiveContent()
@@ -256,6 +251,16 @@ final class EditorPaneView: NSView, PaneContentView {
         }
         switch tab.kind {
         case .file:
+            // A file already open in Monaco stays in Monaco. Re-classifying it
+            // here would let a file deleted or rewritten under the user (branch
+            // switch, `git checkout`) flip a *dirty* buffer to the binary
+            // placeholder: the edits would survive in the model but become
+            // invisible, which reads as data loss.
+            if loadedPaths.contains(tab.path) {
+                webHost.showModel(path: tab.path)
+                setContentVisibility(web: true, media: false, empty: false)
+                return
+            }
             let url = URL(fileURLWithPath: tab.path)
             let classified = EditorFileClass.classify(url: url)
             if case .text = classified {
@@ -304,6 +309,13 @@ final class EditorPaneView: NSView, PaneContentView {
     /// The one write path. Monaco is asked for the buffer, Swift writes it —
     /// atomically, in the encoding the file was read in. A failed write leaves
     /// the tab dirty and says so; it never silently drops the edit.
+    ///
+    /// The round trip to Monaco is asynchronous, so two things can change
+    /// under it and both are guarded: the tab can be closed (a "Don't Save"
+    /// close racing the save must not resurrect the discarded edit on disk),
+    /// and the buffer can be typed into (`markSaved` is version-scoped, so a
+    /// keystroke that landed after the snapshot stays dirty instead of being
+    /// marked clean and later discarded without a prompt).
     private func save(at index: Int, completion: @escaping (Bool) -> Void) {
         guard model.tabs.indices.contains(index), model.tabs[index].kind == .file else {
             completion(false)
@@ -311,8 +323,12 @@ final class EditorPaneView: NSView, PaneContentView {
         }
         let path = model.tabs[index].path
         let url = URL(fileURLWithPath: path)
-        webHost.requestContent(path: path) { [weak self] content in
+        webHost.requestContent(path: path) { [weak self] content, versionId in
             guard let self else {
+                completion(false)
+                return
+            }
+            guard model.index(of: path, kind: .file) != nil else {
                 completion(false)
                 return
             }
@@ -329,10 +345,13 @@ final class EditorPaneView: NSView, PaneContentView {
                 return
             }
             modificationDates[path] = modificationDate(of: url)
-            webHost.markSaved(path: path)
-            if let current = model.index(of: path, kind: .file) { model.setDirty(false, at: current) }
-            dirtySnapshots.removeValue(forKey: path)
-            syncAll()
+            // Version-scoped: the page leaves the tab dirty (and re-posts
+            // nothing) when the buffer has moved past `versionId`.
+            webHost.markSaved(path: path, versionId: versionId)
+            // Dirty state (and with it the crash snapshot) is now the bridge's
+            // to clear: it posts `dirtyChanged(false)` only when it actually
+            // rebased, and `wireBridge` drops the snapshot there. Clearing it
+            // eagerly here would re-open the very hole the version guard shuts.
             completion(true)
         }
     }
@@ -387,12 +406,18 @@ final class EditorPaneView: NSView, PaneContentView {
         }
     }
 
-    private func performClose(at index: Int) {
+    /// `notifyLastClosed: false` is the bulk-drain path: its caller is already
+    /// tearing the pane down and closes it itself, so the "last tab went, close
+    /// the pane" reflex would fire a second, redundant close underneath it.
+    /// Passed per call rather than held as a flag — a `confirmSave` seam that
+    /// never calls its `decide` callback would strand a flag `true` forever and
+    /// silently break every later close.
+    private func performClose(at index: Int, notifyLastClosed: Bool = true) {
         guard let closed = model.close(at: index) else { return }
         discardResources(for: closed)
         syncAll()
         showActiveContent()
-        if model.tabs.isEmpty, !suppressLastTabClosed { onLastTabClosed?() }
+        if model.tabs.isEmpty, notifyLastClosed { onLastTabClosed?() }
     }
 
     /// Releases everything a tab owned: its Monaco model and the three
@@ -410,11 +435,7 @@ final class EditorPaneView: NSView, PaneContentView {
     /// user cancelled (or a save failed) and the close/quit must stop — the
     /// pane is left exactly as far along as the walk got.
     func closeAllTabsAfterConfirmation(completion: @escaping (Bool) -> Void) {
-        suppressLastTabClosed = true
-        drainDirtyTabs { [weak self] proceed in
-            self?.suppressLastTabClosed = false
-            completion(proceed)
-        }
+        drainDirtyTabs(completion: completion)
     }
 
     private func drainDirtyTabs(completion: @escaping (Bool) -> Void) {
@@ -432,7 +453,7 @@ final class EditorPaneView: NSView, PaneContentView {
             case .cancel:
                 completion(false)
             case .discard:
-                performClose(at: index)
+                performClose(at: index, notifyLastClosed: false)
                 drainDirtyTabs(completion: completion)
             case .save:
                 save(at: index) { [weak self] saved in
@@ -440,7 +461,7 @@ final class EditorPaneView: NSView, PaneContentView {
                         completion(false)
                         return
                     }
-                    performClose(at: model.index(of: tab.path, kind: tab.kind) ?? index)
+                    performClose(at: model.index(of: tab.path, kind: tab.kind) ?? index, notifyLastClosed: false)
                     drainDirtyTabs(completion: completion)
                 }
             }

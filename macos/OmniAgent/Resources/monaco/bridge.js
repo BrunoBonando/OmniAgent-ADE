@@ -132,15 +132,24 @@ window.omniagent = {
     if (entry.viewState) editor.restoreViewState(entry.viewState);
     editor.focus();
   },
-  markSaved(path) {
+  // `versionId` is the version whose text Swift actually wrote. If a
+  // keystroke landed inside the getContent->write round trip the buffer has
+  // moved on, and rebasing to the *current* version would mark that unsaved
+  // edit clean — the tab would look saved and a later close would discard it
+  // without asking. Refuse, and leave the tab dirty. Omitting the argument
+  // keeps the old unconditional behaviour, for callers with nothing to race.
+  markSaved(path, versionId) {
     const entry = models.get(path);
     if (!entry) return;
-    entry.savedVersionId = entry.model.getAlternativeVersionId();
+    const current = entry.model.getAlternativeVersionId();
+    if (versionId !== undefined && versionId !== null && versionId !== current) return;
+    entry.savedVersionId = current;
     post({ type: "dirtyChanged", path, dirty: false });
   },
   getContent(path) {
     const entry = models.get(path);
-    return entry ? entry.model.getValue() : null;
+    if (!entry) return null;
+    return { content: entry.model.getValue(), versionId: entry.model.getAlternativeVersionId() };
   },
   closeModel(path) {
     const entry = models.get(path);

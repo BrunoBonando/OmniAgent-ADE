@@ -37,23 +37,38 @@ struct EditorPaneModel: Equatable {
     /// existing preview tab if one exists; a pinned open appends.
     @discardableResult
     mutating func open(path: String, kind: EditorTabKind, asPreview: Bool) -> Int {
+        openReportingEviction(path: path, kind: kind, asPreview: asPreview).index
+    }
+
+    /// `open`, plus the tab this open recycled out of existence, if any. A
+    /// preview open reuses the preview slot in place — nothing is ever
+    /// "closed", so the owner would otherwise never learn that the evicted
+    /// file's editor resources are now unreachable. The recycle rule lives
+    /// here and only here.
+    @discardableResult
+    mutating func openReportingEviction(
+        path: String,
+        kind: EditorTabKind,
+        asPreview: Bool
+    ) -> (index: Int, evicted: EditorTab?) {
         if let existing = index(of: path, kind: kind) {
             activeIndex = existing
             if !asPreview { tabs[existing].isPinned = true }
-            return existing
+            return (existing, nil)
         }
         let tab = EditorTab(path: path, kind: kind, isPinned: !asPreview)
         // A preview tab that is *dirty* is never recycled. `setDirty` already
         // pins an edited buffer, so this second guard is belt-and-braces: no
         // path through this type can silently drop unsaved work.
         if asPreview, let preview = tabs.firstIndex(where: { !$0.isPinned && !$0.isDirty }) {
+            let evicted = tabs[preview]
             tabs[preview] = tab
             activeIndex = preview
-            return preview
+            return (preview, evicted)
         }
         tabs.append(tab)
         activeIndex = tabs.count - 1
-        return activeIndex
+        return (activeIndex, nil)
     }
 
     mutating func activate(_ index: Int) {

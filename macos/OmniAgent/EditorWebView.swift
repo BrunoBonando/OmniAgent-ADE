@@ -135,7 +135,14 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
         run("window.omniagent.setContent(\(Self.jsLiteral(path)), \(Self.jsLiteral(content)))")
     }
     func showModel(path: String) { run("window.omniagent.showModel(\(Self.jsLiteral(path)))") }
-    func markSaved(path: String) { run("window.omniagent.markSaved(\(Self.jsLiteral(path)))") }
+    /// `versionId` is the model version whose text was actually written to
+    /// disk. The page refuses to rebase a buffer that has moved on since, so a
+    /// keystroke typed inside the `requestContent` -> write round trip stays
+    /// dirty instead of being silently marked saved. `nil` rebases
+    /// unconditionally, for callers with no write to race.
+    func markSaved(path: String, versionId: Int? = nil) {
+        run("window.omniagent.markSaved(\(Self.jsLiteral(path)), \(versionId.map(String.init) ?? "null"))")
+    }
     func closeModel(path: String) { run("window.omniagent.closeModel(\(Self.jsLiteral(path)))") }
     func showDiff(path: String, original: String, modified: String) {
         run("window.omniagent.showDiff(\(Self.jsLiteral(path)), \(Self.jsLiteral(original)), \(Self.jsLiteral(modified)))")
@@ -157,13 +164,20 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
         run("window.omniagent.typeForTesting(\(Self.jsLiteral(path)), \(Self.jsLiteral(content)))")
     }
 
-    func requestContent(path: String, completion: @escaping (String?) -> Void) {
+    /// The buffer *and* the model version it was taken at — the two have to
+    /// travel together, or `markSaved` cannot tell a saved buffer from one
+    /// that was edited while the save was in flight.
+    func requestContent(path: String, completion: @escaping (String?, Int?) -> Void) {
         guard isReady else {
-            completion(nil)
+            completion(nil, nil)
             return
         }
         webView.evaluateJavaScript("window.omniagent.getContent(\(Self.jsLiteral(path)))") { value, _ in
-            completion(value as? String)
+            guard let payload = value as? [String: Any] else {
+                completion(nil, nil)
+                return
+            }
+            completion(payload["content"] as? String, payload["versionId"] as? Int)
         }
     }
 
