@@ -260,11 +260,9 @@ final class EditorPaneView: NSView, PaneContentView {
         // subprocesses to draw a list nobody has read yet.
         webHost.onRequestFileDiff = { [weak self] relative in
             guard let self, let root = gitStatus?.root else { return }
-            GitFileContent.unifiedDiff(of: root.appendingPathComponent(relative)) { [weak self] text in
-                self?.webHost.appendFileDiff(
-                    path: relative,
-                    text: text?.isEmpty == false ? (text ?? "") : "No textual changes."
-                )
+            let url = root.appendingPathComponent(relative)
+            GitFileContent.unifiedDiff(of: url) { [weak self] text in
+                self?.webHost.appendFileDiff(path: relative, text: EditorPaneView.hunkText(text, for: url))
             }
         }
         // Routed up rather than opened here, so a file (or a diff) already
@@ -350,6 +348,30 @@ final class EditorPaneView: NSView, PaneContentView {
     /// not even be open. A file that vanished reads as empty, which is
     /// exactly the right left-side-only rendering for a deletion.
     private func loadDiffContent(_ url: URL) {
+        // The same classifier the file tabs use, for the same two reasons —
+        // and both bite harder here. Monaco only ever sees strings, so a
+        // binary decoded latin-1 against a HEAD side full of U+FFFD is noise
+        // rather than a diff; and this read is on the **main thread** with the
+        // whole file in memory, so the size cap is what stops a changed 200 MB
+        // asset from stalling the UI and then becoming a vast JS literal.
+        //
+        // A file that is *gone* is deliberately not classified: it cannot be,
+        // and its diff — the whole left-hand side, nothing on the right — is
+        // exactly what a deletion should look like.
+        if FileManager.default.fileExists(atPath: url.path) {
+            switch EditorFileClass.classify(url: url) {
+            case .text(readOnly: false):
+                break
+            case .text(readOnly: true):
+                webHost.showMessage(
+                    "\(url.lastPathComponent) is too large to diff (over \(EditorFileClass.maxEditableBytes / (1024 * 1024)) MB)."
+                )
+                return
+            case .image, .pdf, .binary:
+                webHost.showMessage("Binary file — no textual diff.")
+                return
+            }
+        }
         GitFileContent.headVersion(of: url) { [weak self] result in
             guard let self,
                   model.activeTab?.path == url.path,
@@ -357,6 +379,13 @@ final class EditorPaneView: NSView, PaneContentView {
             else { return }
             switch result {
             case let .success(original):
+                // The working side is capped above; HEAD's is not, and a file
+                // that has since been truncated can still have a huge blob
+                // behind it.
+                guard original.utf8.count <= EditorFileClass.maxEditableBytes else {
+                    webHost.showMessage("\(url.lastPathComponent) is too large to diff.")
+                    return
+                }
                 let modified = (try? String(contentsOf: url, encoding: .utf8))
                     ?? (try? String(contentsOf: url, encoding: .isoLatin1))
                     ?? ""
@@ -367,6 +396,23 @@ final class EditorPaneView: NSView, PaneContentView {
                 )
             }
         }
+    }
+
+    /// What one row of the overview shows once its diff comes back. The stat
+    /// costs one syscall and happens only for the row the user actually
+    /// opened — never for the whole list.
+    static func hunkText(_ text: String?, for url: URL) -> String {
+        if let text, !text.isEmpty { return text }
+        // A non-nil empty answer really is "git had nothing to print": a
+        // mode-only change, or a file whose staged and working copies match.
+        if text != nil { return "No textual changes." }
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            // `--untracked-files=normal` collapses a new folder into one
+            // `dir/` record, and git cannot diff a directory at all.
+            return "New folder — open a file inside it to see its diff."
+        }
+        return "Could not load this file's diff."
     }
 
     /// The repo-wide overview: every changed file, hunks expanding on demand.
@@ -459,9 +505,11 @@ final class EditorPaneView: NSView, PaneContentView {
             loadDiffContent(URL(fileURLWithPath: tab.path))
         case .changes:
             setContentVisibility(web: true, media: false, empty: false)
-            // Re-rendered on focus for the diff tab's reason: the list is a
-            // snapshot, and the pane has usually been away while the working
-            // tree moved.
+            // Redraws the status the pane is *holding* — it does not re-ask
+            // git. Only the sidebar runs `git status`, and it pushes the
+            // result in through `setGitStatus`, which re-renders too. This
+            // call is what puts the list back after the web view showed
+            // something else (another tab, a message, a renderer crash).
             renderChanges()
         }
     }

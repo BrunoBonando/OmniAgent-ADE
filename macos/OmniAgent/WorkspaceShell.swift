@@ -2148,6 +2148,12 @@ final class WorkspaceFilesTreeView: NSView {
     var onStatusChanged: ((GitStatus?) -> Void)?
 
     private let diffField = ShellFont.label(font: ShellFont.mono(12, .semibold), color: ShellPalette.green)
+    /// Held so it can be disabled outside a repository — see
+    /// `updateDiffHeaderAvailability`.
+    private lazy var diffHeaderRecognizer = NSClickGestureRecognizer(
+        target: self,
+        action: #selector(diffHeaderPressed)
+    )
     private let filterField = NSTextField()
     private let rows = NSStackView()
     private var root: URL?
@@ -2246,12 +2252,12 @@ final class WorkspaceFilesTreeView: NSView {
         // recognizer rather than a button, because the design's header is a
         // two-colour attributed string and an NSButton cannot wear one
         // without a custom cell.
-        diffField.addGestureRecognizer(
-            NSClickGestureRecognizer(target: self, action: #selector(diffHeaderPressed))
-        )
-        diffField.setAccessibilityElement(true)
-        diffField.setAccessibilityRole(.button)
+        diffField.addGestureRecognizer(diffHeaderRecognizer)
         diffField.setAccessibilityLabel("Show all changes")
+        // Inert until a `git status` actually lands: outside a repository
+        // there is no overview to show, and a click that opens a tab saying
+        // so is worse than a header that simply is not a button.
+        updateDiffHeaderAvailability()
     }
 
     @available(*, unavailable)
@@ -2260,6 +2266,14 @@ final class WorkspaceFilesTreeView: NSView {
     @objc private func filterChanged() { render() }
 
     @objc private func diffHeaderPressed() { onOpenAllChanges?() }
+
+    /// The counts are a button only where there is a repository behind them.
+    private func updateDiffHeaderAvailability() {
+        let inRepository = gitStatus != nil
+        diffHeaderRecognizer.isEnabled = inRepository
+        diffField.setAccessibilityElement(inRepository)
+        diffField.setAccessibilityRole(inRepository ? .button : .staticText)
+    }
 
     func setDiff(added: Int, removed: Int) {
         let font = ShellFont.mono(12, .semibold)
@@ -2284,6 +2298,7 @@ final class WorkspaceFilesTreeView: NSView {
         children = [:]
         selected = nil
         setDiff(added: 0, removed: 0)
+        updateDiffHeaderAvailability()
         render()
         // The reset is reported too: a pane must not keep rendering the last
         // workspace's changes while this one's status is still loading.
@@ -2300,6 +2315,7 @@ final class WorkspaceFilesTreeView: NSView {
                 self.children[url] = listing
                 self.gitStatus = status
                 self.setDiff(added: totals.added, removed: totals.removed)
+                self.updateDiffHeaderAvailability()
                 self.render()
                 self.onStatusChanged?(status)
             }

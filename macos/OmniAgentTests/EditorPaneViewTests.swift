@@ -407,6 +407,69 @@ final class EditorPaneViewTests: XCTestCase {
         )
     }
 
+    /// A diff tab must run the file through the same classifier the file tabs
+    /// do. Without it a changed binary is decoded latin-1 against a HEAD side
+    /// full of U+FFFD — and, worse, read whole on the main thread with no size
+    /// cap, which a 200 MB asset turns into a stall plus a vast JS literal.
+    func testDiffOfABinaryFileRefusesRatherThanRenderingMojibake() throws {
+        let repo = try makeGitRepository(committing: "a.swift", "let x = 1\n")
+        let binary = repo.appendingPathComponent("asset.bin")
+        try Data([0x00, 0x01, 0x02, 0xFF, 0x00]).write(to: binary)
+        let pane = makePane()
+        waitUntilReady(pane)
+
+        pane.openDiff(binary)
+
+        XCTAssertTrue(
+            pollUntilContains(pane.webHost, "document.getElementById('message').textContent", "Binary file"),
+            "a binary file was handed to the diff editor anyway"
+        )
+    }
+
+    /// The classifier must not swallow the *deletion* case: a file that is
+    /// gone cannot be classified at all, and its diff is exactly the point.
+    func testDiffOfADeletedFileStillShowsItsHeadSide() throws {
+        let repo = try makeGitRepository(committing: "a.swift", "let x = 1\nlet y = 2\n")
+        let file = repo.appendingPathComponent("a.swift")
+        try FileManager.default.removeItem(at: file)
+        let pane = makePane()
+        waitUntilReady(pane)
+
+        pane.openDiff(file)
+
+        XCTAssertTrue(
+            pollUntilPositive(pane.webHost, "window.omniagent.diffChangesForTesting()"),
+            "the deletion never reached the diff editor"
+        )
+    }
+
+    /// A new folder arrives as one `dir/` record; git cannot diff a directory,
+    /// and the row has to say so rather than claim there is nothing in it.
+    func testChangesRowForANewFolderSaysWhatItIs() throws {
+        let repo = try makeGitRepository(committing: "a.swift", "let x = 1\n")
+        try FileManager.default.createDirectory(
+            at: repo.appendingPathComponent("newdir"),
+            withIntermediateDirectories: true
+        )
+        try "x\n".write(
+            to: repo.appendingPathComponent("newdir/f.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.setGitStatus(GitStatus(root: repo, badges: ["newdir": .untracked]))
+        pane.openChanges()
+        XCTAssertTrue(pollUntilContains(pane.webHost, Self.changesSummary, "newdir:U"))
+
+        run(pane.webHost, "document.querySelectorAll('#changes .file')[0].querySelector('.row').click()")
+
+        XCTAssertTrue(
+            pollUntilContains(pane.webHost, Self.firstRowHunks, "New folder"),
+            "a new folder was reported as having no changes"
+        )
+    }
+
     // MARK: - The Changes overview tab (Task 13)
 
     /// Every changed file, sorted by path, wearing the FILES tree's own

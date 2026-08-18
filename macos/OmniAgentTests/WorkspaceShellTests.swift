@@ -718,7 +718,7 @@ final class WorkspaceShellTests: XCTestCase {
 
     /// Task 13: the header's +N −M counts are the button for the repo-wide
     /// overview.
-    func testTheDiffHeaderOpensAllChanges() throws {
+    func testTheDiffHeaderOpensAllChangesOnlyInsideARepository() throws {
         let tree = WorkspaceFilesTreeView(frame: NSRect(x: 0, y: 0, width: 280, height: 400))
         var opened = 0
         tree.onOpenAllChanges = { opened += 1 }
@@ -726,7 +726,17 @@ final class WorkspaceShellTests: XCTestCase {
         let recognizers = tree.descendants(NSTextField.self).flatMap(\.gestureRecognizers)
         XCTAssertEqual(recognizers.count, 1, "exactly one header label is clickable")
         let recognizer = try XCTUnwrap(recognizers.first)
-        _ = try XCTUnwrap(recognizer.target as AnyObject?)
+        XCTAssertFalse(
+            recognizer.isEnabled,
+            "with no repository the counts are inert — absent, not a click that lands on a message"
+        )
+
+        tree.setRoot(try makeTempGitRepository(changed: "a.swift", clean: "b.swift"))
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline, !recognizer.isEnabled {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(recognizer.isEnabled, "once a status lands the counts are the button")
         NSApp.sendAction(try XCTUnwrap(recognizer.action), to: recognizer.target, from: recognizer)
 
         XCTAssertEqual(opened, 1)

@@ -202,7 +202,11 @@ struct CommandPaletteModel: Equatable {
             // text, and a diff tab is already the answer. The descriptor's
             // persisted tab list is the palette's only view of the pane —
             // it never reaches into `EditorPaneView` itself.
-            if pane.kind == .editor,
+            // Gated on `hasGitRepo` like "Show all changes" above: outside a
+            // repository the row is *absent*, rather than a row that runs and
+            // lands on an inline "is this file in a git repository?" message.
+            if hasGitRepo,
+               pane.kind == .editor,
                pane.editorTabs.indices.contains(pane.editorActiveIndex) {
                 let active = pane.editorTabs[pane.editorActiveIndex]
                 if active.kind == EditorTabKind.file.rawValue {

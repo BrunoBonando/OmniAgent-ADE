@@ -75,11 +75,20 @@ enum GitFileContent {
             // "all new". `--no-index` exits 1 whenever the two differ, which
             // is the entire reason `runGit` takes `acceptExitCodes`.
             if text?.isEmpty != false, !isInHead(relative, root: root) {
-                text = GitStatus.runGit(
+                let fallback = GitStatus.runGit(
                     ["diff", "--no-index", "--", "/dev/null", relative],
                     in: root,
                     acceptExitCodes: [0, 1]
                 )
+                // `--no-index` *also* exits 1 with empty stdout when it cannot
+                // access the path at all (`error: Could not access …`, on the
+                // stderr this discards). The common case is an untracked
+                // **directory**: `--untracked-files=normal` collapses a new
+                // folder into one `dir/` record, and git cannot diff a
+                // directory. Empty here therefore means "git could not
+                // answer", never "there is nothing to show" — reporting it as
+                // the latter is the one thing this must not do.
+                text = fallback?.isEmpty == false ? fallback : nil
             }
             DispatchQueue.main.async { completion(text) }
         }

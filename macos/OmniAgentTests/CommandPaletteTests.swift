@@ -179,7 +179,8 @@ final class CommandPaletteTests: XCTestCase {
             ],
             paneOrder: ["ed"],
             focusedPaneID: "ed",
-            unreadNotifications: 0
+            unreadNotifications: 0,
+            hasGitRepo: true
         )
 
         let row = rows.first { $0.id == "open-diff" }
@@ -220,6 +221,25 @@ final class CommandPaletteTests: XCTestCase {
             unreadNotifications: 0
         )
         XCTAssertNil(empty.first { $0.id == "open-diff" }, "an editor with no tabs has nothing to diff")
+
+        let noRepo = CommandPaletteModel.build(
+            panes: [
+                pane(
+                    "ed",
+                    project: "alpha",
+                    group: "g1",
+                    kind: .editor,
+                    editorTabs: [PersistedEditorTab(path: "/w/src/token.swift", kind: "file", pinned: true)]
+                )
+            ],
+            paneOrder: ["ed"],
+            focusedPaneID: "ed",
+            unreadNotifications: 0
+        )
+        XCTAssertNil(
+            noRepo.first { $0.id == "open-diff" },
+            "outside a repository the row is absent, not a row that lands on an error"
+        )
     }
 
     /// Task 13: "Show all changes" needs a repository to describe. The
