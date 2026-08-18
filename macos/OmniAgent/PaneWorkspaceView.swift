@@ -2889,8 +2889,18 @@ final class PaneHolePlaceholderView: NSView {
         .font: NSFont.systemFont(ofSize: 11, weight: .regular),
         .foregroundColor: NSColor(srgbRed: 138 / 255, green: 146 / 255, blue: 176 / 255, alpha: 1),
     ]
+    /// Same line under the cursor: brighter, over a faint accent pill, so the
+    /// one place a click means "browser" says so before it is clicked.
+    private static let browserHoverAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+        .foregroundColor: NSColor(srgbRed: 206 / 255, green: 210 / 255, blue: 232 / 255, alpha: 1),
+    ]
     private static let plateSize: CGFloat = 46
     private static let browserIconSize: CGFloat = 12
+
+    private var isBrowserHovered = false {
+        didSet { if isBrowserHovered != oldValue { needsDisplay = true } }
+    }
 
     init(onActivate: @escaping () -> Void, onActivateBrowser: @escaping () -> Void = {}) {
         self.onActivate = onActivate
@@ -2954,6 +2964,28 @@ final class PaneHolePlaceholderView: NSView {
         )
     }
 
+    /// The browser row's hit area — hover highlight and click dispatch have to
+    /// agree, or the line lights up somewhere it does not act.
+    var browserHitRect: NSRect { browserTextRect.insetBy(dx: -8, dy: -5) }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        ))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        isBrowserHovered = browserHitRect.contains(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isBrowserHovered = false
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let card = bounds.insetBy(dx: 8, dy: 8)
@@ -3005,6 +3037,11 @@ final class PaneHolePlaceholderView: NSView {
         Self.terminalText.draw(at: terminalTextRect.origin, withAttributes: Self.terminalAttributes)
 
         let browserRect = browserTextRect
+        if isBrowserHovered {
+            let pill = NSBezierPath(roundedRect: browserHitRect, xRadius: 9, yRadius: 9)
+            Self.accent.withAlphaComponent(0.14).setFill()
+            pill.fill()
+        }
         draw(
             symbol: "globe",
             in: NSRect(
@@ -3015,15 +3052,16 @@ final class PaneHolePlaceholderView: NSView {
             ),
             size: Self.browserIconSize,
             weight: .regular,
-            alpha: 0.5
+            alpha: isBrowserHovered ? 0.95 : 0.5
         )
-        let browserTextSize = Self.browserText.size(withAttributes: Self.browserAttributes)
+        let browserAttributes = isBrowserHovered ? Self.browserHoverAttributes : Self.browserAttributes
+        let browserTextSize = Self.browserText.size(withAttributes: browserAttributes)
         Self.browserText.draw(
             at: NSPoint(
                 x: browserRect.minX + Self.browserIconSize + 5,
                 y: browserRect.midY - browserTextSize.height / 2
             ),
-            withAttributes: Self.browserAttributes
+            withAttributes: browserAttributes
         )
     }
 
@@ -3058,7 +3096,7 @@ final class PaneHolePlaceholderView: NSView {
     /// synthesising events: the browser line is the one place a click means a
     /// browser; anywhere else in the cell stays the primary affordance.
     func dispatch(at point: NSPoint) {
-        if browserTextRect.insetBy(dx: -4, dy: -4).contains(point) {
+        if browserHitRect.contains(point) {
             onActivateBrowser()
         } else {
             onActivate()
