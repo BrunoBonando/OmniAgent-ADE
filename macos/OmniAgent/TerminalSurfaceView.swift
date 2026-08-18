@@ -44,6 +44,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     )
     var onTitleChange: ((String) -> Void)?
     var onDirectoryChange: ((String?) -> Void)?
+    var onLinkClick: ((URL) -> Void)?
 
     /// When set, PTY resizes are batched here instead of being sent on every
     /// size change — one send per display refresh during a live divider drag.
@@ -132,6 +133,13 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         terminalView.caretColor = omniBlue
         terminalView.selectedTextBackgroundColor = omniBlue.withAlphaComponent(0.72)
         terminalView.optionAsMetaKey = false
+        // The default `.hoverWithModifier` requires ⌘ before a click matches
+        // a link. `.hover` matches the identical set (explicit or implicit,
+        // whatever's under the pointer) minus that requirement, so a plain
+        // click opens a link — `mouseUp` re-hovers the release point right
+        // before checking, so a cold click (no prior mouse movement) still
+        // matches.
+        terminalView.linkHighlightMode = .hover
         terminalView.setAccessibilityElement(true)
         terminalView.setAccessibilityRole(.textArea)
         terminalView.setAccessibilityLabel("Terminal")
@@ -338,6 +346,17 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
 
     func scrolled(source: TerminalView, position: Double) {}
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+
+    /// Overrides SwiftTerm's own default (`NSWorkspace.shared.open`, see the
+    /// `TerminalViewDelegate` extension in `MacTerminalView.swift`) — a
+    /// forwarder like `setTerminalTitle`/`hostCurrentDirectoryUpdate` above,
+    /// not a decision-maker: what a clicked link becomes is
+    /// `WorkspaceWindowController`'s call, same as every other pane-routing
+    /// decision.
+    func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
+        guard let url = URL(string: link) else { return }
+        onLinkClick?(url)
+    }
 
     @objc func interruptSession(_ sender: Any?) {
         connection.interrupt(sessionID: sessionID)
