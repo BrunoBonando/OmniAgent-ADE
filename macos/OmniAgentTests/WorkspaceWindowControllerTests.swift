@@ -1676,6 +1676,20 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(ensured, ["term-1"])
     }
 
+    /// Two callers asking for the same pane at once — a reconnect's restore
+    /// sweep and that pane's own reattach failure — must produce one spawn,
+    /// not two and a `session already exists` error painted over a working
+    /// agent.
+    func testEnsureIsClaimedUntilTheSpawnAnswers() {
+        let controller = makeController()
+        defer { controller.close() }
+        XCTAssertTrue(controller.beginEnsure("term-1"))
+        XCTAssertFalse(controller.beginEnsure("term-1"))
+        XCTAssertTrue(controller.beginEnsure("term-2"), "a different pane is unaffected")
+        controller.endEnsure("term-1")
+        XCTAssertTrue(controller.beginEnsure("term-1"))
+    }
+
     // MARK: - `--resume` fallback
 
     func testResumeFailedOnlyForAFastNonZeroExitOfAResumeSpawn() {

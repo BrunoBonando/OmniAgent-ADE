@@ -589,6 +589,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 applyConnectionStatus("Connecting")
             case .disconnected:
                 applyConnectionStatus("Reconnecting")
+                // Every "this session is up" belief died with the socket. If
+                // the daemon is what went away, its sessions are gone too, and
+                // `ensureSession` would blind-attach into nothing and leave the
+                // pane blank forever. Forgetting them makes the next connect
+                // prove liveness with `listSessions` instead.
+                readySessions.removeAll()
             }
         }
         connection.onTerminalData = { [weak self] id, bytes, sequence, isSnapshot in
@@ -1838,12 +1844,30 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         ensureSession(sessionID)
     }
 
+    /// Sessions with an `ensureSession` round trip in flight. Two callers can
+    /// legitimately ask for the same pane at once — a reconnect's restore
+    /// sweep and that pane's own reattach failure — and without this both see
+    /// "not in the daemon's list" and create it, so the loser gets `session
+    /// already exists` painted into a pane whose agent just started fine.
+    private var ensuringSessions: Set<String> = []
+
+    /// `true` if this caller owns the round trip; `false` if one is already
+    /// running for the same pane.
+    func beginEnsure(_ sessionID: String) -> Bool {
+        ensuringSessions.insert(sessionID).inserted
+    }
+
+    func endEnsure(_ sessionID: String) {
+        ensuringSessions.remove(sessionID)
+    }
+
     private func ensureSession(_ sessionID: String) {
         if let sessionEnsurer { sessionEnsurer(sessionID); return }
         guard !readySessions.contains(sessionID) else {
             attach(sessionID)
             return
         }
+        guard beginEnsure(sessionID) else { return }
         connection.listSessions { [weak self] result in
             guard let self else { return }
             switch result {
@@ -1857,11 +1881,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // reach the daemon ahead of this pane's `createSession`.
                 reapOrphanedSessions(daemonSessions: sessions)
                 if sessions.contains(sessionID) {
+                    endEnsure(sessionID)
                     attach(sessionID)
                 } else {
+                    // Held until the spawn itself answers — `createSession`
+                    // releases it — so a second caller cannot slip past the
+                    // list check while this one is still starting the session.
                     createSession(sessionID)
                 }
             case let .failure(error):
+                endEnsure(sessionID)
                 applySessionStatus(error.localizedDescription, for: sessionID)
                 reportSessionFailure(error.localizedDescription, for: sessionID)
             }
@@ -1942,6 +1971,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             )
         else {
             let message = "\(engine.rawValue) is not installed — \(EngineLauncher.binaryName(for: engine)) is not on your PATH"
+            endEnsure(sessionID)
             applySessionStatus(message, for: sessionID)
             reportSessionFailure(message, for: sessionID)
             return
@@ -1975,6 +2005,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 signpostID: signpost
             )
             guard let self else { return }
+            endEnsure(sessionID)
             switch result {
             case .success:
                 attach(sessionID)
