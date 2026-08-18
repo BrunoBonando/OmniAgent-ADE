@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0c0c0f; }
+  #editor, #diff { width: 100%; height: 100%; display: none; }
+  #changes, #message {
+    display: none; height: 100%; overflow: auto; box-sizing: border-box; padding: 12px 14px;
+    color: #c2c2cb; font: 12.5px/1.6 ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  #changes .file { margin-bottom: 2px; }
+  #changes .file > .row { cursor: pointer; display: flex; gap: 8px; align-items: baseline; padding: 3px 6px; border-radius: 6px; }
+  #changes .file > .row:hover { background: rgba(255, 255, 255, 0.05); }
+  #changes .badge { font-weight: 600; width: 1.2em; }
+  #changes .badge.M, #changes .badge.R { color: #f0b446; }
+  #changes .badge.A, #changes .badge.U { color: #3ecf8e; }
+  #changes .badge.D, #changes .badge.\! { color: #f2555a; }
+  #changes .open-file { color: #8b95ff; margin-left: auto; font-size: 11px; }
+  #changes pre { margin: 2px 0 8px 26px; white-space: pre-wrap; word-break: break-all; }
+  #changes pre .add { color: #3ecf8e; }
+  #changes pre .del { color: #f2555a; }
+  #changes pre .hunk { color: #6e788a; }
+</style>
+<div id="editor"></div>
+<div id="diff"></div>
+<div id="changes"></div>
+<div id="message"></div>
+<script src="vs/loader.js"></script>
+<script src="bridge.js"></script>

@@ -23,6 +23,7 @@
 		100000000000000000000B0 /* EditorPaneModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000B0 /* EditorPaneModel.swift */; };
 		53C290D7733E43F89B368514 /* EditorPanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACAA95FB7844450B021094B /* EditorPanes.swift */; };
 		71021CF2EFA24E0285BFFFDA /* EditorFileClass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B9844312A440D4A5A932C5 /* EditorFileClass.swift */; };
+		40187BB1C8BB496BBDF4129A /* EditorWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 804C0D63AE9348399ED44B65 /* EditorWebView.swift */; };
 		6B338221C82340A48C81D8A6 /* MediaTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1422F1A7E3B9416382854F44 /* MediaTabView.swift */; };
 		12571DF89D0D4288891BDAFE /* EditorTabStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF6FC80108EE44A497708D9A /* EditorTabStripView.swift */; };
 		10000000000000000000094 /* PaneApprovalBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000094 /* PaneApprovalBar.swift */; };
@@ -31,6 +32,7 @@
 		100000000000000000000B1 /* EditorPaneModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000B1 /* EditorPaneModelTests.swift */; };
 		69D406BCC81448EF8CA13D9D /* EditorPanesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2639724864074430BA56B5D3 /* EditorPanesTests.swift */; };
 		34A6BF2B1B324F22ACCD3693 /* EditorFileClassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD2DAF7A30B04EABB3A14693 /* EditorFileClassTests.swift */; };
+		FE04177400364E128B31DF7B /* EditorWebViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E91EFADEB4413DA81A96F8 /* EditorWebViewTests.swift */; };
 		F2729C0CEE50441882BFD7A7 /* MediaTabViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C15DA4028034799A71F586F /* MediaTabViewTests.swift */; };
 		1B7BF5CE3D794B919522855C /* EditorTabStripViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */; };
 		10000000000000000000000A /* WorkspaceWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* WorkspaceWindowController.swift */; };
@@ -41,6 +43,7 @@
 		10000000000000000000000F /* PaneWorkspaceViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* PaneWorkspaceViewTests.swift */; };
 		100000000000000000000010 /* pane-grid.json in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* pane-grid.json */; };
 		10000000000000000000049 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000049 /* Assets.xcassets */; };
+		4448686B93364960B97876AB /* monaco in Resources */ = {isa = PBXBuildFile; fileRef = A04759722BBF431AA1576C0D /* monaco */; };
 		100000000000000000000011 /* PersistedLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* PersistedLayout.swift */; };
 		100000000000000000000012 /* PersistedLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* PersistedLayoutTests.swift */; };
 		100000000000000000000013 /* SettingsKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* SettingsKeys.swift */; };
@@ -150,12 +153,14 @@
 		200000000000000000000B0 /* EditorPaneModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneModel.swift; sourceTree = "<group>"; };
 		BACAA95FB7844450B021094B /* EditorPanes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPanes.swift; sourceTree = "<group>"; };
 		08B9844312A440D4A5A932C5 /* EditorFileClass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorFileClass.swift; sourceTree = "<group>"; };
+		804C0D63AE9348399ED44B65 /* EditorWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorWebView.swift; sourceTree = "<group>"; };
 		1422F1A7E3B9416382854F44 /* MediaTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaTabView.swift; sourceTree = "<group>"; };
 		CF6FC80108EE44A497708D9A /* EditorTabStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTabStripView.swift; sourceTree = "<group>"; };
 		20000000000000000000093 /* BrowserPanesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPanesTests.swift; sourceTree = "<group>"; };
 		200000000000000000000B1 /* EditorPaneModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneModelTests.swift; sourceTree = "<group>"; };
 		2639724864074430BA56B5D3 /* EditorPanesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPanesTests.swift; sourceTree = "<group>"; };
 		FD2DAF7A30B04EABB3A14693 /* EditorFileClassTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorFileClassTests.swift; sourceTree = "<group>"; };
+		52E91EFADEB4413DA81A96F8 /* EditorWebViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorWebViewTests.swift; sourceTree = "<group>"; };
 		6C15DA4028034799A71F586F /* MediaTabViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaTabViewTests.swift; sourceTree = "<group>"; };
 		F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTabStripViewTests.swift; sourceTree = "<group>"; };
 		20000000000000000000094 /* PaneApprovalBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBar.swift; sourceTree = "<group>"; };
@@ -216,6 +221,7 @@
 		20000000000000000000047 /* rust-session-models.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "rust-session-models.json"; path = "../fixtures/native-macos-compat/rust-session-models.json"; sourceTree = SOURCE_ROOT; };
 		20000000000000000000048 /* status-end-events.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "status-end-events.json"; path = "../fixtures/native-macos-compat/status-end-events.json"; sourceTree = SOURCE_ROOT; };
 		20000000000000000000049 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A04759722BBF431AA1576C0D /* monaco */ = {isa = PBXFileReference; lastKnownFileType = folder; name = monaco; path = Resources/monaco; sourceTree = "<group>"; };
 		20000000000000000000050 /* WorkspaceShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceShell.swift; sourceTree = "<group>"; };
 		20000000000000000000051 /* WorkspaceShellTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceShellTests.swift; sourceTree = "<group>"; };
 		20000000000000000000052 /* EngineIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineIcon.swift; sourceTree = "<group>"; };
@@ -272,6 +278,7 @@
 				08B9844312A440D4A5A932C5 /* EditorFileClass.swift */,
 				1422F1A7E3B9416382854F44 /* MediaTabView.swift */,
 				CF6FC80108EE44A497708D9A /* EditorTabStripView.swift */,
+				804C0D63AE9348399ED44B65 /* EditorWebView.swift */,
 				20000000000000000000094 /* PaneApprovalBar.swift */,
 				20000000000000000000000A /* TerminalSurfaceView.swift */,
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
@@ -305,6 +312,7 @@
 				20000000000000000000060 /* WorkspaceFiles.swift */,
 				20000000000000000000070 /* EngineLauncher.swift */,
 				20000000000000000000049 /* Assets.xcassets */,
+				A04759722BBF431AA1576C0D /* monaco */,
 			);
 			path = OmniAgent;
 			sourceTree = "<group>";
@@ -323,6 +331,7 @@
 				FD2DAF7A30B04EABB3A14693 /* EditorFileClassTests.swift */,
 				6C15DA4028034799A71F586F /* MediaTabViewTests.swift */,
 				F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */,
+				52E91EFADEB4413DA81A96F8 /* EditorWebViewTests.swift */,
 				20000000000000000000095 /* PaneApprovalBarTests.swift */,
 				200000000000000000000011 /* pane-grid.json */,
 				20000000000000000000045 /* NativeMacosCompatibilityFixtureTests.swift */,
@@ -458,6 +467,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				10000000000000000000049 /* Assets.xcassets in Resources */,
+				4448686B93364960B97876AB /* monaco in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -493,6 +503,7 @@
 				71021CF2EFA24E0285BFFFDA /* EditorFileClass.swift in Sources */,
 				6B338221C82340A48C81D8A6 /* MediaTabView.swift in Sources */,
 				12571DF89D0D4288891BDAFE /* EditorTabStripView.swift in Sources */,
+				40187BB1C8BB496BBDF4129A /* EditorWebView.swift in Sources */,
 				10000000000000000000094 /* PaneApprovalBar.swift in Sources */,
 				100000000000000000000009 /* TerminalSurfaceView.swift in Sources */,
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
@@ -543,6 +554,7 @@
 				34A6BF2B1B324F22ACCD3693 /* EditorFileClassTests.swift in Sources */,
 				F2729C0CEE50441882BFD7A7 /* MediaTabViewTests.swift in Sources */,
 				1B7BF5CE3D794B919522855C /* EditorTabStripViewTests.swift in Sources */,
+				FE04177400364E128B31DF7B /* EditorWebViewTests.swift in Sources */,
 				10000000000000000000095 /* PaneApprovalBarTests.swift in Sources */,
 				100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */,
 				100000000000000000000012 /* PersistedLayoutTests.swift in Sources */,
