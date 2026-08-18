@@ -193,6 +193,21 @@ final class WorkspaceRestorationTests: XCTestCase {
         XCTAssertFalse(mixed.contains("web-1"))
     }
 
+    /// The same shared-row guarantee as the browser test above, for `.editor`:
+    /// editor panes persist through `editor_panes_native`
+    /// (`EditorPanesCodec`), never the web-shared `layout` row.
+    func testEditorPanesNeverReachTheSharedLayoutRow() {
+        let editor = PaneDescriptor(
+            sessionID: "editor-1", group: "g", project: "proj",
+            kind: .editor
+        )
+        let terminal = PaneDescriptor(sessionID: "term-1", group: "g", project: "proj")
+        XCTAssertEqual(
+            WorkspaceRestoration.persistedTabs(from: [editor, terminal]).map(\.id),
+            ["term-1"]
+        )
+    }
+
     // MARK: - bootstrap
 
     func testTheBootstrapPaneIsOneUngroupedShellInTheHomeDirectory() {

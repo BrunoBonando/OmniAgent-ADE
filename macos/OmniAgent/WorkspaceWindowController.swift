@@ -250,6 +250,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 return TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
             case .browser:
                 return BrowserPaneView(initialURL: descriptor.browserURL)
+            case .editor:
+                // No `.editor` entry point exists yet (Task 10 adds it) —
+                // this inert placeholder only keeps the switch exhaustive.
+                return EditorPanePlaceholderView()
             }
         }
 

@@ -168,6 +168,24 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
     }
 
+    /// `.editor` gets the same kind-aware placeholder name as `.browser`
+    /// (its own `Editor N` ladder), recognised as generated the same way.
+    func testEditorPlaceholderName() {
+        let pane = PaneDescriptor(sessionID: "e", group: "g", kind: .editor)
+        XCTAssertEqual(SessionOutline.paneLabel(pane), "Editor 1")
+        XCTAssertTrue(SessionOutline.isGeneratedPaneName("Editor 3"))
+    }
+
+    /// Only a terminal's number is disambiguated by engine — an editor
+    /// numbers its own ladder regardless of what `engine` its descriptor
+    /// happens to carry, exactly like `.browser`.
+    func testEditorNumberingIgnoresEngine() {
+        var first = PaneDescriptor(sessionID: "e1", group: "g", kind: .editor)
+        first.autoNumber = 1
+        let next = SessionOutline.nextPaneNumber([first], group: "g", engine: .shell, kind: .editor)
+        XCTAssertEqual(next, 2)
+    }
+
     // MARK: - Identity
 
     func testTerminalInstancesSurviveEveryLayoutMutation() {
@@ -1014,6 +1032,17 @@ final class PaneWorkspaceViewTests: XCTestCase {
         ))
         XCTAssertEqual(workspace.terminalPaneCount, 2, "a browser consumes no PTY budget")
         XCTAssertEqual(workspace.allPaneIDs.count, 3)
+    }
+
+    /// Same backstop, same exemption, for `.editor` — a tabbed editor holds
+    /// no PTY either.
+    func testEditorPaneCostsNoTerminalSlot() {
+        let workspace = makeWorkspace(panes: 1)
+        XCTAssertEqual(workspace.terminalPaneCount, 1)
+        XCTAssertTrue(workspace.addPane(
+            PaneDescriptor(sessionID: "e1", group: "sess-grp-1", kind: .editor)
+        ))
+        XCTAssertEqual(workspace.terminalPaneCount, 1, "an editor consumes no PTY budget")
     }
 
     /// The app-wide ceiling is a backstop, not a limit anyone meets, and it
@@ -2341,6 +2370,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
                 return TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
             case .browser:
                 return BrowserPaneView(initialURL: descriptor.browserURL)
+            case .editor:
+                return EditorPanePlaceholderView()
             }
         }
         workspace.frame = CGRect(x: 0, y: 0, width: 1200, height: 800)

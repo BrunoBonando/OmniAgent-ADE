@@ -1,11 +1,12 @@
 import AppKit
 
 /// What a pane holds. `Engine` says which *process* a terminal runs; kind says
-/// whether there is a process at all. Browser is a kind, never an `Engine`
-/// case — `EngineLauncher`'s exhaustive switches stay closed.
+/// whether there is a process at all. Browser and editor are kinds, never an
+/// `Engine` case — `EngineLauncher`'s exhaustive switches stay closed.
 enum PaneKind: String, Equatable {
     case terminal
     case browser
+    case editor
 }
 
 /// The container's real contract with its content — what PaneContainerView,
@@ -21,4 +22,19 @@ protocol PaneContentView: NSView {
     func focus()
     func scheduleResize()
     func flushResize()
+}
+
+/// The `.editor` surface until Task 9 builds `EditorPaneView` and Task 10
+/// wires it in. No entry point creates an `.editor` pane yet, so this exists
+/// solely to keep `PaneKind`'s exhaustive switches (the surface factory in
+/// `WorkspaceWindowController` chief among them) compiling — every use of it
+/// is meant to be replaced, not extended.
+final class EditorPanePlaceholderView: NSView, PaneContentView {
+    var isSelected: Bool = false
+    var suspendsDrawing: Bool = false
+    var resizeCoalescer: PaneResizeCoalescer?
+    var primaryResponderView: NSView { self }
+    func focus() {}
+    func scheduleResize() {}
+    func flushResize() {}
 }

@@ -81,10 +81,17 @@ struct CommandPaletteModel: Equatable {
                         PaletteCommand(
                             id: "focus:\(paneID)",
                             title: "Switch to \(SessionOutline.projectLabel(project.project, labels: projectLabels)) — \(session.label) — \(SessionOutline.paneLabel(pane))",
-                            // A browser is a pane kind, not an engine — the
-                            // `.shell` its descriptor carries is a placeholder
-                            // that must not be shown as what the pane runs.
-                            detail: pane.kind == .browser ? "browser" : pane.engine.rawValue,
+                            // A browser or editor is a pane kind, not an
+                            // engine — the `.shell` its descriptor carries is
+                            // a placeholder that must not be shown as what
+                            // the pane runs.
+                            detail: {
+                                switch pane.kind {
+                                case .browser: return "browser"
+                                case .editor: return "editor"
+                                case .terminal: return pane.engine.rawValue
+                                }
+                            }(),
                             action: .focusPane(sessionID: paneID)
                         )
                     )

@@ -37,6 +37,12 @@ struct PaneDescriptor: Equatable {
     /// `browserURL` takes cwd's role for a `.browser`.
     var kind: PaneKind
     var browserURL: String
+    /// What an `.editor` pane holds: its persisted tab list and active index,
+    /// kept on the descriptor for exactly `browserURL`'s reason — so
+    /// `persistEditorPanes` can write live panes back to their row without a
+    /// second bookkeeping collection.
+    var editorTabs: [PersistedEditorTab]
+    var editorActiveIndex: Int
 
     init(
         sessionID: String,
@@ -49,7 +55,9 @@ struct PaneDescriptor: Equatable {
         label: String? = nil,
         themeId: TerminalThemeId? = nil,
         kind: PaneKind = .terminal,
-        browserURL: String = ""
+        browserURL: String = "",
+        editorTabs: [PersistedEditorTab] = [],
+        editorActiveIndex: Int = 0
     ) {
         self.sessionID = sessionID
         self.group = group
@@ -62,6 +70,8 @@ struct PaneDescriptor: Equatable {
         self.themeId = themeId
         self.kind = kind
         self.browserURL = browserURL
+        self.editorTabs = editorTabs
+        self.editorActiveIndex = editorActiveIndex
     }
 
     /// The pane's own restored shape, so a plan can be applied without the
@@ -78,7 +88,9 @@ struct PaneDescriptor: Equatable {
             label: pane.label,
             themeId: pane.themeId,
             kind: pane.kind,
-            browserURL: pane.browserURL
+            browserURL: pane.browserURL,
+            editorTabs: pane.editorTabs,
+            editorActiveIndex: pane.editorActiveIndex
         )
     }
 }
@@ -1672,7 +1684,12 @@ final class PaneContainerView: NSView, NSDraggingSource {
                 // for unnamed sessions would show it for hardly any of them.
                 let session = workspace.sessionLabel(forGroup: descriptor.group)
             else { return nil }
-            let noun = descriptor.kind == .browser ? "browser" : "terminal"
+            let noun: String
+            switch descriptor.kind {
+            case .browser: noun = "browser"
+            case .editor: noun = "editor"
+            case .terminal: noun = "terminal"
+            }
             return "\(session) · \(noun) \(ordinal.index) of \(ordinal.total)"
         }
         addSubview(header)
@@ -1908,17 +1925,17 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // `SessionOutline.paneLabel` is the one place that decides what a pane
         // is called, and the sidebar already used it.
         header.title = SessionOutline.paneLabel(descriptor)
-        // A browser carries `.shell` as a placeholder engine; showing that
-        // badge would claim the pane runs something it does not. `nil`
-        // already hides it.
-        header.engine = descriptor.kind == .browser ? nil : descriptor.engine
+        // A browser or editor carries `.shell` as a placeholder engine;
+        // showing that badge would claim the pane runs something it does
+        // not. `nil` already hides it.
+        header.engine = descriptor.kind == .terminal ? descriptor.engine : nil
         header.isMenuAvailable = descriptor.kind == .terminal
         // Its session's name is half the focus subtitle, so a rename has to
         // reach the bar. A no-op unless this pane is the zoomed one.
         header.refreshSubtitle()
-        // No branch badge either: a browser's `cwd` is empty and it has no
-        // repository to be on.
-        if descriptor.kind != .browser { updateBranch(for: descriptor.cwd) }
+        // No branch badge either: a browser's or editor's `cwd` is empty and
+        // it has no repository to be on.
+        if descriptor.kind == .terminal { updateBranch(for: descriptor.cwd) }
     }
 
     /// Resolves the pane's branch off the main thread and hands it to the
@@ -1937,7 +1954,12 @@ final class PaneContainerView: NSView, NSDraggingSource {
     }
 
     func updateAccessibilityLabel(index: Int, of total: Int) {
-        let noun = workspace?.descriptor(for: paneID)?.kind == .browser ? "browser" : "terminal"
+        let noun: String
+        switch workspace?.descriptor(for: paneID)?.kind {
+        case .browser: noun = "browser"
+        case .editor: noun = "editor"
+        case .terminal, nil: noun = "terminal"
+        }
         let position = "\(noun) pane \(index) of \(total)"
         if let group = workspace?.descriptor(for: paneID)?.groupLabel, !group.isEmpty {
             setAccessibilityLabel("\(group), \(position)")

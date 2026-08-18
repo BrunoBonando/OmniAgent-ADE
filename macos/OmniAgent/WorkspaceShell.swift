@@ -1542,9 +1542,12 @@ final class TerminalRowView: ShellRowView, NSTextFieldDelegate {
         hoverEnabled = false
         hoverFill = ShellPalette.hoverSoft
 
-        let icon = pane.kind == .browser
-            ? TerminalRowView.browserIcon()
-            : TerminalRowView.engineIcon(for: pane.engine)
+        let icon: NSView
+        switch pane.kind {
+        case .browser: icon = TerminalRowView.browserIcon()
+        case .editor: icon = ShellGlyphView(.file, color: ShellPalette.fileGlyph, size: 16, lineWidth: 1.1)
+        case .terminal: icon = TerminalRowView.engineIcon(for: pane.engine)
+        }
         engineIcon = icon
         let title = titleField
 

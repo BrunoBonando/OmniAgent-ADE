@@ -136,11 +136,15 @@ enum SessionOutline {
         "\(engine.displayName) \(n)"
     }
 
-    /// The kind-aware placeholder: a browser is not an engine, so it gets its
-    /// own `Browser N` ladder rather than wearing the `.shell` its descriptor
-    /// happens to carry.
+    /// The kind-aware placeholder: a browser or editor is not an engine, so
+    /// each gets its own `Browser N` / `Editor N` ladder rather than wearing
+    /// the `.shell` its descriptor happens to carry.
     static func defaultPaneName(_ pane: PaneDescriptor) -> String {
-        pane.kind == .browser ? "Browser \(pane.autoNumber)" : defaultPaneName(pane.engine, pane.autoNumber)
+        switch pane.kind {
+        case .browser: return "Browser \(pane.autoNumber)"
+        case .editor: return "Editor \(pane.autoNumber)"
+        case .terminal: return defaultPaneName(pane.engine, pane.autoNumber)
+        }
     }
 
     /// Whether a stored label is one this app generated rather than one the
@@ -155,7 +159,8 @@ enum SessionOutline {
     static func isGeneratedPaneName(_ name: String) -> Bool {
         let parts = name.split(separator: " ")
         guard parts.count == 2, Int(parts[1]) != nil else { return false }
-        return parts[0] == "Browser" || Engine.allCases.contains { $0.displayName == parts[0] }
+        return parts[0] == "Browser" || parts[0] == "Editor"
+            || Engine.allCases.contains { $0.displayName == parts[0] }
     }
 
     /// The number a new terminal takes in its session — the lowest free one,
@@ -170,12 +175,12 @@ enum SessionOutline {
         engine: Engine,
         kind: PaneKind = .terminal
     ) -> Int {
-        // Browsers number their own ladder regardless of engine — the
-        // `.shell` a browser descriptor carries is a placeholder, not an
+        // Browsers and editors number their own ladder regardless of engine
+        // — the `.shell` their descriptor carries is a placeholder, not an
         // identity — while terminals keep numbering per engine.
         let taken = Set(
             panes
-                .filter { $0.group == group && $0.kind == kind && (kind == .browser || $0.engine == engine) }
+                .filter { $0.group == group && $0.kind == kind && (kind != .terminal || $0.engine == engine) }
                 .map(\.autoNumber)
         )
         var n = 1

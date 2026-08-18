@@ -27,12 +27,17 @@ struct RestoredPane: Equatable {
     let group: String
     let groupLabel: String?
     /// What the pane holds. The shared `layout` row only ever describes
-    /// terminals; a `.browser` pane restores from its own native-only row.
+    /// terminals; a `.browser` or `.editor` pane restores from its own
+    /// native-only row.
     let kind: PaneKind
     /// The URL a `.browser` pane last showed — cwd's role, for a browser.
     let browserURL: String
+    /// An `.editor` pane's persisted tab list and active index — restored
+    /// from `editor_panes_native`, never the shared `layout` row.
+    let editorTabs: [PersistedEditorTab]
+    let editorActiveIndex: Int
 
-    /// Explicit, with defaults on the two kind fields, so every call site
+    /// Explicit, with defaults on the kind fields, so every call site
     /// written against the old memberwise init compiles unchanged.
     init(
         sessionID: String,
@@ -45,7 +50,9 @@ struct RestoredPane: Equatable {
         group: String,
         groupLabel: String?,
         kind: PaneKind = .terminal,
-        browserURL: String = ""
+        browserURL: String = "",
+        editorTabs: [PersistedEditorTab] = [],
+        editorActiveIndex: Int = 0
     ) {
         self.sessionID = sessionID
         self.reattaches = reattaches
@@ -58,6 +65,8 @@ struct RestoredPane: Equatable {
         self.groupLabel = groupLabel
         self.kind = kind
         self.browserURL = browserURL
+        self.editorTabs = editorTabs
+        self.editorActiveIndex = editorActiveIndex
     }
 }
 
