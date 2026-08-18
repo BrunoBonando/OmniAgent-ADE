@@ -311,6 +311,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.onRequestNewPane = { [weak self] in self?.newTerminalPane(nil) }
         workspace.onRequestNewBrowserPane = { [weak self] in self?.newBrowserPane(nil) }
         workspace.onRequestNewEditorPane = { [weak self] in self?.newEditorPane(nil) }
+        // Every tab drop lands in one of three broker methods, so the rules —
+        // the save prompt, the `PaneGrid.maxPanes` cap, the pane wiring — are
+        // written once rather than once per destination view.
+        workspace.onEditorTabDropOnPane = { [weak self] payload, targetID, zone in
+            guard let self else { return }
+            if zone == .center {
+                handleEditorTabDrop(payload, intoPane: targetID, at: Int.max)
+            } else {
+                handleEditorTabEdgeDrop(payload, target: targetID, zone: zone)
+            }
+        }
+        workspace.onEditorTabDropOnHole = { [weak self] payload in
+            self?.handleEditorTabHoleDrop(payload)
+        }
         workspace.onRequestClosePane = { [weak self] paneID in
             guard let self else { return }
             // Route through focus so the header's close button ends *that*
@@ -2042,46 +2056,64 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             browser.onURLChange = { [weak self] url in
                 self?.workspace.updateDescriptor(for: sessionID) { $0.browserURL = url }
             }
-        } else if let editor = workspace.editorPane(for: sessionID) {
-            // The active tab's name is what the pane wears — the browser's
-            // page-title path, applied to tabs.
-            editor.onTitleChange = { [weak self] title in
-                guard let self else { return }
-                workspace.updateDescriptor(for: sessionID) { $0.title = title }
-                if workspace.focusedPaneID == sessionID { refreshTitle() }
-            }
-            // Tab mutations flow into the descriptor; `updateDescriptor` fires
-            // `onPanesChanged`, which is what `persistEditorPanes` hangs off —
-            // `onURLChange`'s pattern, applied to the tab list.
-            editor.onStateChange = { [weak self] tabs, active in
-                self?.workspace.updateDescriptor(for: sessionID) {
-                    $0.editorTabs = tabs
-                    $0.editorActiveIndex = active
-                }
-            }
-            editor.onLastTabClosed = { [weak self] in
-                self?.workspace.closePane(sessionID)
-            }
-            // The pane that asked travels with the request: the callback
-            // carries only a URL, and by the time a ± toggle is pressed the
-            // focused pane is often somewhere else entirely.
-            editor.onOpenDiffRequest = { [weak self] url in
-                self?.openDiffInEditor(url, from: sessionID)
-            }
-            // The Changes overview's "open file" is a deliberate open, so it
-            // pins — the same rule a double click in the FILES tree follows.
-            editor.onOpenFileRequest = { [weak self] url in
-                self?.openFileInEditor(url, pinned: true)
-            }
-            // A pane created after the status landed would otherwise render
-            // "not a git repository" inside a repository.
-            editor.setGitStatus(latestGitStatus)
-            // `workspaceDirectory(for:)` already falls back to the open
-            // workspace when the pane carries no project of its own.
-            editor.workspaceRoot = workspaceDirectory(for: pane.project)
-                .map { URL(fileURLWithPath: $0) }
+        } else if workspace.editorPane(for: sessionID) != nil {
+            wireEditorPane(sessionID, project: pane.project)
         }
         return true
+    }
+
+    /// Everything the controller hangs off an editor pane. Extracted from
+    /// `addPane` because the edge/hole tab drops build their pane through
+    /// `workspace.addPane(…)` directly — that path inserts rather than
+    /// appends, which `addPane(_:startSession:)` cannot express — and a pane
+    /// that skipped this wiring would never persist a tab, never close when
+    /// its last one went, and never render a diff.
+    private func wireEditorPane(_ sessionID: String, project: String) {
+        guard let editor = workspace.editorPane(for: sessionID) else { return }
+        // The pane's own id, for the payload a dragged tab carries.
+        editor.paneID = sessionID
+        // The active tab's name is what the pane wears — the browser's
+        // page-title path, applied to tabs.
+        editor.onTitleChange = { [weak self] title in
+            guard let self else { return }
+            workspace.updateDescriptor(for: sessionID) { $0.title = title }
+            if workspace.focusedPaneID == sessionID { refreshTitle() }
+        }
+        // Tab mutations flow into the descriptor; `updateDescriptor` fires
+        // `onPanesChanged`, which is what `persistEditorPanes` hangs off —
+        // `onURLChange`'s pattern, applied to the tab list.
+        editor.onStateChange = { [weak self] tabs, active in
+            self?.workspace.updateDescriptor(for: sessionID) {
+                $0.editorTabs = tabs
+                $0.editorActiveIndex = active
+            }
+        }
+        editor.onLastTabClosed = { [weak self] in
+            self?.workspace.closePane(sessionID)
+        }
+        // The pane that asked travels with the request: the callback
+        // carries only a URL, and by the time a ± toggle is pressed the
+        // focused pane is often somewhere else entirely.
+        editor.onOpenDiffRequest = { [weak self] url in
+            self?.openDiffInEditor(url, from: sessionID)
+        }
+        // The Changes overview's "open file" is a deliberate open, so it
+        // pins — the same rule a double click in the FILES tree follows.
+        editor.onOpenFileRequest = { [weak self] url in
+            self?.openFileInEditor(url, pinned: true)
+        }
+        // A tab dropped in this pane's strip: the strip knows *where*, this
+        // knows *which pane*, and the broker below owns the rules.
+        editor.onTabDroppedInStrip = { [weak self] payload, index in
+            self?.handleEditorTabDrop(payload, intoPane: sessionID, at: index)
+        }
+        // A pane created after the status landed would otherwise render
+        // "not a git repository" inside a repository.
+        editor.setGitStatus(latestGitStatus)
+        // `workspaceDirectory(for:)` already falls back to the open
+        // workspace when the pane carries no project of its own.
+        editor.workspaceRoot = workspaceDirectory(for: project)
+            .map { URL(fileURLWithPath: $0) }
     }
 
     /// The tab strip's ± toggle, a FILES-tree badge click or the ⌘K row asked
@@ -2125,6 +2157,170 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.focusPane(target.id)
         target.pane.setGitStatus(latestGitStatus)
         target.pane.openChanges()
+    }
+
+    // MARK: - Tab drag and drop
+
+    /// A reorder inside one strip, or a move between two editor panes.
+    ///
+    /// `insertIndex` is the index the strip's drop indicator was showing —
+    /// measured over the tabs *as they stand*. For a move into another pane
+    /// that is already the right slot; for a reorder inside the dragged tab's
+    /// own strip it counts the dragged tab itself, so a rightward move is one
+    /// too far and is corrected here. `Int.max` means "no position was
+    /// indicated" — a drop on the pane body rather than on its strip.
+    func handleEditorTabDrop(_ payload: EditorTabDragPayload, intoPane targetID: String, at insertIndex: Int) {
+        guard let source = workspace.editorPane(for: payload.paneID),
+              workspace.editorPane(for: targetID) != nil,
+              source.model.tabs.indices.contains(payload.index)
+        else { return }
+        if payload.paneID == targetID {
+            // A release on the pane's own body says nothing about where the
+            // tab should sit, so it moves nothing — an accidental drop must
+            // not silently reorder the strip.
+            guard insertIndex != Int.max else { return }
+            source.moveTab(
+                from: payload.index,
+                to: insertIndex > payload.index ? insertIndex - 1 : insertIndex
+            )
+            return
+        }
+        deliverAfterSavePrompt(payload) { [weak self] in
+            guard let self,
+                  let source = workspace.editorPane(for: payload.paneID),
+                  let target = workspace.editorPane(for: targetID),
+                  let tab = source.removeTabForTransfer(at: payload.index)
+            else { return }
+            target.receiveTransferredTab(
+                tab,
+                at: insertIndex == Int.max ? target.model.tabs.count : insertIndex
+            )
+            workspace.focusPane(targetID)
+        }
+    }
+
+    /// The grid-faithful "edge split": a new editor pane inserted adjacent to
+    /// `targetID` in grid order, holding the dragged tab.
+    ///
+    /// The pane is created **before** the tab is lifted out of its source.
+    /// The other order has a hole in it: moving a pane's only tab away closes
+    /// that pane, and if it was also the anchor there would be nothing left
+    /// to insert beside — the tab would be gone with nowhere to land.
+    func handleEditorTabEdgeDrop(_ payload: EditorTabDragPayload, target targetID: String, zone: EditorTabDropZone) {
+        guard zone != .center,
+              let source = workspace.editorPane(for: payload.paneID),
+              source.model.tabs.indices.contains(payload.index),
+              let anchor = workspace.descriptor(for: targetID),
+              workspace.hasRoomForAnotherPane(inGroupOf: targetID)
+        else { return }
+        deliverAfterSavePrompt(payload) { [weak self] in
+            guard let self,
+                  let source = workspace.editorPane(for: payload.paneID),
+                  source.model.tabs.indices.contains(payload.index),
+                  workspace.descriptor(for: targetID) != nil,
+                  workspace.hasRoomForAnotherPane(inGroupOf: targetID)
+            else { return }
+            let descriptor = editorPaneDescriptor(
+                holding: source.model.tabs[payload.index],
+                group: anchor.group,
+                like: anchor
+            )
+            guard workspace.addPane(
+                descriptor,
+                inserting: zone == .insertBefore ? .before : .after,
+                of: targetID
+            ) else { return }
+            wireEditorPane(descriptor.sessionID, project: descriptor.project)
+            source.removeTabForTransfer(at: payload.index)
+            workspace.focusPane(descriptor.sessionID)
+        }
+    }
+
+    /// A drop on an empty grid cell. A plain append: the grid's hole *is* the
+    /// next fill slot, so the new pane lands exactly where the drop happened.
+    func handleEditorTabHoleDrop(_ payload: EditorTabDragPayload) {
+        guard let source = workspace.editorPane(for: payload.paneID),
+              source.model.tabs.indices.contains(payload.index),
+              // The hole only ever exists in the session on screen, so that
+              // is the session the new pane joins.
+              let group = workspace.activeGroup,
+              workspace.paneCount(inGroup: group) < PaneGrid.maxPanes
+        else { return }
+        let sibling = workspace.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
+        deliverAfterSavePrompt(payload) { [weak self] in
+            guard let self,
+                  let source = workspace.editorPane(for: payload.paneID),
+                  source.model.tabs.indices.contains(payload.index),
+                  workspace.paneCount(inGroup: group) < PaneGrid.maxPanes
+            else { return }
+            let descriptor = editorPaneDescriptor(
+                holding: source.model.tabs[payload.index],
+                group: group,
+                like: sibling
+            )
+            guard workspace.addPane(descriptor) else { return }
+            wireEditorPane(descriptor.sessionID, project: descriptor.project)
+            source.removeTabForTransfer(at: payload.index)
+            workspace.focusPane(descriptor.sessionID)
+        }
+    }
+
+    /// A dirty buffer cannot travel: each editor pane owns its own web view,
+    /// and the destination reads the file from disk. So v1 resolves the edit
+    /// first — save it, discard it, or call the whole drop off — and never
+    /// moves a tab whose unsaved work would go quietly missing.
+    ///
+    /// A clean tab delivers straight through; nothing here is asynchronous
+    /// unless there is genuinely something to ask about.
+    private func deliverAfterSavePrompt(_ payload: EditorTabDragPayload, then deliver: @escaping () -> Void) {
+        guard let source = workspace.editorPane(for: payload.paneID),
+              source.model.tabs.indices.contains(payload.index)
+        else { return }
+        let tab = source.model.tabs[payload.index]
+        guard tab.isDirty else {
+            deliver()
+            return
+        }
+        source.confirmSave((tab.path as NSString).lastPathComponent) { decision in
+            switch decision {
+            case .cancel:
+                break
+            case .discard:
+                deliver()
+            case .save:
+                // Re-resolved: the prompt hands control back to the run loop,
+                // and the strip can have moved under it.
+                guard let index = source.model.index(of: tab.path, kind: tab.kind) else { return }
+                source.save(at: index) { saved in if saved { deliver() } }
+            }
+        }
+    }
+
+    /// The descriptor for a pane created by a tab drop. Numbered by the same
+    /// rule `addPane(_:startSession:)` uses, so the sidebar does not show two
+    /// "Editor 1"s, and seeded with the tab already pinned — a tab you
+    /// deliberately dragged somewhere is not a preview.
+    private func editorPaneDescriptor(
+        holding tab: EditorTab,
+        group: String,
+        like sibling: PaneDescriptor?
+    ) -> PaneDescriptor {
+        var descriptor = PaneDescriptor(
+            sessionID: WorkspaceRestoration.bootstrapPane().sessionID,
+            group: group,
+            groupLabel: sibling?.groupLabel,
+            project: sibling?.project ?? "",
+            kind: .editor,
+            editorTabs: [PersistedEditorTab(path: tab.path, kind: tab.kind.rawValue, pinned: true)],
+            editorActiveIndex: 0
+        )
+        descriptor.autoNumber = SessionOutline.nextPaneNumber(
+            workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
+            group: group,
+            engine: descriptor.engine,
+            kind: .editor
+        )
+        return descriptor
     }
 
     /// The daemon restarted and forgot this session.

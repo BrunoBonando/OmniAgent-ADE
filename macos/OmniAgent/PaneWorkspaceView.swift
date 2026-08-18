@@ -136,6 +136,11 @@ final class PaneResizeCoalescer {
 /// `paneGrid.ts`'s ponytail note) cannot happen here.
 final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     static let paneDragType = NSPasteboard.PasteboardType("digital.bruno.omniagent.pane")
+    /// An editor *tab* in flight. A separate type from `paneDragType` on
+    /// purpose: every destination can then say yes to one and no to the other
+    /// without inspecting a payload, which is what gives a terminal pane the
+    /// no-drop cursor for a tab and the drop highlight for a pane.
+    static let editorTabDragType = NSPasteboard.PasteboardType("digital.bruno.omniagent.editor-tab")
     static let dividerThickness: CGFloat = 6
     static let minimumPaneSize = CGSize(width: 160, height: 96)
     /// `padding:7px` around the design's pane grid — without it the outermost
@@ -184,6 +189,13 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     var onRequestNewBrowserPane: (() -> Void)?
     /// The hole tile's third affordance: an editor in that cell.
     var onRequestNewEditorPane: (() -> Void)?
+    /// An editor tab was dropped on a pane: the payload, the pane it landed
+    /// on, and which band of it. Routed up rather than applied here — moving
+    /// a tab can prompt about unsaved work and can create a pane, and both are
+    /// the window controller's to decide.
+    var onEditorTabDropOnPane: ((EditorTabDragPayload, String, EditorTabDropZone) -> Void)?
+    /// An editor tab was dropped on an empty grid cell.
+    var onEditorTabDropOnHole: ((EditorTabDragPayload) -> Void)?
     /// The header's close button. Closing a pane ends its PTY, which only the
     /// window controller may do — this view never kills a session itself.
     var onRequestClosePane: ((String) -> Void)?
@@ -262,6 +274,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         grids[group]?.paneIDs().count ?? 0
     }
 
+    /// Whether `sessionID`'s own session can hold one more pane — the same
+    /// `PaneGrid.maxPanes` bound every creation path checks, asked from the
+    /// side of an existing pane. The drop destinations use it to refuse an
+    /// edge or hole drop *before* the cursor says yes.
+    func hasRoomForAnotherPane(inGroupOf sessionID: String) -> Bool {
+        guard let group = descriptors[sessionID]?.group else { return false }
+        return paneCount(inGroup: group) < PaneGrid.maxPanes
+    }
+
     /// The most terminals the app will run at once across *every* session —
     /// the mirror of `omniagent-pty-daemon`'s `MAX_SESSIONS`, and the only
     /// cap that is about the whole app rather than one session. Eight
@@ -313,6 +334,42 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// for a session id already on screen.
     @discardableResult
     func addPane(_ descriptor: PaneDescriptor) -> Bool {
+        insertPane(descriptor) { existing, grid in
+            PaneGrid.synced(grid, desiredIDs: existing + [descriptor.sessionID])
+        }
+    }
+
+    /// The edge-drop insertion: the new pane lands adjacent to `targetID` in
+    /// grid order and the ladder re-lays out around it. Every refusal
+    /// `addPane(_:)` makes it makes too, plus its own — an anchor in another
+    /// session's grid has no cell here to sit beside.
+    ///
+    /// `PaneGrid.build` rather than `synced` on purpose: order is the whole
+    /// point of this call, and dragged fractions reset exactly as they do for
+    /// any other change of rung.
+    @discardableResult
+    func addPane(
+        _ descriptor: PaneDescriptor,
+        inserting position: PaneInsertPosition,
+        of targetID: String
+    ) -> Bool {
+        guard descriptors[targetID]?.group == descriptor.group else { return false }
+        return insertPane(descriptor) { existing, _ in
+            var ids = existing
+            let anchor = ids.firstIndex(of: targetID) ?? ids.count - 1
+            let slot = position == .before ? anchor : anchor + 1
+            ids.insert(descriptor.sessionID, at: min(max(0, slot), ids.count))
+            return PaneGrid.build(ids)
+        }
+    }
+
+    /// Everything an add does except decide the new shape, which is the one
+    /// thing an append and an insert disagree about. `shapeGrid` is handed the
+    /// group's current pane ids (in fill order) and its current grid.
+    private func insertPane(
+        _ descriptor: PaneDescriptor,
+        shapeGrid: ([String], PaneGrid?) -> PaneGrid?
+    ) -> Bool {
         // Per session, not per app: twelve is what one grid can draw, and each
         // session has its own grid. A full session must not stop a different
         // one from opening a terminal.
@@ -340,10 +397,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         addSubview(container)
         let group = descriptor.group
         if !groupOrder.contains(group) { groupOrder.append(group) }
-        grids[group] = PaneGrid.synced(
-            grids[group],
-            desiredIDs: (grids[group]?.paneIDs() ?? []) + [descriptor.sessionID]
-        )
+        grids[group] = shapeGrid(grids[group]?.paneIDs() ?? [], grids[group])
         // A pane you just opened is one you are about to type in, so its
         // session comes to the screen. `focusPane` below would switch to it
         // regardless; doing it here keeps `updateVisibility` from running
@@ -1231,9 +1285,75 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             // A moved view is removed and re-added, which is what loses focus.
             reclaimFirstResponder(container)
         }
+        // Where each mover is leaving from, read before the grid changes under
+        // them: the swap lays out immediately, so by the next line these frames
+        // are the cells they are gliding *out* of.
+        let flight = [targetID, sourceID].compactMap { id in containers[id].map { ($0, $0.frame) } }
         guard swapPanes(sourceID, targetID) else { return false }
+        for (container, start) in flight { castGlideShadow(under: container, from: start) }
         if let wasFocused { focusPane(wasFocused) }
         return true
+    }
+
+    /// The soft drop a pane casts while it is in flight — faded in and back out
+    /// across the glide, so a mover reads as lifted off the grid for the moment
+    /// it is crossing it and flat again the instant it lands.
+    ///
+    /// A layer of *this* view directly under the pane's own, rather than a
+    /// shadow on the pane: `PaneContainerView` masks to bounds — that mask is
+    /// what rounds its corners — and a mask clips its layer's own shadow away,
+    /// the same reason the focus card's shadow is a separate layer. It carries
+    /// the pane's exact frame and the same animation, so the pane covers its
+    /// body completely and only the blur past the edges is ever seen.
+    ///
+    /// No-op outside a transition, which is what keeps this to the swap.
+    private func castGlideShadow(under container: PaneContainerView, from start: NSRect) {
+        guard zoomTransition > 0, let host = layer, let paneLayer = container.layer else { return }
+        let end = container.frame
+        let shadow = CALayer()
+        shadow.frame = end
+        shadow.backgroundColor = NSColor.black.cgColor
+        shadow.cornerRadius = PaneContainerView.cornerRadius
+        shadow.cornerCurve = .continuous
+        shadow.shadowColor = NSColor.black.cgColor
+        shadow.shadowOpacity = 1
+        shadow.shadowRadius = 16
+        // Positive is *down*: this view is flipped, so AppKit flips its backing
+        // layer's geometry to match, and the shadow is cast in that space.
+        shadow.shadowOffset = CGSize(width: 0, height: 8)
+        // Spelled out rather than derived from the layer's alpha, which would
+        // cost an offscreen pass per frame for both movers.
+        shadow.shadowPath = CGPath(
+            roundedRect: CGRect(origin: .zero, size: end.size),
+            cornerWidth: PaneContainerView.cornerRadius,
+            cornerHeight: PaneContainerView.cornerRadius,
+            transform: nil
+        )
+        // The model value stays 0, so the fade below is the only time it shows —
+        // and it is back to nothing by the time it is torn down, whatever a
+        // dropped frame does to the timing.
+        shadow.opacity = 0
+        host.insertSublayer(shadow, below: paneLayer)
+        zoomLayer(
+            shadow,
+            fromPosition: CGPoint(x: start.midX, y: start.midY),
+            fromSize: start.size,
+            toSize: end.size
+        )
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 0.45
+        fade.duration = zoomTransition / 2
+        fade.autoreverses = true
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        shadow.add(fade, forKey: "opacity")
+        // Scheduled rather than handed to a transaction's completion, for the
+        // reason `setZoomed` gives: a completion that never arrives would leave
+        // this behind for good, and a stale timer here can only remove a layer
+        // that is already invisible.
+        DispatchQueue.main.asyncAfter(deadline: .now() + zoomTransition) {
+            shadow.removeFromSuperlayer()
+        }
     }
 
     func canAcceptDrop(from sourceID: String, onto targetID: String) -> Bool {
@@ -1324,6 +1444,9 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
                 onActivateBrowser: { [weak self] in self?.onRequestNewBrowserPane?() },
                 onActivateEditor: { [weak self] in self?.onRequestNewEditorPane?() }
             )
+            placeholder.onDropEditorTab = { [weak self] payload in
+                self?.onEditorTabDropOnHole?(payload)
+            }
             holePlaceholders.append(placeholder)
             addSubview(placeholder, positioned: .below, relativeTo: subviews.first)
         }
@@ -1646,7 +1769,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
         addSubview(approvalBar)
         addSubview(dropHighlight, positioned: .above, relativeTo: nil)
         updateChrome()
-        registerForDraggedTypes([PaneWorkspaceView.paneDragType])
+        registerForDraggedTypes([PaneWorkspaceView.paneDragType, PaneWorkspaceView.editorTabDragType])
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Terminal pane")
@@ -1942,11 +2065,25 @@ final class PaneContainerView: NSView, NSDraggingSource {
     // MARK: - Dragging destination
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if editorTabPayload(from: sender) != nil {
+            // Assigned either way: the answer changes as the pointer crosses
+            // from a pane's centre into an edge band on a full grid, and a
+            // highlight left up under a no-drop cursor is a lie.
+            isDropTarget = editorTabDropZone(for: sender) != nil
+            return isDropTarget ? .move : []
+        }
         guard let source = sender.draggingPasteboard.string(forType: PaneWorkspaceView.paneDragType),
               workspace?.canAcceptDrop(from: source, onto: paneID) == true
         else { return [] }
         isDropTarget = true
         return .move
+    }
+
+    /// AppKit only reuses `draggingEntered`'s answer while a destination does
+    /// not implement this — and an editor tab's answer changes as the pointer
+    /// crosses from a pane's edge band into its centre on a full grid.
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
@@ -1959,9 +2096,35 @@ final class PaneContainerView: NSView, NSDraggingSource {
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         isDropTarget = false
+        if let payload = editorTabPayload(from: sender) {
+            // Re-asked rather than remembered: a refusal must mutate nothing,
+            // and `performDragOperation` is reachable without an `entered`.
+            guard let zone = editorTabDropZone(for: sender) else { return false }
+            workspace?.onEditorTabDropOnPane?(payload, paneID, zone)
+            return true
+        }
         guard let source = sender.draggingPasteboard.string(forType: PaneWorkspaceView.paneDragType)
         else { return false }
         return workspace?.performPaneDrop(from: source, onto: paneID) ?? false
+    }
+
+    private func editorTabPayload(from sender: NSDraggingInfo) -> EditorTabDragPayload? {
+        EditorTabDragPayload.decode(
+            sender.draggingPasteboard.string(forType: PaneWorkspaceView.editorTabDragType)
+        )
+    }
+
+    /// What a tab dropped at the pointer would do here, or `nil` for the
+    /// no-drop cursor. Two refusals, both the spec's: a terminal or browser
+    /// pane never grows tabs, and an edge drop needs a free grid cell —
+    /// `PaneGrid.maxPanes`, the same bound ⇧⌘E is refused by.
+    private func editorTabDropZone(for sender: NSDraggingInfo) -> EditorTabDropZone? {
+        guard workspace?.descriptor(for: paneID)?.kind == .editor else { return nil }
+        let zone = EditorTabDropZone.zone(at: convert(sender.draggingLocation, from: nil), in: bounds)
+        guard zone == .center || workspace?.hasRoomForAnotherPane(inGroupOf: paneID) == true else {
+            return nil
+        }
+        return zone
     }
 }
 
@@ -3043,6 +3206,10 @@ final class PaneHolePlaceholderView: NSView {
 
     private let items: [Item]
 
+    /// An editor tab dropped in this empty cell. The cell is a hole precisely
+    /// because the grid is not full, so the pane it asks for always fits.
+    var onDropEditorTab: ((EditorTabDragPayload) -> Void)?
+
     private static let accent = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 1)
     private static let labelAttributes: [NSAttributedString.Key: Any] = [
         .font: NSFont.systemFont(ofSize: 11, weight: .medium),
@@ -3074,11 +3241,34 @@ final class PaneHolePlaceholderView: NSView {
         ]
         super.init(frame: .zero)
         wantsLayer = true
+        registerForDraggedTypes([PaneWorkspaceView.editorTabDragType])
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         // The single assistive press stays "Add terminal": the other kinds
         // remain reachable through the menu, palette, toolbar and sidebar.
         setAccessibilityLabel("Add terminal")
+    }
+
+    // MARK: - Dragging destination
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        payload(from: sender) == nil ? [] : .move
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let payload = payload(from: sender) else { return false }
+        onDropEditorTab?(payload)
+        return true
+    }
+
+    private func payload(from sender: NSDraggingInfo) -> EditorTabDragPayload? {
+        EditorTabDragPayload.decode(
+            sender.draggingPasteboard.string(forType: PaneWorkspaceView.editorTabDragType)
+        )
     }
 
     @available(*, unavailable)

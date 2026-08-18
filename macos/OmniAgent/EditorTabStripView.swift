@@ -31,6 +31,10 @@ final class EditorTabStripView: NSView {
     var onSave: (() -> Void)?
     var onDiffToggle: (() -> Void)?
     var onBeginDrag: ((Int, NSEvent) -> Void)?
+    /// A tab was dropped in this strip, with the index the indicator was
+    /// showing. The strip never mutates anything itself — including its own
+    /// pane's model — so the index is reported, not applied.
+    var onTabDrop: ((EditorTabDragPayload, Int) -> Void)?
 
     private let scroll = NSScrollView()
     private let itemsContainer = NSView()
@@ -85,6 +89,10 @@ final class EditorTabStripView: NSView {
         addSubview(diffButton)
         // Added last so it always draws above the tab items and the scroller.
         addSubview(dropIndicator)
+        // A strip takes any editor tab: the merge/dedupe rules live in
+        // `EditorPaneModel.insert`, and which pane may hold what is not a
+        // question a tab strip can answer.
+        registerForDraggedTypes([PaneWorkspaceView.editorTabDragType])
     }
 
     @available(*, unavailable)
@@ -197,6 +205,53 @@ final class EditorTabStripView: NSView {
         dropIndicator.isHidden = true
     }
 
+    // MARK: - Dragging destination
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard let index = dropIndex(for: sender) else {
+            clearDropIndicator()
+            return []
+        }
+        showDropIndicator(at: index)
+        return .move
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        clearDropIndicator()
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        clearDropIndicator()
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        clearDropIndicator()
+        guard let payload = payload(from: sender), let index = dropIndex(for: sender) else {
+            return false
+        }
+        onTabDrop?(payload, index)
+        return true
+    }
+
+    /// Where the indicator sits for the pointer's x — measured over the tabs
+    /// as they stand, so for a reorder within this strip the dragged tab is
+    /// still counted. `nil` when the pasteboard carries no tab at all.
+    private func dropIndex(for sender: NSDraggingInfo) -> Int? {
+        guard payload(from: sender) != nil else { return nil }
+        let x = convert(sender.draggingLocation, from: nil).x
+        return Self.insertionIndex(forX: x, tabFrames: itemFrames)
+    }
+
+    private func payload(from sender: NSDraggingInfo) -> EditorTabDragPayload? {
+        EditorTabDragPayload.decode(
+            sender.draggingPasteboard.string(forType: PaneWorkspaceView.editorTabDragType)
+        )
+    }
+
     // Test hooks — the real events go through EditorTabItemView's mouse handling.
     func selectForTesting(index: Int) { items[index].onPress?() }
     func closeForTesting(index: Int) { items[index].onClosePress?() }
@@ -293,7 +348,11 @@ final class EditorTabItemView: NSView {
         let distance = hypot(event.locationInWindow.x - start.x, event.locationInWindow.y - start.y)
         guard distance > Self.dragThreshold else { return }
         didFireDragOut = true
-        onDragOut?(event)
+        // `onDragOut` pins the tab, and the pin re-renders the strip — which
+        // removes and releases every item view, *this* one included, while
+        // this method is still on its own stack. The extra reference keeps it
+        // alive until the call returns.
+        withExtendedLifetime(self) { onDragOut?(event) }
     }
 
     override func mouseUp(with event: NSEvent) {

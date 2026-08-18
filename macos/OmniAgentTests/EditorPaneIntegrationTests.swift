@@ -603,6 +603,231 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertTrue(pane.model.tabs[0].isPinned)
     }
 
+    // MARK: - Tab drag-and-drop (Task 14)
+
+    /// The whole cross-pane move, driven through the closure the workspace
+    /// actually calls rather than the broker method directly — so this fails
+    /// if the wiring is missing as well as if the rule is wrong.
+    func testCentreDropMovesTheTabBetweenPanesAndClosesTheEmptySource() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "x")
+        controller.openFileInEditor(file, pinned: true)
+        let sourceID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let targetID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        XCTAssertNotEqual(sourceID, targetID)
+
+        try XCTUnwrap(controller.workspaceView.onEditorTabDropOnPane)(
+            EditorTabDragPayload(paneID: sourceID, index: 0), targetID, .center
+        )
+
+        XCTAssertNil(
+            controller.workspaceView.editorPane(for: sourceID),
+            "the source closed with its last tab"
+        )
+        XCTAssertEqual(
+            controller.workspaceView.editorPane(for: targetID)?.model.tabs.map(\.path),
+            [file.path]
+        )
+        XCTAssertEqual(controller.workspaceView.focusedPaneID, targetID)
+    }
+
+    /// Every pane's strip reports its drops, and the index it reports is the
+    /// one the indicator drew — read off the strip as it stands, with the
+    /// dragged tab still in it, so a rightward move is one short of it.
+    func testAStripDropReordersUsingTheIndicatorsIndex() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let files = try ["a.swift", "b.swift", "c.swift"].map { try makeTempFile($0, "x") }
+        for file in files { controller.openFileInEditor(file, pinned: true) }
+        let paneID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: paneID))
+        XCTAssertEqual(pane.model.tabs.map(\.path), files.map(\.path))
+        XCTAssertNotNil(pane.onTabDroppedInStrip, "the strip's drops are wired to the broker")
+
+        try XCTUnwrap(pane.onTabDroppedInStrip)(EditorTabDragPayload(paneID: paneID, index: 0), 2)
+
+        XCTAssertEqual(
+            pane.model.tabs.map(\.path),
+            [files[1].path, files[0].path, files[2].path],
+            "dropped between b and c, not after c"
+        )
+    }
+
+    /// A drop on a pane's own body says nothing about where the tab should
+    /// go, so it moves nothing — an accidental release must not silently
+    /// reorder the strip.
+    func testACentreDropOnTheTabsOwnPaneMovesNothing() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let files = try ["a.swift", "b.swift"].map { try makeTempFile($0, "x") }
+        for file in files { controller.openFileInEditor(file, pinned: true) }
+        let paneID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: paneID))
+
+        controller.handleEditorTabDrop(
+            EditorTabDragPayload(paneID: paneID, index: 0), intoPane: paneID, at: Int.max
+        )
+
+        XCTAssertEqual(pane.model.tabs.map(\.path), files.map(\.path))
+    }
+
+    func testEdgeDropInsertsANewPaneAdjacentHoldingTheTab() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let a = try makeTempFile("a.swift", "x")
+        let b = try makeTempFile("b.swift", "y")
+        controller.openFileInEditor(a, pinned: true)
+        controller.openFileInEditor(b, pinned: true)
+        let paneID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let before = controller.workspaceView.paneIDs
+
+        controller.handleEditorTabEdgeDrop(
+            EditorTabDragPayload(paneID: paneID, index: 1), target: paneID, zone: .insertAfter
+        )
+
+        let after = controller.workspaceView.paneIDs
+        XCTAssertEqual(after.count, before.count + 1)
+        let anchor = try XCTUnwrap(after.firstIndex(of: paneID))
+        let newID = after[anchor + 1]
+        XCTAssertEqual(controller.workspaceView.descriptor(for: newID)?.kind, .editor)
+        XCTAssertEqual(
+            controller.workspaceView.descriptor(for: newID)?.group,
+            controller.workspaceView.descriptor(for: paneID)?.group
+        )
+        XCTAssertEqual(controller.workspaceView.editorPane(for: newID)?.model.tabs.map(\.path), [b.path])
+        XCTAssertEqual(controller.workspaceView.editorPane(for: paneID)?.model.tabs.map(\.path), [a.path])
+        XCTAssertNotNil(
+            controller.workspaceView.editorPane(for: newID)?.onLastTabClosed,
+            "the inserted pane got the same controller wiring an ordinary one does"
+        )
+    }
+
+    func testHoleDropCreatesANewEditorPaneHoldingTheTab() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let a = try makeTempFile("a.swift", "x")
+        let b = try makeTempFile("b.swift", "y")
+        controller.openFileInEditor(a, pinned: true)
+        controller.openFileInEditor(b, pinned: true)
+        let sourceID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        XCTAssertTrue(controller.newEditor(in: nil))
+        XCTAssertEqual(controller.workspaceView.holePlaceholders.count, 1, "3 panes on the 2x2 rung")
+
+        try XCTUnwrap(controller.workspaceView.onEditorTabDropOnHole)(
+            EditorTabDragPayload(paneID: sourceID, index: 1)
+        )
+
+        XCTAssertEqual(controller.workspaceView.paneIDs.count, 4)
+        let newID = try XCTUnwrap(controller.workspaceView.paneIDs.last)
+        XCTAssertEqual(controller.workspaceView.editorPane(for: newID)?.model.tabs.map(\.path), [b.path])
+        XCTAssertEqual(controller.workspaceView.editorPane(for: sourceID)?.model.tabs.map(\.path), [a.path])
+    }
+
+    /// `PaneGrid.maxPanes`, exactly as every other creation path spells it —
+    /// and a refusal moves nothing at all.
+    func testEveryDropThatWouldCreateAPaneStopsAtTheGridCap() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let a = try makeTempFile("a.swift", "x")
+        let b = try makeTempFile("b.swift", "y")
+        controller.openFileInEditor(a, pinned: true)
+        controller.openFileInEditor(b, pinned: true)
+        let sourceID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        while controller.workspaceView.paneIDs.count < PaneGrid.maxPanes {
+            XCTAssertTrue(controller.newEditor(in: nil))
+        }
+        let panes = controller.workspaceView.paneIDs
+        let tabs = controller.workspaceView.editorPane(for: sourceID)?.model.tabs
+
+        controller.handleEditorTabEdgeDrop(
+            EditorTabDragPayload(paneID: sourceID, index: 1), target: sourceID, zone: .insertAfter
+        )
+        controller.handleEditorTabHoleDrop(EditorTabDragPayload(paneID: sourceID, index: 1))
+
+        XCTAssertEqual(controller.workspaceView.paneIDs, panes, "no pane was created")
+        XCTAssertEqual(controller.workspaceView.editorPane(for: sourceID)?.model.tabs, tabs, "and no tab moved")
+    }
+
+    /// A dirty buffer cannot travel between web views in v1 (each pane owns
+    /// its own Monaco), so the move asks first and honours the answer.
+    func testADirtyTabIsNeverMovedWithoutAsking() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "x")
+        controller.openFileInEditor(file, pinned: true)
+        let sourceID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let source = try XCTUnwrap(controller.workspaceView.editorPane(for: sourceID))
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let targetID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let target = try XCTUnwrap(controller.workspaceView.editorPane(for: targetID))
+        source.modelForTesting { $0.setDirty(true, at: 0) }
+        let payload = EditorTabDragPayload(paneID: sourceID, index: 0)
+
+        var asked: [String] = []
+        source.confirmSave = { name, decide in
+            asked.append(name)
+            decide(.cancel)
+        }
+        controller.handleEditorTabDrop(payload, intoPane: targetID, at: 0)
+
+        XCTAssertEqual(asked, ["a.swift"])
+        XCTAssertEqual(source.model.tabs.map(\.path), [file.path], "cancel left it exactly where it was")
+        XCTAssertTrue(source.model.tabs[0].isDirty)
+        XCTAssertTrue(target.model.tabs.isEmpty)
+
+        source.confirmSave = { _, decide in decide(.discard) }
+        controller.handleEditorTabDrop(payload, intoPane: targetID, at: 0)
+
+        XCTAssertNil(controller.workspaceView.editorPane(for: sourceID))
+        XCTAssertEqual(target.model.tabs.map(\.path), [file.path])
+        XCTAssertFalse(target.model.tabs[0].isDirty, "buffers do not cross web views in v1")
+    }
+
+    /// "Save" writes the buffer through the real bridge and only *then* lets
+    /// the tab travel — the target reloads from disk, so anything unwritten
+    /// would be lost silently without this.
+    func testSavingBeforeAMoveWritesTheBufferThenTravels() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "let x = 1")
+        controller.openFileInEditor(file, pinned: true)
+        let sourceID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let source = try XCTUnwrap(controller.workspaceView.editorPane(for: sourceID))
+        waitUntilReady(source)
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let targetID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let target = try XCTUnwrap(controller.workspaceView.editorPane(for: targetID))
+        source.modelForTesting { $0.setDirty(true, at: 0) }
+        source.confirmSave = { _, decide in decide(.save) }
+
+        let travelled = expectation(description: "the tab travelled after the write")
+        travelled.assertForOverFulfill = false
+        let previous = target.onStateChange
+        target.onStateChange = { tabs, active in
+            previous?(tabs, active)
+            if tabs.contains(where: { $0.path == file.path }) { travelled.fulfill() }
+        }
+
+        controller.handleEditorTabDrop(
+            EditorTabDragPayload(paneID: sourceID, index: 0), intoPane: targetID, at: 0
+        )
+        wait(for: [travelled], timeout: 30)
+
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "let x = 1")
+        XCTAssertEqual(target.model.tabs.map(\.path), [file.path])
+        XCTAssertFalse(target.model.tabs[0].isDirty)
+    }
+
     // MARK: - Helpers
 
     /// The first editor pane in grid order — the routing rules decide *which*

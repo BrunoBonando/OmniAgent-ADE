@@ -248,6 +248,55 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertFalse(workspace.canAcceptDrop(from: "pane-1", onto: "pane-3"))
     }
 
+    /// Task 14's edge drop: the new pane lands *adjacent* in grid order rather
+    /// than appended, and the ladder re-lays out around it.
+    /// Read against the grid's *own* fill order rather than a literal list:
+    /// `synced`'s 2->3 rule puts the third pane lower-left, so three panes are
+    /// not in the order they were added — and the promise here is only that
+    /// the newcomer lands beside its anchor and nothing else moves relative to
+    /// anything else.
+    func testInsertingAPaneAdjacentInGridOrder() {
+        let workspace = makeWorkspace(panes: 3)
+        var expected = workspace.paneIDs
+        XCTAssertEqual(expected.count, 3)
+
+        XCTAssertTrue(workspace.addPane(makeDescriptor("x"), inserting: .after, of: expected[0]))
+        expected.insert("x", at: 1)
+        XCTAssertEqual(workspace.paneIDs, expected)
+
+        XCTAssertTrue(workspace.addPane(makeDescriptor("y"), inserting: .before, of: expected[0]))
+        expected.insert("y", at: 0)
+        XCTAssertEqual(workspace.paneIDs, expected)
+    }
+
+    /// Every refusal the plain `addPane` makes, the inserting one makes too —
+    /// the cap is `PaneGrid.maxPanes` and an id already on screen is never
+    /// added twice — plus its own: a pane in another session has no cell in
+    /// this grid to sit beside.
+    func testInsertingRefusesAnotherSessionAFullGridAndADuplicate() {
+        let workspace = makeWorkspace(panes: 2)
+        var other = makeDescriptor("other-session")
+        other.group = "sess-grp-2"
+        XCTAssertTrue(workspace.addPane(other))
+
+        XCTAssertFalse(
+            workspace.addPane(makeDescriptor("x"), inserting: .after, of: "other-session"),
+            "the anchor is in a different session's grid"
+        )
+        XCTAssertFalse(
+            workspace.addPane(makeDescriptor("pane-1"), inserting: .after, of: "pane-1"),
+            "an id already on screen is never added twice"
+        )
+
+        while workspace.paneCount(inGroup: "sess-grp-1") < PaneGrid.maxPanes {
+            XCTAssertTrue(workspace.addPane(makeDescriptor("filler-\(workspace.paneIDs.count)")))
+        }
+        XCTAssertFalse(
+            workspace.addPane(makeDescriptor("z"), inserting: .before, of: "pane-1"),
+            "the cap refuses an insert exactly as it refuses an append"
+        )
+    }
+
     /// A drop glides both panes into their new cells instead of cutting. Read
     /// off the layers rather than off a rect: the frames land immediately either
     /// way, and the animation is the whole difference.
@@ -279,6 +328,39 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         let panes = workspace.subviews.compactMap { ($0 as? PaneContainerView)?.paneID }
         XCTAssertEqual(panes.suffix(2), ["pane-4", "pane-1"], "the movers must be the top two")
+    }
+
+    /// Each mover casts a shadow for the flight and only for the flight: one
+    /// layer directly beneath its own — the pane's mask would clip a shadow of
+    /// its own away — gone again once it has landed.
+    func testEachGlidingPaneCastsAShadowThatLeavesWhenItLands() throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            throw XCTSkip("under Reduce Motion a swap lands instantly, with nothing to shade")
+        }
+        let (workspace, window) = makeAttachedWorkspace(panes: 4)
+        defer { window.close() }
+        workspace.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(workspace.performPaneDrop(from: "pane-1", onto: "pane-4"))
+
+        let sublayers = try XCTUnwrap(workspace.layer?.sublayers)
+        let shadows = sublayers.filter { $0.shadowOpacity > 0 }
+        XCTAssertEqual(shadows.count, 2, "one per mover, and none for the panes standing still")
+        for id in ["pane-1", "pane-4"] {
+            let pane = try XCTUnwrap(workspace.container(for: id)?.layer)
+            let index = try XCTUnwrap(sublayers.firstIndex(of: pane))
+            XCTAssertGreaterThan(index, 0)
+            XCTAssertTrue(
+                shadows.contains(sublayers[index - 1]),
+                "\(id)'s shadow has to sit directly under it, or it falls on the wrong pane"
+            )
+        }
+
+        RunLoop.current.run(until: Date().addingTimeInterval(PaneWorkspaceView.swapTransitionDuration + 0.1))
+        XCTAssertTrue(
+            (workspace.layer?.sublayers ?? []).allSatisfy { $0.shadowOpacity == 0 },
+            "a shadow left behind is a shadow on every later frame"
+        )
     }
 
     // MARK: - Focus

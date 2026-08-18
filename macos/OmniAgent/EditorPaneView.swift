@@ -23,6 +23,15 @@ final class EditorPaneView: NSView, PaneContentView {
     /// The Changes overview's "open file" — routed up for the same reason the
     /// diff request is: which pane a file lands in is the controller's rule.
     var onOpenFileRequest: ((URL) -> Void)?
+    /// A tab was dropped in this pane's strip, with the index the indicator
+    /// showed. Routed up: a drop can prompt about unsaved work and can move a
+    /// tab out of another pane, neither of which this view may decide.
+    var onTabDroppedInStrip: ((EditorTabDragPayload, Int) -> Void)?
+
+    /// The workspace pane id this view is mounted under, injected by the
+    /// controller's wiring. Only the drag payload needs it — a tab in flight
+    /// is "pane X's tab N", and nothing else here knows X.
+    var paneID: String = ""
 
     var workspaceRoot: URL?
     var changedPaths: Set<String> = [] { didSet { syncChrome() } }
@@ -157,7 +166,79 @@ final class EditorPaneView: NSView, PaneContentView {
             guard let self, let tab = model.activeTab, tab.kind == .file else { return }
             onOpenDiffRequest?(URL(fileURLWithPath: tab.path))
         }
-        // strip.onBeginDrag wired in Task 14.
+        strip.onBeginDrag = { [weak self] index, event in self?.beginTabDrag(index: index, event: event) }
+        strip.onTabDrop = { [weak self] payload, index in
+            self?.onTabDroppedInStrip?(payload, index)
+        }
+    }
+
+    // MARK: - Tab drag and drop
+
+    /// The pasteboard item for dragging tab `index`, and the pin that comes
+    /// with it: dragging a tab pins it, exactly as double-clicking or editing
+    /// it does (spec §4). Nothing else changes — the tab stays in this pane's
+    /// model until a drop actually commits, so a cancelled drag leaves the
+    /// strip as it was.
+    func makeTabDragItem(at index: Int) -> NSPasteboardItem? {
+        guard model.tabs.indices.contains(index),
+              let string = EditorTabDragPayload(paneID: paneID, index: index).pasteboardString()
+        else { return nil }
+        model.pin(at: index)
+        syncAll()
+        let item = NSPasteboardItem()
+        item.setString(string, forType: PaneWorkspaceView.editorTabDragType)
+        return item
+    }
+
+    private func beginTabDrag(index: Int, event: NSEvent) {
+        guard let item = makeTabDragItem(at: index) else { return }
+        let dragItem = NSDraggingItem(pasteboardWriter: item)
+        // The tab's own rectangle, so the drag image starts where the tab is
+        // rather than at the pane's origin. `itemFrames` is recomputed by the
+        // `syncAll` above, so it already reflects the pin's italic-to-roman
+        // width change.
+        let frame = strip.itemFrames.indices.contains(index) ? strip.itemFrames[index] : .zero
+        dragItem.setDraggingFrame(strip.convert(frame, to: self), contents: nil)
+        beginDraggingSession(with: [dragItem], event: event, source: self)
+    }
+
+    /// Lifts a tab out for a move into another pane, releasing everything it
+    /// owned here — its Monaco model above all, since the destination opens
+    /// its own from disk. Fires `onLastTabClosed` when the pane empties, so a
+    /// pane whose final tab is dragged away closes exactly as one whose final
+    /// tab is closed does.
+    ///
+    /// The buffer does **not** travel: each pane owns its own web view, and
+    /// v1 resolves a dirty tab (save or discard) before the move — see the
+    /// controller's `deliverAfterSavePrompt`.
+    @discardableResult
+    func removeTabForTransfer(at index: Int) -> EditorTab? {
+        guard let removed = model.close(at: index) else { return nil }
+        discardResources(for: removed)
+        syncAll()
+        showActiveContent()
+        if model.tabs.isEmpty { onLastTabClosed?() }
+        return removed
+    }
+
+    /// A tab arriving from another pane. It lands clean — its content is
+    /// whatever is on disk, which is what this pane's Monaco will read — and
+    /// `showActiveContent` gives every kind (file, media, diff, changes) the
+    /// same first render it gets on any other activation.
+    func receiveTransferredTab(_ tab: EditorTab, at index: Int) {
+        var arrived = tab
+        arrived.isDirty = false
+        model.insert(arrived, at: index)
+        syncAll()
+        showActiveContent()
+    }
+
+    /// A reorder inside this strip. `destination` is an index in the array
+    /// *after* the tab is lifted out — the caller converts the indicator's
+    /// index, which is measured with the tab still in place.
+    func moveTab(from source: Int, to destination: Int) {
+        model.move(from: source, to: destination)
+        syncAll()
     }
 
     private func wireBridge() {
@@ -417,7 +498,9 @@ final class EditorPaneView: NSView, PaneContentView {
     /// and the buffer can be typed into (`markSaved` is version-scoped, so a
     /// keystroke that landed after the snapshot stays dirty instead of being
     /// marked clean and later discarded without a prompt).
-    private func save(at index: Int, completion: @escaping (Bool) -> Void) {
+    /// Internal, not private: the controller's drop broker saves a dirty tab
+    /// at a known index before letting it travel to another pane.
+    func save(at index: Int, completion: @escaping (Bool) -> Void) {
         guard model.tabs.indices.contains(index), model.tabs[index].kind == .file else {
             completion(false)
             return
@@ -616,5 +699,17 @@ final class EditorPaneView: NSView, PaneContentView {
         case .alertSecondButtonReturn: decide(.discard)
         default: decide(.cancel)
         }
+    }
+}
+
+/// A tab only ever *moves*, and only inside this app — copying one would mean
+/// two panes editing one file through two Monaco models. `PaneContainerView`'s
+/// pane drag says exactly the same thing for the same reason.
+extension EditorPaneView: NSDraggingSource {
+    func draggingSession(
+        _ session: NSDraggingSession,
+        sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        context == .withinApplication ? .move : []
     }
 }
