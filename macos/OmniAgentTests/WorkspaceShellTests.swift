@@ -495,6 +495,10 @@ final class WorkspaceShellTests: XCTestCase {
 
     func testStatusDotColoursFollowTheDesign() {
         XCTAssertEqual(ShellDotsView.color(for: .thinking), ShellPalette.blue)
+        // Running a tool is the agent *working*, not the agent needing you:
+        // it reads blue with the rest of the working family, so amber means
+        // exactly one thing anywhere it appears — waiting on your input.
+        XCTAssertEqual(ShellDotsView.color(for: .toolExecution), ShellPalette.blue)
         XCTAssertEqual(ShellDotsView.color(for: .awaitingApproval), ShellPalette.amber)
         XCTAssertEqual(ShellDotsView.color(for: .ready), ShellPalette.green)
         XCTAssertEqual(ShellDotsView.color(for: .error), ShellPalette.red)

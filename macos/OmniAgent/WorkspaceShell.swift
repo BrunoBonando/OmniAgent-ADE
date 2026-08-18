@@ -557,11 +557,14 @@ final class ShellDotsView: NSView {
         }
     }
 
-    /// The design's dot colours, by live session status.
+    /// The design's dot colours, by live session status. Tool execution sits
+    /// with thinking in the working family: an agent running a build for five
+    /// minutes is *working*, and amber has to mean exactly one thing anywhere
+    /// it appears — the agent is waiting on your input.
     static func color(for status: RemoteSessionStatus?) -> NSColor {
         switch status {
-        case .thinking: return ShellPalette.blue
-        case .toolExecution, .awaitingApproval: return ShellPalette.amber
+        case .thinking, .toolExecution: return ShellPalette.blue
+        case .awaitingApproval: return ShellPalette.amber
         case .ready: return ShellPalette.green
         case .error: return ShellPalette.red
         case nil: return ShellPalette.idle
