@@ -373,17 +373,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return view
     }()
 
-    /// The real blur `zoomBackdrop` cannot provide — see its doc comment.
-    /// Shown only once a zoom's grow animation has settled
-    /// (`finishZoomTransition`) and hidden the instant any transition
-    /// starts (`applyZoom`, `collapseZoom`), so nothing has to track it
-    /// through the ~0.38s the card is actually moving.
-    private lazy var zoomBlur: PaneZoomBlurOverlay = {
-        let overlay = PaneZoomBlurOverlay()
-        overlay.onClick = { [weak self] in self?.setZoomed(nil) }
-        return overlay
-    }()
-
     /// The design's overlay is full-bleed over the app frame —
     /// `position:absolute;top:30px;left:0;right:0;bottom:24px` in
     /// `design/OmniAgent ADE.dc.html`, the whole 1440×900 mock less its title
@@ -524,11 +513,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // under a card.
         guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
             updateLayout()
-            // Nothing is moving under Reduce Motion, so there is no settle to
-            // wait for — the card is already at its final rect and blur can go
-            // up immediately, the same signal `finishZoomTransition` uses for
-            // the animated path.
-            if let sessionID, overlayPaneID == sessionID { showZoomBlur(around: sessionID) }
             return
         }
         zoomTransition = Self.zoomTransitionDuration
@@ -547,63 +531,21 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
     }
 
-    /// The end of one transition's 0.38s. Three outcomes, gated on the token
+    /// The end of one transition's 0.38s. Two outcomes, gated on the token
     /// so it only ever acts for the transition it was created by — see
     /// `zoomTransitionToken` — since a second transition starting invalidates
     /// whichever of these was still pending:
     /// - Shrink completed: the card that was shrinking lands back in the
     ///   grid, and with nothing focused any more the overlay comes out of
     ///   the window.
-    /// - Grow completed, and the zoom it grew into is still the current
-    ///   target: `zoomBlur` shows for the first time, now that the card has
-    ///   stopped moving.
-    /// - Anything else — the target pane changed, or zoom exited, since this
-    ///   transition began: nothing to do, the token guard above would
-    ///   already have caught it.
+    /// - Anything else — a grow that settled, or a target changed since this
+    ///   transition began: nothing to do.
     private func finishZoomTransition(_ token: Int) {
         guard token == zoomTransitionToken else { return }
         if overlayIsCollapsing, let id = overlayPaneID {
             landCard(id)
             teardownOverlay()
-            return
         }
-        // A grow just settled, and nothing since has changed the target —
-        // a switch straight to a different pane, or an exit, would have
-        // moved the token on and failed the guard above already.
-        if let zoomedPaneID, overlayPaneID == zoomedPaneID {
-            showZoomBlur(around: zoomedPaneID)
-        }
-    }
-
-    /// Converts the card's current rect — read from the live view, in the
-    /// overlay host's coordinate space — to screen coordinates and shows
-    /// `zoomBlur` around it. Also what `updateLayout` calls to reposition
-    /// the bands if the window resizes while blur is already showing;
-    /// `PaneZoomBlurOverlay.show` is safe to call repeatedly with updated
-    /// geometry, it just repositions its existing panels.
-    private func showZoomBlur(around id: String) {
-        guard
-            let window,
-            let container = containers[id],
-            container.superview === focusOverlay
-        else { return }
-        let outer = window.convertToScreen(focusOverlay.convert(focusOverlay.bounds, to: nil))
-        let hole = window.convertToScreen(focusOverlay.convert(container.frame, to: nil))
-        zoomBlur.show(around: hole, in: outer, parent: window)
-        // And the wash steps out of the bands' way the moment they are up. A
-        // band blurs what the window server has composited *behind* it, and
-        // what is behind it inside this window is `zoomBackdrop`: a `.sidebar`
-        // material at 78% over every pane. Left there it erases the panes
-        // before a band ever samples them, and the band lays its own material
-        // over the result — two dark materials stacked, which is a flat dark
-        // rectangle where the blurred app should be. Nothing is lost by taking
-        // it out: the bands tile every part of the host the card does not
-        // cover, so at this point it is completely occluded. Instantly rather
-        // than faded for the same reason — there is nothing visible to
-        // animate, and every frame it is still in the composite is a frame the
-        // bands blur the wash instead of the app. `applyZoom` puts it back for
-        // the next transition, which runs with no bands up.
-        zoomBackdrop.setShown(!zoomBlur.isShown, duration: 0)
     }
 
     /// Zoom only survives while it still means something: the pane has to be
@@ -703,7 +645,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // the frame animation below picks it up from wherever the shrink got to.
         if let leaving = overlayPaneID, leaving != id {
             landCard(leaving)
-            zoomBlur.hide()
         }
         overlayIsCollapsing = false
         let host = installOverlayHost()
@@ -713,23 +654,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // window, and a frame carried across unconverted would jump the length
         // of the sidebar.
         let lifting = container.superview !== host
-        // Stale geometry from before this pane's own lift must never show
-        // through the grow — but a re-apply of an already-settled zoom (a
-        // window resize passing through updateLayout, say) must leave
-        // blur alone, or `updateLayout`'s reposition guard right after
-        // `applyZoom()` can never fire: `isShown` would already be false.
-        if lifting { zoomBlur.hide() }
         let start = lifting ? convert(container.frame, to: host) : focusCardShadow.frame
         let restacked = stackOverlay(container, in: host)
         // After any move, not just the lift: re-stacking a view that is already
         // there moves it too, and a move is what costs the first responder.
         if restacked { reclaimFirstResponder(container) }
-        // The wash carries a transition on its own — the bands only appear once
-        // one has settled — but never alongside them: this runs on every layout
-        // pass while a pane is zoomed, and re-showing it unconditionally put it
-        // straight back under the settled bands on the very next pass, which is
-        // exactly the composite `showZoomBlur` takes it out of.
-        zoomBackdrop.setShown(!zoomBlur.isShown, duration: zoomTransition)
+        zoomBackdrop.setShown(true, duration: zoomTransition)
         let card = Self.focusCardFrame(in: host.bounds)
         moveFocusCardShadow(from: start, to: card)
         // The cell it is leaving, handed over rather than left for `place` to
@@ -782,7 +712,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// `updateLayout` owns its frame again. Cheap and idempotent: every layout
     /// pass with nothing focused comes through here.
     private func collapseZoom() {
-        zoomBlur.hide()
         zoomBackdrop.setShown(false, duration: zoomTransition)
         guard let id = overlayPaneID else { return }
         guard
@@ -850,9 +779,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// covering the content view hit-tests as itself, and would swallow every
     /// click meant for the sidebar or a pane.
     private func teardownOverlay() {
-        // Idempotent — a safety net covering any path here that did not
-        // already go through applyZoom/collapseZoom's own zoomBlur.hide().
-        zoomBlur.hide()
         focusCardShadow.removeFromSuperlayer()
         // The backdrop explicitly, not only with the host: where there is no
         // window the host is never installed and this view *is* the host, so
@@ -1352,12 +1278,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         syncDividerViews(layout.dividers)
         syncHolePlaceholders(layout, holeIDs: grid.cells.filter(\.isHole).map(\.id))
         applyZoom()
-        // A window resize while blur is already settled and showing has to
-        // move with it — `addChildWindow` tracks the main window's *moves*
-        // automatically, but not its resizes.
-        if zoomBlur.isShown, let zoomedPaneID, overlayPaneID == zoomedPaneID, !overlayIsCollapsing {
-            showZoomBlur(around: zoomedPaneID)
-        }
         updateAccessibilityLabels()
         refreshFocusSubtitles()
     }
@@ -2684,23 +2604,21 @@ final class PaneBadgeView: NSView {
     }
 }
 
-/// The dim tint a zoomed pane sits on. Despite `blendingMode = .withinWindow`
-/// below, this does **not** blur anything — confirmed directly on screen: even
-/// the plain, non-Metal sidebar behind it shows no blur, only this view's own
-/// flat material tint. `.withinWindow` blending samples sibling views inside
-/// one window's own private compositing tree, and in this window that
-/// sampling produces nothing visible; `.behindWindow` (`PaneZoomBlurOverlay`,
-/// real auxiliary windows) is what actually blurs the panes behind the card.
-/// This view stays for the tint alone, and because it is what animates in
-/// smoothly the instant a zoom starts — `PaneZoomBlurOverlay` only appears
-/// once that animation has settled, to avoid syncing four separate window
-/// frames against an in-flight CALayer animation. It then hands over
-/// completely: `showZoomBlur` takes it straight back out of the composite,
-/// because a band blurs what is on screen *behind* it and this wash is on
-/// screen behind it — near-opaque over every pane, so the bands would be
-/// blurring it rather than the app. Nothing is lost, the bands tile
-/// everything it was covering; `applyZoom` brings it back for the next
-/// transition, which runs with no bands up.
+/// The dim tint a zoomed pane sits on, and the whole of focus mode's
+/// background treatment: it dims, it does not blur. Despite
+/// `blendingMode = .withinWindow` below it blurs nothing — confirmed directly
+/// on screen: even the plain, non-Metal sidebar behind it shows no blur, only
+/// this view's own flat material tint, because `.withinWindow` samples sibling
+/// views inside one window's private compositing tree and in this window that
+/// produces nothing visible.
+///
+/// Real blur needs `.behindWindow`, which needs auxiliary windows of its own —
+/// four of them, tiling the region around the card, since a window covering the
+/// card would blur (and swallow clicks meant for) the card too. That existed
+/// and was removed: seams between independently blurred windows, square corners
+/// against the card's rounded ones, geometry to re-sync on every resize, and a
+/// result that still did not read as blurred. A dim wash does the one job focus
+/// mode needs — say which pane you are in — for one view and no windows.
 ///
 /// This was a layer background filter before it was an in-window
 /// `NSVisualEffectView`, to keep `NSVisualEffectView`'s display-link-backed
@@ -2743,8 +2661,7 @@ final class PaneZoomBackdropView: NSVisualEffectView {
     /// switched to `.behindWindow` here too, because a view *inside* the main
     /// window cannot use `.behindWindow` blending to blur that same window's
     /// own content — `.behindWindow` blurs whatever is behind the window
-    /// hosting it, and this view's window *is* the main window. Real blur
-    /// needed a window of its own: `PaneZoomBlurOverlay`.
+    /// hosting it, and this view's window *is* the main window.
     ///
     /// No tint beyond the material's own, and the design's `rgba(6,6,8,.62)`
     /// is deliberately not reproduced. It is a wash meant to carry a CSS blur
@@ -2813,292 +2730,6 @@ final class PaneZoomBackdropView: NSVisualEffectView {
     /// `PaneDropOverlayView` uses, conditioned on being shown rather than flat.
     override func hitTest(_ point: NSPoint) -> NSView? {
         isShown ? super.hitTest(point) : nil
-    }
-}
-
-/// Up to four borderless, transparent windows tiling the region around a
-/// zoomed pane's card, each a real system blur (`.behindWindow` — what the
-/// Dock, Mission Control and Notification Center use) of whatever is
-/// actually on screen behind it: the main window's panes, sidebar,
-/// everything, Metal-rendered terminal content included, because this
-/// reads the composited screen buffer rather than trying to sample sibling
-/// layers inside one window's own compositing tree the way
-/// `PaneZoomBackdropView`'s `.withinWindow` blending does — confirmed, not
-/// guessed, to blur nothing in this app: even the plain, non-Metal sidebar
-/// behind it showed no blur, only that view's own flat tint.
-///
-/// No auxiliary window's *frame* ever overlaps the card's own screen rect
-/// — `blurBands` guarantees that — so clicking the card reaches the main
-/// window underneath with no hit-testing or click-passthrough trick
-/// needed: there is simply nothing covering that region.
-final class PaneZoomBlurOverlay {
-    private var panels: [PaneZoomBlurPanel] = []
-    var onClick: (() -> Void)?
-
-    /// True once at least one band is on screen — `PaneWorkspaceView` uses
-    /// this to know a window resize needs to reposition them rather than
-    /// leave stale geometry from before the resize.
-    var isShown: Bool { !panels.isEmpty }
-
-    /// Shows exactly as many panels as `blurBands` computes for this
-    /// `hole`/`outer` pair, reusing whatever panels already exist — a panel
-    /// is a generic rectangle of blur, which band it was last positioned as
-    /// does not matter — creating new ones only if more are needed and
-    /// releasing extras back out rather than leaving them parked offscreen.
-    func show(around hole: NSRect, in outer: NSRect, parent: NSWindow) {
-        let bands = Self.blurBands(around: hole, in: outer)
-        guard !bands.isEmpty else { return hide() }
-
-        while panels.count < bands.count {
-            panels.append(PaneZoomBlurPanel())
-        }
-        while panels.count > bands.count {
-            let panel = panels.removeLast()
-            panel.parent?.removeChildWindow(panel)
-            panel.orderOut(nil)
-        }
-
-        for (panel, band) in zip(panels, bands) {
-            panel.onClick = { [weak self] in self?.onClick?() }
-            panel.setFrame(band, display: true)
-            panel.setFadeEdges(Self.innerEdges(of: band, in: outer))
-            if panel.parent !== parent {
-                parent.addChildWindow(panel, ordered: .above)
-            }
-            panel.orderFront(nil)
-        }
-    }
-
-    /// Idempotent: safe to call whether or not anything is currently shown,
-    /// so every call site that ends a zoom transition can call it
-    /// unconditionally rather than tracking whether blur happened to be up.
-    func hide() {
-        guard !panels.isEmpty else { return }
-        for panel in panels {
-            panel.parent?.removeChildWindow(panel)
-            panel.orderOut(nil)
-        }
-        panels.removeAll()
-    }
-
-    // MARK: - Geometry
-
-    /// The standard "outer rect minus inner rect" decomposition: a
-    /// full-width band above the hole, a full-width band below it, and two
-    /// bands exactly as tall as the hole to its left and right. Together
-    /// with the hole itself these tile `outer` with no gaps and no
-    /// overlaps. A side with no room (the hole flush against that edge, or
-    /// past it) is omitted rather than emitted as a zero- or negative-sized
-    /// rect — an empty window is a real `NSWindow` doing nothing.
-    ///
-    /// Static and pure so the geometry can be checked without a window,
-    /// the same reason `PaneWorkspaceView.focusCardFrame(in:)` is.
-    static func blurBands(around hole: NSRect, in outer: NSRect) -> [NSRect] {
-        guard outer.width > 0, outer.height > 0 else { return [] }
-        let clampedHole = hole.intersection(outer)
-        guard !clampedHole.isEmpty else { return [outer] }
-
-        var bands: [NSRect] = []
-        let top = NSRect(
-            x: outer.minX, y: clampedHole.maxY,
-            width: outer.width, height: outer.maxY - clampedHole.maxY
-        )
-        if top.height > 0 { bands.append(top) }
-
-        let bottom = NSRect(
-            x: outer.minX, y: outer.minY,
-            width: outer.width, height: clampedHole.minY - outer.minY
-        )
-        if bottom.height > 0 { bands.append(bottom) }
-
-        let left = NSRect(
-            x: outer.minX, y: clampedHole.minY,
-            width: clampedHole.minX - outer.minX, height: clampedHole.height
-        )
-        if left.width > 0 { bands.append(left) }
-
-        let right = NSRect(
-            x: clampedHole.maxX, y: clampedHole.minY,
-            width: outer.maxX - clampedHole.maxX, height: clampedHole.height
-        )
-        if right.width > 0 { bands.append(right) }
-
-        return bands
-    }
-
-    /// Which sides of `rect` are seams rather than the outer silhouette —
-    /// an edge that does not coincide with the matching edge of `outer` is
-    /// one this band shares with the hole or with a neighbouring band,
-    /// confirmed on screen as a hard visible line: two independently
-    /// blurred windows meeting at a boundary never blur to quite the same
-    /// result. An edge flush with `outer` needs no softening — there is
-    /// nothing on the other side of it but the window's own silhouette.
-    ///
-    /// Pure and static for the same reason `blurBands` is — this is what
-    /// decides which sides `show` asks a panel to fade, and it has to agree
-    /// with `blurBands`' own geometry without duplicating it.
-    static func innerEdges(of rect: NSRect, in outer: NSRect) -> Set<NSRectEdge> {
-        var edges: Set<NSRectEdge> = []
-        if rect.minX > outer.minX { edges.insert(.minX) }
-        if rect.maxX < outer.maxX { edges.insert(.maxX) }
-        if rect.minY > outer.minY { edges.insert(.minY) }
-        if rect.maxY < outer.maxY { edges.insert(.maxY) }
-        return edges
-    }
-}
-
-/// One rectangular slice of the region around a zoomed pane's card,
-/// showing real system blur. `.sidebar` for the same reason
-/// `PaneZoomBackdropView` picked it: the middle-tier material real frosted
-/// glass uses, without `.hudWindow`'s dark panel tint.
-final class PaneZoomBlurBandView: NSVisualEffectView {
-    static let material: NSVisualEffectView.Material = .sidebar
-
-    /// How wide a seam-side fade reaches in from the edge, and what it
-    /// fades toward. Never toward transparent: this window's own blur ends
-    /// exactly at its frame, so a fade to transparent would reveal the
-    /// sharp, unblurred main window through a thin sliver at every seam —
-    /// worse than the hard line it replaced. Fading toward a fixed neutral
-    /// instead only ever darkens the seam a little on both sides of it,
-    /// which reads as a soft edge without needing to match whatever
-    /// specific pixels a neighbouring, independently blurred window
-    /// happens to be showing there.
-    private static let fadeWidth: CGFloat = 28
-    private static let fadeColor = NSColor.black.withAlphaComponent(0.35).cgColor
-
-    var onClick: (() -> Void)?
-
-    /// Which sides of this band are seams — set by `PaneZoomBlurOverlay.show`
-    /// from `innerEdges(of:in:)` every time a panel is (re)positioned, since
-    /// a pooled panel can play a different band role from one call to the
-    /// next.
-    private var fadeEdges: Set<NSRectEdge> = []
-    private var fadeLayers: [CAGradientLayer] = []
-
-    init() {
-        super.init(frame: .zero)
-        material = Self.material
-        blendingMode = .behindWindow
-        state = .active
-        appearance = NSAppearance(named: .darkAqua)
-        // The backdrop underneath already carries the labelled way out —
-        // these are decorative blur, not a second affordance.
-        setAccessibilityElement(false)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is unavailable")
-    }
-
-    func setFadeEdges(_ edges: Set<NSRectEdge>) {
-        guard fadeEdges != edges else { return }
-        fadeEdges = edges
-        needsLayout = true
-    }
-
-    override func layout() {
-        super.layout()
-        rebuildFadeLayers()
-    }
-
-    /// One thin gradient strip per seam side, sized to `fadeWidth` (clamped
-    /// to the band's own dimension so a narrow left/right band's two
-    /// vertical fades never overlap-stack past full strength) and rebuilt
-    /// on every layout pass, since a resize changes both this band's size
-    /// and — via a fresh `show()` call — potentially which edges are seams
-    /// at all.
-    private func rebuildFadeLayers() {
-        fadeLayers.forEach { $0.removeFromSuperlayer() }
-        fadeLayers.removeAll()
-        guard let layer, bounds.width > 0, bounds.height > 0 else { return }
-        for edge in fadeEdges {
-            let gradient = CAGradientLayer()
-            gradient.colors = [NSColor.clear.cgColor, Self.fadeColor]
-            switch edge {
-            case .minX:
-                let w = min(Self.fadeWidth, bounds.width)
-                gradient.frame = NSRect(x: 0, y: 0, width: w, height: bounds.height)
-                gradient.startPoint = CGPoint(x: 1, y: 0.5)
-                gradient.endPoint = CGPoint(x: 0, y: 0.5)
-            case .maxX:
-                let w = min(Self.fadeWidth, bounds.width)
-                gradient.frame = NSRect(x: bounds.width - w, y: 0, width: w, height: bounds.height)
-                gradient.startPoint = CGPoint(x: 0, y: 0.5)
-                gradient.endPoint = CGPoint(x: 1, y: 0.5)
-            case .minY:
-                let h = min(Self.fadeWidth, bounds.height)
-                gradient.frame = NSRect(x: 0, y: 0, width: bounds.width, height: h)
-                gradient.startPoint = CGPoint(x: 0.5, y: 1)
-                gradient.endPoint = CGPoint(x: 0.5, y: 0)
-            case .maxY:
-                let h = min(Self.fadeWidth, bounds.height)
-                gradient.frame = NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h)
-                gradient.startPoint = CGPoint(x: 0.5, y: 0)
-                gradient.endPoint = CGPoint(x: 0.5, y: 1)
-            @unknown default:
-                continue
-            }
-            layer.addSublayer(gradient)
-            fadeLayers.append(gradient)
-        }
-    }
-
-    // Swallowed for the same reason PaneZoomBackdropView's is: a click
-    // meant for "get me out of here" must not reach — or focus — the
-    // blurred pane underneath.
-    override func mouseDown(with event: NSEvent) {}
-    override func mouseUp(with event: NSEvent) { onClick?() }
-}
-
-/// The window one blur band lives in: borderless and non-activating so
-/// clicking it never steals key window status or app activation from the
-/// main window, transparent everywhere its content view is not painting
-/// blur, and with no shadow of its own — the card's shadow belongs to the
-/// card, not to a plain rectangle standing in for empty space.
-final class PaneZoomBlurPanel: NSPanel {
-    var onClick: (() -> Void)? {
-        get { bandView.onClick }
-        set { bandView.onClick = newValue }
-    }
-
-    func setFadeEdges(_ edges: Set<NSRectEdge>) { bandView.setFadeEdges(edges) }
-
-    // `.nonactivatingPanel` suppresses *app* activation on click, not key
-    // window acquisition — `NSPanel.canBecomeKey` defaults to true even
-    // when borderless. Without this override, clicking a band could
-    // momentarily resign the main window's key status. A non-key window
-    // still receives mouseDown/mouseUp, so this cannot break click-to-exit.
-    override var canBecomeKey: Bool { false }
-
-    private let bandView = PaneZoomBlurBandView()
-
-    init() {
-        super.init(
-            contentRect: .zero,
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: true
-        )
-        isOpaque = false
-        backgroundColor = .clear
-        hasShadow = false
-        // Never torn down by AppKit out from under PaneZoomBlurOverlay's
-        // own pooling — `close()` is never called on these, only
-        // `orderOut`/`removeChildWindow` — and this stays false rather
-        // than the programmatic-NSWindow default of true because ARC, not
-        // AppKit, owns these: they live only as long as something holds a
-        // strong reference (PaneZoomBlurOverlay.panels, transiently
-        // window.childWindows), and `true` is the classic over-release
-        // trap the moment anything ever calls `close()` on one.
-        isReleasedWhenClosed = false
-        contentView = bandView
-        setAccessibilityElement(false)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is unavailable")
     }
 }
 
