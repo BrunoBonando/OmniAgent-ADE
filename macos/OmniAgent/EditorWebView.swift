@@ -143,6 +143,14 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
     func markSaved(path: String, versionId: Int? = nil) {
         run("window.omniagent.markSaved(\(Self.jsLiteral(path)), \(versionId.map(String.init) ?? "null"))")
     }
+    /// Puts an unsaved buffer back after the renderer died, *without* rebasing
+    /// the page's saved version — the restored text is dirty against the file
+    /// on disk, and the page has to agree or a later close would discard it
+    /// without asking. `setContent` above rebases and cannot stand in for it.
+    func restoreUnsaved(path: String, content: String) {
+        run("window.omniagent.restoreUnsaved(\(Self.jsLiteral(path)), \(Self.jsLiteral(content)))")
+    }
+
     func closeModel(path: String) { run("window.omniagent.closeModel(\(Self.jsLiteral(path)))") }
     func showDiff(path: String, original: String, modified: String) {
         run("window.omniagent.showDiff(\(Self.jsLiteral(path)), \(Self.jsLiteral(original)), \(Self.jsLiteral(modified)))")
@@ -178,6 +186,25 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
                 return
             }
             completion(payload["content"] as? String, payload["versionId"] as? Int)
+        }
+    }
+
+    /// Whether the page still regards `path`'s buffer as saved — the question
+    /// `save`'s own `true` does *not* answer. `markSaved` refuses to rebase a
+    /// buffer that moved during the write and posts nothing when it refuses,
+    /// and a posted message is not ordered against an `evaluateJavaScript`
+    /// reply, so Swift's dirty flag cannot be read for this. This query is
+    /// ordered behind the `markSaved` that precedes it, so it can.
+    ///
+    /// A bridge that is not ready answers `false`: "unknown" must never read
+    /// as "safe to discard".
+    func requestIsClean(path: String, completion: @escaping (Bool) -> Void) {
+        guard isReady else {
+            completion(false)
+            return
+        }
+        webView.evaluateJavaScript("window.omniagent.isClean(\(Self.jsLiteral(path)))") { value, _ in
+            completion((value as? NSNumber)?.boolValue ?? false)
         }
     }
 

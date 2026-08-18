@@ -151,6 +151,27 @@ window.omniagent = {
     if (!entry) return null;
     return { content: entry.model.getValue(), versionId: entry.model.getAlternativeVersionId() };
   },
+  // Does the page still regard this buffer as saved? Swift cannot answer
+  // that from its own dirty flag: `markSaved` posts nothing when it refuses
+  // to rebase, and a posted message is not ordered against an
+  // `evaluateJavaScript` reply — so "no news" is indistinguishable from "not
+  // delivered yet". Asking the page is ordered, and therefore decidable.
+  // A path with no model answers `true`: there is no buffer left to lose.
+  isClean(path) {
+    const entry = models.get(path);
+    if (!entry) return true;
+    return entry.model.getAlternativeVersionId() === entry.savedVersionId;
+  },
+  // Crash recovery: put an unsaved buffer back *without* rebasing
+  // `savedVersionId`, so the rebuilt page agrees with Swift that the tab is
+  // dirty against what is on disk. `setContent` above deliberately rebases
+  // and would mark the restored edit clean — a later close would then discard
+  // it with no prompt.
+  restoreUnsaved(path, content) {
+    const entry = models.get(path);
+    if (!entry) return;
+    entry.model.setValue(content);
+  },
   closeModel(path) {
     const entry = models.get(path);
     if (!entry) return;
@@ -251,8 +272,7 @@ window.omniagent = {
   // dirty transition a real keystroke produces is observable from XCTest.
   // `models` is closed over in this file, so Swift cannot reach it directly.
   typeForTesting(path, content) {
-    const entry = models.get(path);
-    if (entry) entry.model.setValue(content);
+    this.restoreUnsaved(path, content);
   },
   // Test hook: the diff is computed asynchronously by the editor web worker
   // and has no bridge event of its own, so expose the change count. -1 means

@@ -734,6 +734,53 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         stop()
     }
 
+    /// Any unsaved editor buffer anywhere in this window. Asked before
+    /// prompting, so a workspace with nothing to lose never delays a ⇧⌘W or
+    /// a ⌘Q by so much as a run-loop turn.
+    var hasDirtyEditorTabs: Bool {
+        workspace.allPaneIDs.contains { workspace.editorPane(for: $0)?.hasDirtyTabs == true }
+    }
+
+    /// Walks every editor pane's dirty tabs with save prompts, one pane after
+    /// another. `true` means everything resolved (saved or deliberately
+    /// discarded); `false` means the user cancelled — or a write failed — and
+    /// the close or quit must stop.
+    ///
+    /// Chained rather than looped: each prompt answers on a callback, and the
+    /// save behind a "Save" answer is a round trip to Monaco.
+    func promptDirtyEditorTabs(completion: @escaping (Bool) -> Void) {
+        let editors = workspace.allPaneIDs
+            .compactMap { workspace.editorPane(for: $0) }
+            .filter(\.hasDirtyTabs)
+        func step(_ remaining: [EditorPaneView]) {
+            guard let next = remaining.first else {
+                completion(true)
+                return
+            }
+            next.closeAllTabsAfterConfirmation { proceed in
+                guard proceed else {
+                    completion(false)
+                    return
+                }
+                step(Array(remaining.dropFirst()))
+            }
+        }
+        step(editors)
+    }
+
+    /// ⇧⌘W. Answers `false` and closes the window itself once the prompts
+    /// resolve, rather than blocking AppKit's close on an asynchronous
+    /// answer. `NSWindow.close()` does not consult this delegate method, so
+    /// there is no second pass to guard against.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard hasDirtyEditorTabs else { return true }
+        promptDirtyEditorTabs { proceed in
+            guard proceed else { return }
+            sender.close()
+        }
+        return false
+    }
+
     func windowDidBecomeKey(_ notification: Notification) {
         workspace.restoreFocus()
     }
@@ -1121,6 +1168,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// close is ⇧⌘W.
     @objc func closePane(_ sender: Any?) {
         guard let focused = workspace.focusedPaneID else { return }
+        // An editor pane can be holding unsaved work, and closing it disposes
+        // the Monaco models that are the only copy of it. Ask first; the
+        // prompt is asynchronous, so the close happens in its completion.
+        if let editor = workspace.editorPane(for: focused), editor.hasDirtyTabs {
+            editor.closeAllTabsAfterConfirmation { [weak self] proceed in
+                guard proceed, let self else { return }
+                destroyPane(focused)
+            }
+            return
+        }
+        destroyPane(focused)
+    }
+
+    /// The close itself, once nothing is left to ask about. Split out of
+    /// `closePane` so the guarded and unguarded paths cannot drift.
+    private func destroyPane(_ focused: String) {
         // Only a terminal has a daemon session to kill. The status cleanup
         // below stays unconditional: it is per-pane bookkeeping, and empty
         // for a pane kind that never reported any.

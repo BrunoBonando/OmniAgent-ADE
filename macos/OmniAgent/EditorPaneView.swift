@@ -47,6 +47,10 @@ final class EditorPaneView: NSView, PaneContentView {
         alert.informativeText = message
         alert.runModal()
     }
+    /// The other alert seam: an open file changed on disk *while the buffer
+    /// was dirty*. `takeDisk == false` is "Keep Mine".
+    var confirmConflict: ((String, @escaping (_ takeDisk: Bool) -> Void) -> Void) =
+        EditorPaneView.defaultConfirmConflict
 
     /// Per-open-file bookkeeping, keyed by absolute path.
     private var encodings: [String: String.Encoding] = [:]
@@ -55,9 +59,18 @@ final class EditorPaneView: NSView, PaneContentView {
     /// read successfully?" answer — a file we could not read never lands here,
     /// so `showActiveContent` shows the message instead of an empty editor.
     private(set) var loadedPaths: Set<String> = []
-    /// Debounced dirty-buffer snapshots from the bridge — crash insurance
-    /// (Task 15 replays them on renderer death).
+    /// Debounced dirty-buffer snapshots from the bridge — crash insurance,
+    /// replayed by `restoreAfterRendererCrash` when the page comes back.
     private(set) var dirtySnapshots: [String: String] = [:]
+    /// Open files that have vanished from disk. The buffer is kept (it is the
+    /// only copy left, and saving recreates the file); only the tab title
+    /// changes, so this is chrome and never republishes the persisted row.
+    private(set) var deletedPaths: Set<String> = []
+    /// Set when the renderer dies, cleared by the `onReady` that follows it.
+    /// `onReady` fires again after *every* crash, so it is a "the web view is
+    /// (re)born" signal rather than a one-shot — and only a rebirth needs the
+    /// models put back.
+    private var needsModelRestore = false
 
     // MARK: - PaneContentView
 
@@ -75,7 +88,13 @@ final class EditorPaneView: NSView, PaneContentView {
         default: return mediaHost.isHidden ? webHost.webView : mediaHost.preferredResponder
         }
     }
-    func focus() { window?.makeFirstResponder(primaryResponderView) }
+    /// Focus is the spec's moment for noticing the world moved: an agent (or
+    /// a `git checkout`) rewrites files while the pane is not looking, and
+    /// this is when the user comes back to look.
+    func focus() {
+        checkExternalChanges()
+        window?.makeFirstResponder(primaryResponderView)
+    }
     func scheduleResize() {}
     func flushResize() {}
 
@@ -277,7 +296,117 @@ final class EditorPaneView: NSView, PaneContentView {
                 onOpenFileRequest?(url)
             }
         }
-        // onCrash wired in Task 15.
+        // The renderer died: `EditorWebView` has already dropped its queue and
+        // is reloading the page. Nothing can be sent until it answers `ready`,
+        // so all this does is remember why the next `ready` is arriving.
+        webHost.onCrash = { [weak self] in self?.needsModelRestore = true }
+        webHost.onReady = { [weak self] in
+            guard let self, needsModelRestore else { return }
+            needsModelRestore = false
+            restoreAfterRendererCrash()
+        }
+    }
+
+    /// The page was rebuilt from scratch, so every Monaco model it held is
+    /// gone. Re-open the ones this pane had loaded — dirty buffers from their
+    /// last ~2 s snapshot (spec §7: unsaved edits survive a renderer death),
+    /// clean ones from disk — and re-show the active tab.
+    ///
+    /// Only `loadedPaths` are restored, which keeps the pane's laziness
+    /// intact: a restored-session tab Monaco never saw stays unloaded until
+    /// it is activated, exactly as before the crash. `.diff` and `.changes`
+    /// tabs need nothing replayed — `showActiveContent` refetches them.
+    func restoreAfterRendererCrash() {
+        for tab in model.tabs where tab.kind == .file && loadedPaths.contains(tab.path) {
+            let url = URL(fileURLWithPath: tab.path)
+            let snapshot = tab.isDirty ? dirtySnapshots[tab.path] : nil
+            var readOnly = false
+            if FileManager.default.fileExists(atPath: tab.path) {
+                guard case let .text(classified) = EditorFileClass.classify(url: url) else { continue }
+                readOnly = classified
+            } else if snapshot == nil {
+                // The file went away while the renderer was down and there is
+                // no unsaved buffer to put back: there is genuinely nothing to
+                // restore. Forget the model so the tab re-derives itself on
+                // activation rather than showing a blank surface for a Monaco
+                // model that no longer exists.
+                loadedPaths.remove(tab.path)
+                deletedPaths.insert(tab.path)
+                continue
+            }
+            // A file that vanished under a *dirty* buffer falls through with
+            // `readOnly` false and an empty disk side — the snapshot below is
+            // the only copy of that work left, and losing it to a crash is
+            // exactly what this method exists to prevent.
+            let encoding = encodings[tab.path] ?? .utf8
+            let disk = (try? String(contentsOf: url, encoding: encoding)) ?? ""
+            // Open at the *disk* text first so the page's saved version is the
+            // file's, then put the unsaved edit back on top of it. Opening
+            // straight at the snapshot would make the page call that edit
+            // saved, and a later close would discard it without asking.
+            webHost.openModel(path: tab.path, content: disk, readOnly: readOnly)
+            if let snapshot { webHost.restoreUnsaved(path: tab.path, content: snapshot) }
+        }
+        syncAll()
+        showActiveContent()
+    }
+
+    // MARK: - External changes
+
+    /// Spec §2. A file that moved on disk under a **clean** buffer is reloaded
+    /// silently; under a **dirty** one the user is asked (keep mine / take
+    /// disk). A file that is *gone* keeps its buffer and is marked in the
+    /// strip — the buffer is the only copy left, and saving recreates it.
+    ///
+    /// The recorded mtime advances *before* the prompt, so one disk change
+    /// asks exactly once however many times focus comes back.
+    func checkExternalChanges() {
+        var markedChanged = false
+        for tab in model.tabs where tab.kind == .file {
+            let path = tab.path
+            guard let recorded = modificationDates[path] else { continue }
+            guard FileManager.default.fileExists(atPath: path) else {
+                markedChanged = deletedPaths.insert(path).inserted || markedChanged
+                continue
+            }
+            markedChanged = deletedPaths.remove(path) != nil || markedChanged
+            let current = modificationDate(of: URL(fileURLWithPath: path)) ?? recorded
+            guard current > recorded else { continue }
+            modificationDates[path] = current
+            if tab.isDirty {
+                confirmConflict((path as NSString).lastPathComponent) { [weak self] takeDisk in
+                    guard takeDisk else { return }
+                    self?.reloadFromDisk(path)
+                }
+            } else {
+                reloadFromDisk(path)
+            }
+        }
+        // Chrome only: a title gaining or losing " (deleted)" is not a tab
+        // mutation and must not rewrite the persisted row.
+        if markedChanged { syncChrome() }
+    }
+
+    /// Replaces a buffer with what is on disk. Clearing dirty (and with it the
+    /// crash snapshot) is deliberately left to the bridge: `setContent`
+    /// rebases the page's saved version and posts `dirtyChanged(false)`, and
+    /// `wireBridge` drops the snapshot there. Doing it here as well would let
+    /// Swift call a buffer clean that the page had not actually rebased.
+    private func reloadFromDisk(_ path: String) {
+        guard loadedPaths.contains(path) else { return }
+        let encoding = encodings[path] ?? .utf8
+        guard let content = try? String(contentsOfFile: path, encoding: encoding) else { return }
+        webHost.setContent(path: path, content: content)
+    }
+
+    private static func defaultConfirmConflict(_ name: String, _ decide: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "\(name) changed on disk"
+        alert.informativeText =
+            "You have unsaved edits, and the file was modified outside the editor (probably by an agent)."
+        alert.addButton(withTitle: "Keep Mine")
+        alert.addButton(withTitle: "Take Disk")
+        decide(alert.runModal() == .alertSecondButtonReturn)
     }
 
     // MARK: - Opening
@@ -453,6 +582,8 @@ final class EditorPaneView: NSView, PaneContentView {
     }
 
     private func activateTab(_ index: Int) {
+        // Same reason as `focus()`: switching to a tab is looking at it again.
+        checkExternalChanges()
         model.activate(index)
         syncAll()
         // `showActiveContent` loads a restored tab's model on first sight.
@@ -577,6 +708,9 @@ final class EditorPaneView: NSView, PaneContentView {
                 return
             }
             modificationDates[path] = modificationDate(of: url)
+            // The write recreated a file that had vanished, so the strip's
+            // " (deleted)" mark is no longer true.
+            if deletedPaths.remove(path) != nil { syncChrome() }
             // Version-scoped: the page leaves the tab dirty (and re-posts
             // nothing) when the buffer has moved past `versionId`.
             webHost.markSaved(path: path, versionId: versionId)
@@ -631,9 +765,69 @@ final class EditorPaneView: NSView, PaneContentView {
             case .cancel: break
             case .discard: performClose(at: index)
             case .save:
-                save(at: index) { saved in
-                    if saved { self.performClose(at: self.model.index(of: tab.path, kind: tab.kind) ?? index) }
+                saveThenCloseIfClean(tab: tab, index: index) { [weak self] clean in
+                    // Not clean means a keystroke landed inside the write and
+                    // was correctly refused by the version-scoped `markSaved`.
+                    // The decision the user made was about the *old* content;
+                    // ask again rather than closing over the new edit.
+                    guard let self, !clean else { return }
+                    if let again = model.index(of: tab.path, kind: tab.kind) { requestCloseTab(at: again) }
                 }
+            }
+        }
+    }
+
+    /// Saves a tab, waits for the page to *acknowledge* the buffer clean, and
+    /// only then closes it.
+    ///
+    /// This is the load-bearing distinction Task 15 exists to close.
+    /// `save`'s `completion(true)` means "the bytes reached disk", **not**
+    /// "the buffer is clean" — and the modal `confirmSave` alert does not
+    /// protect the gap, because `NSAlert.runModal()` returns *before* the
+    /// asynchronous `requestContent -> write -> markSaved` round trip even
+    /// begins. A keystroke landing in that window is refused by the
+    /// version-scoped `markSaved` and would then be discarded anyway by a
+    /// close that never re-checks.
+    ///
+    /// `completion` reports whether the tab was closed. A failed *write*
+    /// never reaches it: that keeps `false` meaning exactly one thing at each
+    /// call site — "still dirty, ask again" — while a write that cannot land
+    /// stops the walk through `onFailure`.
+    private func saveThenCloseIfClean(
+        tab: EditorTab,
+        index: Int,
+        notifyLastClosed: Bool = true,
+        onFailure: @escaping () -> Void = {},
+        completion: @escaping (Bool) -> Void
+    ) {
+        save(at: index) { [weak self] saved in
+            guard let self else {
+                onFailure()
+                return
+            }
+            guard saved else {
+                onFailure()
+                return
+            }
+            // Ordered behind the `markSaved` the write just issued, which a
+            // posted `dirtyChanged` message is not — so this is the only
+            // decidable answer to "did the page accept the save?".
+            webHost.requestIsClean(path: tab.path) { [weak self] clean in
+                guard let self else {
+                    onFailure()
+                    return
+                }
+                guard clean else {
+                    completion(false)
+                    return
+                }
+                // The prompt handed control back to the run loop; the strip
+                // can have moved under it.
+                performClose(
+                    at: model.index(of: tab.path, kind: tab.kind) ?? index,
+                    notifyLastClosed: notifyLastClosed
+                )
+                completion(true)
             }
         }
     }
@@ -661,6 +855,7 @@ final class EditorPaneView: NSView, PaneContentView {
         encodings.removeValue(forKey: tab.path)
         modificationDates.removeValue(forKey: tab.path)
         dirtySnapshots.removeValue(forKey: tab.path)
+        deletedPaths.remove(tab.path)
     }
 
     /// Resolves every dirty tab with a prompt and closes it. `false` means the
@@ -688,13 +883,18 @@ final class EditorPaneView: NSView, PaneContentView {
                 performClose(at: index, notifyLastClosed: false)
                 drainDirtyTabs(completion: completion)
             case .save:
-                save(at: index) { [weak self] saved in
-                    guard saved, let self else {
-                        completion(false)
-                        return
-                    }
-                    performClose(at: model.index(of: tab.path, kind: tab.kind) ?? index, notifyLastClosed: false)
-                    drainDirtyTabs(completion: completion)
+                saveThenCloseIfClean(
+                    tab: tab,
+                    index: index,
+                    notifyLastClosed: false,
+                    // A write that could not land is not "resolved": it stops
+                    // the walk, exactly as it did before.
+                    onFailure: { completion(false) }
+                ) { [weak self] _ in
+                    // Closed or not, the next step is the same: drain what is
+                    // still dirty. A tab that stayed dirty because a keystroke
+                    // landed inside the write is simply asked about again.
+                    self?.drainDirtyTabs(completion: completion)
                 }
             }
         }
@@ -705,16 +905,16 @@ final class EditorPaneView: NSView, PaneContentView {
     private func syncAll() { sync(publish: true) }
 
     private func sync(publish: Bool) {
-        strip.render(model: model, diffAvailable: activeFileHasChanges())
+        strip.render(model: model, diffAvailable: activeFileHasChanges(), deletedPaths: deletedPaths)
         onTitleChange?(model.activeTab.map(EditorTabStripView.title(for:)) ?? "Editor")
         guard publish else { return }
         onStateChange?(persistedTabs, model.activeIndex)
     }
 
-    /// Chrome only — `changedPaths` moving is not a tab mutation, so it must
-    /// not republish the persisted row.
+    /// Chrome only — neither `changedPaths` nor `deletedPaths` moving is a tab
+    /// mutation, so neither may republish the persisted row.
     private func syncChrome() {
-        strip.render(model: model, diffAvailable: activeFileHasChanges())
+        strip.render(model: model, diffAvailable: activeFileHasChanges(), deletedPaths: deletedPaths)
     }
 
     private var persistedTabs: [PersistedEditorTab] {
@@ -733,6 +933,20 @@ final class EditorPaneView: NSView, PaneContentView {
     func modelForTesting(_ mutate: (inout EditorPaneModel) -> Void) {
         mutate(&model)
         syncAll()
+    }
+
+    /// Stands in for the bridge's debounced `contentSnapshot`, which takes two
+    /// real seconds to arrive.
+    func injectSnapshotForTesting(path: String, content: String) {
+        dirtySnapshots[path] = content
+    }
+
+    /// Kills the renderer through the *production* seam — the delegate
+    /// callback WebKit itself calls — so the test drives the real crash path
+    /// (queue dropped, page reloaded, `onCrash` then `onReady`) rather than a
+    /// second implementation of it.
+    func simulateRendererCrashForTesting() {
+        webHost.webViewWebContentProcessDidTerminate(webHost.webView)
     }
 
     private static func defaultConfirmSave(_ name: String, _ decide: @escaping (EditorSaveDecision) -> Void) {

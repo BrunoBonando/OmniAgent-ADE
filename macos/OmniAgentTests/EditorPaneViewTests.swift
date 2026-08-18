@@ -657,4 +657,262 @@ final class EditorPaneViewTests: XCTestCase {
         XCTAssertFalse(pane.loadedPaths.contains(first.path))
         XCTAssertTrue(pane.loadedPaths.contains(second.path))
     }
+
+    // MARK: - Task 15: external changes
+
+    /// Spec §2: a clean buffer whose file moved under it reloads silently.
+    func testCleanBufferSilentlyReloadsOnExternalChange() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        try "v2".write(to: url, atomically: true, encoding: .utf8)
+        // mtime granularity is a second on some filesystems; force a date that
+        // is unambiguously newer rather than racing the clock.
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)],
+            ofItemAtPath: url.path
+        )
+        pane.confirmConflict = { _, _ in XCTFail("a clean buffer must never prompt") }
+
+        pane.checkExternalChanges()
+
+        let reloaded = expectation(description: "reloaded")
+        pane.webHost.requestContent(path: url.path) { content, _ in
+            XCTAssertEqual(content, "v2")
+            reloaded.fulfill()
+        }
+        wait(for: [reloaded], timeout: 10)
+    }
+
+    /// A dirty buffer is never overwritten without being asked about, and
+    /// "Keep Mine" leaves the edits exactly where they were.
+    func testDirtyBufferConflictPromptsAndKeepMineKeepsTheEdits() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        makeDirty(pane, path: url.path, content: "mine")
+        try "v2".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)],
+            ofItemAtPath: url.path
+        )
+        var asked: [String] = []
+        pane.confirmConflict = { name, decide in
+            asked.append(name)
+            decide(false)
+        }
+
+        pane.checkExternalChanges()
+
+        XCTAssertEqual(asked, ["a.swift"])
+        XCTAssertTrue(pane.model.tabs[0].isDirty)
+        let kept = expectation(description: "kept")
+        pane.webHost.requestContent(path: url.path) { content, _ in
+            XCTAssertEqual(content, "mine")
+            kept.fulfill()
+        }
+        wait(for: [kept], timeout: 10)
+
+        // The recorded mtime advanced with the prompt, so the *same* disk
+        // change must not ask a second time on the next focus.
+        pane.checkExternalChanges()
+        XCTAssertEqual(asked, ["a.swift"])
+    }
+
+    /// "Take Disk" is the other half of the same prompt: the buffer becomes
+    /// what is on disk, and the tab goes clean because the page rebased.
+    func testConflictTakeDiskReplacesTheBuffer() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        makeDirty(pane, path: url.path, content: "mine")
+        try "v2".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)],
+            ofItemAtPath: url.path
+        )
+        pane.confirmConflict = { _, decide in decide(true) }
+
+        pane.checkExternalChanges()
+
+        let reloaded = expectation(description: "reloaded")
+        pane.webHost.requestContent(path: url.path) { content, _ in
+            XCTAssertEqual(content, "v2")
+            reloaded.fulfill()
+        }
+        wait(for: [reloaded], timeout: 10)
+        XCTAssertTrue(
+            pollUntil { pane.model.tabs[0].isDirty == false },
+            "the page rebased, so the dirty flag must come back false"
+        )
+        XCTAssertTrue(pane.dirtySnapshots[url.path] == nil)
+    }
+
+    /// A file deleted under the editor keeps its buffer and says so in the
+    /// strip; saving recreates the file and clears the mark.
+    func testDeletedFileIsMarkedKeepsItsBufferAndSaveRecreatesIt() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        makeDirty(pane, path: url.path, content: "mine")
+        try FileManager.default.removeItem(at: url)
+        pane.confirmConflict = { _, _ in XCTFail("a deletion is not a keep-mine/take-disk question") }
+
+        pane.checkExternalChanges()
+
+        XCTAssertTrue(pane.deletedPaths.contains(url.path))
+        XCTAssertEqual(pane.strip.itemTitles, ["a.swift (deleted)"])
+        XCTAssertTrue(pane.model.tabs[0].isDirty, "the buffer is the only copy left")
+
+        let saved = expectation(description: "saved")
+        pane.saveActiveTab { XCTAssertTrue($0); saved.fulfill() }
+        wait(for: [saved], timeout: 10)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "mine")
+
+        pane.checkExternalChanges()
+        XCTAssertFalse(pane.deletedPaths.contains(url.path))
+        XCTAssertEqual(pane.strip.itemTitles, ["a.swift"])
+    }
+
+    // MARK: - Task 15: renderer-crash restore
+
+    /// Spec §7: unsaved edits survive a WKWebView renderer death. The page is
+    /// rebuilt from scratch, so the buffer comes back from its last snapshot.
+    func testCrashRestoreReplaysDirtySnapshot() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        pane.injectSnapshotForTesting(path: url.path, content: "edited-but-unsaved")
+        pane.modelForTesting { $0.setDirty(true, at: 0) }
+
+        pane.simulateRendererCrashForTesting()
+        XCTAssertFalse(pane.webHost.isReady, "the crash tears the bridge down")
+        waitUntilReady(pane)
+
+        let restored = expectation(description: "restored")
+        pane.webHost.requestContent(path: url.path) { content, _ in
+            XCTAssertEqual(content, "edited-but-unsaved")
+            restored.fulfill()
+        }
+        wait(for: [restored], timeout: 15)
+        XCTAssertTrue(pane.model.tabs[0].isDirty)
+    }
+
+    /// The other half: a *clean* tab comes back from disk, never from a
+    /// snapshot left over from before its last save.
+    func testCrashRestoreReloadsACleanTabFromDisk() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        pane.injectSnapshotForTesting(path: url.path, content: "stale")
+        try "v2".write(to: url, atomically: true, encoding: .utf8)
+
+        pane.simulateRendererCrashForTesting()
+        waitUntilReady(pane)
+
+        let restored = expectation(description: "restored")
+        pane.webHost.requestContent(path: url.path) { content, _ in
+            XCTAssertEqual(content, "v2")
+            restored.fulfill()
+        }
+        wait(for: [restored], timeout: 15)
+        XCTAssertFalse(pane.model.tabs[0].isDirty)
+    }
+
+    /// The nastiest ordering of the two hardening rules: the file vanishes
+    /// *and* the renderer dies, with unsaved work in the buffer. The snapshot
+    /// is the only copy left, so it has to come back even though the file
+    /// cannot be classified any more.
+    func testCrashRestoreKeepsADirtyBufferWhoseFileVanished() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        pane.injectSnapshotForTesting(path: url.path, content: "only-copy")
+        pane.modelForTesting { $0.setDirty(true, at: 0) }
+        try FileManager.default.removeItem(at: url)
+
+        pane.simulateRendererCrashForTesting()
+        waitUntilReady(pane)
+
+        let restored = expectation(description: "restored")
+        pane.webHost.requestContent(path: url.path) { content, _ in
+            XCTAssertEqual(content, "only-copy")
+            restored.fulfill()
+        }
+        wait(for: [restored], timeout: 15)
+        XCTAssertTrue(pane.model.tabs[0].isDirty)
+        XCTAssertTrue(pane.loadedPaths.contains(url.path))
+    }
+
+    // MARK: - Task 15: the save-acknowledgement window
+
+    /// `save`'s `true` means "the bytes reached disk", not "the buffer is
+    /// clean": a keystroke landing inside the `getContent` -> write round trip
+    /// is (correctly) refused by the version-scoped `markSaved` and leaves the
+    /// buffer dirty. Closing the tab on that `true` alone would discard the
+    /// keystroke with no prompt — which the modal alert does *not* prevent,
+    /// because `runModal` returns before the async round trip even starts.
+    func testDrainWaitsForTheSaveToBeAcknowledgedClean() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        makeDirty(pane, path: url.path, content: "edit-1")
+
+        var prompts = 0
+        pane.confirmSave = { _, decide in
+            prompts += 1
+            decide(.save)
+            // `evaluateJavaScript` calls run in the page in order, so this
+            // lands *after* the `getContent` `decide(.save)` just issued and
+            // *before* Swift's write comes back — exactly the window.
+            if prompts == 1 {
+                pane.webHost.setContentForTesting(path: url.path, content: "typed-during-save")
+            }
+        }
+
+        let drained = expectation(description: "drained")
+        var proceeded: Bool?
+        pane.closeAllTabsAfterConfirmation {
+            proceeded = $0
+            drained.fulfill()
+        }
+        wait(for: [drained], timeout: 30)
+
+        XCTAssertEqual(proceeded, true)
+        XCTAssertEqual(prompts, 2, "the edit that landed inside the write is asked about again")
+        XCTAssertTrue(pane.model.tabs.isEmpty)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "typed-during-save")
+    }
+
+    /// The same window, on the single-tab close path.
+    func testClosingOneTabWaitsForTheSaveToBeAcknowledgedClean() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        makeDirty(pane, path: url.path, content: "edit-1")
+
+        var prompts = 0
+        pane.confirmSave = { _, decide in
+            prompts += 1
+            decide(.save)
+            if prompts == 1 {
+                pane.webHost.setContentForTesting(path: url.path, content: "typed-during-save")
+            }
+        }
+
+        pane.requestCloseTab(at: 0)
+
+        XCTAssertTrue(pollUntil(timeout: 30) { pane.model.tabs.isEmpty })
+        XCTAssertEqual(prompts, 2)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "typed-during-save")
+    }
 }

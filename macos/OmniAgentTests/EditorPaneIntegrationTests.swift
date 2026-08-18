@@ -942,6 +942,156 @@ final class EditorPaneIntegrationTests: XCTestCase {
     }
 
     /// A real file on disk — `EditorPaneView.openFile` stats and reads it.
+    // MARK: - Task 15: the three dirty prompts
+
+    /// ⌘W on an editor pane with unsaved work asks before it destroys it —
+    /// the hole Task 10 knowingly left in `closePane`.
+    func testCloseDirtyEditorPaneAsksFirst() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: true)
+        let workspace = controller.workspaceView
+        let id = try XCTUnwrap(workspace.focusedPaneID)
+        let pane = try XCTUnwrap(workspace.editorPane(for: id))
+        pane.modelForTesting { $0.setDirty(true, at: 0) }
+
+        pane.confirmSave = { _, decide in decide(.cancel) }
+        controller.closePane(nil)
+        XCTAssertNotNil(workspace.editorPane(for: id), "cancel kept the pane")
+        XCTAssertEqual(pane.model.tabs.count, 1, "…and the unsaved buffer with it")
+
+        pane.confirmSave = { _, decide in decide(.discard) }
+        controller.closePane(nil)
+        XCTAssertNil(workspace.editorPane(for: id))
+    }
+
+    /// A clean editor pane closes with no prompt at all.
+    func testCloseCleanEditorPaneNeverAsks() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: true)
+        let workspace = controller.workspaceView
+        let id = try XCTUnwrap(workspace.focusedPaneID)
+        let pane = try XCTUnwrap(workspace.editorPane(for: id))
+        pane.confirmSave = { _, _ in XCTFail("nothing is unsaved") }
+
+        controller.closePane(nil)
+
+        XCTAssertNil(workspace.editorPane(for: id))
+    }
+
+    /// ⇧⌘W: the window holds itself open while anything is unsaved.
+    func testWindowCloseAsksAboutDirtyEditorTabs() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: true)
+        let id = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: id))
+        pane.modelForTesting { $0.setDirty(true, at: 0) }
+
+        var asked = 0
+        pane.confirmSave = { _, decide in
+            asked += 1
+            decide(.cancel)
+        }
+        XCTAssertFalse(controller.windowShouldClose(window), "unsaved work holds the window open")
+        XCTAssertEqual(asked, 1)
+        XCTAssertTrue(window.isVisible)
+        XCTAssertEqual(pane.model.tabs.count, 1)
+
+        pane.confirmSave = { _, decide in
+            asked += 1
+            decide(.discard)
+        }
+        XCTAssertFalse(
+            controller.windowShouldClose(window),
+            "the delegate still answers no — it closes the window itself once the prompt resolves"
+        )
+        XCTAssertEqual(asked, 2)
+        XCTAssertFalse(window.isVisible, "…and the window is gone")
+    }
+
+    /// A workspace with nothing unsaved never delays its own close.
+    func testWindowCloseIsImmediateWhenNothingIsUnsaved() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: true)
+
+        XCTAssertTrue(controller.windowShouldClose(window))
+        XCTAssertTrue(window.isVisible, "…and it was AppKit that closed it, not us")
+    }
+
+    /// ⌘Q walks every window that has something to lose, and one cancel stops
+    /// the whole quit.
+    func testQuitPromptsEveryWindowWithDirtyEditorTabs() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: true)
+        let id = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: id))
+
+        XCTAssertTrue(
+            AppDelegate.dirtyWorkspaceControllers(in: [window]).isEmpty,
+            "nothing unsaved, nothing to ask about"
+        )
+        pane.modelForTesting { $0.setDirty(true, at: 0) }
+        XCTAssertEqual(AppDelegate.dirtyWorkspaceControllers(in: [window]).count, 1)
+
+        let delegate = AppDelegate()
+        var replies: [Bool] = []
+        delegate.replyToTermination = { replies.append($0) }
+
+        pane.confirmSave = { _, decide in decide(.cancel) }
+        delegate.promptDirtyEditorTabs(in: [controller]) { delegate.replyToTermination($0) }
+        XCTAssertEqual(replies, [false], "cancel stops the quit")
+        XCTAssertEqual(pane.model.tabs.count, 1, "…and nothing was thrown away")
+
+        pane.confirmSave = { _, decide in decide(.discard) }
+        delegate.promptDirtyEditorTabs(in: [controller]) { delegate.replyToTermination($0) }
+        XCTAssertEqual(replies, [false, true])
+        XCTAssertTrue(pane.model.tabs.isEmpty)
+    }
+
+    /// And `applicationShouldTerminate` itself defers rather than quitting
+    /// out from under an unsaved buffer.
+    func testApplicationShouldTerminateDefersWhileAnythingIsUnsaved() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: true)
+        let id = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: id))
+        pane.modelForTesting { $0.setDirty(true, at: 0) }
+
+        let delegate = AppDelegate()
+        var replies: [Bool] = []
+        delegate.replyToTermination = { replies.append($0) }
+        var asked = 0
+        pane.confirmSave = { _, decide in
+            asked += 1
+            decide(.cancel)
+        }
+
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApp), .terminateLater)
+        XCTAssertGreaterThanOrEqual(asked, 1)
+        XCTAssertEqual(replies, [false])
+
+        // This test deliberately ends on "cancel", i.e. with the buffer still
+        // unsaved. Left that way, a window that outlives the test would make
+        // the *real* delegate put a modal alert on screen when the test host
+        // quits — which nobody is there to answer.
+        pane.modelForTesting { $0.setDirty(false, at: 0) }
+        XCTAssertFalse(controller.hasDirtyEditorTabs)
+    }
+
     private func makeTempFile(_ name: String, _ contents: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("editor-open-\(UUID().uuidString)")

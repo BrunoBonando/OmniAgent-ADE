@@ -44,6 +44,11 @@ final class EditorTabStripView: NSView {
     private var items: [EditorTabItemView] = []
 
     private(set) var itemFrames: [CGRect] = []
+    /// The titles actually drawn, in order — including the `" (deleted)"`
+    /// suffix a vanished file wears. The strip has no other way to say what it
+    /// rendered, and the suffix is the whole user-visible half of Task 15's
+    /// deleted-on-disk rule.
+    private(set) var itemTitles: [String] = []
 
     private static let itemSpacing: CGFloat = 1
     private static let itemHeight: CGFloat = 24
@@ -168,10 +173,20 @@ final class EditorTabStripView: NSView {
         return tabFrames.count
     }
 
-    func render(model: EditorPaneModel, diffAvailable: Bool) {
+    /// `deletedPaths` are the open files that have vanished from disk since
+    /// they were read. Their buffers stay exactly where they are — the tab
+    /// title is the only thing that changes, because at that point the buffer
+    /// is the only copy of the file left.
+    func render(model: EditorPaneModel, diffAvailable: Bool, deletedPaths: Set<String> = []) {
         itemsContainer.subviews.forEach { $0.removeFromSuperview() }
+        itemTitles = model.tabs.map { tab in
+            // `.file` only: a diff tab of a deleted file is not broken, it is
+            // a deletion — showing its whole HEAD side is the point of it.
+            let gone = tab.kind == .file && deletedPaths.contains(tab.path)
+            return Self.title(for: tab) + (gone ? " (deleted)" : "")
+        }
         items = model.tabs.enumerated().map { index, tab in
-            let item = EditorTabItemView(tab: tab, title: Self.title(for: tab), isActiveTab: index == model.activeIndex)
+            let item = EditorTabItemView(tab: tab, title: itemTitles[index], isActiveTab: index == model.activeIndex)
             item.onPress = { [weak self] in self?.onSelect?(index) }
             item.onDoublePress = { [weak self] in self?.onPin?(index) }
             item.onClosePress = { [weak self] in self?.onClose?(index) }

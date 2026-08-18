@@ -63,6 +63,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// How the deferred answer gets back to AppKit. A seam because
+    /// `NSApp.reply(toApplicationShouldTerminate:)` outside a real
+    /// termination sequence does nothing a test can observe.
+    var replyToTermination: (Bool) -> Void = { NSApp.reply(toApplicationShouldTerminate: $0) }
+
+    /// ⌘Q must not throw away unsaved editor buffers. Every workspace window
+    /// holding any is walked with save prompts; one cancel anywhere stops the
+    /// quit. A session with nothing unsaved quits immediately — no deferral,
+    /// no run-loop turn.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let dirty = Self.dirtyWorkspaceControllers(in: sender.windows)
+        guard !dirty.isEmpty else { return .terminateNow }
+        promptDirtyEditorTabs(in: dirty) { [weak self] proceed in
+            self?.replyToTermination(proceed)
+        }
+        return .terminateLater
+    }
+
+    /// Every workspace window with something unsaved, in window order and
+    /// deduplicated — a controller can own more than one window, and must be
+    /// asked about its panes exactly once.
+    static func dirtyWorkspaceControllers(in windows: [NSWindow]) -> [WorkspaceWindowController] {
+        var seen = Set<ObjectIdentifier>()
+        return windows
+            .compactMap { $0.windowController as? WorkspaceWindowController }
+            .filter { seen.insert(ObjectIdentifier($0)).inserted }
+            .filter(\.hasDirtyEditorTabs)
+    }
+
+    /// One window at a time, chained: each controller's prompts answer on a
+    /// callback. Internal so a test can drive the walk without staging a real
+    /// application termination.
+    func promptDirtyEditorTabs(
+        in controllers: [WorkspaceWindowController],
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard let next = controllers.first else {
+            completion(true)
+            return
+        }
+        next.promptDirtyEditorTabs { [weak self] proceed in
+            guard proceed, let self else {
+                completion(false)
+                return
+            }
+            promptDirtyEditorTabs(in: Array(controllers.dropFirst()), completion: completion)
+        }
+    }
+
     /// Task 6c's channel-aware path resolution. Production's result is
     /// byte-identical to this property's pre-6c literal (see
     /// `DaemonPersistenceTests`), so this is a resolution-mechanism change,
