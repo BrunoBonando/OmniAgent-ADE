@@ -429,8 +429,8 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// One scale for both axes, so the card keeps the window's own proportions
     /// rather than being letterboxed into a fixed shape.
     static let focusOverlayPadding: CGFloat = 26
-    static let focusCardScale: CGFloat = 0.82
-    static let focusCardMaxSize = NSSize(width: 1280, height: 800)
+    static let focusCardScale: CGFloat = 0.88
+    static let focusCardMaxSize = NSSize(width: 1400, height: 880)
     /// `0 40px 100px`: 40pt of downward offset, and a CSS blur radius is about
     /// twice a layer's shadow radius, so 100px of spread is 50 here.
     static let focusCardShadowDrop: CGFloat = 40
@@ -2495,6 +2495,13 @@ final class PaneZoomBackdropView: NSVisualEffectView {
 
     var onClick: (() -> Void)?
 
+    /// The blur material alone, at full alpha, reads as near-opaque black —
+    /// there is nothing of the sharp background left in the composite, only
+    /// the material's own dark tint. Landing short of 1 lets a fraction of
+    /// the untinted, unblurred pixels back into the mix, which is what turns
+    /// "blurred" into "blurred but still legible" instead of "blacked out".
+    private static let shownAlpha: CGFloat = 0.7
+
     private var isShown = false
 
     /// `backdrop-filter:blur(16px)` as the platform's own within-window blur,
@@ -2543,7 +2550,7 @@ final class PaneZoomBackdropView: NSVisualEffectView {
         guard isShown != shown else { return }
         isShown = shown
         if shown { isHidden = false }
-        let alpha: CGFloat = shown ? 1 : 0
+        let alpha: CGFloat = shown ? Self.shownAlpha : 0
         guard duration > 0 else {
             alphaValue = alpha
             isHidden = !shown
@@ -2854,29 +2861,36 @@ final class PaneDividerView: NSView {
     }
 }
 
-
 /// The empty cell of an incomplete rectangle. Visible (so a hole reads as a
 /// deliberate empty slot rather than a rendering bug) and clickable, which is
 /// the same double duty the web grid's hole tile does. Two affordances now: a
 /// terminal remains the primary one — a click anywhere in the cell — and the
-/// fainter "+ New browser" line underneath is the one place a click means a
+/// fainter "New browser" line underneath is the one place a click means a
 /// browser instead.
+///
+/// Drawn rather than composed from subviews: the whole cell is one hit target,
+/// so subviews would only add layout to keep in sync. The "blurred" backdrop is
+/// three radial gradients — a real blur filter buys nothing over a gradient
+/// whose edge is already transparent.
 final class PaneHolePlaceholderView: NSView {
     private let onActivate: () -> Void
     private let onActivateBrowser: () -> Void
 
-    private static let terminalText = "+ New terminal" as NSString
-    private static let browserText = "+ New browser" as NSString
+    private static let accent = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 1)
+    private static let terminalText = "New terminal" as NSString
+    private static let browserText = "New browser" as NSString
     private static let terminalAttributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-        .foregroundColor: NSColor(srgbRed: 110 / 255, green: 120 / 255, blue: 138 / 255, alpha: 1),
+        .font: NSFont.systemFont(ofSize: 12.5, weight: .medium),
+        .foregroundColor: NSColor(srgbRed: 206 / 255, green: 210 / 255, blue: 232 / 255, alpha: 1),
     ]
     /// Smaller and fainter: the secondary affordance must not compete with
     /// the primary one it sits under.
     private static let browserAttributes: [NSAttributedString.Key: Any] = [
         .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-        .foregroundColor: NSColor(srgbRed: 110 / 255, green: 120 / 255, blue: 138 / 255, alpha: 0.65),
+        .foregroundColor: NSColor(srgbRed: 138 / 255, green: 146 / 255, blue: 176 / 255, alpha: 1),
     ]
+    private static let plateSize: CGFloat = 46
+    private static let browserIconSize: CGFloat = 12
 
     init(onActivate: @escaping () -> Void, onActivateBrowser: @escaping () -> Void = {}) {
         self.onActivate = onActivate
@@ -2895,6 +2909,23 @@ final class PaneHolePlaceholderView: NSView {
         fatalError("init(coder:) is unavailable")
     }
 
+    /// The icon plate above the primary line. Everything else is positioned off
+    /// this, so the block stays centred as the cell resizes.
+    var plateRect: NSRect {
+        let terminalHeight = Self.terminalText.size(withAttributes: Self.terminalAttributes).height
+        let browserHeight = max(
+            Self.browserText.size(withAttributes: Self.browserAttributes).height,
+            Self.browserIconSize
+        )
+        let block = Self.plateSize + 12 + terminalHeight + 7 + browserHeight
+        return NSRect(
+            x: bounds.midX - Self.plateSize / 2,
+            y: bounds.midY + block / 2 - Self.plateSize,
+            width: Self.plateSize,
+            height: Self.plateSize
+        )
+    }
+
     /// Where the primary line draws — derived from `bounds` rather than
     /// recorded during `draw(_:)`, so the click dispatch below is testable
     /// on a view nothing has rendered yet.
@@ -2902,34 +2933,121 @@ final class PaneHolePlaceholderView: NSView {
         let size = Self.terminalText.size(withAttributes: Self.terminalAttributes)
         return NSRect(
             x: bounds.midX - size.width / 2,
-            y: bounds.midY - size.height / 2,
+            y: plateRect.minY - 12 - size.height,
             width: size.width,
             height: size.height
         )
     }
 
-    /// The browser line, visually below the terminal one — this view is not
-    /// flipped, so "below" is the smaller y.
+    /// The browser affordance, visually below the terminal one — this view is
+    /// not flipped, so "below" is the smaller y. Covers the globe glyph as well
+    /// as the label, since both read as the same one thing to click.
     var browserTextRect: NSRect {
         let size = Self.browserText.size(withAttributes: Self.browserAttributes)
+        let width = Self.browserIconSize + 5 + size.width
+        let height = max(size.height, Self.browserIconSize)
         return NSRect(
-            x: bounds.midX - size.width / 2,
-            y: terminalTextRect.minY - 7 - size.height,
-            width: size.width,
-            height: size.height
+            x: bounds.midX - width / 2,
+            y: terminalTextRect.minY - 7 - height,
+            width: width,
+            height: height
         )
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let outline = NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 8), xRadius: 8, yRadius: 8)
+        let card = bounds.insetBy(dx: 8, dy: 8)
+        guard card.width > 2, card.height > 2 else { return }
+        let outline = NSBezierPath(roundedRect: card, xRadius: 14, yRadius: 14)
+
+        NSGraphicsContext.saveGraphicsState()
+        outline.addClip()
+        NSGradient(
+            starting: NSColor(srgbRed: 17 / 255, green: 19 / 255, blue: 28 / 255, alpha: 1),
+            ending: NSColor(srgbRed: 7 / 255, green: 8 / 255, blue: 12 / 255, alpha: 1)
+        )?.draw(in: card, angle: -90)
+        // The abstract backdrop: soft blobs bled off the corners, each one a
+        // radial gradient that fades to fully transparent — which is what a
+        // blurred shape looks like anyway, minus the filter.
+        let span = max(card.width, card.height)
+        let blobs: [(NSColor, NSPoint, CGFloat, CGFloat)] = [
+            (Self.accent,
+             NSPoint(x: card.minX + card.width * 0.1, y: card.maxY - card.height * 0.05),
+             span * 0.85, 0.30),
+            (NSColor(srgbRed: 186 / 255, green: 116 / 255, blue: 255 / 255, alpha: 1),
+             NSPoint(x: card.maxX - card.width * 0.05, y: card.minY + card.height * 0.1),
+             span * 0.8, 0.26),
+            (NSColor(srgbRed: 86 / 255, green: 198 / 255, blue: 214 / 255, alpha: 1),
+             NSPoint(x: card.maxX + card.width * 0.05, y: card.maxY),
+             span * 0.55, 0.20),
+        ]
+        for (color, center, radius, alpha) in blobs {
+            NSGradient(
+                starting: color.withAlphaComponent(alpha),
+                ending: color.withAlphaComponent(0)
+            )?.draw(fromCenter: center, radius: 0, toCenter: center, radius: radius, options: [])
+        }
+        NSGraphicsContext.restoreGraphicsState()
+
         outline.lineWidth = 1
-        outline.setLineDash([6, 5], count: 2, phase: 0)
-        NSColor(srgbRed: 36 / 255, green: 43 / 255, blue: 57 / 255, alpha: 1).setStroke()
+        Self.accent.withAlphaComponent(0.16).setStroke()
         outline.stroke()
 
+        let plate = plateRect
+        let platePath = NSBezierPath(roundedRect: plate, xRadius: 13, yRadius: 13)
+        Self.accent.withAlphaComponent(0.12).setFill()
+        platePath.fill()
+        platePath.lineWidth = 1
+        Self.accent.withAlphaComponent(0.28).setStroke()
+        platePath.stroke()
+        draw(symbol: "terminal", in: plate, size: 20, weight: .medium, alpha: 0.9)
+
         Self.terminalText.draw(at: terminalTextRect.origin, withAttributes: Self.terminalAttributes)
-        Self.browserText.draw(at: browserTextRect.origin, withAttributes: Self.browserAttributes)
+
+        let browserRect = browserTextRect
+        draw(
+            symbol: "globe",
+            in: NSRect(
+                x: browserRect.minX,
+                y: browserRect.midY - Self.browserIconSize / 2,
+                width: Self.browserIconSize,
+                height: Self.browserIconSize
+            ),
+            size: Self.browserIconSize,
+            weight: .regular,
+            alpha: 0.5
+        )
+        let browserTextSize = Self.browserText.size(withAttributes: Self.browserAttributes)
+        Self.browserText.draw(
+            at: NSPoint(
+                x: browserRect.minX + Self.browserIconSize + 5,
+                y: browserRect.midY - browserTextSize.height / 2
+            ),
+            withAttributes: Self.browserAttributes
+        )
+    }
+
+    /// SF Symbol, tinted with the accent and centred in `rect`. A missing
+    /// symbol simply draws nothing — the labels still say what the cell does.
+    private func draw(symbol: String, in rect: NSRect, size: CGFloat, weight: NSFont.Weight, alpha: CGFloat) {
+        guard let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: size, weight: weight)) else { return }
+        let target = NSRect(
+            x: rect.midX - image.size.width / 2,
+            y: rect.midY - image.size.height / 2,
+            width: image.size.width,
+            height: image.size.height
+        )
+        // Tint inside an image of the glyph's own size: `.sourceAtop` needs a
+        // destination whose alpha *is* the glyph, and the card underneath is
+        // opaque, so tinting in place would just paint a filled rectangle.
+        let tinted = NSImage(size: image.size, flipped: false) { rect in
+            image.draw(in: rect)
+            Self.accent.withAlphaComponent(alpha).set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        tinted.draw(in: target)
     }
 
     override func mouseUp(with event: NSEvent) {
