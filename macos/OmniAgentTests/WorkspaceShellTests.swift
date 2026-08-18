@@ -716,6 +716,58 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(diffed, [url])
     }
 
+    /// Task 13: the header's +N −M counts are the button for the repo-wide
+    /// overview.
+    func testTheDiffHeaderOpensAllChanges() throws {
+        let tree = WorkspaceFilesTreeView(frame: NSRect(x: 0, y: 0, width: 280, height: 400))
+        var opened = 0
+        tree.onOpenAllChanges = { opened += 1 }
+
+        let recognizers = tree.descendants(NSTextField.self).flatMap(\.gestureRecognizers)
+        XCTAssertEqual(recognizers.count, 1, "exactly one header label is clickable")
+        let recognizer = try XCTUnwrap(recognizers.first)
+        _ = try XCTUnwrap(recognizer.target as AnyObject?)
+        NSApp.sendAction(try XCTUnwrap(recognizer.action), to: recognizer.target, from: recognizer)
+
+        XCTAssertEqual(opened, 1)
+    }
+
+    /// The pane surfaces need the same `git status` the tree drew its badges
+    /// from, so the tree reports every load — including the `nil` that means
+    /// "no workspace, no repository".
+    func testTheTreeReportsItsGitStatus() throws {
+        let tree = WorkspaceFilesTreeView(frame: NSRect(x: 0, y: 0, width: 280, height: 400))
+        var reported: [GitStatus?] = []
+        tree.onStatusChanged = { reported.append($0) }
+        let directory = try makeTempGitRepository(changed: "a.swift", clean: "b.swift")
+
+        tree.setRoot(directory)
+
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline, reported.compactMap({ $0 }).isEmpty {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertNil(reported.first ?? nil, "the reset lands first, so a stale status never lingers")
+        let status = try XCTUnwrap(reported.compactMap { $0 }.first)
+        XCTAssertEqual(status.badges["a.swift"], .untracked)
+    }
+
+    func testTheSidebarForwardsTheHeaderAndTheStatus() throws {
+        let sidebar = makeSidebar()
+        var opened = 0
+        var reported: [GitStatus?] = []
+        sidebar.onOpenAllChanges = { opened += 1 }
+        sidebar.onGitStatusChanged = { reported.append($0) }
+
+        try XCTUnwrap(sidebar.filesTree.onOpenAllChanges)()
+        try XCTUnwrap(sidebar.filesTree.onStatusChanged)(
+            GitStatus(root: URL(fileURLWithPath: "/w"), badges: ["a.swift": .modified])
+        )
+
+        XCTAssertEqual(opened, 1)
+        XCTAssertEqual(reported.compactMap { $0 }.first?.badges["a.swift"], .modified)
+    }
+
     /// A real click, at a point in the row rather than through its closure.
     private func click(_ view: NSView, at point: NSPoint, in window: NSWindow) {
         let inWindow = view.convert(point, to: nil)

@@ -13,6 +13,20 @@ enum GitBadge: Equatable {
     case untracked
     case renamed
     case conflicted
+
+    /// The single letter this state wears. Defined once, on the state itself,
+    /// so the FILES tree and the editor's Changes overview cannot drift into
+    /// disagreeing about what "M" means.
+    var letter: String {
+        switch self {
+        case .modified: return "M"
+        case .added: return "A"
+        case .deleted: return "D"
+        case .untracked: return "U"
+        case .renamed: return "R"
+        case .conflicted: return "!"
+        }
+    }
 }
 
 /// One row of the FILES tree.

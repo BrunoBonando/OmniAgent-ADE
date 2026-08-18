@@ -222,6 +222,22 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertNil(empty.first { $0.id == "open-diff" }, "an editor with no tabs has nothing to diff")
     }
 
+    /// Task 13: "Show all changes" needs a repository to describe. The
+    /// caller knows whether there is one; the model never runs git itself.
+    func testShowAllChangesOnlyInARepo() {
+        let without = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0
+        )
+        XCTAssertFalse(without.contains { $0.action == .showAllChanges })
+
+        let with = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0, hasGitRepo: true
+        )
+        XCTAssertTrue(with.contains { $0.action == .showAllChanges })
+        XCTAssertEqual(with.first { $0.action == .showAllChanges }?.id, "show-all-changes")
+        XCTAssertEqual(with.first { $0.action == .showAllChanges }?.title, "Show all changes")
+    }
+
     // MARK: - brain search (Task 6a-2/6b-2)
 
     func testTheSearchBrainRowIsAbsentWithNoQueryAndAppearsOnceThereIsOne() {

@@ -407,6 +407,119 @@ final class EditorPaneViewTests: XCTestCase {
         )
     }
 
+    // MARK: - The Changes overview tab (Task 13)
+
+    /// Every changed file, sorted by path, wearing the FILES tree's own
+    /// letters — the two surfaces read from one mapping so they cannot
+    /// disagree about what "M" means.
+    func testChangesTabListsEveryChangedFileWithTheTreesLetters() {
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.setGitStatus(GitStatus(root: dir, badges: ["src/b.swift": .untracked, "a.swift": .modified]))
+
+        pane.openChanges()
+
+        XCTAssertEqual(pane.model.tabs.map(\.kind), [.changes])
+        XCTAssertTrue(
+            pollUntilContains(pane.webHost, Self.changesSummary, "a.swift:M,src/b.swift:U"),
+            "the changes list never rendered in path order with the tree's letters"
+        )
+    }
+
+    /// A pane with no repository behind it says so rather than showing an
+    /// empty list that reads as "no changes".
+    func testChangesTabWithoutARepositorySaysSo() {
+        let pane = makePane()
+        waitUntilReady(pane)
+
+        pane.openChanges()
+
+        XCTAssertTrue(
+            pollUntilContains(pane.webHost, "document.getElementById('message').textContent", "Not a git repository")
+        )
+    }
+
+    /// The whole point of the overview: hunks arrive only when a row is
+    /// opened, one `git diff` per file, against a real repository.
+    func testChangesTabExpandsAFilesHunksLazily() throws {
+        let repo = try makeGitRepository(committing: "a.swift", "let x = 1\n")
+        try "let x = 1\nlet y = 2\n".write(
+            to: repo.appendingPathComponent("a.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.setGitStatus(GitStatus(root: repo, badges: ["a.swift": .modified]))
+        pane.openChanges()
+        XCTAssertTrue(pollUntilContains(pane.webHost, Self.changesSummary, "a.swift:M"))
+        XCTAssertFalse(
+            pollUntilContains(pane.webHost, Self.firstRowHunks, "let y", timeout: 1),
+            "nothing is fetched until the row is opened"
+        )
+
+        run(pane.webHost, "document.querySelectorAll('#changes .file')[0].querySelector('.row').click()")
+
+        XCTAssertTrue(
+            pollUntilContains(pane.webHost, Self.firstRowHunks, "+let y = 2"),
+            "the row never received its diff"
+        )
+    }
+
+    /// The two ways out of the overview: "open file" opens the file, a double
+    /// click opens its diff. Both route up — which pane they land in is the
+    /// controller's rule, not this view's.
+    func testChangesTabRoutesOpenFileAndOpenDiffUp() {
+        let pane = makePane()
+        waitUntilReady(pane)
+        var openedFile: URL?
+        var openedDiff: URL?
+        pane.onOpenFileRequest = { openedFile = $0 }
+        pane.onOpenDiffRequest = { openedDiff = $0 }
+        pane.setGitStatus(GitStatus(root: dir, badges: ["a.swift": .modified]))
+        pane.openChanges()
+        XCTAssertTrue(pollUntilContains(pane.webHost, Self.changesSummary, "a.swift:M"))
+
+        run(pane.webHost, "document.querySelectorAll('#changes .file')[0].querySelector('.open-file').click()")
+        XCTAssertTrue(pollUntil { openedFile != nil })
+        XCTAssertEqual(openedFile?.lastPathComponent, "a.swift")
+
+        run(
+            pane.webHost,
+            "document.querySelectorAll('#changes .file')[0].querySelector('.row')"
+                + ".dispatchEvent(new MouseEvent('dblclick'))"
+        )
+        XCTAssertTrue(pollUntil { openedDiff != nil })
+        XCTAssertEqual(openedDiff?.lastPathComponent, "a.swift")
+    }
+
+    /// `path:badge` for every row, in DOM order.
+    private static let changesSummary = """
+        Array.from(document.querySelectorAll('#changes .file'))
+            .map(f => f.dataset.path + ':' + f.querySelector('.badge').textContent).join(',')
+        """
+
+    private static let firstRowHunks =
+        "document.querySelectorAll('#changes .file')[0].querySelector('pre').textContent"
+
+    /// Fire-and-forget JS, waited on so the page has actually run it.
+    private func run(_ view: EditorWebView, _ script: String) {
+        let done = expectation(description: "script")
+        view.webView.evaluateJavaScript(script) { _, _ in done.fulfill() }
+        wait(for: [done], timeout: 10)
+    }
+
+    /// Spins the run loop until a Swift-side condition holds — the bridge
+    /// answers on the main thread, so nothing else would ever let it in.
+    private func pollUntil(timeout: TimeInterval = 10, _ satisfied: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if satisfied() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        return satisfied()
+    }
+
     /// A throwaway repository of this test's own — never this repo's working
     /// tree, whose HEAD and index move under a running suite.
     private func makeGitRepository(committing name: String, _ contents: String) throws -> URL {

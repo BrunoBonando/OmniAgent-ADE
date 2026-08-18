@@ -2119,15 +2119,7 @@ final class WorkspaceFileRowView: ShellRowView {
 
     static func badgeText(_ node: WorkspaceFileNode) -> String {
         if node.isDirectory { return node.changedCount == 0 ? "" : "\(node.changedCount)" }
-        switch node.gitBadge {
-        case .modified: return "M"
-        case .added: return "A"
-        case .deleted: return "D"
-        case .renamed: return "R"
-        case .untracked: return "U"
-        case .conflicted: return "!"
-        case nil: return ""
-        }
+        return node.gitBadge?.letter ?? ""
     }
 
     static func badgeColor(_ node: WorkspaceFileNode) -> NSColor {
@@ -2149,6 +2141,11 @@ final class WorkspaceFilesTreeView: NSView {
     var onOpenFile: ((URL, Bool) -> Void)?
     /// A git badge was clicked: show that file's diff against HEAD.
     var onOpenDiff: ((URL) -> Void)?
+    /// The header's +N −M counts were clicked: show the repo-wide overview.
+    var onOpenAllChanges: (() -> Void)?
+    /// Every `git status` this tree loads, so the editor panes render the same
+    /// snapshot the badges were drawn from rather than running git again.
+    var onStatusChanged: ((GitStatus?) -> Void)?
 
     private let diffField = ShellFont.label(font: ShellFont.mono(12, .semibold), color: ShellPalette.green)
     private let filterField = NSTextField()
@@ -2244,12 +2241,25 @@ final class WorkspaceFilesTreeView: NSView {
             rows.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
         ])
         setDiff(added: 0, removed: 0)
+
+        // The counts are the button for the repo-wide overview — a gesture
+        // recognizer rather than a button, because the design's header is a
+        // two-colour attributed string and an NSButton cannot wear one
+        // without a custom cell.
+        diffField.addGestureRecognizer(
+            NSClickGestureRecognizer(target: self, action: #selector(diffHeaderPressed))
+        )
+        diffField.setAccessibilityElement(true)
+        diffField.setAccessibilityRole(.button)
+        diffField.setAccessibilityLabel("Show all changes")
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
     @objc private func filterChanged() { render() }
+
+    @objc private func diffHeaderPressed() { onOpenAllChanges?() }
 
     func setDiff(added: Int, removed: Int) {
         let font = ShellFont.mono(12, .semibold)
@@ -2275,6 +2285,9 @@ final class WorkspaceFilesTreeView: NSView {
         selected = nil
         setDiff(added: 0, removed: 0)
         render()
+        // The reset is reported too: a pane must not keep rendering the last
+        // workspace's changes while this one's status is still loading.
+        onStatusChanged?(nil)
         guard let url else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -2288,6 +2301,7 @@ final class WorkspaceFilesTreeView: NSView {
                 self.gitStatus = status
                 self.setDiff(added: totals.added, removed: totals.removed)
                 self.render()
+                self.onStatusChanged?(status)
             }
         }
     }
@@ -2531,6 +2545,11 @@ final class WorkspaceSidebarView: NSView {
     var onOpenFile: ((URL, Bool) -> Void)?
     /// The FILES tree's badge clicks, forwarded to the controller.
     var onOpenDiff: ((URL) -> Void)?
+    /// The FILES header's counts, forwarded to the controller.
+    var onOpenAllChanges: (() -> Void)?
+    /// Every `git status` the FILES tree loads, forwarded to the controller,
+    /// which fans it out to the editor panes.
+    var onGitStatusChanged: ((GitStatus?) -> Void)?
 
     let picker = WorkspacePickerView()
     let backRow = WorkspaceBackRowView()
@@ -2596,6 +2615,8 @@ final class WorkspaceSidebarView: NSView {
         sessionsTree.onNewEditor = { [weak self] in self?.onNewEditor?() }
         filesTree.onOpenFile = { [weak self] url, pinned in self?.onOpenFile?(url, pinned) }
         filesTree.onOpenDiff = { [weak self] url in self?.onOpenDiff?(url) }
+        filesTree.onOpenAllChanges = { [weak self] in self?.onOpenAllChanges?() }
+        filesTree.onStatusChanged = { [weak self] status in self?.onGitStatusChanged?(status) }
         sessionsTree.onRenamePane = { [weak self] paneID, name in
             self?.onRenamePane?(paneID, name)
         }

@@ -385,6 +385,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.openFileInEditor(url, pinned: pinned)
         }
         shellSidebar.onOpenDiff = { [weak self] url in self?.openDiffInEditor(url) }
+        shellSidebar.onOpenAllChanges = { [weak self] in self?.openChangesOverview() }
+        // The sidebar owns the `git status`; the editor panes render it. Held
+        // here as well so a pane created *later* can be seeded with it — see
+        // the editor branch of `addPane`.
+        shellSidebar.onGitStatusChanged = { [weak self] status in
+            guard let self else { return }
+            latestGitStatus = status
+            for id in workspace.allPaneIDs {
+                workspace.editorPane(for: id)?.setGitStatus(status)
+            }
+        }
         shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
         // Asking the login shell for its PATH spawns a shell; do it now, off
         // the main thread, so the first terminal does not wait for it.
@@ -862,6 +873,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The editor pane the user was last looking at. Maintained by
     /// `onFocusedPaneChanged`, so it survives focus moving away to a terminal.
     private var lastFocusedEditorPaneID: String?
+
+    /// The FILES tree's last `git status`. The palette asks it whether there
+    /// is a repository at all, and every new editor pane is seeded from it.
+    private var latestGitStatus: GitStatus?
 
     /// Where a file opens: the most recently focused editor pane, then any
     /// editor pane, then a freshly created one. `nil` only when the grid is
@@ -1409,7 +1424,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     project: workspace.focusedPaneID
                         .flatMap { workspace.descriptor(for: $0)?.project } ?? ""
                 ),
-                projectLabels: projectLabels
+                projectLabels: projectLabels,
+                hasGitRepo: latestGitStatus != nil
             ),
             over: window
         )
@@ -1433,6 +1449,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             newEditorPane(nil)
         case let .openDiffForCurrentFile(path):
             openDiffInEditor(URL(fileURLWithPath: path))
+        case .showAllChanges:
+            openChangesOverview()
         case .newSession:
             newSession(nil)
         // Interrupt and reattach are the focused terminal's own responder
@@ -2019,6 +2037,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             editor.onOpenDiffRequest = { [weak self] url in
                 self?.openDiffInEditor(url, from: sessionID)
             }
+            // The Changes overview's "open file" is a deliberate open, so it
+            // pins — the same rule a double click in the FILES tree follows.
+            editor.onOpenFileRequest = { [weak self] url in
+                self?.openFileInEditor(url, pinned: true)
+            }
+            // A pane created after the status landed would otherwise render
+            // "not a git repository" inside a repository.
+            editor.setGitStatus(latestGitStatus)
             // `workspaceDirectory(for:)` already falls back to the open
             // workspace when the pane carries no project of its own.
             editor.workspaceRoot = workspaceDirectory(for: pane.project)
@@ -2058,6 +2084,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard let target = targetEditorPane() else { return }
         workspace.focusPane(target.id)
         target.pane.openDiff(url)
+    }
+
+    /// The FILES header's counts, or the ⌘K row: the repo-wide overview, in
+    /// the same pane a file click would use. Seeded on the way in, because the
+    /// tab renders whatever status the pane is currently holding.
+    func openChangesOverview() {
+        guard let target = targetEditorPane() else { return }
+        workspace.focusPane(target.id)
+        target.pane.setGitStatus(latestGitStatus)
+        target.pane.openChanges()
     }
 
     /// The daemon restarted and forgot this session.

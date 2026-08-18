@@ -13,6 +13,8 @@ enum PaletteAction: Equatable {
     /// The focused editor's active file, diffed against HEAD — the palette's
     /// twin of the tab strip's ± toggle.
     case openDiffForCurrentFile(path: String)
+    /// The repo-wide Changes overview.
+    case showAllChanges
     case interruptFocusedPane
     case reattachFocusedPane
     case toggleSidebar
@@ -64,7 +66,10 @@ struct CommandPaletteModel: Equatable {
         focusedPaneID: String?,
         unreadNotifications: Int,
         nextSessionName: String? = nil,
-        projectLabels: [String: String] = [:]
+        projectLabels: [String: String] = [:],
+        /// Whether the open workspace is a git repository. Passed in rather
+        /// than discovered: this model never runs a subprocess.
+        hasGitRepo: Bool = false
     ) -> [PaletteCommand] {
         // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
         // the already-fixed call site in `WorkspaceWindowController`'s
@@ -111,6 +116,16 @@ struct CommandPaletteModel: Equatable {
         commands.append(
             PaletteCommand(id: "new-editor", title: "New editor pane", detail: "⇧⌘E", action: .newEditorPane)
         )
+        if hasGitRepo {
+            commands.append(
+                PaletteCommand(
+                    id: "show-all-changes",
+                    title: "Show all changes",
+                    detail: "git",
+                    action: .showAllChanges
+                )
+            )
+        }
         commands.append(
             PaletteCommand(
                 id: "new-session",

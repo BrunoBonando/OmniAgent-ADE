@@ -503,6 +503,106 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertEqual(pane.model.tabs.map(\.kind), [.diff])
     }
 
+    // MARK: - The Changes overview (Task 13)
+
+    /// One overview per pane: asking twice focuses the tab that is already
+    /// there rather than stacking a second copy of the same list.
+    func testOpenChangesOverviewCreatesSingletonTab() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        controller.openChangesOverview()
+        controller.openChangesOverview()
+
+        let pane = try XCTUnwrap(firstEditorPane(in: controller))
+        XCTAssertEqual(pane.model.tabs.filter { $0.kind == .changes }.count, 1)
+    }
+
+    /// The sidebar owns the `git status`; every editor pane is told, including
+    /// panes created after it landed — otherwise a pane opened later would
+    /// show "not a git repository" in a repository.
+    func testGitStatusReachesEveryEditorPaneIncludingNewOnes() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let existing = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let root = try makeTempFile("a.swift", "x").deletingLastPathComponent()
+
+        try XCTUnwrap(controller.shellSidebar.onGitStatusChanged)(
+            GitStatus(root: root, badges: ["a.swift": .modified])
+        )
+
+        XCTAssertEqual(
+            controller.workspaceView.editorPane(for: existing)?.changedPaths,
+            [root.appendingPathComponent("a.swift").path],
+            "a live pane hears about it"
+        )
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let fresh = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        XCTAssertEqual(
+            controller.workspaceView.editorPane(for: fresh)?.changedPaths,
+            [root.appendingPathComponent("a.swift").path],
+            "and so does a pane created afterwards"
+        )
+    }
+
+    /// The FILES header's +N −M counts are the button: clicking them opens the
+    /// repo-wide overview.
+    func testTheFilesHeaderOpensTheChangesOverview() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        try XCTUnwrap(controller.shellSidebar.onOpenAllChanges)()
+
+        let pane = try XCTUnwrap(firstEditorPane(in: controller))
+        XCTAssertEqual(pane.model.tabs.map(\.kind), [.changes])
+    }
+
+    /// The palette row exists only where there is a repository to describe,
+    /// and running it opens the same tab the header does.
+    func testThePaletteOffersAllChangesOnlyOnceTheWorkspaceIsARepo() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        controller.showCommandPalette(nil)
+        XCTAssertFalse(controller.palette.model.matches.contains { $0.action == .showAllChanges })
+        controller.palette.dismiss()
+
+        try XCTUnwrap(controller.shellSidebar.onGitStatusChanged)(
+            GitStatus(root: URL(fileURLWithPath: "/w"), badges: ["a.swift": .modified])
+        )
+        controller.showCommandPalette(nil)
+        XCTAssertTrue(controller.palette.model.matches.contains { $0.action == .showAllChanges })
+        controller.palette.dismiss()
+
+        controller.run(.showAllChanges)
+
+        let pane = try XCTUnwrap(firstEditorPane(in: controller))
+        XCTAssertEqual(pane.model.tabs.map(\.kind), [.changes])
+    }
+
+    /// The overview's "open file" is the FILES tree's own routing, so a file
+    /// opened from it lands pinned in an editor pane like any deliberate open.
+    func testTheOverviewsOpenFileRequestOpensAPinnedFileTab() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let paneID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: paneID))
+        let file = try makeTempFile("a.swift", "x")
+
+        try XCTUnwrap(pane.onOpenFileRequest)(file)
+
+        XCTAssertEqual(pane.model.tabs.map(\.path), [file.path])
+        XCTAssertEqual(pane.model.tabs.map(\.kind), [.file])
+        XCTAssertTrue(pane.model.tabs[0].isPinned)
+    }
+
     // MARK: - Helpers
 
     /// The first editor pane in grid order — the routing rules decide *which*

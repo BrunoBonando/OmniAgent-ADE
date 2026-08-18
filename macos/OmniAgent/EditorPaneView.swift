@@ -20,9 +20,16 @@ final class EditorPaneView: NSView, PaneContentView {
     var onStateChange: (([PersistedEditorTab], Int) -> Void)?
     var onLastTabClosed: (() -> Void)?
     var onOpenDiffRequest: ((URL) -> Void)?
+    /// The Changes overview's "open file" — routed up for the same reason the
+    /// diff request is: which pane a file lands in is the controller's rule.
+    var onOpenFileRequest: ((URL) -> Void)?
 
     var workspaceRoot: URL?
     var changedPaths: Set<String> = [] { didSet { syncChrome() } }
+    /// The workspace's last `git status`, pushed in by the controller. The
+    /// Changes tab is a rendering of exactly this — the pane never runs
+    /// `git status` itself, so it can never disagree with the FILES tree.
+    private(set) var gitStatus: GitStatus?
 
     var confirmSave: ((String, @escaping (EditorSaveDecision) -> Void) -> Void) = EditorPaneView.defaultConfirmSave
     var presentError: ((String) -> Void) = { message in
@@ -167,7 +174,30 @@ final class EditorPaneView: NSView, PaneContentView {
             guard let self, let index = model.index(of: path, kind: .file) else { return }
             save(at: index) { _ in }
         }
-        // onChangesOpen / onRequestFileDiff wired in Tasks 12–13.
+        // One `git diff` per row, and only when the row is opened: a
+        // thousand-file working tree would otherwise cost a thousand
+        // subprocesses to draw a list nobody has read yet.
+        webHost.onRequestFileDiff = { [weak self] relative in
+            guard let self, let root = gitStatus?.root else { return }
+            GitFileContent.unifiedDiff(of: root.appendingPathComponent(relative)) { [weak self] text in
+                self?.webHost.appendFileDiff(
+                    path: relative,
+                    text: text?.isEmpty == false ? (text ?? "") : "No textual changes."
+                )
+            }
+        }
+        // Routed up rather than opened here, so a file (or a diff) already
+        // open somewhere else is focused instead of duplicated — the
+        // no-duplicates rule is the whole workspace's, not this pane's.
+        webHost.onChangesOpen = { [weak self] relative, asDiff in
+            guard let self, let root = gitStatus?.root else { return }
+            let url = root.appendingPathComponent(relative)
+            if asDiff {
+                onOpenDiffRequest?(url)
+            } else {
+                onOpenFileRequest?(url)
+            }
+        }
         // onCrash wired in Task 15.
     }
 
@@ -258,11 +288,41 @@ final class EditorPaneView: NSView, PaneContentView {
         }
     }
 
-    /// Task 13 gives this a real body (`webHost.showChanges` from `GitStatus`).
+    /// The repo-wide overview: every changed file, hunks expanding on demand.
+    /// At most one per pane — the tab is keyed `("", .changes)`, so a second
+    /// request focuses the tab that is already there.
     func openChanges() {
         model.open(path: "", kind: .changes, asPreview: false)
         syncAll()
         showActiveContent()
+    }
+
+    /// The workspace's `git status` changed (or a pane was just created and is
+    /// being seeded). Updates the ± toggle's `changedPaths` *and* re-renders an
+    /// open overview, which are the two things the status feeds.
+    func setGitStatus(_ status: GitStatus?) {
+        gitStatus = status
+        changedPaths = Set(
+            status.map { snapshot in
+                snapshot.badges.keys.map { snapshot.root.appendingPathComponent($0).path }
+            } ?? []
+        )
+        if model.activeTab?.kind == .changes { renderChanges() }
+    }
+
+    /// Files sorted by path, each with the FILES tree's own badge letter
+    /// (`GitBadge.letter`, so the two surfaces read one mapping). The hunks
+    /// are *not* fetched here — the page asks for them per row, as they open.
+    private func renderChanges() {
+        guard let status = gitStatus else {
+            webHost.showMessage("Not a git repository — nothing to show.")
+            return
+        }
+        webHost.showChanges(
+            files: status.badges
+                .sorted { $0.key < $1.key }
+                .map { (path: $0.key, badge: $0.value.letter) }
+        )
     }
 
     private func activateTab(_ index: Int) {
@@ -318,6 +378,10 @@ final class EditorPaneView: NSView, PaneContentView {
             loadDiffContent(URL(fileURLWithPath: tab.path))
         case .changes:
             setContentVisibility(web: true, media: false, empty: false)
+            // Re-rendered on focus for the diff tab's reason: the list is a
+            // snapshot, and the pane has usually been away while the working
+            // tree moved.
+            renderChanges()
         }
     }
 
