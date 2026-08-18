@@ -2406,6 +2406,18 @@ final class PaneStatusMarkView: NSView {
             layer?.opacity = 1
             return
         }
+        // Tool execution shares thinking's blue and differs only in motion: a
+        // hard on/off blink rather than the smooth pulse. Colour already says
+        // "the agent is working"; the motion says which kind of work.
+        if status == .toolExecution {
+            let blink = CAKeyframeAnimation(keyPath: "opacity")
+            blink.values = [1, 0.25]
+            blink.calculationMode = .discrete
+            blink.duration = 0.7
+            blink.repeatCount = .infinity
+            layer?.add(blink, forKey: "om-pulse")
+            return
+        }
         let pulse = CABasicAnimation(keyPath: "opacity")
         pulse.fromValue = 1
         pulse.toValue = 0.45

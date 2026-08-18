@@ -689,6 +689,22 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertNotEqual(PaneStatusMarkView.color(for: .ready), PaneStatusMarkView.color(for: nil))
     }
 
+    /// Tool execution keeps thinking's blue and is told apart by motion alone:
+    /// a discrete blink where thinking smoothly pulses.
+    func testToolExecutionBlinksWhereThinkingPulses() throws {
+        let mark = PaneStatusMarkView()
+        mark.status = .thinking
+        XCTAssertTrue(mark.layer?.animation(forKey: "om-pulse") is CABasicAnimation)
+        mark.status = .toolExecution
+        let blink = try XCTUnwrap(mark.layer?.animation(forKey: "om-pulse") as? CAKeyframeAnimation)
+        XCTAssertEqual(blink.calculationMode, .discrete)
+        XCTAssertEqual(
+            PaneStatusMarkView.color(for: .toolExecution),
+            PaneStatusMarkView.color(for: .thinking),
+            "and the colour stays blue -- only the motion says which kind of work"
+        )
+    }
+
     /// Four panes side by side are told apart by colour before their labels are
     /// read, so no two engines may share a badge colour.
     func testEveryEngineBadgeIsItsOwnColour() {
@@ -2070,4 +2086,28 @@ private final class StubDraggingInfo: NSObject, NSDraggingInfo {
 /// pane kind it does not handle, which deserves to fail loudly.
 private extension PaneContainerView {
     var terminalSurface: TerminalSurfaceView { surface as! TerminalSurfaceView }
+}
+
+// TEMP-GLYPH-PREVIEW
+final class TempGlyphPreviewTests: XCTestCase {
+    func testRenderDestinationGlyphs() throws {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 90))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor(white: 0.09, alpha: 1).cgColor
+        for (index, destination) in WorkspaceDestination.allCases.enumerated() {
+            let view = ShellGlyphView(
+                destination.glyph,
+                color: NSColor(white: 0.85, alpha: 1),
+                size: 40,
+                lineWidth: 3
+            )
+            view.frame = NSRect(x: 30 + CGFloat(index) * 90, y: 25, width: 40, height: 40)
+            container.addSubview(view)
+        }
+        let rep = try XCTUnwrap(container.bitmapImageRepForCachingDisplay(in: container.bounds))
+        container.cacheDisplay(in: container.bounds, to: rep)
+        let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        let dir = ProcessInfo.processInfo.environment["TEST_RUNNER_PANE_RENDER_DIR"] ?? NSTemporaryDirectory()
+        try png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("glyphs.png"))
+    }
 }

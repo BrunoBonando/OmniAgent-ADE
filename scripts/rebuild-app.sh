@@ -126,13 +126,28 @@ fi
 if [ "$keep_daemon" = yes ]; then
   echo "Leaving the running PTY daemon alone (--keep-daemon)."
 else
-  if pgrep -f "/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon$" >/dev/null 2>&1; then
+  daemon_pattern="/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon$"
+  if pgrep -f "$daemon_pattern" >/dev/null 2>&1; then
     echo "Stopping the PTY daemon so the new one is the one that runs..."
-    pkill -f "/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon$" || true
+    pkill -f "$daemon_pattern" || true
     for _ in 1 2 3 4 5; do
-      pgrep -f "/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon$" >/dev/null 2>&1 || break
+      pgrep -f "$daemon_pattern" >/dev/null 2>&1 || break
       sleep 1
     done
+  elif pgrep -a -f "$daemon_pattern" >/dev/null 2>&1; then
+    # -a is the difference between seeing it and not: pgrep/pkill exclude their
+    # own ancestors, and the daemon *is* this shell's ancestor whenever the
+    # rebuild is run from a terminal pane inside OmniAgent -- which is the
+    # normal case. So the stop above was a silent no-op exactly there, and
+    # every such install kept the old daemon: the bug this block exists to
+    # prevent, reintroduced by the tool used to check for it.
+    #
+    # Killing it from here is not the fix: it would hang up this script's own
+    # PTY mid-install. Say so instead of pretending.
+    echo "PTY daemon NOT restarted: it is this shell's own parent (rebuild started"
+    echo "  from a pane inside OmniAgent). Daemon-side changes are not live."
+    echo "  To finish: quit OmniAgent, then from an outside Terminal run"
+    echo "  pkill -f omniagent-pty-daemon && open -a OmniAgent"
   fi
 fi
 
