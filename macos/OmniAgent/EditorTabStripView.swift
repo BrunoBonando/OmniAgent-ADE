@@ -1,5 +1,23 @@
 import AppKit
 
+/// A round-capped × filling `rect`, inset by the same 4.2-of-16 proportion
+/// as `PaneHeaderButton`'s `.close` glyph in `PaneWorkspaceView.swift` — the
+/// pane header's close dot and this strip's tab-close accessory draw the
+/// identical shape, so it lives here once rather than twice.
+func drawXGlyph(in rect: NSRect, color: NSColor, lineWidth: CGFloat) {
+    let insetFraction: CGFloat = 4.2 / 16
+    let inset = rect.insetBy(dx: rect.width * insetFraction, dy: rect.height * insetFraction)
+    let path = NSBezierPath()
+    path.lineWidth = lineWidth
+    path.lineCapStyle = .round
+    path.move(to: NSPoint(x: inset.minX, y: inset.minY))
+    path.line(to: NSPoint(x: inset.maxX, y: inset.maxY))
+    path.move(to: NSPoint(x: inset.minX, y: inset.maxY))
+    path.line(to: NSPoint(x: inset.maxX, y: inset.minY))
+    color.setStroke()
+    path.stroke()
+}
+
 /// The native tab strip over an editor pane's content — the app's first tab
 /// strip, deliberately AppKit (the native-rule exception covers only the
 /// editor surface below it). Renders an `EditorPaneModel`; every mutation
@@ -216,11 +234,11 @@ final class EditorTabItemView: NSView {
     }
 
     /// Title width plus room for the leading/trailing padding and the
-    /// trailing dirty-dot/close accessory.
+    /// trailing dirty-dot/close accessory — title + 44pt, per the brief.
     var intrinsicWidth: CGFloat {
         let attributes: [NSAttributedString.Key: Any] = [.font: Self.titleFont(preview: !tab.isPinned)]
         let textWidth = (titleText as NSString).size(withAttributes: attributes).width
-        return textWidth + Self.horizontalPadding * 2 + Self.accessorySize + 6
+        return textWidth + Self.horizontalPadding * 2 + Self.accessorySize + 8
     }
 
     init(tab: EditorTab, title: String, isActiveTab: Bool) {
@@ -315,7 +333,7 @@ final class EditorTabItemView: NSView {
         (titleText as NSString).draw(in: titleRect, withAttributes: attributes)
 
         if showsCloseGlyph {
-            drawClose(in: accessoryRect, color: color)
+            drawXGlyph(in: accessoryRect, color: color, lineWidth: 1.2)
         } else {
             drawDirtyDot(in: accessoryRect, color: ShellPalette.ink)
         }
@@ -326,18 +344,5 @@ final class EditorTabItemView: NSView {
         let dot = NSRect(x: rect.midX - diameter / 2, y: rect.midY - diameter / 2, width: diameter, height: diameter)
         color.setFill()
         NSBezierPath(ovalIn: dot).fill()
-    }
-
-    private func drawClose(in rect: NSRect, color: NSColor) {
-        let inset = rect.insetBy(dx: 4.5, dy: 4.5)
-        let path = NSBezierPath()
-        path.lineWidth = 1.2
-        path.lineCapStyle = .round
-        path.move(to: NSPoint(x: inset.minX, y: inset.minY))
-        path.line(to: NSPoint(x: inset.maxX, y: inset.maxY))
-        path.move(to: NSPoint(x: inset.minX, y: inset.maxY))
-        path.line(to: NSPoint(x: inset.maxX, y: inset.minY))
-        color.setStroke()
-        path.stroke()
     }
 }

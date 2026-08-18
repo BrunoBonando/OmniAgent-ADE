@@ -3288,10 +3288,10 @@ final class PaneHeaderButton: NSView {
             path.move(to: point(3.6, 8))
             path.line(to: point(12.4, 8))
         case .close:
-            path.move(to: point(4.2, 4.2))
-            path.line(to: point(11.8, 11.8))
-            path.move(to: point(11.8, 4.2))
-            path.line(to: point(4.2, 11.8))
+            // Shared with EditorTabStripView's tab-close accessory — see
+            // drawXGlyph in EditorTabStripView.swift — so the two × glyphs
+            // cannot drift apart.
+            drawXGlyph(in: box, color: color, lineWidth: path.lineWidth)
         case .menu:
             // Three dots — filled rather than stroked, which is the only way
             // they read at this size.

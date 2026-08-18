@@ -45,11 +45,12 @@ final class EditorTabStripViewTests: XCTestCase {
         strip.layoutSubtreeIfNeeded()
         let rep = try XCTUnwrap(strip.bitmapImageRepForCachingDisplay(in: strip.bounds))
         strip.cacheDisplay(in: strip.bounds, to: rep)
-        // `rep.size` is the point-size (always 600 here); `pixelsWide` is the
-        // backing-store pixel count, which is 600 at 1x and 1200 at 2x
-        // (Retina) — this test host renders at 2x, so the check must be
-        // scale-robust rather than asserting a literal 600.
-        XCTAssertEqual(rep.pixelsWide, 600 * Int(rep.pixelsWide == 600 ? 1 : rep.pixelsWide / 600))
+        // `rep.size` is the point-size (always 600 here, at any backing
+        // scale); `pixelsWide` is the backing-store pixel count — 600 at 1x,
+        // 1200 at 2x (Retina, this test host's scale). Checked against the
+        // possible scale factors themselves, not derived from `pixelsWide`,
+        // so a zero-size layout (0 is neither) still fails loudly here.
+        XCTAssertTrue([600, 1200].contains(rep.pixelsWide), "unexpected pixel width \(rep.pixelsWide)")
         XCTAssertGreaterThan(rep.pixelsHigh, 0)
     }
 
