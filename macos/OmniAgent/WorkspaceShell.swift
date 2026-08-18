@@ -46,7 +46,7 @@ enum WorkspaceDestination: String, CaseIterable {
         switch self {
         case .dashboard: return .bars
         case .board: return .columns
-        case .terminals: return .terminal
+        case .terminals: return .panes
         }
     }
 }
@@ -255,6 +255,7 @@ enum ShellGlyph {
     case bars
     case columns
     case terminal
+    case panes
     case folder
     case file
     case magnifier
@@ -263,7 +264,7 @@ enum ShellGlyph {
     /// - Parameter box: the SVG's own viewBox side (16 or 24), so the path can
     ///   be written in the document's coordinates and scaled once here.
     func draw(in rect: NSRect, color: NSColor, lineWidth: CGFloat = 1.6) {
-        let box: CGFloat = (self == .bars || self == .columns || self == .terminal) ? 24 : 16
+        let box: CGFloat = (self == .bars || self == .columns || self == .terminal || self == .panes) ? 24 : 16
         let scale = min(rect.width, rect.height) / box
         let transform = NSAffineTransform()
         transform.translateX(by: rect.minX, yBy: rect.minY)
@@ -325,6 +326,22 @@ enum ShellGlyph {
             path.line(to: NSPoint(x: 8, y: 15))
             path.move(to: NSPoint(x: 13, y: 15))
             path.line(to: NSPoint(x: 16, y: 15))
+            path.stroke()
+        case .panes:
+            // A tiled layout, not a terminal: the Desk holds terminals,
+            // browsers and editors side by side.
+            let outline = NSBezierPath(
+                roundedRect: NSRect(x: 3, y: 4, width: 18, height: 16),
+                xRadius: 2.4,
+                yRadius: 2.4
+            )
+            outline.lineWidth = 2
+            outline.stroke()
+            path.lineWidth = 2
+            path.move(to: NSPoint(x: 10.5, y: 4))
+            path.line(to: NSPoint(x: 10.5, y: 20))
+            path.move(to: NSPoint(x: 10.5, y: 12))
+            path.line(to: NSPoint(x: 21, y: 12))
             path.stroke()
         case .folder:
             path.move(to: NSPoint(x: 2, y: 4.6))
