@@ -43,6 +43,20 @@ enum SettingsKey {
     /// chosen `PersonaOption.id`, or `""`.
     static let authPersona = "auth_persona"
 
+    /// **No TypeScript twin yet — this is a native-first row.** Real login
+    /// (Core's `/v1/auth/login` via `AuthClient`) shipped in the native app
+    /// only; `ui/src/onboarding/authGateState.ts` still implements the fake
+    /// gate and declares no key for this. The signed-in account's email
+    /// address, or `""` when sign-in was skipped. If the web build ever gains
+    /// real login, its constant must be this exact string.
+    static let authAccountEmail = "auth_account_email"
+
+    /// **No TypeScript twin yet — this is a native-first row**, for the same
+    /// reason as `authAccountEmail` above. The account's display name
+    /// ("Bruno Bonando"), or `""` when the server has none or sign-in was
+    /// skipped.
+    static let authAccountName = "auth_account_name"
+
     /// `ui/src/state/closedWorkspaces.ts`'s `CLOSED_WORKSPACES_SETTING_KEY`.
     /// Declared for schema completeness (it is one shared `brain.db` row,
     /// same as every other key here) but not read or written by this build:

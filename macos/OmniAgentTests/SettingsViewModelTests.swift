@@ -66,7 +66,8 @@ final class SettingsViewModelTests: XCTestCase {
         settingsRows: [String: String] = [:],
         brainAdmin: FakeBrainAdminClient = FakeBrainAdminClient(),
         notifier: SessionNotifier = SessionNotifier(delivery: RecordingDelivery()),
-        daemonStatus: FakeDaemonStatus = FakeDaemonStatus()
+        daemonStatus: FakeDaemonStatus = FakeDaemonStatus(),
+        revokeServerSession: @escaping () -> Void = {}
     ) -> (SettingsViewModel, FakeSettingsClient) {
         let client = FakeSettingsClient(rows: settingsRows)
         let settings = SettingsStore(client: client)
@@ -77,7 +78,8 @@ final class SettingsViewModelTests: XCTestCase {
             notifier: notifier,
             version: "2026.7.30",
             daemonStatus: daemonStatus,
-            openLoginItemsSettings: {}
+            openLoginItemsSettings: {},
+            revokeServerSession: revokeServerSession
         )
         return (model, client)
     }
@@ -198,7 +200,11 @@ final class SettingsViewModelTests: XCTestCase {
     }
 
     func testSignOutResetsTheAuthGateAndRefreshesTheSummary() {
-        let (model, client) = makeModel(settingsRows: ["auth_signed_in": "true", "auth_persona": "student"])
+        var revokeCallCount = 0
+        let (model, client) = makeModel(
+            settingsRows: ["auth_signed_in": "true", "auth_persona": "student"],
+            revokeServerSession: { revokeCallCount += 1 }
+        )
         XCTAssertTrue(model.authSignedIn)
 
         model.signOut()
@@ -208,6 +214,10 @@ final class SettingsViewModelTests: XCTestCase {
         XCTAssertEqual(client.rows["auth_persona"], "")
         XCTAssertFalse(model.authSignedIn)
         XCTAssertEqual(model.authSummary, "Not signed in (dev mode).")
+        // Log out is not only local: the server session (refresh token +
+        // cookie) must be revoked too — production wires this closure to
+        // `AuthClient.shared.logout()`.
+        XCTAssertEqual(revokeCallCount, 1)
     }
 
     func testSignInCallsThePresentAuthGateHook() {
