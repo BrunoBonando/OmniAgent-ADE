@@ -280,6 +280,97 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    /// A terminal link click's browser twin of `testNewBrowserJoinsTheFocusedSessionWithoutADaemonSessionAndStopsAtTheGrid`:
+    /// the pane lands in the clicking terminal's own session, showing the
+    /// clicked URL rather than blank.
+    func testALinkClickOpensABrowserPaneInTheSameSessionShowingThatURL() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        let group = try XCTUnwrap(workspace.descriptor(for: "native-terminal")?.group)
+        let surface = try XCTUnwrap(workspace.terminalSurface(for: "native-terminal"))
+
+        surface.onLinkClick?(try XCTUnwrap(URL(string: "https://example.com/path")))
+
+        let browserID = try XCTUnwrap(workspace.focusedPaneID)
+        let descriptor = try XCTUnwrap(workspace.descriptor(for: browserID))
+        XCTAssertEqual(descriptor.kind, .browser)
+        XCTAssertEqual(descriptor.group, group, "opens in the clicking terminal's own session")
+        XCTAssertEqual(descriptor.browserURL, "https://example.com/path")
+    }
+
+    /// The grid-full edge `testNewBrowserJoinsTheFocusedSessionWithoutADaemonSessionAndStopsAtTheGrid`
+    /// leaves unhandled for the toolbar/hole-tile (which just hide instead):
+    /// a link click has nowhere silent to go, so it asks, and a confirmed
+    /// answer opens a fresh session rather than doing nothing.
+    func testALinkClickWithAFullGridAsksAndOpensInAFreshSessionWhenConfirmed() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        let group = try XCTUnwrap(workspace.descriptor(for: "native-terminal")?.group)
+        let surface = try XCTUnwrap(workspace.terminalSurface(for: "native-terminal"))
+        while workspace.paneIDs.count < PaneGrid.maxPanes {
+            XCTAssertTrue(controller.newBrowser(in: nil))
+        }
+        var asked: URL?
+        controller.newSessionForLinkConfirmer = { url, completion in
+            asked = url
+            completion(true)
+        }
+
+        surface.onLinkClick?(try XCTUnwrap(URL(string: "https://example.com")))
+
+        XCTAssertEqual(asked, URL(string: "https://example.com"))
+        let browserID = try XCTUnwrap(workspace.focusedPaneID)
+        let descriptor = try XCTUnwrap(workspace.descriptor(for: browserID))
+        XCTAssertEqual(descriptor.kind, .browser)
+        XCTAssertNotEqual(descriptor.group, group, "a fresh session, not the full one")
+        XCTAssertEqual(descriptor.browserURL, "https://example.com")
+    }
+
+    /// Declining the prompt must not strand the click: it falls back to
+    /// wherever a non-web link already goes (see the test below), and opens
+    /// no pane.
+    func testDecliningTheNewSessionPromptOpensTheLinkExternallyInstead() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        let surface = try XCTUnwrap(workspace.terminalSurface(for: "native-terminal"))
+        while workspace.paneIDs.count < PaneGrid.maxPanes {
+            XCTAssertTrue(controller.newBrowser(in: nil))
+        }
+        controller.newSessionForLinkConfirmer = { _, completion in completion(false) }
+        var opened: URL?
+        controller.externalLinkOpener = { opened = $0 }
+        let before = workspace.allPaneIDs.count
+
+        surface.onLinkClick?(try XCTUnwrap(URL(string: "https://example.com")))
+
+        XCTAssertEqual(opened, URL(string: "https://example.com"))
+        XCTAssertEqual(workspace.allPaneIDs.count, before, "no pane was created")
+    }
+
+    /// A browser pane can't do anything with `mailto:`/custom schemes, so
+    /// those skip the pane grid entirely rather than asking first.
+    func testANonWebLinkSkipsTheBrowserPaneAndOpensExternally() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        let surface = try XCTUnwrap(workspace.terminalSurface(for: "native-terminal"))
+        var opened: URL?
+        controller.externalLinkOpener = { opened = $0 }
+        let before = workspace.allPaneIDs.count
+
+        surface.onLinkClick?(try XCTUnwrap(URL(string: "mailto:bruno@bonando.com")))
+
+        XCTAssertEqual(opened, URL(string: "mailto:bruno@bonando.com"))
+        XCTAssertEqual(workspace.allPaneIDs.count, before, "no browser pane for a non-web scheme")
+    }
+
     func testClosePaneCommandRemovesTheFocusedPaneAndLeavesTheRestAlive() throws {
         let controller = makeController()
         defer { controller.close() }
@@ -1268,6 +1359,33 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    /// A restart comes back to the session that was in use last, not to
+    /// whichever pane happened to be restored last (every restored pane
+    /// focuses itself on the way in, so without this the last one wins).
+    func testRestoreReturnsToTheLastUsedSession() {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.showWindow(nil)
+        controller.lastFocusedPaneOnLaunch = "sess-a"
+
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "grp-1"),
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-b", group: "grp-2"),
+                ])
+            )
+        )
+        XCTAssertEqual(controller.workspaceView.activeGroup, "grp-2", "the last restored pane won, so far")
+
+        controller.applyRestoredBrowserPanes([])
+
+        XCTAssertEqual(controller.workspaceView.focusedPaneID, "sess-a")
+        XCTAssertEqual(controller.workspaceView.activeGroup, "grp-1")
+        XCTAssertNil(controller.lastFocusedPaneOnLaunch, "spent once, so a reconnect never re-steals focus")
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(
@@ -1350,6 +1468,37 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(delegate.bytes.isEmpty)
         XCTAssertTrue(surface.terminalView.validateMenuItem(command))
         XCTAssertEqual(command.state, .on)
+    }
+
+    /// The one-line mechanism the whole feature rides on: `.hover` matches
+    /// exactly what `.hoverWithModifier` (SwiftTerm's default) already
+    /// matches, minus the ⌘ requirement — so a plain click opens a link
+    /// without new mouse-event interception.
+    func testTheTerminalMatchesLinksOnAPlainClickNotOnlyCommandClick() {
+        let surface = makeSurface()
+        XCTAssertEqual(surface.terminalView.linkHighlightMode, .hover)
+    }
+
+    /// `requestOpenLink` is a forwarder, same shape as `onTitleChange`/
+    /// `onDirectoryChange`: parse and hand upward, decide nothing itself.
+    func testALinkClickForwardsTheParsedURL() {
+        let surface = makeSurface()
+        var clicked: URL?
+        surface.onLinkClick = { clicked = $0 }
+
+        surface.requestOpenLink(source: surface.terminalView, link: "https://example.com/path", params: [:])
+
+        XCTAssertEqual(clicked, URL(string: "https://example.com/path"))
+    }
+
+    func testAnUnparsableLinkForwardsNothing() {
+        let surface = makeSurface()
+        var clicked: URL?
+        surface.onLinkClick = { clicked = $0 }
+
+        surface.requestOpenLink(source: surface.terminalView, link: "", params: [:])
+
+        XCTAssertNil(clicked)
     }
 
     func testTerminalExposesMinimumNativeAccessibilityContract() {

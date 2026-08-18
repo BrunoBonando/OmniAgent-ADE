@@ -166,6 +166,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// independently of the shared `layout` row.
     private var browserPanesReadDispatched = false
     private var browserPanesReadCompleted = false
+    /// The pane that had focus when the app was last used, so a restart
+    /// comes back to that session rather than to whichever pane happened to
+    /// restore last. Native-local UI state the web build knows nothing about,
+    /// so `UserDefaults` rather than a shared settings row — the same call
+    /// `WorkspaceShell`'s divider position makes. Read once, at init: every
+    /// pane a restore adds focuses itself on the way in, overwriting the
+    /// stored value long before the restore is finished.
+    static let lastFocusedPaneDefaultsKey = "LastFocusedPane"
+    var lastFocusedPaneOnLaunch: String? = UserDefaults.standard
+        .string(forKey: WorkspaceWindowController.lastFocusedPaneDefaultsKey)
     /// The last value written to each settings row — see `write(_:to:)`.
     private var lastPersisted: [String: String] = [:]
     /// Where settings writes go. `nil` means the daemon; a test substitutes a
@@ -275,6 +285,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return true
         }
         workspace.onFocusedPaneChanged = { [weak self] paneID in
+            UserDefaults.standard.set(paneID, forKey: Self.lastFocusedPaneDefaultsKey)
             self?.refreshTitle()
             self?.reloadOutline()
             self?.refreshInspectorIfVisible(for: paneID)
@@ -722,9 +733,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// `newPane(in:)` minus everything PTY-shaped: no cap against
     /// `maxTerminals` (a browser costs WebKit memory, not a daemon slot), no
     /// cwd derivation, and `startSession: false` so the id never reaches
-    /// `ensureSession`.
+    /// `ensureSession`. `url` is what a terminal's link click opens to; the
+    /// toolbar/hole-tile callers leave it blank, same as always.
     @discardableResult
-    func newBrowser(in session: SessionGroupNode?) -> Bool {
+    func newBrowser(in session: SessionGroupNode?, url: String = "") -> Bool {
         let sibling = session.map { seed in
             seed.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
         } ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
@@ -743,7 +755,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 group: group,
                 groupLabel: sibling?.groupLabel ?? session?.name,
                 kind: .browser,
-                browserURL: ""
+                browserURL: url
             ),
             startSession: false
         )
@@ -817,6 +829,93 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             startSession: true
         )
         return group
+    }
+
+    /// `startSession(inDirectory:project:)`'s browser twin: the same
+    /// fresh-group minting, but a `.browser`/`startSession: false` pane
+    /// instead of a terminal — only reachable from a link click whose own
+    /// session's grid was full and got confirmed for a new one.
+    @discardableResult
+    private func newBrowserSession(url: String, project: String) -> Bool {
+        let group = SessionOutline.newSessionGroupID()
+        let name = SessionOutline.nextSessionName(
+            workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
+            project: project
+        )
+        return addPane(
+            RestoredPane(
+                sessionID: UUID().uuidString,
+                reattaches: false,
+                project: project,
+                engine: .shell,
+                cwd: "",
+                label: nil,
+                themeId: nil,
+                group: group,
+                groupLabel: name,
+                kind: .browser,
+                browserURL: url
+            ),
+            startSession: false
+        )
+    }
+
+    /// A terminal's link click: opens in the clicking pane's own session
+    /// (`newBrowser(in: nil, ...)` reads the focused pane, and every visible
+    /// pane belongs to the focused pane's session — see `workspace.paneIDs`).
+    /// `PaneGrid.maxPanes` is the only thing that can refuse that, and unlike
+    /// the toolbar/hole-tile (which just hide themselves before it happens),
+    /// a click has nowhere silent to go, so it asks. Non-web links (mailto:,
+    /// custom schemes) skip the pane grid entirely.
+    private func openLinkInBrowserPane(_ url: URL, from sessionID: String) {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            openExternally(url)
+            return
+        }
+        if newBrowser(in: nil, url: url.absoluteString) { return }
+        let project = workspace.descriptor(for: sessionID)?.project ?? ""
+        confirmNewSessionForLink(url) { [weak self] confirmed in
+            guard let self else { return }
+            guard confirmed else {
+                self.openExternally(url)
+                return
+            }
+            self.newBrowserSession(url: url.absoluteString, project: project)
+        }
+    }
+
+    /// Where a link that isn't (or wasn't confirmed as) an in-app browser
+    /// pane goes instead. `nil` means the real `NSWorkspace`; a test
+    /// substitutes a recorder rather than actually launching a browser.
+    var externalLinkOpener: ((URL) -> Void)?
+
+    private func openExternally(_ url: URL) {
+        (externalLinkOpener ?? { NSWorkspace.shared.open($0) })(url)
+    }
+
+    /// Whether a full session's grid should get a fresh session for a
+    /// clicked link's browser pane. `nil` means "ask with an `NSAlert`"; a
+    /// test substitutes an answer so the link-click path can run without
+    /// blocking on a modal.
+    var newSessionForLinkConfirmer: ((URL, @escaping (Bool) -> Void) -> Void)?
+
+    private func confirmNewSessionForLink(_ url: URL, completion: @escaping (Bool) -> Void) {
+        if let newSessionForLinkConfirmer {
+            newSessionForLinkConfirmer(url, completion)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "This session's pane grid is full."
+        alert.informativeText = "Open \(url.host ?? url.absoluteString) in a new session?"
+        alert.addButton(withTitle: "New Session")
+        alert.addButton(withTitle: "Cancel")
+        guard let window else {
+            completion(alert.runModal() == .alertFirstButtonReturn)
+            return
+        }
+        alert.beginSheetModal(for: window) { response in
+            completion(response == .alertFirstButtonReturn)
+        }
     }
 
     /// Where a new session's directory comes from. `nil` means "ask with an
@@ -1421,6 +1520,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             }
         }
         workspace.reorderPanes(order)
+        // Last step of the restore chain (layout -> browser panes -> here):
+        // every pane exists, so the session you were last in can be the one
+        // on screen. Cleared after use — a later reconnect must not yank
+        // focus away from wherever you have since moved.
+        if let last = lastFocusedPaneOnLaunch {
+            lastFocusedPaneOnLaunch = nil
+            workspace.focusPane(last)
+        }
     }
 
     /// Writes the live browser panes back to their own row. Refused until
@@ -1523,6 +1630,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             surface?.onDirectoryChange = { [weak self] directory in
                 guard let self, workspace.focusedPaneID == sessionID else { return }
                 window?.representedURL = directory.map(URL.init(fileURLWithPath:))
+            }
+            surface?.onLinkClick = { [weak self] url in
+                self?.openLinkInBrowserPane(url, from: sessionID)
             }
             if startSession { ensureSession(sessionID) }
         } else if let browser = workspace.browserPane(for: sessionID) {
