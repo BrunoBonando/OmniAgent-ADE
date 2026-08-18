@@ -1082,6 +1082,121 @@ final class EditorPaneViewTests: XCTestCase {
         XCTAssertTrue(pane.model.tabs.isEmpty)
     }
 
+    /// Fix round 3, Important 2. A *wedged* renderer never answers
+    /// `evaluateJavaScript` — unlike a crashed one, which errors and lets the
+    /// completion run. Without a deadline the close simply never happens, and
+    /// on the window and quit paths that means an app that cannot be quit.
+    /// The safe fallback is "treat it as dirty and ask".
+    func testAWedgedRendererStillPromptsRatherThanHangingTheClose() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        pane.webHost.stallsRendererForTesting = true
+
+        let asked = expectation(description: "asked rather than waited forever")
+        pane.confirmSave = { _, decide in
+            asked.fulfill()
+            decide(.cancel)
+        }
+        pane.requestCloseTab(at: 0)
+
+        wait(for: [asked], timeout: EditorWebView.replyTimeout + 8)
+        XCTAssertEqual(pane.model.tabs.count, 1, "cancel kept it, and nothing hung")
+    }
+
+    /// The same deadline on the walk the window and quit paths use.
+    func testAWedgedRendererStillCompletesTheDirtyWalk() throws {
+        let url = try write("a.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+        pane.webHost.stallsRendererForTesting = true
+        pane.confirmSave = { _, decide in decide(.discard) }
+
+        let drained = expectation(description: "the walk finished")
+        var proceeded: Bool?
+        pane.closeAllTabsAfterConfirmation {
+            proceeded = $0
+            drained.fulfill()
+        }
+
+        wait(for: [drained], timeout: EditorWebView.replyTimeout + 8)
+        XCTAssertEqual(proceeded, true)
+        XCTAssertTrue(pane.model.tabs.isEmpty)
+    }
+
+    /// Fix round 3, Important 3. Both `.discard` arms close by identity: two
+    /// closes can overlap inside the reconcile round trip, and closing by a
+    /// captured index would discard somebody else's buffer unprompted.
+    func testDiscardClosesTheTabItAskedAboutEvenIfTheStripMoved() throws {
+        let first = try write("a.swift", "one")
+        let second = try write("b.swift", "two")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(first, pinned: true)
+        pane.openFile(second, pinned: true)
+        makeDirty(pane, path: second.path, content: "edited")
+        XCTAssertEqual(pane.model.tabs.map(\.path), [first.path, second.path])
+
+        // The prompt for b.swift (index 1) arrives with a.swift already gone,
+        // so the captured index now points at b.swift's *successor* slot.
+        pane.confirmSave = { _, decide in
+            pane.modelForTesting { $0.close(at: 0) }
+            decide(.discard)
+        }
+        pane.requestCloseTab(at: 1)
+
+        XCTAssertTrue(pollUntil(timeout: 10) { pane.model.tabs.isEmpty })
+    }
+
+    /// Fix round 3, Minor. The entry guard cannot help when **one** pass finds
+    /// two changed dirty files: both resolves are dispatched before either
+    /// alert goes up. The second must back its recorded date out and wait for
+    /// the next focus, not stack a nested alert inside the first's `runModal`.
+    func testOnePassOverTwoChangedFilesDoesNotStackAlerts() throws {
+        let first = try write("a.swift", "v1")
+        let second = try write("b.swift", "v1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(first, pinned: true)
+        pane.openFile(second, pinned: true)
+        makeDirty(pane, path: first.path, content: "mine-a")
+        makeDirty(pane, path: second.path, content: "mine-b")
+
+        var open = 0
+        var peak = 0
+        var names: [String] = []
+        var release: ((Bool) -> Void)?
+        pane.confirmConflict = { name, decide in
+            open += 1
+            peak = max(peak, open)
+            names.append(name)
+            release = decide
+        }
+
+        for url in [first, second] {
+            try "v2".write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date().addingTimeInterval(5)],
+                ofItemAtPath: url.path
+            )
+        }
+        pane.checkExternalChanges()
+
+        XCTAssertTrue(pollUntil(timeout: 10) { open == 1 })
+        XCTAssertFalse(pollUntil(timeout: 2) { open > 1 })
+        XCTAssertEqual(peak, 1, "one conflict alert at a time")
+
+        // The file that was skipped is still pending, not lost.
+        let first_name = names[0]
+        release?(false)
+        pane.checkExternalChanges()
+        XCTAssertTrue(pollUntil(timeout: 10) { names.count == 2 })
+        XCTAssertNotEqual(names[1], first_name, "the other file gets its turn")
+        release?(false)
+    }
+
     // MARK: - Task 15: the save-acknowledgement window
 
     /// `save`'s `true` means "the bytes reached disk", not "the buffer is

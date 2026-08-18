@@ -828,6 +828,76 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertFalse(target.model.tabs[0].isDirty)
     }
 
+    /// Fix round 3, Important 1. ⌘W / the header × / the toolbar / the palette
+    /// all arrive at `closePane`, which read the lagging flag and went
+    /// straight to destroying the pane — disposing every Monaco model in it
+    /// with no prompt. Staged by typing and closing in the same run-loop turn.
+    func testClosingAPaneWhoseDirtyMessageIsStillInFlightStillAsks() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "let x = 1")
+        controller.openFileInEditor(file, pinned: true)
+        let id = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: id))
+        waitUntilReady(pane)
+
+        pane.webHost.setContentForTesting(path: file.path, content: "in-flight")
+        XCTAssertFalse(pane.model.tabs[0].isDirty, "the posted message cannot have landed yet")
+
+        let asked = expectation(description: "asked before destroying the pane")
+        pane.confirmSave = { _, decide in
+            asked.fulfill()
+            decide(.cancel)
+        }
+        controller.closePane(nil)
+        wait(for: [asked], timeout: 10)
+
+        XCTAssertNotNil(controller.workspaceView.editorPane(for: id), "cancel kept the pane")
+    }
+
+    /// Fix round 3, Minor. Every other dirty window/quit test stages dirt with
+    /// `modelForTesting` and never waits for the bridge, so they all take the
+    /// `!isReady` branch. This one drives the whole thing for real: bridge up,
+    /// typed through the page, then quit.
+    func testQuitPromptsAboutABufferTypedThroughTheRealBridge() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        let file = try makeTempFile("a.swift", "let x = 1")
+        controller.openFileInEditor(file, pinned: true)
+        let id = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: id))
+        waitUntilReady(pane)
+        makeDirty(pane, path: file.path, content: "let x = 2")
+
+        let delegate = AppDelegate()
+        var replies: [Bool] = []
+        let replied = expectation(description: "AppKit was answered")
+        replied.assertForOverFulfill = false
+        delegate.replyToTermination = {
+            replies.append($0)
+            replied.fulfill()
+        }
+        var asked = 0
+        pane.confirmSave = { _, decide in
+            asked += 1
+            decide(.save)
+        }
+
+        XCTAssertEqual(
+            AppDelegate.controllersThatMayHaveUnsavedWork(in: [window]).count, 1
+        )
+        delegate.promptDirtyEditorTabs(in: [controller]) { delegate.replyToTermination($0) }
+        wait(for: [replied], timeout: 30)
+
+        XCTAssertEqual(replies, [true])
+        XCTAssertEqual(asked, 1, "the real dirty buffer was asked about exactly once")
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "let x = 2", "and saved")
+        XCTAssertTrue(pane.model.tabs.isEmpty)
+    }
+
     /// Fix round 2, Important. The drag's entry gate read the lagging flag
     /// too: a keystroke whose `dirtyChanged` post has not landed reads clean,
     /// and the tab was carried away — disposing the source's Monaco model,

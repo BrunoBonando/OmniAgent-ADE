@@ -186,12 +186,19 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
             completion(nil, nil)
             return
         }
+        // Same deadline rule as `requestIsClean` — a save is on the quit path
+        // too. `nil` reads as "could not be read back from the editor", which
+        // fails the save loudly and leaves the buffer dirty.
+        let answer = deadline(Self.contentTimeout, fallback: (nil, nil) as (String?, Int?)) { pair in
+            completion(pair.0, pair.1)
+        }
+        guard !stallsRendererForTesting else { return }
         webView.evaluateJavaScript("window.omniagent.getContent(\(Self.jsLiteral(path)))") { value, _ in
             guard let payload = value as? [String: Any] else {
-                completion(nil, nil)
+                answer((nil, nil))
                 return
             }
-            completion(payload["content"] as? String, payload["versionId"] as? Int)
+            answer((payload["content"] as? String, payload["versionId"] as? Int))
         }
     }
 
@@ -209,9 +216,54 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
             completion(false)
             return
         }
+        let answer = deadline(Self.replyTimeout, fallback: false, completion)
+        guard !stallsRendererForTesting else { return }
         webView.evaluateJavaScript("window.omniagent.isClean(\(Self.jsLiteral(path)))") { value, _ in
-            completion((value as? NSNumber)?.boolValue ?? false)
+            answer((value as? NSNumber)?.boolValue ?? false)
         }
+    }
+
+    /// How long a renderer round trip may take before the caller is given the
+    /// safe answer instead.
+    ///
+    /// This is not belt and braces. A *crashed* web content process answers —
+    /// `evaluateJavaScript` fails and the completion runs — but a **wedged**
+    /// one (a runaway script, a hung compositor) never calls back at all. The
+    /// close and quit paths depend on these replies, and by the time they are
+    /// waiting `windowShouldClose` has already answered `false` and
+    /// `applicationShouldTerminate` has already returned `.terminateLater`. No
+    /// reply then means the window never closes and the app can never quit —
+    /// Force Quit is the only way out. Every fallback here is therefore the
+    /// conservative one: an unnecessary save prompt is a papercut, an app that
+    /// cannot be quit is not.
+    static let replyTimeout: TimeInterval = 2
+    /// The buffer read is the same guarantee with far more headroom: it moves
+    /// the whole file across the bridge, and answering "could not be read"
+    /// for a slow-but-working save would cost the user a write.
+    static let contentTimeout: TimeInterval = 10
+
+    /// Test seam standing in for a wedged web content process, which cannot be
+    /// produced on demand. Round trips are issued as normal but never answered
+    /// by the page, so only the deadline above can complete them.
+    var stallsRendererForTesting = false
+
+    /// Wraps `completion` so it runs exactly once: either from the reply, or
+    /// from the deadline with `fallback`. Main-thread only — every caller and
+    /// every WebKit completion here is on the main queue — so the `answered`
+    /// flag needs no synchronisation.
+    private func deadline<T>(
+        _ seconds: TimeInterval,
+        fallback: T,
+        _ completion: @escaping (T) -> Void
+    ) -> (T) -> Void {
+        var answered = false
+        let deliver: (T) -> Void = { value in
+            guard !answered else { return }
+            answered = true
+            completion(value)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { deliver(fallback) }
+        return deliver
     }
 
     // MARK: - Events (JS -> Swift)

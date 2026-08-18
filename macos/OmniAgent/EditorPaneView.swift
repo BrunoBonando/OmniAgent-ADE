@@ -408,7 +408,7 @@ final class EditorPaneView: NSView, PaneContentView {
             // this is re-checked as soon as the bridge is back.
             guard webHost.isReady else { continue }
             modificationDates[path] = current
-            resolveExternalChange(path)
+            resolveExternalChange(path, previouslyRecorded: recorded)
         }
         // Chrome only: a title gaining or losing " (deleted)" is not a tab
         // mutation and must not rewrite the persisted row.
@@ -424,10 +424,19 @@ final class EditorPaneView: NSView, PaneContentView {
     /// over it and lose the edit with no prompt. `requestIsClean` is an
     /// `evaluateJavaScript` reply, which is ordered — the same reason the
     /// close path asks it rather than trusting `save`'s `true`.
-    private func resolveExternalChange(_ path: String) {
+    private func resolveExternalChange(_ path: String, previouslyRecorded: Date?) {
         webHost.requestIsClean(path: path) { [weak self] clean in
             guard let self else { return }
             guard clean else {
+                // One pass can find two changed dirty files, and the entry
+                // guard cannot help: both resolves were dispatched before
+                // either alert went up. Put the recorded date back so this
+                // change is noticed again on the next focus rather than
+                // stacking a nested alert inside the first one's `runModal`.
+                guard !conflictPromptInFlight else {
+                    modificationDates[path] = previouslyRecorded
+                    return
+                }
                 conflictPromptInFlight = true
                 confirmConflict((path as NSString).lastPathComponent) { [weak self] takeDisk in
                     guard let self else { return }
@@ -474,6 +483,16 @@ final class EditorPaneView: NSView, PaneContentView {
         // bookkeeping have to go with it or they leak for the life of the
         // pane. Only the model knows which tab it reused, so it reports it;
         // re-deriving that here would be the same rule written twice.
+        // Known, deliberately not fixed here: the recycle predicate
+        // (`!isPinned && !isDirty`) reads a dirty flag that lags the page by a
+        // message hop, so a buffer typed into microseconds ago can still be
+        // evicted as "a clean preview". `reconcileDirtyFlags` would close it —
+        // but only by making `openFile` asynchronous, and its synchronous
+        // publish is a documented contract (Task 10 §7) that the sidebar,
+        // palette and drop paths and their tests all rely on. The window is
+        // one message hop, and the same hop pins the tab (spec §4) and so
+        // closes it; widening `openFile` to an async contract for it is a
+        // change of its own, not a line in this one.
         let opened = model.openReportingEviction(path: url.path, kind: kind, asPreview: !pinned)
         if let evicted = opened.evicted { discardResources(for: evicted) }
         if !hadTab, kind == .file { loadFileTab(url, classified: classified) }
@@ -847,8 +866,11 @@ final class EditorPaneView: NSView, PaneContentView {
                 return
             }
             if let index = model.index(of: path, kind: .file), model.tabs[index].isDirty != !clean {
+                // `setDirty(true)` also *pins* the tab (spec §4: editing the
+                // buffer pins it), which is a change to the persisted row —
+                // so this publishes rather than only re-rendering the strip.
                 model.setDirty(!clean, at: index)
-                syncChrome()
+                syncAll()
             }
             completion(!clean)
         }
@@ -857,8 +879,17 @@ final class EditorPaneView: NSView, PaneContentView {
     /// Saves every dirty file tab, one after another — the writes are async
     /// (Monaco answers `requestContent` on a callback), so they are chained
     /// rather than looped. Stops at the first failure.
+    /// Reconciles first for the same reason every other gate does: the filter
+    /// below reads the dirty flags, and a keystroke whose `dirtyChanged` post
+    /// has not landed would be silently left out of a Save All.
     func saveAllDirty(completion: @escaping (Bool) -> Void) {
-        saveSerially(model.tabs.filter { $0.isDirty && $0.kind == .file }.map(\.path), completion: completion)
+        reconcileDirtyFlags { [weak self] in
+            guard let self else {
+                completion(false)
+                return
+            }
+            saveSerially(model.tabs.filter { $0.isDirty && $0.kind == .file }.map(\.path), completion: completion)
+        }
     }
 
     private func saveSerially(_ paths: [String], completion: @escaping (Bool) -> Void) {
@@ -913,7 +944,12 @@ final class EditorPaneView: NSView, PaneContentView {
             guard let self else { return }
             switch decision {
             case .cancel: break
-            case .discard: performClose(at: index)
+            case .discard:
+                // By identity, never by the captured index: the reconcile
+                // round trip and the prompt both hand control back to the run
+                // loop, and a strip that moved under them would otherwise have
+                // the *wrong* tab discarded, unprompted.
+                performClose(at: model.index(of: tab.path, kind: tab.kind) ?? index)
             case .save:
                 saveThenCloseIfClean(tab: tab, index: index) { [weak self] clean in
                     // Not clean means a keystroke landed inside the write and
@@ -1063,7 +1099,7 @@ final class EditorPaneView: NSView, PaneContentView {
             case .cancel:
                 completion(false)
             case .discard:
-                performClose(at: index, notifyLastClosed: false)
+                performClose(at: model.index(of: tab.path, kind: tab.kind) ?? index, notifyLastClosed: false)
                 drainDirtyTabs(completion: completion)
             case .save:
                 saveThenCloseIfClean(

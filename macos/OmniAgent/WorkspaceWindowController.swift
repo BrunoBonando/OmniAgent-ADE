@@ -1193,9 +1193,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @objc func closePane(_ sender: Any?) {
         guard let focused = workspace.focusedPaneID else { return }
         // An editor pane can be holding unsaved work, and closing it disposes
-        // the Monaco models that are the only copy of it. Ask first; the
-        // prompt is asynchronous, so the close happens in its completion.
-        if let editor = workspace.editorPane(for: focused), editor.hasDirtyTabs {
+        // every Monaco model in it — the only copy of that work. This is the
+        // widest of the close gates (⌘W, the pane header's ×, the toolbar item
+        // and the palette all arrive here), so it does not read `hasDirtyTabs`
+        // directly: that flag lags the page by a message hop, and a stale
+        // "clean" here destroys the pane with no prompt at all.
+        // `closeAllTabsAfterConfirmation` reconciles with the page and
+        // completes immediately when there is genuinely nothing to ask about.
+        if let editor = workspace.editorPane(for: focused), editor.hasLoadedBuffers {
             editor.closeAllTabsAfterConfirmation { [weak self] proceed in
                 guard proceed, let self else { return }
                 destroyPane(focused)
