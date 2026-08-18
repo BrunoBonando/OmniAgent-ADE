@@ -119,21 +119,26 @@ enum EngineLauncher {
     /// (`Contents/Resources` holds only the icon, assets and SwiftTerm). Adding
     /// the flag without the binary would make every agent fail to start, so the
     /// agents launch stock here until the helper is bundled.
-    /// `conversationID` claims a specific Claude conversation for this
-    /// terminal (see `ClaudeConversation`). Pass it only for a spawn that
-    /// cannot already own one: `--session-id` naming a conversation that
-    /// exists makes `claude` exit 1 with "Session ID … is already in use",
-    /// which turns opening a terminal into a terminal that is instantly dead —
-    /// strictly worse than a stock `claude`. Recovering from that needs the
-    /// liveness-probed `--resume` → `--session-id` → stock ladder the Tauri
-    /// build carries (`ClaudeIdentity::ladder`), which this app does not have
-    /// yet, so it only claims identities it knows are free.
+    /// `conversationID` names the Claude conversation this terminal owns (see
+    /// `ClaudeConversation`), and `resuming` picks which flag carries it:
+    ///
+    /// - `--session-id <U>` (`resuming: false`) — a *fresh* pane claiming an
+    ///   id nothing has written under yet. Naming one that already exists
+    ///   makes `claude` exit 1 with "Session ID … is already in use", so this
+    ///   is only for ids the caller knows are free.
+    /// - `--resume <U>` (`resuming: true`) — a pane whose daemon session is
+    ///   gone (the PTY daemon was killed, the app reopened) reopening *its
+    ///   own* conversation rather than starting a blank one. Naming a
+    ///   conversation that does not exist exits 1 after ~1.25 s, which the
+    ///   caller catches and respawns stock — see
+    ///   `WorkspaceWindowController.createSession`.
     ///
     /// `codex`/`shell`/`agy` have no conversation concept and are untouched.
     /// `copilot` takes the same flag as `claude`.
     static func command(
         for engine: Engine,
         conversationID: String? = nil,
+        resuming: Bool = false,
         resolve: (String) -> String? = resolveBinary
     ) -> [String]? {
         guard let program = resolve(binaryName(for: engine)) else { return nil }
@@ -144,7 +149,7 @@ enum EngineLauncher {
             return [program, "-l"]
         case .claude, .copilot:
             guard let conversationID else { return [program] }
-            return [program, "--session-id", conversationID]
+            return [program, resuming ? "--resume" : "--session-id", conversationID]
         case .codex, .antigravity:
             return [program]
         }

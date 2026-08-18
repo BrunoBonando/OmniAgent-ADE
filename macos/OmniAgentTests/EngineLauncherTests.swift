@@ -167,6 +167,21 @@ final class EngineLauncherTests: XCTestCase {
         )
         // No claim to make: stock, rather than a flag that would kill the spawn.
         XCTAssertEqual(EngineLauncher.command(for: .claude, resolve: resolve), ["/bin/claude"])
+    }
+
+    /// A restore whose daemon session is gone reopens its own conversation
+    /// instead of starting blank — the `--resume` half of the ladder.
+    func testResumingSwapsSessionIDForResume() {
+        let resolve: (String) -> String? = { "/bin/" + $0 }
+        XCTAssertEqual(
+            EngineLauncher.command(for: .claude, conversationID: "abc", resuming: true, resolve: resolve),
+            ["/bin/claude", "--resume", "abc"]
+        )
+        // The stock fallback carries neither flag.
+        XCTAssertEqual(
+            EngineLauncher.command(for: .claude, conversationID: nil, resuming: true, resolve: resolve),
+            ["/bin/claude"]
+        )
         // Engines with no conversation concept are untouched.
         XCTAssertEqual(
             EngineLauncher.command(for: .codex, conversationID: "abc", resolve: resolve),

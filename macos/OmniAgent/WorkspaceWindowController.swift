@@ -628,6 +628,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         connection.onExit = { [weak self] event in
             guard let self, workspace.container(for: event.id) != nil else { return }
+            // The `--resume` fallback: a conversation that no longer exists
+            // makes `claude` exit non-zero almost immediately, which would
+            // otherwise leave a dead pane where a working agent belongs.
+            if Self.resumeFailed(
+                spawnedAt: resumeSpawns.removeValue(forKey: event.id),
+                exitCode: event.exitCode
+            ) {
+                readySessions.remove(event.id)
+                createSession(event.id, stock: true)
+                return
+            }
             readySessions.remove(event.id)
             lastStatus.removeValue(forKey: event.id)
             applySessionStatus("Session ended", for: event.id)
@@ -1888,13 +1899,46 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         claimableConversations.insert(sessionID)
     }
 
-    private func createSession(_ sessionID: String) {
+    /// Terminals spawned with `--resume`, and when — see `onExit`'s fallback.
+    private var resumeSpawns: [String: Date] = [:]
+
+    /// How long after a `--resume` spawn an exit still counts as "that
+    /// conversation does not exist" rather than "the user quit". Sized off the
+    /// measurement in `src-tauri/src/sessions.rs`: `claude --resume <uuid>`
+    /// naming nothing exits 1 after ~1.25 s.
+    /// ponytail: a wall-clock window, not a liveness probe — the daemon owns
+    /// the child, so an exit event is all we get, and 4× the observed failure
+    /// latency separates it from a real quit well enough.
+    static let resumeFallbackWindow: TimeInterval = 5
+
+    /// Whether an exit means the resumed conversation was not there, rather
+    /// than the user quitting an agent that resumed fine. `nil` `spawnedAt` is
+    /// a session that never carried `--resume` at all.
+    static func resumeFailed(
+        spawnedAt: Date?,
+        exitCode: UInt32?,
+        now: Date = Date()
+    ) -> Bool {
+        guard let spawnedAt, exitCode != 0 else { return false }
+        return now.timeIntervalSince(spawnedAt) < resumeFallbackWindow
+    }
+
+    /// `stock` skips both identity flags — the fallback after a `--resume`
+    /// found no conversation to resume.
+    private func createSession(_ sessionID: String, stock: Bool = false) {
         let descriptor = workspace.descriptor(for: sessionID)
         let engine = descriptor?.engine ?? .shell
+        // A pane that may claim its conversation is a fresh one: `--session-id`.
+        // One that may not is a restore whose daemon session is gone — the
+        // daemon was killed, or the app reopened after it was — so it reopens
+        // its own conversation with `--resume` instead of starting blank.
+        let claimed = stock ? nil : claimConversation(for: sessionID)
+        let resuming = !stock && claimed == nil
         guard
             let command = EngineLauncher.command(
                 for: engine,
-                conversationID: claimConversation(for: sessionID)
+                conversationID: resuming ? ClaudeConversation.uuid(forSessionID: sessionID) : claimed,
+                resuming: resuming
             )
         else {
             let message = "\(engine.rawValue) is not installed — \(EngineLauncher.binaryName(for: engine)) is not on your PATH"
@@ -1909,6 +1953,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             name: "Create Session",
             signpostID: signpost
         )
+        // Read off the built argv rather than off `engine`, so engines that
+        // ignore the conversation id never arm the fallback.
+        if command.contains("--resume") { resumeSpawns[sessionID] = Date() }
         let cwd = startingDirectory(for: descriptor)
         connection.createSession(
             CreateSessionRequest(

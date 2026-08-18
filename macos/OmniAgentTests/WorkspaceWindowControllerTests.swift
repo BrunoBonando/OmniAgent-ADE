@@ -1648,6 +1648,29 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         window.makeKeyAndOrderFront(nil)
         return (surface, window)
     }
+
+    // MARK: - `--resume` fallback
+
+    func testResumeFailedOnlyForAFastNonZeroExitOfAResumeSpawn() {
+        let now = Date()
+        let spawned = now.addingTimeInterval(-1.25)
+        XCTAssertTrue(WorkspaceWindowController.resumeFailed(spawnedAt: spawned, exitCode: 1, now: now))
+        // Killed by a signal — no code — still means the pane never started.
+        XCTAssertTrue(WorkspaceWindowController.resumeFailed(spawnedAt: spawned, exitCode: nil, now: now))
+        // A clean quit is a quit, not a missing conversation.
+        XCTAssertFalse(WorkspaceWindowController.resumeFailed(spawnedAt: spawned, exitCode: 0, now: now))
+        // An hour in, a crash is the agent's business, not a failed resume.
+        XCTAssertFalse(
+            WorkspaceWindowController.resumeFailed(
+                spawnedAt: now.addingTimeInterval(-3600),
+                exitCode: 1,
+                now: now
+            )
+        )
+        // A session that never carried `--resume` is never respawned.
+        XCTAssertFalse(WorkspaceWindowController.resumeFailed(spawnedAt: nil, exitCode: 1, now: now))
+    }
+
 }
 
 private extension NSView {
