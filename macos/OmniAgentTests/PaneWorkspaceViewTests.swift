@@ -227,6 +227,25 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertFalse(workspace.canAcceptDrop(from: "pane-1", onto: "pane-3"))
     }
 
+    /// A drop glides both panes into their new cells instead of cutting. Read
+    /// off the layers rather than off a rect: the frames land immediately either
+    /// way, and the animation is the whole difference.
+    func testADropGlidesBothPanesIntoTheirNewCells() throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            throw XCTSkip("under Reduce Motion a swap lands instantly")
+        }
+        let (workspace, window) = makeAttachedWorkspace(panes: 2)
+        defer { window.close() }
+        workspace.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(workspace.performPaneDrop(from: "pane-1", onto: "pane-2"))
+
+        for id in ["pane-1", "pane-2"] {
+            let layer = try XCTUnwrap(workspace.container(for: id)?.layer)
+            XCTAssertNotNil(layer.animation(forKey: "position"), "\(id) cut to its new cell")
+        }
+    }
+
     // MARK: - Focus
 
     func testClosingTheFocusedPaneMovesFocusToItsFillOrderNeighbour() {

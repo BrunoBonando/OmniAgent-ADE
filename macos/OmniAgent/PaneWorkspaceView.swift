@@ -456,6 +456,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// pane lifting off the others rather than as a cut.
     static let zoomTransitionDuration: TimeInterval = 0.38
 
+    /// How long two panes take to trade cells after a drop. Shorter than a zoom:
+    /// nothing is lifting off the grid, the two are just changing places, and at
+    /// the zoom's length that reads as sluggish.
+    static let swapTransitionDuration: TimeInterval = 0.26
+
     /// The curve every part of the transition shares — the card, its shadow and
     /// the backdrop's fade. Front-loaded: about 85% of the distance is covered in
     /// the first third, then it eases out long and flat, so the card leaves fast
@@ -463,9 +468,9 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// it replaces spent as long arriving as leaving, which reads as a slide.
     static let zoomTimingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
 
-    /// Non-zero only for the one layout pass a zoom change kicks off, so the
-    /// pane's move is animated there and nowhere else: every other pass (window
-    /// resize, divider drag, session switch) has to land instantly.
+    /// Non-zero only for the one layout pass a zoom change or a pane swap kicks
+    /// off, so the panes' moves are animated there and nowhere else: every other
+    /// pass (window resize, divider drag, session switch) has to land instantly.
     private var zoomTransition: TimeInterval = 0
 
     @discardableResult
@@ -1257,6 +1262,16 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     func performPaneDrop(from sourceID: String, onto targetID: String) -> Bool {
         guard canAcceptDrop(from: sourceID, onto: targetID) else { return false }
         let wasFocused = focusedPaneID
+        // The two cells trade places on a glide rather than a cut. `place`
+        // already animates every pane whose frame moves during a transition
+        // window — position *and* scale, so cells of different sizes morph into
+        // each other rather than jumping — and this borrows that for the one
+        // layout pass the swap costs. Skipped under Reduce Motion, and with no
+        // window there is nothing on screen to animate.
+        if window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            zoomTransition = Self.swapTransitionDuration
+        }
+        defer { zoomTransition = 0 }
         guard swapPanes(sourceID, targetID) else { return false }
         if let wasFocused { focusPane(wasFocused) }
         return true
@@ -2536,24 +2551,17 @@ final class PaneStatusMarkView: NSView {
             layer?.opacity = 1
             return
         }
-        // Tool execution shares thinking's blue and differs only in motion: a
-        // hard on/off blink rather than the smooth pulse. Colour already says
-        // "the agent is working"; the motion says which kind of work.
-        if status == .toolExecution {
-            let blink = CAKeyframeAnimation(keyPath: "opacity")
-            blink.values = [1, 0.25]
-            blink.calculationMode = .discrete
-            // ponytail: ~33ms per state -- two frames on, two off at 60Hz. 10ms
-            // is under one frame there and aliases into an irregular shimmer.
-            blink.duration = 0.067
-            blink.repeatCount = .infinity
-            layer?.add(blink, forKey: "om-pulse")
-            return
-        }
+        // Tool execution shares thinking's blue and differs only in motion: the
+        // same pulse, run faster. Colour says "the agent is working"; the tempo
+        // says which kind of work.
         let pulse = CABasicAnimation(keyPath: "opacity")
         pulse.fromValue = 1
         pulse.toValue = 0.45
-        pulse.duration = status == .thinking ? 0.9 : 1.1
+        switch status {
+        case .toolExecution: pulse.duration = 0.35
+        case .thinking: pulse.duration = 0.9
+        default: pulse.duration = 1.1
+        }
         pulse.autoreverses = true
         pulse.repeatCount = .infinity
         layer?.add(pulse, forKey: "om-pulse")
@@ -3251,11 +3259,10 @@ final class PaneHeaderButton: NSView {
             wedge([(2.2, 2.2), (9.2, 2.2), (2.2, 9.2)])
             wedge([(13.8, 13.8), (6.8, 13.8), (13.8, 6.8)])
         case .restore:
-            // The same pair pulled off the corners to meet in the middle, which
-            // is how macOS says "put it back". Direction is the only difference
-            // between the two, and at 8pt this is the difference that survives.
-            wedge([(6.6, 6.6), (6.6, 1.0), (1.0, 6.6)])
-            wedge([(9.4, 9.4), (9.4, 15.0), (15.0, 9.4)])
+            // macOS's minimize bar. Inside an 8pt disc a single stroke reads
+            // where a wedge pair does not.
+            path.move(to: point(3.6, 8))
+            path.line(to: point(12.4, 8))
         case .close:
             path.move(to: point(4.2, 4.2))
             path.line(to: point(11.8, 11.8))
