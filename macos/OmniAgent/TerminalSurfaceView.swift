@@ -132,7 +132,12 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         )
         terminalView.caretColor = omniBlue
         terminalView.selectedTextBackgroundColor = omniBlue.withAlphaComponent(0.72)
-        terminalView.optionAsMetaKey = false
+        // ⌥ is Meta, not a compose key: ⌥⌫ must send ESC DEL so readline
+        // kills a word (and ⌥←/→ move by word). Standing decision
+        // (2026-08-18) — this is a coding terminal first; ⌥-composed
+        // characters (é, ã, ç) are the accepted cost, and ⌘⌥O toggles
+        // it back per pane when you need them.
+        terminalView.optionAsMetaKey = true
         // The default `.hoverWithModifier` requires ⌘ before a click matches
         // a link. `.hover` matches the identical set (explicit or implicit,
         // whatever's under the pointer) minus that requirement, so a plain

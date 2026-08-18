@@ -1477,18 +1477,33 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
-    func testTerminalPreservesComposedTextInsteadOfTreatingOptionAsMeta() {
+    func testOptionDeleteSendsMetaBackspaceSoTheShellKillsAWord() throws {
         let surface = makeSurface()
         let delegate = RecordingTerminalDelegate()
         surface.terminalView.terminalDelegate = delegate
 
-        surface.terminalView.insertText(
-            "é",
-            replacementRange: NSRange(location: NSNotFound, length: 0)
-        )
+        XCTAssertTrue(surface.terminalView.optionAsMetaKey)
+        surface.terminalView.keyDown(with: try optionDeleteEvent())
 
-        XCTAssertFalse(surface.terminalView.optionAsMetaKey)
-        XCTAssertEqual(delegate.bytes, Array("é".utf8))
+        // ESC DEL is readline's `backward-kill-word`; a bare 0x7f kills one char.
+        XCTAssertEqual(delegate.bytes, [0x1b, 0x7f])
+    }
+
+    private func optionDeleteEvent() throws -> NSEvent {
+        try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [.option],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: 0,
+                context: nil,
+                characters: "\u{7f}",
+                charactersIgnoringModifiers: "\u{7f}",
+                isARepeat: false,
+                keyCode: 51
+            )
+        )
     }
 
     func testCommandOptionOIsClaimedByMenuBeforeSwiftTermKittyKeyDown() throws {
@@ -1519,7 +1534,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             NSApp.target(forAction: action, to: nil, from: command) as? NativeTerminalView
                 === surface.terminalView
         )
-        XCTAssertFalse(surface.terminalView.optionAsMetaKey)
+        XCTAssertTrue(surface.terminalView.optionAsMetaKey)
 
         let event = try XCTUnwrap(
             NSEvent.keyEvent(
@@ -1537,10 +1552,10 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
         XCTAssertTrue(try XCTUnwrap(NSApp.mainMenu).performKeyEquivalent(with: event))
 
-        XCTAssertTrue(surface.terminalView.optionAsMetaKey)
+        XCTAssertFalse(surface.terminalView.optionAsMetaKey)
         XCTAssertTrue(delegate.bytes.isEmpty)
         XCTAssertTrue(surface.terminalView.validateMenuItem(command))
-        XCTAssertEqual(command.state, .on)
+        XCTAssertEqual(command.state, .off)
     }
 
     /// The one-line mechanism the whole feature rides on: `.hover` matches
