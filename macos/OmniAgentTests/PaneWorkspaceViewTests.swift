@@ -1510,10 +1510,23 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(blurIsUp(), "blur must be up once the grow has settled")
 
         // A resize with nothing else changed about the zoom — the exact pass
-        // the unconditional `hide()` this guards against used to break.
+        // the unconditional `hide()` this guards against used to break. The
+        // *window* has to shrink, not just the workspace subview:
+        // `showZoomBlur`'s geometry is anchored to `window.contentView.bounds`
+        // (`installOverlayHost`), which only the window's own frame drives —
+        // production wires the workspace to the window via Auto Layout
+        // (`WorkspaceWindowController`), but this fixture sets `workspace`'s
+        // frame by hand, so shrinking it alone leaves the window's content
+        // view, and therefore the blur geometry, untouched.
+        let before = Set(window.childWindows?.compactMap { ($0 as? PaneZoomBlurPanel)?.frame } ?? [])
+        var windowFrame = window.frame
+        windowFrame.size.width -= 10
+        window.setFrame(windowFrame, display: true)
         workspace.setFrameSize(NSSize(width: workspace.frame.width - 10, height: workspace.frame.height))
+        let after = Set(window.childWindows?.compactMap { ($0 as? PaneZoomBlurPanel)?.frame } ?? [])
 
         XCTAssertTrue(blurIsUp(), "a resize must not hide blur that was already settled and showing")
+        XCTAssertNotEqual(before, after, "and the bands must follow the window's new size")
     }
 
     /// Opening a terminal in the 0.32s a card is still shrinking (⌘↩ then ⌘T)
@@ -1716,6 +1729,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertFalse(panel.isOpaque)
         XCTAssertFalse(panel.hasShadow, "the shadow belongs to the card, not to a plain rectangle of blur")
         XCTAssertTrue(panel.contentView is PaneZoomBlurBandView)
+        XCTAssertEqual(panel.backgroundColor, .clear)
+        XCTAssertFalse(panel.isReleasedWhenClosed, "ARC owns these, not AppKit's close()")
 
         var clicked = false
         panel.onClick = { clicked = true }

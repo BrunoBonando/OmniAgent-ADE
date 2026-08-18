@@ -496,7 +496,13 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // in the grid. True of the windowless tests, and of a window closed from
         // under a card.
         guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            return updateLayout()
+            updateLayout()
+            // Nothing is moving under Reduce Motion, so there is no settle to
+            // wait for — the card is already at its final rect and blur can go
+            // up immediately, the same signal `finishZoomTransition` uses for
+            // the animated path.
+            if let sessionID, overlayPaneID == sessionID { showZoomBlur(around: sessionID) }
+            return
         }
         zoomTransition = Self.zoomTransitionDuration
         // No `NSAnimationContext` group: every frame in the transition is animated
@@ -514,7 +520,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
     }
 
-    /// The end of one transition's 0.32s. Three outcomes, gated on the token
+    /// The end of one transition's 0.38s. Three outcomes, gated on the token
     /// so it only ever acts for the transition it was created by — see
     /// `zoomTransitionToken` — since a second transition starting invalidates
     /// whichever of these was still pending:
@@ -2766,14 +2772,14 @@ final class PaneZoomBlurOverlay {
         }
         while panels.count > bands.count {
             let panel = panels.removeLast()
-            parent.removeChildWindow(panel)
+            panel.parent?.removeChildWindow(panel)
             panel.orderOut(nil)
         }
 
         for (panel, band) in zip(panels, bands) {
             panel.onClick = { [weak self] in self?.onClick?() }
             panel.setFrame(band, display: true)
-            if panel.parent == nil {
+            if panel.parent !== parent {
                 parent.addChildWindow(panel, ordered: .above)
             }
             panel.orderFront(nil)
@@ -2853,6 +2859,9 @@ final class PaneZoomBlurBandView: NSVisualEffectView {
         blendingMode = .behindWindow
         state = .active
         appearance = NSAppearance(named: .darkAqua)
+        // The backdrop underneath already carries the labelled way out —
+        // these are decorative blur, not a second affordance.
+        setAccessibilityElement(false)
     }
 
     @available(*, unavailable)
@@ -2878,6 +2887,13 @@ final class PaneZoomBlurPanel: NSPanel {
         set { bandView.onClick = newValue }
     }
 
+    // `.nonactivatingPanel` suppresses *app* activation on click, not key
+    // window acquisition — `NSPanel.canBecomeKey` defaults to true even
+    // when borderless. Without this override, clicking a band could
+    // momentarily resign the main window's key status. A non-key window
+    // still receives mouseDown/mouseUp, so this cannot break click-to-exit.
+    override var canBecomeKey: Bool { false }
+
     private let bandView = PaneZoomBlurBandView()
 
     init() {
@@ -2891,11 +2907,16 @@ final class PaneZoomBlurPanel: NSPanel {
         backgroundColor = .clear
         hasShadow = false
         // Never torn down by AppKit out from under PaneZoomBlurOverlay's
-        // own pooling — `close()` is never called on these, `orderOut`
-        // and `removeChildWindow` are, and this panel is reused, not
-        // recreated, across a `hide()`/`show()` pair.
+        // own pooling — `close()` is never called on these, only
+        // `orderOut`/`removeChildWindow` — and this stays false rather
+        // than the programmatic-NSWindow default of true because ARC, not
+        // AppKit, owns these: they live only as long as something holds a
+        // strong reference (PaneZoomBlurOverlay.panels, transiently
+        // window.childWindows), and `true` is the classic over-release
+        // trap the moment anything ever calls `close()` on one.
         isReleasedWhenClosed = false
         contentView = bandView
+        setAccessibilityElement(false)
     }
 
     @available(*, unavailable)
