@@ -1187,11 +1187,18 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
     func testTheCommandPaletteAndSidebarToggleAreOnTheMenuAndTravelTheResponderChain() throws {
         ApplicationMenus.install()
-        let palette = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "Command Palette"))
-        XCTAssertNil(palette.target)
-        XCTAssertEqual(palette.action, #selector(WorkspaceWindowController.showCommandPalette(_:)))
-        XCTAssertEqual(palette.keyEquivalent, "k")
-        XCTAssertEqual(palette.keyEquivalentModifierMask, [.command])
+        let file = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "File")?.submenu)
+        let spotlights = file.items.filter { $0.title == "Spotlight" }
+        XCTAssertEqual(spotlights.count, 2, "one visible row, plus the ⌘K alternate under ⌥")
+        for palette in spotlights {
+            XCTAssertNil(palette.target)
+            XCTAssertEqual(palette.action, #selector(WorkspaceWindowController.showCommandPalette(_:)))
+        }
+        // ⌃Space is the shortcut; ⌘K still opens it for anyone whose input
+        // sources have claimed that chord.
+        XCTAssertEqual(spotlights.map(\.keyEquivalent), [" ", "k"])
+        XCTAssertEqual(spotlights.map(\.keyEquivalentModifierMask), [[.control], [.command]])
+        XCTAssertEqual(spotlights.map(\.isAlternate), [false, true])
 
         let session = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "New Session"))
         XCTAssertNil(session.target)

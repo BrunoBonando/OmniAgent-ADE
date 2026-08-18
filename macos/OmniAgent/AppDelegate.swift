@@ -118,7 +118,12 @@ enum ApplicationMenus {
             item("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])
         )
         file.addItem(.separator())
-        file.addItem(item("Command Palette", Selector(("showCommandPalette:")), "k"))
+        // ⌃Space, Spotlight's own shape. macOS ships "Select the previous
+        // input source" on the same chord, but only binds it once a second
+        // keyboard layout exists; ⌘K stays as the alternative for anyone it
+        // does collide with.
+        file.addItem(item("Spotlight", Selector(("showCommandPalette:")), " ", [.control]))
+        file.addItem(spotlightAlternate())
 
         let edit = NSMenu(title: "Edit")
         main.addItem(withSubmenu: edit)
@@ -200,6 +205,15 @@ enum ApplicationMenus {
     private static func arrowKey(_ functionKey: Int) -> String {
         guard let scalar = UnicodeScalar(UInt32(functionKey)) else { return "" }
         return String(Character(scalar))
+    }
+
+    /// The same command on ⌘K, shown only while ⌥ is held: one visible row,
+    /// two chords, no second line of menu clutter.
+    private static func spotlightAlternate() -> NSMenuItem {
+        let item = item("Spotlight", Selector(("showCommandPalette:")), "k")
+        item.isAlternate = true
+        item.keyEquivalentModifierMask = [.command]
+        return item
     }
 
     private static func item(
