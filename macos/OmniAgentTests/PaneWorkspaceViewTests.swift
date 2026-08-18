@@ -1747,6 +1747,41 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
     }
 
+    /// `innerEdges` is what tells a band which of its sides to fade —
+    /// confirmed on screen as a real, visible hard line between two
+    /// independently blurred windows meeting at a shared boundary. An edge
+    /// flush with `outer` is the window's own silhouette, not a seam.
+    func testInnerEdgesFindsOnlySeamsNotTheOuterSilhouette() {
+        let outer = NSRect(x: 0, y: 0, width: 1000, height: 800)
+        let hole = NSRect(x: 300, y: 250, width: 400, height: 300)
+        let bands = PaneZoomBlurOverlay.blurBands(around: hole, in: outer)
+        XCTAssertEqual(bands.count, 4, "this test assumes a hole with room on every side")
+
+        // Top band: full width (its left/right are the window's own edges),
+        // only its bottom (facing the hole and the side bands) is a seam.
+        let top = bands[0]
+        XCTAssertEqual(PaneZoomBlurOverlay.innerEdges(of: top, in: outer), [.minY])
+
+        // Bottom band: same shape, mirrored — only its top is a seam.
+        let bottom = bands[1]
+        XCTAssertEqual(PaneZoomBlurOverlay.innerEdges(of: bottom, in: outer), [.maxY])
+
+        // Left band: only as tall as the hole, so its top, bottom AND right
+        // are all seams — its left is the only edge on the window's own
+        // silhouette.
+        let left = bands[2]
+        XCTAssertEqual(PaneZoomBlurOverlay.innerEdges(of: left, in: outer), [.maxX, .minY, .maxY])
+
+        // Right band: mirrored — top, bottom and left are seams.
+        let right = bands[3]
+        XCTAssertEqual(PaneZoomBlurOverlay.innerEdges(of: right, in: outer), [.minX, .minY, .maxY])
+    }
+
+    func testInnerEdgesOfTheWholeOuterRectIsEmpty() {
+        let outer = NSRect(x: 0, y: 0, width: 1000, height: 800)
+        XCTAssertEqual(PaneZoomBlurOverlay.innerEdges(of: outer, in: outer), [], "no hole, no seam")
+    }
+
     /// Mirrors `testTheBackdropTintsTheAppBehindItAndDoesNotClaimToBlurIt`'s shape:
     /// configuration only, no pixels — `.behindWindow` blur is exactly as
     /// unrenderable in an offscreen test as `.withinWindow` was, this just
