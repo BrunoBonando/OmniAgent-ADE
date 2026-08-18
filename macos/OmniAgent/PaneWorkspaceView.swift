@@ -565,6 +565,20 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         let outer = window.convertToScreen(focusOverlay.convert(focusOverlay.bounds, to: nil))
         let hole = window.convertToScreen(focusOverlay.convert(container.frame, to: nil))
         zoomBlur.show(around: hole, in: outer, parent: window)
+        // And the wash steps out of the bands' way the moment they are up. A
+        // band blurs what the window server has composited *behind* it, and
+        // what is behind it inside this window is `zoomBackdrop`: a `.sidebar`
+        // material at 78% over every pane. Left there it erases the panes
+        // before a band ever samples them, and the band lays its own material
+        // over the result — two dark materials stacked, which is a flat dark
+        // rectangle where the blurred app should be. Nothing is lost by taking
+        // it out: the bands tile every part of the host the card does not
+        // cover, so at this point it is completely occluded. Instantly rather
+        // than faded for the same reason — there is nothing visible to
+        // animate, and every frame it is still in the composite is a frame the
+        // bands blur the wash instead of the app. `applyZoom` puts it back for
+        // the next transition, which runs with no bands up.
+        zoomBackdrop.setShown(!zoomBlur.isShown, duration: 0)
     }
 
     /// Zoom only survives while it still means something: the pane has to be
@@ -685,7 +699,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // After any move, not just the lift: re-stacking a view that is already
         // there moves it too, and a move is what costs the first responder.
         if restacked { reclaimFirstResponder(container) }
-        zoomBackdrop.setShown(true, duration: zoomTransition)
+        // The wash carries a transition on its own — the bands only appear once
+        // one has settled — but never alongside them: this runs on every layout
+        // pass while a pane is zoomed, and re-showing it unconditionally put it
+        // straight back under the settled bands on the very next pass, which is
+        // exactly the composite `showZoomBlur` takes it out of.
+        zoomBackdrop.setShown(!zoomBlur.isShown, duration: zoomTransition)
         let card = Self.focusCardFrame(in: host.bounds)
         moveFocusCardShadow(from: start, to: card)
         // The cell it is leaving, handed over rather than left for `place` to
@@ -2510,7 +2529,9 @@ final class PaneStatusMarkView: NSView {
             let blink = CAKeyframeAnimation(keyPath: "opacity")
             blink.values = [1, 0.25]
             blink.calculationMode = .discrete
-            blink.duration = 0.7
+            // ponytail: 10ms per state -- at/below a 60Hz frame, so it strobes
+            // rather than reads as on/off there; fine on 120Hz.
+            blink.duration = 0.02
             blink.repeatCount = .infinity
             layer?.add(blink, forKey: "om-pulse")
             return
@@ -2620,7 +2641,13 @@ final class PaneBadgeView: NSView {
 /// This view stays for the tint alone, and because it is what animates in
 /// smoothly the instant a zoom starts — `PaneZoomBlurOverlay` only appears
 /// once that animation has settled, to avoid syncing four separate window
-/// frames against an in-flight CALayer animation.
+/// frames against an in-flight CALayer animation. It then hands over
+/// completely: `showZoomBlur` takes it straight back out of the composite,
+/// because a band blurs what is on screen *behind* it and this wash is on
+/// screen behind it — near-opaque over every pane, so the bands would be
+/// blurring it rather than the app. Nothing is lost, the bands tile
+/// everything it was covering; `applyZoom` brings it back for the next
+/// transition, which runs with no bands up.
 ///
 /// This was a layer background filter before it was an in-window
 /// `NSVisualEffectView`, to keep `NSVisualEffectView`'s display-link-backed
@@ -2781,6 +2808,7 @@ final class PaneZoomBlurOverlay {
         for (panel, band) in zip(panels, bands) {
             panel.onClick = { [weak self] in self?.onClick?() }
             panel.setFrame(band, display: true)
+            panel.setFadeEdges(Self.innerEdges(of: band, in: outer))
             if panel.parent !== parent {
                 parent.addChildWindow(panel, ordered: .above)
             }
@@ -2844,6 +2872,26 @@ final class PaneZoomBlurOverlay {
 
         return bands
     }
+
+    /// Which sides of `rect` are seams rather than the outer silhouette —
+    /// an edge that does not coincide with the matching edge of `outer` is
+    /// one this band shares with the hole or with a neighbouring band,
+    /// confirmed on screen as a hard visible line: two independently
+    /// blurred windows meeting at a boundary never blur to quite the same
+    /// result. An edge flush with `outer` needs no softening — there is
+    /// nothing on the other side of it but the window's own silhouette.
+    ///
+    /// Pure and static for the same reason `blurBands` is — this is what
+    /// decides which sides `show` asks a panel to fade, and it has to agree
+    /// with `blurBands`' own geometry without duplicating it.
+    static func innerEdges(of rect: NSRect, in outer: NSRect) -> Set<NSRectEdge> {
+        var edges: Set<NSRectEdge> = []
+        if rect.minX > outer.minX { edges.insert(.minX) }
+        if rect.maxX < outer.maxX { edges.insert(.maxX) }
+        if rect.minY > outer.minY { edges.insert(.minY) }
+        if rect.maxY < outer.maxY { edges.insert(.maxY) }
+        return edges
+    }
 }
 
 /// One rectangular slice of the region around a zoomed pane's card,
@@ -2853,7 +2901,26 @@ final class PaneZoomBlurOverlay {
 final class PaneZoomBlurBandView: NSVisualEffectView {
     static let material: NSVisualEffectView.Material = .sidebar
 
+    /// How wide a seam-side fade reaches in from the edge, and what it
+    /// fades toward. Never toward transparent: this window's own blur ends
+    /// exactly at its frame, so a fade to transparent would reveal the
+    /// sharp, unblurred main window through a thin sliver at every seam —
+    /// worse than the hard line it replaced. Fading toward a fixed neutral
+    /// instead only ever darkens the seam a little on both sides of it,
+    /// which reads as a soft edge without needing to match whatever
+    /// specific pixels a neighbouring, independently blurred window
+    /// happens to be showing there.
+    private static let fadeWidth: CGFloat = 28
+    private static let fadeColor = NSColor.black.withAlphaComponent(0.35).cgColor
+
     var onClick: (() -> Void)?
+
+    /// Which sides of this band are seams — set by `PaneZoomBlurOverlay.show`
+    /// from `innerEdges(of:in:)` every time a panel is (re)positioned, since
+    /// a pooled panel can play a different band role from one call to the
+    /// next.
+    private var fadeEdges: Set<NSRectEdge> = []
+    private var fadeLayers: [CAGradientLayer] = []
 
     init() {
         super.init(frame: .zero)
@@ -2869,6 +2936,59 @@ final class PaneZoomBlurBandView: NSVisualEffectView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is unavailable")
+    }
+
+    func setFadeEdges(_ edges: Set<NSRectEdge>) {
+        guard fadeEdges != edges else { return }
+        fadeEdges = edges
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        rebuildFadeLayers()
+    }
+
+    /// One thin gradient strip per seam side, sized to `fadeWidth` (clamped
+    /// to the band's own dimension so a narrow left/right band's two
+    /// vertical fades never overlap-stack past full strength) and rebuilt
+    /// on every layout pass, since a resize changes both this band's size
+    /// and — via a fresh `show()` call — potentially which edges are seams
+    /// at all.
+    private func rebuildFadeLayers() {
+        fadeLayers.forEach { $0.removeFromSuperlayer() }
+        fadeLayers.removeAll()
+        guard let layer, bounds.width > 0, bounds.height > 0 else { return }
+        for edge in fadeEdges {
+            let gradient = CAGradientLayer()
+            gradient.colors = [NSColor.clear.cgColor, Self.fadeColor]
+            switch edge {
+            case .minX:
+                let w = min(Self.fadeWidth, bounds.width)
+                gradient.frame = NSRect(x: 0, y: 0, width: w, height: bounds.height)
+                gradient.startPoint = CGPoint(x: 1, y: 0.5)
+                gradient.endPoint = CGPoint(x: 0, y: 0.5)
+            case .maxX:
+                let w = min(Self.fadeWidth, bounds.width)
+                gradient.frame = NSRect(x: bounds.width - w, y: 0, width: w, height: bounds.height)
+                gradient.startPoint = CGPoint(x: 0, y: 0.5)
+                gradient.endPoint = CGPoint(x: 1, y: 0.5)
+            case .minY:
+                let h = min(Self.fadeWidth, bounds.height)
+                gradient.frame = NSRect(x: 0, y: 0, width: bounds.width, height: h)
+                gradient.startPoint = CGPoint(x: 0.5, y: 1)
+                gradient.endPoint = CGPoint(x: 0.5, y: 0)
+            case .maxY:
+                let h = min(Self.fadeWidth, bounds.height)
+                gradient.frame = NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h)
+                gradient.startPoint = CGPoint(x: 0.5, y: 0)
+                gradient.endPoint = CGPoint(x: 0.5, y: 1)
+            @unknown default:
+                continue
+            }
+            layer.addSublayer(gradient)
+            fadeLayers.append(gradient)
+        }
     }
 
     // Swallowed for the same reason PaneZoomBackdropView's is: a click
@@ -2888,6 +3008,8 @@ final class PaneZoomBlurPanel: NSPanel {
         get { bandView.onClick }
         set { bandView.onClick = newValue }
     }
+
+    func setFadeEdges(_ edges: Set<NSRectEdge>) { bandView.setFadeEdges(edges) }
 
     // `.nonactivatingPanel` suppresses *app* activation on click, not key
     // window acquisition — `NSPanel.canBecomeKey` defaults to true even
@@ -2932,76 +3054,94 @@ final class PaneZoomBlurPanel: NSPanel {
 /// rather than an `NSButton` + SF Symbol so the glyphs match the design's own
 /// strokes, the same way `ShellGlyph` does for the sidebar.
 final class PaneHeaderButton: NSView {
-    enum Glyph { case focus, exitFocus, close, menu }
+    enum Glyph { case expand, restore, close, menu }
+
+    /// Which disc of the header's cluster this is. The colours are macOS's own
+    /// because the whole point of borrowing the shape is that nobody has to be
+    /// taught what three coloured dots in a title bar do.
+    enum TrafficLight {
+        case yellow, green, red
+
+        var fill: NSColor {
+            switch self {
+            case .yellow: return NSColor(srgbRed: 254 / 255, green: 188 / 255, blue: 46 / 255, alpha: 1)
+            case .green: return NSColor(srgbRed: 40 / 255, green: 200 / 255, blue: 64 / 255, alpha: 1)
+            case .red: return NSColor(srgbRed: 255 / 255, green: 95 / 255, blue: 87 / 255, alpha: 1)
+            }
+        }
+
+        /// The glyph riding on the disc: a dark tint of the disc itself, the way
+        /// macOS draws its own, rather than black on colour.
+        var glyphColor: NSColor {
+            switch self {
+            case .yellow: return NSColor(srgbRed: 89 / 255, green: 51 / 255, blue: 0, alpha: 0.72)
+            case .green: return NSColor(srgbRed: 0, green: 61 / 255, blue: 7 / 255, alpha: 0.72)
+            case .red: return NSColor(srgbRed: 77 / 255, green: 0, blue: 0, alpha: 0.72)
+            }
+        }
+    }
 
     /// The grid header's controls, `width:20px;height:20px`.
     static let iconSize: CGFloat = 20
 
-    /// The focused card's pill (design line 1082): `padding:5px 9px`,
-    /// `gap:6px`, `border-radius:6px`, a `.5px` border and a 16pt glyph.
-    private static let labelHorizontalInset: CGFloat = 9
-    private static let labelVerticalInset: CGFloat = 5
-    private static let labelGap: CGFloat = 6
-    private static let labelGlyphSize: CGFloat = 16
-    private static let labelCornerRadius: CGFloat = 6
-    private static let labelFont = ShellFont.ui(13.5, .medium)
-    private static let labelForeground = NSColor(
-        srgbRed: 216 / 255,
-        green: 216 / 255,
-        blue: 222 / 255,
-        alpha: 1
-    )
-    private static let labelFill = NSColor(white: 1, alpha: 0.07)
-    private static let labelHoverFill = NSColor(white: 1, alpha: 0.13)
-    private static let labelStroke = NSColor(white: 1, alpha: 0.14)
+    /// A disc that cannot act right now: grey, with its glyph still faintly on
+    /// it. It keeps its place in the cluster rather than vanishing, so the three
+    /// positions never shuffle and you can still see *which* control is off.
+    private static let disabledFill = NSColor(srgbRed: 72 / 255, green: 72 / 255, blue: 80 / 255, alpha: 1)
+    private static let disabledGlyph = NSColor(white: 1, alpha: 0.26)
 
     var onClick: (() -> Void)?
     var hoverTint = NSColor(srgbRed: 223 / 255, green: 226 / 255, blue: 255 / 255, alpha: 1)
     var hoverFill = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.22)
 
-    /// The close button's macOS traffic-light treatment: a filled red disc with
-    /// the ✕ showing only under the pointer, exactly as a window's own does.
-    var isTrafficLight = false { didSet { needsDisplay = true } }
+    /// macOS's traffic-light treatment: a filled disc of this colour. Unlike a
+    /// window's own, the glyph is drawn at rest rather than only under the
+    /// pointer — a pane's cluster is one small thing in a busy bar, and it has
+    /// to say what it does without being hunted for first.
+    var trafficLight: TrafficLight? { didSet { needsDisplay = true } }
+
+    /// Whether pressing it means anything right now. A disabled control still
+    /// draws and still reserves its slot; it just goes grey, stops answering the
+    /// pointer, and tells assistive technology it is unavailable.
+    var isEnabled = true {
+        didSet {
+            guard isEnabled != oldValue else { return }
+            // Otherwise a control disabled with the pointer resting on it keeps
+            // the hover it can no longer act on.
+            if !isEnabled { isHovered = false }
+            setAccessibilityEnabled(isEnabled)
+            needsDisplay = true
+        }
+    }
 
     private let glyph: Glyph
-    /// What the button says, and `nil` for the grid's bare icon square. A label
-    /// makes the button the design's bordered pill instead — same click target,
-    /// but it says what it does and what key does it, which is the whole reason
-    /// the focused card does not simply reuse the icon that got you there.
-    let label: String?
     private var isHovered = false { didSet { needsDisplay = true } }
     private var tracking: NSTrackingArea?
 
-    init(glyph: Glyph, label: String? = nil) {
+    init(glyph: Glyph) {
         self.glyph = glyph
-        self.label = label
         super.init(frame: .zero)
         wantsLayer = true
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        // A labelled button is named by what it *says*: Voice Control resolves
-        // "Click Exit focus · esc" against the visible text, and a control whose
-        // whole job is teaching the way out must not be the one that cannot be
-        // spoken. Only the bare icons need a described name, having none.
-        if let label {
-            setAccessibilityLabel(label)
-        } else {
-            // No `.exitFocus` here: it exists only as the labelled pill, so
-            // there is no bare form of it left to describe. Kind-neutral
-            // wording, since the pane may hold a browser as well as a
-            // terminal.
-            switch glyph {
-            case .focus: setAccessibilityLabel("Zoom this pane")
-            case .menu: setAccessibilityLabel("Pane options")
-            default: setAccessibilityLabel("Close this pane")
-            }
+        // A coloured disc draws no words, so the name is the only thing Voice
+        // Control and VoiceOver have to go on — and the yellow one is the only
+        // place the escape hatch is spelled out at all. Kind-neutral wording,
+        // since the pane may hold a browser as well as a terminal.
+        switch glyph {
+        case .expand: setAccessibilityLabel("Zoom this pane")
+        case .restore: setAccessibilityLabel("Restore this pane · esc")
+        case .menu: setAccessibilityLabel("Pane options")
+        case .close: setAccessibilityLabel("Close this pane")
         }
     }
 
     /// Assistive presses go the same way a click does. `NSView` gives a view with
-    /// `.button` role no press behaviour of its own, so without this the pill is
-    /// visible and named to VoiceOver and does nothing when it is activated.
+    /// `.button` role no press behaviour of its own, so without this a disc is
+    /// visible and named to VoiceOver and does nothing when it is activated —
+    /// and it refuses for the same reason a click does while it is disabled.
     override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
         onClick?()
         return onClick != nil
     }
@@ -3014,28 +3154,15 @@ final class PaneHeaderButton: NSView {
     override var isFlipped: Bool { true }
 
     override var intrinsicContentSize: NSSize {
-        guard let label else { return NSSize(width: Self.iconSize, height: Self.iconSize) }
-        let text = (label as NSString).size(withAttributes: [.font: Self.labelFont])
-        return NSSize(
-            width: ceil(
-                Self.labelHorizontalInset * 2 + Self.labelGlyphSize + Self.labelGap + text.width
-            ),
-            height: ceil(Self.labelVerticalInset * 2 + max(Self.labelGlyphSize, text.height))
-        )
+        NSSize(width: Self.iconSize, height: Self.iconSize)
     }
 
-    /// The 16 unit box the glyph is drawn in: the whole button when it is a bare
-    /// icon, the leading square inside the padding when it is a pill.
+    /// The 16 unit box the glyph is drawn in: the whole button for the bare ⋯
+    /// icon, and inside the disc for a traffic light. Three abutting 20pt
+    /// squares put 20pt between disc centres, which is macOS's own spacing.
     private var glyphBox: NSRect {
-        // The disc is 12pt inside the 20pt square, and the ✕ sits inside the disc.
-        if isTrafficLight { return bounds.insetBy(dx: 6, dy: 6) }
-        guard label != nil else { return bounds }
-        return NSRect(
-            x: Self.labelHorizontalInset,
-            y: (bounds.height - Self.labelGlyphSize) / 2,
-            width: Self.labelGlyphSize,
-            height: Self.labelGlyphSize
-        )
+        // The disc is 12pt inside the 20pt square, and the glyph sits inside it.
+        trafficLight == nil ? bounds : bounds.insetBy(dx: 6, dy: 6)
     }
 
     override func updateTrackingAreas() {
@@ -3050,61 +3177,32 @@ final class PaneHeaderButton: NSView {
         tracking = area
     }
 
-    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseEntered(with event: NSEvent) { isHovered = isEnabled }
     override func mouseExited(with event: NSEvent) { isHovered = false }
 
     override func mouseDown(with event: NSEvent) {}
 
     override func mouseUp(with event: NSEvent) {
-        guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        guard isEnabled, bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
         onClick?()
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        if let label {
-            // The pill is bordered and filled at rest, not only on hover: it is
-            // the card's one control, and the hover fill alone would leave it
-            // invisible until the pointer found it.
-            let pill = NSBezierPath(
-                roundedRect: bounds.insetBy(dx: 0.25, dy: 0.25),
-                xRadius: Self.labelCornerRadius,
-                yRadius: Self.labelCornerRadius
-            )
-            (isHovered ? Self.labelHoverFill : Self.labelFill).setFill()
-            pill.fill()
-            Self.labelStroke.setStroke()
-            pill.lineWidth = 0.5
-            pill.stroke()
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: Self.labelFont,
-                .foregroundColor: Self.labelForeground,
-            ]
-            let size = (label as NSString).size(withAttributes: attributes)
-            (label as NSString).draw(
-                at: NSPoint(
-                    x: glyphBox.maxX + Self.labelGap,
-                    y: (bounds.height - size.height) / 2
-                ),
-                withAttributes: attributes
-            )
-        } else if isTrafficLight {
-            NSColor(srgbRed: 255 / 255, green: 95 / 255, blue: 87 / 255, alpha: isHovered ? 1 : 0.9)
-                .setFill()
+        if let trafficLight {
+            (isEnabled
+                ? trafficLight.fill.withAlphaComponent(isHovered ? 1 : 0.92)
+                : Self.disabledFill).setFill()
             NSBezierPath(ovalIn: bounds.insetBy(dx: 4, dy: 4)).fill()
-            // Nothing on top of the disc until the pointer is over it.
-            guard isHovered else { return }
         } else if isHovered {
             hoverFill.setFill()
             NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
         }
-        // A pill's glyph keeps the label's colour through hover, where the
-        // design moves only the fill; a bare icon is the thing that lights up.
+        // A disc's glyph is a dark tint of the disc and is always on it; the
+        // bare ⋯ icon is the one that lights up under the pointer instead.
         let color: NSColor
-        if isTrafficLight {
-            color = NSColor(srgbRed: 77 / 255, green: 0, blue: 0, alpha: 0.65)
-        } else if label != nil {
-            color = Self.labelForeground
+        if let trafficLight {
+            color = isEnabled ? trafficLight.glyphColor : Self.disabledGlyph
         } else {
             color = isHovered
                 ? hoverTint
@@ -3121,31 +3219,29 @@ final class PaneHeaderButton: NSView {
         func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
             NSPoint(x: box.minX + x * scale, y: box.minY + y * scale)
         }
-        func brackets(_ corners: [[(CGFloat, CGFloat)]]) {
-            for corner in corners {
-                path.move(to: point(corner[0].0, corner[0].1))
-                for step in corner.dropFirst() { path.line(to: point(step.0, step.1)) }
-            }
+        /// A filled right triangle. Solid, not stroked: inside a 12pt disc the
+        /// glyph gets an 8pt box, and at that size a stroked bracket is mush
+        /// where a wedge still reads.
+        func wedge(_ corners: [(CGFloat, CGFloat)]) {
+            let shape = NSBezierPath()
+            shape.move(to: point(corners[0].0, corners[0].1))
+            for step in corners.dropFirst() { shape.line(to: point(step.0, step.1)) }
+            shape.close()
+            color.setFill()
+            shape.fill()
         }
         switch glyph {
-        case .focus:
-            // Four corner brackets pointing outward — "blow this pane up".
-            brackets([
-                [(6.2, 2.4), (2.4, 2.4), (2.4, 6.2)],
-                [(9.8, 2.4), (13.6, 2.4), (13.6, 6.2)],
-                [(13.6, 9.8), (13.6, 13.6), (9.8, 13.6)],
-                [(6.2, 13.6), (2.4, 13.6), (2.4, 9.8)],
-            ])
-        case .exitFocus:
-            // The same construction mirrored, so the brackets point inward —
-            // "put it back". A reader tells the two apart without the label,
-            // which is why the pill is not just the outward icon with words.
-            brackets([
-                [(2.6, 6.4), (2.6, 2.6), (6.4, 2.6)],
-                [(13.4, 6.4), (13.4, 2.6), (9.6, 2.6)],
-                [(9.6, 13.4), (13.4, 13.4), (13.4, 9.6)],
-                [(6.4, 13.4), (2.6, 13.4), (2.6, 9.6)],
-            ])
+        case .expand:
+            // macOS's own fullscreen glyph: two wedges shouldered into opposite
+            // corners, mass at the outside — "blow this pane up over the rest".
+            wedge([(2.2, 2.2), (9.2, 2.2), (2.2, 9.2)])
+            wedge([(13.8, 13.8), (6.8, 13.8), (13.8, 6.8)])
+        case .restore:
+            // The same pair pulled off the corners to meet in the middle, which
+            // is how macOS says "put it back". Direction is the only difference
+            // between the two, and at 8pt this is the difference that survives.
+            wedge([(7.2, 7.2), (7.2, 1.4), (1.4, 7.2)])
+            wedge([(8.8, 8.8), (8.8, 14.6), (14.6, 8.8)])
         case .close:
             path.move(to: point(4.2, 4.2))
             path.line(to: point(11.8, 11.8))
