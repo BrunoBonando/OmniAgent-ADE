@@ -34,6 +34,29 @@ enum PaletteAction: Equatable {
     case noop
 }
 
+/// The heading a row sits under, in the order the sections appear. Spotlight
+/// groups what it finds rather than pouring it into one list, and so does
+/// this: rows are emitted in section order, so a section is just a run of
+/// consecutive rows and nothing has to sort or re-index after filtering.
+enum PaletteSection: String, Equatable {
+    case terminals = "Terminals"
+    case browsers = "Browsers"
+    case files = "Files"
+    case actions = "Actions"
+    case brain = "Brain"
+
+    /// The SF Symbol every row in the section wears.
+    var symbol: String {
+        switch self {
+        case .terminals: return "apple.terminal"
+        case .browsers: return "globe"
+        case .files: return "doc.text"
+        case .actions: return "command"
+        case .brain: return "sparkle.magnifyingglass"
+        }
+    }
+}
+
 /// One row.
 struct PaletteCommand: Equatable {
     let id: String
@@ -45,13 +68,22 @@ struct PaletteCommand: Equatable {
     /// terminal's cwd, a file's full path. Spotlight has to find a pane by
     /// what is *in* it, not only by the words its row happens to print.
     let keywords: String?
+    let section: PaletteSection
 
-    init(id: String, title: String, detail: String?, action: PaletteAction, keywords: String? = nil) {
+    init(
+        id: String,
+        title: String,
+        detail: String?,
+        action: PaletteAction,
+        keywords: String? = nil,
+        section: PaletteSection = .actions
+    ) {
         self.id = id
         self.title = title
         self.detail = detail
         self.action = action
         self.keywords = keywords
+        self.section = section
     }
 
     /// Case-insensitive substring over title *and* keywords. `needle` is
@@ -103,14 +135,21 @@ struct CommandPaletteModel: Equatable {
         let tree = SessionOutline.group(ordered, focusedPaneID: focusedPaneID)
 
         var commands: [PaletteCommand] = []
+        // Walked once, emitted per kind: the outline's project/session order
+        // survives inside each section, and the sections come out in the
+        // order the palette shows them.
+        var paneRows: [PaneKind: [PaletteCommand]] = [:]
         for project in tree {
             for session in project.sessions {
                 for paneID in session.paneIDs {
                     guard let pane = byID[paneID] else { continue }
-                    commands.append(
+                    paneRows[pane.kind, default: []].append(
                         PaletteCommand(
                             id: "focus:\(paneID)",
-                            title: "Switch to \(SessionOutline.projectLabel(project.project, labels: projectLabels)) — \(session.label) — \(SessionOutline.paneLabel(pane))",
+                            // Name first, context after the em dash — the row
+                            // view dims everything past it, so a column of
+                            // rows scans by name the way Spotlight's does.
+                            title: "\(SessionOutline.paneLabel(pane)) — \(SessionOutline.projectLabel(project.project, labels: projectLabels)) · \(session.label)",
                             // A browser or editor is a pane kind, not an
                             // engine — the `.shell` its descriptor carries is
                             // a placeholder that must not be shown as what
@@ -127,12 +166,23 @@ struct CommandPaletteModel: Equatable {
                             // terminal by the folder it sits in, neither of
                             // which the row's title says.
                             keywords: [pane.browserURL, pane.cwd, pane.title].filter { !$0.isEmpty }
-                                .joined(separator: " ")
+                                .joined(separator: " "),
+                            section: {
+                                switch pane.kind {
+                                case .terminal: return .terminals
+                                case .browser: return .browsers
+                                // An editor pane sits with the files it holds.
+                                case .editor: return .files
+                                }
+                            }()
                         )
                     )
                 }
             }
         }
+        commands += paneRows[.terminal] ?? []
+        commands += paneRows[.browser] ?? []
+        commands += paneRows[.editor] ?? []
         // Every file open in an editor pane, deduped by path: a file open in
         // two panes is one thing to go to, not two.
         var seenPaths: Set<String> = []
@@ -143,10 +193,11 @@ struct CommandPaletteModel: Equatable {
                 commands.append(
                     PaletteCommand(
                         id: "file:\(tab.path)",
-                        title: "Open \(name)",
+                        title: name,
                         detail: folder.isEmpty ? "file" : folder,
                         action: .openFile(path: tab.path),
-                        keywords: tab.path
+                        keywords: tab.path,
+                        section: .files
                     )
                 )
             }
@@ -255,7 +306,8 @@ struct CommandPaletteModel: Equatable {
                 id: "search-brain",
                 title: "Search brain for \u{201C}\(trimmed)\u{201D}",
                 detail: nil,
-                action: .searchBrain(query: trimmed)
+                action: .searchBrain(query: trimmed),
+                section: .brain
             )
         )
         return rows

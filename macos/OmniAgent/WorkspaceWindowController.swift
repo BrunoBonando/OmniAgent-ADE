@@ -1518,7 +1518,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     presentSearchResults(hits, for: query)
                 case .failure:
                     palette.present(
-                        commands: [PaletteCommand(id: "search-error", title: "Brain search failed.", detail: nil, action: .noop)],
+                        commands: [PaletteCommand(id: "search-error", title: "Brain search failed.", detail: nil, action: .noop, section: .brain)],
                         over: window
                     )
                 }
@@ -1541,7 +1541,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     id: "no-results",
                     title: "No matches in the brain for \u{201C}\(query)\u{201D}.",
                     detail: nil,
-                    action: .noop
+                    action: .noop,
+                    section: .brain
                 ),
             ]
         } else {
@@ -1550,7 +1551,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     id: "hit:\(hit.id)",
                     title: "\(hit.label) — \(SessionOutline.projectLabel(hit.project, labels: projectLabels))",
                     detail: hit.kind,
-                    action: .revealProjectContext(project: hit.project)
+                    action: .revealProjectContext(project: hit.project),
+                    section: .brain
                 )
             }
         }

@@ -17,8 +17,8 @@ final class CommandPaletteTests: XCTestCase {
 
         let switches = commands.filter { if case .focusPane = $0.action { return true } else { return false } }
         XCTAssertEqual(switches.map(\.title), [
-            "Switch to alpha — Build — migrate",
-            "Switch to beta — Session 1 — Shell 1",
+            "migrate — alpha · Build",
+            "Shell 1 — beta · Session 1",
         ])
         XCTAssertEqual(switches.map(\.detail), ["shell", "shell"])
     }
@@ -152,7 +152,7 @@ final class CommandPaletteTests: XCTestCase {
             focusedPaneID: nil,
             unreadNotifications: 0
         )
-        XCTAssertEqual(noLabels.first { $0.id == "focus:a" }?.title, "Switch to alpha — Session 1 — Shell 1")
+        XCTAssertEqual(noLabels.first { $0.id == "focus:a" }?.title, "Shell 1 — alpha · Session 1")
 
         let withLabels = CommandPaletteModel.build(
             panes: [pane("a", project: "alpha", group: "g1")],
@@ -161,7 +161,7 @@ final class CommandPaletteTests: XCTestCase {
             unreadNotifications: 0,
             projectLabels: ["alpha": "Alpha Project"]
         )
-        XCTAssertEqual(withLabels.first { $0.id == "focus:a" }?.title, "Switch to Alpha Project — Session 1 — Shell 1")
+        XCTAssertEqual(withLabels.first { $0.id == "focus:a" }?.title, "Shell 1 — Alpha Project · Session 1")
     }
 
     /// Task 12: the focused editor's active *file* tab can be diffed from the
@@ -348,7 +348,7 @@ final class CommandPaletteTests: XCTestCase {
         )
 
         let files = commands.filter { if case .openFile = $0.action { return true } else { return false } }
-        XCTAssertEqual(files.map(\.title), ["Open main.swift", "Open README.md"])
+        XCTAssertEqual(files.map(\.title), ["main.swift", "README.md"], "the filename is the row, Spotlight-style")
         XCTAssertEqual(files.map(\.detail), ["src", "repo"])
         XCTAssertEqual(files.first?.action, .openFile(path: "/repo/src/main.swift"))
     }
@@ -373,6 +373,56 @@ final class CommandPaletteTests: XCTestCase {
 
         model.update(query: "src/parser")
         XCTAssertEqual(model.matches.first?.action, .openFile(path: "/repo/src/parser.rs"), "so is a file's full path")
+    }
+
+    func testRowsComeOutInSectionOrderSoAGroupIsJustARunOfRows() {
+        var model = CommandPaletteModel(
+            commands: CommandPaletteModel.build(
+                panes: [
+                    pane("web", project: "alpha", group: "g1", kind: .browser),
+                    pane("t1", project: "alpha", group: "g1"),
+                    pane("ed", project: "alpha", group: "g1", kind: .editor, editorTabs: [
+                        PersistedEditorTab(path: "/repo/main.swift", kind: "file", pinned: true),
+                    ]),
+                    pane("t2", project: "beta", group: "g2"),
+                ],
+                paneOrder: ["web", "t1", "ed", "t2"],
+                focusedPaneID: nil,
+                unreadNotifications: 0
+            )
+        )
+        model.update(query: "")
+
+        // Consecutive runs, never interleaved: the table can insert one
+        // heading wherever the section changes and stop there.
+        var runs: [PaletteSection] = []
+        for command in model.matches where runs.last != command.section {
+            runs.append(command.section)
+        }
+        XCTAssertEqual(runs, [.terminals, .browsers, .files, .actions])
+
+        // Panes keep the outline's own order inside their section.
+        XCTAssertEqual(
+            model.matches.filter { $0.section == .terminals }.map(\.id),
+            ["focus:t1", "focus:t2"]
+        )
+        // The editor pane sits with the files it holds.
+        XCTAssertEqual(
+            model.matches.filter { $0.section == .files }.map(\.id),
+            ["focus:ed", "file:/repo/main.swift"]
+        )
+    }
+
+    func testTheBrainSearchRowIsItsOwnTrailingSection() {
+        var model = CommandPaletteModel(commands: CommandPaletteModel.build(
+            panes: [pane("a", project: "alpha", group: "g1")],
+            paneOrder: ["a"],
+            focusedPaneID: nil,
+            unreadNotifications: 0
+        ))
+        model.update(query: "alpha")
+
+        XCTAssertEqual(model.matches.last?.section, .brain)
     }
 
     // MARK: - the panel

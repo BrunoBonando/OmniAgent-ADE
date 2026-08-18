@@ -26,10 +26,23 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
     private let scrim = SpotlightScrimWindow()
+    /// The table's rows: a section heading, or an index into `model.matches`.
+    /// Selection stays the model's business — headings are simply not in it,
+    /// which is what makes ↑/↓ skip them without a single special case.
+    private var display: [DisplayRow] = []
+
+    private enum DisplayRow {
+        case header(PaletteSection)
+        case command(Int)
+    }
+
+    static let rowHeight: CGFloat = 36
+    static let headerHeight: CGFloat = 28
+    static let cornerRadius: CGFloat = 22
 
     init() {
         let panel = CommandPalettePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 380),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
             // Borderless: a titled window brings its own square-cornered
             // shadow and background, both of which show through the glass
             // panel's rounded corners.
@@ -47,7 +60,8 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         super.init(window: panel)
 
         field.placeholderString = "Search terminals, browsers, files…"
-        field.font = .systemFont(ofSize: 19, weight: .regular)
+        field.font = .systemFont(ofSize: 21, weight: .regular)
+        field.textColor = .white
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
@@ -58,7 +72,10 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         column.resizingMask = .autoresizingMask
         tableView.addTableColumn(column)
         tableView.headerView = nil
-        tableView.rowHeight = 30
+        tableView.rowHeight = Self.rowHeight
+        // `.inset` is what gives the highlight Spotlight's rounded, inset
+        // pill instead of a full-bleed blue band.
+        tableView.style = .inset
         tableView.backgroundColor = .clear
         tableView.usesAlternatingRowBackgroundColors = false
         tableView.dataSource = self
@@ -71,31 +88,34 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
 
-        let glass = NSVisualEffectView(frame: NSRect(origin: .zero, size: panel.frame.size))
-        glass.material = .hudWindow
-        glass.blendingMode = .behindWindow
-        // `.active`, not `.followsWindowActiveState`: the glass must not go
-        // flat the moment something else takes key.
-        glass.state = .active
-        glass.autoresizingMask = [.width, .height]
-        glass.wantsLayer = true
-        glass.layer?.cornerRadius = 16
-        glass.layer?.masksToBounds = true
-        glass.layer?.borderWidth = 1
-        glass.layer?.borderColor = NSColor(white: 1, alpha: 0.12).cgColor
+        // Liquid Glass where the OS has it — `NSGlassEffectView` is the real
+        // material, with its own refraction and specular edge, not a blur
+        // standing in for one. The visual-effect view stays as the fallback
+        // for anything older than macOS 26.
+        let content = NSView(frame: NSRect(origin: .zero, size: panel.frame.size))
+        content.autoresizingMask = [.width, .height]
 
-        field.frame = NSRect(x: 22, y: glass.bounds.height - 58, width: glass.bounds.width - 44, height: 34)
+        let magnifier = NSImageView(frame: NSRect(x: 26, y: content.bounds.height - 55, width: 24, height: 24))
+        magnifier.image = NSImage(
+            systemSymbolName: "magnifyingglass",
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
+        magnifier.contentTintColor = NSColor(white: 1, alpha: 0.6)
+        magnifier.autoresizingMask = [.minYMargin]
+        field.frame = NSRect(x: 62, y: content.bounds.height - 62, width: content.bounds.width - 86, height: 38)
         field.autoresizingMask = [.width, .minYMargin]
-        let rule = NSView(frame: NSRect(x: 0, y: glass.bounds.height - 68, width: glass.bounds.width, height: 1))
+        let rule = NSView(frame: NSRect(x: 0, y: content.bounds.height - 74, width: content.bounds.width, height: 1))
         rule.autoresizingMask = [.width, .minYMargin]
         rule.wantsLayer = true
-        rule.layer?.backgroundColor = NSColor(white: 1, alpha: 0.09).cgColor
-        scrollView.frame = NSRect(x: 8, y: 8, width: glass.bounds.width - 16, height: glass.bounds.height - 80)
+        rule.layer?.backgroundColor = NSColor(white: 1, alpha: 0.14).cgColor
+        scrollView.frame = NSRect(x: 6, y: 10, width: content.bounds.width - 12, height: content.bounds.height - 86)
         scrollView.autoresizingMask = [.width, .height]
-        glass.addSubview(field)
-        glass.addSubview(rule)
-        glass.addSubview(scrollView)
-        panel.contentView = glass
+        content.addSubview(magnifier)
+        content.addSubview(field)
+        content.addSubview(rule)
+        content.addSubview(scrollView)
+
+        panel.contentView = Self.glassHost(content, size: panel.frame.size)
         panel.initialFirstResponder = field
         panel.onCancel = { [weak self] in self?.dismiss() }
         scrim.onClick = { [weak self] in self?.dismiss() }
@@ -106,12 +126,40 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         fatalError("init(coder:) is unavailable")
     }
 
+    /// Wraps the spotlight's content in glass: the real Liquid Glass on
+    /// macOS 26, and the `.behindWindow` blur that stood in for it before.
+    private static func glassHost(_ content: NSView, size: NSSize) -> NSView {
+        let frame = NSRect(origin: .zero, size: size)
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView(frame: frame)
+            glass.autoresizingMask = [.width, .height]
+            glass.cornerRadius = Self.cornerRadius
+            glass.style = .regular
+            glass.contentView = content
+            return glass
+        }
+        let effect = NSVisualEffectView(frame: frame)
+        effect.material = .hudWindow
+        // A child window over the workspace is the one arrangement where
+        // `.behindWindow` blurs what is behind the panel and nothing else.
+        effect.blendingMode = .behindWindow
+        effect.state = .active
+        effect.autoresizingMask = [.width, .height]
+        effect.wantsLayer = true
+        effect.layer?.cornerRadius = Self.cornerRadius
+        effect.layer?.masksToBounds = true
+        effect.layer?.borderWidth = 1
+        effect.layer?.borderColor = NSColor(white: 1, alpha: 0.12).cgColor
+        effect.addSubview(content)
+        return effect
+    }
+
     /// Opens over `parent`, rebuilt from scratch so the list can never offer
     /// a pane that closed while the palette was shut.
     func present(commands: [PaletteCommand], over parent: NSWindow?) {
         model.reset(commands: commands)
         field.stringValue = ""
-        tableView.reloadData()
+        rebuildDisplay()
         syncSelection()
         // Strict stacking without fighting window levels: the scrim is a
         // child of the workspace and the panel a child of the scrim, and a
@@ -170,8 +218,23 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
 
     func controlTextDidChange(_ notification: Notification) {
         model.update(query: field.stringValue)
-        tableView.reloadData()
+        rebuildDisplay()
         syncSelection()
+    }
+
+    /// One heading wherever the section changes — the rows already arrive in
+    /// section order, so this is a walk, not a sort.
+    private func rebuildDisplay() {
+        display = []
+        var current: PaletteSection?
+        for (index, command) in model.matches.enumerated() {
+            if command.section != current {
+                display.append(.header(command.section))
+                current = command.section
+            }
+            display.append(.command(index))
+        }
+        tableView.reloadData()
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
@@ -194,36 +257,69 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
     }
 
     @objc private func rowClicked() {
-        guard tableView.clickedRow >= 0 else { return }
-        model.select(index: tableView.clickedRow)
+        guard tableView.clickedRow >= 0, display.indices.contains(tableView.clickedRow),
+              case let .command(index) = display[tableView.clickedRow]
+        else { return }
+        model.select(index: index)
         runSelected()
     }
 
     private func syncSelection() {
-        let rows = model.matches
-        guard !rows.isEmpty else {
+        guard let row = displayRow(for: model.selectedIndex) else {
             tableView.deselectAll(nil)
             return
         }
-        tableView.selectRowIndexes(IndexSet(integer: model.selectedIndex), byExtendingSelection: false)
-        tableView.scrollRowToVisible(model.selectedIndex)
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        // The heading above it comes along, so scrolling to the first row of a
+        // section never leaves its title clipped off the top.
+        tableView.scrollRowToVisible(row > 0 ? row - 1 : row)
+        tableView.scrollRowToVisible(row)
+    }
+
+    /// Where a model index sits in the table, once headings are counted.
+    private func displayRow(for index: Int) -> Int? {
+        display.firstIndex {
+            if case let .command(i) = $0 { return i == index }
+            return false
+        }
     }
 
     // MARK: - Table
 
-    func numberOfRows(in tableView: NSTableView) -> Int { model.matches.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { display.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let rows = model.matches
-        guard rows.indices.contains(row) else { return nil }
-        return PaletteRowView(command: rows[row])
+        guard display.indices.contains(row) else { return nil }
+        switch display[row] {
+        case let .header(section):
+            return PaletteSectionHeaderView(section: section)
+        case let .command(index):
+            let rows = model.matches
+            guard rows.indices.contains(index) else { return nil }
+            return PaletteRowView(command: rows[index])
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard display.indices.contains(row) else { return Self.rowHeight }
+        if case .header = display[row] { return Self.headerHeight }
+        return Self.rowHeight
+    }
+
+    /// A heading is a label, not a destination.
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        guard display.indices.contains(row) else { return false }
+        if case .header = display[row] { return false }
+        return true
     }
 
     /// Arrow keys are handled by the field, but clicking still moves the
     /// model so Enter runs what the eye is on.
     func tableViewSelectionDidChange(_ notification: Notification) {
-        guard tableView.selectedRow >= 0 else { return }
-        model.select(index: tableView.selectedRow)
+        guard tableView.selectedRow >= 0, display.indices.contains(tableView.selectedRow),
+              case let .command(index) = display[tableView.selectedRow]
+        else { return }
+        model.select(index: index)
     }
 }
 
@@ -239,32 +335,78 @@ final class CommandPalettePanel: NSPanel {
     }
 }
 
-/// One palette row: title on the left, hint on the right.
+/// A section heading — "Terminals", "Files" — small, uppercase and quiet, so
+/// the eye lands on the rows and uses the headings only to orient.
+final class PaletteSectionHeaderView: NSTableCellView {
+    init(section: PaletteSection) {
+        super.init(frame: .zero)
+        // Tracking is what keeps a 10pt uppercase label readable rather than
+        // cramped, and is the difference between "a heading" and "small text".
+        let label = NSTextField(labelWithAttributedString: NSAttributedString(
+            string: section.rawValue.uppercased(),
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+                .foregroundColor: NSColor(white: 1, alpha: 0.42),
+                .kern: 1.2,
+            ]
+        ))
+        addSubview(label)
+        textField = label
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(section.rawValue)
+
+        label.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+}
+
+/// One palette row: the section's icon, the title, and the hint on the right.
 final class PaletteRowView: NSTableCellView {
     init(command: PaletteCommand) {
         super.init(frame: .zero)
-        let title = NSTextField(labelWithString: command.title)
-        title.font = .systemFont(ofSize: 13)
+        let icon = NSImageView()
+        icon.image = NSImage(
+            systemSymbolName: command.section.symbol,
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
+        icon.contentTintColor = NSColor(white: 1, alpha: 0.75)
+        addSubview(icon)
+
+        let title = NSTextField(labelWithAttributedString: Self.styled(command.title))
         title.lineBreakMode = .byTruncatingTail
         addSubview(title)
         textField = title
 
         let detail = NSTextField(labelWithString: command.detail ?? "")
-        detail.font = .systemFont(ofSize: 11)
-        detail.textColor = NSColor(srgbRed: 130 / 255, green: 140 / 255, blue: 158 / 255, alpha: 1)
+        detail.font = .systemFont(ofSize: 12)
+        detail.textColor = NSColor(white: 1, alpha: 0.5)
         detail.alignment = .right
+        detail.setContentCompressionResistancePriority(.required, for: .horizontal)
         addSubview(detail)
 
         setAccessibilityElement(true)
         setAccessibilityLabel(command.detail.map { "\(command.title), \($0)" } ?? command.title)
 
+        icon.translatesAutoresizingMaskIntoConstraints = false
         title.translatesAutoresizingMaskIntoConstraints = false
         detail.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 18),
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
             title.centerYAnchor.constraint(equalTo: centerYAnchor),
-            detail.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 8),
-            detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            detail.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 12),
+            detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
             detail.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
@@ -272,6 +414,27 @@ final class PaletteRowView: NSTableCellView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is unavailable")
+    }
+
+    /// The name at full strength, everything after the first em dash dimmed:
+    /// one string in the model, two weights on screen, and a column of rows
+    /// that scans by name rather than by the words they have in common.
+    static func styled(_ title: String) -> NSAttributedString {
+        let text = NSMutableAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 14),
+                .foregroundColor: NSColor(white: 1, alpha: 0.96),
+            ]
+        )
+        if let dash = title.range(of: " — ") {
+            let start = title.distance(from: title.startIndex, to: dash.lowerBound)
+            text.addAttributes(
+                [.foregroundColor: NSColor(white: 1, alpha: 0.45)],
+                range: NSRange(location: start, length: (title as NSString).length - start)
+            )
+        }
+        return text
     }
 }
 
