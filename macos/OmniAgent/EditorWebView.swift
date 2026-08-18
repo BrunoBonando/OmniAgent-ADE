@@ -21,6 +21,12 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
     private(set) var isReady = false
     /// Commands issued before Monaco's `ready` land here and replay in order.
     private var queued: [String] = []
+    /// A page that never reaches `ready` must not turn the queue into an
+    /// unbounded retainer of whole file contents. Far above any real pre-ready
+    /// burst (a pane opens a handful of models), so eviction means something
+    /// is wrong, not that a normal workload is being trimmed.
+    static let maxQueuedCharacters = 8 * 1024 * 1024
+    private var queuedCharacters = 0
     private let contentController: WKUserContentController
     private let messageProxy: MessageProxy
 
@@ -54,7 +60,7 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
 
         wantsLayer = true
         layer?.backgroundColor = PaneContainerView.paneBackgroundColor.cgColor
-        if #available(macOS 13.3, *) { webView.isInspectable = true }
+        webView.isInspectable = true
         webView.navigationDelegate = self
         // The page paints #0c0c0f itself; this is what WebKit paints *under* it,
         // so there is no white flash between attach and first paint. (The public
@@ -106,9 +112,20 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
     private func run(_ script: String) {
         guard isReady else {
             queued.append(script)
+            queuedCharacters += script.count
+            // Evict oldest first: these are per-path state setters, so the most
+            // recent commands describe the state the owner actually wants.
+            while queuedCharacters > Self.maxQueuedCharacters, !queued.isEmpty {
+                queuedCharacters -= queued.removeFirst().count
+            }
             return
         }
         webView.evaluateJavaScript(script)
+    }
+
+    private func dropQueue() {
+        queued = []
+        queuedCharacters = 0
     }
 
     func openModel(path: String, content: String, readOnly: Bool) {
@@ -158,7 +175,7 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
         case "ready":
             isReady = true
             let replay = queued
-            queued = []
+            dropQueue()
             for script in replay { webView.evaluateJavaScript(script) }
             onReady?()
         case "dirtyChanged":
@@ -186,9 +203,23 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
     /// (with its crash snapshots) when `onReady` fires again.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         isReady = false
-        queued = []
+        dropQueue()
         onCrash?()
         loadPage()
+    }
+
+    /// The page could not load at all. Nothing will ever replay, so let go of
+    /// the queued content rather than retain it for the life of the pane.
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        dropQueue()
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        dropQueue()
     }
 
     /// Holds its owner weakly so the content controller cannot pin the view

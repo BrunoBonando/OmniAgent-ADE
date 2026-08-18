@@ -1,0 +1,498 @@
+import AppKit
+
+/// What the user chose in the "save before closing?" prompt.
+enum EditorSaveDecision { case save, discard, cancel }
+
+/// An editor pane's content: a native tab strip over a swap container that
+/// shows either the Monaco web surface (file/diff/changes tabs) or a native
+/// media view (image/PDF). The PTY half of `PaneContentView` is a no-op,
+/// exactly like `BrowserPaneView`. All disk I/O lives here, on the Swift
+/// side; Monaco only ever sees strings.
+final class EditorPaneView: NSView, PaneContentView {
+    let strip = EditorTabStripView()
+    let webHost = EditorWebView()
+    let mediaHost = MediaTabView()
+    private let emptyField = NSTextField(labelWithString: "No file open — click a file in FILES")
+
+    private(set) var model = EditorPaneModel()
+
+    var onTitleChange: ((String) -> Void)?
+    var onStateChange: (([PersistedEditorTab], Int) -> Void)?
+    var onLastTabClosed: (() -> Void)?
+    var onOpenDiffRequest: ((URL) -> Void)?
+
+    var workspaceRoot: URL?
+    var changedPaths: Set<String> = [] { didSet { syncChrome() } }
+
+    var confirmSave: ((String, @escaping (EditorSaveDecision) -> Void) -> Void) = EditorPaneView.defaultConfirmSave
+    var presentError: ((String) -> Void) = { message in
+        let alert = NSAlert()
+        alert.messageText = "Could not save"
+        alert.informativeText = message
+        alert.runModal()
+    }
+
+    /// Per-open-file bookkeeping, keyed by absolute path.
+    private var encodings: [String: String.Encoding] = [:]
+    private var modificationDates: [String: Date] = [:]
+    /// Paths that currently have a live Monaco model. Also the "did this file
+    /// read successfully?" answer — a file we could not read never lands here,
+    /// so `showActiveContent` shows the message instead of an empty editor.
+    private(set) var loadedPaths: Set<String> = []
+    /// Debounced dirty-buffer snapshots from the bridge — crash insurance
+    /// (Task 15 replays them on renderer death).
+    private(set) var dirtySnapshots: [String: String] = [:]
+
+    /// Set only while `closeAllTabsAfterConfirmation` is draining the pane.
+    /// Its caller (Task 15's close/quit path) is already tearing the pane
+    /// down, so the "you closed the last tab, close the pane" reflex would
+    /// fire a second, redundant close underneath it.
+    private var suppressLastTabClosed = false
+
+    // MARK: - PaneContentView
+
+    var isSelected = false
+    var suspendsDrawing = false
+    weak var resizeCoalescer: PaneResizeCoalescer?
+    var primaryResponderView: NSView {
+        switch model.activeTab?.kind {
+        case .media: return mediaHost.preferredResponder
+        case .none: return self
+        default: return webHost.webView
+        }
+    }
+    func focus() { window?.makeFirstResponder(primaryResponderView) }
+    func scheduleResize() {}
+    func flushResize() {}
+
+    init(initialTabs: [PersistedEditorTab], activeIndex: Int) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = PaneContainerView.paneBackgroundColor.cgColor
+
+        emptyField.font = ShellFont.ui(13)
+        emptyField.textColor = ShellPalette.inkMuted
+        emptyField.alignment = .center
+        emptyField.lineBreakMode = .byTruncatingTail
+        emptyField.maximumNumberOfLines = 1
+
+        for view in [strip, webHost, mediaHost, emptyField] as [NSView] { addSubview(view) }
+        setContentVisibility(web: false, media: false, empty: true)
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Editor pane")
+
+        wireStrip()
+        wireBridge()
+        restore(initialTabs: initialTabs, activeIndex: activeIndex)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override var isFlipped: Bool { true }
+
+    override func layout() {
+        super.layout()
+        applyLayout()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        applyLayout()
+    }
+
+    private func applyLayout() {
+        strip.frame = NSRect(x: 0, y: 0, width: bounds.width, height: EditorTabStripView.height)
+        let content = NSRect(
+            x: 0,
+            y: EditorTabStripView.height,
+            width: bounds.width,
+            height: max(0, bounds.height - EditorTabStripView.height)
+        )
+        webHost.frame = content
+        mediaHost.frame = content
+        let size = emptyField.intrinsicContentSize
+        emptyField.frame = NSRect(
+            x: content.minX + (content.width - size.width) / 2,
+            y: content.minY + (content.height - size.height) / 2,
+            width: min(size.width, content.width),
+            height: size.height
+        )
+    }
+
+    /// Restores a persisted row. Tabs whose file has vanished since the last
+    /// launch are dropped (`.changes` has no file and always survives), and
+    /// the active index is clamped into whatever is left.
+    private func restore(initialTabs: [PersistedEditorTab], activeIndex: Int) {
+        let surviving: [EditorTab] = initialTabs.compactMap { persisted in
+            // The codec already drops unknown kinds; belt and braces here.
+            guard let kind = EditorTabKind(rawValue: persisted.kind) else { return nil }
+            guard kind == .changes || FileManager.default.fileExists(atPath: persisted.path) else { return nil }
+            return EditorTab(path: persisted.path, kind: kind, isPinned: persisted.pinned)
+        }
+        for (index, tab) in surviving.enumerated() { model.insert(tab, at: index) }
+        model.activate(min(max(0, activeIndex), max(0, surviving.count - 1)))
+        // No publish: the restore *is* what the persisted row already says.
+        sync(publish: false)
+        showActiveContent()
+    }
+
+    private func wireStrip() {
+        strip.onSelect = { [weak self] index in self?.activateTab(index) }
+        strip.onPin = { [weak self] index in
+            guard let self else { return }
+            model.pin(at: index)
+            syncAll()
+        }
+        strip.onClose = { [weak self] index in self?.requestCloseTab(at: index) }
+        strip.onSave = { [weak self] in self?.saveActiveTab() }
+        strip.onDiffToggle = { [weak self] in
+            guard let self, let tab = model.activeTab, tab.kind == .file else { return }
+            onOpenDiffRequest?(URL(fileURLWithPath: tab.path))
+        }
+        // strip.onBeginDrag wired in Task 14.
+    }
+
+    private func wireBridge() {
+        webHost.onDirtyChanged = { [weak self] path, dirty in
+            guard let self, let index = model.index(of: path, kind: .file) else { return }
+            model.setDirty(dirty, at: index)
+            if !dirty { dirtySnapshots.removeValue(forKey: path) }
+            syncAll()
+        }
+        webHost.onSnapshot = { [weak self] path, content in
+            self?.dirtySnapshots[path] = content
+        }
+        webHost.onSaveRequested = { [weak self] path in
+            guard let self, let index = model.index(of: path, kind: .file) else { return }
+            save(at: index) { _ in }
+        }
+        // onChangesOpen / onRequestFileDiff wired in Tasks 12–13.
+        // onCrash wired in Task 15.
+    }
+
+    // MARK: - Opening
+
+    func openFile(_ url: URL, pinned: Bool) {
+        let classified = EditorFileClass.classify(url: url)
+        let kind = classified.tabKind
+        let hadTab = model.index(of: url.path, kind: kind) != nil
+        // A preview open recycles the existing preview tab in place, which
+        // evicts whatever was in it — its Monaco model and bookkeeping have to
+        // go with it or they leak for the life of the pane.
+        let recycled: EditorTab? = (pinned || hadTab)
+            ? nil
+            : model.tabs.first { !$0.isPinned && !$0.isDirty }
+        model.open(path: url.path, kind: kind, asPreview: !pinned)
+        if let recycled, recycled.path != url.path || recycled.kind != kind {
+            discardResources(for: recycled)
+        }
+        if !hadTab, kind == .file { loadFileTab(url, classified: classified) }
+        syncAll()
+        showActiveContent()
+    }
+
+    /// Reads `url` off disk and hands Monaco a string — the only place a file
+    /// tab's text enters the editor. Idempotent: a path that already has a
+    /// live model is left alone, so re-activating a tab never clobbers the
+    /// buffer with what is on disk.
+    private func loadFileTab(_ url: URL, classified: EditorFileClass) {
+        guard case let .text(readOnly) = classified else { return }
+        guard !loadedPaths.contains(url.path) else { return }
+        var encoding = String.Encoding.utf8
+        var text: String? = try? String(contentsOf: url, encoding: .utf8)
+        if text == nil {
+            // Not valid UTF-8, but `EditorFileClass` already ruled out binary:
+            // latin-1 maps every byte, so this always succeeds for real text.
+            text = try? String(contentsOf: url, encoding: .isoLatin1)
+            if text != nil { encoding = .isoLatin1 }
+        }
+        guard let text else {
+            webHost.showMessage("Could not read \(url.lastPathComponent)")
+            return
+        }
+        encodings[url.path] = encoding
+        modificationDates[url.path] = modificationDate(of: url)
+        loadedPaths.insert(url.path)
+        webHost.openModel(path: url.path, content: text, readOnly: readOnly)
+    }
+
+    private func modificationDate(of url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    /// Task 12 gives this a real body (HEAD version + `webHost.showDiff`).
+    /// Until then it only opens the tab, so the strip and persistence are
+    /// already exercised by the surrounding plumbing.
+    func openDiff(_ url: URL) {
+        model.open(path: url.path, kind: .diff, asPreview: false)
+        syncAll()
+        showActiveContent()
+    }
+
+    /// Task 13 gives this a real body (`webHost.showChanges` from `GitStatus`).
+    func openChanges() {
+        model.open(path: "", kind: .changes, asPreview: false)
+        syncAll()
+        showActiveContent()
+    }
+
+    private func activateTab(_ index: Int) {
+        model.activate(index)
+        syncAll()
+        // `showActiveContent` loads a restored tab's model on first sight.
+        showActiveContent()
+    }
+
+    /// Routes the active tab to exactly one surface. Whether a `.file` tab is
+    /// text or binary is re-derived here (one stat plus an 8 KB read) rather
+    /// than cached in a parallel dictionary that could drift from disk.
+    private func showActiveContent() {
+        guard let tab = model.activeTab else {
+            setContentVisibility(web: false, media: false, empty: true)
+            return
+        }
+        switch tab.kind {
+        case .file:
+            let url = URL(fileURLWithPath: tab.path)
+            let classified = EditorFileClass.classify(url: url)
+            if case .text = classified {
+                loadFileTab(url, classified: classified)
+                if loadedPaths.contains(tab.path) {
+                    webHost.showModel(path: tab.path)
+                } else {
+                    webHost.showMessage("Could not read \(url.lastPathComponent)")
+                }
+                setContentVisibility(web: true, media: false, empty: false)
+            } else {
+                mediaHost.show(url: url, kind: .binary)
+                setContentVisibility(web: false, media: true, empty: false)
+            }
+        case .media:
+            let url = URL(fileURLWithPath: tab.path)
+            mediaHost.show(url: url, kind: EditorFileClass.classify(url: url))
+            setContentVisibility(web: false, media: true, empty: false)
+        case .diff, .changes:
+            setContentVisibility(web: true, media: false, empty: false)
+        }
+    }
+
+    private func setContentVisibility(web: Bool, media: Bool, empty: Bool) {
+        webHost.isHidden = !web
+        mediaHost.isHidden = !media
+        emptyField.isHidden = !empty
+    }
+
+    // MARK: - Saving
+
+    func saveActiveTab() { saveActiveTab { _ in } }
+
+    func saveActiveTab(completion: @escaping (Bool) -> Void) {
+        guard let tab = model.activeTab, tab.kind == .file else {
+            completion(false)
+            return
+        }
+        guard let index = model.index(of: tab.path, kind: .file) else {
+            completion(false)
+            return
+        }
+        save(at: index, completion: completion)
+    }
+
+    /// The one write path. Monaco is asked for the buffer, Swift writes it —
+    /// atomically, in the encoding the file was read in. A failed write leaves
+    /// the tab dirty and says so; it never silently drops the edit.
+    private func save(at index: Int, completion: @escaping (Bool) -> Void) {
+        guard model.tabs.indices.contains(index), model.tabs[index].kind == .file else {
+            completion(false)
+            return
+        }
+        let path = model.tabs[index].path
+        let url = URL(fileURLWithPath: path)
+        webHost.requestContent(path: path) { [weak self] content in
+            guard let self else {
+                completion(false)
+                return
+            }
+            guard let content else {
+                presentError("\(url.lastPathComponent) could not be read back from the editor.")
+                completion(false)
+                return
+            }
+            do {
+                try content.write(to: url, atomically: true, encoding: encodings[path] ?? .utf8)
+            } catch {
+                presentError("\(url.lastPathComponent): \(error.localizedDescription)")
+                completion(false)
+                return
+            }
+            modificationDates[path] = modificationDate(of: url)
+            webHost.markSaved(path: path)
+            if let current = model.index(of: path, kind: .file) { model.setDirty(false, at: current) }
+            dirtySnapshots.removeValue(forKey: path)
+            syncAll()
+            completion(true)
+        }
+    }
+
+    var hasDirtyTabs: Bool { model.tabs.contains(where: \.isDirty) }
+
+    /// Saves every dirty file tab, one after another — the writes are async
+    /// (Monaco answers `requestContent` on a callback), so they are chained
+    /// rather than looped. Stops at the first failure.
+    func saveAllDirty(completion: @escaping (Bool) -> Void) {
+        saveSerially(model.tabs.filter { $0.isDirty && $0.kind == .file }.map(\.path), completion: completion)
+    }
+
+    private func saveSerially(_ paths: [String], completion: @escaping (Bool) -> Void) {
+        guard let path = paths.first else {
+            completion(true)
+            return
+        }
+        let rest = Array(paths.dropFirst())
+        guard let index = model.index(of: path, kind: .file) else {
+            saveSerially(rest, completion: completion)
+            return
+        }
+        save(at: index) { [weak self] saved in
+            guard saved, let self else {
+                completion(false)
+                return
+            }
+            saveSerially(rest, completion: completion)
+        }
+    }
+
+    // MARK: - Closing
+
+    func requestCloseTab(at index: Int) {
+        guard model.tabs.indices.contains(index) else { return }
+        let tab = model.tabs[index]
+        guard tab.isDirty else {
+            performClose(at: index)
+            return
+        }
+        confirmSave((tab.path as NSString).lastPathComponent) { [weak self] decision in
+            guard let self else { return }
+            switch decision {
+            case .cancel: break
+            case .discard: performClose(at: index)
+            case .save:
+                save(at: index) { saved in
+                    if saved { self.performClose(at: self.model.index(of: tab.path, kind: tab.kind) ?? index) }
+                }
+            }
+        }
+    }
+
+    private func performClose(at index: Int) {
+        guard let closed = model.close(at: index) else { return }
+        discardResources(for: closed)
+        syncAll()
+        showActiveContent()
+        if model.tabs.isEmpty, !suppressLastTabClosed { onLastTabClosed?() }
+    }
+
+    /// Releases everything a tab owned: its Monaco model and the three
+    /// path-keyed dictionaries. Called from close *and* from preview-tab
+    /// recycling, which evicts a tab without ever calling close.
+    private func discardResources(for tab: EditorTab) {
+        guard tab.kind == .file else { return }
+        if loadedPaths.remove(tab.path) != nil { webHost.closeModel(path: tab.path) }
+        encodings.removeValue(forKey: tab.path)
+        modificationDates.removeValue(forKey: tab.path)
+        dirtySnapshots.removeValue(forKey: tab.path)
+    }
+
+    /// Resolves every dirty tab with a prompt and closes it. `false` means the
+    /// user cancelled (or a save failed) and the close/quit must stop — the
+    /// pane is left exactly as far along as the walk got.
+    func closeAllTabsAfterConfirmation(completion: @escaping (Bool) -> Void) {
+        suppressLastTabClosed = true
+        drainDirtyTabs { [weak self] proceed in
+            self?.suppressLastTabClosed = false
+            completion(proceed)
+        }
+    }
+
+    private func drainDirtyTabs(completion: @escaping (Bool) -> Void) {
+        guard let index = model.tabs.firstIndex(where: \.isDirty) else {
+            completion(true)
+            return
+        }
+        let tab = model.tabs[index]
+        confirmSave((tab.path as NSString).lastPathComponent) { [weak self] decision in
+            guard let self else {
+                completion(false)
+                return
+            }
+            switch decision {
+            case .cancel:
+                completion(false)
+            case .discard:
+                performClose(at: index)
+                drainDirtyTabs(completion: completion)
+            case .save:
+                save(at: index) { [weak self] saved in
+                    guard saved, let self else {
+                        completion(false)
+                        return
+                    }
+                    performClose(at: model.index(of: tab.path, kind: tab.kind) ?? index)
+                    drainDirtyTabs(completion: completion)
+                }
+            }
+        }
+    }
+
+    // MARK: - Sync
+
+    private func syncAll() { sync(publish: true) }
+
+    private func sync(publish: Bool) {
+        strip.render(model: model, diffAvailable: activeFileHasChanges())
+        onTitleChange?(model.activeTab.map(EditorTabStripView.title(for:)) ?? "Editor")
+        guard publish else { return }
+        onStateChange?(persistedTabs, model.activeIndex)
+    }
+
+    /// Chrome only — `changedPaths` moving is not a tab mutation, so it must
+    /// not republish the persisted row.
+    private func syncChrome() {
+        strip.render(model: model, diffAvailable: activeFileHasChanges())
+    }
+
+    private var persistedTabs: [PersistedEditorTab] {
+        model.tabs.map { PersistedEditorTab(path: $0.path, kind: $0.kind.rawValue, pinned: $0.isPinned) }
+    }
+
+    private func activeFileHasChanges() -> Bool {
+        guard let tab = model.activeTab, tab.kind == .file else { return false }
+        return changedPaths.contains(tab.path)
+    }
+
+    // MARK: - Test hooks
+
+    /// Mutates the model the way the strip's callbacks would, then re-syncs —
+    /// the only supported way for a test to fabricate tab state.
+    func modelForTesting(_ mutate: (inout EditorPaneModel) -> Void) {
+        mutate(&model)
+        syncAll()
+    }
+
+    private static func defaultConfirmSave(_ name: String, _ decide: @escaping (EditorSaveDecision) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "Save changes to \(name)?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: decide(.save)
+        case .alertSecondButtonReturn: decide(.discard)
+        default: decide(.cancel)
+        }
+    }
+}

@@ -85,6 +85,10 @@ window.omniagent = {
       const model = monaco.editor.createModel(content, undefined, monaco.Uri.file(path));
       entry = { model, savedVersionId: model.getAlternativeVersionId(), viewState: null, readOnly: !!readOnly };
       model.onDidChangeContent(() => {
+        // Writes Swift itself just made are not user edits: `setContent`
+        // raises this flag so the rebase of `savedVersionId` lands before
+        // anyone can observe a dirty state that was never real.
+        if (entry.suppressChanges) return;
         post({ type: "dirtyChanged", path, dirty: model.getAlternativeVersionId() !== entry.savedVersionId });
         clearTimeout(snapshotTimers.get(path));
         snapshotTimers.set(path, setTimeout(() => {
@@ -95,11 +99,23 @@ window.omniagent = {
     }
     this.showModel(path);
   },
+  // Swift replacing the buffer behind the user (a reload, or the file being
+  // rewritten on disk). `onDidChangeContent` fires *synchronously* inside
+  // `setValue`, so without the guard this would post `dirty:true` and arm a
+  // 2 s snapshot before the `dirty:false` below — a visible tab flicker plus a
+  // spurious snapshot of content Swift had just written itself.
   setContent(path, content) {
     const entry = models.get(path);
     if (!entry) return;
-    entry.model.setValue(content);
-    entry.savedVersionId = entry.model.getAlternativeVersionId();
+    entry.suppressChanges = true;
+    try {
+      entry.model.setValue(content);
+      entry.savedVersionId = entry.model.getAlternativeVersionId();
+    } finally {
+      entry.suppressChanges = false;
+    }
+    clearTimeout(snapshotTimers.get(path));
+    snapshotTimers.delete(path);
     post({ type: "dirtyChanged", path, dirty: false });
   },
   showModel(path) {
@@ -131,6 +147,9 @@ window.omniagent = {
     if (!entry) return;
     clearTimeout(snapshotTimers.get(path));
     snapshotTimers.delete(path);
+    // Disposing a model the editor still holds leaves it pointing at a dead
+    // model; detach first.
+    if (editor && editor.getModel() === entry.model) editor.setModel(null);
     entry.model.dispose();
     models.delete(path);
   },
@@ -165,6 +184,8 @@ window.omniagent = {
     for (const file of files) {
       const wrap = document.createElement("div");
       wrap.className = "file";
+      // `appendFileDiff` finds its row by this, not by markup position.
+      wrap.dataset.path = file.path;
       const row = document.createElement("div");
       row.className = "row";
       const badge = document.createElement("span");
@@ -198,7 +219,7 @@ window.omniagent = {
   appendFileDiff(path, text) {
     const container = el("changes");
     for (const wrap of container.querySelectorAll(".file")) {
-      if (wrap.querySelector(".row span:nth-child(2)").textContent !== path) continue;
+      if (wrap.dataset.path !== path) continue;
       const detail = wrap.querySelector("pre");
       detail.dataset.loaded = "1";
       detail.textContent = "";

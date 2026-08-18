@@ -6,19 +6,38 @@ final class EditorWebViewTests: XCTestCase {
     func testJSLiteralEscapes() {
         XCTAssertEqual(EditorWebView.jsLiteral("a"), "\"a\"")
         XCTAssertEqual(EditorWebView.jsLiteral("a\"b\n"), "\"a\\\"b\\n\"")
-        // The exact escaping of "/" and of non-ASCII differs by Foundation
-        // version, so for anything gnarlier than the two cases above assert the
-        // round-trip through a JSON decode rather than a byte-for-byte form.
+    }
+
+    /// The only judge that matters for `jsLiteral` is the engine that will
+    /// evaluate its output, so evaluate it. Decoding with the same
+    /// `JSONSerialization` that encoded it would be circular, and would miss
+    /// exactly the characters where JSON and JavaScript string literals used to
+    /// disagree: U+2028/U+2029 are legal in JSON but were syntax errors inside a
+    /// JS string literal until ES2019.
+    func testJSLiteralSurvivesTheJavaScriptEngine() {
+        let view = EditorWebView()
+        let ready = expectation(description: "ready")
+        view.onReady = { ready.fulfill() }
+        wait(for: [ready], timeout: 30)
+
         let tricky = [
+            "a",
             "</script>",
             "path with 'quotes' \"and\" \\slashes\\ and\nnewlines",
-            "tabs\tand\rcarriage\u{0B}returns",
-            "unicode: café — 🍎",
+            "tabs\tand\rcarriage returns",
+            "line\u{2028}and paragraph\u{2029}separators",
+            "unicode: café — 🍎 — \u{0000}nul",
+            "backtick ` and ${notATemplate}",
         ]
         for value in tricky {
             let literal = EditorWebView.jsLiteral(value)
-            let decoded = (try? JSONSerialization.jsonObject(with: Data("[\(literal)]".utf8))) as? [String]
-            XCTAssertEqual(decoded?.first, value, "round-trip failed for \(value.debugDescription)")
+            let done = expectation(description: "eval")
+            view.webView.evaluateJavaScript("(\(literal))") { evaluated, error in
+                XCTAssertNil(error, "JS rejected the literal for \(value.debugDescription)")
+                XCTAssertEqual(evaluated as? String, value, "round-trip failed for \(value.debugDescription)")
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 10)
         }
     }
 
@@ -144,6 +163,138 @@ final class EditorWebViewTests: XCTestCase {
         )
     }
 
+    /// `setContent` is Swift replacing the buffer behind the user, so the tab
+    /// must land clean *without ever passing through dirty*. Monaco fires
+    /// `onDidChangeContent` synchronously inside `setValue`, so the naive order
+    /// (write, then rebase) posts `dirty:true` first and arms a 2 s snapshot of
+    /// content Swift had just written itself. Assert the whole event sequence,
+    /// not just its final state.
+    func testSetContentNeverFlickersDirtyOrArmsASnapshot() {
+        let view = EditorWebView()
+        let ready = expectation(description: "ready")
+        view.onReady = { ready.fulfill() }
+        wait(for: [ready], timeout: 30)
+
+        let path = "/tmp/quiet.txt"
+        view.openModel(path: path, content: "one", readOnly: false)
+
+        var dirtyEvents: [Bool] = []
+        var snapshots: [String] = []
+        let clean = expectation(description: "clean")
+        clean.assertForOverFulfill = false
+        view.onDirtyChanged = { changed, isDirty in
+            guard changed == path else { return }
+            dirtyEvents.append(isDirty)
+            if !isDirty { clean.fulfill() }
+        }
+        view.onSnapshot = { changed, content in
+            if changed == path { snapshots.append(content) }
+        }
+
+        view.setContent(path: path, content: "two")
+        wait(for: [clean], timeout: 10)
+        XCTAssertEqual(dirtyEvents, [false], "setContent flickered the tab through dirty")
+
+        // The snapshot debounce is 2 s; give an armed timer room to fire.
+        RunLoop.current.run(until: Date().addingTimeInterval(3))
+        XCTAssertEqual(snapshots, [], "setContent armed a spurious content snapshot")
+        XCTAssertEqual(dirtyEvents, [false], "a late dirtyChanged arrived after setContent")
+    }
+
+    /// The changes view: rows render, and `appendFileDiff` finds the right one.
+    /// The path deliberately carries quotes, a dash and a space — it travels
+    /// through `jsLiteral` twice and is matched back by `data-path`, so this
+    /// covers the escaping and the row lookup at once.
+    func testChangesViewRendersRowsAndFillsTheRightFileDiff() {
+        let view = EditorWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let ready = expectation(description: "ready")
+        view.onReady = { ready.fulfill() }
+        wait(for: [ready], timeout: 30)
+
+        let tricky = "src/b — it's \"quoted\".txt"
+        view.showChanges(files: [(path: "src/a.swift", badge: "M"), (path: tricky, badge: "A")])
+
+        XCTAssertEqual(evaluate(view, "document.querySelectorAll('#changes .file').length"), "2")
+        XCTAssertEqual(evaluate(view, "document.querySelectorAll('#changes .file')[1].dataset.path"), tricky)
+        XCTAssertEqual(evaluate(view, "document.querySelectorAll('#changes .badge')[1].textContent"), "A")
+        XCTAssertEqual(evaluate(view, "document.querySelectorAll('#changes .badge')[1].className"), "badge A")
+        XCTAssertEqual(evaluate(view, "getComputedStyle(document.getElementById('changes')).display"), "block")
+
+        view.appendFileDiff(path: tricky, text: "@@ -1 +1 @@\n-old\n+new\n context")
+
+        let detail = "document.querySelectorAll('#changes .file')[1].querySelector('pre')"
+        XCTAssertEqual(evaluate(view, "\(detail).dataset.loaded"), "1")
+        XCTAssertEqual(evaluate(view, "\(detail).querySelectorAll('.hunk').length"), "1")
+        XCTAssertEqual(evaluate(view, "\(detail).querySelectorAll('.del').length"), "1")
+        XCTAssertEqual(evaluate(view, "\(detail).querySelectorAll('.add').length"), "1")
+        XCTAssertEqual(evaluate(view, "\(detail).querySelector('.add').textContent.trim()"), "+new")
+        // The other row must be untouched — this is what row matching by DOM
+        // position used to get wrong.
+        XCTAssertEqual(
+            evaluate(view, "document.querySelectorAll('#changes .file')[0].querySelector('pre').textContent"),
+            ""
+        )
+    }
+
+    /// The other half of the changes protocol: the three gestures a row
+    /// supports each reach Swift as the right event.
+    func testChangesViewGesturesReachSwift() {
+        let view = EditorWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let ready = expectation(description: "ready")
+        view.onReady = { ready.fulfill() }
+        wait(for: [ready], timeout: 30)
+
+        let path = "src/a.swift"
+        view.showChanges(files: [(path: path, badge: "M")])
+
+        // Single click expands the row and asks Swift for its diff.
+        let asked = expectation(description: "requestFileDiff")
+        view.onRequestFileDiff = { if $0 == path { asked.fulfill() } }
+        evaluate(view, "(document.querySelector('#changes .row').click(), 'ok')")
+        wait(for: [asked], timeout: 10)
+
+        // Clicking the "open file" affordance opens the file, not the diff.
+        let openedFile = expectation(description: "changesOpen file")
+        view.onChangesOpen = { opened, asDiff in
+            if opened == path, !asDiff { openedFile.fulfill() }
+        }
+        evaluate(view, "(document.querySelector('#changes .open-file').click(), 'ok')")
+        wait(for: [openedFile], timeout: 10)
+
+        // Double click opens it as a diff.
+        let openedDiff = expectation(description: "changesOpen diff")
+        view.onChangesOpen = { opened, asDiff in
+            if opened == path, asDiff { openedDiff.fulfill() }
+        }
+        evaluate(
+            view,
+            "(document.querySelector('#changes .row')"
+                + ".dispatchEvent(new MouseEvent('dblclick', { bubbles: true })), 'ok')"
+        )
+        wait(for: [openedDiff], timeout: 10)
+    }
+
+    /// `showMessage` is the placeholder state, and it must also be the *only*
+    /// visible region — `showOnly` is what keeps the four panes exclusive.
+    func testShowMessageIsTheOnlyVisibleRegion() {
+        let view = EditorWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let ready = expectation(description: "ready")
+        view.onReady = { ready.fulfill() }
+        wait(for: [ready], timeout: 30)
+
+        view.showChanges(files: [(path: "src/a.swift", badge: "M")])
+        view.showMessage("Select a file to edit")
+
+        XCTAssertEqual(evaluate(view, "document.getElementById('message').textContent"), "Select a file to edit")
+        for region in ["message", "editor", "diff", "changes"] {
+            XCTAssertEqual(
+                evaluate(view, "getComputedStyle(document.getElementById('\(region)')).display"),
+                region == "message" ? "block" : "none",
+                "#\(region) visibility"
+            )
+        }
+    }
+
     /// `closeModel` really disposes: a later read for that path is nil, not
     /// stale text.
     func testCloseModelDisposes() {
@@ -160,6 +311,26 @@ final class EditorWebViewTests: XCTestCase {
             gone.fulfill()
         }
         wait(for: [gone], timeout: 10)
+    }
+
+    /// Evaluates a JS expression and returns it stringified, failing the test
+    /// on a JS error rather than quietly yielding nil.
+    @discardableResult
+    private func evaluate(
+        _ view: EditorWebView,
+        _ script: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) -> String? {
+        var result: String?
+        let done = expectation(description: "eval")
+        view.webView.evaluateJavaScript("String(\(script))") { value, error in
+            if let error { XCTFail("JS error for \(script): \(error)", file: file, line: line) }
+            result = value as? String
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 10)
+        return result
     }
 
     /// Polls a JS expression that returns a count until it is positive. The
