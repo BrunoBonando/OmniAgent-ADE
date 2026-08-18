@@ -35,6 +35,7 @@
 		34A6BF2B1B324F22ACCD3693 /* EditorFileClassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD2DAF7A30B04EABB3A14693 /* EditorFileClassTests.swift */; };
 		FE04177400364E128B31DF7B /* EditorWebViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E91EFADEB4413DA81A96F8 /* EditorWebViewTests.swift */; };
 		2ADA9E4CC4CE4F37B25A421B /* EditorPaneViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BF1B274379647B88A0DBA04 /* EditorPaneViewTests.swift */; };
+		3C1E9A5F7D0B42E1A8460F31 /* EditorPaneIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A44D2B60E9C41D8B5721CA3 /* EditorPaneIntegrationTests.swift */; };
 		F2729C0CEE50441882BFD7A7 /* MediaTabViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C15DA4028034799A71F586F /* MediaTabViewTests.swift */; };
 		1B7BF5CE3D794B919522855C /* EditorTabStripViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */; };
 		10000000000000000000000A /* WorkspaceWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* WorkspaceWindowController.swift */; };
@@ -165,6 +166,7 @@
 		FD2DAF7A30B04EABB3A14693 /* EditorFileClassTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorFileClassTests.swift; sourceTree = "<group>"; };
 		52E91EFADEB4413DA81A96F8 /* EditorWebViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorWebViewTests.swift; sourceTree = "<group>"; };
 		9BF1B274379647B88A0DBA04 /* EditorPaneViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneViewTests.swift; sourceTree = "<group>"; };
+		7A44D2B60E9C41D8B5721CA3 /* EditorPaneIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneIntegrationTests.swift; sourceTree = "<group>"; };
 		6C15DA4028034799A71F586F /* MediaTabViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaTabViewTests.swift; sourceTree = "<group>"; };
 		F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTabStripViewTests.swift; sourceTree = "<group>"; };
 		20000000000000000000094 /* PaneApprovalBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBar.swift; sourceTree = "<group>"; };
@@ -338,6 +340,7 @@
 				F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */,
 				52E91EFADEB4413DA81A96F8 /* EditorWebViewTests.swift */,
 				9BF1B274379647B88A0DBA04 /* EditorPaneViewTests.swift */,
+				7A44D2B60E9C41D8B5721CA3 /* EditorPaneIntegrationTests.swift */,
 				20000000000000000000095 /* PaneApprovalBarTests.swift */,
 				200000000000000000000011 /* pane-grid.json */,
 				20000000000000000000045 /* NativeMacosCompatibilityFixtureTests.swift */,
@@ -563,6 +566,7 @@
 				1B7BF5CE3D794B919522855C /* EditorTabStripViewTests.swift in Sources */,
 				FE04177400364E128B31DF7B /* EditorWebViewTests.swift in Sources */,
 				2ADA9E4CC4CE4F37B25A421B /* EditorPaneViewTests.swift in Sources */,
+				3C1E9A5F7D0B42E1A8460F31 /* EditorPaneIntegrationTests.swift in Sources */,
 				10000000000000000000095 /* PaneApprovalBarTests.swift in Sources */,
 				100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */,
 				100000000000000000000012 /* PersistedLayoutTests.swift in Sources */,
