@@ -56,6 +56,22 @@ if [ "$notarize" = auto ]; then
   fi
 fi
 
+# One rebuild at a time. Several Claude sessions share this working tree, and
+# two xcodebuilds writing the same Release product interleave rather than queue:
+# on 2026-08-18 a build's `codesign` failed with `No such file or directory`
+# because another had replaced the daemon binary out from under it mid-sign, and
+# the app went into /Applications unsigned. A directory is the lock because
+# mkdir is atomic everywhere; a stale one after a crash is removed by hand,
+# which the message says.
+lock="$ROOT_DIR/macos/.build/rebuild.lock"
+mkdir -p "$(dirname "$lock")"
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "$0: another rebuild is already running -- this one would corrupt it." >&2
+  echo "    Wait for it to finish, or if nothing is building: rmdir $lock" >&2
+  exit 1
+fi
+trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+
 version="$(./scripts/bump-build-version.sh)"
 ./macos/build.sh universal
 
