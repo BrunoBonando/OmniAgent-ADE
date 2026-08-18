@@ -173,6 +173,8 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// The header's close button. Closing a pane ends its PTY, which only the
     /// window controller may do — this view never kills a session itself.
     var onRequestClosePane: ((String) -> Void)?
+    /// The header's ⋯ button, with the view the menu should drop from.
+    var onRequestPaneMenu: ((String, NSView) -> Void)?
     var onFocusedPaneChanged: ((String?) -> Void)?
     /// Raised when the set of panes, their order, or one pane's metadata
     /// changed — i.e. exactly when the `layout` settings row would no longer
@@ -1543,6 +1545,11 @@ final class PaneContainerView: NSView, NSDraggingSource {
             guard let self else { return }
             self.workspace?.onRequestClosePane?(self.paneID)
         }
+        header.onMenuRequested = { [weak self] anchor in
+            guard let self else { return }
+            self.workspace?.focusPane(self.paneID)
+            self.workspace?.onRequestPaneMenu?(self.paneID, anchor)
+        }
         // The design's `session restore · terminal 1 of 4`. A closure rather
         // than a stored string because the ordinal is a fact about the
         // workspace, not about this pane: a sibling closing while this one is
@@ -1799,6 +1806,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // badge would claim the pane runs something it does not. `nil`
         // already hides it.
         header.engine = descriptor.kind == .browser ? nil : descriptor.engine
+        header.isMenuAvailable = descriptor.kind == .terminal
         // Its session's name is half the focus subtitle, so a rename has to
         // reach the bar. A no-op unless this pane is the zoomed one.
         header.refreshSubtitle()
@@ -2088,10 +2096,23 @@ final class PaneHeaderView: NSView {
     var onDragOut: ((NSEvent) -> Void)?
     var onZoomRequested: (() -> Void)?
     var onCloseRequested: (() -> Void)?
+    /// The ⋯ button, handed the view to hang the menu off. The bar builds no
+    /// menu itself: what a pane can be told to do is the window controller's
+    /// business, same as closing one is.
+    var onMenuRequested: ((NSView) -> Void)?
 
     var isZoomAvailable = false {
         didSet {
             guard isZoomAvailable != oldValue else { return }
+            applyControlVisibility()
+        }
+    }
+
+    /// Every item in the menu talks to a running engine, so a browser pane has
+    /// no menu rather than an all-greyed one.
+    var isMenuAvailable = false {
+        didSet {
+            guard isMenuAvailable != oldValue else { return }
             applyControlVisibility()
         }
     }
@@ -2120,6 +2141,7 @@ final class PaneHeaderView: NSView {
     private let subtitleLabel: NSTextField
     private let engineBadge = PaneBadgeView()
     private let branchBadge = PaneBadgeView()
+    private let menuButton: PaneHeaderButton
     private let focusButton: PaneHeaderButton
     private let exitFocusButton: PaneHeaderButton
     private let closeButton: PaneHeaderButton
@@ -2140,6 +2162,7 @@ final class PaneHeaderView: NSView {
             font: ShellFont.ui(14),
             color: NSColor(srgbRed: 92 / 255, green: 92 / 255, blue: 102 / 255, alpha: 1)
         )
+        menuButton = PaneHeaderButton(glyph: .menu)
         focusButton = PaneHeaderButton(glyph: .focus)
         exitFocusButton = PaneHeaderButton(glyph: .exitFocus, label: "Exit focus · esc")
         closeButton = PaneHeaderButton(glyph: .close)
@@ -2155,11 +2178,14 @@ final class PaneHeaderView: NSView {
         // while this pane is zoomed, so "toggle" there can only mean "get out".
         exitFocusButton.onClick = { [weak self] in self?.onZoomRequested?() }
         closeButton.onClick = { [weak self] in self?.onCloseRequested?() }
-        closeButton.hoverTint = NSColor(srgbRed: 255 / 255, green: 138 / 255, blue: 142 / 255, alpha: 1)
-        closeButton.hoverFill = NSColor(srgbRed: 242 / 255, green: 85 / 255, blue: 90 / 255, alpha: 0.18)
+        closeButton.isTrafficLight = true
+        menuButton.onClick = { [weak self] in
+            guard let self else { return }
+            self.onMenuRequested?(self.menuButton)
+        }
         let views: [NSView] = [
             mark, titleLabel, subtitleLabel, engineBadge, branchBadge,
-            focusButton, exitFocusButton, closeButton,
+            menuButton, focusButton, exitFocusButton, closeButton,
         ]
         for view in views { addSubview(view) }
         // Same reason the surface applies its cursor state up front: the header
@@ -2202,6 +2228,7 @@ final class PaneHeaderView: NSView {
         focusButton.isHidden = !isZoomAvailable || isZoomed
         exitFocusButton.isHidden = !isZoomed
         closeButton.isHidden = isZoomed
+        menuButton.isHidden = !isMenuAvailable
         needsLayout = true
     }
 
@@ -2266,7 +2293,7 @@ final class PaneHeaderView: NSView {
         // A hidden control gives its slot back to the title rather than leaving
         // a gap where a button used to be — which is how the zoom icon's slot,
         // and the close button's while zoomed, go to the name.
-        for button in [closeButton, focusButton, exitFocusButton] where !button.isHidden {
+        for button in [closeButton, focusButton, exitFocusButton, menuButton] where !button.isHidden {
             let size = button.intrinsicContentSize
             right -= size.width
             button.frame = CGRect(
@@ -2625,12 +2652,72 @@ final class PaneZoomBackdropView: NSVisualEffectView {
     }
 }
 
+/// Up to four borderless, transparent windows tiling the region around a
+/// zoomed pane's card, each a real system blur (`.behindWindow` — what the
+/// Dock, Mission Control and Notification Center use) of whatever is
+/// actually on screen behind it: the main window's panes, sidebar,
+/// everything, Metal-rendered terminal content included, because this
+/// reads the composited screen buffer rather than trying to sample sibling
+/// layers inside one window's own compositing tree the way
+/// `PaneZoomBackdropView`'s `.withinWindow` blending does — confirmed, not
+/// guessed, to blur nothing in this app: even the plain, non-Metal sidebar
+/// behind it showed no blur, only that view's own flat tint.
+///
+/// No auxiliary window's *frame* ever overlaps the card's own screen rect
+/// — `blurBands` guarantees that — so clicking the card reaches the main
+/// window underneath with no hit-testing or click-passthrough trick
+/// needed: there is simply nothing covering that region.
+final class PaneZoomBlurOverlay {
+    /// The standard "outer rect minus inner rect" decomposition: a
+    /// full-width band above the hole, a full-width band below it, and two
+    /// bands exactly as tall as the hole to its left and right. Together
+    /// with the hole itself these tile `outer` with no gaps and no
+    /// overlaps. A side with no room (the hole flush against that edge, or
+    /// past it) is omitted rather than emitted as a zero- or negative-sized
+    /// rect — an empty window is a real `NSWindow` doing nothing.
+    ///
+    /// Static and pure so the geometry can be checked without a window,
+    /// the same reason `PaneWorkspaceView.focusCardFrame(in:)` is.
+    static func blurBands(around hole: NSRect, in outer: NSRect) -> [NSRect] {
+        guard outer.width > 0, outer.height > 0 else { return [] }
+        let clampedHole = hole.intersection(outer)
+        guard !clampedHole.isEmpty else { return [outer] }
+
+        var bands: [NSRect] = []
+        let top = NSRect(
+            x: outer.minX, y: clampedHole.maxY,
+            width: outer.width, height: outer.maxY - clampedHole.maxY
+        )
+        if top.height > 0 { bands.append(top) }
+
+        let bottom = NSRect(
+            x: outer.minX, y: outer.minY,
+            width: outer.width, height: clampedHole.minY - outer.minY
+        )
+        if bottom.height > 0 { bands.append(bottom) }
+
+        let left = NSRect(
+            x: outer.minX, y: clampedHole.minY,
+            width: clampedHole.minX - outer.minX, height: clampedHole.height
+        )
+        if left.width > 0 { bands.append(left) }
+
+        let right = NSRect(
+            x: clampedHole.maxX, y: clampedHole.minY,
+            width: outer.maxX - clampedHole.maxX, height: clampedHole.height
+        )
+        if right.width > 0 { bands.append(right) }
+
+        return bands
+    }
+}
+
 /// A control in the pane header, in one of two shapes: the grid's bare 20pt icon
 /// square, or — given a `label` — the focused card's bordered pill. Hand-drawn
 /// rather than an `NSButton` + SF Symbol so the glyphs match the design's own
 /// strokes, the same way `ShellGlyph` does for the sidebar.
 final class PaneHeaderButton: NSView {
-    enum Glyph { case focus, exitFocus, close }
+    enum Glyph { case focus, exitFocus, close, menu }
 
     /// The grid header's controls, `width:20px;height:20px`.
     static let iconSize: CGFloat = 20
@@ -2656,6 +2743,10 @@ final class PaneHeaderButton: NSView {
     var onClick: (() -> Void)?
     var hoverTint = NSColor(srgbRed: 223 / 255, green: 226 / 255, blue: 255 / 255, alpha: 1)
     var hoverFill = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.22)
+
+    /// The close button's macOS traffic-light treatment: a filled red disc with
+    /// the ✕ showing only under the pointer, exactly as a window's own does.
+    var isTrafficLight = false { didSet { needsDisplay = true } }
 
     private let glyph: Glyph
     /// What the button says, and `nil` for the grid's bare icon square. A label
@@ -2684,7 +2775,11 @@ final class PaneHeaderButton: NSView {
             // there is no bare form of it left to describe. Kind-neutral
             // wording, since the pane may hold a browser as well as a
             // terminal.
-            setAccessibilityLabel(glyph == .focus ? "Zoom this pane" : "Close this pane")
+            switch glyph {
+            case .focus: setAccessibilityLabel("Zoom this pane")
+            case .menu: setAccessibilityLabel("Pane options")
+            default: setAccessibilityLabel("Close this pane")
+            }
         }
     }
 
@@ -2717,6 +2812,8 @@ final class PaneHeaderButton: NSView {
     /// The 16 unit box the glyph is drawn in: the whole button when it is a bare
     /// icon, the leading square inside the padding when it is a pill.
     private var glyphBox: NSRect {
+        // The disc is 12pt inside the 20pt square, and the ✕ sits inside the disc.
+        if isTrafficLight { return bounds.insetBy(dx: 6, dy: 6) }
         guard label != nil else { return bounds }
         return NSRect(
             x: Self.labelHorizontalInset,
@@ -2776,6 +2873,12 @@ final class PaneHeaderButton: NSView {
                 ),
                 withAttributes: attributes
             )
+        } else if isTrafficLight {
+            NSColor(srgbRed: 255 / 255, green: 95 / 255, blue: 87 / 255, alpha: isHovered ? 1 : 0.9)
+                .setFill()
+            NSBezierPath(ovalIn: bounds.insetBy(dx: 4, dy: 4)).fill()
+            // Nothing on top of the disc until the pointer is over it.
+            guard isHovered else { return }
         } else if isHovered {
             hoverFill.setFill()
             NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
@@ -2783,7 +2886,9 @@ final class PaneHeaderButton: NSView {
         // A pill's glyph keeps the label's colour through hover, where the
         // design moves only the fill; a bare icon is the thing that lights up.
         let color: NSColor
-        if label != nil {
+        if isTrafficLight {
+            color = NSColor(srgbRed: 77 / 255, green: 0, blue: 0, alpha: 0.65)
+        } else if label != nil {
             color = Self.labelForeground
         } else {
             color = isHovered
@@ -2831,6 +2936,15 @@ final class PaneHeaderButton: NSView {
             path.line(to: point(11.8, 11.8))
             path.move(to: point(11.8, 4.2))
             path.line(to: point(4.2, 11.8))
+        case .menu:
+            // Three dots — filled rather than stroked, which is the only way
+            // they read at this size.
+            color.setFill()
+            for x in [4.4, 8.0, 11.6] as [CGFloat] {
+                let dot = point(x, 8)
+                NSBezierPath(ovalIn: NSRect(x: dot.x - 1.2, y: dot.y - 1.2, width: 2.4, height: 2.4))
+                    .fill()
+            }
         }
         path.stroke()
     }

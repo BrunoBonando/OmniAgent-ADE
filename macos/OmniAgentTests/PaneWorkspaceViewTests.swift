@@ -1594,6 +1594,58 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(backdrop.alphaValue, 0.78)
     }
 
+    /// The standard "outer rect minus inner rect" decomposition into four
+    /// non-overlapping bands: a full-width strip above the hole, a
+    /// full-width strip below it, and two strips exactly as tall as the
+    /// hole itself to its left and right. Together with the hole they tile
+    /// `outer` with no gaps and no overlaps — the property that lets four
+    /// separate windows cover "everywhere except the card" with no
+    /// hit-testing tricks needed, since no band's rect ever touches the
+    /// hole's rect.
+    func testBlurBandsTileTheOuterRectAroundTheHoleWithNoOverlap() {
+        let outer = NSRect(x: 0, y: 0, width: 1000, height: 800)
+        let hole = NSRect(x: 300, y: 250, width: 400, height: 300)
+
+        let bands = PaneZoomBlurOverlay.blurBands(around: hole, in: outer)
+
+        XCTAssertEqual(bands.count, 4, "a hole with room on every side produces all four bands")
+        for band in bands {
+            XCTAssertFalse(band.intersects(hole), "no band may cover any part of the card")
+            XCTAssertTrue(outer.contains(band), "no band may spill outside the region being blurred")
+        }
+        // Every band, plus the hole itself, must reconstruct outer's area
+        // exactly — the tiling has no gaps.
+        let totalArea = bands.reduce(hole.width * hole.height) { $0 + $1.width * $1.height }
+        XCTAssertEqual(totalArea, outer.width * outer.height, accuracy: 0.001)
+    }
+
+    func testBlurBandsDropsAZeroSizedSideRatherThanEmittingAnEmptyRect() {
+        let outer = NSRect(x: 0, y: 0, width: 1000, height: 800)
+        // Flush against the left edge: there is no room for a left band.
+        let hole = NSRect(x: 0, y: 200, width: 400, height: 300)
+
+        let bands = PaneZoomBlurOverlay.blurBands(around: hole, in: outer)
+
+        XCTAssertEqual(bands.count, 3, "top, bottom and right only — no zero-width left band")
+        for band in bands {
+            XCTAssertGreaterThan(band.width, 0)
+            XCTAssertGreaterThan(band.height, 0)
+        }
+    }
+
+    func testBlurBandsWithNoHoleBlursTheWholeOuterRect() {
+        let outer = NSRect(x: 0, y: 0, width: 1000, height: 800)
+
+        XCTAssertEqual(PaneZoomBlurOverlay.blurBands(around: .zero, in: outer), [outer])
+    }
+
+    func testBlurBandsWithAnEmptyOuterRectProducesNothing() {
+        XCTAssertEqual(
+            PaneZoomBlurOverlay.blurBands(around: NSRect(x: 0, y: 0, width: 10, height: 10), in: .zero),
+            []
+        )
+    }
+
     // MARK: - Click to activate
 
     /// Clicking anywhere in a terminal makes it the active one. Every click
