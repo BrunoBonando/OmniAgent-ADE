@@ -1418,13 +1418,21 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
         controller.workspaceView.focusPane("sess-sh")
         XCTAssertFalse(
-            controller.paneOptionsMenu().items.contains { $0.title == "Change Claude Color…" },
+            controller.paneOptionsMenu().items.contains { $0.title == "Change Claude Color" },
             "a shell terminal has no /color, so offering it is offering nothing"
         )
 
         controller.workspaceView.focusPane("sess-cl")
-        XCTAssertTrue(
-            controller.paneOptionsMenu().items.contains { $0.title == "Change Claude Color…" }
+        let colors = controller.paneOptionsMenu().items.first { $0.title == "Change Claude Color" }
+        XCTAssertEqual(
+            colors?.submenu?.items.map(\.title),
+            ["Red", "Blue", "Green", "Yellow", "Purple", "Orange", "Pink", "Cyan", "Default"],
+            "/color takes these names and rejects everything else, hex included"
+        )
+        XCTAssertEqual(
+            colors?.submenu?.items.map { $0.representedObject as? String },
+            WorkspaceWindowController.claudeColors,
+            "the lowercase name is what gets typed at the terminal"
         )
     }
 
@@ -1449,13 +1457,6 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
-    func testTheColorPickerSpellsColoursForACLI() {
-        XCTAssertEqual(WorkspaceWindowController.hex(.white), "#FFFFFF")
-        XCTAssertEqual(
-            WorkspaceWindowController.hex(NSColor(srgbRed: 1, green: 0.5, blue: 0, alpha: 1)),
-            "#FF8000"
-        )
-    }
 
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(

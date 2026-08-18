@@ -1026,16 +1026,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     func paneOptionsMenu() -> NSMenu {
         let menu = NSMenu()
         let engine = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }?.engine
-        var items: [(String, Selector)] = [
+        let items: [(String, Selector)] = [
             ("Rename Conversation…", #selector(renameConversation(_:))),
-        ]
-        // `/color` is Claude's slash command and nobody else's, so the item
-        // only exists in front of a Claude terminal rather than being offered
-        // and then greyed out.
-        if engine == .claude {
-            items.append(("Change Claude Color…", #selector(changeClaudeColor(_:))))
-        }
-        items += [
             ("Interrupt", Selector(("interruptSession:"))),
             ("Kill Session", Selector(("killSession:"))),
             ("Reattach", Selector(("reattachSession:"))),
@@ -1044,6 +1036,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         ]
         for (title, action) in items {
             menu.addItem(NSMenuItem(title: title, action: action, keyEquivalent: ""))
+        }
+        // `/color` is Claude's slash command and nobody else's, so the item
+        // only exists in front of a Claude terminal rather than being offered
+        // and then greyed out. A submenu rather than a colour picker: the
+        // command takes nine names and rejects everything else, `#ff00dd`
+        // included.
+        if engine == .claude {
+            let colors = NSMenuItem(title: "Change Claude Color", action: nil, keyEquivalent: "")
+            colors.submenu = claudeColorMenu()
+            menu.addItem(colors)
         }
         menu.addItem(.separator())
         menu.addItem(
@@ -1073,15 +1075,33 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
-    /// The ⋯ menu's "Change Claude Color…".
+    /// The names `/color` accepts; anything else comes back as
+    /// `Invalid color`, which is why this is a list and not a colour picker.
+    static let claudeColors = [
+        "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan", "default",
+    ]
+
+    func claudeColorMenu() -> NSMenu {
+        let menu = NSMenu()
+        for color in Self.claudeColors {
+            let item = NSMenuItem(
+                title: color.capitalized,
+                action: #selector(changeClaudeColor(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = color
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    /// One name off that submenu, typed at the terminal.
     @objc func changeClaudeColor(_ sender: Any?) {
-        guard let paneID = workspace.focusedPaneID,
+        guard let color = (sender as? NSMenuItem)?.representedObject as? String,
+              let paneID = workspace.focusedPaneID,
               workspace.descriptor(for: paneID)?.engine == .claude
         else { return }
-        askForColor { [weak self] color in
-            guard let self, let color else { return }
-            workspace.terminalSurface(for: paneID)?.sendInput("/color \(color)\r")
-        }
+        workspace.terminalSurface(for: paneID)?.sendInput("/color \(color)\r")
     }
 
     /// Where the new conversation name comes from. `nil` means "ask with an
@@ -1108,43 +1128,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         guard let window else { return answer(alert.runModal()) }
         alert.beginSheetModal(for: window, completionHandler: answer)
-    }
-
-    /// Where the colour comes from. Same seam, same reason.
-    var colorPrompt: ((@escaping (String?) -> Void) -> Void)?
-
-    private func askForColor(completion: @escaping (String?) -> Void) {
-        if let colorPrompt {
-            colorPrompt(completion)
-            return
-        }
-        // The well opens the system colour picker; the alert is what commits.
-        // Wiring `/color` to the picker's own action instead would send one
-        // line per drag frame.
-        let well = NSColorWell(frame: NSRect(x: 0, y: 0, width: 64, height: 32))
-        let alert = NSAlert()
-        alert.messageText = "Change Claude Color"
-        alert.informativeText = "Sends /color to this terminal."
-        alert.accessoryView = well
-        alert.addButton(withTitle: "Set Color")
-        alert.addButton(withTitle: "Cancel")
-        let answer: (NSApplication.ModalResponse) -> Void = { response in
-            well.deactivate()
-            completion(response == .alertFirstButtonReturn ? Self.hex(well.color) : nil)
-        }
-        guard let window else { return answer(alert.runModal()) }
-        alert.beginSheetModal(for: window, completionHandler: answer)
-    }
-
-    /// `#RRGGBB` — the one colour spelling a CLI can be expected to read.
-    static func hex(_ color: NSColor) -> String {
-        let rgb = color.usingColorSpace(.sRGB) ?? .white
-        return String(
-            format: "#%02X%02X%02X",
-            Int((rgb.redComponent * 255).rounded()),
-            Int((rgb.greenComponent * 255).rounded()),
-            Int((rgb.blueComponent * 255).rounded())
-        )
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
