@@ -1513,6 +1513,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // session-ended notification all read this one stored value, and
                 // nothing wants the spinner frame the engine sent with it.
                 let title = SessionOutline.sanitizedPaneTitle(title)
+                // A title that is only the engine's brand is not news about
+                // this pane, and storing it is what made named terminals flip
+                // back to "Claude Code" — see `isEngineBrandTitle`.
+                guard !SessionOutline.isEngineBrandTitle(title) else { return }
                 workspace.updateDescriptor(for: sessionID) { $0.title = title }
                 if workspace.focusedPaneID == sessionID { refreshTitle() }
             }

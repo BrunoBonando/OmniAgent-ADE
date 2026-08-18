@@ -241,6 +241,19 @@ enum SessionOutline {
         return String(stripped).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Whether a reported title says nothing but which engine is running.
+    ///
+    /// Claude Code writes both `✳ Claude Code` and `✳ <summary>` inside a
+    /// single burst of OSC title updates — captured live, five writes in the
+    /// same tenth of a second, the brand sometimes last. A pane stores the one
+    /// that landed last, so a named terminal kept flipping back to "Claude
+    /// Code". Brand-only titles are dropped rather than stored; before any
+    /// summary exists the numbered placeholder ("Claude 2") covers it, and it
+    /// reads better than the brand anyway.
+    static func isEngineBrandTitle(_ title: String) -> Bool {
+        Engine.allCases.contains { $0.badgeTitle == title || $0.displayName == title }
+    }
+
     /// What a project row says: the label `listProjects` returned for this
     /// project id, else the id itself (a project the directory hasn't
     /// loaded yet, or one the brain has never heard of), and the

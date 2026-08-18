@@ -18,30 +18,27 @@ import AppKit
 
 // MARK: - Destinations
 
-/// Level 2's four destinations, in the design's order.
+/// Level 2's three destinations, in the design's order.
 enum WorkspaceDestination: String, CaseIterable {
     case dashboard
     case board
     case terminals
-    case files
 
     var title: String {
         switch self {
         case .dashboard: return "Dashboard"
         case .board: return "Board"
         case .terminals: return "Terminals"
-        case .files: return "Files"
         }
     }
 
-    /// The static half of the design's second line. Terminals and Files
-    /// override theirs with live text, so those are only the fallback.
+    /// The static half of the design's second line. Terminals overrides its
+    /// own with live text, so this is only the fallback.
     var subtitle: String {
         switch self {
         case .dashboard: return "activity, tokens, approvals"
         case .board: return "backlog, sprint, timeline"
         case .terminals: return "no session"
-        case .files: return "no changes"
         }
     }
 
@@ -50,7 +47,6 @@ enum WorkspaceDestination: String, CaseIterable {
         case .dashboard: return .bars
         case .board: return .columns
         case .terminals: return .terminal
-        case .files: return .folder
         }
     }
 }
@@ -1111,7 +1107,7 @@ final class WorkspaceBackRowView: ShellRowView {
     }
 }
 
-/// One of Level 2's four destination rows.
+/// One of Level 2's three destination rows.
 final class WorkspaceNavRowView: ShellRowView {
     let destination: WorkspaceDestination
 
@@ -2077,9 +2073,6 @@ final class WorkspaceFileRowView: ShellRowView {
 /// a lazily expanded tree with git state on the right.
 final class WorkspaceFilesTreeView: NSView {
     var onOpenFile: ((URL) -> Void)?
-    /// Reported up so the Files nav row can print the same numbers as the
-    /// section header without running `git` a second time.
-    var onDiffTotals: ((Int, Int, Int) -> Void)?
 
     private let diffField = ShellFont.label(font: ShellFont.mono(12, .semibold), color: ShellPalette.green)
     private let filterField = NSTextField()
@@ -2216,7 +2209,6 @@ final class WorkspaceFilesTreeView: NSView {
                 self.gitStatus = status
                 self.setDiff(added: totals.added, removed: totals.removed)
                 self.render()
-                self.onDiffTotals?(totals.added, totals.removed, status?.badges.count ?? 0)
             }
         }
     }
@@ -2513,12 +2505,6 @@ final class WorkspaceSidebarView: NSView {
         sessionsTree.onRenameSession = { [weak self] session, name in
             self?.onRenameSession?(session, name)
         }
-        // The tree already paid for `git status`; the nav row shows the same
-        // numbers rather than running it again.
-        filesTree.onDiffTotals = { [weak self] added, removed, changed in
-            self?.setFilesSummary(added: added, removed: removed, changed: changed)
-        }
-
         for view in [track, picker, level2, accountRow] { view.translatesAutoresizingMaskIntoConstraints = false }
         addSubview(track)
         addSubview(accountRow)
@@ -2588,24 +2574,15 @@ final class WorkspaceSidebarView: NSView {
         navStack.edgeInsets = NSEdgeInsets(top: 8, left: 7, bottom: 9, right: 7)
         navStack.translatesAutoresizingMaskIntoConstraints = false
 
-        // Dashboard, Board, Terminals, Files — the four buttons stay one block,
-        // and the sessions tree hangs underneath all of them. It used to sit
-        // between Terminals and Files, which read as Files belonging to the file
-        // tree below rather than to the buttons above.
+        // Dashboard, Board, Terminals — the three buttons stay one block, and
+        // the sessions tree hangs directly off Terminals rather than trailing
+        // the whole menu, and stays on screen no matter which button is lit.
         //
         // The buttons scroll *with* the sessions list rather than staying put
-        // above a scrolling tree: at the seam's floor the four rows use the
+        // above a scrolling tree: at the seam's floor the three rows use the
         // whole half, so a tree that is the only scroller has nowhere to put
         // the sessions. One scroller over the lot means the user can always
         // reach them, at any seam position.
-        // The sessions overview belongs to Terminals, so it hangs directly off
-        // that row rather than trailing the whole menu. Files is a destination
-        // *below* the terminals, and the tree it opens is below that again —
-        // with the sessions last, the Files button sat above the very list it
-        // has nothing to do with, reading as though the sessions were part of
-        // Files. `applyDestination` hides the container off the terminals
-        // destination, and a hidden arranged subview collapses, so Files
-        // follows Terminals directly whenever the list is not showing.
         for row in navRows {
             navStack.addArrangedSubview(row)
             if row.destination == .terminals { navStack.addArrangedSubview(sessionsContainer) }
@@ -2681,7 +2658,7 @@ final class WorkspaceSidebarView: NSView {
 
     /// The shortest the menu half is allowed to be: every nav row still on
     /// screen, plus the stack's own insets. That is the user's rule — "the
-    /// highest it can go is where Dash, Board, Terminals and Files are still
+    /// highest it can go is where Dash, Board and Terminals are still
     /// visible" — expressed as a number rather than a guess, so it stays true
     /// if a row's height or the insets ever change.
     var minimumMenuHeight: CGFloat {
@@ -2762,9 +2739,9 @@ final class WorkspaceSidebarView: NSView {
     func applyDestination(_ destination: WorkspaceDestination) {
         self.destination = destination
         for row in navRows { row.apply(selected: row.destination == destination) }
-        // The design shows the sessions tree for every destination that is not
-        // one of the standalone screens.
-        sessionsContainer.isHidden = destination != .terminals
+        // Terminals always shows at least its sessions, so the tree never
+        // hides — switching to Dashboard or Board only changes which row is
+        // lit.
     }
 
     /// Everything the sessions half of Level 2 renders.
@@ -2795,12 +2772,6 @@ final class WorkspaceSidebarView: NSView {
                 current.map { "\($0.label) · \(shape.rows)×\(shape.cols)" } ?? "no session"
             )
         }
-    }
-
-    func setFilesSummary(added: Int, removed: Int, changed: Int) {
-        guard let files = navRows.first(where: { $0.destination == .files }) else { return }
-        files.setDiff(added: added, removed: removed)
-        files.setCount(changed == 0 ? nil : changed)
     }
 
     /// Points the FILES tree at the open workspace's directory.

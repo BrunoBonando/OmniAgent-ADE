@@ -958,6 +958,27 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return true
     }
 
+    /// Seats each session's panes in `order` — the saved order, restored.
+    ///
+    /// Restoration adds panes one at a time, and `PaneGrid.synced`'s 2 -> 3
+    /// rule deliberately seats a *newly opened* third pane lower-left, ahead
+    /// of the pane that was already there. Replayed over a saved layout that
+    /// is not new, that rule swapped panes 2 and 3 on every launch — and,
+    /// because the swapped order is what gets written back, swapped them
+    /// again on the next one. A session whose panes are not all named in
+    /// `order` is left exactly as it is.
+    func reorderPanes(_ order: [String]) {
+        for group in groupOrder {
+            let ids = order.filter { descriptors[$0]?.group == group }
+            guard let current = grids[group]?.paneIDs(), ids.count == current.count, ids != current else {
+                continue
+            }
+            grids[group] = PaneGrid.build(ids)
+        }
+        updateVisibility()
+        updateLayout()
+    }
+
     /// Trades two panes' cells. Everything else — the shape, every dragged
     /// fraction, both terminals — is untouched.
     @discardableResult
@@ -2870,55 +2891,60 @@ final class PaneDividerView: NSView {
 }
 
 /// The empty cell of an incomplete rectangle. Visible (so a hole reads as a
-/// deliberate empty slot rather than a rendering bug) and clickable, which is
-/// the same double duty the web grid's hole tile does. Two affordances now: a
-/// terminal remains the primary one — a click anywhere in the cell — and the
-/// fainter "New browser" line underneath is the one place a click means a
-/// browser instead.
+/// deliberate empty slot rather than a rendering bug) and clickable: a row of
+/// icon buttons in the middle of the cell — Terminal, Browser, File Viewer —
+/// laid out like the Dock, each its own hit target.
 ///
-/// Drawn rather than composed from subviews: the whole cell is one hit target,
-/// so subviews would only add layout to keep in sync. The "blurred" backdrop is
-/// three radial gradients — a real blur filter buys nothing over a gradient
-/// whose edge is already transparent.
+/// Drawn rather than composed from subviews: three plates and three labels are
+/// less code as geometry than as views to keep in layout sync. The "blurred"
+/// backdrop is three radial gradients — a real blur filter buys nothing over a
+/// gradient whose edge is already transparent.
 final class PaneHolePlaceholderView: NSView {
-    private let onActivate: () -> Void
-    private let onActivateBrowser: () -> Void
-
-    private static let accent = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 1)
-    private static let terminalText = "New terminal" as NSString
-    private static let browserText = "New browser" as NSString
-    private static let terminalAttributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 12.5, weight: .medium),
-        .foregroundColor: NSColor(srgbRed: 206 / 255, green: 210 / 255, blue: 232 / 255, alpha: 1),
-    ]
-    /// Smaller and fainter: the secondary affordance must not compete with
-    /// the primary one it sits under.
-    private static let browserAttributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-        .foregroundColor: NSColor(srgbRed: 138 / 255, green: 146 / 255, blue: 176 / 255, alpha: 1),
-    ]
-    /// Same line under the cursor: brighter, over a faint accent pill, so the
-    /// one place a click means "browser" says so before it is clicked.
-    private static let browserHoverAttributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-        .foregroundColor: NSColor(srgbRed: 206 / 255, green: 210 / 255, blue: 232 / 255, alpha: 1),
-    ]
-    private static let plateSize: CGFloat = 46
-    private static let browserIconSize: CGFloat = 12
-
-    private var isBrowserHovered = false {
-        didSet { if isBrowserHovered != oldValue { needsDisplay = true } }
+    private struct Item {
+        let symbol: String
+        let label: NSString
+        /// `nil` for an affordance that does not exist yet: the button draws
+        /// dimmed and refuses the click, rather than lying about being live.
+        let action: (() -> Void)?
     }
 
-    init(onActivate: @escaping () -> Void, onActivateBrowser: @escaping () -> Void = {}) {
-        self.onActivate = onActivate
-        self.onActivateBrowser = onActivateBrowser
+    private let items: [Item]
+
+    private static let accent = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 1)
+    private static let labelAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+        .foregroundColor: NSColor(srgbRed: 150 / 255, green: 157 / 255, blue: 186 / 255, alpha: 1),
+    ]
+    private static let labelHoverAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+        .foregroundColor: NSColor(srgbRed: 214 / 255, green: 218 / 255, blue: 240 / 255, alpha: 1),
+    ]
+    private static let labelHeight =
+        ("Ag" as NSString).size(withAttributes: labelAttributes).height
+    private static let plateSize: CGFloat = 54
+    private static let plateGap: CGFloat = 16
+    private static let labelGap: CGFloat = 9
+
+    private var hoveredIndex: Int? {
+        didSet { if hoveredIndex != oldValue { needsDisplay = true } }
+    }
+
+    init(
+        onActivate: @escaping () -> Void,
+        onActivateBrowser: (() -> Void)? = nil,
+        onActivateFiles: (() -> Void)? = nil
+    ) {
+        items = [
+            Item(symbol: "terminal", label: "Terminal", action: onActivate),
+            Item(symbol: "globe", label: "Browser", action: onActivateBrowser),
+            Item(symbol: "doc.text", label: "File Viewer", action: onActivateFiles),
+        ]
         super.init(frame: .zero)
         wantsLayer = true
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        // The single press stays "Add terminal": browsers remain reachable
-        // through the menu, palette, toolbar and sidebar for assistive users.
+        // The single assistive press stays "Add terminal": the other kinds
+        // remain reachable through the menu, palette, toolbar and sidebar.
         setAccessibilityLabel("Add terminal")
     }
 
@@ -2927,54 +2953,60 @@ final class PaneHolePlaceholderView: NSView {
         fatalError("init(coder:) is unavailable")
     }
 
-    /// The icon plate above the primary line. Everything else is positioned off
-    /// this, so the block stays centred as the cell resizes.
-    var plateRect: NSRect {
-        let terminalHeight = Self.terminalText.size(withAttributes: Self.terminalAttributes).height
-        let browserHeight = max(
-            Self.browserText.size(withAttributes: Self.browserAttributes).height,
-            Self.browserIconSize
-        )
-        let block = Self.plateSize + 12 + terminalHeight + 7 + browserHeight
+    /// How much of the full-size dock this cell can hold. A hole in an
+    /// eight-pane grid is small, so the row shrinks with it rather than
+    /// spilling past the card's edges.
+    private var scale: CGFloat {
+        let full = CGFloat(items.count) * Self.plateSize
+            + CGFloat(items.count - 1) * Self.plateGap
+        return min(1, (bounds.width - 40) / full)
+    }
+
+    /// Labels are the first thing to go: below this the plates alone still
+    /// read, and the text would collide with its neighbour's.
+    private var showsLabels: Bool { scale > 0.85 && bounds.height > 130 }
+
+    /// The icon plates, left to right, centred as one block. Derived from
+    /// `bounds` rather than recorded during `draw(_:)`, so click dispatch is
+    /// testable on a view nothing has rendered yet.
+    var itemRects: [NSRect] {
+        let scale = self.scale
+        guard scale > 0 else { return [] }
+        let plate = Self.plateSize * scale
+        let gap = Self.plateGap * scale
+        let block = plate + (showsLabels ? Self.labelGap + Self.labelHeight : 0)
+        let width = CGFloat(items.count) * plate + CGFloat(items.count - 1) * gap
+        // Not flipped: the plates sit at the top of the block, labels under.
+        let y = bounds.midY + block / 2 - plate
+        return items.indices.map { index in
+            NSRect(
+                x: bounds.midX - width / 2 + CGFloat(index) * (plate + gap),
+                y: y,
+                width: plate,
+                height: plate
+            )
+        }
+    }
+
+    /// One button's hit area — plate plus its label, with enough slack to feel
+    /// like a button and enough gap left between neighbours that a click never
+    /// lands ambiguously.
+    func hitRect(at index: Int) -> NSRect {
+        let rects = itemRects
+        guard rects.indices.contains(index) else { return .zero }
+        let label = showsLabels ? Self.labelGap + Self.labelHeight : 0
         return NSRect(
-            x: bounds.midX - Self.plateSize / 2,
-            y: bounds.midY + block / 2 - Self.plateSize,
-            width: Self.plateSize,
-            height: Self.plateSize
+            x: rects[index].minX - 6,
+            y: rects[index].minY - label - 5,
+            width: rects[index].width + 12,
+            height: rects[index].height + label + 10
         )
     }
 
-    /// Where the primary line draws — derived from `bounds` rather than
-    /// recorded during `draw(_:)`, so the click dispatch below is testable
-    /// on a view nothing has rendered yet.
-    var terminalTextRect: NSRect {
-        let size = Self.terminalText.size(withAttributes: Self.terminalAttributes)
-        return NSRect(
-            x: bounds.midX - size.width / 2,
-            y: plateRect.minY - 12 - size.height,
-            width: size.width,
-            height: size.height
-        )
+    /// The button under a point, if it is one that can actually be pressed.
+    private func index(at point: NSPoint) -> Int? {
+        items.indices.first { items[$0].action != nil && hitRect(at: $0).contains(point) }
     }
-
-    /// The browser affordance, visually below the terminal one — this view is
-    /// not flipped, so "below" is the smaller y. Covers the globe glyph as well
-    /// as the label, since both read as the same one thing to click.
-    var browserTextRect: NSRect {
-        let size = Self.browserText.size(withAttributes: Self.browserAttributes)
-        let width = Self.browserIconSize + 5 + size.width
-        let height = max(size.height, Self.browserIconSize)
-        return NSRect(
-            x: bounds.midX - width / 2,
-            y: terminalTextRect.minY - 7 - height,
-            width: width,
-            height: height
-        )
-    }
-
-    /// The browser row's hit area — hover highlight and click dispatch have to
-    /// agree, or the line lights up somewhere it does not act.
-    var browserHitRect: NSRect { browserTextRect.insetBy(dx: -8, dy: -5) }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -2984,22 +3016,24 @@ final class PaneHolePlaceholderView: NSView {
             options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
             owner: self
         ))
-        // The hit rect is derived from `bounds`, so a resized cell needs its
-        // cursor rect recomputed too — `updateTrackingAreas` is the one hook
+        // The hit rects are derived from `bounds`, so a resized cell needs its
+        // cursor rects recomputed too — `updateTrackingAreas` is the one hook
         // that already fires on exactly that.
         window?.invalidateCursorRects(for: self)
     }
 
     override func resetCursorRects() {
-        addCursorRect(browserHitRect, cursor: .pointingHand)
+        for index in items.indices where items[index].action != nil {
+            addCursorRect(hitRect(at: index), cursor: .pointingHand)
+        }
     }
 
     override func mouseMoved(with event: NSEvent) {
-        isBrowserHovered = browserHitRect.contains(convert(event.locationInWindow, from: nil))
+        hoveredIndex = index(at: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseExited(with event: NSEvent) {
-        isBrowserHovered = false
+        hoveredIndex = nil
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -3041,44 +3075,37 @@ final class PaneHolePlaceholderView: NSView {
         Self.accent.withAlphaComponent(0.16).setStroke()
         outline.stroke()
 
-        let plate = plateRect
-        let platePath = NSBezierPath(roundedRect: plate, xRadius: 13, yRadius: 13)
-        Self.accent.withAlphaComponent(0.12).setFill()
-        platePath.fill()
-        platePath.lineWidth = 1
-        Self.accent.withAlphaComponent(0.28).setStroke()
-        platePath.stroke()
-        draw(symbol: "terminal", in: plate, size: 20, weight: .medium, alpha: 0.9)
+        let scale = self.scale
+        for (index, rect) in itemRects.enumerated() {
+            let item = items[index]
+            let hovered = hoveredIndex == index
+            NSGraphicsContext.saveGraphicsState()
+            // A kind that does not exist yet is drawn faded — it reads as "not
+            // yet" rather than as a button that swallows clicks; `dispatch`
+            // refuses it for real.
+            if item.action == nil { NSGraphicsContext.current?.cgContext.setAlpha(0.4) }
 
-        Self.terminalText.draw(at: terminalTextRect.origin, withAttributes: Self.terminalAttributes)
+            let plate = NSBezierPath(roundedRect: rect, xRadius: 15 * scale, yRadius: 15 * scale)
+            Self.accent.withAlphaComponent(hovered ? 0.20 : 0.10).setFill()
+            plate.fill()
+            plate.lineWidth = 1
+            Self.accent.withAlphaComponent(hovered ? 0.55 : 0.26).setStroke()
+            plate.stroke()
+            draw(symbol: item.symbol, in: rect, size: 22 * scale, weight: .regular, alpha: hovered ? 1 : 0.85)
 
-        let browserRect = browserTextRect
-        if isBrowserHovered {
-            let pill = NSBezierPath(roundedRect: browserHitRect, xRadius: 9, yRadius: 9)
-            Self.accent.withAlphaComponent(0.14).setFill()
-            pill.fill()
+            if showsLabels {
+                let attributes = hovered ? Self.labelHoverAttributes : Self.labelAttributes
+                let size = item.label.size(withAttributes: attributes)
+                item.label.draw(
+                    at: NSPoint(
+                        x: rect.midX - size.width / 2,
+                        y: rect.minY - Self.labelGap - size.height
+                    ),
+                    withAttributes: attributes
+                )
+            }
+            NSGraphicsContext.restoreGraphicsState()
         }
-        draw(
-            symbol: "globe",
-            in: NSRect(
-                x: browserRect.minX,
-                y: browserRect.midY - Self.browserIconSize / 2,
-                width: Self.browserIconSize,
-                height: Self.browserIconSize
-            ),
-            size: Self.browserIconSize,
-            weight: .regular,
-            alpha: isBrowserHovered ? 0.95 : 0.5
-        )
-        let browserAttributes = isBrowserHovered ? Self.browserHoverAttributes : Self.browserAttributes
-        let browserTextSize = Self.browserText.size(withAttributes: browserAttributes)
-        Self.browserText.draw(
-            at: NSPoint(
-                x: browserRect.minX + Self.browserIconSize + 5,
-                y: browserRect.midY - browserTextSize.height / 2
-            ),
-            withAttributes: browserAttributes
-        )
     }
 
     /// SF Symbol, tinted with the accent and centred in `rect`. A missing
@@ -3109,14 +3136,11 @@ final class PaneHolePlaceholderView: NSView {
     }
 
     /// The click rule, split from `mouseUp` so it is testable without
-    /// synthesising events: the browser line is the one place a click means a
-    /// browser; anywhere else in the cell stays the primary affordance.
+    /// synthesising events: each button acts for itself, and the space around
+    /// them does nothing — these are buttons, not one cell-sized target.
     func dispatch(at point: NSPoint) {
-        if browserHitRect.contains(point) {
-            onActivateBrowser()
-        } else {
-            onActivate()
-        }
+        guard let index = index(at: point) else { return }
+        items[index].action?()
     }
 
     override func accessibilityPerformPress() -> Bool {
@@ -3125,6 +3149,6 @@ final class PaneHolePlaceholderView: NSView {
     }
 
     func activate() {
-        onActivate()
+        items[0].action?()
     }
 }

@@ -146,6 +146,32 @@ final class SessionOutlineTests: XCTestCase {
         )
     }
 
+    /// Captured from a live `claude` 2.1.234 PTY: one burst of OSC title
+    /// writes carries `◑ Claude Code`, `◑ Say the word banana`, `✳ Claude
+    /// Code`, `✳ Say the word banana` — the brand and the summary interleaved,
+    /// either one landing last. Storing the brand is what made a named pane
+    /// revert to "Claude Code".
+    func testTheEnginesOwnBrandIsNotATitleAPaneWears() {
+        for frame in ["", "✳ ", "◐ "] {
+            XCTAssertTrue(
+                SessionOutline.isEngineBrandTitle(
+                    SessionOutline.sanitizedPaneTitle("\(frame)Claude Code")
+                ),
+                "\(frame)Claude Code says nothing about the conversation"
+            )
+        }
+        XCTAssertTrue(SessionOutline.isEngineBrandTitle("Claude"), "the short form too")
+        XCTAssertTrue(SessionOutline.isEngineBrandTitle("Codex"))
+        XCTAssertFalse(
+            SessionOutline.isEngineBrandTitle("Say the word banana"),
+            "a summary is the whole point of reading the title"
+        )
+        XCTAssertFalse(
+            SessionOutline.isEngineBrandTitle("Fixing Claude Code"),
+            "the brand inside a real summary is still a real summary"
+        )
+    }
+
     func testAPaneWithNoProjectIsNamedRatherThanShownAsABlankRow() {
         XCTAssertEqual(SessionOutline.projectLabel(""), "No project")
         XCTAssertEqual(SessionOutline.projectLabel("alpha"), "alpha")

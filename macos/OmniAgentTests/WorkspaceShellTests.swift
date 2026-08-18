@@ -134,10 +134,8 @@ final class WorkspaceShellTests: XCTestCase {
     }
 
     /// The sessions overview belongs to Terminals, so it hangs directly off
-    /// that row — with Files, a destination *below* the terminals, after it.
-    /// It used to trail the whole menu, which put the Files button above the
-    /// very list it has nothing to do with.
-    func testTheSessionsListSitsUnderTerminalsAndAboveFiles() throws {
+    /// that row rather than trailing the whole menu.
+    func testTheSessionsListSitsUnderTerminals() throws {
         let sidebar = makeSidebar()
         sidebar.showWorkspace(project("p1", "Project"), animated: false)
         sidebar.applyDestination(.terminals)
@@ -152,8 +150,7 @@ final class WorkspaceShellTests: XCTestCase {
         func position(_ view: NSView) -> CGFloat { view.convert(view.bounds, to: sidebar).midY }
         let dash = try XCTUnwrap(sidebar.navRows.first { $0.destination == .dashboard })
         let terminals = try XCTUnwrap(sidebar.navRows.first { $0.destination == .terminals })
-        let files = try XCTUnwrap(sidebar.navRows.first { $0.destination == .files })
-        XCTAssertFalse(sidebar.sessionsContainer.isHidden, "terminals is the active destination")
+        XCTAssertFalse(sidebar.sessionsContainer.isHidden)
 
         // Which way "further down the menu" runs in this coordinate space is
         // read off a pair whose order is not in question, rather than assumed.
@@ -161,10 +158,6 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertTrue(
             downwards(position(sidebar.sessionsContainer), position(terminals)),
             "the sessions list hangs off Terminals"
-        )
-        XCTAssertTrue(
-            downwards(position(files), position(sidebar.sessionsContainer)),
-            "and Files sits below the sessions, not above them"
         )
     }
 
@@ -292,21 +285,24 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(lit.count, 1)
     }
 
-    /// The design nests the sessions tree under Terminals, so it is only on
-    /// screen for that destination.
-    func testTheSessionsTreeOnlyShowsUnderTerminals() {
+    /// The sessions tree hangs off Terminals, but stays on screen for every
+    /// destination — the sidebar always shows at least the session list.
+    func testTheSessionsTreeStaysVisibleAcrossDestinations() {
         let sidebar = makeSidebar()
         sidebar.applyDestination(.terminals)
         XCTAssertFalse(sidebar.sessionsTree.isHiddenOrHasHiddenAncestor)
         sidebar.applyDestination(.dashboard)
-        XCTAssertTrue(sidebar.sessionsTree.isHiddenOrHasHiddenAncestor)
+        XCTAssertFalse(sidebar.sessionsTree.isHiddenOrHasHiddenAncestor)
+        sidebar.applyDestination(.board)
+        XCTAssertFalse(sidebar.sessionsTree.isHiddenOrHasHiddenAncestor)
     }
 
-    /// Every destination row exists, in the design's order.
+    /// Every destination row exists, in the design's order. No FILES button —
+    /// the file tree still hangs off the sidebar's lower half, unconditionally.
     func testNavRowsMatchTheDesignOrder() {
         XCTAssertEqual(
             makeSidebar().navRows.map(\.destination),
-            [.dashboard, .board, .terminals, .files]
+            [.dashboard, .board, .terminals]
         )
     }
 

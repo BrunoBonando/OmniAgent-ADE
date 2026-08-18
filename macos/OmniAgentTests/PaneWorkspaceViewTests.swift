@@ -62,10 +62,10 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(workspace.holePlaceholders.isEmpty, "a full rung has no holes")
     }
 
-    /// The hole's second, fainter line is the one place a click means a
-    /// browser; everywhere else in the cell — and the assistive press — stays
-    /// the primary "new terminal" affordance.
-    func testTheHoleTileAlsoOffersABrowserOnItsOwnLine() {
+    /// The hole's dock offers one button per pane kind. Each acts for itself,
+    /// the space around them does nothing, and File Viewer is drawn but inert
+    /// until the editor pane exists.
+    func testTheHoleTileOffersADockOfPaneKinds() {
         let workspace = makeWorkspace(panes: 3)
         var terminals = 0
         var browsers = 0
@@ -73,16 +73,35 @@ final class PaneWorkspaceViewTests: XCTestCase {
         workspace.onRequestNewBrowserPane = { browsers += 1 }
         let hole = workspace.holePlaceholders[0]
 
-        hole.dispatch(at: NSPoint(x: hole.browserTextRect.midX, y: hole.browserTextRect.midY))
-        XCTAssertEqual(browsers, 1, "a click on the browser line opens a browser")
+        XCTAssertEqual(hole.itemRects.count, 3, "Terminal, Browser, File Viewer")
+        let ys = Set(hole.itemRects.map(\.minY))
+        XCTAssertEqual(ys.count, 1, "side by side, like the Dock")
+        XCTAssertLessThan(hole.itemRects[0].maxX, hole.itemRects[1].minX)
+        XCTAssertLessThan(hole.itemRects[1].maxX, hole.itemRects[2].minX)
+        XCTAssertEqual(
+            (hole.itemRects[0].minX + hole.itemRects[2].maxX) / 2,
+            hole.bounds.midX,
+            accuracy: 0.5,
+            "centred in the empty cell"
+        )
+
+        hole.dispatch(at: NSPoint(x: hole.itemRects[1].midX, y: hole.itemRects[1].midY))
+        XCTAssertEqual(browsers, 1, "the browser button opens a browser")
         XCTAssertEqual(terminals, 0)
 
+        hole.dispatch(at: NSPoint(x: hole.itemRects[0].midX, y: hole.itemRects[0].midY))
+        XCTAssertEqual(terminals, 1, "the terminal button opens a terminal")
+
+        hole.dispatch(at: NSPoint(x: hole.itemRects[2].midX, y: hole.itemRects[2].midY))
+        XCTAssertEqual(terminals, 1, "File Viewer is not wired to anything yet")
+        XCTAssertEqual(browsers, 1)
+
         hole.dispatch(at: NSPoint(x: hole.bounds.minX + 2, y: hole.bounds.minY + 2))
-        XCTAssertEqual(terminals, 1, "anywhere else is the primary affordance")
+        XCTAssertEqual(terminals, 1, "the space around the buttons is not a button")
+        XCTAssertEqual(browsers, 1)
 
         XCTAssertTrue(hole.accessibilityPerformPress())
         XCTAssertEqual(terminals, 2, "the assistive press stays the single Add terminal action")
-        XCTAssertEqual(browsers, 1)
         XCTAssertEqual(hole.accessibilityLabel(), "Add terminal")
     }
 
