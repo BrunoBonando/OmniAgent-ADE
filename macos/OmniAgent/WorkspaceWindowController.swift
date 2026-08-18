@@ -1161,6 +1161,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // command takes nine names and rejects everything else, `#ff00dd`
         // included.
         if engine == .claude {
+            let models = NSMenuItem(title: "Change Model", action: nil, keyEquivalent: "")
+            models.submenu = claudeModelMenu()
+            menu.addItem(models)
             let colors = NSMenuItem(title: "Change Claude Color", action: nil, keyEquivalent: "")
             colors.submenu = claudeColorMenu()
             menu.addItem(colors)
@@ -1191,6 +1194,45 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard descriptor.engine != .shell else { return }
             workspace.terminalSurface(for: paneID)?.sendInput("/rename \(named)\r")
         }
+    }
+
+    /// What `/model` is given. Aliases rather than the full ids they resolve to:
+    /// an id changes with every model release and these do not, and typing a
+    /// stale one at Claude gets an error instead of a model.
+    static let claudeModels = [
+        ("Default", "default"),
+        ("Opus", "opus"),
+        ("Opus · 1M context", "opus[1m]"),
+        ("Sonnet", "sonnet"),
+        ("Sonnet · 1M context", "sonnet[1m]"),
+        ("Haiku", "haiku"),
+        ("Opus Plan Mode", "opusplan"),
+    ]
+
+    func claudeModelMenu() -> NSMenu {
+        let menu = NSMenu()
+        for (title, alias) in Self.claudeModels {
+            let item = NSMenuItem(
+                title: title,
+                action: #selector(changeClaudeModel(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = alias
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    /// One alias off that submenu, typed at the terminal. Claude answers with
+    /// its own confirmation, so nothing here tracks which model is current —
+    /// the terminal is the source of truth and a checkmark here would be a
+    /// second one, wrong the moment `/model` is typed by hand.
+    @objc func changeClaudeModel(_ sender: Any?) {
+        guard let alias = (sender as? NSMenuItem)?.representedObject as? String,
+              let paneID = workspace.focusedPaneID,
+              workspace.descriptor(for: paneID)?.engine == .claude
+        else { return }
+        workspace.terminalSurface(for: paneID)?.sendInput("/model \(alias)\r")
     }
 
     /// The names `/color` accepts; anything else comes back as

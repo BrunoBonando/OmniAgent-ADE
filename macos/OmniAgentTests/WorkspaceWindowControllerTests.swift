@@ -1428,6 +1428,10 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             controller.paneOptionsMenu().items.contains { $0.title == "Change Claude Color" },
             "a shell terminal has no /color, so offering it is offering nothing"
         )
+        XCTAssertFalse(
+            controller.paneOptionsMenu().items.contains { $0.title == "Change Model" },
+            "nor a /model"
+        )
 
         controller.workspaceView.focusPane("sess-cl")
         let colors = controller.paneOptionsMenu().items.first { $0.title == "Change Claude Color" }
@@ -1444,6 +1448,13 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(
             colors?.submenu?.items.allSatisfy { $0.image != nil } == true,
             "the swatch is what makes a list of colour words pickable at a glance"
+        )
+
+        let models = controller.paneOptionsMenu().items.first { $0.title == "Change Model" }
+        XCTAssertEqual(
+            models?.submenu?.items.map { $0.representedObject as? String },
+            WorkspaceWindowController.claudeModels.map(\.1),
+            "the alias is what gets typed after /model"
         )
     }
 
