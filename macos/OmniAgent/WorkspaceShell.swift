@@ -1515,6 +1515,9 @@ final class TerminalRowView: ShellRowView, NSTextFieldDelegate {
     /// blocked on a question. Selecting the terminal is what clears it — the
     /// row is focused, the approval bar is on screen, the ask is answered.
     private(set) var awaitingBadge: ShellAwaitingBadgeView?
+    /// The engine (or browser) icon. Held so the badge's placement against it
+    /// is a fact a test can check, not a constraint nobody ever sees again.
+    private(set) var engineIcon: NSView!
 
     init(pane: PaneDescriptor, focused: Bool, status: RemoteSessionStatus?) {
         paneID = pane.sessionID
@@ -1538,6 +1541,7 @@ final class TerminalRowView: ShellRowView, NSTextFieldDelegate {
         let icon = pane.kind == .browser
             ? TerminalRowView.browserIcon()
             : TerminalRowView.engineIcon(for: pane.engine)
+        engineIcon = icon
         let title = titleField
 
         // The design tints the OmniAgent mark per status and puts a matching
@@ -1567,19 +1571,21 @@ final class TerminalRowView: ShellRowView, NSTextFieldDelegate {
         }
 
         for view in [icon, title, statusGlyph] { addSubview(view) }
+        title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7).isActive = true
         // An unselected terminal blocked on a question wears the amber pill
-        // right beside its engine icon; selecting the row retires it.
+        // in the row's own indent, *left* of the engine icon; selecting the row
+        // retires it. Left rather than right so it never moves the icon or the
+        // name: every row's icon column stays where it is, badge or no badge,
+        // and the pill reads as a marker in the margin instead of a word
+        // wedged into the title.
         if status == .awaitingApproval, !focused {
             let badge = ShellAwaitingBadgeView(count: 1)
             awaitingBadge = badge
             addSubview(badge)
             NSLayoutConstraint.activate([
-                badge.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+                badge.trailingAnchor.constraint(equalTo: icon.leadingAnchor, constant: -5),
                 badge.centerYAnchor.constraint(equalTo: centerYAnchor),
-                title.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 6),
             ])
-        } else {
-            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7).isActive = true
         }
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
