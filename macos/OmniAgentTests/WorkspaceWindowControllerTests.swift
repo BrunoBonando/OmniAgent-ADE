@@ -51,6 +51,32 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(Set(names).count, names.count, "no two terminals read the same")
     }
 
+    /// Terminals come back in the order they were saved in, and re-saving
+    /// them does not move them. Panes restore one at a time, and
+    /// `PaneGrid.synced`'s 2 -> 3 rule seats the third one ahead of the
+    /// second — which swapped panes 2 and 3 on every single launch, then
+    /// wrote the swap back so the next launch swapped them again.
+    func testRestoredTerminalsKeepTheirSavedOrderAcrossRelaunches() {
+        let saved = ["sess-a", "sess-b", "sess-c", "sess-d"]
+        var layout = PersistedLayoutCodec.serialize(
+            saved.map { PersistedTab(project: "alpha", engine: .claude, cwd: "/a", id: $0, group: "grp-1") }
+        )
+
+        for launch in 1...3 {
+            let controller = makeEmptyController()
+            defer { controller.close() }
+            controller.showWindow(nil)
+            controller.applyRestoredPanes(WorkspaceRestoration.plan(fromLayout: layout))
+
+            XCTAssertEqual(controller.workspaceView.allPaneIDs, saved, "launch \(launch)")
+            layout = PersistedLayoutCodec.serialize(
+                WorkspaceRestoration.persistedTabs(
+                    from: controller.workspaceView.allPaneIDs.compactMap { controller.workspaceView.descriptor(for: $0) }
+                )
+            )
+        }
+    }
+
     /// A terminal claims its Claude conversation exactly once. Claiming twice
     /// is what `--session-id` punishes: naming a conversation that already
     /// exists makes `claude` exit 1 immediately, so a respawn after the daemon
@@ -970,6 +996,59 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
         XCTAssertLessThanOrEqual(small.width, 900)
         XCTAssertLessThanOrEqual(small.height, 600)
+    }
+
+    /// The grid's shape ladder never grows past two rows, so there are only
+    /// two window sizes to toggle between. `makeController` already opens
+    /// one pane, so the window has already been through its *first*
+    /// row-count transition — and already scaled from whatever raw frame it
+    /// started at — by the time this reads `window.frame`; there is no
+    /// observing the pre-scale frame from outside. What the reference-frame
+    /// design promises, and what is actually checkable, is that returning to
+    /// a row count always lands on the exact size that row count landed on
+    /// before — never a little larger each time.
+    func testWindowScalesOnARowCountTransitionAndReturnsToTheSameSizeRatherThanCompounding() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        let visible = try XCTUnwrap(window.screen?.visibleFrame)
+        let group = try XCTUnwrap(controller.workspaceView.descriptor(for: "native-terminal")?.group)
+        let oneRow = window.frame.size
+
+        // Two browser panes — no daemon session behind them, so no PTY
+        // needed — bring the grid from one pane to three, which is row two
+        // on this ladder.
+        controller.workspaceView.addPane(
+            PaneDescriptor(sessionID: "extra-1", group: group, kind: .browser, browserURL: "https://example.com")
+        )
+        controller.workspaceView.addPane(
+            PaneDescriptor(sessionID: "extra-2", group: group, kind: .browser, browserURL: "https://example.com")
+        )
+        XCTAssertEqual(controller.workspaceView.grid?.rows, 2)
+        let twoRow = window.frame.size
+        XCTAssertNotEqual(twoRow, oneRow, "the transition to two rows actually resized the window")
+        XCTAssertEqual(window.frame.midX, visible.midX, accuracy: 1, "centred on screen")
+        XCTAssertEqual(window.frame.midY, visible.midY, accuracy: 1)
+
+        controller.workspaceView.focusPane("extra-1")
+        controller.closePane(nil)
+        controller.workspaceView.focusPane("extra-2")
+        controller.closePane(nil)
+        XCTAssertEqual(controller.workspaceView.grid?.rows, 1)
+        XCTAssertEqual(window.frame.size, oneRow, "back to one row lands on the exact size the first transition did")
+
+        // A second round trip must land on the same two sizes again, not
+        // scale either one further from wherever the window sits now — the
+        // property scaling from a fixed reference, rather than the window's
+        // current frame, exists to guarantee.
+        controller.workspaceView.addPane(
+            PaneDescriptor(sessionID: "extra-3", group: group, kind: .browser, browserURL: "https://example.com")
+        )
+        controller.workspaceView.addPane(
+            PaneDescriptor(sessionID: "extra-4", group: group, kind: .browser, browserURL: "https://example.com")
+        )
+        XCTAssertEqual(window.frame.size, twoRow, "a second trip to two rows lands on the same size as the first")
     }
 
     // MARK: - Orphaned sessions

@@ -388,7 +388,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             height: min(reference.height * scale, visible.height).rounded()
         )
         let origin = NSPoint(x: (visible.midX - size.width / 2).rounded(), y: (visible.midY - size.height / 2).rounded())
-        window.setFrame(NSRect(origin: origin, size: size), display: true, animate: window.isVisible)
+        // Not animated under XCTest, the same reason `restoreWindowFrame` isn't:
+        // a test reading `window.frame` right after this call needs the final
+        // rect there, not whatever an in-flight animation last painted.
+        let animate = window.isVisible && NSClassFromString("XCTestCase") == nil
+        window.setFrame(NSRect(origin: origin, size: size), display: true, animate: animate)
     }
 
     /// Restores where the user last put the window, and centres the default on
@@ -958,6 +962,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         for pane in plan where workspace.descriptor(for: pane.sessionID) == nil {
             addPane(pane, startSession: false)
         }
+        // The saved order is the order, on every launch — see
+        // `PaneWorkspaceView.reorderPanes`.
+        workspace.reorderPanes(plan.map(\.sessionID))
         // Terminals only: an unfiltered browser pane id reaching
         // `ensureSession` would fall through to `createSession`, whose
         // missing-engine default is `.shell` — a silent login shell.
@@ -1388,11 +1395,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// keeps them off the daemon.
     func applyRestoredBrowserPanes(_ panes: [PersistedBrowserPane]) {
         browserPanesReadCompleted = true
+        // Terminals are already seated in their saved order; each browser
+        // pane joins the end of it rather than displacing one of them.
+        var order = workspace.allPaneIDs
         for pane in panes
         where workspace.paneCount(inGroup: pane.group ?? WorkspaceRestoration.ungroupedSessionID) < PaneGrid.maxPanes {
-            addPane(
+            let sessionID = UUID().uuidString
+            if addPane(
                 RestoredPane(
-                    sessionID: UUID().uuidString,
+                    sessionID: sessionID,
                     reattaches: false,
                     project: "",
                     engine: .shell,
@@ -1405,8 +1416,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     browserURL: pane.url
                 ),
                 startSession: false
-            )
+            ) {
+                order.append(sessionID)
+            }
         }
+        workspace.reorderPanes(order)
     }
 
     /// Writes the live browser panes back to their own row. Refused until
