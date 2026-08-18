@@ -2712,6 +2712,72 @@ final class PaneZoomBlurOverlay {
     }
 }
 
+/// One rectangular slice of the region around a zoomed pane's card,
+/// showing real system blur. `.sidebar` for the same reason
+/// `PaneZoomBackdropView` picked it: the middle-tier material real frosted
+/// glass uses, without `.hudWindow`'s dark panel tint.
+final class PaneZoomBlurBandView: NSVisualEffectView {
+    static let material: NSVisualEffectView.Material = .sidebar
+
+    var onClick: (() -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        material = Self.material
+        blendingMode = .behindWindow
+        state = .active
+        appearance = NSAppearance(named: .darkAqua)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    // Swallowed for the same reason PaneZoomBackdropView's is: a click
+    // meant for "get me out of here" must not reach — or focus — the
+    // blurred pane underneath.
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) { onClick?() }
+}
+
+/// The window one blur band lives in: borderless and non-activating so
+/// clicking it never steals key window status or app activation from the
+/// main window, transparent everywhere its content view is not painting
+/// blur, and with no shadow of its own — the card's shadow belongs to the
+/// card, not to a plain rectangle standing in for empty space.
+final class PaneZoomBlurPanel: NSPanel {
+    var onClick: (() -> Void)? {
+        get { bandView.onClick }
+        set { bandView.onClick = newValue }
+    }
+
+    private let bandView = PaneZoomBlurBandView()
+
+    init() {
+        super.init(
+            contentRect: .zero,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: true
+        )
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        // Never torn down by AppKit out from under PaneZoomBlurOverlay's
+        // own pooling — `close()` is never called on these, `orderOut`
+        // and `removeChildWindow` are, and this panel is reused, not
+        // recreated, across a `hide()`/`show()` pair.
+        isReleasedWhenClosed = false
+        contentView = bandView
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+}
+
 /// A control in the pane header, in one of two shapes: the grid's bare 20pt icon
 /// square, or — given a `label` — the focused card's bordered pill. Hand-drawn
 /// rather than an `NSButton` + SF Symbol so the glyphs match the design's own

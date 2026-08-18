@@ -1646,6 +1646,58 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
     }
 
+    /// Mirrors `testTheBackdropBlursTheAppBehindItAndTintsNothing`'s shape:
+    /// configuration only, no pixels — `.behindWindow` blur is exactly as
+    /// unrenderable in an offscreen test as `.withinWindow` was, this just
+    /// confirms the one property that actually decides whether real blur
+    /// happens (`blendingMode`), plus everything else the panel needs.
+    func testBlurBandViewIsConfiguredForRealSystemBlur() {
+        let band = PaneZoomBlurBandView()
+
+        XCTAssertEqual(band.blendingMode, .behindWindow, "reads the real screen buffer, not sibling layers")
+        XCTAssertEqual(band.state, .active, "blurred whether or not the window is key")
+        XCTAssertEqual(band.material, .sidebar)
+    }
+
+    func testBlurBandViewSwallowsMouseDownAndFiresOnClickOnMouseUp() throws {
+        let band = PaneZoomBlurBandView()
+        var clicked = false
+        band.onClick = { clicked = true }
+
+        // The exact construction `testClickingAnywhereInAPaneMakesItTheActiveOne`
+        // and others in this file already use for a synthetic mouse event —
+        // `NSEvent` has no bare parameterless initializer.
+        func mouseEvent(_ type: NSEvent.EventType) throws -> NSEvent {
+            try XCTUnwrap(
+                NSEvent.mouseEvent(
+                    with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+                )
+            )
+        }
+
+        band.mouseDown(with: try mouseEvent(.leftMouseDown))
+        XCTAssertFalse(clicked, "mouseDown alone must not dismiss the zoom")
+
+        band.mouseUp(with: try mouseEvent(.leftMouseUp))
+        XCTAssertTrue(clicked)
+    }
+
+    func testBlurPanelIsABorderlessNonactivatingTransparentWindowHostingABandView() {
+        let panel = PaneZoomBlurPanel()
+
+        XCTAssertTrue(panel.styleMask.contains(.borderless))
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel), "must never steal key window / app activation")
+        XCTAssertFalse(panel.isOpaque)
+        XCTAssertFalse(panel.hasShadow, "the shadow belongs to the card, not to a plain rectangle of blur")
+        XCTAssertTrue(panel.contentView is PaneZoomBlurBandView)
+
+        var clicked = false
+        panel.onClick = { clicked = true }
+        (panel.contentView as? PaneZoomBlurBandView)?.onClick?()
+        XCTAssertTrue(clicked, "the panel's onClick must forward to its content view's")
+    }
+
     // MARK: - Click to activate
 
     /// Clicking anywhere in a terminal makes it the active one. Every click
