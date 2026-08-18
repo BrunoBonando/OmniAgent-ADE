@@ -3,6 +3,13 @@
 <style>
   html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0c0c0f; }
   #editor, #diff { width: 100%; height: 100%; display: none; }
+  #banner {
+    display: none; box-sizing: border-box; height: 24px; padding: 4px 10px;
+    background: #2b2416; color: #f0b446; border-bottom: 1px solid #3b3120;
+    font: 11.5px/16px ui-sans-serif, -apple-system, "SF Pro Text", sans-serif;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  body.has-banner #editor { height: calc(100% - 24px); }
   #changes, #message {
     display: none; height: 100%; overflow: auto; box-sizing: border-box; padding: 12px 14px;
     color: #c2c2cb; font: 12.5px/1.6 ui-monospace, "SF Mono", Menlo, monospace;
@@ -20,6 +27,7 @@
   #changes pre .del { color: #f2555a; }
   #changes pre .hunk { color: #6e788a; }
 </style>
+<div id="banner"></div>
 <div id="editor"></div>
 <div id="diff"></div>
 <div id="changes"></div>

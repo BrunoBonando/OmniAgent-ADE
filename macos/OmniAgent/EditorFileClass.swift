@@ -10,7 +10,14 @@ enum EditorFileClass: Equatable {
     case pdf
     case binary
 
+    /// Above this a text file is opened **read-only**: Monaco copes, but an
+    /// edit-and-save round trip on that much text does not.
     static let maxEditableBytes = 10 * 1024 * 1024
+    /// Above this it is not opened at all. Everything below crosses the bridge
+    /// as one JSON-escaped JS string literal, built on the main thread — a
+    /// 500 MB log would simply freeze the app, so it is refused with a message
+    /// instead. The band between the two caps is the read-only one.
+    static let maxReadableBytes = 25 * 1024 * 1024
     static let sniffLength = 8 * 1024
 
     static let imageExtensions: Set<String> = [

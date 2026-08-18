@@ -1096,6 +1096,90 @@ final class EditorPaneIntegrationTests: XCTestCase {
     }
 
     /// A real file on disk — `EditorPaneView.openFile` stats and reads it.
+    // MARK: - Final review round
+
+    /// Final review, Important. The quit/close walk *closes* every dirty tab,
+    /// and `performClose` publishes — so the row was rewritten on the way out
+    /// with precisely the files being edited removed, and next launch restored
+    /// everything except them (spec §5 says open tabs come back).
+    func testQuittingDoesNotEraseTheFilesItPromptedAboutFromTheRow() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        var writes: [String] = []
+        controller.settingsWriter = { key, value in
+            if key == SettingsKey.editorPanes { writes.append(value) }
+        }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes([])
+        controller.applyRestoredEditorPanes([])
+        let file = try makeTempFile("a.swift", "let x = 1")
+        controller.openFileInEditor(file, pinned: true)
+        let id = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: id))
+        XCTAssertTrue(
+            writes.contains { $0.contains(file.lastPathComponent) },
+            "the file is in the row to begin with"
+        )
+        pane.modelForTesting { $0.setDirty(true, at: 0) }
+        pane.confirmSave = { _, decide in decide(.discard) }
+
+        let done = expectation(description: "walked")
+        controller.promptDirtyEditorTabs { _ in done.fulfill() }
+        wait(for: [done], timeout: 20)
+
+        XCTAssertFalse(
+            writes.last?.contains("\"panes\":[]") ?? false,
+            "the walk must not persist the emptied pane: \(writes.last ?? "-")"
+        )
+        XCTAssertTrue(
+            writes.last?.contains(file.lastPathComponent) ?? false,
+            "the file the user was asked about is still in the row for next launch"
+        )
+    }
+
+    /// Final review: ⌘S had no menu item at all, so saving only worked while
+    /// Monaco itself held focus.
+    func testTheFileMenuCarriesSaveAndSaveAll() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        ApplicationMenus.install()
+        let fileMenu = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "File")?.submenu)
+        let save = try XCTUnwrap(fileMenu.item(withTitle: "Save"))
+        let saveAll = try XCTUnwrap(fileMenu.item(withTitle: "Save All"))
+        XCTAssertEqual(save.action, #selector(WorkspaceWindowController.saveActiveFile(_:)))
+        XCTAssertEqual(save.keyEquivalent, "s")
+        XCTAssertEqual(save.keyEquivalentModifierMask, [.command], "⌘S")
+        XCTAssertEqual(saveAll.action, #selector(WorkspaceWindowController.saveAllFiles(_:)))
+        XCTAssertEqual(saveAll.keyEquivalentModifierMask, [.command, .option], "⌥⌘S")
+        XCTAssertFalse(controller.validateMenuItem(save), "no editor pane, nothing to save")
+        XCTAssertFalse(controller.validateMenuItem(saveAll))
+
+        let file = try makeTempFile("a.swift", "let x = 1")
+        controller.openFileInEditor(file, pinned: true)
+        let id = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: id))
+        waitUntilReady(pane)
+
+        XCTAssertTrue(controller.validateMenuItem(save))
+        XCTAssertTrue(controller.validateMenuItem(saveAll))
+
+        makeDirty(pane, path: file.path, content: "let x = 2")
+        controller.saveActiveFile(nil)
+        XCTAssertTrue(
+            pollUntil(timeout: 20) { (try? String(contentsOf: file, encoding: .utf8)) == "let x = 2" },
+            "⌘S wrote the buffer"
+        )
+
+        // …and Save All reaches a buffer the focused-pane command would not.
+        makeDirty(pane, path: file.path, content: "let x = 3")
+        controller.saveAllFiles(nil)
+        XCTAssertTrue(
+            pollUntil(timeout: 20) { (try? String(contentsOf: file, encoding: .utf8)) == "let x = 3" }
+        )
+    }
+
     // MARK: - Task 15: the three dirty prompts
 
     /// ⌘W on an editor pane with unsaved work asks before it destroys it —

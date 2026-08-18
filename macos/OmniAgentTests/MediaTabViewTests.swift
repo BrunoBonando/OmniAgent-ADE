@@ -4,11 +4,19 @@ import XCTest
 
 final class MediaTabViewTests: XCTestCase {
     func testCaption() {
-        XCTAssertEqual(MediaTabView.caption(pixelsWide: 1024, pixelsHigh: 768, byteCount: 2_097_152), "1024 × 768 · 2.1 MB")
+        // The byte size follows `Locale.current` (2.1 MB / 2,1 MB), exactly as
+        // every other number in the OS does, so the separator is not asserted.
+        let caption = MediaTabView.caption(pixelsWide: 1024, pixelsHigh: 768, byteCount: 2_097_152)
+        XCTAssertTrue(caption.hasPrefix("1024 × 768 · 2"), caption)
+        XCTAssertTrue(caption.hasSuffix("1 MB"), caption)
     }
 
     func testPlaceholder() {
         XCTAssertEqual(MediaTabView.placeholderText(name: "a.bin", byteCount: 12_288), "a.bin — binary file, 12 KB")
+        // 12 KB is a whole number in every locale; a fractional one is not, so
+        // that case is checked structurally.
+        let fractional = MediaTabView.placeholderText(name: "a.bin", byteCount: 2_097_152)
+        XCTAssertTrue(fractional.hasPrefix("a.bin — binary file, 2"), fractional)
     }
 
     func testShowImageOffscreen() throws {

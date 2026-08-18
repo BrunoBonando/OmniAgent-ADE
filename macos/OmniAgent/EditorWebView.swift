@@ -169,6 +169,9 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
     func appendFileDiff(path: String, text: String) {
         run("window.omniagent.appendFileDiff(\(Self.jsLiteral(path)), \(Self.jsLiteral(text)))")
     }
+    /// A strip above the editor, or `""` to take it away. Only the editor
+    /// surface has one; showing anything else clears it.
+    func showBanner(_ text: String) { run("window.omniagent.showBanner(\(Self.jsLiteral(text)))") }
     func showMessage(_ text: String) { run("window.omniagent.showMessage(\(Self.jsLiteral(text)))") }
 
     /// Drives `model.setValue` *without* rebasing the saved version, i.e. what

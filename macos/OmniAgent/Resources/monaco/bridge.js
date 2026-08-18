@@ -26,10 +26,20 @@ let diffModels = null; // {original, modified} — transient, disposed on hide
 
 function post(message) { window.webkit.messageHandlers.editor.postMessage(message); }
 function el(id) { return document.getElementById(id); }
+function setBanner(text) {
+  const banner = el("banner");
+  banner.textContent = text || "";
+  banner.style.display = text ? "block" : "none";
+  document.body.classList.toggle("has-banner", !!text);
+}
+
 function showOnly(id) {
   for (const pane of ["editor", "diff", "changes", "message"]) {
     el(pane).style.display = pane === id ? "block" : "none";
   }
+  // The banner belongs to the editor surface only; anything else showing
+  // means it is describing a file that is no longer on screen.
+  if (id !== "editor") setBanner("");
   if (id !== "diff" && diffModels) {
     diffModels.original.dispose();
     diffModels.modified.dispose();
@@ -267,6 +277,12 @@ window.omniagent = {
       }
       return;
     }
+  },
+  // Spec 7: a text file too big to edit is opened read-only, and has to say
+  // so — an editor that silently swallows keystrokes reads as broken.
+  // `automaticLayout` re-lays Monaco out when the height changes under it.
+  showBanner(text) {
+    setBanner(text);
   },
   showMessage(text) {
     showOnly("message");

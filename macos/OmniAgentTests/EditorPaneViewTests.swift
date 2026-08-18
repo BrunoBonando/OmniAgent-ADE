@@ -663,6 +663,127 @@ final class EditorPaneViewTests: XCTestCase {
         XCTAssertTrue(pane.loadedPaths.contains(second.path))
     }
 
+    // MARK: - Final review round
+
+    /// A file of the requested size that `EditorFileClass` still calls text:
+    /// the sniff only reads the first 8 KB, so real text there and a sparse
+    /// tail keeps the test fast without making the file binary.
+    private func makeSparseTextFile(_ name: String, bytes: Int) throws -> URL {
+        let url = dir.appendingPathComponent(name)
+        let header = Data(String(repeating: "text line\n", count: 2_000).utf8)
+        try header.write(to: url)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(bytes))
+        try handle.close()
+        return url
+    }
+
+    /// Final review, Critical (the save half). A tab that vanishes during the
+    /// save must take nothing with it. `save`'s own identity guard already
+    /// turns most of this window into `.failed`; the `.clean` arm behind it
+    /// now re-resolves by identity too, so neither can reach the tab that took
+    /// the captured slot.
+    func testASaveWhoseTabVanishedTouchesNothingElse() throws {
+        let doomed = try write("a.swift", "one")
+        let bystander = try write("b.swift", "two")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(doomed, pinned: true)
+        pane.openFile(bystander, pinned: true)
+        makeDirty(pane, path: doomed.path, content: "edited-a")
+        makeDirty(pane, path: bystander.path, content: "edited-b")
+
+        // Answer Save for a.swift, then delete its tab out from under the
+        // round trip. Slot 0 now holds b.swift, with unsaved work in it.
+        pane.confirmSave = { _, decide in
+            decide(.save)
+            pane.modelForTesting { $0.close(at: 0) }
+        }
+        pane.requestCloseTab(at: 0)
+
+        XCTAssertTrue(
+            pollUntil(timeout: 15) { pane.model.tabs.map(\.path) == [bystander.path] },
+            "the bystander must survive: \(pane.model.tabs.map(\.path))"
+        )
+        XCTAssertFalse(pollUntil(timeout: 2) { pane.model.tabs.isEmpty })
+        XCTAssertTrue(pane.model.tabs[0].isDirty, "…with its unsaved edits intact")
+    }
+
+    /// The same rule on the bulk walk, which must also stay live: a tab that
+    /// vanished is *resolved*, so the drain has to go on completing or the
+    /// close or quit waiting on it hangs.
+    func testTheDrainSkipsAVanishedTabWithoutClosingItsSuccessor() throws {
+        let doomed = try write("a.swift", "one")
+        let bystander = try write("b.swift", "two")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(doomed, pinned: true)
+        pane.openFile(bystander, pinned: true)
+        makeDirty(pane, path: doomed.path, content: "edited-a")
+
+        var asked = 0
+        pane.confirmSave = { _, decide in
+            asked += 1
+            if asked == 1 { pane.modelForTesting { $0.close(at: 0) } }
+            decide(.discard)
+        }
+        let drained = expectation(description: "the walk finished")
+        var proceeded: Bool?
+        pane.closeAllTabsAfterConfirmation {
+            proceeded = $0
+            drained.fulfill()
+        }
+        wait(for: [drained], timeout: 20)
+
+        XCTAssertEqual(proceeded, true)
+        XCTAssertEqual(pane.model.tabs.map(\.path), [bystander.path], "the clean bystander is untouched")
+    }
+
+    /// Final review, Important. `maxEditableBytes` only decides read-only —
+    /// the whole file was still read on the main thread and escaped into a JS
+    /// literal, so a huge one froze the app. Refuse instead.
+    func testAFileOverTheHardCapIsRefusedRatherThanRead() throws {
+        let url = try makeSparseTextFile("huge.txt", bytes: EditorFileClass.maxReadableBytes + 1)
+        let pane = makePane()
+        waitUntilReady(pane)
+
+        pane.openFile(url, pinned: true)
+
+        XCTAssertEqual(pane.model.tabs.map(\.path), [url.path], "the tab opens…")
+        XCTAssertFalse(pane.loadedPaths.contains(url.path), "…but Monaco is never handed the file")
+        XCTAssertTrue(
+            pollUntilContains(pane.webHost, "document.getElementById('message').textContent", "too large to open"),
+            "and it says so"
+        )
+    }
+
+    /// Spec §7's read-only banner for the band between the two caps.
+    func testAReadOnlyFileWearsABanner() throws {
+        let url = try makeSparseTextFile("big.txt", bytes: EditorFileClass.maxEditableBytes + 1024)
+        let pane = makePane()
+        waitUntilReady(pane)
+
+        pane.openFile(url, pinned: true)
+
+        XCTAssertTrue(pane.loadedPaths.contains(url.path), "it opens — just not for editing")
+        XCTAssertTrue(
+            pollUntilContains(pane.webHost, "document.getElementById('banner').textContent", "Read-only"),
+            "and says why"
+        )
+    }
+
+    /// A normal file must not wear one.
+    func testAnEditableFileHasNoBanner() throws {
+        let url = try write("a.swift", "let x = 1")
+        let pane = makePane()
+        waitUntilReady(pane)
+        pane.openFile(url, pinned: true)
+
+        XCTAssertTrue(
+            pollUntilContains(pane.webHost, "document.getElementById('banner').style.display", "none")
+        )
+    }
+
     // MARK: - Task 15: external changes
 
     /// Reads a model's text back, polling. The external-change reload is

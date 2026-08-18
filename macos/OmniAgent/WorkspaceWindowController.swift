@@ -770,6 +770,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// cannot work here because "Save" *is* an action: the write has to happen
     /// before the answer means anything.
     func promptDirtyEditorTabs(completion: @escaping (Bool) -> Void) {
+        // Held for the whole walk, including the cancelled case: a walk that
+        // stopped half way has closed some tabs, and that half-drained state
+        // is not what should be on disk either.
+        editorPaneDrainInFlight = true
+        let finish: (Bool) -> Void = { [weak self] proceed in
+            self?.editorPaneDrainInFlight = false
+            completion(proceed)
+        }
+        walkDirtyEditorPanes(completion: finish)
+    }
+
+    private func walkDirtyEditorPanes(completion: @escaping (Bool) -> Void) {
         // Every pane holding a buffer, not just those whose *flag* says dirty:
         // `closeAllTabsAfterConfirmation` reconciles with the page and
         // completes immediately when there is genuinely nothing to ask about.
@@ -1201,8 +1213,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // `closeAllTabsAfterConfirmation` reconciles with the page and
         // completes immediately when there is genuinely nothing to ask about.
         if let editor = workspace.editorPane(for: focused), editor.hasLoadedBuffers {
+            editorPaneDrainInFlight = true
             editor.closeAllTabsAfterConfirmation { [weak self] proceed in
-                guard proceed, let self else { return }
+                guard let self else { return }
+                editorPaneDrainInFlight = false
+                guard proceed else {
+                    // Cancelled: the pane stays, and the row is republished so
+                    // whatever the walk did resolve before the cancel is on
+                    // disk.
+                    persistEditorPanes()
+                    return
+                }
                 destroyPane(focused)
             }
             return
@@ -1228,6 +1249,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // where the *user* closes the pane.
         lastStatus.removeValue(forKey: focused)
         workspace.closePane(focused)
+    }
+
+    /// ⌘S. Monaco has its own ⌘S while it holds focus, but that only fires
+    /// when the keystroke reaches the web view — with focus anywhere else in
+    /// the pane there was no way to save at all, and no menu item saying the
+    /// command exists. Both routes end at the same `saveActiveTab`.
+    @objc func saveActiveFile(_ sender: Any?) {
+        focusedEditorPane()?.saveActiveTab()
+    }
+
+    /// ⌥⌘S — every unsaved buffer in every editor pane.
+    @objc func saveAllFiles(_ sender: Any?) {
+        for id in workspace.allPaneIDs {
+            workspace.editorPane(for: id)?.saveAllDirty { _ in }
+        }
+    }
+
+    private func focusedEditorPane() -> EditorPaneView? {
+        workspace.focusedPaneID.flatMap { workspace.editorPane(for: $0) }
     }
 
     /// The header's ⋯ menu. Nothing new lives here: it is the pane-scoped half
@@ -1426,6 +1466,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals
         case #selector(closePane(_:)):
             return workspace.focusedPaneID != nil
+        case #selector(saveActiveFile(_:)):
+            // Only a file tab has anything to write. Disabled rather than
+            // absent, and a disabled item does not swallow ⌘S — so the key
+            // keeps reaching whatever else wants it.
+            return focusedEditorPane()?.model.activeTab?.kind == .file
+        case #selector(saveAllFiles(_:)):
+            return workspace.allPaneIDs.contains { workspace.editorPane(for: $0)?.hasLoadedBuffers == true }
         case #selector(renameConversation(_:)):
             // A browser or editor pane has a label but no conversation.
             return workspace.focusedPaneID
@@ -2077,6 +2124,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Those are two synchronous steps of one move, and the write between them
     /// would persist the tab as open in both panes.
     private var editorPaneDropInFlight = false
+    /// A close or quit is draining dirty editor tabs. The drain *closes* every
+    /// tab it resolves, and `performClose` publishes — so without this the
+    /// `editor_panes_native` row would be rewritten on the way out with
+    /// precisely the files the user was editing removed, and next launch would
+    /// restore everything except them (spec §5). Same shape as the drop gate
+    /// above, for the same reason: a transient intermediate state must not be
+    /// mistaken for the state to persist.
+    private var editorPaneDrainInFlight = false
+
 
     /// Writes the live editor panes back to their own row. Refused until that
     /// row has actually been read — `persistLayout`'s reasoning again. Tab
@@ -2084,7 +2140,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// `onPanesChanged`, the browser pane's `onURLChange` chain applied to
     /// tabs, so opening or closing a tab persists with no extra plumbing.
     private func persistEditorPanes() {
-        guard editorPanesReadCompleted, !editorPaneDropInFlight else { return }
+        guard editorPanesReadCompleted, !editorPaneDropInFlight, !editorPaneDrainInFlight else { return }
         let panes = workspace.allPaneIDs
             .compactMap { workspace.descriptor(for: $0) }
             .filter { $0.kind == .editor }

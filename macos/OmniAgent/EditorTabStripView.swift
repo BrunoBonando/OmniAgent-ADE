@@ -195,7 +195,13 @@ final class EditorTabStripView: NSView {
         }
         for item in items { itemsContainer.addSubview(item) }
         saveButton.isHidden = !(model.activeTab?.isDirty ?? false)
-        diffButton.isHidden = !(diffAvailable && model.activeTab?.kind == .file)
+        // On a `.file` tab it opens the diff; on a `.diff` tab it goes back to
+        // the file. Hiding it there made the ± a one-way door.
+        switch model.activeTab?.kind {
+        case .file: diffButton.isHidden = !diffAvailable
+        case .diff: diffButton.isHidden = false
+        default: diffButton.isHidden = true
+        }
         needsLayout = true
         layoutSubtreeIfNeeded()
         itemFrames = items.map { $0.convert($0.bounds, to: self) }
@@ -297,6 +303,24 @@ final class EditorTabItemView: NSView {
     private static let horizontalPadding: CGFloat = 10
     private static let dragThreshold: CGFloat = 4
 
+    /// Spec §4's per-extension tab icon. `NSWorkspace.icon(forFileType:)`
+    /// hits Launch Services, so the answers are cached per extension: this is
+    /// read from `draw` and from `intrinsicWidth`, for every tab, on every
+    /// render.
+    private static var iconCache: [String: NSImage] = [:]
+
+    static func icon(forPath path: String) -> NSImage {
+        let ext = (path as NSString).pathExtension.lowercased()
+        if let cached = iconCache[ext] { return cached }
+        let icon = NSWorkspace.shared.icon(forFileType: ext.isEmpty ? "public.data" : ext)
+        icon.size = NSSize(width: iconSize, height: iconSize)
+        iconCache[ext] = icon
+        return icon
+    }
+
+    static let iconSize: CGFloat = 13
+    private static let iconGap: CGFloat = 5
+
     private static func titleFont(preview: Bool) -> NSFont {
         let base = ShellFont.ui(12)
         guard preview else { return base }
@@ -308,8 +332,12 @@ final class EditorTabItemView: NSView {
     var intrinsicWidth: CGFloat {
         let attributes: [NSAttributedString.Key: Any] = [.font: Self.titleFont(preview: !tab.isPinned)]
         let textWidth = (titleText as NSString).size(withAttributes: attributes).width
-        return textWidth + Self.horizontalPadding * 2 + Self.accessorySize + 8
+        return textWidth + Self.horizontalPadding * 2 + Self.accessorySize + 8 + iconLeading
     }
+
+    /// The width the icon claims ahead of the title. `.changes` has no file
+    /// behind it, so it gets none.
+    private var iconLeading: CGFloat { tab.kind == .changes ? 0 : Self.iconSize + Self.iconGap }
 
     init(tab: EditorTab, title: String, isActiveTab: Bool) {
         self.tab = tab
@@ -396,10 +424,26 @@ final class EditorTabItemView: NSView {
         let color = isActiveTab ? ShellPalette.ink : ShellPalette.inkNav
         let font = Self.titleFont(preview: !tab.isPinned)
         let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
-        let maxTitleWidth = max(0, accessoryRect.minX - Self.horizontalPadding - Self.horizontalPadding)
+        if iconLeading > 0 {
+            let icon = Self.icon(forPath: tab.path)
+            icon.draw(
+                in: NSRect(
+                    x: Self.horizontalPadding,
+                    y: (bounds.height - Self.iconSize) / 2,
+                    width: Self.iconSize,
+                    height: Self.iconSize
+                ),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: isActiveTab ? 1 : 0.65
+            )
+        }
+
+        let titleX = Self.horizontalPadding + iconLeading
+        let maxTitleWidth = max(0, accessoryRect.minX - titleX - Self.horizontalPadding)
         let size = (titleText as NSString).size(withAttributes: attributes)
         let titleRect = NSRect(
-            x: Self.horizontalPadding,
+            x: titleX,
             y: (bounds.height - size.height) / 2,
             width: min(size.width, maxTitleWidth),
             height: size.height

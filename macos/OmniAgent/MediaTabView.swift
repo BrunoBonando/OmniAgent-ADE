@@ -23,14 +23,14 @@ final class MediaTabView: NSView {
         return formatter
     }()
 
-    /// `ByteCountFormatter` has no `locale` property — it always follows
-    /// `Locale.current`, so under e.g. de_DE it would print "2,1 MB". Both
-    /// callers below need a fixed "." decimal point (the caption is compared
-    /// verbatim in tests), so normalize after formatting instead.
+    /// `ByteCountFormatter` follows `Locale.current`, which is what a caption
+    /// beside every other number in the OS should do. It used to be forced to
+    /// a "." decimal point so a test could compare the string verbatim; on a
+    /// comma-decimal machine that made the caption the one thing on screen
+    /// disagreeing with the rest of the system. The test is locale-tolerant
+    /// instead.
     private static func formattedBytes(_ byteCount: Int) -> String {
-        let raw = byteFormatter.string(fromByteCount: Int64(byteCount))
-        guard let separator = Locale.current.decimalSeparator, separator != "." else { return raw }
-        return raw.replacingOccurrences(of: separator, with: ".")
+        byteFormatter.string(fromByteCount: Int64(byteCount))
     }
 
     override init(frame frameRect: NSRect) {

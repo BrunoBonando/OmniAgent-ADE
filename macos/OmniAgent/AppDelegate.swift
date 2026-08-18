@@ -177,6 +177,10 @@ enum ApplicationMenus {
         file.addItem(item("New Browser Pane", Selector(("newBrowserPane:")), "t", [.command, .shift]))
         file.addItem(item("New Editor Pane", Selector(("newEditorPane:")), "e", [.command, .shift]))
         file.addItem(item("New Session", Selector(("newSession:")), "n"))
+        file.addItem(.separator())
+        file.addItem(item("Save", Selector(("saveActiveFile:")), "s"))
+        file.addItem(item("Save All", Selector(("saveAllFiles:")), "s", [.command, .option]))
+        file.addItem(.separator())
         file.addItem(item("Close Pane", Selector(("closePane:")), "w"))
         file.addItem(
             item("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])

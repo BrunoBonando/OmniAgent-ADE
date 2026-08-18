@@ -68,6 +68,9 @@ final class EditorPaneView: NSView, PaneContentView {
     /// read successfully?" answer — a file we could not read never lands here,
     /// so `showActiveContent` shows the message instead of an empty editor.
     private(set) var loadedPaths: Set<String> = []
+    /// Paths Monaco holds read-only because of their size. They wear a banner
+    /// (spec §7) — an editor that silently swallows keystrokes reads as broken.
+    private var readOnlyPaths: Set<String> = []
     /// Debounced dirty-buffer snapshots from the bridge — crash insurance,
     /// replayed by `restoreAfterRendererCrash` when the page comes back.
     private(set) var dirtySnapshots: [String: String] = [:]
@@ -194,8 +197,18 @@ final class EditorPaneView: NSView, PaneContentView {
         strip.onClose = { [weak self] index in self?.requestCloseTab(at: index) }
         strip.onSave = { [weak self] in self?.saveActiveTab() }
         strip.onDiffToggle = { [weak self] in
-            guard let self, let tab = model.activeTab, tab.kind == .file else { return }
-            onOpenDiffRequest?(URL(fileURLWithPath: tab.path))
+            guard let self, let tab = model.activeTab else { return }
+            switch tab.kind {
+            case .file:
+                onOpenDiffRequest?(URL(fileURLWithPath: tab.path))
+            case .diff:
+                // The return leg. Without it the ± is a one-way door: the
+                // affordance vanished on the diff tab, so there was no way
+                // back to the file except finding its tab by hand.
+                onOpenFileRequest?(URL(fileURLWithPath: tab.path))
+            default:
+                break
+            }
         }
         strip.onBeginDrag = { [weak self] index, event in self?.beginTabDrag(index: index, event: event) }
         strip.onTabDrop = { [weak self] payload, index in
@@ -504,9 +517,24 @@ final class EditorPaneView: NSView, PaneContentView {
     /// tab's text enters the editor. Idempotent: a path that already has a
     /// live model is left alone, so re-activating a tab never clobbers the
     /// buffer with what is on disk.
+    /// Why a text file cannot be opened at all, or `nil` if it can.
+    ///
+    /// `EditorFileClass.maxEditableBytes` only decides *read-only*; the whole
+    /// file is still read here on the main thread and JSON-escaped into one JS
+    /// string literal, so without a hard ceiling a 500 MB log freezes the app.
+    /// `loadDiffContent` has refused on size since Task 12's review; this is
+    /// the same refusal on the path that actually opens files.
+    private func refusalMessage(for url: URL) -> String? {
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
+        guard size > EditorFileClass.maxReadableBytes else { return nil }
+        let megabytes = EditorFileClass.maxReadableBytes / (1024 * 1024)
+        return "\(url.lastPathComponent) is too large to open (over \(megabytes) MB)."
+    }
+
     private func loadFileTab(_ url: URL, classified: EditorFileClass) {
         guard case let .text(readOnly) = classified else { return }
         guard !loadedPaths.contains(url.path) else { return }
+        guard refusalMessage(for: url) == nil else { return }
         var encoding = String.Encoding.utf8
         var text: String? = try? String(contentsOf: url, encoding: .utf8)
         if text == nil {
@@ -522,6 +550,7 @@ final class EditorPaneView: NSView, PaneContentView {
         encodings[url.path] = encoding
         modificationDates[url.path] = modificationDate(of: url)
         loadedPaths.insert(url.path)
+        if readOnly { readOnlyPaths.insert(url.path) } else { readOnlyPaths.remove(url.path) }
         webHost.openModel(path: url.path, content: text, readOnly: readOnly)
     }
 
@@ -636,7 +665,17 @@ final class EditorPaneView: NSView, PaneContentView {
                 snapshot.badges.keys.map { snapshot.root.appendingPathComponent($0).path }
             } ?? []
         )
-        if model.activeTab?.kind == .changes { renderChanges() }
+        switch model.activeTab?.kind {
+        case .changes:
+            renderChanges()
+        case .diff:
+            // Spec §3: a diff tab shows what git says *now*. The status moving
+            // is exactly the event that makes an open one stale, and until
+            // this it only refreshed when the tab was re-activated.
+            if let tab = model.activeTab { loadDiffContent(URL(fileURLWithPath: tab.path)) }
+        default:
+            break
+        }
     }
 
     /// Files sorted by path, each with the FILES tree's own badge letter
@@ -680,17 +719,23 @@ final class EditorPaneView: NSView, PaneContentView {
             // invisible, which reads as data loss.
             if loadedPaths.contains(tab.path) {
                 webHost.showModel(path: tab.path)
+                showBannerForActiveFile(tab.path)
                 setContentVisibility(web: true, media: false, empty: false)
                 return
             }
             let url = URL(fileURLWithPath: tab.path)
             let classified = EditorFileClass.classify(url: url)
             if case .text = classified {
-                loadFileTab(url, classified: classified)
-                if loadedPaths.contains(tab.path) {
-                    webHost.showModel(path: tab.path)
+                if let refusal = refusalMessage(for: url) {
+                    webHost.showMessage(refusal)
                 } else {
-                    webHost.showMessage("Could not read \(url.lastPathComponent)")
+                    loadFileTab(url, classified: classified)
+                    if loadedPaths.contains(tab.path) {
+                        webHost.showModel(path: tab.path)
+                        showBannerForActiveFile(tab.path)
+                    } else {
+                        webHost.showMessage("Could not read \(url.lastPathComponent)")
+                    }
                 }
                 setContentVisibility(web: true, media: false, empty: false)
             } else {
@@ -716,6 +761,13 @@ final class EditorPaneView: NSView, PaneContentView {
             // something else (another tab, a message, a renderer crash).
             renderChanges()
         }
+    }
+
+    private func showBannerForActiveFile(_ path: String) {
+        let editable = EditorFileClass.maxEditableBytes / (1024 * 1024)
+        webHost.showBanner(
+            readOnlyPaths.contains(path) ? "Read-only — this file is over \(editable) MB." : ""
+        )
     }
 
     private func setContentVisibility(web: Bool, media: Bool, empty: Bool) {
@@ -945,11 +997,15 @@ final class EditorPaneView: NSView, PaneContentView {
             switch decision {
             case .cancel: break
             case .discard:
-                // By identity, never by the captured index: the reconcile
-                // round trip and the prompt both hand control back to the run
-                // loop, and a strip that moved under them would otherwise have
-                // the *wrong* tab discarded, unprompted.
-                performClose(at: model.index(of: tab.path, kind: tab.kind) ?? index)
+                // By identity, and with **no fallback to the captured index**:
+                // the reconcile round trip and the prompt both hand control
+                // back to the run loop, and if the asked-about tab went away
+                // in that window the captured slot now holds somebody else's
+                // tab. Closing that one would dispose its Monaco model and
+                // lose *its* unsaved edits, with no prompt at all. A tab that
+                // is already gone needs no closing.
+                guard let index = model.index(of: tab.path, kind: tab.kind) else { return }
+                performClose(at: index)
             case .save:
                 saveThenCloseIfClean(tab: tab, index: index) { [weak self] clean in
                     // Not clean means a keystroke landed inside the write and
@@ -1027,12 +1083,18 @@ final class EditorPaneView: NSView, PaneContentView {
             case .stillDirty:
                 completion(false)
             case .clean:
-                // The prompt handed control back to the run loop; the strip
-                // can have moved under it.
-                performClose(
-                    at: model.index(of: tab.path, kind: tab.kind) ?? index,
-                    notifyLastClosed: notifyLastClosed
-                )
+                // Identity only — never the captured index. If the tab went
+                // away during the save, the slot it held now belongs to
+                // another tab whose buffer would be disposed unprompted.
+                //
+                // A vanished tab still reports `true`: it is *resolved*, and
+                // the bulk walk above must go on completing or the close or
+                // quit waiting on it would never finish (the liveness hazard
+                // round 3 fixed). That is why this cannot simply `return`,
+                // the way the single-tab discard above can.
+                if let index = model.index(of: tab.path, kind: tab.kind) {
+                    performClose(at: index, notifyLastClosed: notifyLastClosed)
+                }
                 completion(true)
             }
         }
@@ -1062,6 +1124,7 @@ final class EditorPaneView: NSView, PaneContentView {
         modificationDates.removeValue(forKey: tab.path)
         dirtySnapshots.removeValue(forKey: tab.path)
         deletedPaths.remove(tab.path)
+        readOnlyPaths.remove(tab.path)
     }
 
     /// Resolves every dirty tab with a prompt and closes it. `false` means the
@@ -1099,7 +1162,13 @@ final class EditorPaneView: NSView, PaneContentView {
             case .cancel:
                 completion(false)
             case .discard:
-                performClose(at: model.index(of: tab.path, kind: tab.kind) ?? index, notifyLastClosed: false)
+                // Identity only, and the walk continues either way: a tab that
+                // vanished during the prompt is already resolved, but the
+                // drain still has to run to completion or the close or quit
+                // waiting on it hangs.
+                if let index = model.index(of: tab.path, kind: tab.kind) {
+                    performClose(at: index, notifyLastClosed: false)
+                }
                 drainDirtyTabs(completion: completion)
             case .save:
                 saveThenCloseIfClean(
