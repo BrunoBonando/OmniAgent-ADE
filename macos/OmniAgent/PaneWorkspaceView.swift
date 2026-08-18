@@ -2068,14 +2068,15 @@ final class PaneDropOverlayView: NSView {
 
 /// The pane's chrome, from the design's terminal grid: a status mark that says
 /// what the agent is doing, the terminal's name, which engine is driving it,
-/// the branch it is on, and the two controls. Also the drag handle — the whole
-/// bar is grabbable except where a button sits.
+/// the branch it is on, and the controls: a ⋯ menu and a macOS traffic-light
+/// cluster — yellow, green, red. Also the drag handle — the whole bar is
+/// grabbable except where a button sits.
 ///
 /// It draws two treatments, switched by `isZoomed`: the grid pane's bar, and the
-/// focused card's taller one with a bigger name, a `session · terminal N of M`
-/// subtitle and a labelled way out (design line 1070). The mark, the engine
-/// badge and the branch badge are identical in both — the delta is deliberately
-/// only what tells you *this pane is the one blown up over the others*.
+/// focused card's taller one with a bigger name and a `session · terminal N of
+/// M` subtitle (design line 1070). The mark, the engine badge, the branch badge
+/// and the cluster are identical in both — the delta is deliberately only what
+/// tells you *this pane is the one blown up over the others*.
 final class PaneHeaderView: NSView {
     /// A grid pane's bar is `height:30px`; the focused card's is `34px` (design
     /// line 1070). A pane reads `currentHeight` rather than either static: the
@@ -2193,30 +2194,31 @@ final class PaneHeaderView: NSView {
     var isZoomAvailable = false {
         didSet {
             guard isZoomAvailable != oldValue else { return }
-            applyControlVisibility()
+            applyControlState()
         }
     }
 
     /// Every item in the menu talks to a running engine, so a browser pane has
-    /// no menu rather than an all-greyed one.
+    /// no menu rather than an all-greyed one. The ⋯ is not part of the cluster,
+    /// so it is the one control that may still leave rather than grey out.
     var isMenuAvailable = false {
         didSet {
             guard isMenuAvailable != oldValue else { return }
-            applyControlVisibility()
+            applyControlState()
         }
     }
 
     /// The whole focus treatment, from the focused card at design line 1070: a
-    /// taller bar with more air in it, a bigger and brighter title, the
-    /// `session · terminal N of M` subtitle, and the labelled `Exit focus ·
-    /// esc` pill where the 20pt zoom icon sits in the grid. That last swap is
-    /// the point of the exercise — the control that got you in must not look
-    /// like the control that gets you out.
+    /// taller bar with more air in it, a bigger and brighter title, and the
+    /// `session · terminal N of M` subtitle. The controls do not move — the
+    /// cluster answers a zoom by swapping which discs are live, which is the
+    /// point of a cluster: the way out is already on screen, in the place it
+    /// will always be, rather than a control that appears where another was.
     var isZoomed = false {
         didSet {
             guard isZoomed != oldValue else { return }
             applyEmphasis()
-            applyControlVisibility()
+            applyControlState()
             refreshSubtitle()
             // The pane's layout reads `currentHeight`, and a subview growing
             // does not invalidate its parent's layout by itself.
@@ -2231,8 +2233,10 @@ final class PaneHeaderView: NSView {
     private let engineBadge = PaneBadgeView()
     private let branchBadge = PaneBadgeView()
     private let menuButton: PaneHeaderButton
-    private let focusButton: PaneHeaderButton
-    private let exitFocusButton: PaneHeaderButton
+    /// The cluster, in the order it reads: yellow restores the pane from a
+    /// zoom, green blows it up, red closes it.
+    private let restoreButton: PaneHeaderButton
+    private let zoomButton: PaneHeaderButton
     private let closeButton: PaneHeaderButton
 
     private var mouseDownEvent: NSEvent?
@@ -2252,8 +2256,8 @@ final class PaneHeaderView: NSView {
             color: NSColor(srgbRed: 92 / 255, green: 92 / 255, blue: 102 / 255, alpha: 1)
         )
         menuButton = PaneHeaderButton(glyph: .menu)
-        focusButton = PaneHeaderButton(glyph: .focus)
-        exitFocusButton = PaneHeaderButton(glyph: .exitFocus, label: "Exit focus · esc")
+        restoreButton = PaneHeaderButton(glyph: .restore)
+        zoomButton = PaneHeaderButton(glyph: .expand)
         closeButton = PaneHeaderButton(glyph: .close)
         super.init(frame: .zero)
         wantsLayer = true
@@ -2262,26 +2266,30 @@ final class PaneHeaderView: NSView {
         subtitleLabel.isHidden = true
         engineBadge.isHidden = true
         branchBadge.isHidden = true
-        focusButton.onClick = { [weak self] in self?.onZoomRequested?() }
-        // The same toggle, reached from the other side: the pill exists only
+        zoomButton.onClick = { [weak self] in self?.onZoomRequested?() }
+        // The same toggle, reached from the other side: yellow is live only
         // while this pane is zoomed, so "toggle" there can only mean "get out".
-        exitFocusButton.onClick = { [weak self] in self?.onZoomRequested?() }
+        restoreButton.onClick = { [weak self] in self?.onZoomRequested?() }
         closeButton.onClick = { [weak self] in self?.onCloseRequested?() }
-        closeButton.isTrafficLight = true
+        restoreButton.trafficLight = .yellow
+        zoomButton.trafficLight = .green
+        closeButton.trafficLight = .red
         menuButton.onClick = { [weak self] in
             guard let self else { return }
             self.onMenuRequested?(self.menuButton)
         }
+        // Added left to right, the order they are laid out in, so the subview
+        // order a reader — or a test — walks is the order on screen.
         let views: [NSView] = [
             mark, titleLabel, subtitleLabel, engineBadge, branchBadge,
-            menuButton, focusButton, exitFocusButton, closeButton,
+            menuButton, restoreButton, zoomButton, closeButton,
         ]
         for view in views { addSubview(view) }
         // Same reason the surface applies its cursor state up front: the header
         // starts unfocused and unzoomed, so the didSets that dim the title and
         // pick the controls never fire for a pane that is never selected.
         applyEmphasis()
-        applyControlVisibility()
+        applyControlState()
         setAccessibilityElement(false)
     }
 
@@ -2308,15 +2316,20 @@ final class PaneHeaderView: NSView {
             : NSColor(srgbRed: 154 / 255, green: 154 / 255, blue: 164 / 255, alpha: 1)
     }
 
-    /// Which trailing control the bar offers. Exactly one of the zoom icon and
-    /// the exit pill is ever present, and the close button steps aside while
-    /// zoomed (the design's focused card has none): closing the terminal you
-    /// just blew up over the others is not what the card is for, and ⌘W still
-    /// does it.
-    private func applyControlVisibility() {
-        focusButton.isHidden = !isZoomAvailable || isZoomed
-        exitFocusButton.isHidden = !isZoomed
-        closeButton.isHidden = isZoomed
+    /// Which discs are live. All three are always *there*: a cluster is read by
+    /// position, so a control that cannot act right now greys out where it
+    /// stands rather than letting the others slide into its place.
+    ///
+    /// - Yellow only means something once there is a zoom to come back from.
+    /// - Green is the way in, so it is off while you are already in — and off
+    ///   entirely with a single pane on screen, which has nothing to zoom over.
+    /// - Red goes off while zoomed for the reason the design's focused card
+    ///   carried no close button at all: closing the terminal you just blew up
+    ///   over the others is not what the card is for, and ⌘W still does it.
+    private func applyControlState() {
+        restoreButton.isEnabled = isZoomed
+        zoomButton.isEnabled = isZoomAvailable && !isZoomed
+        closeButton.isEnabled = !isZoomed
         menuButton.isHidden = !isMenuAvailable
         needsLayout = true
     }
@@ -2379,10 +2392,11 @@ final class PaneHeaderView: NSView {
         // The title takes what is left, which is what makes a narrow pane drop
         // the branch and then the engine rather than clipping its own name.
         var right = bounds.maxX - currentTrailingInset
-        // A hidden control gives its slot back to the title rather than leaving
-        // a gap where a button used to be — which is how the zoom icon's slot,
-        // and the close button's while zoomed, go to the name.
-        for button in [closeButton, focusButton, exitFocusButton, menuButton] where !button.isHidden {
+        // Right to left, so the cluster reads yellow, green, red — and abutting,
+        // which puts 20pt between disc centres exactly as macOS does. Only the
+        // ⋯ ever hides, and when it does its slot goes back to the title rather
+        // than leaving a gap where a button used to be.
+        for button in [closeButton, zoomButton, restoreButton, menuButton] where !button.isHidden {
             let size = button.intrinsicContentSize
             right -= size.width
             button.frame = CGRect(
@@ -2529,9 +2543,9 @@ final class PaneStatusMarkView: NSView {
             let blink = CAKeyframeAnimation(keyPath: "opacity")
             blink.values = [1, 0.25]
             blink.calculationMode = .discrete
-            // ponytail: 10ms per state -- at/below a 60Hz frame, so it strobes
-            // rather than reads as on/off there; fine on 120Hz.
-            blink.duration = 0.02
+            // ponytail: ~33ms per state -- two frames on, two off at 60Hz. 10ms
+            // is under one frame there and aliases into an irregular shimmer.
+            blink.duration = 0.067
             blink.repeatCount = .infinity
             layer?.add(blink, forKey: "om-pulse")
             return
