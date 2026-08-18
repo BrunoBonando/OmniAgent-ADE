@@ -435,11 +435,66 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertTrue(sidebar.sessionsTree.showsNewTerminalRow)
     }
 
-    /// One pane is printed as a bare count; more than one gets the grid shape.
-    func testTheGridBadgeMatchesTheLadder() {
-        XCTAssertEqual(SessionRowView.badgeText(paneCount: 1), "1")
-        XCTAssertEqual(SessionRowView.badgeText(paneCount: 2), "1×2")
-        XCTAssertEqual(SessionRowView.badgeText(paneCount: 4), "2×2")
+    /// A terminal blocked on a question wears the amber pill beside its engine
+    /// icon — until it is the selected one, whose ask is on screen already.
+    func testAnAwaitingTerminalRowWearsTheBadgeUntilSelected() {
+        let awaiting = TerminalRowView(
+            pane: pane("t1", group: "s1"), focused: false, status: .awaitingApproval
+        )
+        XCTAssertEqual(awaiting.awaitingBadge?.count, 1)
+        let selected = TerminalRowView(
+            pane: pane("t1", group: "s1"), focused: true, status: .awaitingApproval
+        )
+        XCTAssertNil(selected.awaitingBadge)
+        let working = TerminalRowView(
+            pane: pane("t1", group: "s1"), focused: false, status: .thinking
+        )
+        XCTAssertNil(working.awaitingBadge)
+    }
+
+    /// Expanded, the terminal rows underneath carry the badge; collapsed, the
+    /// session row aggregates them at its right edge, next to the dots.
+    func testOnlyACollapsedSessionRowAggregatesTheWaitingCount() {
+        let expanded = SessionRowView(
+            session: sessionNode(label: "s"),
+            expanded: true,
+            statuses: [.awaitingApproval],
+            awaitingCount: 2
+        )
+        XCTAssertNil(expanded.awaitingBadge)
+        let collapsed = SessionRowView(
+            session: sessionNode(label: "s"),
+            expanded: false,
+            statuses: [.awaitingApproval],
+            awaitingCount: 2
+        )
+        XCTAssertEqual(collapsed.awaitingBadge?.count, 2)
+        let quiet = SessionRowView(
+            session: sessionNode(label: "s"),
+            expanded: false,
+            statuses: [.ready],
+            awaitingCount: 0
+        )
+        XCTAssertNil(quiet.awaitingBadge)
+    }
+
+    /// End to end through the tree: collapsing the current session rolls its
+    /// blocked terminals into one count, minus the focused one — selected
+    /// counts as seen, the same rule that clears a terminal row's own badge.
+    func testACollapsedSessionCountsItsUnseenAsks() throws {
+        let sidebar = makeSidebar()
+        let panes = (1...3).map { pane("t\($0)", group: "s1") }
+        let statuses: [String: RemoteSessionStatus] = [
+            "t1": .awaitingApproval, "t2": .awaitingApproval, "t3": .awaitingApproval,
+        ]
+        sidebar.reloadSessions(
+            panes: panes, focusedPaneID: "t1", statuses: statuses, project: "p1"
+        )
+        let row = try XCTUnwrap(sidebar.sessionsTree.descendant(SessionRowView.self))
+        XCTAssertNil(row.awaitingBadge, "expanded: the terminal rows carry it")
+        row.onPress?()
+        let collapsed = try XCTUnwrap(sidebar.sessionsTree.descendant(SessionRowView.self))
+        XCTAssertEqual(collapsed.awaitingBadge?.count, 2, "three asks, one focused")
     }
 
     func testStatusDotColoursFollowTheDesign() {
@@ -550,5 +605,17 @@ final class WorkspaceShellTests: XCTestCase {
         )
         node.gitBadge = badge
         return node
+    }
+}
+
+private extension NSView {
+    /// Depth-first search for the tree tests — the rows live in a private
+    /// stack, and walking the view tree is how a test sees what a user sees.
+    func descendant<View: NSView>(_ type: View.Type) -> View? {
+        for subview in subviews {
+            if let match = subview as? View { return match }
+            if let match = subview.descendant(type) { return match }
+        }
+        return nil
     }
 }

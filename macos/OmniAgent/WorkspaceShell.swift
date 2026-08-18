@@ -1250,6 +1250,44 @@ final class WorkspaceNavRowView: ShellRowView {
 
 // MARK: - Level 2 · sessions tree
 
+/// The amber "inputs waiting" pill: the count of terminals blocked on a
+/// question. Worn by a collapsed session row (aggregate) and by an awaiting
+/// terminal row (its own 1) — the same badge, so the eye learns it once.
+final class ShellAwaitingBadgeView: NSView {
+    let count: Int
+
+    init(count: Int) {
+        self.count = count
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        layer?.cornerCurve = .continuous
+        layer?.backgroundColor = ShellPalette.amber.withAlphaComponent(0.12).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = ShellPalette.amber.withAlphaComponent(0.26).cgColor
+        let label = ShellFont.label(
+            "\(count)",
+            font: ShellFont.mono(11, .semibold),
+            color: ShellPalette.amber
+        )
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            widthAnchor.constraint(greaterThanOrEqualToConstant: 16),
+            widthAnchor.constraint(equalTo: label.widthAnchor, constant: 10),
+            heightAnchor.constraint(equalToConstant: 16),
+        ])
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(count == 1 ? "1 input waiting" : "\(count) inputs waiting")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
 /// A session row — the collapsible parent of a set of terminals.
 final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     let session: SessionGroupNode
@@ -1261,11 +1299,18 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     private let chevron: ShellGlyphView
     private let titleField: NSTextField
     private let dots = ShellDotsView()
-    private let badgeField: NSTextField
     private let bar = NSView()
     private let isCurrent: Bool
+    /// The amber waiting-inputs count, worn only while the row is collapsed —
+    /// expanded, the terminal rows underneath carry their own.
+    private(set) var awaitingBadge: ShellAwaitingBadgeView?
 
-    init(session: SessionGroupNode, expanded: Bool, statuses: [RemoteSessionStatus?]) {
+    init(
+        session: SessionGroupNode,
+        expanded: Bool,
+        statuses: [RemoteSessionStatus?],
+        awaitingCount: Int = 0
+    ) {
         self.session = session
         isCurrent = session.isCurrent
         chevron = ShellGlyphView(
@@ -1278,11 +1323,6 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             session.label,
             font: ShellFont.ui(14.5, session.isCurrent ? .semibold : .medium),
             color: session.isCurrent ? ShellPalette.ink : ShellPalette.inkSecondary
-        )
-        badgeField = ShellFont.label(
-            SessionRowView.badgeText(paneCount: session.paneIDs.count),
-            font: ShellFont.mono(12, .medium),
-            color: session.isCurrent ? ShellPalette.accent : ShellPalette.inkFaint
         )
         super.init(frame: .zero)
 
@@ -1302,7 +1342,7 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             pulsing: Set(statuses.enumerated().compactMap { ShellDotsView.pulses($1) ? $0 : nil })
         )
 
-        for view in [bar, chevron, titleField, dots, badgeField] { addSubview(view) }
+        for view in [bar, chevron, titleField, dots] { addSubview(view) }
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             bar.widthAnchor.constraint(equalToConstant: 2.5),
@@ -1316,18 +1356,26 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
             titleField.trailingAnchor.constraint(equalTo: dots.leadingAnchor, constant: -8),
 
-            dots.trailingAnchor.constraint(equalTo: badgeField.leadingAnchor, constant: -8),
             dots.centerYAnchor.constraint(equalTo: centerYAnchor),
-
-            badgeField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            badgeField.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             topAnchor.constraint(equalTo: titleField.topAnchor, constant: -6),
             bottomAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 6),
         ])
+        // Collapsed, the row is all its terminals get to say — the waiting
+        // count rides the right edge, where the eye already checks the dots.
+        if !expanded, awaitingCount > 0 {
+            let badge = ShellAwaitingBadgeView(count: awaitingCount)
+            awaitingBadge = badge
+            addSubview(badge)
+            NSLayoutConstraint.activate([
+                dots.trailingAnchor.constraint(equalTo: badge.leadingAnchor, constant: -8),
+                badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+                badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ])
+        } else {
+            dots.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8).isActive = true
+        }
         dots.setContentCompressionResistancePriority(.init(751), for: .horizontal)
-        badgeField.setContentCompressionResistancePriority(.required, for: .horizontal)
-        badgeField.setContentHuggingPriority(.required, for: .horizontal)
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         refreshBackground()
         setAccessibilityLabel("Session \(session.label)")
@@ -1350,15 +1398,6 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             fill = .clear
         }
         layer?.backgroundColor = fill.cgColor
-    }
-
-    /// The design prints the pane count for a lone terminal and the grid shape
-    /// otherwise, rows first: 4 panes ladder to 2 columns × 2 rows and read
-    /// "2×2", 2 panes read "1×2".
-    static func badgeText(paneCount: Int) -> String {
-        guard paneCount > 1 else { return "\(max(0, paneCount))" }
-        let shape = PaneGrid.shape(count: paneCount)
-        return "\(shape.rows)×\(shape.cols)"
     }
 
     // MARK: Rename
@@ -1453,6 +1492,10 @@ final class TerminalRowView: ShellRowView, NSTextFieldDelegate {
     /// What the row shows now — the editor opens on this, and a cancelled or
     /// empty rename puts it back.
     private let displayedName: String
+    /// The amber waiting pill beside the engine icon while this terminal is
+    /// blocked on a question. Selecting the terminal is what clears it — the
+    /// row is focused, the approval bar is on screen, the ask is answered.
+    private(set) var awaitingBadge: ShellAwaitingBadgeView?
 
     init(pane: PaneDescriptor, focused: Bool, status: RemoteSessionStatus?) {
         paneID = pane.sessionID
@@ -1505,13 +1548,26 @@ final class TerminalRowView: ShellRowView, NSTextFieldDelegate {
         }
 
         for view in [icon, title, statusGlyph] { addSubview(view) }
+        // An unselected terminal blocked on a question wears the amber pill
+        // right beside its engine icon; selecting the row retires it.
+        if status == .awaitingApproval, !focused {
+            let badge = ShellAwaitingBadgeView(count: 1)
+            awaitingBadge = badge
+            addSubview(badge)
+            NSLayoutConstraint.activate([
+                badge.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+                badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+                title.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 6),
+            ])
+        } else {
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7).isActive = true
+        }
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 18),
             icon.heightAnchor.constraint(equalToConstant: 18),
 
-            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7),
             title.centerYAnchor.constraint(equalTo: centerYAnchor),
             title.trailingAnchor.constraint(equalTo: statusGlyph.leadingAnchor, constant: -7),
 
@@ -1810,7 +1866,12 @@ final class SessionsTreeView: NSView {
             let row = SessionRowView(
                 session: session,
                 expanded: expanded,
-                statuses: session.paneIDs.map { statuses[$0] }
+                statuses: session.paneIDs.map { statuses[$0] },
+                // The focused terminal's ask is on screen already — it counts
+                // as seen, the same rule that clears its own row's badge.
+                awaitingCount: session.paneIDs
+                    .filter { statuses[$0] == .awaitingApproval && $0 != focusedPaneID }
+                    .count
             )
             row.onPress = { [weak self] in
                 guard let self else { return }
