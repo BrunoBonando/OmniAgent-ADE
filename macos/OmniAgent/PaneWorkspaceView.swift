@@ -1405,18 +1405,23 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// `#0c0c0f` — the pane body behind the terminal, from the design's grid.
     static let paneBackgroundColor = NSColor(srgbRed: 12 / 255, green: 12 / 255, blue: 15 / 255, alpha: 1)
     /// Focus is the thing you look for most often in a grid of eight, so the
-    /// selected pane's ring is a solid accent line and the rest recede to a
+    /// selected pane's ring is a solid line and the rest recede to a
     /// hairline. At the old 0.45 the two were near enough that you had to hunt
     /// for the pane you were typing into.
     static let idleBorderColor = NSColor(white: 1, alpha: 0.06)
+    /// What the focused ring falls back to while nothing has been reported
+    /// yet — with a live status the ring wears that status's own colour
+    /// instead (see `borderColor`).
     static let focusedBorderColor = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.85)
     /// The accent wash the selected pane's header carries, so the highlight is
     /// legible even where a neighbouring pane's ring sits right beside it.
     static let focusedHeaderTint = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.11)
-    /// `box-shadow:0 0 0 1px rgba(240,180,70,.35)` — a pane that has stopped to
-    /// ask something outranks focus, because it is the one the user must act on.
-    static let awaitingBorderColor = NSColor(srgbRed: 240 / 255, green: 180 / 255, blue: 70 / 255, alpha: 0.55)
-    static let errorBorderColor = NSColor(srgbRed: 242 / 255, green: 85 / 255, blue: 90 / 255, alpha: 0.55)
+    /// How solid the status-coloured ring is: bright on the focused pane, and
+    /// still clearly visible on an unfocused one that has stopped to ask
+    /// something or errored — urgency outranks focus, because that pane is
+    /// the one the user must act on.
+    static let focusedRingAlpha: CGFloat = 0.85
+    static let urgentRingAlpha: CGFloat = 0.55
     static let dropTargetBorderColor = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 1)
 
     var isFocused = false {
@@ -1697,14 +1702,24 @@ final class PaneContainerView: NSView, NSDraggingSource {
         approvalPollTimer?.invalidate()
     }
 
-    /// Which colour the 1pt ring takes. Ordered by urgency: a drop in flight,
-    /// then a question the agent is blocked on, then an error, then focus.
+    /// Which colour the 1pt ring takes: a drop in flight first, then the
+    /// pane's live status in the sidebar's own palette — the ring, the
+    /// header's mark and the tree's dots must never disagree, which is why
+    /// this reads `PaneStatusMarkView.color(for:)` instead of keeping its own
+    /// copies. Focus brightens the ring; a question or an error keeps it
+    /// visible even on an unfocused pane, whose other statuses recede to the
+    /// hairline (the mark and the wash still carry them there).
     private var borderColor: NSColor {
         if isDropTarget { return Self.dropTargetBorderColor }
+        if isFocused {
+            guard let status else { return Self.focusedBorderColor }
+            return PaneStatusMarkView.color(for: status).withAlphaComponent(Self.focusedRingAlpha)
+        }
         switch status {
-        case .awaitingApproval: return Self.awaitingBorderColor
-        case .error: return Self.errorBorderColor
-        default: return isFocused ? Self.focusedBorderColor : Self.idleBorderColor
+        case .awaitingApproval, .error:
+            return PaneStatusMarkView.color(for: status).withAlphaComponent(Self.urgentRingAlpha)
+        default:
+            return Self.idleBorderColor
         }
     }
 
@@ -1981,6 +1996,8 @@ final class PaneHeaderView: NSView {
         didSet {
             guard status != oldValue else { return }
             mark.status = status
+            // The focused bar's bottom hairline wears the status colour too.
+            needsDisplay = true
         }
     }
 
@@ -2194,7 +2211,11 @@ final class PaneHeaderView: NSView {
         }
         bounds.fill()
         if isFocused {
-            PaneContainerView.focusedBorderColor.withAlphaComponent(0.4).setFill()
+            // The ring's own colour, dimmed — status first, accent while
+            // nothing has been reported yet, same rule as the border.
+            let ring = status.map(PaneStatusMarkView.color(for:))
+                ?? PaneContainerView.focusedBorderColor
+            ring.withAlphaComponent(0.4).setFill()
         } else {
             NSColor(white: 1, alpha: 0.07).setFill()
         }

@@ -546,30 +546,48 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
     // MARK: - Header chrome
 
-    /// The border says what the pane is doing, and "I have stopped to ask you
-    /// something" outranks "you are looking at me" — a focused pane already
-    /// reads as focused from everything else on screen.
-    func testThePaneBorderFollowsStatusAndUrgencyOutranksFocus() {
+    /// The border says what the pane is doing, in the same colours the
+    /// sidebar's dots and the header's mark already use — one mapping, not
+    /// three. Focus brightens the ring; a question or an error keeps a visible
+    /// ring even on a pane you are not looking at, because that pane is the
+    /// one the user must act on.
+    func testThePaneBorderWearsTheStatusColourAndUrgencySurvivesUnfocus() {
         let workspace = makeWorkspace(panes: 2)
         let target = workspace.container(for: "pane-1")!
         workspace.focusPane("pane-1")
+        // Before anything has been reported, focus falls back to the accent.
         XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.focusedBorderColor.cgColor)
 
-        workspace.setStatus(.awaitingApproval, for: "pane-1")
-        XCTAssertEqual(target.status, .awaitingApproval)
-        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.awaitingBorderColor.cgColor)
-
-        workspace.setStatus(.error, for: "pane-1")
-        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.errorBorderColor.cgColor)
-
-        workspace.setStatus(.ready, for: "pane-1")
-        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.focusedBorderColor.cgColor)
+        func ring(_ status: RemoteSessionStatus, alpha: CGFloat) -> CGColor {
+            PaneStatusMarkView.color(for: status).withAlphaComponent(alpha).cgColor
+        }
+        for status: RemoteSessionStatus in [.ready, .thinking, .toolExecution, .awaitingApproval, .error] {
+            workspace.setStatus(status, for: "pane-1")
+            XCTAssertEqual(target.status, status)
+            XCTAssertEqual(
+                target.layer?.backgroundColor,
+                ring(status, alpha: PaneContainerView.focusedRingAlpha),
+                "a focused pane's ring wears its own status colour (\(status))"
+            )
+        }
 
         // An unfocused pane still shows urgency; that is the whole point of
-        // being able to see it from the other side of the grid.
+        // being able to see it from the other side of the grid. Everything
+        // else recedes to the hairline — the mark and the wash still carry
+        // the status there.
         workspace.focusPane("pane-2")
         workspace.setStatus(.awaitingApproval, for: "pane-1")
-        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.awaitingBorderColor.cgColor)
+        XCTAssertEqual(
+            target.layer?.backgroundColor,
+            ring(.awaitingApproval, alpha: PaneContainerView.urgentRingAlpha)
+        )
+        workspace.setStatus(.error, for: "pane-1")
+        XCTAssertEqual(
+            target.layer?.backgroundColor,
+            ring(.error, alpha: PaneContainerView.urgentRingAlpha)
+        )
+        workspace.setStatus(.ready, for: "pane-1")
+        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.idleBorderColor.cgColor)
     }
 
     /// The ring has to survive the corners. It is the container's background
