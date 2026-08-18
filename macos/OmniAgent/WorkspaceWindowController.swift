@@ -384,6 +384,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.onOpenFile = { [weak self] url, pinned in
             self?.openFileInEditor(url, pinned: pinned)
         }
+        shellSidebar.onOpenDiff = { [weak self] url in self?.openDiffInEditor(url) }
         shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
         // Asking the login shell for its PATH spawns a shell; do it now, off
         // the main thread, so the first terminal does not wait for it.
@@ -1430,6 +1431,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             newBrowserPane(nil)
         case .newEditorPane:
             newEditorPane(nil)
+        case let .openDiffForCurrentFile(path):
+            openDiffInEditor(URL(fileURLWithPath: path))
         case .newSession:
             newSession(nil)
         // Interrupt and reattach are the focused terminal's own responder
@@ -2010,7 +2013,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             editor.onLastTabClosed = { [weak self] in
                 self?.workspace.closePane(sessionID)
             }
-            editor.onOpenDiffRequest = { [weak self] url in self?.openDiffInEditor(url) }
+            // The pane that asked travels with the request: the callback
+            // carries only a URL, and by the time a ± toggle is pressed the
+            // focused pane is often somewhere else entirely.
+            editor.onOpenDiffRequest = { [weak self] url in
+                self?.openDiffInEditor(url, from: sessionID)
+            }
             // `workspaceDirectory(for:)` already falls back to the open
             // workspace when the pane carries no project of its own.
             editor.workspaceRoot = workspaceDirectory(for: pane.project)
@@ -2019,12 +2027,37 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         return true
     }
 
-    /// The tab strip's diff toggle asked for a diff of `url`. Task 12 gives
-    /// this a real body (the HEAD blob plus `EditorPaneView.openDiff`); it is
-    /// landed empty now so the editor wiring above is complete rather than
-    /// half-connected.
-    func openDiffInEditor(_ url: URL) {
-        // Task 12.
+    /// The tab strip's ± toggle, a FILES-tree badge click or the ⌘K row asked
+    /// for `url`'s diff against HEAD.
+    ///
+    /// Three rungs, in order:
+    ///
+    /// 1. A diff of this file already open **anywhere** is focused rather
+    ///    than opened twice — Task 11's workspace-wide no-duplicates rule,
+    ///    applied to diffs.
+    /// 2. `origin`, the pane whose strip asked. Focus has usually moved on by
+    ///    then, so "the focused pane" would be the wrong answer.
+    /// 3. `targetEditorPane()`, the same routing a FILES-tree click uses —
+    ///    last-focused editor, any editor, or a new one. `nil` only when the
+    ///    grid is full and none of it is an editor, and then this does
+    ///    nothing, exactly like ⇧⌘E.
+    func openDiffInEditor(_ url: URL, from origin: String? = nil) {
+        for id in workspace.allPaneIDs {
+            guard let pane = workspace.editorPane(for: id),
+                  pane.model.index(of: url.path, kind: .diff) != nil
+            else { continue }
+            workspace.focusPane(id)
+            pane.openDiff(url)
+            return
+        }
+        if let origin, let pane = workspace.editorPane(for: origin) {
+            workspace.focusPane(origin)
+            pane.openDiff(url)
+            return
+        }
+        guard let target = targetEditorPane() else { return }
+        workspace.focusPane(target.id)
+        target.pane.openDiff(url)
     }
 
     /// The daemon restarted and forgot this session.

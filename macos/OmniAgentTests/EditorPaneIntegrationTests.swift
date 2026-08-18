@@ -417,7 +417,101 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertTrue(workspace.allPaneIDs.allSatisfy { workspace.descriptor(for: $0)?.kind != .editor })
     }
 
+    // MARK: - Diffs (Task 12)
+
+    /// The strip's ± toggle, the FILES badge and the palette all land here: a
+    /// diff tab, always pinned — asking for a diff is never accidental.
+    func testOpenDiffCreatesAPinnedDiffTab() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        controller.openDiffInEditor(try makeTempFile("a.swift", "x"))
+
+        let pane = try XCTUnwrap(firstEditorPane(in: controller))
+        XCTAssertEqual(pane.model.tabs.map(\.kind), [.diff])
+        XCTAssertTrue(pane.model.tabs[0].isPinned)
+    }
+
+    /// The ± toggle belongs to a *particular* pane, and the callback carries
+    /// no pane id — so the wiring has to remember which pane asked. Focus has
+    /// usually moved on by the time a request lands.
+    func testTheStripsDiffRequestOpensInTheAskingPane() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let asking = try XCTUnwrap(workspace.focusedPaneID)
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let other = try XCTUnwrap(workspace.focusedPaneID)
+        let file = try makeTempFile("a.swift", "x")
+
+        try XCTUnwrap(workspace.editorPane(for: asking)?.onOpenDiffRequest)(file)
+
+        XCTAssertEqual(workspace.editorPane(for: asking)?.model.tabs.map(\.kind), [.diff])
+        XCTAssertEqual(workspace.editorPane(for: other)?.model.tabs.count, 0, "not the pane that happened to be focused")
+        XCTAssertEqual(workspace.focusedPaneID, asking, "and focus follows the diff")
+    }
+
+    /// The no-duplicates rule is workspace-wide (Task 11's, applied to diffs):
+    /// a diff already open anywhere is focused rather than opened again.
+    func testADiffAlreadyOpenAnywhereIsFocusedNotDuplicated() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let first = try XCTUnwrap(workspace.focusedPaneID)
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let second = try XCTUnwrap(workspace.focusedPaneID)
+        let file = try makeTempFile("a.swift", "x")
+        try XCTUnwrap(workspace.editorPane(for: first)?.onOpenDiffRequest)(file)
+
+        try XCTUnwrap(workspace.editorPane(for: second)?.onOpenDiffRequest)(file)
+
+        XCTAssertEqual(workspace.editorPane(for: first)?.model.tabs.count, 1)
+        XCTAssertEqual(workspace.editorPane(for: second)?.model.tabs.count, 0)
+        XCTAssertEqual(workspace.focusedPaneID, first)
+    }
+
+    /// The palette row runs the same method the toggle does.
+    func testThePaletteOpensTheDiffForTheFocusedEditorsFile() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "x")
+
+        controller.run(.openDiffForCurrentFile(path: file.path))
+
+        let pane = try XCTUnwrap(firstEditorPane(in: controller))
+        XCTAssertEqual(pane.model.tabs.map(\.path), [file.path])
+        XCTAssertEqual(pane.model.tabs.map(\.kind), [.diff])
+    }
+
+    /// The sidebar's badge click is the third entry point, and it goes through
+    /// the same chain the file rows already use.
+    func testTheSidebarsBadgeClickReachesTheEditor() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "x")
+
+        try XCTUnwrap(controller.shellSidebar.onOpenDiff)(file)
+
+        let pane = try XCTUnwrap(firstEditorPane(in: controller))
+        XCTAssertEqual(pane.model.tabs.map(\.kind), [.diff])
+    }
+
     // MARK: - Helpers
+
+    /// The first editor pane in grid order — the routing rules decide *which*
+    /// pane, and every diff/changes test only cares that exactly one got it.
+    private func firstEditorPane(in controller: WorkspaceWindowController) -> EditorPaneView? {
+        controller.workspaceView.allPaneIDs.lazy
+            .compactMap { controller.workspaceView.editorPane(for: $0) }
+            .first
+    }
 
     /// A real file on disk — `EditorPaneView.openFile` stats and reads it.
     private func makeTempFile(_ name: String, _ contents: String) throws -> URL {

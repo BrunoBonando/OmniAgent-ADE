@@ -655,6 +655,132 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(opened.map(\.1), [true])
     }
 
+    // MARK: - Opening diffs (Task 12)
+
+    /// The git badge is its own hit target: clicking the "M" asks for the
+    /// diff, clicking anywhere else in the row still opens the file.
+    func testTheGitBadgeIsItsOwnClickTarget() throws {
+        let row = WorkspaceFileRowView(node: file(badge: .modified), depth: 0, expanded: false, selected: false)
+        var presses = 0
+        var badgePresses = 0
+        row.onPress = { presses += 1 }
+        row.onBadgePress = { badgePresses += 1 }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 280, height: 60),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: true
+        )
+        window.contentView?.addSubview(row)
+        row.frame = NSRect(x: 0, y: 0, width: 280, height: ShellMetrics.fileRowHeight)
+        row.layoutSubtreeIfNeeded()
+        let badge = try XCTUnwrap(row.descendants(NSTextField.self).first { $0.stringValue == "M" })
+
+        click(row, at: NSPoint(x: badge.frame.midX, y: badge.frame.midY), in: window)
+
+        XCTAssertEqual(badgePresses, 1, "the badge answered")
+        XCTAssertEqual(presses, 0, "and the row did not")
+
+        click(row, at: NSPoint(x: 40, y: row.bounds.midY), in: window)
+
+        XCTAssertEqual(presses, 1, "the rest of the row still opens the file")
+        XCTAssertEqual(badgePresses, 1)
+    }
+
+    /// Only a *changed* file has a badge to click, so only a changed file
+    /// carries the callback — an unbadged row must keep its whole width as
+    /// "open this file".
+    func testOnlyChangedFileRowsCarryABadgePress() throws {
+        let tree = WorkspaceFilesTreeView(frame: NSRect(x: 0, y: 0, width: 280, height: 400))
+        var diffed: [URL] = []
+        tree.onOpenDiff = { diffed.append($0) }
+        let directory = try makeTempGitRepository(changed: "a.swift", clean: "b.swift")
+        tree.setRoot(directory)
+
+        let changed = try awaitFileRow(named: "a.swift", in: tree) { $0.node.gitBadge != nil }
+        let clean = try awaitFileRow(named: "b.swift", in: tree) { _ in true }
+        XCTAssertNil(clean.onBadgePress, "a clean row has no badge and no diff to offer")
+        try XCTUnwrap(changed.onBadgePress)()
+
+        XCTAssertEqual(diffed.map(\.lastPathComponent), ["a.swift"])
+    }
+
+    func testTheSidebarForwardsTheTreesDiffRequests() throws {
+        let sidebar = makeSidebar()
+        var diffed: [URL] = []
+        sidebar.onOpenDiff = { diffed.append($0) }
+        let url = URL(fileURLWithPath: "/tmp/a.swift")
+
+        try XCTUnwrap(sidebar.filesTree.onOpenDiff)(url)
+
+        XCTAssertEqual(diffed, [url])
+    }
+
+    /// A real click, at a point in the row rather than through its closure.
+    private func click(_ view: NSView, at point: NSPoint, in window: NSWindow) {
+        let inWindow = view.convert(point, to: nil)
+        func event(_ type: NSEvent.EventType) -> NSEvent? {
+            NSEvent.mouseEvent(
+                with: type,
+                location: inWindow,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            )
+        }
+        guard let down = event(.leftMouseDown), let up = event(.leftMouseUp) else {
+            return XCTFail("could not synthesize a click")
+        }
+        view.mouseDown(with: down)
+        view.mouseUp(with: up)
+    }
+
+    /// A throwaway repository, so the badges under test come from real `git`
+    /// rather than this repo's own working tree (which other sessions move).
+    private func makeTempGitRepository(changed: String, clean: String) throws -> URL {
+        let directory = try makeTempDirectory()
+        func git(_ arguments: String...) throws {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["git", "-C", directory.path] + arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            guard (try? process.run()) != nil else { throw XCTSkip("git is not available on PATH") }
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { throw XCTSkip("git is not usable here") }
+        }
+        try git("init", "-q")
+        try git("config", "user.email", "t@t")
+        try git("config", "user.name", "t")
+        try "x".write(to: directory.appendingPathComponent(clean), atomically: true, encoding: .utf8)
+        try git("add", ".")
+        try git("commit", "-qm", "initial")
+        try "x".write(to: directory.appendingPathComponent(changed), atomically: true, encoding: .utf8)
+        return directory
+    }
+
+    /// The tree loads its listing *and* its `git status` off the main thread,
+    /// so a row worth asserting on may not exist yet.
+    private func awaitFileRow(
+        named name: String,
+        in tree: WorkspaceFilesTreeView,
+        until predicate: (WorkspaceFileRowView) -> Bool
+    ) throws -> WorkspaceFileRowView {
+        let deadline = Date().addingTimeInterval(20)
+        repeat {
+            if let row = tree.descendants(WorkspaceFileRowView.self).first(where: { $0.node.name == name }),
+               predicate(row) {
+                return row
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        } while Date() < deadline
+        throw XCTSkip("the FILES row for \(name) never arrived")
+    }
+
     /// Presses the row for `name`, re-finding it each time: activating a row
     /// re-renders the tree, so the previous row object is already detached.
     private func pressFileRow(named name: String, in tree: WorkspaceFilesTreeView) throws {

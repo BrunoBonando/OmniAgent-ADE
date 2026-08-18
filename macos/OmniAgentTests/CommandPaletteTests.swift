@@ -164,6 +164,64 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(withLabels.first { $0.id == "focus:a" }?.title, "Switch to Alpha Project — Session 1 — Shell 1")
     }
 
+    /// Task 12: the focused editor's active *file* tab can be diffed from the
+    /// palette. Nothing else offers the row — there is no file to diff.
+    func testTheOpenDiffRowFollowsTheFocusedEditorsActiveFileTab() {
+        let rows = CommandPaletteModel.build(
+            panes: [
+                pane(
+                    "ed",
+                    project: "alpha",
+                    group: "g1",
+                    kind: .editor,
+                    editorTabs: [PersistedEditorTab(path: "/w/src/token.swift", kind: "file", pinned: true)]
+                )
+            ],
+            paneOrder: ["ed"],
+            focusedPaneID: "ed",
+            unreadNotifications: 0
+        )
+
+        let row = rows.first { $0.id == "open-diff" }
+        XCTAssertEqual(row?.title, "Open diff for token.swift")
+        XCTAssertEqual(row?.detail, "vs HEAD")
+        XCTAssertEqual(row?.action, .openDiffForCurrentFile(path: "/w/src/token.swift"))
+    }
+
+    func testNothingElseOffersTheOpenDiffRow() {
+        let terminal = CommandPaletteModel.build(
+            panes: [pane("a", project: "alpha", group: "g1")],
+            paneOrder: ["a"],
+            focusedPaneID: "a",
+            unreadNotifications: 0
+        )
+        XCTAssertNil(terminal.first { $0.id == "open-diff" }, "a terminal has no file to diff")
+
+        let alreadyADiff = CommandPaletteModel.build(
+            panes: [
+                pane(
+                    "ed",
+                    project: "alpha",
+                    group: "g1",
+                    kind: .editor,
+                    editorTabs: [PersistedEditorTab(path: "/w/src/token.swift", kind: "diff", pinned: true)]
+                )
+            ],
+            paneOrder: ["ed"],
+            focusedPaneID: "ed",
+            unreadNotifications: 0
+        )
+        XCTAssertNil(alreadyADiff.first { $0.id == "open-diff" }, "the active tab is already the diff")
+
+        let empty = CommandPaletteModel.build(
+            panes: [pane("ed", project: "alpha", group: "g1", kind: .editor)],
+            paneOrder: ["ed"],
+            focusedPaneID: "ed",
+            unreadNotifications: 0
+        )
+        XCTAssertNil(empty.first { $0.id == "open-diff" }, "an editor with no tabs has nothing to diff")
+    }
+
     // MARK: - brain search (Task 6a-2/6b-2)
 
     func testTheSearchBrainRowIsAbsentWithNoQueryAndAppearsOnceThereIsOne() {
@@ -284,7 +342,9 @@ final class CommandPaletteTests: XCTestCase {
         group: String,
         groupLabel: String? = nil,
         label: String? = nil,
-        kind: PaneKind = .terminal
+        kind: PaneKind = .terminal,
+        editorTabs: [PersistedEditorTab] = [],
+        editorActiveIndex: Int = 0
     ) -> PaneDescriptor {
         PaneDescriptor(
             sessionID: id,
@@ -294,7 +354,9 @@ final class CommandPaletteTests: XCTestCase {
             engine: .shell,
             cwd: "/",
             label: label,
-            kind: kind
+            kind: kind,
+            editorTabs: editorTabs,
+            editorActiveIndex: editorActiveIndex
         )
     }
 }

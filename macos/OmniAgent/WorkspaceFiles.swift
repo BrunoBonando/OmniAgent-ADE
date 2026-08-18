@@ -213,7 +213,19 @@ struct GitStatus {
     /// git missing from `PATH`, spawn refused, a non-zero exit (not a
     /// repository, a corrupt index). A sidebar with no badges is a fine
     /// outcome; a crash is not.
-    private static func runGit(_ arguments: [String], in directory: URL) -> String? {
+    ///
+    /// `internal` for `GitFileContent`, which speaks the same subprocess
+    /// dialect (`/usr/bin/env git`, `GIT_OPTIONAL_LOCKS=0`, off the main
+    /// thread) and must not grow a second, subtly different copy of it.
+    ///
+    /// `acceptExitCodes` widens what counts as success for the one caller
+    /// that needs it: `git diff --no-index` exits **1** when the two files
+    /// differ, which is its ordinary answer rather than a failure.
+    static func runGit(
+        _ arguments: [String],
+        in directory: URL,
+        acceptExitCodes: Set<Int32> = [0]
+    ) -> String? {
         let process = Process()
         // `/usr/bin/env` rather than a hard-coded `/usr/bin/git` so a
         // Homebrew or Xcode-toolchain git on the user's PATH is honoured
@@ -243,7 +255,7 @@ struct GitStatus {
         // fill the pipe buffer, and waiting first would deadlock.
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
+        guard acceptExitCodes.contains(process.terminationStatus) else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -393,7 +405,10 @@ struct GitStatus {
 
     /// Symlink-resolved and standardized, so a `/var/folders/...` URL and the
     /// `/private/var/folders/...` the same file also answers to compare equal.
-    private static func canonicalPath(_ url: URL) -> String {
+    ///
+    /// `internal` for `GitFileContent`, whose repo-relative paths have to
+    /// agree with this type's to the character.
+    static func canonicalPath(_ url: URL) -> String {
         url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 }

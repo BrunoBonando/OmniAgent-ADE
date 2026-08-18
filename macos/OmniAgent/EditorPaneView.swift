@@ -218,13 +218,44 @@ final class EditorPaneView: NSView, PaneContentView {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
-    /// Task 12 gives this a real body (HEAD version + `webHost.showDiff`).
-    /// Until then it only opens the tab, so the strip and persistence are
-    /// already exercised by the surrounding plumbing.
+    /// `url`'s working tree against its HEAD version, in Monaco's side-by-side
+    /// diff editor. Always pinned: asking for a diff is never accidental.
+    ///
+    /// The content is fetched by `showActiveContent`, which is also what runs
+    /// when the tab is focused again — one path, so a diff tab always shows
+    /// what git says *now* rather than what it said when the tab was opened.
     func openDiff(_ url: URL) {
         model.open(path: url.path, kind: .diff, asPreview: false)
         syncAll()
         showActiveContent()
+    }
+
+    /// Both sides of the diff. The HEAD side is a subprocess and answers on
+    /// the main thread; by then the user may well have moved to another tab,
+    /// so the answer is dropped unless it is still the one on screen.
+    ///
+    /// The working-tree side is read here rather than taken from Monaco: a
+    /// diff tab is a view of the *file*, and the file's own editor tab may
+    /// not even be open. A file that vanished reads as empty, which is
+    /// exactly the right left-side-only rendering for a deletion.
+    private func loadDiffContent(_ url: URL) {
+        GitFileContent.headVersion(of: url) { [weak self] result in
+            guard let self,
+                  model.activeTab?.path == url.path,
+                  model.activeTab?.kind == .diff
+            else { return }
+            switch result {
+            case let .success(original):
+                let modified = (try? String(contentsOf: url, encoding: .utf8))
+                    ?? (try? String(contentsOf: url, encoding: .isoLatin1))
+                    ?? ""
+                webHost.showDiff(path: url.path, original: original, modified: modified)
+            case .failure:
+                webHost.showMessage(
+                    "Could not load the diff for \(url.lastPathComponent) — is this file in a git repository?"
+                )
+            }
+        }
     }
 
     /// Task 13 gives this a real body (`webHost.showChanges` from `GitStatus`).
@@ -279,7 +310,13 @@ final class EditorPaneView: NSView, PaneContentView {
             let url = URL(fileURLWithPath: tab.path)
             mediaHost.show(url: url, kind: EditorFileClass.classify(url: url))
             setContentVisibility(web: false, media: true, empty: false)
-        case .diff, .changes:
+        case .diff:
+            setContentVisibility(web: true, media: false, empty: false)
+            // Re-queried on every activation, not cached: the working tree
+            // moves under a diff tab constantly (an edit, a stage, a branch
+            // switch), and a stale diff is worse than a slow one.
+            loadDiffContent(URL(fileURLWithPath: tab.path))
+        case .changes:
             setContentVisibility(web: true, media: false, empty: false)
         }
     }

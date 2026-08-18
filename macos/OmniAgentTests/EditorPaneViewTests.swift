@@ -367,6 +367,108 @@ final class EditorPaneViewTests: XCTestCase {
         wait(for: [reread], timeout: 10)
     }
 
+    // MARK: - Diff tabs (Task 12)
+
+    /// The whole Task 12 chain against a **throwaway** repository: the HEAD
+    /// blob and the working tree, handed to Monaco's side-by-side diff editor,
+    /// which really computes the changes. The computation happens on the
+    /// editor web worker, so this is also the pane-level guard on the
+    /// deliberately absent `MonacoEnvironment.getWorkerUrl` override
+    /// (`bridge.js` explains why it must stay absent).
+    func testDiffTabRendersTheWorkingTreeAgainstHead() throws {
+        let repo = try makeGitRepository(committing: "a.swift", "let x = 1\n")
+        let file = repo.appendingPathComponent("a.swift")
+        try "let x = 1\nlet y = 2\n".write(to: file, atomically: true, encoding: .utf8)
+        let pane = makePane()
+        waitUntilReady(pane)
+
+        pane.openDiff(file)
+
+        XCTAssertEqual(pane.model.tabs.map(\.kind), [.diff])
+        XCTAssertTrue(pane.model.tabs[0].isPinned, "a diff open is always deliberate")
+        XCTAssertTrue(
+            pollUntilPositive(pane.webHost, "window.omniagent.diffChangesForTesting()"),
+            "the diff editor never computed the change"
+        )
+    }
+
+    /// A file that is in no repository at all cannot be diffed, and says so
+    /// inside the pane rather than showing two blank editors.
+    func testDiffOutsideARepositorySaysSo() throws {
+        let url = try write("a.swift", "let x = 1")
+        let pane = makePane()
+        waitUntilReady(pane)
+
+        pane.openDiff(url)
+
+        XCTAssertTrue(
+            pollUntilContains(pane.webHost, "document.getElementById('message').textContent", "git repository"),
+            "no explanation ever reached the pane"
+        )
+    }
+
+    /// A throwaway repository of this test's own — never this repo's working
+    /// tree, whose HEAD and index move under a running suite.
+    private func makeGitRepository(committing name: String, _ contents: String) throws -> URL {
+        let repo = dir.appendingPathComponent("repo-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        func git(_ arguments: String...) throws {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["git", "-C", repo.path] + arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            guard (try? process.run()) != nil else { throw XCTSkip("git is not available on PATH") }
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { throw XCTSkip("git is not usable here") }
+        }
+        try git("init", "-q")
+        try git("config", "user.email", "t@t")
+        try git("config", "user.name", "t")
+        try contents.write(to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        try git("add", ".")
+        try git("commit", "-qm", "initial")
+        return repo
+    }
+
+    /// The diff is computed asynchronously by the editor web worker and has no
+    /// bridge event of its own, so it is polled. (`EditorWebViewTests` keeps
+    /// its own copy of this: a shared one would be a test seam in the pane's
+    /// public surface for no product reason.)
+    private func pollUntilPositive(_ view: EditorWebView, _ script: String, timeout: TimeInterval = 20) -> Bool {
+        poll(view, script, timeout: timeout) { ($0 as? NSNumber).map { $0.intValue > 0 } ?? false }
+    }
+
+    private func pollUntilContains(
+        _ view: EditorWebView,
+        _ script: String,
+        _ needle: String,
+        timeout: TimeInterval = 20
+    ) -> Bool {
+        poll(view, script, timeout: timeout) { ($0 as? String)?.contains(needle) ?? false }
+    }
+
+    private func poll(
+        _ view: EditorWebView,
+        _ script: String,
+        timeout: TimeInterval,
+        until satisfied: @escaping (Any?) -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            var answered = false
+            let step = expectation(description: "poll")
+            view.webView.evaluateJavaScript(script) { value, _ in
+                answered = satisfied(value)
+                step.fulfill()
+            }
+            wait(for: [step], timeout: 5)
+            if answered { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        return false
+    }
+
     /// A preview open recycles the preview tab; the evicted file's Monaco
     /// model and bookkeeping must go with it.
     func testPreviewTabRecyclingReleasesTheEvictedFile() throws {

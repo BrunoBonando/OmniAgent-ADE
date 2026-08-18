@@ -10,6 +10,9 @@ enum PaletteAction: Equatable {
     case newBrowserPane
     case newEditorPane
     case newSession
+    /// The focused editor's active file, diffed against HEAD — the palette's
+    /// twin of the tab strip's ± toggle.
+    case openDiffForCurrentFile(path: String)
     case interruptFocusedPane
     case reattachFocusedPane
     case toggleSidebar
@@ -135,6 +138,24 @@ struct CommandPaletteModel: Equatable {
                 commands.append(
                     PaletteCommand(id: "reattach", title: "Reattach \(name)", detail: "⌘R", action: .reattachFocusedPane)
                 )
+            }
+            // Only a *file* tab has something to diff: a media tab is not
+            // text, and a diff tab is already the answer. The descriptor's
+            // persisted tab list is the palette's only view of the pane —
+            // it never reaches into `EditorPaneView` itself.
+            if pane.kind == .editor,
+               pane.editorTabs.indices.contains(pane.editorActiveIndex) {
+                let active = pane.editorTabs[pane.editorActiveIndex]
+                if active.kind == EditorTabKind.file.rawValue {
+                    commands.append(
+                        PaletteCommand(
+                            id: "open-diff",
+                            title: "Open diff for \((active.path as NSString).lastPathComponent)",
+                            detail: "vs HEAD",
+                            action: .openDiffForCurrentFile(path: active.path)
+                        )
+                    )
+                }
             }
         }
         commands.append(

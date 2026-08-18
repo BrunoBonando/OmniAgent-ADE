@@ -1979,8 +1979,18 @@ final class SessionsTreeView: NSView {
 final class WorkspaceFileRowView: ShellRowView {
     let node: WorkspaceFileNode
 
+    /// Pressing the git badge asks for the file's diff instead of opening it.
+    /// `nil` on every row that has no badge to press — a clean file's whole
+    /// width stays "open this file".
+    var onBadgePress: (() -> Void)?
+
     private let chevron: ShellGlyphView?
+    private let badgeField: NSTextField
     private var isSelected: Bool
+    /// Set on a mouse-down that landed on the badge, so the *release* decides
+    /// — a press that starts on the badge and ends elsewhere does nothing, the
+    /// way every other control on the platform behaves.
+    private var badgePressArmed = false
 
     init(node: WorkspaceFileNode, depth: Int, expanded: Bool, selected: Bool) {
         self.node = node
@@ -1988,6 +1998,11 @@ final class WorkspaceFileRowView: ShellRowView {
         chevron = node.isDirectory
             ? ShellGlyphView(.chevronRight, color: ShellPalette.chevron, size: 15, lineWidth: 1.6)
             : nil
+        badgeField = ShellFont.label(
+            WorkspaceFileRowView.badgeText(node),
+            font: ShellFont.mono(node.isDirectory ? 11.5 : 12, .semibold),
+            color: WorkspaceFileRowView.badgeColor(node)
+        )
         super.init(frame: .zero)
 
         wantsLayer = true
@@ -2015,11 +2030,7 @@ final class WorkspaceFileRowView: ShellRowView {
             color: WorkspaceFileRowView.nameColor(node: node, depth: depth, selected: selected)
         )
 
-        let badge = ShellFont.label(
-            WorkspaceFileRowView.badgeText(node),
-            font: ShellFont.mono(node.isDirectory ? 11.5 : 12, .semibold),
-            color: WorkspaceFileRowView.badgeColor(node)
-        )
+        let badge = badgeField
 
         var leading: NSLayoutXAxisAnchor = leadingAnchor
         var offset = indent
@@ -2062,6 +2073,31 @@ final class WorkspaceFileRowView: ShellRowView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
     func setExpanded(_ expanded: Bool) { chevron?.rotated = expanded }
+
+    /// The badge is a small target, so it is grown by 6 pt on every side —
+    /// enough to hit reliably, still far from the name.
+    private func isBadgePoint(_ point: NSPoint) -> Bool {
+        guard onBadgePress != nil, !badgeField.isHidden, !badgeField.stringValue.isEmpty else { return false }
+        return badgeField.frame.insetBy(dx: -6, dy: -6).contains(point)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if isBadgePoint(convert(event.locationInWindow, from: nil)) {
+            badgePressArmed = true
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard badgePressArmed else {
+            super.mouseUp(with: event)
+            return
+        }
+        badgePressArmed = false
+        guard isBadgePoint(convert(event.locationInWindow, from: nil)) else { return }
+        onBadgePress?()
+    }
 
     override func refreshBackground() {
         let fill: NSColor
@@ -2111,6 +2147,8 @@ final class WorkspaceFilesTreeView: NSView {
     /// `(url, pinned)` — VS Code's rule: a single click previews, a double
     /// click pins.
     var onOpenFile: ((URL, Bool) -> Void)?
+    /// A git badge was clicked: show that file's diff against HEAD.
+    var onOpenDiff: ((URL) -> Void)?
 
     private let diffField = ShellFont.label(font: ShellFont.mono(12, .semibold), color: ShellPalette.green)
     private let filterField = NSTextField()
@@ -2303,13 +2341,20 @@ final class WorkspaceFilesTreeView: NSView {
             // matches, otherwise the match would be unreachable.
             if !matches && !node.isDirectory { continue }
 
+            let annotated = annotate(node)
             let row = WorkspaceFileRowView(
-                node: annotate(node),
+                node: annotated,
                 depth: depth,
                 expanded: isOpen,
                 selected: node.url == selected
             )
             row.onPress = { [weak self] in self?.activate(node) }
+            // Only a changed file has a badge, and only a badge is clickable:
+            // a directory's count is an aggregate with no single diff behind
+            // it, and a clean file has nothing to show.
+            if !node.isDirectory, annotated.gitBadge != nil {
+                row.onBadgePress = { [weak self] in self?.onOpenDiff?(node.url) }
+            }
             rows.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
 
@@ -2484,6 +2529,8 @@ final class WorkspaceSidebarView: NSView {
     var onOpenSettings: (() -> Void)?
     /// The FILES tree's `(url, pinned)`, forwarded to the controller.
     var onOpenFile: ((URL, Bool) -> Void)?
+    /// The FILES tree's badge clicks, forwarded to the controller.
+    var onOpenDiff: ((URL) -> Void)?
 
     let picker = WorkspacePickerView()
     let backRow = WorkspaceBackRowView()
@@ -2548,6 +2595,7 @@ final class WorkspaceSidebarView: NSView {
         sessionsTree.onNewBrowser = { [weak self] in self?.onNewBrowser?() }
         sessionsTree.onNewEditor = { [weak self] in self?.onNewEditor?() }
         filesTree.onOpenFile = { [weak self] url, pinned in self?.onOpenFile?(url, pinned) }
+        filesTree.onOpenDiff = { [weak self] url in self?.onOpenDiff?(url) }
         sessionsTree.onRenamePane = { [weak self] paneID, name in
             self?.onRenamePane?(paneID, name)
         }
