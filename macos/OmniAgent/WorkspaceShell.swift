@@ -28,7 +28,7 @@ enum WorkspaceDestination: String, CaseIterable {
         switch self {
         case .dashboard: return "Dashboard"
         case .board: return "Board"
-        case .terminals: return "Terminals"
+        case .terminals: return "Desk"
         }
     }
 
