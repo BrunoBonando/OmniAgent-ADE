@@ -64,7 +64,10 @@ const _: () = assert!(
 // and can match against `screen().contents()` directly.
 
 /// Prompts an engine renders when it is blocked on the user's decision.
-const ATTENTION_MARKERS: &[&str] = &["Do you want to", "Would you like to"];
+/// "Esc to cancel" is the footer every Claude selection dialog shares —
+/// AskUserQuestion, the trust prompt, pickers — measured against v2.1.234;
+/// the working-state hint is the distinct lowercase "esc to interrupt".
+const ATTENTION_MARKERS: &[&str] = &["Do you want to", "Would you like to", "Esc to cancel"];
 
 /// On screen while Claude runs a Bash tool. Deliberately screen state rather
 /// than a stream latch: a running tool is a state that *ends*, and a latch
@@ -1107,7 +1110,14 @@ mod status_tests {
     fn an_approval_prompt_is_recognised() {
         assert!(contains_attention_marker("Do you want to create notes.txt?"));
         assert!(contains_attention_marker("Would you like to continue?"));
+        // The shared selection-dialog footer: AskUserQuestion, trust prompt.
+        assert!(contains_attention_marker(
+            "Enter to select · ↑/↓ to navigate · Esc to cancel"
+        ));
+        assert!(contains_attention_marker("Enter to confirm · Esc to cancel"));
         assert!(!contains_attention_marker("Reading src/main.rs"));
+        // The busy-state hint is lowercase and must not read as blocked.
+        assert!(!contains_attention_marker("esc to interrupt"));
     }
 
     /// `Exit code 0` is a success. Getting this wrong paints a healthy
