@@ -828,6 +828,109 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertFalse(target.model.tabs[0].isDirty)
     }
 
+    /// The prompt hands control back to the run loop, so the strip can move
+    /// under it — and the payload's index is then pointing at somebody else's
+    /// tab. Moving that one would also discard *its* unsaved buffer, so this
+    /// is a data-loss guard, not an off-by-one one.
+    func testATabThatShiftedUnderTheSavePromptIsStillTheOneThatMoves() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let files = try ["a.swift", "b.swift", "c.swift", "d.swift"].map { try makeTempFile($0, "x") }
+        for file in files { controller.openFileInEditor(file, pinned: true) }
+        let sourceID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let source = try XCTUnwrap(controller.workspaceView.editorPane(for: sourceID))
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let targetID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        let target = try XCTUnwrap(controller.workspaceView.editorPane(for: targetID))
+        // c.swift (index 2) is the one dragged; d.swift is dirty too, and is
+        // what index 2 points at once a.swift goes.
+        source.modelForTesting {
+            $0.setDirty(true, at: 2)
+            $0.setDirty(true, at: 3)
+        }
+
+        source.confirmSave = { _, decide in
+            // The user closes a.swift while the prompt is up.
+            source.requestCloseTab(at: 0)
+            decide(.discard)
+        }
+        controller.handleEditorTabDrop(
+            EditorTabDragPayload(paneID: sourceID, index: 2), intoPane: targetID, at: 0
+        )
+
+        XCTAssertEqual(
+            target.model.tabs.map(\.path), [files[2].path],
+            "c.swift travelled — not whatever index 2 points at now"
+        )
+        XCTAssertEqual(source.model.tabs.map(\.path), [files[1].path, files[3].path])
+        XCTAssertTrue(
+            source.model.tabs[1].isDirty,
+            "and d.swift kept its unsaved buffer instead of being lifted and discarded"
+        )
+    }
+
+    /// The case the create-before-lift order exists for: the pane's **only**
+    /// tab, dropped on that same pane's edge. Lifting first closes the source
+    /// — which is also the anchor — and the tab would have nowhere to land.
+    func testEdgeDroppingAPanesOnlyTabOnItsOwnEdgeKeepsTheTab() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let file = try makeTempFile("a.swift", "x")
+        controller.openFileInEditor(file, pinned: true)
+        let paneID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        XCTAssertEqual(controller.workspaceView.editorPane(for: paneID)?.model.tabs.count, 1)
+        let before = controller.workspaceView.paneIDs.count
+
+        controller.handleEditorTabEdgeDrop(
+            EditorTabDragPayload(paneID: paneID, index: 0), target: paneID, zone: .insertBefore
+        )
+
+        XCTAssertNil(controller.workspaceView.editorPane(for: paneID), "the emptied source closed")
+        let holders = controller.workspaceView.paneIDs.filter {
+            controller.workspaceView.editorPane(for: $0)?.model.tabs.contains {
+                $0.path == file.path
+            } == true
+        }
+        XCTAssertEqual(holders.count, 1, "the tab survives, in exactly one pane")
+        XCTAssertEqual(controller.workspaceView.paneIDs.count, before, "one pane traded for one pane")
+    }
+
+    /// An edge drop creates the pane and then lifts the tab, and `addPane`
+    /// publishes synchronously in between. No snapshot written across that
+    /// pair may show the same file open in two panes — a crash landing there
+    /// would restore a duplicate.
+    func testNoPersistedSnapshotEverShowsTheDraggedTabInTwoPanes() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        var rows: [String] = []
+        controller.settingsWriter = { key, value in
+            if key == SettingsKey.editorPanes { rows.append(value) }
+        }
+        controller.showWindow(nil)
+        controller.applyRestoredEditorPanes([])
+        let a = try makeTempFile("a.swift", "x")
+        let b = try makeTempFile("b.swift", "y")
+        controller.openFileInEditor(a, pinned: true)
+        controller.openFileInEditor(b, pinned: true)
+        let paneID = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        rows.removeAll()
+
+        controller.handleEditorTabEdgeDrop(
+            EditorTabDragPayload(paneID: paneID, index: 1), target: paneID, zone: .insertAfter
+        )
+
+        XCTAssertFalse(rows.isEmpty, "the move is persisted")
+        for row in rows {
+            // By name, not by path: the row is JSON, which escapes every "/".
+            XCTAssertEqual(
+                row.components(separatedBy: b.lastPathComponent).count - 1, 1,
+                "b.swift appears once in every snapshot, never in two panes at once: \(row)"
+            )
+        }
+    }
+
     // MARK: - Helpers
 
     /// The first editor pane in grid order — the routing rules decide *which*

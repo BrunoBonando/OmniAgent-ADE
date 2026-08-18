@@ -1518,7 +1518,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     presentSearchResults(hits, for: query)
                 case .failure:
                     palette.present(
-                        commands: [PaletteCommand(id: "search-error", title: "Brain search failed.", detail: nil, action: .noop, section: .brain)],
+                        commands: [PaletteCommand(id: "search-error", title: "Brain search failed.", detail: nil, action: .noop)],
                         over: window
                     )
                 }
@@ -1541,8 +1541,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     id: "no-results",
                     title: "No matches in the brain for \u{201C}\(query)\u{201D}.",
                     detail: nil,
-                    action: .noop,
-                    section: .brain
+                    action: .noop
                 ),
             ]
         } else {
@@ -1551,8 +1550,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     id: "hit:\(hit.id)",
                     title: "\(hit.label) — \(SessionOutline.projectLabel(hit.project, labels: projectLabels))",
                     detail: hit.kind,
-                    action: .revealProjectContext(project: hit.project),
-                    section: .brain
+                    action: .revealProjectContext(project: hit.project)
                 )
             }
         }
@@ -1939,13 +1937,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         if let focused { workspace.focusPane(focused) }
     }
 
+    /// Closed while a drop is creating a pane and lifting the tab into it.
+    /// Those are two synchronous steps of one move, and the write between them
+    /// would persist the tab as open in both panes.
+    private var editorPaneDropInFlight = false
+
     /// Writes the live editor panes back to their own row. Refused until that
     /// row has actually been read — `persistLayout`'s reasoning again. Tab
     /// mutations already flow through `onStateChange` -> `updateDescriptor` ->
     /// `onPanesChanged`, the browser pane's `onURLChange` chain applied to
     /// tabs, so opening or closing a tab persists with no extra plumbing.
     private func persistEditorPanes() {
-        guard editorPanesReadCompleted else { return }
+        guard editorPanesReadCompleted, !editorPaneDropInFlight else { return }
         let panes = workspace.allPaneIDs
             .compactMap { workspace.descriptor(for: $0) }
             .filter { $0.kind == .editor }
@@ -2187,11 +2190,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             )
             return
         }
-        deliverAfterSavePrompt(payload) { [weak self] in
+        deliverAfterSavePrompt(payload) { [weak self] dragged in
             guard let self,
                   let source = workspace.editorPane(for: payload.paneID),
                   let target = workspace.editorPane(for: targetID),
-                  let tab = source.removeTabForTransfer(at: payload.index)
+                  let index = source.model.index(of: dragged.path, kind: dragged.kind),
+                  let tab = source.removeTabForTransfer(at: index)
             else { return }
             target.receiveTransferredTab(
                 tab,
@@ -2215,26 +2219,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
               let anchor = workspace.descriptor(for: targetID),
               workspace.hasRoomForAnotherPane(inGroupOf: targetID)
         else { return }
-        deliverAfterSavePrompt(payload) { [weak self] in
+        deliverAfterSavePrompt(payload) { [weak self] dragged in
             guard let self,
                   let source = workspace.editorPane(for: payload.paneID),
-                  source.model.tabs.indices.contains(payload.index),
+                  source.model.index(of: dragged.path, kind: dragged.kind) != nil,
                   workspace.descriptor(for: targetID) != nil,
                   workspace.hasRoomForAnotherPane(inGroupOf: targetID)
             else { return }
-            let descriptor = editorPaneDescriptor(
-                holding: source.model.tabs[payload.index],
-                group: anchor.group,
-                like: anchor
-            )
-            guard workspace.addPane(
-                descriptor,
-                inserting: zone == .insertBefore ? .before : .after,
-                of: targetID
-            ) else { return }
-            wireEditorPane(descriptor.sessionID, project: descriptor.project)
-            source.removeTabForTransfer(at: payload.index)
-            workspace.focusPane(descriptor.sessionID)
+            let descriptor = editorPaneDescriptor(holding: dragged, group: anchor.group, like: anchor)
+            createEditorPane(descriptor, liftingFrom: source, tab: dragged) {
+                self.workspace.addPane(
+                    descriptor,
+                    inserting: zone == .insertBefore ? .before : .after,
+                    of: targetID
+                )
+            }
         }
     }
 
@@ -2249,22 +2248,51 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
               workspace.paneCount(inGroup: group) < PaneGrid.maxPanes
         else { return }
         let sibling = workspace.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
-        deliverAfterSavePrompt(payload) { [weak self] in
+        deliverAfterSavePrompt(payload) { [weak self] dragged in
             guard let self,
                   let source = workspace.editorPane(for: payload.paneID),
-                  source.model.tabs.indices.contains(payload.index),
+                  source.model.index(of: dragged.path, kind: dragged.kind) != nil,
                   workspace.paneCount(inGroup: group) < PaneGrid.maxPanes
             else { return }
-            let descriptor = editorPaneDescriptor(
-                holding: source.model.tabs[payload.index],
-                group: group,
-                like: sibling
-            )
-            guard workspace.addPane(descriptor) else { return }
-            wireEditorPane(descriptor.sessionID, project: descriptor.project)
-            source.removeTabForTransfer(at: payload.index)
-            workspace.focusPane(descriptor.sessionID)
+            let descriptor = editorPaneDescriptor(holding: dragged, group: group, like: sibling)
+            createEditorPane(descriptor, liftingFrom: source, tab: dragged) {
+                self.workspace.addPane(descriptor)
+            }
         }
+    }
+
+    /// The create-then-lift half both pane-creating drops share: build the
+    /// pane holding the tab, wire it, and only then take the tab out of the
+    /// pane it came from.
+    ///
+    /// The two steps are one move, so the persisted row must not be written
+    /// between them — `addPane` fires `onPanesChanged` synchronously, and a
+    /// snapshot taken there would show the same tab open in two panes. The
+    /// gate is closed across the pair and the row written once at the end.
+    private func createEditorPane(
+        _ descriptor: PaneDescriptor,
+        liftingFrom source: EditorPaneView,
+        tab: EditorTab,
+        add: () -> Bool
+    ) {
+        editorPaneDropInFlight = true
+        defer {
+            editorPaneDropInFlight = false
+            persistEditorPanes()
+        }
+        guard add() else { return }
+        wireEditorPane(descriptor.sessionID, project: descriptor.project)
+        // Re-resolved by identity, never by the payload's index: the prompt
+        // above can have handed control back to the run loop, and the strip
+        // can have moved under it. Lifting the wrong tab here would discard
+        // *its* unsaved buffer.
+        guard let index = source.model.index(of: tab.path, kind: tab.kind),
+              source.removeTabForTransfer(at: index) != nil
+        else {
+            assertionFailure("the tab vanished between the guard above and the lift")
+            return
+        }
+        workspace.focusPane(descriptor.sessionID)
     }
 
     /// A dirty buffer cannot travel: each editor pane owns its own web view,
@@ -2274,13 +2302,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     ///
     /// A clean tab delivers straight through; nothing here is asynchronous
     /// unless there is genuinely something to ask about.
-    private func deliverAfterSavePrompt(_ payload: EditorTabDragPayload, then deliver: @escaping () -> Void) {
+    /// `deliver` is handed the tab's **identity** — `(path, kind)`, resolved
+    /// once here while the payload's index is still meaningful. Every caller
+    /// must find the tab again by that identity rather than by
+    /// `payload.index`: a prompt (or an async save) hands control back to the
+    /// run loop, and a tab closed or dragged in that window shifts every index
+    /// after it. Moving the wrong tab would also discard *its* buffer.
+    private func deliverAfterSavePrompt(
+        _ payload: EditorTabDragPayload,
+        then deliver: @escaping (EditorTab) -> Void
+    ) {
         guard let source = workspace.editorPane(for: payload.paneID),
               source.model.tabs.indices.contains(payload.index)
         else { return }
         let tab = source.model.tabs[payload.index]
         guard tab.isDirty else {
-            deliver()
+            deliver(tab)
             return
         }
         source.confirmSave((tab.path as NSString).lastPathComponent) { decision in
@@ -2288,12 +2325,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             case .cancel:
                 break
             case .discard:
-                deliver()
+                deliver(tab)
             case .save:
-                // Re-resolved: the prompt hands control back to the run loop,
-                // and the strip can have moved under it.
                 guard let index = source.model.index(of: tab.path, kind: tab.kind) else { return }
-                source.save(at: index) { saved in if saved { deliver() } }
+                source.save(at: index) { saved in if saved { deliver(tab) } }
             }
         }
     }
