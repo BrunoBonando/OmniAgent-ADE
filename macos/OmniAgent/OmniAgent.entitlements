@@ -37,6 +37,22 @@
   or Apple Events automation), add it here with the same
   "what specifically needs it" justification — not preemptively.
 -->
+<!--
+  Sign in with Apple (future, deliberately NOT enabled): the native login
+  screen wires the full ASAuthorization flow, but the entitlement below is
+  a *restricted* one — signing with it while the embedded provisioning
+  profile doesn't grant it makes the app fail to launch outright
+  (taskgated kills it at exec). Until a Developer ID provisioning profile
+  carrying it exists, the flow surfaces "Sign in with Apple isn't enabled
+  in this build yet" (ASAuthorizationError 1000) and the key stays out:
+
+    <key>com.apple.developer.applesignin</key>
+    <array>
+      <string>Default</string>
+    </array>
+
+  Add it only together with that provisioning profile — never on its own.
+-->
 <plist version="1.0">
 <dict/>
 </plist>
