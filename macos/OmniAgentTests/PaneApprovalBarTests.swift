@@ -451,17 +451,38 @@ final class TerminalReturnKeyTests: XCTestCase {
         XCTAssertNil(NativeTerminalView.composedOptionText(modifiers: [], characters: "]"))
     }
 
-    /// The routing half: `performKeyEquivalent` is only consulted for every
-    /// key-down by AppKit's own dispatch, so this pins that the window really
-    /// hands ⇧⏎ to a focused terminal before the first responder sees it.
-    func testTheWindowRoutesShiftReturnToTheFocusedTerminal() {
+    /// The routing half. `performKeyEquivalent` looked like the hook and is
+    /// not one: AppKit offers it only for ⌘ chords, so a bare ⇧⏎ or ⌥ chord
+    /// went straight to SwiftTerm's `keyDown` and both overrides were dead
+    /// code in the shipped app. `WorkspaceWindow.sendEvent` is the hook that
+    /// actually runs — this pins the decision it delegates to.
+    func testTheTerminalConsumesShiftReturnAndComposedOptionOnKeyDown() {
         let surface = TerminalSurfaceView(
             connection: SessionConnection(
-                socketURL: URL(fileURLWithPath: "/tmp/omniagent-shift-return-test.sock")
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-key-intercept-test.sock")
             ),
             sessionID: "pane-1"
         )
-        let window = NSWindow(
+        let terminal = surface.terminalView
+        XCTAssertTrue(terminal.interceptKeyDown(returnEvent(shift: true)), "⇧⏎")
+        XCTAssertTrue(terminal.interceptKeyDown(optionEvent(characters: "}", keyCode: 25)), "⌥9")
+        XCTAssertFalse(terminal.interceptKeyDown(returnEvent(shift: false)), "plain ⏎ is SwiftTerm's")
+        XCTAssertFalse(
+            terminal.interceptKeyDown(optionEvent(characters: "∫", keyCode: 11)),
+            "⌥b is Meta and stays SwiftTerm's"
+        )
+    }
+
+    /// A `WorkspaceWindow` sees its focused terminal as the concrete class
+    /// `sendEvent` type-checks for — the cast that carries the fix.
+    func testTheWorkspaceWindowSeesAFocusedTerminalAsNativeTerminalView() {
+        let surface = TerminalSurfaceView(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-key-intercept-test.sock")
+            ),
+            sessionID: "pane-1"
+        )
+        let window = WorkspaceWindow(
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
             styleMask: [.titled],
             backing: .buffered,
@@ -470,15 +491,22 @@ final class TerminalReturnKeyTests: XCTestCase {
         window.contentView = surface
         window.makeKeyAndOrderFront(nil)
         XCTAssertTrue(window.makeFirstResponder(surface.terminalView))
+        XCTAssertTrue(window.firstResponder is NativeTerminalView)
+    }
 
-        XCTAssertFalse(
-            window.performKeyEquivalent(with: returnEvent(shift: false)),
-            "plain ⏎ must be left to SwiftTerm's own key handling"
-        )
-        XCTAssertTrue(
-            window.performKeyEquivalent(with: returnEvent(shift: true)),
-            "⇧⏎ never reached the terminal view"
-        )
+    private func optionEvent(characters: String, keyCode: UInt16) -> NSEvent {
+        NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .option,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: keyCode
+        )!
     }
 
     private func returnEvent(shift: Bool) -> NSEvent {

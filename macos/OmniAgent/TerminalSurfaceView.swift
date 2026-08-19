@@ -34,21 +34,28 @@ final class NativeTerminalView: TerminalView {
            event.charactersIgnoringModifiers == "o" {
             return true
         }
-        if window?.firstResponder === self,
-           let composed = Self.composedOptionText(
-               modifiers: event.modifierFlags,
-               characters: event.characters
-           ) {
+        return super.performKeyEquivalent(with: event)
+    }
+
+    /// AppKit offers `performKeyEquivalent` only for ⌘ chords: a bare ⌥ or ⇧
+    /// chord is delivered straight to `keyDown`, which SwiftTerm declares
+    /// `public` (not `open`) and so cannot be overridden from this module.
+    /// `WorkspaceWindow.sendEvent` — already the interception point for esc,
+    /// for the same reason — calls this before the event reaches SwiftTerm.
+    /// Returns true when the keystroke was consumed here.
+    func interceptKeyDown(_ event: NSEvent) -> Bool {
+        if let composed = Self.composedOptionText(
+            modifiers: event.modifierFlags,
+            characters: event.characters
+        ) {
             send(Array(composed.utf8))
             return true
         }
-        guard window?.firstResponder === self,
-              let bytes = Self.overrideBytes(
-                  keyCode: event.keyCode,
-                  modifiers: event.modifierFlags,
-                  kittyActive: !(terminal?.keyboardEnhancementFlags.isEmpty ?? true)
-              )
-        else { return super.performKeyEquivalent(with: event) }
+        guard let bytes = Self.overrideBytes(
+            keyCode: event.keyCode,
+            modifiers: event.modifierFlags,
+            kittyActive: !(terminal?.keyboardEnhancementFlags.isEmpty ?? true)
+        ) else { return false }
         send(bytes)
         return true
     }
@@ -486,10 +493,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     /// What it wants is the line the agent's own blinking bullet is on: `⏺`,
     /// the mark it puts beside whatever it is doing right now. That bullet is
     /// *blinking*, so half the time it is not on the screen to be found — which
-    /// is why this looks for the bullet's column rather than the bullet. From
-    /// the lowest bullet on screen, the answer is the lowest line still in that
-    /// column: either the bullet's own line, or the one under it whose bullet
-    /// happens to be blinked off this frame.
+    /// is why `bulletLine` looks for the bullet's column as well as the bullet.
     ///
     /// With no bullet anywhere — a plain shell — three rules stand in, and they
     /// cost a shell nothing, having none of what they skip:
@@ -507,38 +511,45 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     /// What survives is the lowest line that actually reports something.
     static func lastOutputLine(of terminal: Terminal) -> String? {
         let rows = visibleRows(of: terminal)
-        // The bullet's own line wins when there is one, blinked off or not.
-        if let fromBullet = bulletLine(in: rows) { return fromBullet }
+        // A screen with bullets on it is an agent's, and its bullets are the
+        // answer. One with none is a shell's, and the rules below stand in.
+        if rows.contains(where: { isBullet($0.body) }) { return bulletLine(in: rows) }
         return reportingLine(in: rows)
     }
 
-    /// The lowest line in the agent's bullet column: its current action.
+    /// The lowest line carrying the agent's bullet — its current action.
+    ///
+    /// Two kinds of line qualify, and *only* these two, which is what keeps the
+    /// answer off everything else an agent paints. A visible bullet, flush at
+    /// the margin. And a line whose text starts exactly where a bullet's text
+    /// starts, `bulletTextColumn` in: that is the running line, whose bullet is
+    /// blinked off this frame. Everything else on the screen fails both tests —
+    /// a wrapped continuation of a bullet's own line is flush but has no
+    /// bullet, a tool's output is indented further, a tool's own echo opens
+    /// with `⎿`, and the separator the terminal hangs its tab name on is flush
+    /// with no bullet either. That separator is why this is a whitelist: it is
+    /// the lowest line on the screen with words in it, and it never changes.
     private static func bulletLine(in rows: [(indent: Int, body: String)]) -> String? {
-        guard let bullet = rows.lastIndex(where: { isBullet($0.body) }) else { return nil }
-        let column = rows[bullet].indent
-        var best = display(rows[bullet].body)
-        var echoIndent: Int?
-        for row in rows[(bullet + 1)...] {
-            if row.body.isEmpty {
-                echoIndent = nil
-                continue
-            }
-            if let echoIndent, row.indent > echoIndent { continue }
-            echoIndent = nil
-            if isEcho(row.body) {
-                echoIndent = row.indent
-                continue
-            }
-            // A blinked-off bullet leaves its text where the bullet's own text
-            // sits — two columns in. Anything further in belongs to a tool's
-            // output, not to the agent's line.
-            guard row.indent <= column + 2 else { continue }
-            if isSpinner(row.body) || isHint(row.body) { continue }
-            guard row.body.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains)
-            else { continue }
-            best = display(row.body)
+        var best: String?
+        for row in rows where isBullet(row.body) || isBlinkedOffBullet(row) {
+            let text = display(row.body)
+            if !text.isEmpty { best = text }
         }
-        return best.isEmpty ? nil : best
+        return best
+    }
+
+    /// Where a bullet's text begins: the bullet, one blank cell, then words.
+    static let bulletTextColumn = 2
+
+    /// A bullet line caught mid-blink — text in the bullet's column with no
+    /// bullet in front of it.
+    private static func isBlinkedOffBullet(_ row: (indent: Int, body: String)) -> Bool {
+        guard row.indent == bulletTextColumn,
+              !isEcho(row.body),
+              !isSpinner(row.body),
+              !isHint(row.body)
+        else { return false }
+        return row.body.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains)
     }
 
     private static func isBullet(_ body: String) -> Bool {

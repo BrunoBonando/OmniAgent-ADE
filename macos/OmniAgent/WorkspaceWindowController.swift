@@ -64,6 +64,11 @@ final class WorkspaceWindow: NSWindow {
            onEscape?() == true {
             return
         }
+        if event.type == .keyDown,
+           let terminal = firstResponder as? NativeTerminalView,
+           terminal.interceptKeyDown(event) {
+            return
+        }
         if event.type == .keyDown, firstResponder is TerminalView {
             os_signpost(
                 .event,
@@ -440,6 +445,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             latestGitStatus = status
             for id in workspace.allPaneIDs {
                 workspace.editorPane(for: id)?.setGitStatus(status)
+            }
+            // The spotlight searches the repository's files, and this is the
+            // one place that already knows when the repository changed.
+            guard let root = status?.root else {
+                repoFiles = []
+                return
+            }
+            DispatchQueue.global(qos: .utility).async {
+                let files = GitStatus.trackedFiles(repoRoot: root)
+                DispatchQueue.main.async { self.repoFiles = files }
             }
         }
         shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
@@ -1007,6 +1022,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The FILES tree's last `git status`. The palette asks it whether there
     /// is a repository at all, and every new editor pane is seeded from it.
     private var latestGitStatus: GitStatus?
+    /// The repository's tracked files, repository-relative, for the spotlight.
+    /// Refreshed with the git status rather than when the palette opens, so
+    /// opening it never waits on a subprocess.
+    private var repoFiles: [String] = []
 
     /// Where a file opens: the most recently focused editor pane, then any
     /// editor pane, then a freshly created one. `nil` only when the grid is
@@ -1828,6 +1847,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 projectLabels: projectLabels,
                 hasGitRepo: latestGitStatus != nil
             ),
+            files: repoFiles,
+            filesRoot: latestGitStatus?.root,
             over: window
         )
     }
