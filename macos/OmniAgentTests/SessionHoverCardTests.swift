@@ -92,10 +92,6 @@ final class SessionHoverCardTests: XCTestCase {
         XCTAssertEqual(HoverCardModel.duration(9_000), "9s")
         XCTAssertEqual(HoverCardModel.duration(252_000), "4m 12s")
         XCTAssertEqual(HoverCardModel.duration(3_840_000), "1h 04m")
-        // Coarse drops the seconds: a totals line nobody is timing does not
-        // need a digit that changes every tick.
-        XCTAssertEqual(HoverCardModel.coarseDuration(252_000), "4m")
-        XCTAssertEqual(HoverCardModel.coarseDuration(9_000), "9s")
     }
 
     func testTheTailIsTheBeginningOfTheLineAndAnEllipsis() {
@@ -110,20 +106,23 @@ final class SessionHoverCardTests: XCTestCase {
 
     /// Tokens are not in this line, deliberately: nothing in the native app
     /// counts them, and a number the app cannot know is worse than no number.
-    func testTotalsCountToolRunsAndActiveTime() {
+    func testTotalsCountToolRuns() {
         var ledger = PaneActivityLedger()
         ledger.record(paneID: "a", status: .thinking, at: t0)
         ledger.record(paneID: "a", status: .toolExecution, at: t0 + 1_000)
 
         let totals = HoverCardModel.totalsLine(ledger.activity(for: "a"), now: t0 + 60_000)
-        XCTAssertEqual(totals, "1 tool run · 1m active")
+        XCTAssertEqual(totals, "1 tool run")
 
         ledger.record(paneID: "a", status: .thinking, at: t0 + 61_000)
         ledger.record(paneID: "a", status: .toolExecution, at: t0 + 62_000)
         XCTAssertEqual(
             HoverCardModel.totalsLine(ledger.activity(for: "a"), now: t0 + 120_000),
-            "2 tool runs · 2m active"
+            "2 tool runs"
         )
+        // The active total is deliberately absent: the timing line above is
+        // already a clock, and the same fact twice is noise.
+        XCTAssertFalse(totals?.contains("active") ?? false)
         // Nothing has happened yet -> nothing to say.
         XCTAssertNil(HoverCardModel.totalsLine(nil, now: t0))
     }
@@ -380,6 +379,80 @@ final class SessionHoverCardTests: XCTestCase {
         let line = try XCTUnwrap(TerminalSurfaceView.lastOutputLine(of: terminal))
         XCTAssertEqual(line, "Editing SessionConnection.swift")
         XCTAssertFalse(line.contains("\0"), "a NUL is a cell SwiftTerm never filled")
+    }
+
+    /// The bug this rule exists for: Claude's screen ends with its own
+    /// furniture — an empty input box, a working directory, a context meter and
+    /// `auto mode on` — none of which changes when the agent does anything. The
+    /// card showed that. It has to show the last thing the agent actually did.
+    func testTheOutputLineIsTheLastRealActionNotTheStatusBar() throws {
+        let terminal = Terminal(
+            delegate: SilentTerminalDelegate(),
+            options: TerminalOptions(cols: 90, rows: 20)
+        )
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J")
+        let screen = [
+            "● Now registering the new file with the Xcode project:",
+            "",
+            "  Building modal rename component; registering with Xcode · 1m 36s",
+            "  └ $ cd macos && python3 - <<'PY'",
+            "      p = \"OmniAgentTests/PaneWorkspaceViewTests.swift\"",
+            "      s = open(p).read()",
+            "      'PaneAsk… (1m 34s · 2 lines)",
+            "      (ctrl+b to run in background)",
+            "",
+            "✳ Crystallizing… (5m 17s · ↓ 14.8k tokens)",
+            "",
+            "› ",
+            "──────────────────────────────────────────────",
+            "~/Documents/Bruno.Digital/OmniAgent-ADE                                    /rc",
+            "Context   25%  Opus 5 (1M context)",
+            "Session   11%  2h 0m left",
+            "Week      65%  37h 20m left",
+            "▶▶ auto mode on (shift+tab to cycle) · ← for agents",
+        ]
+        for (index, line) in screen.enumerated() {
+            terminal.feed(text: "\u{1b}[\(index + 1);1H" + line)
+        }
+
+        XCTAssertEqual(
+            TerminalSurfaceView.lastOutputLine(of: terminal),
+            "Building modal rename component; registering with Xcode · 1m 36s"
+        )
+    }
+
+    /// A plain shell has none of that furniture, and must not be second-guessed
+    /// by rules written for one that does.
+    func testAShellStillGetsItsLastLine() throws {
+        let terminal = Terminal(
+            delegate: SilentTerminalDelegate(),
+            options: TerminalOptions(cols: 60, rows: 6)
+        )
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J")
+        terminal.feed(text: "\u{1b}[1;1Hcargo test --workspace")
+        terminal.feed(text: "\u{1b}[2;1Htest result: ok. 812 passed; 0 failed")
+
+        XCTAssertEqual(
+            TerminalSurfaceView.lastOutputLine(of: terminal),
+            "test result: ok. 812 passed; 0 failed"
+        )
+    }
+
+    /// The agent's own bullet is a margin mark, not a word — the card shows the
+    /// sentence.
+    func testTheBulletIsNotPartOfTheSentence() throws {
+        let terminal = Terminal(
+            delegate: SilentTerminalDelegate(),
+            options: TerminalOptions(cols: 60, rows: 4)
+        )
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J")
+        terminal.feed(text: "\u{1b}[1;1H● Reading SessionConnection.swift")
+        terminal.feed(text: "\u{1b}[3;1H› ")
+
+        XCTAssertEqual(
+            TerminalSurfaceView.lastOutputLine(of: terminal),
+            "Reading SessionConnection.swift"
+        )
     }
 
     func testAnEmptyTerminalHasNoOutputLine() {

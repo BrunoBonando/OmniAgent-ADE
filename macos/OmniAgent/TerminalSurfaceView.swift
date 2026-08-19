@@ -405,37 +405,100 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         return Array(lines.suffix(limit))
     }
 
-    /// The bottom-most line with anything readable on it — what the sidebar's
-    /// hover card types out.
+    /// What this terminal is *doing*, as one line — what the sidebar's hover
+    /// card types out.
     ///
     /// Reads the visible rows directly instead of going through `tailLines`,
-    /// which serialises the *whole* buffer: this is polled ten times a second
-    /// for as long as a card is open, and the scrollback is thousands of lines.
+    /// which serialises the whole buffer: this is polled ten times a second for
+    /// as long as a card is open, and the scrollback is thousands of lines.
     func lastOutputLine() -> String? {
         Self.lastOutputLine(of: terminalView.terminal)
     }
 
     /// Free of the view, like `tailLines`, so a bare `Terminal` can drive it.
     ///
-    /// "Readable" means it has a letter or a digit in it. A full-screen TUI is
-    /// a box, and its bottom rows are usually the frame — a card that typed out
-    /// `╰──────────╯` would be technically showing the last line of output and
-    /// telling the user nothing.
+    /// Not literally the last line: on a screen an agent owns, the last line is
+    /// its own furniture. Claude's is `auto mode on (shift+tab to cycle)`,
+    /// under a context meter, under a working directory, under an empty input
+    /// box — none of which changes when the agent does something. Three rules
+    /// get past all of it, and cost nothing on a plain shell, which has none of
+    /// it:
+    ///
+    /// 1. **Everything at and below the input box is chrome.** The box is the
+    ///    bottom-most `›`/`❯` prompt line; the status bar lives under it by
+    ///    construction, whatever it happens to say today.
+    /// 2. **A command echo is one block.** A line opening with `└`/`⎿`/`$`
+    ///    starts it and its indented body continues it — the card should say
+    ///    what the tool is *for*, which is the line above, not the shell it
+    ///    spawned or the heredoc it is feeding.
+    /// 3. **A spinner frame is an animation, not news.** `✳ Crystallizing…`
+    ///    says only that the agent is busy, which the card's own status already
+    ///    says, in a colour.
+    ///
+    /// What survives is the lowest line that actually reports something.
     static func lastOutputLine(of terminal: Terminal) -> String? {
-        for row in stride(from: terminal.rows - 1, through: 0, by: -1) {
+        var rows: [(indent: Int, body: String)] = []
+        for row in 0..<terminal.rows {
             guard let line = terminal.getLine(row: row) else { continue }
             // Same NUL substitution `tailLines` documents: SwiftTerm returns
             // U+0000 for a cell nobody wrote, and a TUI paints by jumping
             // columns rather than writing the spaces between words.
-            let text = line.translateToString(trimRight: true)
+            let raw = line.translateToString(trimRight: true)
                 .replacingOccurrences(of: "\0", with: " ")
-            let cleaned = text.trimmingCharacters(in: Self.borderAndSpace)
-            guard cleaned.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains) else {
+            let indent = raw.prefix { $0.unicodeScalars.allSatisfy(borderAndSpace.contains) }.count
+            rows.append((indent, raw.trimmingCharacters(in: borderAndSpace)))
+        }
+        // Rule 1. The *last* prompt line: the submitted messages above wear the
+        // same glyph, and they are transcript, not chrome.
+        if let box = rows.lastIndex(where: { isPrompt($0.body) }) {
+            rows = Array(rows.prefix(box))
+        }
+
+        // Top down, so a block is met at its header rather than in its middle,
+        // and so the last survivor is the lowest one.
+        var best: String?
+        var echoIndent: Int?
+        for row in rows {
+            if row.body.isEmpty {
+                echoIndent = nil
                 continue
             }
-            return cleaned
+            // Rule 2, continued: still inside the echo block.
+            if let echoIndent, row.indent > echoIndent { continue }
+            echoIndent = nil
+            if isEcho(row.body) {
+                echoIndent = row.indent
+                continue
+            }
+            // Rule 3, plus the hint lines an agent parks under its tool calls
+            // (`(ctrl+b to run in background)`), plus anything with no words in
+            // it at all — a box's own bottom edge is not output.
+            if isSpinner(row.body) || isHint(row.body) { continue }
+            guard row.body.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains)
+            else { continue }
+            best = row.body.drop { $0.unicodeScalars.allSatisfy(leadingMarker.contains) }
+                .trimmingCharacters(in: .whitespaces)
         }
-        return nil
+        return best?.isEmpty == false ? best : nil
+    }
+
+    private static func isPrompt(_ body: String) -> Bool {
+        guard let first = body.first, "›❯>".contains(first) else { return false }
+        return body.count == 1 || body.dropFirst().first == " "
+    }
+
+    private static func isEcho(_ body: String) -> Bool {
+        guard let first = body.first else { return false }
+        return "└⎿$".contains(first)
+    }
+
+    private static func isHint(_ body: String) -> Bool {
+        body.hasPrefix("(") && body.hasSuffix(")")
+    }
+
+    private static func isSpinner(_ body: String) -> Bool {
+        guard let first = body.unicodeScalars.first else { return false }
+        return spinner.contains(first)
     }
 
     /// The box-drawing verticals a TUI wraps its lines in, plus whitespace.
@@ -443,6 +506,27 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     /// frame it happens to be sitting inside.
     private static let borderAndSpace = CharacterSet(charactersIn: "│┃║|╎┆┊╵ \t")
         .union(.whitespacesAndNewlines)
+
+    /// The bullets an agent prefixes its own lines with. Taken off the front of
+    /// what the card shows — the glyph is a margin mark, not a word.
+    private static let leadingMarker = CharacterSet(charactersIn: "●⏺◉◆▪▸▶►→⇒✓✔✗✘·-• \t")
+
+    /// Spinner frames, the ones `SessionOutline.sanitizedPaneTitle` strips off a
+    /// reported title for the same reason. Deliberately *not* that set: it
+    /// includes the whole ◯–◿ block, and U+25CF ● in the middle of it is
+    /// Claude's transcript bullet — the mark on the lines most worth showing.
+    private static let spinner: CharacterSet = {
+        var set = CharacterSet()
+        set.insert(charactersIn: "*\u{00B7}\u{2217}")
+        set.insert(charactersIn: "\u{2722}"..."\u{2727}")
+        set.insert(charactersIn: "\u{2731}"..."\u{2736}")
+        set.insert(charactersIn: "\u{273A}"..."\u{273D}")
+        // The arc spinners ◐◑◒◓ only, not the filled circles beside them.
+        set.insert(charactersIn: "\u{25D0}"..."\u{25D3}")
+        // Braille spinners, the other common CLI idiom.
+        set.insert(charactersIn: "\u{2800}"..."\u{28FF}")
+        return set
+    }()
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
         scheduleResize()

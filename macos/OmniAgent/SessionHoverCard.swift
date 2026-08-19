@@ -96,7 +96,7 @@ struct HoverCardModel: Equatable {
     var meta: String?
     /// `started 20:14 · 4m 12s`.
     var timing: String?
-    /// `42 tool runs · 18m active`.
+    /// `42 tool runs`.
     var totals: String?
     /// The live output line. `nil` for anything that is not a terminal.
     var tail: String?
@@ -236,17 +236,17 @@ extension HoverCardModel {
         return "started \(clock(since)) · \(duration(run))"
     }
 
-    /// `42 tool runs · 18m active`. Deliberately not tokens: nothing in the
-    /// native app counts them (`UsageAnalytics.recordTokens` is ported but
-    /// never called, and its buckets are per project), and a number the app
-    /// cannot actually know is worse than no number.
+    /// `42 tool runs`, and only that.
+    ///
+    /// Not tokens: nothing in the native app counts them
+    /// (`UsageAnalytics.recordTokens` is ported but never called, and its
+    /// buckets are per project), and a number the app cannot actually know is
+    /// worse than no number. And not the active total either — the line above
+    /// is already a clock, and two durations stacked one on the other read as
+    /// the same fact printed twice.
     static func totalsLine(_ activity: PaneActivity?, now: Double) -> String? {
-        guard let activity else { return nil }
-        var parts: [String] = []
-        if activity.toolRuns > 0 { parts.append(count(activity.toolRuns, "tool run")) }
-        let active = activity.activeMs(now: now)
-        if active >= 1000 { parts.append("\(coarseDuration(active)) active") }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        guard let activity, activity.toolRuns > 0 else { return nil }
+        return count(activity.toolRuns, "tool run")
     }
 
     private static func editorIsDirty(_ editor: EditorPaneModel?) -> Bool {
@@ -291,15 +291,6 @@ extension HoverCardModel {
         if hours > 0 { return String(format: "%dh %02dm", hours, minutes) }
         if minutes > 0 { return "\(minutes)m \(seconds)s" }
         return "\(seconds)s"
-    }
-
-    /// The same span with the seconds dropped — for totals, where a ticking
-    /// second on a number nobody is timing is just noise.
-    static func coarseDuration(_ ms: Double) -> String {
-        let total = Int(max(0, ms) / 1000)
-        if total >= 3600 { return String(format: "%dh %02dm", total / 3600, (total % 3600) / 60) }
-        if total >= 60 { return "\(total / 60)m" }
-        return "\(total)s"
     }
 
     /// Fixed 24-hour clock rather than the user's locale: the card sits beside
