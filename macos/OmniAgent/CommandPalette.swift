@@ -38,7 +38,7 @@ enum PaletteAction: Equatable {
 /// groups what it finds rather than pouring it into one list, and so does
 /// this: rows are emitted in section order, so a section is just a run of
 /// consecutive rows and nothing has to sort or re-index after filtering.
-enum PaletteSection: String, Equatable {
+enum PaletteSection: String, CaseIterable, Equatable {
     case terminals = "Terminals"
     case browsers = "Browsers"
     case files = "Files"
@@ -69,6 +69,10 @@ struct PaletteCommand: Equatable {
     /// what is *in* it, not only by the words its row happens to print.
     let keywords: String?
     let section: PaletteSection
+    /// Where the thing *is* — a pane's project and session, a file's folder.
+    /// Its own line under the title, as in Spotlight, rather than a suffix
+    /// dimmed inside one.
+    let subtitle: String?
 
     init(
         id: String,
@@ -76,7 +80,8 @@ struct PaletteCommand: Equatable {
         detail: String?,
         action: PaletteAction,
         keywords: String? = nil,
-        section: PaletteSection = .actions
+        section: PaletteSection = .actions,
+        subtitle: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -84,12 +89,15 @@ struct PaletteCommand: Equatable {
         self.action = action
         self.keywords = keywords
         self.section = section
+        self.subtitle = subtitle
     }
 
-    /// Case-insensitive substring over title *and* keywords. `needle` is
-    /// already lowercased by the caller.
+    /// Case-insensitive substring over everything the row carries — what it
+    /// shows and what it hides. `needle` is already lowercased by the caller.
     func matches(_ needle: String) -> Bool {
-        title.lowercased().contains(needle) || keywords?.lowercased().contains(needle) == true
+        title.lowercased().contains(needle)
+            || subtitle?.lowercased().contains(needle) == true
+            || keywords?.lowercased().contains(needle) == true
     }
 }
 
@@ -106,6 +114,8 @@ struct CommandPaletteModel: Equatable {
     private(set) var commands: [PaletteCommand]
     private(set) var query = ""
     private(set) var selectedIndex = 0
+    /// The chosen tag, or `nil` for "All".
+    private(set) var selectedSection: PaletteSection?
 
     init(commands: [PaletteCommand] = []) {
         self.commands = commands
@@ -146,10 +156,7 @@ struct CommandPaletteModel: Equatable {
                     paneRows[pane.kind, default: []].append(
                         PaletteCommand(
                             id: "focus:\(paneID)",
-                            // Name first, context after the em dash — the row
-                            // view dims everything past it, so a column of
-                            // rows scans by name the way Spotlight's does.
-                            title: "\(SessionOutline.paneLabel(pane)) — \(SessionOutline.projectLabel(project.project, labels: projectLabels)) · \(session.label)",
+                            title: SessionOutline.paneLabel(pane),
                             // A browser or editor is a pane kind, not an
                             // engine — the `.shell` its descriptor carries is
                             // a placeholder that must not be shown as what
@@ -174,7 +181,8 @@ struct CommandPaletteModel: Equatable {
                                 // An editor pane sits with the files it holds.
                                 case .editor: return .files
                                 }
-                            }()
+                            }(),
+                            subtitle: "\(SessionOutline.projectLabel(project.project, labels: projectLabels)) · \(session.label)\(pane.browserURL.isEmpty ? "" : " · \(pane.browserURL)")"
                         )
                     )
                 }
@@ -189,15 +197,18 @@ struct CommandPaletteModel: Equatable {
         for pane in ordered where pane.kind == .editor {
             for tab in pane.editorTabs where seenPaths.insert(tab.path).inserted {
                 let name = (tab.path as NSString).lastPathComponent
-                let folder = ((tab.path as NSString).deletingLastPathComponent as NSString).lastPathComponent
                 commands.append(
                     PaletteCommand(
                         id: "file:\(tab.path)",
                         title: name,
-                        detail: folder.isEmpty ? "file" : folder,
+                        detail: nil,
                         action: .openFile(path: tab.path),
                         keywords: tab.path,
-                        section: .files
+                        section: .files,
+                        // The folder it lives in, home abbreviated — the
+                        // location line Spotlight puts under a file's name.
+                        subtitle: ((tab.path as NSString).deletingLastPathComponent as NSString)
+                            .abbreviatingWithTildeInPath
                     )
                 )
             }
@@ -288,17 +299,27 @@ struct CommandPaletteModel: Equatable {
         return commands
     }
 
-    /// Case-insensitive substring on the row's title, order preserved — the
-    /// same match the web palette does, deliberately not a fuzzy score: the
-    /// list is short and stable ordering is what makes muscle memory work.
+    /// The rows the query found, narrowed to the selected tag.
     ///
-    /// A non-empty query also appends a trailing "Search brain for …" row —
-    /// present whenever there is something to search for, exactly like the
-    /// web palette's own always-offered search row, regardless of whether
-    /// any action also matched.
+    /// **Nothing until something is typed.** An empty field shows the bar and
+    /// only the bar — the palette used to answer "" with its whole command
+    /// list, which is a menu, not a search.
+    ///
+    /// Order is preserved and matching is a case-insensitive substring,
+    /// deliberately not a fuzzy score: the list is short and stable ordering
+    /// is what makes muscle memory work. A non-empty query always ends with
+    /// the "Search brain for …" row, whether or not anything else matched.
     var matches: [PaletteCommand] {
+        guard let section = selectedSection else { return found }
+        return found.filter { $0.section == section }
+    }
+
+    /// Everything the query found, before the tag narrows it — what the tag
+    /// row itself is built from, so filtering can never hide the tag you
+    /// would need to get back.
+    var found: [PaletteCommand] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return commands }
+        guard !trimmed.isEmpty else { return [] }
         let needle = trimmed.lowercased()
         var rows = commands.filter { $0.matches(needle) }
         rows.append(
@@ -313,6 +334,13 @@ struct CommandPaletteModel: Equatable {
         return rows
     }
 
+    /// The tags under the field: `nil` — "All" — first, then every section
+    /// the query actually found, in the palette's own section order.
+    var sectionTags: [PaletteSection?] {
+        let present = Set(found.map(\.section))
+        return [nil] + PaletteSection.allCases.filter(present.contains)
+    }
+
     var selected: PaletteCommand? {
         let rows = matches
         guard rows.indices.contains(selectedIndex) else { return nil }
@@ -323,6 +351,7 @@ struct CommandPaletteModel: Equatable {
         self.commands = commands
         query = ""
         selectedIndex = 0
+        selectedSection = nil
     }
 
     /// Typing always returns the highlight to the top: the best match for a
@@ -330,6 +359,27 @@ struct CommandPaletteModel: Equatable {
     mutating func update(query: String) {
         self.query = query
         selectedIndex = 0
+        // A tag the new query no longer finds would filter the list down to
+        // nothing with no way back except noticing why.
+        if let section = selectedSection, !sectionTags.contains(section) {
+            selectedSection = nil
+        }
+    }
+
+    /// Picks a tag — `nil` for "All".
+    mutating func select(section: PaletteSection?) {
+        selectedSection = section
+        selectedIndex = 0
+    }
+
+    /// ⇥ / ⇧⇥ through the tags, wrapping: a short, closed ring is the one
+    /// place wrapping beats clamping, because every stop is one step away.
+    mutating func cycleSection(by delta: Int) {
+        let tags = sectionTags
+        guard tags.count > 1 else { return }
+        let current = tags.firstIndex(of: selectedSection) ?? 0
+        let next = ((current + delta) % tags.count + tags.count) % tags.count
+        select(section: tags[next])
     }
 
     /// Clamped rather than wrapping — ⌄ at the bottom of a list is a

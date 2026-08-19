@@ -1297,14 +1297,14 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
 
         controller.showCommandPalette(nil)
-        XCTAssertTrue(controller.palette.model.matches.contains { $0.action == .focusPane(sessionID: "sess-a") })
+        XCTAssertTrue(controller.palette.model.commands.contains { $0.action == .focusPane(sessionID: "sess-a") })
 
         controller.palette.dismiss()
         controller.workspaceView.closePane("sess-a")
         controller.showCommandPalette(nil)
 
         XCTAssertFalse(
-            controller.palette.model.matches.contains { $0.action == .focusPane(sessionID: "sess-a") },
+            controller.palette.model.commands.contains { $0.action == .focusPane(sessionID: "sess-a") },
             "a pane that closed while the palette was shut can never be offered"
         )
         controller.palette.dismiss()
