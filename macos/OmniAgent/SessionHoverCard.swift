@@ -98,8 +98,13 @@ struct HoverCardModel: Equatable {
     var timing: String?
     /// `42 tool runs`.
     var totals: String?
-    /// The live output line. `nil` for anything that is not a terminal.
+    /// The live output line — only while the pane is working. `nil` otherwise,
+    /// and for anything that is not a terminal.
     var tail: String?
+    /// Whether the card carries a working line at all. A terminal always does:
+    /// working, it is the mark and the line; ready, it is the mark alone, green,
+    /// which is the card saying "nothing running" without spending a word on it.
+    var mark: Bool = false
 
     /// How much of the output line the card shows. The ask was the beginning
     /// of the line and an ellipsis, not the line.
@@ -153,7 +158,11 @@ extension HoverCardModel {
                 meta: pane.cwd.isEmpty ? nil : WorkspaceBackRowView.abbreviate(pane.cwd),
                 timing: timingLine(activity, now: now),
                 totals: totalsLine(activity, now: now),
-                tail: tail.flatMap { snippet($0) }
+                // Only while it is working. A settled pane's last line is not
+                // news, and a mark pulsing beside it would be a lie about what
+                // the pane is doing.
+                tail: PaneActivityLedger.isBusy(status) ? tail.flatMap { snippet($0) } : nil,
+                mark: true
             )
         }
     }
@@ -465,19 +474,21 @@ final class TypingTextField: NSTextField {
 
 // MARK: - The card's body
 
-/// A small filled circle in the status colour, glowing and pulsing exactly the
-/// way the sidebar row's own mark does.
-final class HoverStatusDot: NSView {
-    private var color: NSColor = ShellPalette.idle
+/// The OmniAgent mark in front of the working line, tinted and pulsing the way
+/// the sidebar row's own mark does — the card's stand-in for the blinking
+/// bullet the agent prints beside whatever it is currently doing.
+final class HoverWorkingMarkView: NSImageView {
+    static let size: CGFloat = 11
 
     init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: 7, height: 7))
-        wantsLayer = true
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.size, height: Self.size))
+        image = OmniAgentMark.image
+        imageScaling = .scaleProportionallyUpOrDown
         translatesAutoresizingMaskIntoConstraints = false
-        layer?.cornerRadius = 3.5
+        wantsLayer = true
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 7),
-            heightAnchor.constraint(equalToConstant: 7),
+            widthAnchor.constraint(equalToConstant: Self.size),
+            heightAnchor.constraint(equalToConstant: Self.size),
         ])
     }
 
@@ -485,12 +496,14 @@ final class HoverStatusDot: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
     func apply(color: NSColor, pulses: Bool) {
-        self.color = color
-        layer?.backgroundColor = color.cgColor
-        layer?.shadowColor = color.cgColor
-        layer?.shadowOpacity = 0.55
-        layer?.shadowRadius = 4
-        layer?.shadowOffset = .zero
+        contentTintColor = color
+        shadow = {
+            let glow = NSShadow()
+            glow.shadowColor = color.withAlphaComponent(0.53)
+            glow.shadowBlurRadius = 4
+            glow.shadowOffset = .zero
+            return glow
+        }()
         layer?.removeAnimation(forKey: "om-pulse")
         guard pulses, !ShellMotion.reduced else { return }
         let pulse = CABasicAnimation(keyPath: "opacity")
@@ -510,15 +523,21 @@ final class HoverCardBodyView: NSView {
     static let width: CGFloat = 280
     static let inset: CGFloat = 14
 
-    let dot = HoverStatusDot()
-    let statusField = ShellFont.label(font: ShellFont.ui(11.5, .semibold), color: ShellPalette.inkSecondary)
     let titleField = ShellFont.label(font: ShellFont.ui(15, .semibold), color: ShellPalette.ink)
     let metaField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkMuted)
     let timingField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkTertiary)
     let totalsField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkFaint)
-    let tailField = TypingTextField(font: ShellFont.mono(11.5), color: ShellPalette.inkSecondary)
+    /// The working line: blue, because it is the one thing on the card that is
+    /// happening rather than being reported.
+    let tailField = TypingTextField(font: ShellFont.mono(11.5), color: ShellPalette.blue)
+    /// The OmniAgent mark in front of that line, pulsing — standing in for the
+    /// blinking bullet the agent puts there itself. Same glyph, same pulse and
+    /// same blue as the sidebar row's own mark, so the card and the row are
+    /// visibly saying one thing.
+    let workingMark = HoverWorkingMarkView()
     let engineIcon = NSImageView()
     private let rule = NSView()
+    private let tailRow = NSStackView()
     private let stack = NSStackView()
 
     init() {
@@ -528,24 +547,34 @@ final class HoverCardBodyView: NSView {
         engineIcon.translatesAutoresizingMaskIntoConstraints = false
         engineIcon.imageScaling = .scaleProportionallyUpOrDown
 
-        let header = NSStackView(views: [dot, statusField, NSView(), engineIcon])
+        // The engine's mark rides on the title now that the status pill is
+        // gone: what the pane is is a property of its name, not a row of its
+        // own.
+        let header = NSStackView(views: [titleField, NSView(), engineIcon])
         header.orientation = .horizontal
         header.alignment = .centerY
-        header.spacing = 6
+        header.spacing = 8
         header.translatesAutoresizingMaskIntoConstraints = false
 
         rule.wantsLayer = true
         rule.layer?.backgroundColor = ShellPalette.hairlineStrong.cgColor
         rule.translatesAutoresizingMaskIntoConstraints = false
 
+        tailRow.orientation = .horizontal
+        tailRow.alignment = .centerY
+        tailRow.spacing = 6
+        tailRow.translatesAutoresizingMaskIntoConstraints = false
+        tailRow.addArrangedSubview(workingMark)
+        tailRow.addArrangedSubview(tailField)
+
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 3
         stack.translatesAutoresizingMaskIntoConstraints = false
-        for view in [header, titleField, metaField, timingField, totalsField, rule, tailField] {
+        for view in [header, metaField, timingField, totalsField, rule, tailRow] {
             stack.addArrangedSubview(view)
         }
-        stack.setCustomSpacing(9, after: header)
+        stack.setCustomSpacing(5, after: header)
         stack.setCustomSpacing(9, after: totalsField)
         stack.setCustomSpacing(8, after: rule)
         addSubview(stack)
@@ -561,11 +590,10 @@ final class HoverCardBodyView: NSView {
             engineIcon.heightAnchor.constraint(equalToConstant: 15),
             rule.widthAnchor.constraint(equalToConstant: content),
             rule.heightAnchor.constraint(equalToConstant: 1),
-            titleField.widthAnchor.constraint(equalToConstant: content),
             metaField.widthAnchor.constraint(equalToConstant: content),
             timingField.widthAnchor.constraint(equalToConstant: content),
             totalsField.widthAnchor.constraint(equalToConstant: content),
-            tailField.widthAnchor.constraint(equalToConstant: content),
+            tailRow.widthAnchor.constraint(equalToConstant: content),
         ])
     }
 
@@ -580,10 +608,10 @@ final class HoverCardBodyView: NSView {
         let sameRow = self.model?.title == model.title
         self.model = model
 
-        dot.apply(color: model.accent, pulses: model.pulses)
-        statusField.stringValue = model.status.uppercased()
-        statusField.textColor = model.accent
         titleField.stringValue = model.title
+        // The status is not printed any more — the working line says it, and
+        // says what the work *is*. It stays as the card's spoken label.
+        setAccessibilityLabel("\(model.title). \(model.status)")
 
         set(metaField, model.meta)
         set(timingField, model.timing)
@@ -597,15 +625,17 @@ final class HoverCardBodyView: NSView {
             engineIcon.isHidden = true
         }
 
+        rule.isHidden = !model.mark
+        tailRow.isHidden = !model.mark
+        workingMark.apply(color: model.accent, pulses: model.pulses)
         if let tail = model.tail {
-            rule.isHidden = false
             tailField.isHidden = false
             // A different row is a different sentence: continuing the type
             // would splice two panes' output together.
             if !sameRow { tailField.reset() }
             tailField.setLine(tail)
         } else {
-            rule.isHidden = true
+            // Not working: the mark stands alone in its status colour.
             tailField.isHidden = true
             tailField.reset()
         }

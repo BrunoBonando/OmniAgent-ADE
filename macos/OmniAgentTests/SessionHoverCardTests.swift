@@ -141,19 +141,58 @@ final class SessionHoverCardTests: XCTestCase {
         XCTAssertEqual(model.status, "Working")
         XCTAssertEqual(model.accent, ShellPalette.blue)
         XCTAssertTrue(model.pulses)
+        XCTAssertTrue(model.mark)
         XCTAssertEqual(model.timing, "started \(HoverCardModel.clock(t0)) · 4m 12s")
         XCTAssertEqual(model.engine, .claude)
         XCTAssertEqual(model.tail?.count, HoverCardModel.tailLimit + 1)
     }
 
-    func testAnIdleTerminalIsJustAName() {
-        let model = HoverCardModel.pane(terminal(), status: .ready, activity: nil, now: t0)
+    /// Ready is the mark alone, green: the card saying "nothing running"
+    /// without spending a word on it. The last line an idle pane printed is not
+    /// news, and a mark pulsing beside it would be a lie.
+    func testAReadyTerminalIsTheMarkAloneAndNoOutputLine() {
+        let model = HoverCardModel.pane(
+            terminal(),
+            status: .ready,
+            activity: nil,
+            tail: "Editing SessionConnection.swift",
+            now: t0
+        )
         XCTAssertEqual(model.status, "Ready")
         XCTAssertEqual(model.accent, ShellPalette.green)
         XCTAssertFalse(model.pulses)
         XCTAssertNil(model.timing)
         XCTAssertNil(model.totals)
-        XCTAssertNil(model.tail)
+        XCTAssertNil(model.tail, "settled: no line, whatever the terminal still shows")
+        XCTAssertTrue(model.mark, "but the mark is there, green")
+    }
+
+    /// And the body follows it: the row stays, the words go.
+    func testTheWorkingLineIsAMarkWithWordsAndThenAMarkWithout() {
+        let body = HoverCardBodyView()
+        body.tailField.animates = false
+
+        var ledger = PaneActivityLedger()
+        ledger.record(paneID: "a", status: .thinking, at: t0)
+        body.apply(
+            HoverCardModel.pane(
+                terminal(),
+                status: .thinking,
+                activity: ledger.activity(for: "a"),
+                tail: "Building modal rename component",
+                now: t0 + 1_000
+            )
+        )
+        XCTAssertFalse(body.tailField.isHidden)
+        XCTAssertEqual(body.tailField.typedText, "Building modal rename component")
+        XCTAssertEqual(body.workingMark.contentTintColor, ShellPalette.blue)
+        XCTAssertEqual(body.tailField.textColor, ShellPalette.blue, "the working line is blue")
+        XCTAssertNotNil(body.workingMark.layer?.animation(forKey: "om-pulse") ?? nil)
+
+        body.apply(HoverCardModel.pane(terminal(), status: .ready, activity: nil, now: t0))
+        XCTAssertTrue(body.tailField.isHidden, "ready is the mark alone")
+        XCTAssertEqual(body.workingMark.contentTintColor, ShellPalette.green)
+        XCTAssertNil(body.workingMark.layer?.animation(forKey: "om-pulse") ?? nil, "and it is still")
     }
 
     func testAWaitingTerminalSaysSo() {
@@ -173,6 +212,7 @@ final class SessionHoverCardTests: XCTestCase {
         let editorPane = PaneDescriptor(sessionID: "e", group: "g", title: "main.swift", kind: .editor)
         let editorCard = HoverCardModel.pane(editorPane, status: nil, activity: nil, editor: editor, now: t0)
         XCTAssertEqual(editorCard.status, "Editor")
+        XCTAssertFalse(editorCard.mark, "an editor has no agent, so nothing to mark")
         XCTAssertEqual(editorCard.totals, "2 tabs · 1 unsaved")
         XCTAssertEqual(editorCard.accent, ShellPalette.amber, "unsaved work is the one thing worth a colour")
         XCTAssertNil(editorCard.tail)
@@ -387,15 +427,16 @@ final class SessionHoverCardTests: XCTestCase {
         body.layoutSubtreeIfNeeded()
 
         XCTAssertEqual(size.width, HoverCardBodyView.width)
-        XCTAssertGreaterThan(size.height, 100, "six rows and a rule do not fit in less")
+        XCTAssertGreaterThan(size.height, 90, "five rows and a rule do not fit in less")
 
         let rep = try XCTUnwrap(body.bitmapImageRepForCachingDisplay(in: body.bounds))
         body.cacheDisplay(in: body.bounds, to: rep)
         XCTAssertTrue([280, 560].contains(rep.pixelsWide), "unexpected pixel width \(rep.pixelsWide)")
         XCTAssertGreaterThan(rep.pixelsHigh, 0)
 
-        // A ready terminal has no timing, totals or tail — and in a stack view
-        // a hidden row is genuinely gone, so the card is visibly shorter.
+        // A ready terminal has no timing and no totals — and in a stack view a
+        // hidden row is genuinely gone, so the card is visibly shorter. The
+        // mark row stays: that is the green mark, standing alone.
         body.apply(HoverCardModel.pane(terminal(), status: .ready, activity: nil, now: t0))
         XCTAssertLessThan(body.cardSize.height, size.height)
     }
@@ -423,6 +464,53 @@ final class SessionHoverCardTests: XCTestCase {
     /// furniture — an empty input box, a working directory, a context meter and
     /// `auto mode on` — none of which changes when the agent does anything. The
     /// card showed that. It has to show the last thing the agent actually did.
+    /// The line the agent's own blinking bullet is on — including when the blink
+    /// has it off screen this frame, which is half the time.
+    func testTheOutputLineIsTheBulletsLineEvenWhileTheBulletIsBlinkedOff() throws {
+        let terminal = Terminal(
+            delegate: SilentTerminalDelegate(),
+            options: TerminalOptions(cols: 80, rows: 10)
+        )
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J")
+        let screen = [
+            "⏺ Now registering the new file with the Xcode project:",
+            "",
+            "  Building modal rename component; registering with Xcode · 1m 36s",
+            "  └ $ cd macos && python3 - <<'PY'",
+            "      p = \"OmniAgentTests/PaneWorkspaceViewTests.swift\"",
+            "",
+            "      still the tool's own output, not the agent's line",
+            "",
+            "› ",
+        ]
+        for (index, line) in screen.enumerated() {
+            terminal.feed(text: "\u{1b}[\(index + 1);1H" + line)
+        }
+
+        XCTAssertEqual(
+            TerminalSurfaceView.lastOutputLine(of: terminal),
+            "Building modal rename component; registering with Xcode · 1m 36s",
+            "the blinked-off bullet's line, not the tool output indented under it"
+        )
+    }
+
+    /// A visible bullet with nothing under it is its own answer.
+    func testTheBulletsOwnLineWinsWhenTheBlinkHasItOn() throws {
+        let terminal = Terminal(
+            delegate: SilentTerminalDelegate(),
+            options: TerminalOptions(cols: 60, rows: 6)
+        )
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J")
+        terminal.feed(text: "\u{1b}[1;1H⏺ Reading EditorPaneView.swift")
+        terminal.feed(text: "\u{1b}[2;1H⏺ Editing SessionHoverCard.swift")
+        terminal.feed(text: "\u{1b}[4;1H› ")
+
+        XCTAssertEqual(
+            TerminalSurfaceView.lastOutputLine(of: terminal),
+            "Editing SessionHoverCard.swift"
+        )
+    }
+
     func testTheOutputLineIsTheLastRealActionNotTheStatusBar() throws {
         let terminal = Terminal(
             delegate: SilentTerminalDelegate(),

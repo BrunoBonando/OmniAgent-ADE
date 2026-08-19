@@ -34,6 +34,14 @@ final class NativeTerminalView: TerminalView {
            event.charactersIgnoringModifiers == "o" {
             return true
         }
+        if window?.firstResponder === self,
+           let composed = Self.composedOptionText(
+               modifiers: event.modifierFlags,
+               characters: event.characters
+           ) {
+            send(Array(composed.utf8))
+            return true
+        }
         guard window?.firstResponder === self,
               let bytes = Self.overrideBytes(
                   keyCode: event.keyCode,
@@ -67,6 +75,31 @@ final class NativeTerminalView: TerminalView {
         return [0x1b, 0x0d]
     }
 
+    /// ⌥ is Meta here, which on a non-US layout eats the only way to type a
+    /// bracket: on the Portuguese layout ⌥8/⌥9 are `[`/`]` and ⌥⇧8/⌥⇧9 are
+    /// `{`/`}`, and as Meta they went out as ESC 8 / ESC 9. A ⌥ chord that
+    /// AppKit already composed into ASCII punctuation is such a layout key,
+    /// not a Meta chord — the Meta chords worth keeping (⌥⌫, ⌥←/→, ⌥b/⌥f)
+    /// compose either nothing or a letter, so they still fall through to
+    /// SwiftTerm. The cost is Meta-punctuation chords on layouts that do
+    /// compose ASCII there — Meta-. (yank-last-arg) being the one anybody
+    /// misses.
+    static func composedOptionText(
+        modifiers: NSEvent.ModifierFlags,
+        characters: String?
+    ) -> String? {
+        // ⇧ rides along on the brace half of the pair, so only ⌃/⌘ disqualify.
+        guard modifiers.intersection([.control, .command, .option]) == .option,
+              let characters,
+              characters.unicodeScalars.count == 1,
+              let scalar = characters.unicodeScalars.first,
+              // Printable ASCII, minus space, minus anything alphanumeric.
+              (0x21...0x7e).contains(scalar.value),
+              !CharacterSet.alphanumerics.contains(scalar)
+        else { return nil }
+        return characters
+    }
+
     override func accessibilityPerformPress() -> Bool {
         window?.makeFirstResponder(self)
         return true
@@ -86,6 +119,9 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     var onTitleChange: ((String) -> Void)?
     var onDirectoryChange: ((String?) -> Void)?
     var onLinkClick: ((URL) -> Void)?
+    /// The user submitted `/clear` — a new conversation, so whatever the pane
+    /// was called is about nothing now.
+    var onClearCommand: (() -> Void)?
 
     /// When set, PTY resizes are batched here instead of being sent on every
     /// size change — one send per display refresh during a live divider drag.
@@ -360,10 +396,35 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     /// a `/rename`), which is not the user starting a conversation.
     private(set) var hasUserInput = false
 
+    /// What has been typed since the last Enter. Only ever long enough to
+    /// recognise a `/clear`; anything that is not a plain printable character
+    /// throws it away rather than guessing at the line the engine sees.
+    private var typedLine = ""
+
     func send(source: TerminalView, data: ArraySlice<UInt8>) {
         hasUserInput = true
+        trackTypedLine(data)
         os_signpost(.event, log: Instrumentation.log, name: "Terminal Input")
         connection.write(sessionID: sessionID, bytes: Data(data))
+    }
+
+    /// Watches the keystroke stream for `/clear` and nothing else.
+    private func trackTypedLine(_ data: ArraySlice<UInt8>) {
+        for byte in data {
+            switch byte {
+            case 0x0D, 0x0A:
+                if typedLine.trimmingCharacters(in: .whitespaces) == "/clear" { onClearCommand?() }
+                typedLine = ""
+            case 0x7F, 0x08:
+                if !typedLine.isEmpty { typedLine.removeLast() }
+            case 0x20...0x7E:
+                typedLine.append(Character(UnicodeScalar(byte)))
+            default:
+                // An escape sequence, a paste, anything non-ASCII: this is a
+                // spelling check, not a shell parser. Start over.
+                typedLine = ""
+            }
+        }
     }
 
     /// Writes to the PTY exactly as typing would — the approval bar's buttons
@@ -420,13 +481,21 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     /// Not literally the last line: on a screen an agent owns, the last line is
     /// its own furniture. Claude's is `auto mode on (shift+tab to cycle)`,
     /// under a context meter, under a working directory, under an empty input
-    /// box — none of which changes when the agent does something. Three rules
-    /// get past all of it, and cost nothing on a plain shell, which has none of
-    /// it:
+    /// box — none of which changes when the agent does something.
+    ///
+    /// What it wants is the line the agent's own blinking bullet is on: `⏺`,
+    /// the mark it puts beside whatever it is doing right now. That bullet is
+    /// *blinking*, so half the time it is not on the screen to be found — which
+    /// is why this looks for the bullet's column rather than the bullet. From
+    /// the lowest bullet on screen, the answer is the lowest line still in that
+    /// column: either the bullet's own line, or the one under it whose bullet
+    /// happens to be blinked off this frame.
+    ///
+    /// With no bullet anywhere — a plain shell — three rules stand in, and they
+    /// cost a shell nothing, having none of what they skip:
     ///
     /// 1. **Everything at and below the input box is chrome.** The box is the
-    ///    bottom-most `›`/`❯` prompt line; the status bar lives under it by
-    ///    construction, whatever it happens to say today.
+    ///    bottom-most `›`/`❯` prompt line. This one applies either way.
     /// 2. **A command echo is one block.** A line opening with `└`/`⎿`/`$`
     ///    starts it and its indented body continues it — the card should say
     ///    what the tool is *for*, which is the line above, not the shell it
@@ -437,23 +506,55 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     ///
     /// What survives is the lowest line that actually reports something.
     static func lastOutputLine(of terminal: Terminal) -> String? {
-        var rows: [(indent: Int, body: String)] = []
-        for row in 0..<terminal.rows {
-            guard let line = terminal.getLine(row: row) else { continue }
-            // Same NUL substitution `tailLines` documents: SwiftTerm returns
-            // U+0000 for a cell nobody wrote, and a TUI paints by jumping
-            // columns rather than writing the spaces between words.
-            let raw = line.translateToString(trimRight: true)
-                .replacingOccurrences(of: "\0", with: " ")
-            let indent = raw.prefix { $0.unicodeScalars.allSatisfy(borderAndSpace.contains) }.count
-            rows.append((indent, raw.trimmingCharacters(in: borderAndSpace)))
-        }
-        // Rule 1. The *last* prompt line: the submitted messages above wear the
-        // same glyph, and they are transcript, not chrome.
-        if let box = rows.lastIndex(where: { isPrompt($0.body) }) {
-            rows = Array(rows.prefix(box))
-        }
+        let rows = visibleRows(of: terminal)
+        // The bullet's own line wins when there is one, blinked off or not.
+        if let fromBullet = bulletLine(in: rows) { return fromBullet }
+        return reportingLine(in: rows)
+    }
 
+    /// The lowest line in the agent's bullet column: its current action.
+    private static func bulletLine(in rows: [(indent: Int, body: String)]) -> String? {
+        guard let bullet = rows.lastIndex(where: { isBullet($0.body) }) else { return nil }
+        let column = rows[bullet].indent
+        var best = display(rows[bullet].body)
+        var echoIndent: Int?
+        for row in rows[(bullet + 1)...] {
+            if row.body.isEmpty {
+                echoIndent = nil
+                continue
+            }
+            if let echoIndent, row.indent > echoIndent { continue }
+            echoIndent = nil
+            if isEcho(row.body) {
+                echoIndent = row.indent
+                continue
+            }
+            // A blinked-off bullet leaves its text where the bullet's own text
+            // sits — two columns in. Anything further in belongs to a tool's
+            // output, not to the agent's line.
+            guard row.indent <= column + 2 else { continue }
+            if isSpinner(row.body) || isHint(row.body) { continue }
+            guard row.body.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains)
+            else { continue }
+            best = display(row.body)
+        }
+        return best.isEmpty ? nil : best
+    }
+
+    private static func isBullet(_ body: String) -> Bool {
+        guard let first = body.first else { return false }
+        return "⏺●".contains(first)
+    }
+
+    /// The body with its margin mark taken off — the glyph is a mark, not a
+    /// word.
+    private static func display(_ body: String) -> String {
+        String(body.drop { $0.unicodeScalars.allSatisfy(leadingMarker.contains) })
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func reportingLine(in allRows: [(indent: Int, body: String)]) -> String? {
+        var rows = allRows
         // Top down, so a block is met at its header rather than in its middle,
         // and so the last survivor is the lowest one.
         var best: String?
@@ -476,10 +577,31 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
             if isSpinner(row.body) || isHint(row.body) { continue }
             guard row.body.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains)
             else { continue }
-            best = row.body.drop { $0.unicodeScalars.allSatisfy(leadingMarker.contains) }
-                .trimmingCharacters(in: .whitespaces)
+            best = display(row.body)
         }
         return best?.isEmpty == false ? best : nil
+    }
+
+    /// The visible screen, each row reduced to what these rules read: how far
+    /// in its text starts, and that text with the box it sits in trimmed off.
+    /// Everything at and below the input box is dropped — the status bar lives
+    /// under it by construction, whatever it happens to say today, and the
+    /// *last* prompt line is the box (the submitted messages above wear the
+    /// same glyph, and they are transcript).
+    private static func visibleRows(of terminal: Terminal) -> [(indent: Int, body: String)] {
+        var rows: [(indent: Int, body: String)] = []
+        for row in 0..<terminal.rows {
+            guard let line = terminal.getLine(row: row) else { continue }
+            // Same NUL substitution `tailLines` documents: SwiftTerm returns
+            // U+0000 for a cell nobody wrote, and a TUI paints by jumping
+            // columns rather than writing the spaces between words.
+            let raw = line.translateToString(trimRight: true)
+                .replacingOccurrences(of: "\0", with: " ")
+            let indent = raw.prefix { $0.unicodeScalars.allSatisfy(borderAndSpace.contains) }.count
+            rows.append((indent, raw.trimmingCharacters(in: borderAndSpace)))
+        }
+        guard let box = rows.lastIndex(where: { isPrompt($0.body) }) else { return rows }
+        return Array(rows.prefix(box))
     }
 
     private static func isPrompt(_ body: String) -> Bool {
