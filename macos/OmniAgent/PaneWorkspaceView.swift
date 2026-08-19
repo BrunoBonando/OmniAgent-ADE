@@ -2360,6 +2360,65 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             .key
     }
 
+    /// Translates the camera. Event-free so the geometry can be checked without
+    /// synthesizing an `NSScrollWheel`, the way `focusCardFrame(in:)` is static
+    /// and pure "so the geometry can be checked without a window".
+    func panCanvas(by delta: CGSize) {
+        guard isCanvasMode else { return }
+        camera = DeskCamera(
+            scale: camera.scale,
+            origin: CGPoint(x: camera.origin.x + delta.width, y: camera.origin.y + delta.height)
+        )
+    }
+
+    /// Rescales about a fixed point in this view's coordinates — the pointer for
+    /// a pinch or a ⌘-scroll, the viewport centre for ⌘+ / ⌘-.
+    ///
+    /// Written out rather than delegating to `DeskCamera.clamped(minScale:in:)`,
+    /// which re-centres on the viewport by definition: a pinch that walks the
+    /// canvas out from under your fingers is the first thing anyone notices.
+    /// The forward map is the inverse of `canvasPoint(from:)` —
+    /// `viewPoint = canvasPoint * scale + origin` — so holding the anchor still
+    /// means `origin = viewPoint - anchor * newScale`.
+    func zoomCanvas(by factor: CGFloat, about viewPoint: CGPoint) {
+        guard isCanvasMode, factor > 0 else { return }
+        let anchor = camera.canvasPoint(from: viewPoint)
+        let scale = min(DeskCamera.maxScale, max(minimumCanvasScale, camera.scale * factor))
+        camera = DeskCamera(
+            scale: scale,
+            origin: CGPoint(
+                x: viewPoint.x - anchor.x * scale,
+                y: viewPoint.y - anchor.y * scale
+            )
+        )
+    }
+
+    /// `zoomCanvas`, plus the resolution the spec's "one operation" demands: a
+    /// gesture that runs the scale into the 1.0 ceiling over a session card
+    /// finishes the job and enters that session, instead of parking at scale 1
+    /// with a fractional origin — which `DeskCamera.isIdentity` rejects, so the
+    /// panes would stay dead under a camera that looks like it arrived.
+    func pinchCanvas(by factor: CGFloat, about viewPoint: CGPoint) {
+        guard isCanvasMode else { return }
+        zoomCanvas(by: factor, about: viewPoint)
+        guard camera.scale >= DeskCamera.maxScale,
+              let id = canvasNode(at: viewPoint),
+              let node = deskNode(id, in: canvasTree),
+              case .session(let group) = node.kind
+        else { return }
+        enterSession(group)
+    }
+
+    /// The tree is small — one account, a handful of workspaces, at most eight
+    /// sessions — so a walk costs nothing and there is no index to keep in sync.
+    private func deskNode(_ id: String, in node: DeskNode) -> DeskNode? {
+        if node.id == id { return node }
+        for child in node.children {
+            if let found = deskNode(id, in: child) { return found }
+        }
+        return nil
+    }
+
     private func hasNeighbor(_ direction: PaneDirection) -> Bool {
         guard let focusedPaneID else { return false }
         return grid?.neighbor(of: focusedPaneID, direction: direction) != nil

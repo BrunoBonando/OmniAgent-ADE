@@ -74,6 +74,87 @@ final class DeskCanvasInputTests: XCTestCase {
         XCTAssertEqual(workspace.canvasNode(at: viewPoint), node, "the middle session card")
     }
 
+    // MARK: - Camera gestures
+
+    /// A pan is a pure origin translation: the scale does not move.
+    func testPanningMovesTheOriginByTheScrollDeltaAndNothingElse() {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let before = workspace.camera
+
+        workspace.panCanvas(by: CGSize(width: 40, height: -25))
+
+        XCTAssertEqual(workspace.camera.scale, before.scale, accuracy: 0.0001, "a pan does not zoom")
+        XCTAssertEqual(workspace.camera.origin.x, before.origin.x + 40, accuracy: 0.0001)
+        XCTAssertEqual(workspace.camera.origin.y, before.origin.y - 25, accuracy: 0.0001)
+    }
+
+    /// The one thing people notice immediately if it is wrong: the canvas point
+    /// under the pointer must not move while you pinch.
+    ///
+    /// Seated at `fitAll` first, because a fresh canvas mode camera is already
+    /// at the 1.0 ceiling and "did it zoom in" has no answer up there.
+    func testZoomingAboutAPointLeavesThatCanvasPointUnderThePointer() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let layout = try XCTUnwrap(workspace.canvasLayout)
+        workspace.camera = DeskCamera.fitAll(content: layout.contentRect, in: workspace.bounds)
+        let anchor = CGPoint(x: 900, y: 220)
+        let before = workspace.camera.canvasPoint(from: anchor)
+        let scaleBefore = workspace.camera.scale
+
+        workspace.zoomCanvas(by: PaneWorkspaceView.canvasZoomStep, about: anchor)
+
+        let after = workspace.camera.canvasPoint(from: anchor)
+        XCTAssertEqual(after.x, before.x, accuracy: 0.001, "the point under the pointer is fixed")
+        XCTAssertEqual(after.y, before.y, accuracy: 0.001)
+        XCTAssertGreaterThan(workspace.camera.scale, scaleBefore, "and it did zoom in")
+    }
+
+    /// `[fitAll, 1.0]`. Above 1.0 there is nothing to see and
+    /// `metalRenderingScaleFactor()` clamps at `max(1, …)` anyway; below fitAll
+    /// the whole tree is already on screen.
+    func testZoomStopsAtOneAboveAndAtFitAllBelow() {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let centre = CGPoint(x: workspace.bounds.midX, y: workspace.bounds.midY)
+
+        for _ in 0..<40 { workspace.zoomCanvas(by: PaneWorkspaceView.canvasZoomStep, about: centre) }
+        XCTAssertEqual(workspace.camera.scale, DeskCamera.maxScale, accuracy: 0.0001, "1.0 is the ceiling")
+
+        for _ in 0..<40 { workspace.zoomCanvas(by: 1 / PaneWorkspaceView.canvasZoomStep, about: centre) }
+        XCTAssertEqual(
+            workspace.camera.scale,
+            workspace.minimumCanvasScale,
+            accuracy: 0.0001,
+            "fitAll is the floor"
+        )
+    }
+
+    /// "Keep zooming past a threshold" is the fourth way in (spec §5) and it has
+    /// to resolve to the same one operation as a double-click. A pinch that
+    /// reaches 1.0 over a session card enters that session, rather than leaving
+    /// the camera at scale 1 with a fractional origin — a state `isIdentity`
+    /// rejects, so no pane would accept input in it.
+    ///
+    /// It lives on `pinchCanvas` and not on `zoomCanvas` on purpose: ⌘+ is aimed
+    /// at the viewport centre, which at fitAll is routinely over the middle
+    /// card, and a keyboard zoom that teleported into a session would be a
+    /// different command than the one that was pressed.
+    func testAPinchThatReachesOneOverASessionCardEntersThatSession() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let layout = try XCTUnwrap(workspace.canvasLayout)
+        let group = workspace.groupIDs[2]
+        let node = try XCTUnwrap(nodeID(forGroup: group, in: workspace))
+        let rect = try XCTUnwrap(layout.frames[node])
+        workspace.camera = DeskCamera.fitAll(content: layout.contentRect, in: workspace.bounds)
+        let anchor = CGPoint(
+            x: rect.midX * workspace.camera.scale + workspace.camera.origin.x,
+            y: rect.midY * workspace.camera.scale + workspace.camera.origin.y
+        )
+
+        for _ in 0..<40 { workspace.pinchCanvas(by: 1.3, about: anchor) }
+
+        XCTAssertEqual(workspace.activeGroup, group, "the pinch landed in that session")
+    }
+
     // MARK: - Helpers
 
     /// One session per group, one pane each, sized like the real Desk. Mirrors
