@@ -624,6 +624,146 @@ final class HoverCardBodyView: NSView {
     }
 }
 
+// MARK: - The glass, and the drop
+
+/// Everything inside the panel: the card, and the drop of glass beside it that
+/// says which row this belongs to.
+///
+/// The drop is not drawn. It is a second `NSGlassEffectView`, and both of them
+/// live inside an `NSGlassEffectContainerView` whose `spacing` is wide enough
+/// that the system merges them — so what appears between the card and the row
+/// is macOS 26's own liquid bridge, stretching and necking as the card moves
+/// down the sidebar. A drawn triangle would be a shape stuck on the side of a
+/// material; this is the material.
+///
+/// Below macOS 26 there is nothing to merge: the card falls back to the blur
+/// `CommandPaletteController.glassHost` uses, and the drop to a tinted circle,
+/// which points without pretending to flow.
+final class HoverCardShellView: NSView {
+    /// The column the drop lives in, left of the card.
+    static let lane: CGFloat = 20
+    static let dropSize: CGFloat = 14
+    /// Between the drop and the card — the neck of the merge. Wide enough to
+    /// read as two things joined, narrow enough that they *do* join.
+    static let neck: CGFloat = 5
+
+    let body = HoverCardBodyView()
+    private let card: NSView
+    private let drop: NSView
+    private let host: NSView
+    private let wrapper = NSView()
+    private let tint = CAGradientLayer()
+
+    /// Where the drop points, in this view's coordinates. The card is
+    /// top-aligned with its row but gets pushed around by the screen edges, so
+    /// the row's centre is not a fixed place on the card.
+    private(set) var dropCenterY: CGFloat = 0
+
+    override init(frame frameRect: NSRect) {
+        // The palette's treatment: the system material, with a slight navy
+        // gradient over it — a flat wash reads as paint, a gradient as glass.
+        body.wantsLayer = true
+        tint.colors = [
+            NSColor(srgbRed: 0.09, green: 0.10, blue: 0.16, alpha: 0.55).cgColor,
+            NSColor(srgbRed: 0.05, green: 0.05, blue: 0.09, alpha: 0.42).cgColor,
+        ]
+        tint.startPoint = CGPoint(x: 0.1, y: 1)
+        tint.endPoint = CGPoint(x: 0.9, y: 0)
+        tint.cornerRadius = SessionHoverCardController.cornerRadius
+        tint.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        body.layer?.insertSublayer(tint, at: 0)
+        body.autoresizingMask = [.width, .height]
+
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = SessionHoverCardController.cornerRadius
+            glass.contentView = body
+            card = glass
+
+            let bead = NSGlassEffectView()
+            bead.cornerRadius = Self.dropSize / 2
+            // The same navy the card's gradient settles on, so the bridge
+            // between them is one material rather than two.
+            bead.tintColor = NSColor(srgbRed: 0.07, green: 0.08, blue: 0.13, alpha: 0.5)
+            drop = bead
+
+            let container = NSGlassEffectContainerView()
+            // Comfortably more than `neck`: the merge begins at this distance,
+            // and starting it early is what gives the bridge its curve.
+            container.spacing = 24
+            container.contentView = wrapper
+            host = container
+        } else {
+            card = CommandPaletteController.glassHost(
+                body,
+                size: NSSize(width: HoverCardBodyView.width, height: 120),
+                cornerRadius: SessionHoverCardController.cornerRadius
+            )
+            let bead = NSView()
+            bead.wantsLayer = true
+            bead.layer?.cornerRadius = Self.dropSize / 2
+            bead.layer?.backgroundColor = NSColor(
+                srgbRed: 0.12,
+                green: 0.13,
+                blue: 0.20,
+                alpha: 0.92
+            ).cgColor
+            drop = bead
+            host = NSView()
+        }
+
+        super.init(frame: frameRect)
+        wantsLayer = true
+        addSubview(host)
+        // The container's `contentView` setter parents the wrapper itself; the
+        // fallback's plain host does not.
+        if wrapper.superview == nil { host.addSubview(wrapper) }
+        wrapper.addSubview(card)
+        wrapper.addSubview(drop)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func layout() {
+        super.layout()
+        host.frame = bounds
+        wrapper.frame = bounds
+        card.frame = NSRect(x: Self.lane, y: 0, width: max(0, bounds.width - Self.lane), height: bounds.height)
+        drop.frame = dropFrame(centerY: dropCenterY)
+    }
+
+    /// Points the drop at `centerY`. Animated when the card slides from one row
+    /// to the next — the bridge necks and stretches on its own, which is the
+    /// whole reason the drop is glass and not a triangle.
+    func pointDrop(at centerY: CGFloat, animated: Bool) {
+        dropCenterY = centerY
+        let frame = dropFrame(centerY: centerY)
+        guard animated, !ShellMotion.reduced else {
+            drop.frame = frame
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 0.85, 0.25, 1)
+            drop.animator().frame = frame
+        }
+    }
+
+    /// Where the drop sits for a given row centre, kept far enough from the
+    /// card's own corners that the bridge always leaves from a straight edge.
+    func dropFrame(centerY: CGFloat) -> NSRect {
+        let inset = SessionHoverCardController.cornerRadius + Self.dropSize / 2
+        let y = min(max(centerY, min(inset, bounds.height / 2)), max(bounds.height - inset, bounds.height / 2))
+        return NSRect(
+            x: Self.lane - Self.neck - Self.dropSize,
+            y: y - Self.dropSize / 2,
+            width: Self.dropSize,
+            height: Self.dropSize
+        )
+    }
+}
+
 // MARK: - The panel
 
 /// The hover card itself: a borderless glass panel that follows the pointer
@@ -653,9 +793,10 @@ final class SessionHoverCardController {
     /// a row rebuilt under a stationary pointer must not drop the card.
     var rowFrame: ((Target) -> NSRect?)?
 
-    /// Long enough that running the pointer down the list does not strobe
-    /// cards, short enough to feel like it was already there.
-    static let openDelay: TimeInterval = 0.35
+    /// Barely a delay at all — enough to keep a pointer crossing the list from
+    /// firing a card per row, and no more. Anything longer reads as the card
+    /// deciding whether to come.
+    static let openDelay: TimeInterval = 0.12
     static let tickInterval: TimeInterval = 0.1
     /// Between the row's right edge and the card.
     static let gap: CGFloat = 12
@@ -664,9 +805,9 @@ final class SessionHoverCardController {
     static let slide: CGFloat = 6
 
     private(set) var target: Target?
-    private let body = HoverCardBodyView()
+    private let shell = HoverCardShellView()
+    private var body: HoverCardBodyView { shell.body }
     private let panel: NSPanel
-    private let tint = CAGradientLayer()
     private var openTimer: Timer?
     private var tickTimer: Timer?
     private weak var parent: NSWindow?
@@ -677,7 +818,12 @@ final class SessionHoverCardController {
 
     init() {
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: HoverCardBodyView.width, height: 120),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: HoverCardBodyView.width + HoverCardShellView.lane,
+                height: 120
+            ),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -690,28 +836,7 @@ final class SessionHoverCardController {
         panel.hidesOnDeactivate = false
         panel.animationBehavior = .none
         panel.collectionBehavior = [.transient, .ignoresCycle]
-
-        // The palette's treatment: the system material, with a slight navy
-        // gradient over it — a flat wash reads as paint, a gradient as glass.
-        body.wantsLayer = true
-        tint.colors = [
-            NSColor(srgbRed: 0.09, green: 0.10, blue: 0.16, alpha: 0.55).cgColor,
-            NSColor(srgbRed: 0.05, green: 0.05, blue: 0.09, alpha: 0.42).cgColor,
-        ]
-        tint.startPoint = CGPoint(x: 0.1, y: 1)
-        tint.endPoint = CGPoint(x: 0.9, y: 0)
-        tint.cornerRadius = Self.cornerRadius
-        tint.frame = body.bounds
-        tint.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        body.layer?.insertSublayer(tint, at: 0)
-        body.autoresizingMask = [.width, .height]
-
-        let glass = CommandPaletteController.glassHost(
-            body,
-            size: NSSize(width: HoverCardBodyView.width, height: 120),
-            cornerRadius: Self.cornerRadius
-        )
-        panel.contentView = glass
+        panel.contentView = shell
     }
 
     deinit {
@@ -763,15 +888,27 @@ final class SessionHoverCardController {
         })
     }
 
-    /// Where the card goes: top-aligned with its row, just off the sidebar's
-    /// edge, and always fully inside the window.
+    /// Where the panel goes: the card top-aligned with its row and `gap` past
+    /// the sidebar's edge, always fully inside the window.
+    ///
+    /// `size` is the whole panel, drop lane included, so the lane comes back
+    /// off the left — the drop belongs in the space between the row and the
+    /// card, which is exactly what it is pointing across.
     static func frame(size: NSSize, row: NSRect, container: NSRect) -> NSRect {
-        var origin = NSPoint(x: row.maxX + gap, y: row.maxY + 6 - size.height)
+        var origin = NSPoint(
+            x: row.maxX + gap - HoverCardShellView.lane,
+            y: row.maxY + 6 - size.height
+        )
         origin.x = min(origin.x, container.maxX - size.width - 8)
         origin.x = max(origin.x, container.minX + 8)
         origin.y = min(origin.y, container.maxY - size.height - 8)
         origin.y = max(origin.y, container.minY + 8)
         return NSRect(origin: origin, size: size)
+    }
+
+    /// The whole panel for a card of `size` — the drop needs a lane of its own.
+    static func panelSize(card: NSSize) -> NSSize {
+        NSSize(width: card.width + HoverCardShellView.lane, height: card.height)
     }
 
     private func present() {
@@ -789,7 +926,7 @@ final class SessionHoverCardController {
         let wasOpen = panel.isVisible
         body.apply(model)
         body.tailField.animates = !ShellMotion.reduced
-        let size = body.cardSize
+        let size = Self.panelSize(card: body.cardSize)
         let frame = Self.frame(size: size, row: row, container: parent.frame)
 
         if !wasOpen {
@@ -807,6 +944,9 @@ final class SessionHoverCardController {
             panel.animator().alphaValue = 1
             panel.animator().setFrame(frame, display: true)
         }
+        // Animated only when sliding between rows: on the way in the card is
+        // moving anyway, and a drop crawling into place behind it reads as lag.
+        shell.pointDrop(at: row.midY - frame.minY, animated: wasOpen)
         startTicking()
     }
 
@@ -837,7 +977,11 @@ final class SessionHoverCardController {
             return
         }
         body.apply(model)
-        let frame = Self.frame(size: body.cardSize, row: row, container: parent.frame)
+        let frame = Self.frame(size: Self.panelSize(card: body.cardSize), row: row, container: parent.frame)
         if !frame.equalTo(panel.frame) { panel.setFrame(frame, display: true) }
+        // The row moves under the card as the sidebar reloads; the drop keeps
+        // pointing at it.
+        let centerY = row.midY - frame.minY
+        if abs(centerY - shell.dropCenterY) > 0.5 { shell.pointDrop(at: centerY, animated: true) }
     }
 }

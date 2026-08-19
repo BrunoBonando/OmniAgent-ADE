@@ -288,14 +288,17 @@ final class SessionHoverCardTests: XCTestCase {
     /// see on the last row.
     func testThePanelSitsBesideItsRowAndStaysInsideTheWindow() {
         let window = NSRect(x: 100, y: 100, width: 1_200, height: 800)
-        let size = NSSize(width: 280, height: 140)
+        let size = SessionHoverCardController.panelSize(card: NSSize(width: 280, height: 140))
+        XCTAssertEqual(size.width, 280 + HoverCardShellView.lane, "the drop gets a lane of its own")
 
         let middle = SessionHoverCardController.frame(
             size: size,
             row: NSRect(x: 110, y: 500, width: 238, height: 26),
             container: window
         )
-        XCTAssertEqual(middle.minX, 348 + SessionHoverCardController.gap)
+        // The *card* sits `gap` past the row; the lane it points across is to
+        // the left of that.
+        XCTAssertEqual(middle.minX + HoverCardShellView.lane, 348 + SessionHoverCardController.gap)
         XCTAssertEqual(middle.maxY, 526 + 6, "top-aligned with the row")
 
         // A row at the very bottom pushes the card up rather than off.
@@ -315,6 +318,34 @@ final class SessionHoverCardTests: XCTestCase {
             container: NSRect(x: 100, y: 100, width: 420, height: 800)
         )
         XCTAssertEqual(tight.maxX, 520 - 8)
+    }
+
+    /// The drop is what says which row the card belongs to, so it has to track
+    /// the row's centre — and stay off the card's own corners, where the merge
+    /// would leave from a curve instead of a straight edge.
+    func testTheDropPointsAtTheRowAndKeepsOffTheCorners() {
+        let shell = HoverCardShellView(frame: NSRect(x: 0, y: 0, width: 300, height: 140))
+        shell.layoutSubtreeIfNeeded()
+
+        let middle = shell.dropFrame(centerY: 70)
+        XCTAssertEqual(middle.midY, 70)
+        XCTAssertEqual(
+            middle.maxX + HoverCardShellView.neck,
+            HoverCardShellView.lane,
+            "the drop sits a neck's width from the card"
+        )
+        XCTAssertGreaterThan(middle.minX, 0, "and inside the panel, or the bridge is clipped")
+
+        // A row level with the very top of the card pulls the drop down to
+        // where the card's edge is straight.
+        let high = shell.dropFrame(centerY: 139)
+        XCTAssertLessThan(high.midY, 139)
+        XCTAssertGreaterThanOrEqual(high.midY, 140 - SessionHoverCardController.cornerRadius - 7)
+
+        // Animation off under Reduce Motion is the caller's business; pointing
+        // is not.
+        shell.pointDrop(at: 40, animated: false)
+        XCTAssertEqual(shell.dropCenterY, 40)
     }
 
     /// Glance-only: the card can never swallow a click meant for the pane
