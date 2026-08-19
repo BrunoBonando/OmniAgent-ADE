@@ -145,11 +145,17 @@ final class PaneAskOverlayView: NSView {
         }
         if #available(macOS 26.0, *) {
             let pane = NSGlassEffectView()
-            // `.clear`, untinted — the same call focus mode makes, for the same
-            // reason: the pane behind the question is glassed, not coloured and
-            // not dimmed. A tint here is a wash over everything behind the
-            // panel, which puts the card's navy on the surroundings too.
-            pane.style = .clear
+            // `.regular`, untinted. The panel always covered the whole pane,
+            // header included — its frame is the container's bounds and it is
+            // the topmost subview — but with `.clear` it did not *look* it:
+            // clear glass over the header's flat opaque fill is close to a
+            // no-op, while the same glass over terminal text visibly refracts,
+            // so only the content read as covered. `.regular` carries the
+            // material's own frosting, which shows on a flat fill too.
+            //
+            // Still no `tintColor`: that is a wash of *colour* over everything
+            // behind the panel, and the navy belongs to the card alone.
+            pane.style = .regular
             pane.tintColor = nil
             scrim = pane
             let card = NSGlassEffectView()
