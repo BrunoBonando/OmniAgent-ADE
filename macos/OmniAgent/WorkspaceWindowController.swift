@@ -1598,9 +1598,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return
         }
         if let container = paneID.flatMap({ workspace.container(for: $0) }) {
+            // No icon: a pencil said nothing the title had not, and a glyph
+            // over a text field is one thing too many on a card this small.
             container.presentAsk(
                 title: "Rename this conversation",
-                icon: NSImage(systemSymbolName: "pencil", accessibilityDescription: nil),
                 input: current,
                 options: [
                     PaneAskOption("Cancel") { _ in completion(nil) },

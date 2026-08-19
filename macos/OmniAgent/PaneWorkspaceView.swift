@@ -1772,7 +1772,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
     func presentAsk(
         title: String,
         message: String = "",
-        icon: NSImage?,
+        icon: NSImage? = nil,
         input: String? = nil,
         options: [PaneAskOption],
         onCancel: @escaping () -> Void = {}

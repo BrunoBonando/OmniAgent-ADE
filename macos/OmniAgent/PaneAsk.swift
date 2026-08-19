@@ -287,7 +287,10 @@ final class PaneAskOverlayView: NSView {
             : Self.height(of: messageLabel, width: content)
         let messageBlock = messageHeight > 0 ? messageHeight + 8 : 0
         let fieldBlock = field == nil ? 0 : Self.fieldHeight + 14
-        let height = padding + Self.iconSize + 12 + titleHeight + messageBlock
+        // No icon, no room for one — the same rule the message follows. A card
+        // whose subject has no picture worth showing says it in the title.
+        let iconBlock = iconView.image == nil ? 0 : Self.iconSize + 12
+        let height = padding + iconBlock + titleHeight + messageBlock
             + 18 + fieldBlock + Self.buttonHeight + padding
         cardFrame = NSRect(
             x: ((bounds.width - width) / 2).rounded(),
@@ -299,13 +302,16 @@ final class PaneAskOverlayView: NSView {
         cardTint.frame = cardFrame
         cardTintLayer.frame = cardTint.bounds
         var y = cardFrame.minY + padding
-        iconView.frame = NSRect(
-            x: cardFrame.midX - Self.iconSize / 2,
-            y: y,
-            width: Self.iconSize,
-            height: Self.iconSize
-        )
-        y += Self.iconSize + 12
+        iconView.isHidden = iconBlock == 0
+        if iconBlock > 0 {
+            iconView.frame = NSRect(
+                x: cardFrame.midX - Self.iconSize / 2,
+                y: y,
+                width: Self.iconSize,
+                height: Self.iconSize
+            )
+            y += iconBlock
+        }
         titleLabel.frame = NSRect(x: cardFrame.minX + padding, y: y, width: content, height: titleHeight)
         y += titleHeight
         messageLabel.isHidden = messageHeight == 0

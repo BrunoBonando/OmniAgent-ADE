@@ -693,7 +693,6 @@ final class PaneWorkspaceViewTests: XCTestCase {
         // gap the subtitle used to fill rather than leave a hole in the middle.
         container.presentAsk(
             title: "Rename this conversation",
-            icon: NSImage(systemSymbolName: "pencil", accessibilityDescription: nil),
             input: "Ingest",
             options: [
                 PaneAskOption("Cancel") { _ in },
