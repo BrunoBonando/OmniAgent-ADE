@@ -161,6 +161,42 @@ final class DeskCameraFlightTests: XCTestCase {
         XCTAssertEqual(workspace.camera, DeskCamera(scale: 1, origin: .zero), "no flight off the canvas")
     }
 
+    /// A session can die in the air: its last terminal exits while the camera is
+    /// still flying at its card, and `closePane` drops the group. There is then
+    /// nothing to land — but a landing that merely gave up left `canvasMode` on
+    /// with the camera parked at scale 1 over a card that no longer exists,
+    /// which is no session on screen and no landing left to come. The canvas is
+    /// where the user gets put down instead.
+    func testASessionThatDiesMidFlightLandsTheUserBackOnTheCanvas() throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            throw XCTSkip("under Reduce Motion the flight lands before the pane can close")
+        }
+        let (workspace, window) = makeAttachedWorkspace(groups: 2, panesPerGroup: 1)
+        defer { window.close() }
+        workspace.canvasMode = true
+
+        workspace.enterSession("sess-grp-2")
+        XCTAssertTrue(workspace.canvasMode, "still in the air")
+        XCTAssertTrue(workspace.closePane("sess-2-pane-1"), "and its last terminal exits under it")
+        RunLoop.current.run(
+            until: Date().addingTimeInterval(PaneWorkspaceView.zoomTransitionDuration + 0.2)
+        )
+
+        XCTAssertTrue(workspace.canvasMode, "put down on the canvas rather than nowhere")
+        XCTAssertEqual(
+            workspace.camera,
+            DeskCamera.fitAll(
+                content: try XCTUnwrap(workspace.canvasLayout?.contentRect),
+                in: workspace.bounds
+            ),
+            "aimed at the whole tree — the same operation esc and ⌘0 resolve to"
+        )
+        XCTAssertTrue(
+            workspace.canvasOwnsInput,
+            "so clicks, keys and gestures all still reach the canvas"
+        )
+    }
+
     /// Leaving joins the canvas *where the session already is*: the layout mode
     /// changes and the camera is re-seated on that card in the same turn, so the
     /// flight starts from the pixels that were on screen. Read off the

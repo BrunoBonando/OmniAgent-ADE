@@ -352,6 +352,32 @@ final class DeskCanvasLODTests: XCTestCase {
         XCTAssertEqual(focused.terminalSurface.terminalView.terminal.options.cursorStyle, .blinkBlock)
     }
 
+    /// Nor while the camera is flying *at* a card, which is the case scale
+    /// alone cannot see: a card is exactly the viewport, so aiming at one is
+    /// scale 1 on a whole-pixel origin for the whole 0.38s. Judged on that
+    /// looser test, the session being left kept its blink through every entry —
+    /// a 0.7s timer forcing a full-resolution Metal frame under a camera that is
+    /// somewhere else — so the question is the transform, not the scale.
+    func testNothingBlinksWhileTheCameraIsFlyingAtACardEvenAtScaleOne() throws {
+        let workspace = makeCanvasWorkspace(sessions: 2, panesEach: 1)
+        workspace.focusPane("s2-p1")
+        let card = try XCTUnwrap(workspace.canvasRect(forGroup: "grp-2"))
+
+        // Exactly the camera `enterSession` flies to, assigned rather than flown
+        // so the assertion does not race a 0.38s animation.
+        workspace.camera = DeskCamera.focus(on: card, in: workspace.bounds)
+
+        XCTAssertTrue(workspace.camera.isIdentity, "the trap this test exists for")
+        XCTAssertFalse(workspace.camera.isIdentityTransform, "the transform is a whole card's translation")
+        let focused = try XCTUnwrap(workspace.container(for: "s2-p1"))
+        XCTAssertFalse(focused.isSelected)
+        XCTAssertEqual(
+            focused.terminalSurface.terminalView.terminal.options.cursorStyle,
+            .steadyBlock,
+            "the steady twin, which is what stops the timer"
+        )
+    }
+
     /// And only the session the camera is on. `adoptFocus` is the click path,
     /// and it sets `focusedPaneID` without touching `activeGroup` — so a pane
     /// in a session the camera is not on can hold focus, and must not blink at

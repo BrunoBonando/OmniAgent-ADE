@@ -50,6 +50,49 @@ final class DeskCanvasInputTests: XCTestCase {
         XCTAssertNil(workspace.hitTest(CGPoint(x: 1400, y: 400)), "and nothing outside its frame")
     }
 
+    /// And for the whole 0.38s of an entry flight, which is the case the
+    /// boundary is easiest to get wrong: a card is exactly the viewport, so
+    /// aiming at one is scale 1 on a whole-pixel origin — `isIdentity` is true
+    /// while `sublayerTransform` is a translation of hundreds of points.
+    /// Deferring to `super` there hands the click to whichever container's
+    /// *frame* holds the point, which is a pane of some other session drawn
+    /// nowhere near the pointer, and its PTY gets the mouse event.
+    func testTheCanvasKeepsEveryHitForTheWholeEntryFlight() throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            throw XCTSkip("under Reduce Motion the flight lands in the same turn, with nothing in the air")
+        }
+        let (workspace, window) = makeAttachedCanvasWorkspace(sessions: 3)
+        defer { window.close() }
+        // Session 1's card dragged onto the canvas origin, which is what makes
+        // the difference visible rather than incidental: its pane's *frame* then
+        // covers the whole viewport, so a `super.hitTest` during the flight
+        // lands on a terminal of session 1 while session 3 is what is drawn
+        // there — the click focuses and types into the wrong PTY.
+        let pinned = try XCTUnwrap(nodeID(forGroup: "sess-grp-1", in: workspace))
+        workspace.moveNode(pinned, to: .zero)
+        let strayPane = try XCTUnwrap(workspace.container(for: "pane-1"))
+        XCTAssertTrue(strayPane.frame.contains(CGPoint(x: 600, y: 400)), "the fixture's premise")
+
+        workspace.enterSession("sess-grp-3")
+
+        XCTAssertTrue(workspace.canvasMode, "still flying — the landing is 0.38s away")
+        XCTAssertTrue(workspace.camera.isIdentity, "the trap: scale 1 on a whole-pixel origin")
+        XCTAssertFalse(
+            workspace.camera.isIdentityTransform,
+            "and a translation of a whole card still installed under every pane"
+        )
+        XCTAssertTrue(workspace.canvasOwnsInput)
+        for point in [CGPoint(x: 1, y: 1), CGPoint(x: 600, y: 400), CGPoint(x: 1199, y: 799)] {
+            XCTAssertTrue(workspace.hitTest(point) === workspace, "the canvas takes the hit at \(point)")
+        }
+        let hit = workspace.hitTest(CGPoint(x: 600, y: 400))
+        XCTAssertFalse(
+            hit?.isDescendant(of: strayPane) == true,
+            "and never anything inside the pinned session's pane, which is not what is drawn there"
+        )
+        XCTAssertTrue(workspace.acceptsFirstResponder, "and can still be handed the keyboard")
+    }
+
     /// The node under the pointer comes from inverting the camera by hand,
     /// because AppKit cannot be asked: `convert(_:from:)` does not know the
     /// `sublayerTransform` exists.
@@ -487,6 +530,28 @@ final class DeskCanvasInputTests: XCTestCase {
             workspace.minimumCanvasScale,
             accuracy: 0.0001,
             "aimed at fitAll, the same operation ⌘0 and esc resolve to"
+        )
+    }
+
+    /// Leaving takes the keyboard off the terminal, with no click anywhere in
+    /// it. The three ways out — a pinch, ⌘0 and esc — are none of them a
+    /// `mouseDown`, which is the only other place the canvas claims first
+    /// responder; left on the terminal, esc would send ESC to that shell instead
+    /// of aiming at fitAll, ↩ a newline instead of entering the selection, and
+    /// the arrows would walk a cursor in a pane rendered at a third of its size.
+    func testLeavingASessionTakesTheKeyboardOffTheTerminalWithNoClickInvolved() throws {
+        let (workspace, window) = makeAttachedCanvasWorkspace(sessions: 2)
+        defer { window.close() }
+        workspace.canvasMode = false
+        workspace.focusPane("pane-1")
+        XCTAssertFalse(window.firstResponder === workspace, "a terminal holds it, the way it always has")
+
+        workspace.exitToCanvas()
+
+        XCTAssertTrue(workspace.canvasMode)
+        XCTAssertTrue(
+            window.firstResponder === workspace,
+            "the canvas holds the keyboard on the canvas, click or no click"
         )
     }
 

@@ -1137,16 +1137,21 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// swapping in `steadyTwin(of:)` is the only thing that stops it.
     ///
     /// Normal mode: the focused pane, exactly as before. Canvas mode: nobody,
-    /// unless the camera has landed at identity on the focused pane's own
+    /// unless the camera carries no transform at all over the focused pane's own
     /// session — which is precisely the state in which a pane accepts input at
     /// all, since every coordinate conversion in this file is blind to the
     /// camera's layer transform below it.
+    ///
+    /// The same `isIdentityTransform` `canvasOwnsInput` turns on, and not
+    /// `isIdentity`: an entry flight is scale 1 over a card for 0.38s, and on
+    /// the looser test the session being *left* kept its cursor blinking — a
+    /// 0.7s timer forcing a full-resolution Metal frame — for every one of them.
     private var selectablePaneID: String? {
         guard isCanvasMode else { return focusedPaneID }
         guard
             let focusedPaneID,
             descriptors[focusedPaneID]?.group == activeGroup,
-            camera.isIdentity
+            camera.isIdentityTransform
         else { return nil }
         return focusedPaneID
     }
@@ -1304,7 +1309,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// viewport" are the same picture only once normal mode has laid that card
     /// out in `bounds` again.
     private func landSession(_ group: String) {
-        guard grids[group] != nil else { return }
+        guard grids[group] != nil else {
+            // The session died in the air: its last terminal exited during the
+            // flight and `closePane` dropped the group. Returning would leave
+            // `canvasMode` on with the camera parked at scale 1 over a card that
+            // no longer exists — no session on screen and no landing left to
+            // come. The canvas is the honest place to be put down instead.
+            exitToCanvas()
+            return
+        }
         activeGroup = group
         // Back to the single-session layout, which lays `activeGroup`'s grid out
         // in `bounds` — the same pixels the camera is looking at this instant,
@@ -1376,6 +1389,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             }
         }
         flyCamera(to: DeskCamera.fitAll(content: canvasContentRect, in: bounds))
+        // The keyboard leaves with the camera. Coming out of a session the
+        // terminal is still the window's first responder, and nothing else on
+        // this path would take it back: esc would send ESC to that shell instead
+        // of aiming at fitAll, ↩ a newline instead of entering the selection,
+        // and the arrows would walk a cursor in a terminal rendered at a third
+        // of its size. `mouseDown` also takes it, but a click is not on the way
+        // out — a pinch, ⌘0 and esc are.
+        window?.makeFirstResponder(self)
     }
 
     /// Removes a pane, reflowing the grid down a rung when the count drops. If
@@ -2356,14 +2377,26 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// `convert(container.frame, to: host)`, `collapseZoom`'s
     /// `convert(cell, to: host)`, and `PaneContainerView.editorTabDropZone`.
     ///
-    /// At `camera.isIdentity` the `sublayerTransform` *is* identity, so every
-    /// one of those is already correct and this defers to `super` — the panes
-    /// behave exactly as they do with no canvas at all. Below identity scale the
-    /// canvas is the answer to every hit and no descendant ever sees a mouse
-    /// event, which is what keeps those ten sites right. This is not a feature
-    /// cut; it is the invariant.
+    /// Every one of them is right exactly when `sublayerTransform` is the
+    /// identity matrix and wrong under any other, so that — and not "the camera
+    /// looks landed" — is what hands input back to the panes.
+    ///
+    /// `isIdentityTransform`, deliberately, and **not** `isIdentity`: the
+    /// latter is scale 1 with a whole-pixel origin, which every entry flight
+    /// satisfies for its whole 0.38s while the transform is a translation of
+    /// hundreds of points. Guarding on it handed clicks to whichever container's
+    /// *frame* happened to contain the point — a pane of some other session,
+    /// drawn nowhere near the pointer — and a flight whose landing bailed left
+    /// that state up permanently.
+    var canvasOwnsInput: Bool { isCanvasMode && !camera.isIdentityTransform }
+
+    /// At the identity transform every conversion above is already correct and
+    /// this defers to `super` — the panes behave exactly as they do with no
+    /// canvas at all. Anywhere else the canvas is the answer to every hit and no
+    /// descendant ever sees a mouse event, which is what keeps those ten sites
+    /// right. This is not a feature cut; it is the invariant.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard isCanvasMode, !camera.isIdentity else { return super.hitTest(point) }
+        guard canvasOwnsInput else { return super.hitTest(point) }
         // `point` arrives in the SUPERVIEW's coordinates, so containment is
         // against `frame`, not `bounds`: this view is flipped and its superview
         // is not, and `bounds` is the flipped space on the other side of that.
@@ -2432,6 +2465,13 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // layout mode is off (`landSession`), and a pinch from inside one is
         // exactly the gesture that has to bring you back out.
         guard isCanvasMode || deskCanvasLoaded else { return }
+        // `isIdentity` here where its neighbours ask `canvasOwnsInput`, and the
+        // difference is the point: a camera parked at scale 1 over a card — in
+        // a session, or mid-entry-flight with the landing still to come — has
+        // nowhere to zoom in to, and pinching out of it is the way back. Sent
+        // through `zoomCanvas` instead, an entry flight would be pinched out of
+        // and then land the session anyway 0.38s later; `exitToCanvas` is the
+        // one that also cancels the arrival.
         guard isCanvasMode, !camera.isIdentity else {
             // At identity — inside a session, or on the canvas parked over one
             // card — the only pinch with an answer is the one that goes back
@@ -2491,10 +2531,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard isCanvasMode, !camera.isIdentity else { return super.mouseDown(with: event) }
-        // Below identity the canvas holds the keyboard: arrows move the node
-        // selection, ↩ enters, and nothing typed can reach a terminal nobody
-        // can read.
+        guard canvasOwnsInput else { return super.mouseDown(with: event) }
+        // Where the canvas owns input it holds the keyboard too: arrows move
+        // the node selection, ↩ enters, and nothing typed can reach a terminal
+        // nobody can read.
         window?.makeFirstResponder(self)
         let viewPoint = convert(event.locationInWindow, from: nil)
         guard let id = canvasNode(at: viewPoint), let frame = canvasLayout?.frames[id] else {
@@ -2513,7 +2553,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard isCanvasMode, !camera.isIdentity, let id = draggingNodeID else {
+        guard canvasOwnsInput, let id = draggingNodeID else {
             return super.mouseDragged(with: event)
         }
         let canvasPoint = camera.canvasPoint(from: convert(event.locationInWindow, from: nil))
@@ -2530,7 +2570,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard isCanvasMode, !camera.isIdentity else { return super.mouseUp(with: event) }
+        guard canvasOwnsInput else { return super.mouseUp(with: event) }
         draggingNodeID = nil
         didDragNode = false
     }
@@ -2562,14 +2602,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return rect
     }
 
-    /// Only below identity, and only in canvas mode. `PaneWorkspaceView` has
-    /// never accepted first responder — inside a session it must keep not
-    /// accepting it, or a click on the gap between panes would take the keyboard
-    /// off a terminal.
-    override var acceptsFirstResponder: Bool { isCanvasMode && !camera.isIdentity }
+    /// Exactly while the canvas owns input — which is every canvas state but
+    /// the identity transform, the 0.38s of an entry flight included.
+    /// `PaneWorkspaceView` has never accepted first responder — inside a
+    /// session it must keep not accepting it, or a click on the gap between
+    /// panes would take the keyboard off a terminal.
+    override var acceptsFirstResponder: Bool { canvasOwnsInput }
 
     override func keyDown(with event: NSEvent) {
-        guard isCanvasMode, !camera.isIdentity else { return super.keyDown(with: event) }
+        guard canvasOwnsInput else { return super.keyDown(with: event) }
         switch event.keyCode {
         case 123: moveNodeSelection(.left)
         case 124: moveNodeSelection(.right)
@@ -2659,7 +2700,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard isCanvasMode, !camera.isIdentity else { return super.scrollWheel(with: event) }
+        guard canvasOwnsInput else { return super.scrollWheel(with: event) }
         if event.modifierFlags.contains(.command) {
             pinchCanvas(
                 by: 1 + event.scrollingDeltaY / 200,

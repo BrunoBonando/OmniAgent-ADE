@@ -177,16 +177,37 @@ struct DeskCamera: Equatable {
         )
     }
 
-    /// True when scale is exactly 1 and the origin is whole-pixel — the only
-    /// state in which panes accept input, and the precondition `flyCamera(to:)`
-    /// checks before snapping `sublayerTransform` to identity. Exactly 1, not
-    /// within an epsilon: the landing camera is assigned, never accumulated,
-    /// and a fractional origin is soft text for as long as it stands.
+    /// True when scale is exactly 1 and the origin is whole-pixel — an arrival
+    /// worth landing: the camera is over one card at full size and on whole
+    /// pixels, which is the precondition `landSession` snaps the transform on.
+    /// Exactly 1, not within an epsilon: the landing camera is assigned, never
+    /// accumulated, and a fractional origin is soft text for as long as it
+    /// stands.
+    ///
+    /// This is **not** "the transform is identity" — see `isIdentityTransform`,
+    /// which is, and which is the one input ownership turns on.
     var isIdentity: Bool {
         scale == 1
             && origin.x.isFinite && origin.y.isFinite
             && origin.x == origin.x.rounded()
             && origin.y == origin.y.rounded()
+    }
+
+    /// True when `transform` is the identity matrix: scale 1 **and** no
+    /// translation at all. The only state in which panes accept input, because
+    /// it is the only one in which `PaneWorkspaceView`'s ten-odd
+    /// `event.locationInWindow` / `convert(_:from:)` call sites — every one of
+    /// them blind to a `CALayer` transform — are still right.
+    ///
+    /// Strictly stronger than `isIdentity`, and the gap is the normal case
+    /// rather than a corner: a session card is exactly the viewport, so
+    /// `focus(on:in:)` over one is always `scale == 1, origin == -card.origin`,
+    /// and `DeskCanvas.place` rounds card origins. Every entry flight therefore
+    /// spends its whole 0.38s at `isIdentity == true` with a translation of
+    /// hundreds of points installed — which is precisely the interval in which
+    /// a click routed to a pane by view frame lands on the wrong session's PTY.
+    var isIdentityTransform: Bool {
+        scale == 1 && origin == .zero
     }
 }
 
