@@ -76,6 +76,12 @@ enum EngineLauncher {
     /// them. `shell` is not in here — it is the fallback, not a choice.
     static let agentPreference: [Engine] = [.claude, .codex, .antigravity, .copilot]
 
+    /// Every engine a terminal may be switched to, in the order the engine
+    /// menu lists them — the agents first, the plain shell last. This is the
+    /// one list that menu is built from, so an engine added here appears
+    /// there without touching the UI.
+    static let selectable: [Engine] = agentPreference + [.shell]
+
     /// The binary each engine runs. AntiGravity's CLI is `agy`, not its own
     /// name — the one case where the mapping is not the identity.
     static func binaryName(for engine: Engine) -> String {
@@ -95,9 +101,16 @@ enum EngineLauncher {
 
     // MARK: - Availability
 
+    /// Whether this engine's CLI is on the `PATH`. The engine menu greys the
+    /// ones that are not rather than hiding them: "Codex — not installed" is
+    /// a fact worth reading, a silently missing row is not.
+    static func isInstalled(_ engine: Engine, resolve: (String) -> String? = resolveBinary) -> Bool {
+        resolve(binaryName(for: engine)) != nil
+    }
+
     /// Every agent whose CLI is actually installed.
     static func availableAgents(resolve: (String) -> String? = resolveBinary) -> [Engine] {
-        agentPreference.filter { resolve(binaryName(for: $0)) != nil }
+        agentPreference.filter { isInstalled($0, resolve: resolve) }
     }
 
     /// What a new terminal should run: the first installed agent, or a plain

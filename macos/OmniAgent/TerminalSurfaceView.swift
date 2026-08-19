@@ -3,7 +3,7 @@ import MetalKit
 import os.signpost
 import SwiftTerm
 
-final class NativeTerminalView: TerminalView, NSMenuItemValidation {
+final class NativeTerminalView: TerminalView {
     /// AppKit does not hand the first responder to a clicked view on its own,
     /// and SwiftTerm's `mouseDown` only starts a selection — so without this a
     /// click in the terminal body left focus wherever it was, and only the
@@ -26,6 +26,14 @@ final class NativeTerminalView: TerminalView, NSMenuItemValidation {
     /// first responder, and reaches every view in the window — hence the
     /// focus check.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // SwiftTerm's own ⌘⌥O flips `optionAsMetaKey` off inside `keyDown`,
+        // which this module cannot override — so the keystroke is swallowed
+        // here instead, before it ever reaches the terminal. ⌥ is always Meta.
+        if window?.firstResponder === self,
+           event.modifierFlags.contains([.command, .option]),
+           event.charactersIgnoringModifiers == "o" {
+            return true
+        }
         guard window?.firstResponder === self,
               let bytes = Self.overrideBytes(
                   keyCode: event.keyCode,
@@ -68,15 +76,6 @@ final class NativeTerminalView: TerminalView, NSMenuItemValidation {
         String(data: terminal.getBufferAsData(), encoding: .utf8) ?? ""
     }
 
-    @objc func toggleOptionAsMeta(_ sender: Any?) {
-        optionAsMetaKey.toggle()
-    }
-
-    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        guard menuItem.action == #selector(toggleOptionAsMeta(_:)) else { return true }
-        menuItem.state = optionAsMetaKey ? .on : .off
-        return true
-    }
 }
 
 final class TerminalSurfaceView: NSView, TerminalViewDelegate {
@@ -176,9 +175,9 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         terminalView.selectedTextBackgroundColor = omniBlue.withAlphaComponent(0.72)
         // ⌥ is Meta, not a compose key: ⌥⌫ must send ESC DEL so readline
         // kills a word (and ⌥←/→ move by word). Standing decision
-        // (2026-08-18) — this is a coding terminal first; ⌥-composed
-        // characters (é, ã, ç) are the accepted cost, and ⌘⌥O toggles
-        // it back per pane when you need them.
+        // (2026-08-19) — this is a coding terminal first and standard
+        // behaviour, so there is no toggle: ⌥-composed characters
+        // (é, ã, ç) are the accepted cost.
         terminalView.optionAsMetaKey = true
         // The default `.hoverWithModifier` requires ⌘ before a click matches
         // a link. `.hover` matches the identical set (explicit or implicit,
@@ -354,7 +353,15 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         )
     }
 
+    /// Whether anything has been typed at this terminal. What decides if
+    /// swapping the pane's engine has to ask first — a terminal nobody has
+    /// typed in has no conversation to lose. Deliberately keystrokes only:
+    /// `sendInput` below is this app writing to the PTY (an approval button,
+    /// a `/rename`), which is not the user starting a conversation.
+    private(set) var hasUserInput = false
+
     func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        hasUserInput = true
         os_signpost(.event, log: Instrumentation.log, name: "Terminal Input")
         connection.write(sessionID: sessionID, bytes: Data(data))
     }
@@ -397,6 +404,45 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         }
         return Array(lines.suffix(limit))
     }
+
+    /// The bottom-most line with anything readable on it — what the sidebar's
+    /// hover card types out.
+    ///
+    /// Reads the visible rows directly instead of going through `tailLines`,
+    /// which serialises the *whole* buffer: this is polled ten times a second
+    /// for as long as a card is open, and the scrollback is thousands of lines.
+    func lastOutputLine() -> String? {
+        Self.lastOutputLine(of: terminalView.terminal)
+    }
+
+    /// Free of the view, like `tailLines`, so a bare `Terminal` can drive it.
+    ///
+    /// "Readable" means it has a letter or a digit in it. A full-screen TUI is
+    /// a box, and its bottom rows are usually the frame — a card that typed out
+    /// `╰──────────╯` would be technically showing the last line of output and
+    /// telling the user nothing.
+    static func lastOutputLine(of terminal: Terminal) -> String? {
+        for row in stride(from: terminal.rows - 1, through: 0, by: -1) {
+            guard let line = terminal.getLine(row: row) else { continue }
+            // Same NUL substitution `tailLines` documents: SwiftTerm returns
+            // U+0000 for a cell nobody wrote, and a TUI paints by jumping
+            // columns rather than writing the spaces between words.
+            let text = line.translateToString(trimRight: true)
+                .replacingOccurrences(of: "\0", with: " ")
+            let cleaned = text.trimmingCharacters(in: Self.borderAndSpace)
+            guard cleaned.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains) else {
+                continue
+            }
+            return cleaned
+        }
+        return nil
+    }
+
+    /// The box-drawing verticals a TUI wraps its lines in, plus whitespace.
+    /// Trimmed off both ends so the card shows the sentence rather than the
+    /// frame it happens to be sitting inside.
+    private static let borderAndSpace = CharacterSet(charactersIn: "│┃║|╎┆┊╵ \t")
+        .union(.whitespacesAndNewlines)
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
         scheduleResize()

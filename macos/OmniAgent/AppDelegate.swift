@@ -212,15 +212,6 @@ enum ApplicationMenus {
         // into the terminal. ⌘↩ is Bruno's own binding, chosen over the
         // design hint text's ⌃⌘F.
         session.addItem(item("Focus This Terminal", Selector(("toggleFocusMode:")), "\r"))
-        session.addItem(.separator())
-        session.addItem(
-            item(
-                "Use Option as Meta",
-                Selector(("toggleOptionAsMeta:")),
-                "o",
-                [.command, .option]
-            )
-        )
 
         // Pane commands travel the responder chain (target nil): directional
         // focus and swap land on PaneWorkspaceView, pane lifecycle on
