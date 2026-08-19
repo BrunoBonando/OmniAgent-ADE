@@ -3263,13 +3263,13 @@ final class PaneAskOverlayView: NSView {
 /// the same strength, from here — they are the same gesture ("push the
 /// workspace back, keep it readable") and had drifted into two settings of it.
 ///
-/// `.clear`, untinted, and deliberately short of full strength: the material at
-/// `1` frosts the workspace hard enough that you stop recognising which pane is
-/// which, which is the one thing a backdrop over your own work must not do.
-/// `strength` is what "a bit less" means — enough of the sharp original left in
-/// the composite to read the shapes through it.
+/// `.clear`, untinted, and just short of full strength. `strength` is the one
+/// knob, and it was found by walking it: at `1` the material frosts hard enough
+/// that you stop recognising which pane is which, and at `0.62` so much of the
+/// sharp original comes back through that it reads as a transparent wash rather
+/// than as glass. `0.85` is the frost that still leaves the workspace legible.
 enum WorkspaceGlass {
-    static let strength: CGFloat = 0.62
+    static let strength: CGFloat = 0.85
 
     /// The sheet, or `nil` before macOS 26 — where there is no glass to ask
     /// for and every stand-in dims rather than refracts, so the callers leave
