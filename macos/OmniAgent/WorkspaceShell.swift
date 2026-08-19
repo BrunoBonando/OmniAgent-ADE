@@ -42,6 +42,16 @@ enum WorkspaceDestination: String, CaseIterable {
         }
     }
 
+    /// The SF Symbol the spotlight draws for this destination. Separate from
+    /// `glyph`, which is the sidebar's own hand-drawn vocabulary.
+    var paletteSymbol: String {
+        switch self {
+        case .dashboard: return "chart.bar"
+        case .board: return "square.grid.2x2"
+        case .terminals: return "rectangle.split.2x2"
+        }
+    }
+
     var glyph: ShellGlyph {
         switch self {
         case .dashboard: return .bars

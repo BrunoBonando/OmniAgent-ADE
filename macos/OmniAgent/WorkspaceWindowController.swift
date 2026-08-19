@@ -1777,6 +1777,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             newEditorPane(nil)
         case let .openDiffForCurrentFile(path):
             openDiffInEditor(URL(fileURLWithPath: path))
+        case let .showDestination(destination):
+            applyDestination(destination)
         case let .openFile(path):
             openFileInEditor(URL(fileURLWithPath: path), pinned: true)
             // `openFileInEditor` focuses the pane it landed in but knows
@@ -1920,6 +1922,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard workspace.descriptor(for: sessionID) != nil else { return false }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        // A pane lives on the Desk. Revealing one from Dashboard or Board used
+        // to focus it behind whichever destination was showing — the caret
+        // moved, the screen did not.
+        if destination != .terminals { applyDestination(.terminals) }
         workspace.focusPane(sessionID)
         // In focus mode the card is the only terminal the user can see, so
         // revealing another pane has to move the *card*, not just the caret.

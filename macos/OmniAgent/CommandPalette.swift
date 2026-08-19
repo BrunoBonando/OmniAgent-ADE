@@ -13,6 +13,9 @@ enum PaletteAction: Equatable {
     /// The focused editor's active file, diffed against HEAD — the palette's
     /// twin of the tab strip's ± toggle.
     case openDiffForCurrentFile(path: String)
+    /// One of Level 2's three destinations — Dashboard, Board, Desk — the
+    /// sidebar's own buttons, reachable by typing their names.
+    case showDestination(WorkspaceDestination)
     /// A file open in some editor pane, chosen from the spotlight — reveals
     /// the pane holding it and brings that tab forward.
     case openFile(path: String)
@@ -39,6 +42,7 @@ enum PaletteAction: Equatable {
 /// this: rows are emitted in section order, so a section is just a run of
 /// consecutive rows and nothing has to sort or re-index after filtering.
 enum PaletteSection: String, CaseIterable, Equatable {
+    case sessions = "Sessions"
     case terminals = "Terminals"
     case browsers = "Browsers"
     case files = "Files"
@@ -48,6 +52,7 @@ enum PaletteSection: String, CaseIterable, Equatable {
     /// The SF Symbol every row in the section wears.
     var symbol: String {
         switch self {
+        case .sessions: return "rectangle.stack"
         case .terminals: return "apple.terminal"
         case .browsers: return "globe"
         case .files: return "doc.text"
@@ -69,6 +74,9 @@ struct PaletteCommand: Equatable {
     /// what is *in* it, not only by the words its row happens to print.
     let keywords: String?
     let section: PaletteSection
+    /// Overrides the section's icon for a row that has its own — the
+    /// destinations, which are places rather than commands.
+    let symbol: String?
     /// Where the thing *is* — a pane's project and session, a file's folder.
     /// Its own line under the title, as in Spotlight, rather than a suffix
     /// dimmed inside one.
@@ -81,7 +89,8 @@ struct PaletteCommand: Equatable {
         action: PaletteAction,
         keywords: String? = nil,
         section: PaletteSection = .actions,
-        subtitle: String? = nil
+        subtitle: String? = nil,
+        symbol: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -90,7 +99,12 @@ struct PaletteCommand: Equatable {
         self.keywords = keywords
         self.section = section
         self.subtitle = subtitle
+        self.symbol = symbol
     }
+
+    /// What the row draws: its own icon when it has one, its section's
+    /// otherwise.
+    var icon: String { symbol ?? section.symbol }
 
     /// Case-insensitive substring over everything the row carries — what it
     /// shows and what it hides. `needle` is already lowercased by the caller.
@@ -145,6 +159,27 @@ struct CommandPaletteModel: Equatable {
         let tree = SessionOutline.group(ordered, focusedPaneID: focusedPaneID)
 
         var commands: [PaletteCommand] = []
+        // A session is a row of its own: typing its name goes to the session,
+        // landing on the first pane in it. The count is what tells two
+        // identically-named sessions in different projects apart at a glance.
+        for project in tree {
+            let projectLabel = SessionOutline.projectLabel(project.project, labels: projectLabels)
+            for session in project.sessions {
+                guard let first = session.paneIDs.first else { continue }
+                let panes = session.paneIDs.count
+                commands.append(
+                    PaletteCommand(
+                        id: "session:\(project.project)/\(session.id)",
+                        title: session.label,
+                        detail: panes == 1 ? "1 pane" : "\(panes) panes",
+                        action: .focusPane(sessionID: first),
+                        keywords: projectLabel,
+                        section: .sessions,
+                        subtitle: projectLabel
+                    )
+                )
+            }
+        }
         // Walked once, emitted per kind: the outline's project/session order
         // survives inside each section, and the sections come out in the
         // order the palette shows them.
@@ -182,7 +217,23 @@ struct CommandPaletteModel: Equatable {
                                 case .editor: return .files
                                 }
                             }(),
-                            subtitle: "\(SessionOutline.projectLabel(project.project, labels: projectLabels)) · \(session.label)\(pane.browserURL.isEmpty ? "" : " · \(pane.browserURL)")"
+                            subtitle: {
+                                var parts = [
+                                    SessionOutline.projectLabel(project.project, labels: projectLabels),
+                                    session.label,
+                                ]
+                                // The agent's own live title — "Fixing the
+                                // parser". Already searchable through
+                                // `keywords`; shown too whenever the pane wears
+                                // a name of its own, because then the title is
+                                // the one thing on the row you cannot see.
+                                let title = pane.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !title.isEmpty, title != SessionOutline.paneLabel(pane) {
+                                    parts.append(title)
+                                }
+                                if !pane.browserURL.isEmpty { parts.append(pane.browserURL) }
+                                return parts.joined(separator: " · ")
+                            }()
                         )
                     )
                 }
@@ -212,6 +263,22 @@ struct CommandPaletteModel: Equatable {
                     )
                 )
             }
+        }
+        // The sidebar's own three buttons, by name. `allCases` rather than a
+        // hand-written list: a fourth destination should appear here the day
+        // it appears in the sidebar, not the day someone remembers this.
+        for destination in WorkspaceDestination.allCases {
+            commands.append(
+                PaletteCommand(
+                    id: "destination:\(destination.rawValue)",
+                    title: destination.title,
+                    detail: nil,
+                    action: .showDestination(destination),
+                    section: .actions,
+                    subtitle: destination.subtitle,
+                    symbol: destination.paletteSymbol
+                )
+            )
         }
         commands.append(
             PaletteCommand(id: "new-pane", title: "New terminal pane", detail: "⌘T", action: .newPane)

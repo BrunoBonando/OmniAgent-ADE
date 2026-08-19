@@ -587,7 +587,7 @@ final class PaletteRowView: NSTableCellView {
 
         let icon = NSImageView()
         icon.image = NSImage(
-            systemSymbolName: command.section.symbol,
+            systemSymbolName: command.icon,
             accessibilityDescription: nil
         )?.withSymbolConfiguration(.init(pointSize: 15, weight: .regular))
         icon.contentTintColor = NSColor(white: 1, alpha: 0.85)

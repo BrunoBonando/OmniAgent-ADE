@@ -15,7 +15,7 @@ final class CommandPaletteTests: XCTestCase {
             unreadNotifications: 0
         )
 
-        let switches = commands.filter { if case .focusPane = $0.action { return true } else { return false } }
+        let switches = commands.filter { $0.id.hasPrefix("focus:") }
         XCTAssertEqual(switches.map(\.title), ["migrate", "Shell 1"])
         XCTAssertEqual(switches.map(\.subtitle), ["alpha · Build", "beta · Session 1"], "the location is its own line")
         XCTAssertEqual(switches.map(\.detail), ["shell", "shell"])
@@ -30,7 +30,11 @@ final class CommandPaletteTests: XCTestCase {
         )
         XCTAssertEqual(
             unfocused.map(\.id),
-            ["focus:a", "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar"]
+            [
+                "session:alpha/g1", "focus:a",
+                "destination:dashboard", "destination:board", "destination:terminals",
+                "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
+            ]
         )
 
         let focused = CommandPaletteModel.build(
@@ -42,7 +46,9 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(
             focused.map(\.id),
             [
-                "focus:a", "new-pane", "new-browser", "new-editor", "new-session",
+                "session:alpha/g1", "focus:a",
+                "destination:dashboard", "destination:board", "destination:terminals",
+                "new-pane", "new-browser", "new-editor", "new-session",
                 "close-pane", "interrupt", "reattach", "toggle-sidebar",
             ]
         )
@@ -112,7 +118,10 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(
             CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0)
                 .map(\.id),
-            ["new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar"]
+            [
+                "destination:dashboard", "destination:board", "destination:terminals",
+                "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
+            ]
         )
     }
 
@@ -290,6 +299,82 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(model.sectionTags, [nil], "no categories to tag, either")
     }
 
+    func testEverySessionIsARowThatGoesToItsFirstPane() {
+        let commands = CommandPaletteModel.build(
+            panes: [
+                pane("a", project: "alpha", group: "g1", groupLabel: "Build"),
+                pane("b", project: "alpha", group: "g1", groupLabel: "Build"),
+                pane("c", project: "beta", group: "g2"),
+            ],
+            paneOrder: ["a", "b", "c"],
+            focusedPaneID: nil,
+            unreadNotifications: 0,
+            projectLabels: ["alpha": "Alpha Project"]
+        )
+
+        let sessions = commands.filter { $0.section == .sessions }
+        XCTAssertEqual(sessions.map(\.title), ["Build", "Session 1"])
+        XCTAssertEqual(sessions.map(\.subtitle), ["Alpha Project", "beta"])
+        XCTAssertEqual(sessions.map(\.detail), ["2 panes", "1 pane"])
+        XCTAssertEqual(sessions.first?.action, .focusPane(sessionID: "a"), "the session opens on its first pane")
+    }
+
+    func testTheSidebarsThreeDestinationsAreRowsWithTheirOwnIcons() {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0
+        )
+        let destinations = commands.filter {
+            if case .showDestination = $0.action { return true } else { return false }
+        }
+
+        XCTAssertEqual(destinations.map(\.title), ["Dashboard", "Board", "Desk"])
+        XCTAssertEqual(destinations.map(\.subtitle), [
+            "activity, tokens, approvals",
+            "backlog, sprint, timeline",
+            "no session",
+        ])
+        XCTAssertEqual(destinations.first?.action, .showDestination(.dashboard))
+        // Their own icons, not the Actions section's ⌘.
+        XCTAssertEqual(destinations.map(\.icon), ["chart.bar", "square.grid.2x2", "rectangle.split.2x2"])
+    }
+
+    func testATerminalsLiveTitleIsSearchableAndShownWhenTheNameHidesIt() {
+        let named = CommandPaletteModel.build(
+            panes: [{
+                var pane = pane("a", project: "alpha", group: "g1", groupLabel: "Build", label: "claude")
+                pane.title = "Fixing the parser"
+                return pane
+            }()],
+            paneOrder: ["a"],
+            focusedPaneID: nil,
+            unreadNotifications: 0
+        )
+        let row = named.first { $0.id == "focus:a" }
+        XCTAssertEqual(row?.title, "claude")
+        XCTAssertEqual(
+            row?.subtitle, "alpha · Build · Fixing the parser",
+            "a pane wearing a name of its own would otherwise hide what it is working on"
+        )
+
+        var model = CommandPaletteModel(commands: named)
+        model.update(query: "parser")
+        XCTAssertEqual(model.matches.first?.id, "focus:a", "and it is searchable either way")
+
+        // A pane with no name of its own already *is* its title — no need to
+        // print it twice.
+        let unnamed = CommandPaletteModel.build(
+            panes: [{
+                var pane = pane("a", project: "alpha", group: "g1", groupLabel: "Build")
+                pane.title = "Fixing the parser"
+                return pane
+            }()],
+            paneOrder: ["a"],
+            focusedPaneID: nil,
+            unreadNotifications: 0
+        )
+        XCTAssertEqual(unnamed.first { $0.id == "focus:a" }?.subtitle, "alpha · Build")
+    }
+
     // MARK: - the tags
 
     func testTheTagsAreAllFollowedByEveryCategoryTheQueryFound() {
@@ -464,7 +549,7 @@ final class CommandPaletteTests: XCTestCase {
         for command in commands where runs.last != command.section {
             runs.append(command.section)
         }
-        XCTAssertEqual(runs, [.terminals, .browsers, .files, .actions])
+        XCTAssertEqual(runs, [.sessions, .terminals, .browsers, .files, .actions])
 
         // Panes keep the outline's own order inside their section.
         XCTAssertEqual(
