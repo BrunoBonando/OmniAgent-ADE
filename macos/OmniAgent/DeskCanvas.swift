@@ -1,4 +1,5 @@
 import Foundation
+import QuartzCore
 
 /// The Desk organigram — `You → Workspace → Sessions` — and the tidy tree that
 /// arranges it. Pure value types: no AppKit view code, no layer, no window,
@@ -58,6 +59,131 @@ struct DeskCanvasLayout: Equatable {
     /// a tree always has at least its root, and a zero rect would make the fit
     /// scale meaningless.
     let contentRect: CGRect
+}
+
+/// The canvas camera: a uniform scale and a translation, applied as one
+/// `CATransform3D` on `PaneWorkspaceView.layer.sublayerTransform`. It touches
+/// no frame, so every container's frame stays in canvas coordinates and
+/// nothing downstream learns about zoom.
+///
+/// **Coordinates.** Canvas space *is* the view's space, which is flipped —
+/// `PaneWorkspaceView`'s `override var isFlipped: Bool { true }`, "Row 0 on
+/// top, matching `PaneGrid.layout(in:dividerThickness:)`" — and AppKit flips
+/// the backing layer's geometry to match ("this view is flipped, so AppKit
+/// flips its backing layer's geometry to match"). y grows downward on both
+/// sides of the transform, so nothing here inverts an axis.
+///
+/// **Direction.** `viewPoint = canvasPoint * scale + origin`, with
+/// `canvasPoint(from:)` its exact inverse. `transform` scales *then*
+/// translates, so `m41`/`m42` are `origin` unscaled — which assumes the
+/// layer it is installed on anchors at its corner. **Verify that anchor before
+/// trusting this** — Task 5's `PaneWorkspaceCanvasModeTests` asserts
+/// `workspace.layer!.anchorPoint` explicitly for exactly this reason. AppKit's
+/// default is `(0.5, 0.5)`, and with a centred anchor `applyCamera()` must
+/// compose the recentring itself rather than assigning `camera.transform`
+/// unchanged.
+struct DeskCamera: Equatable {
+    var scale: CGFloat
+    var origin: CGPoint
+
+    /// The ceiling, and there is nothing above it. SwiftTerm rasterizes at
+    /// `metalRenderingScaleFactor()`, whose whole body is
+    /// `max(1, metalScaleFactorOverride ?? backingScaleFactor())`, so past 1
+    /// the camera only magnifies pixels that already exist. 1.0 is also the
+    /// only scale at which the transform is a pure translation and the ten-odd
+    /// `NSView`/`locationInWindow` conversions in `PaneWorkspaceView` — all
+    /// blind to a `CALayer` transform — are still right, which is what makes
+    /// panes interactive only here.
+    static let maxScale: CGFloat = 1.0
+
+    /// Scale first, translate second: `m41`/`m42` carry `origin` unscaled.
+    var transform: CATransform3D {
+        CATransform3DConcat(
+            CATransform3DMakeScale(scale, scale, 1),
+            CATransform3DMakeTranslation(origin.x, origin.y, 0)
+        )
+    }
+
+    /// Maps a point in the view's coordinate space back into canvas space.
+    /// A camera with no usable scale has no inverse; the point comes back
+    /// unchanged rather than as an infinity that would poison a hit test.
+    func canvasPoint(from viewPoint: CGPoint) -> CGPoint {
+        guard scale > 0, scale.isFinite else { return viewPoint }
+        return CGPoint(
+            x: (viewPoint.x - origin.x) / scale,
+            y: (viewPoint.y - origin.y) / scale
+        )
+    }
+
+    /// The whole content plus `DeskCanvas.fitMargin` of breathing room — half
+    /// of it on each side, so the fraction reads as "20% more than the tree" —
+    /// centred in `bounds`. This is the zoom-out end of the clamp range.
+    static func fitAll(content: CGRect, in bounds: CGRect) -> DeskCamera {
+        let padded = content.insetBy(
+            dx: -content.width * DeskCanvas.fitMargin / 2,
+            dy: -content.height * DeskCanvas.fitMargin / 2
+        )
+        return focus(on: padded, in: bounds)
+    }
+
+    /// The camera that maps `rect` onto `bounds`: the tighter of the two axes,
+    /// centred, and never above `maxScale`. A session card is viewport-sized,
+    /// so focusing one is exactly 1.0 — the identity the whole navigation model
+    /// is built on. A rect *smaller* than the viewport is centred at 1.0 rather
+    /// than blown up, because there is no more detail up there to find.
+    /// A degenerate rect or an unsized viewport answers identity rather than a
+    /// NaN, which would blank every sublayer on screen and never recover.
+    static func focus(on rect: CGRect, in bounds: CGRect) -> DeskCamera {
+        guard rect.width > 0, rect.height > 0, bounds.width > 0, bounds.height > 0 else {
+            return DeskCamera(scale: 1, origin: .zero)
+        }
+        let fitted = min(
+            min(bounds.width / rect.width, bounds.height / rect.height),
+            maxScale
+        )
+        return DeskCamera(
+            scale: fitted,
+            origin: CGPoint(
+                x: bounds.midX - fitted * rect.midX,
+                y: bounds.midY - fitted * rect.midY
+            )
+        )
+    }
+
+    /// Clamps scale into `[minScale, maxScale]`, keeping whatever sits under
+    /// the viewport's centre exactly where it is. A `minScale` above the
+    /// ceiling collapses onto the ceiling — the ceiling wins, rather than the
+    /// range inverting. A camera already in range is returned untouched, so an
+    /// `Equatable` no-change guard upstream stays true.
+    func clamped(minScale: CGFloat, in bounds: CGRect) -> DeskCamera {
+        let floorScale = min(minScale, Self.maxScale)
+        let target = min(max(scale, floorScale), Self.maxScale)
+        guard target != scale else { return self }
+        guard scale > 0, scale.isFinite else {
+            return DeskCamera(scale: target, origin: origin)
+        }
+        let middle = CGPoint(x: bounds.midX, y: bounds.midY)
+        let held = canvasPoint(from: middle)
+        return DeskCamera(
+            scale: target,
+            origin: CGPoint(
+                x: middle.x - target * held.x,
+                y: middle.y - target * held.y
+            )
+        )
+    }
+
+    /// True when scale is exactly 1 and the origin is whole-pixel — the only
+    /// state in which panes accept input, and the precondition `flyCamera(to:)`
+    /// checks before snapping `sublayerTransform` to identity. Exactly 1, not
+    /// within an epsilon: the landing camera is assigned, never accumulated,
+    /// and a fractional origin is soft text for as long as it stands.
+    var isIdentity: Bool {
+        scale == 1
+            && origin.x.isFinite && origin.y.isFinite
+            && origin.x == origin.x.rounded()
+            && origin.y == origin.y.rounded()
+    }
 }
 
 enum DeskCanvas {
