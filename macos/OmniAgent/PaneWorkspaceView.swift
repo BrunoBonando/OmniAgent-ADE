@@ -2262,6 +2262,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             return hasNeighbor(.down)
         case #selector(selectPane(_:)):
             return menuItem.tag >= 1 && menuItem.tag <= paneIDs.count
+        case #selector(zoomCanvasIn(_:)):
+            return isCanvasMode && camera.scale < DeskCamera.maxScale
+        case #selector(zoomCanvasOut(_:)):
+            return isCanvasMode && camera.scale > minimumCanvasScale
         default:
             return true
         }
@@ -2288,6 +2292,23 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 
     /// One ⌘+ / ⌘- step. Multiplicative, so in and out are exact inverses.
     static let canvasZoomStep: CGFloat = 1.25
+
+    /// Whether the Desk destination is the one on screen — the canvas *or* a
+    /// session reached from it.
+    ///
+    /// `canvasMode` is the *layout* question, and it is false while the user is
+    /// inside a session: `landSession` turns it off as it lands, precisely so
+    /// that "identity" and "this card fills the viewport" are the same picture.
+    /// So a gesture guarded on `canvasMode` alone cannot fire from inside a
+    /// session — and the way back *out* of one is a gesture. Which destination
+    /// is showing is something only the window controller knows; this is where
+    /// it says so, and `applyDestination(_:)` is its only writer.
+    var deskCanvasLoaded = false
+
+    /// How much of a pinch counts as "out". A trackpad reports a pinch as a
+    /// stream of small `magnification` deltas and a resting hand reports noise,
+    /// so the way out of a session needs a threshold rather than a sign test.
+    static let canvasPinchOutFactor: CGFloat = 0.98
 
     /// How far a node has to travel before a click becomes a drag, in **canvas**
     /// units rather than window units. `PaneHeaderView.mouseDragged`'s 4pt
@@ -2407,7 +2428,20 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// with a fractional origin — which `DeskCamera.isIdentity` rejects, so the
     /// panes would stay dead under a camera that looks like it arrived.
     func pinchCanvas(by factor: CGFloat, about viewPoint: CGPoint) {
-        guard isCanvasMode else { return }
+        // `deskCanvasLoaded` and not `canvasMode` alone: inside a session the
+        // layout mode is off (`landSession`), and a pinch from inside one is
+        // exactly the gesture that has to bring you back out.
+        guard isCanvasMode || deskCanvasLoaded else { return }
+        guard isCanvasMode, !camera.isIdentity else {
+            // At identity — inside a session, or on the canvas parked over one
+            // card — the only pinch with an answer is the one that goes back
+            // out, and it is the same operation ⌘0 and esc resolve to. Pinching
+            // *in* does nothing: 1.0 is the ceiling, and
+            // `metalRenderingScaleFactor()` clamps at `max(1, …)`, so a terminal
+            // cannot rasterize sharper than 1× in any case.
+            if factor <= Self.canvasPinchOutFactor { exitToCanvas() }
+            return
+        }
         zoomCanvas(by: factor, about: viewPoint)
         guard camera.scale >= DeskCamera.maxScale,
               let id = canvasNode(at: viewPoint),
@@ -2593,6 +2627,52 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             let b = hypot(second.value.midX - point.x, second.value.midY - point.y)
             return a == b ? first.key < second.key : a < b
         }?.key
+    }
+
+    /// ⌘= and ⌘-. Responder-chain commands rather than more `keyDown` cases,
+    /// so the View menu can validate and show them the way ⌘1…⌘9 already do
+    /// through `selectPane(_:)`.
+    @objc func zoomCanvasIn(_ sender: Any?) {
+        zoomCanvas(by: Self.canvasZoomStep, about: CGPoint(x: bounds.midX, y: bounds.midY))
+    }
+
+    @objc func zoomCanvasOut(_ sender: Any?) {
+        zoomCanvas(by: 1 / Self.canvasZoomStep, about: CGPoint(x: bounds.midX, y: bounds.midY))
+    }
+
+    // ⌘0 is deliberately not a command on this view. Task 10b's Desk menu binds
+    // it to the controller's `zoomDeskToFit:`, which calls `exitToCanvas()` —
+    // one owner for one shortcut. A `fitCanvas(_:)` here would be a second
+    // selector for the same operation, reachable by nothing.
+
+    // MARK: - Canvas gestures
+
+    /// Pinch. `magnification` is a per-event delta fraction, so it multiplies.
+    ///
+    /// `magnify:` is a responder-chain message, so at identity scale — where
+    /// `hitTest` hands the event to a pane — an unhandled pinch still bubbles up
+    /// to here, which is how pinching out of a session works. `pinchCanvas`
+    /// owns the decision either way; this is only the adapter.
+    override func magnify(with event: NSEvent) {
+        guard isCanvasMode || deskCanvasLoaded else { return super.magnify(with: event) }
+        pinchCanvas(by: 1 + event.magnification, about: convert(event.locationInWindow, from: nil))
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard isCanvasMode, !camera.isIdentity else { return super.scrollWheel(with: event) }
+        if event.modifierFlags.contains(.command) {
+            pinchCanvas(
+                by: 1 + event.scrollingDeltaY / 200,
+                about: convert(event.locationInWindow, from: nil)
+            )
+            return
+        }
+        // `scrollingDeltaX/Y`, not `deltaX/Y`: the precise-device values are in
+        // points and already carry the natural-scroll direction, while `deltaY`
+        // is in wheel "lines" and a trackpad rounds small moves to zero. In this
+        // flipped space a positive `scrollingDeltaY` moves the content down,
+        // which is a larger origin y.
+        panCanvas(by: CGSize(width: event.scrollingDeltaX, height: event.scrollingDeltaY))
     }
 
     private func hasNeighbor(_ direction: PaneDirection) -> Bool {
@@ -3326,12 +3406,13 @@ final class PaneFocusOverlayView: NSView {
     /// and this host's whole job is to hold a view that is being reparented.
     weak var commandTarget: PaneWorkspaceView?
 
-    /// The nine pane commands, and nothing else. Forwarding whatever the
-    /// workspace merely *responds to* would also forward the selectors it
-    /// inherits from `NSView` — `print:` is the classic — so a Print item added
-    /// later would resolve to the pane grid while a card is up and to the window
-    /// the rest of the time, which is the kind of difference that gets diagnosed
-    /// slowly. The set is closed, greppable, and cannot drift with the class.
+    /// The nine pane commands and the two canvas ones, and nothing else.
+    /// Forwarding whatever the workspace merely *responds to* would also forward
+    /// the selectors it inherits from `NSView` — `print:` is the classic — so a
+    /// Print item added later would resolve to the pane grid while a card is up
+    /// and to the window the rest of the time, which is the kind of difference
+    /// that gets diagnosed slowly. The set is closed, greppable, and cannot
+    /// drift with the class.
     private static let forwardedCommands: Set<Selector> = [
         #selector(PaneWorkspaceView.focusPaneLeft(_:)),
         #selector(PaneWorkspaceView.focusPaneRight(_:)),
@@ -3342,6 +3423,8 @@ final class PaneFocusOverlayView: NSView {
         #selector(PaneWorkspaceView.swapPaneUp(_:)),
         #selector(PaneWorkspaceView.swapPaneDown(_:)),
         #selector(PaneWorkspaceView.selectPane(_:)),
+        #selector(PaneWorkspaceView.zoomCanvasIn(_:)),
+        #selector(PaneWorkspaceView.zoomCanvasOut(_:)),
     ]
 
     override func supplementalTarget(forAction action: Selector, sender: Any?) -> Any? {

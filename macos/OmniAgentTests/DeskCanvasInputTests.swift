@@ -369,6 +369,142 @@ final class DeskCanvasInputTests: XCTestCase {
         XCTAssertEqual(workspace.selectedNodeID, expected)
     }
 
+    // MARK: - Menu commands
+
+    /// `PaneFocusOverlayView.forwardedCommands` is a deliberately CLOSED set,
+    /// and its comment says why: "Forwarding whatever the workspace merely
+    /// *responds to* would also forward the selectors it inherits from `NSView`
+    /// — `print:` is the classic — so a Print item added later would resolve to
+    /// the pane grid while a card is up and to the window the rest of the time,
+    /// which is the kind of difference that gets diagnosed slowly." The canvas
+    /// commands therefore go in by hand, and `print:` stays out.
+    func testTheCanvasCommandsAreForwardedAndPrintStillIsNot() {
+        let workspace = makeCanvasWorkspace(sessions: 2)
+        let host = PaneFocusOverlayView()
+        host.commandTarget = workspace
+
+        for action in [
+            #selector(PaneWorkspaceView.zoomCanvasIn(_:)),
+            #selector(PaneWorkspaceView.zoomCanvasOut(_:)),
+        ] {
+            XCTAssertTrue(
+                host.supplementalTarget(forAction: action, sender: nil) as AnyObject? === workspace,
+                "\(action) has to reach the workspace while a card is up"
+            )
+        }
+
+        let printAction = Selector(("print:"))
+        XCTAssertTrue(workspace.responds(to: printAction), "the premise of the assertion below")
+        XCTAssertNil(
+            host.supplementalTarget(forAction: printAction, sender: nil),
+            "a selector the workspace merely inherits is not a canvas command"
+        )
+    }
+
+    /// The items grey out at the clamps rather than doing nothing when pressed.
+    func testTheZoomItemsGreyOutAtTheClampsAndOnlyExistOnTheCanvas() {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let zoomIn = NSMenuItem(title: "", action: #selector(PaneWorkspaceView.zoomCanvasIn(_:)), keyEquivalent: "")
+        let zoomOut = NSMenuItem(title: "", action: #selector(PaneWorkspaceView.zoomCanvasOut(_:)), keyEquivalent: "")
+
+        workspace.camera = DeskCamera(scale: 1, origin: .zero)
+        XCTAssertFalse(workspace.validateMenuItem(zoomIn), "1.0 is the ceiling")
+        XCTAssertTrue(workspace.validateMenuItem(zoomOut))
+
+        workspace.zoomCanvas(by: 0.0001, about: CGPoint(x: workspace.bounds.midX, y: workspace.bounds.midY))
+        XCTAssertTrue(workspace.validateMenuItem(zoomIn))
+        XCTAssertFalse(workspace.validateMenuItem(zoomOut), "fitAll is the floor")
+
+        workspace.canvasMode = false
+        for item in [zoomIn, zoomOut] {
+            XCTAssertFalse(workspace.validateMenuItem(item), "no canvas, no canvas commands")
+        }
+    }
+
+    /// ⌘+ / ⌘- keep the viewport centre, not the pointer: there is no pointer.
+    func testTheSteppedZoomKeepsTheViewportCentre() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let layout = try XCTUnwrap(workspace.canvasLayout)
+        workspace.camera = DeskCamera.fitAll(content: layout.contentRect, in: workspace.bounds)
+        let centre = CGPoint(x: workspace.bounds.midX, y: workspace.bounds.midY)
+        let before = workspace.camera.canvasPoint(from: centre)
+        let scaleBefore = workspace.camera.scale
+
+        workspace.zoomCanvasIn(nil)
+
+        let after = workspace.camera.canvasPoint(from: centre)
+        XCTAssertGreaterThan(workspace.camera.scale, scaleBefore, "it did zoom in")
+        XCTAssertEqual(after.x, before.x, accuracy: 0.001)
+        XCTAssertEqual(after.y, before.y, accuracy: 0.001)
+    }
+
+    /// The existing nine still resolve, and the pane-command validation is
+    /// untouched by the two cases added beside it.
+    func testTheNineExistingPaneCommandsStillForwardAndValidate() {
+        let workspace = makeCanvasWorkspace(sessions: 2)
+        let host = PaneFocusOverlayView()
+        host.commandTarget = workspace
+
+        XCTAssertTrue(
+            host.supplementalTarget(
+                forAction: #selector(PaneWorkspaceView.selectPane(_:)),
+                sender: nil
+            ) as AnyObject? === workspace
+        )
+        let item = NSMenuItem(title: "", action: #selector(PaneWorkspaceView.selectPane(_:)), keyEquivalent: "")
+        item.tag = 1
+        XCTAssertTrue(workspace.validateMenuItem(item), "⌘1 still validates against paneIDs")
+    }
+
+    // MARK: - Out of a session
+
+    /// Pinching out is one of the three ways back to the canvas (with ⌘0 and
+    /// esc) and it has to fire from *inside* a session — where `canvasMode` is
+    /// **false**, because `landSession` turns it off as it snaps the transform
+    /// so that "identity" and "this card fills the viewport" are one picture.
+    /// The layout mode therefore cannot answer "is the Desk on screen"; only the
+    /// destination can, and `deskCanvasLoaded` is where it says so. Without it
+    /// this gesture is unreachable exactly where it is needed.
+    func testAPinchOutInsideASessionFliesBackToTheCanvasOnlyWhenTheDeskIsLoaded() {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let centre = CGPoint(x: workspace.bounds.midX, y: workspace.bounds.midY)
+        workspace.enterSession(workspace.groupIDs[1])
+        XCTAssertFalse(workspace.canvasMode, "with no window the flight lands in this same turn")
+        XCTAssertTrue(workspace.camera.isIdentity)
+
+        workspace.pinchCanvas(by: 0.9, about: centre)
+        XCTAssertFalse(
+            workspace.canvasMode,
+            "off the Desk a pinch on a pane grid is not a canvas gesture"
+        )
+
+        workspace.deskCanvasLoaded = true
+        workspace.pinchCanvas(by: 0.9, about: centre)
+
+        XCTAssertTrue(workspace.canvasMode, "and on the Desk it is the way out")
+        XCTAssertEqual(
+            workspace.camera.scale,
+            workspace.minimumCanvasScale,
+            accuracy: 0.0001,
+            "aimed at fitAll, the same operation ⌘0 and esc resolve to"
+        )
+    }
+
+    /// And a pinch *in* from inside a session does nothing: 1.0 is the ceiling,
+    /// and `metalRenderingScaleFactor()`'s `max(1, …)` means there is no sharper
+    /// rasterization to zoom towards.
+    func testAPinchInInsideASessionDoesNothing() {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        workspace.deskCanvasLoaded = true
+        workspace.enterSession(workspace.groupIDs[1])
+        let before = workspace.camera
+
+        workspace.pinchCanvas(by: 1.3, about: CGPoint(x: workspace.bounds.midX, y: workspace.bounds.midY))
+
+        XCTAssertFalse(workspace.canvasMode, "still in the session")
+        XCTAssertEqual(workspace.camera, before, "and the camera did not move")
+    }
+
     // MARK: - Helpers
 
     /// One session per group, one pane each, sized like the real Desk. Mirrors
