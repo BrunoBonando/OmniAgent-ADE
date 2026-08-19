@@ -298,6 +298,77 @@ final class DeskCanvasInputTests: XCTestCase {
         XCTAssertEqual(after, before, "twenty translation steps, not one resize")
     }
 
+    // MARK: - The keyboard
+
+    /// Below identity the canvas is first responder and the terminals are not.
+    /// This is the other half of the hit-test invariant: typing must not reach a
+    /// terminal you cannot read, and no `hitTest` stops a key event on its own.
+    func testBelowIdentityScaleTheCanvasHoldsTheKeyboardAndNoTerminalDoes() {
+        let (workspace, window) = makeAttachedCanvasWorkspace(sessions: 2)
+        defer { window.close() }
+        workspace.camera = DeskCamera(scale: 0.3, origin: .zero)
+
+        XCTAssertTrue(workspace.acceptsFirstResponder, "the canvas is willing to take it")
+        workspace.mouseDown(with: mouseEvent(.leftMouseDown, at: CGPoint(x: 600, y: 400), in: window))
+        workspace.mouseUp(with: mouseEvent(.leftMouseUp, at: CGPoint(x: 600, y: 400), in: window))
+
+        XCTAssertTrue(window.firstResponder === workspace, "and it has it, not a terminal")
+    }
+
+    /// And inside a session it must go back to never accepting it, or a click on
+    /// the gap between panes would take the keyboard off a terminal.
+    func testAtIdentityScaleTheCanvasRefusesFirstResponderTheWayItAlwaysHas() {
+        let workspace = makeCanvasWorkspace(sessions: 2)
+        workspace.camera = DeskCamera(scale: 1, origin: .zero)
+        XCTAssertFalse(workspace.acceptsFirstResponder)
+
+        workspace.canvasMode = false
+        XCTAssertFalse(workspace.acceptsFirstResponder, "and with no canvas at all")
+    }
+
+    /// Arrows walk the selection geometrically. Flipped space: `isFlipped` is
+    /// true, y grows downward, so `.down` is the *larger* y —
+    /// `PaneDividerView.mouseDragged` already depends on the same convention.
+    func testArrowKeysWalkTheSelectionDownTheTreeAndReturnEntersASession() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let parent = try XCTUnwrap(firstWorkspaceNode(in: tree(workspace)))
+        let sessions = Set(parent.children.map(\.id))
+        workspace.selectedNodeID = parent.id
+
+        workspace.moveNodeSelection(.down)
+        let selected = try XCTUnwrap(workspace.selectedNodeID)
+        XCTAssertTrue(sessions.contains(selected), "down from the workspace node lands on a session")
+
+        let group = try XCTUnwrap(parent.children.first { $0.id == selected }.flatMap { node -> String? in
+            guard case .session(let group) = node.kind else { return nil }
+            return group
+        })
+        workspace.enterCanvasNode(selected)
+        XCTAssertEqual(workspace.activeGroup, group, "and ↩ enters it")
+    }
+
+    /// With nothing selected the arrows have to start somewhere, and the
+    /// viewport centre is the only defensible answer — it is what you are
+    /// looking at.
+    func testTheFirstArrowKeyWithNothingSelectedPicksTheNodeNearestTheViewportCentre() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let layout = try XCTUnwrap(workspace.canvasLayout)
+        workspace.camera = DeskCamera.fitAll(content: layout.contentRect, in: workspace.bounds)
+        workspace.selectedNodeID = nil
+
+        workspace.moveNodeSelection(.down)
+
+        let centre = workspace.camera.canvasPoint(
+            from: CGPoint(x: workspace.bounds.midX, y: workspace.bounds.midY)
+        )
+        let expected = layout.frames.min { first, second in
+            let a = hypot(first.value.midX - centre.x, first.value.midY - centre.y)
+            let b = hypot(second.value.midX - centre.x, second.value.midY - centre.y)
+            return a == b ? first.key < second.key : a < b
+        }?.key
+        XCTAssertEqual(workspace.selectedNodeID, expected)
+    }
+
     // MARK: - Helpers
 
     /// One session per group, one pane each, sized like the real Desk. Mirrors

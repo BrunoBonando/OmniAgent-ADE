@@ -2528,6 +2528,73 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return rect
     }
 
+    /// Only below identity, and only in canvas mode. `PaneWorkspaceView` has
+    /// never accepted first responder — inside a session it must keep not
+    /// accepting it, or a click on the gap between panes would take the keyboard
+    /// off a terminal.
+    override var acceptsFirstResponder: Bool { isCanvasMode && !camera.isIdentity }
+
+    override func keyDown(with event: NSEvent) {
+        guard isCanvasMode, !camera.isIdentity else { return super.keyDown(with: event) }
+        switch event.keyCode {
+        case 123: moveNodeSelection(.left)
+        case 124: moveNodeSelection(.right)
+        case 125: moveNodeSelection(.down)
+        case 126: moveNodeSelection(.up)
+        case 36, 76: // ↩ and the numeric keypad's
+            if let selectedNodeID { enterCanvasNode(selectedNodeID) }
+        case 53: // esc — the same one operation, aimed at fitAll
+            selectedNodeID = nil
+            exitToCanvas()
+        default:
+            // Deliberately dropped rather than passed on: below identity the
+            // panes are unreadable, and a keystroke that reached one would be
+            // typed into a terminal nobody can see.
+            NSSound.beep()
+        }
+    }
+
+    /// Walks the selection to the nearest node in one direction.
+    ///
+    /// Flipped space — `isFlipped` is `true`, y grows downward — so `.up` is a
+    /// *smaller* y. `PaneDividerView.mouseDragged` already depends on the same
+    /// convention. Ties break on the node id so the walk is deterministic.
+    func moveNodeSelection(_ direction: PaneDirection) {
+        guard isCanvasMode, let layout = canvasLayout, !layout.frames.isEmpty else { return }
+        guard let current = selectedNodeID, let from = layout.frames[current] else {
+            selectedNodeID = nodeNearest(
+                camera.canvasPoint(from: CGPoint(x: bounds.midX, y: bounds.midY))
+            )
+            return
+        }
+        let origin = CGPoint(x: from.midX, y: from.midY)
+        let candidates = layout.frames.filter { id, rect in
+            guard id != current else { return false }
+            let dx = rect.midX - origin.x
+            let dy = rect.midY - origin.y
+            switch direction {
+            case .left: return dx < -0.5
+            case .right: return dx > 0.5
+            case .up: return dy < -0.5
+            case .down: return dy > 0.5
+            }
+        }
+        guard let best = candidates.min(by: { first, second in
+            let a = hypot(first.value.midX - origin.x, first.value.midY - origin.y)
+            let b = hypot(second.value.midX - origin.x, second.value.midY - origin.y)
+            return a == b ? first.key < second.key : a < b
+        }) else { return }
+        selectedNodeID = best.key
+    }
+
+    private func nodeNearest(_ point: CGPoint) -> String? {
+        canvasLayout?.frames.min { first, second in
+            let a = hypot(first.value.midX - point.x, first.value.midY - point.y)
+            let b = hypot(second.value.midX - point.x, second.value.midY - point.y)
+            return a == b ? first.key < second.key : a < b
+        }?.key
+    }
+
     private func hasNeighbor(_ direction: PaneDirection) -> Bool {
         guard let focusedPaneID else { return false }
         return grid?.neighbor(of: focusedPaneID, direction: direction) != nil
