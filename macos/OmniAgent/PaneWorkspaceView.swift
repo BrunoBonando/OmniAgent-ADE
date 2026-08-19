@@ -504,10 +504,19 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// `focusCardScale` of the window until that would exceed `focusCardMaxSize`,
     /// and never more than that.
     ///
-    /// One scale for both axes, so the card keeps the window's own proportions
-    /// rather than being letterboxed into a fixed shape.
+    /// The width's scale is what keeps the card the window's own shape rather
+    /// than a letterbox; height then takes a little more of what is left, since
+    /// vertical room is rows of terminal — see `focusCardHeightScale`.
     static let focusOverlayPadding: CGFloat = 26
     static let focusCardScale: CGFloat = 0.88
+    /// Height gets its own, larger share. A window is wider than the thing being
+    /// read inside it needs to be, so the width scale is about leaving the
+    /// surround visible — while every point of height is a row of terminal, and
+    /// the vertical slack the single scale left over was the one dimension worth
+    /// spending it on. Still bounded by the overlay's padding and by
+    /// `focusCardMaxSize`, and never *less* than the width's share, so the card
+    /// is only ever taller than proportional, never letterboxed.
+    static let focusCardHeightScale: CGFloat = 0.94
     static let focusCardMaxSize = NSSize(width: 1760, height: 1100)
     /// `0 40px 100px`: 40pt of downward offset, and a CSS blur radius is about
     /// twice a layer's shadow radius, so 100px of spread is 50 here.
@@ -639,7 +648,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         )
         let width = min(host.width * fit, max(0, host.width - focusOverlayPadding * 2))
             .rounded(.down)
-        let height = min(host.height * fit, max(0, host.height - focusOverlayPadding * 2))
+        // Height's own fit, from `focusCardHeightScale` and the same cap. Always
+        // at least `fit`, since that is bounded by the smaller scale and by this
+        // very cap — so this only ever gives the card back vertical room the
+        // width's share was never using.
+        let heightFit = min(
+            focusCardHeightScale,
+            host.height > 0 ? focusCardMaxSize.height / host.height : focusCardHeightScale
+        )
+        let height = min(host.height * heightFit, max(0, host.height - focusOverlayPadding * 2))
             .rounded(.down)
         // Not rounded: `width`/`height` are already whole, and rounding an
         // origin derived from an *odd* one would land up to half a point off
@@ -749,8 +766,17 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// final size while the card was still small — an opaque black rectangle
     /// around a growing pane. Scaled rather than resized for the same reason the
     /// card is, and so the two interpolate identically and stay locked together.
-    private func moveFocusCardShadow(from start: NSRect, to card: NSRect) {
+    ///
+    /// `fadingOut` is the shrink, and it fades the shadow away over the same span
+    /// rather than carrying it all the way down to the cell: a card's shadow
+    /// around a grid-sized pane is a dark halo no pane ever has, and the overlay
+    /// is torn down by a timer that cannot land on the exact frame the animation
+    /// ends — so a shadow still at full strength there flickers, one way on
+    /// either side of that timer. Faded, there is nothing left to catch the eye
+    /// whichever side it falls on.
+    private func moveFocusCardShadow(from start: NSRect, to card: NSRect, fadingOut: Bool = false) {
         focusCardShadow.frame = card
+        focusCardShadow.opacity = fadingOut ? 0 : 1
         guard zoomTransition > 0, !start.isEmpty, start != card else { return }
         zoomLayer(
             focusCardShadow,
@@ -758,6 +784,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             fromSize: start.size,
             toSize: card.size
         )
+        guard fadingOut else { return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.duration = zoomTransition
+        fade.timingFunction = Self.zoomTimingFunction
+        focusCardShadow.add(fade, forKey: "opacity")
     }
 
     /// Undoes the overlay: the backdrop fades, the card shrinks back to its grid
@@ -799,7 +831,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // ~1080 columns for 0.32s while the view is already cell-sized, and every
         // exit tears its output.
         overlayIsCollapsing = true
-        moveFocusCardShadow(from: focusCardShadow.frame, to: target)
+        moveFocusCardShadow(from: focusCardShadow.frame, to: target, fadingOut: true)
         place(container, at: target)
     }
 
@@ -2790,73 +2822,53 @@ final class PaneBadgeView: NSView {
     }
 }
 
-/// The glass a zoomed pane sits on: one panel the size of the window, with
-/// the card in front of it — macOS 26's own Liquid Glass (`NSGlassEffectView`),
-/// the system material itself rather than a stand-in for it, so what is behind
-/// it in this window is what it refracts: the panes, the sidebar, everything
-/// the card does not cover.
+/// The glass a zoomed pane sits on: one panel the size of the window, with the
+/// card in front of it — macOS 26's own Liquid Glass (`NSGlassEffectView`), the
+/// system material itself rather than a stand-in for it, so what is behind it in
+/// this window is what it refracts: the panes, the sidebar, everything the card
+/// does not cover.
 ///
-/// Before macOS 26 there is no glass to ask for and this stays the dim
-/// `.sidebar` wash it used to be, which blurs nothing — confirmed on screen:
-/// `.withinWindow` blending samples sibling views inside one window's private
-/// compositing tree, and in this window that produces a flat tint and no blur.
-/// Real blur without glass needed auxiliary windows tiling the region around
-/// the card, since a window covering the card would blur the card too and
-/// swallow its clicks; that existed, read as seams and square corners rather
-/// than as blur, and was removed.
+/// `.clear` rather than `.regular`, and no tint, no forced dark appearance:
+/// focus mode refracts the workspace, it does not darken it. `.regular` carries
+/// the material's own dimming fill, which is the one thing this panel must not
+/// do — the surroundings stay as bright as they were, just glassed.
+///
+/// Before macOS 26 there is no glass to ask for and the panel is left out
+/// entirely, because every pre-26 stand-in dims: `.withinWindow` blending
+/// samples sibling views inside one window's private compositing tree, which in
+/// this window produces a flat tint and no blur at all (confirmed on screen),
+/// and real blur without glass needed auxiliary windows tiling the region around
+/// the card — that existed, read as seams and square corners rather than as
+/// blur, and was removed. So on older systems the backdrop is nothing but the
+/// click-catcher that gets you out of focus.
 final class PaneZoomBackdropView: NSView {
     var onClick: (() -> Void)?
 
-    /// Glass is made to be looked through and carries its own translucency, so
-    /// it shows at full strength. The fallback wash is a near-opaque material
-    /// instead, and lands short of 1 on purpose: that fraction of sharp,
-    /// untinted pixels back in the mix is the difference between "dimmed" and
-    /// "blacked out".
-    private let shownAlpha: CGFloat
-
-    /// The panel itself. Sized in `layout` rather than by an autoresizing mask,
-    /// which starts from this view's own zero frame and has nothing to scale.
-    private let effect: NSView
+    /// The panel itself, on macOS 26. Sized in `layout` rather than by an
+    /// autoresizing mask, which starts from this view's own zero frame and has
+    /// nothing to scale.
+    private let effect: NSView?
 
     private var isShown = false
 
     init() {
-        let panel: NSView
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView()
-            // `.regular` rather than `.clear`: the point of the panel is that
-            // the pane in front of it is the thing in focus, which needs the
-            // app behind it pushed back, not merely tinted.
-            glass.style = .regular
-            panel = glass
-            shownAlpha = 1
+            glass.style = .clear
+            // Explicitly none: a tint is a wash of colour over everything behind
+            // the panel, which is exactly the darkening this panel exists without.
+            glass.tintColor = nil
+            effect = glass
         } else {
-            let wash = NSVisualEffectView()
-            /// Materials come in roughly three blur strengths: `.headerView`
-            /// sits in the thinnest tier, meant to lie over window content with
-            /// barely any softening; `.hudWindow` is a dark panel material that
-            /// darkens everything behind it. `.sidebar` is the middle tier real
-            /// apps use for frosted glass, without `.hudWindow`'s panel tint.
-            wash.material = .sidebar
-            /// `.behindWindow` is not an option for a view *inside* the main
-            /// window: it blurs whatever is behind the window hosting it, and
-            /// this view's window is that window.
-            wash.blendingMode = .withinWindow
-            // `.followsWindowActiveState` would drop it the moment the window
-            // stopped being key — including while a sheet or the palette is up.
-            wash.state = .active
-            panel = wash
-            shownAlpha = 0.78
+            effect = nil
         }
-        effect = panel
         super.init(frame: .zero)
-        appearance = NSAppearance(named: .darkAqua)
         // Explicit, though an effect view is layer-backed anyway: this view does
         // not *have* a `layer` until it joins a hierarchy, and the card's shadow
         // is inserted directly above that layer — with none there, `stackOverlay`
         // silently left the shadow out.
         wantsLayer = true
-        addSubview(effect)
+        if let effect { addSubview(effect) }
         alphaValue = 0
         isHidden = true
         setAccessibilityElement(true)
@@ -2871,16 +2883,19 @@ final class PaneZoomBackdropView: NSView {
 
     override func layout() {
         super.layout()
-        effect.frame = bounds
+        effect?.frame = bounds
     }
 
-    /// Fades the panel in and out. Hidden only once it has faded out, never
-    /// left invisible-but-present: it swallows clicks.
+    /// Fades the panel in and out, in step with the card's own flight. Hidden
+    /// only once it has faded out, never left invisible-but-present: it swallows
+    /// clicks.
     func setShown(_ shown: Bool, duration: TimeInterval) {
         guard isShown != shown else { return }
         isShown = shown
         if shown { isHidden = false }
-        let alpha: CGFloat = shown ? shownAlpha : 0
+        // Glass is made to be looked through and carries its own translucency,
+        // so it shows at full strength.
+        let alpha: CGFloat = shown ? 1 : 0
         guard duration > 0 else {
             alphaValue = alpha
             isHidden = !shown

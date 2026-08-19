@@ -1192,8 +1192,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let otherIndex = try XCTUnwrap(
             order.firstIndex(of: try XCTUnwrap(workspace.container(for: "pane-1")))
         )
-        XCTAssertGreaterThan(zoomedIndex, blurIndex, "the zoomed pane sits above the blur")
-        XCTAssertLessThan(otherIndex, blurIndex, "and everything else behind it, blurred")
+        XCTAssertGreaterThan(zoomedIndex, blurIndex, "the zoomed pane sits above the glass")
+        XCTAssertLessThan(otherIndex, blurIndex, "and everything else behind it, refracted")
 
         XCTAssertTrue(workspace.toggleZoom("pane-2"), "the same button shrinks it back")
         XCTAssertNil(workspace.zoomedPaneID)
@@ -1238,14 +1238,22 @@ final class PaneWorkspaceViewTests: XCTestCase {
     func testFocusCardFrameIsACappedShareOfTheOverlayItIsCentredIn() {
         let padding = PaneWorkspaceView.focusOverlayPadding
         let scale = PaneWorkspaceView.focusCardScale
+        let heightScale = PaneWorkspaceView.focusCardHeightScale
         let cap = PaneWorkspaceView.focusCardMaxSize
         let roomy = PaneWorkspaceView.focusCardFrame(
             in: NSRect(x: 0, y: 0, width: 1400, height: 900)
         )
         XCTAssertEqual(
             roomy.size,
-            NSSize(width: (1400 * scale).rounded(.down), height: (900 * scale).rounded(.down)),
-            "a share of the window while that share fits the cap"
+            NSSize(
+                width: (1400 * scale).rounded(.down),
+                height: (900 * heightScale).rounded(.down)
+            ),
+            "a share of the window while that share fits the cap — height's own, larger one"
+        )
+        XCTAssertGreaterThan(
+            heightScale, scale,
+            "height spends the slack the width's share leaves; rows of terminal are the point"
         )
         XCTAssertEqual(roomy.midX, 700, "centred in the overlay")
         XCTAssertEqual(roomy.midY, 450)
@@ -1254,13 +1262,12 @@ final class PaneWorkspaceViewTests: XCTestCase {
         // wide there is nothing left to focus *on*.
         let huge = NSRect(x: 0, y: 0, width: 3840, height: 1600)
         let capped = PaneWorkspaceView.focusCardFrame(in: huge)
-        XCTAssertEqual(capped.width, cap.width, "capped on the axis that hits the cap first")
-        XCTAssertLessThan(capped.height, cap.height)
-        XCTAssertEqual(
-            capped.width / capped.height,
-            huge.width / huge.height,
-            accuracy: 0.01,
-            "and still the window's own proportions, not letterboxed into the cap's"
+        XCTAssertEqual(capped.width, cap.width, "width capped")
+        XCTAssertEqual(capped.height, cap.height, "and on a display this tall, height too")
+        XCTAssertGreaterThan(
+            capped.height,
+            (huge.height * (capped.width / huge.width)).rounded(.down),
+            "taller than the width's share alone would make it, never shorter"
         )
         XCTAssertEqual(capped.midX, huge.midX, accuracy: 1, "still centred")
         XCTAssertEqual(capped.midY, huge.midY, accuracy: 1)
@@ -1348,7 +1355,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let backdrop = try XCTUnwrap(
             host.subviews.compactMap { $0 as? PaneZoomBackdropView }.first
         )
-        XCTAssertFalse(backdrop.isHidden, "the blur is shown")
+        XCTAssertFalse(backdrop.isHidden, "the glass is shown")
         XCTAssertEqual(backdrop.frame, host.bounds, "over the same rect the host covers")
         let order = host.subviews
         XCTAssertGreaterThan(
@@ -1394,6 +1401,12 @@ final class PaneWorkspaceViewTests: XCTestCase {
             // flying, and the overlay is still mounted because the transition's
             // completion has not run yet.
             XCTAssertTrue(host.superview === content, "the overlay is still mounted")
+            // And the shadow is already fading rather than riding the shrink all
+            // the way down at full strength: the teardown is on a timer that
+            // cannot land on the frame the animation ends, and a shadow still
+            // there flickers on whichever side of it the timer falls.
+            XCTAssertEqual(shadow.opacity, 0)
+            XCTAssertNotNil(shadow.animation(forKey: "opacity"), "faded, not cut")
             let overSidebar = sidebar.convert(NSPoint(x: 5, y: 5), to: nil)
             XCTAssertNil(
                 host.hitTest(content.convert(overSidebar, from: nil)),
@@ -1766,39 +1779,41 @@ final class PaneWorkspaceViewTests: XCTestCase {
         )
     }
 
-    /// One panel filling the window the card sits in front of — glass on
-    /// macOS 26, the dim `.sidebar` wash before it; see the class doc comment.
+    /// One panel of untinted Liquid Glass filling the window the card sits in
+    /// front of — glass on macOS 26, nothing at all before it, since every
+    /// pre-26 stand-in dims and dimming is the thing this panel must not do.
     /// Configuration and geometry only: an effect view is exactly as
     /// unrenderable in an offscreen test as it has always been.
-    func testTheBackdropIsOnePanelFillingTheWindowTheCardSitsOn() throws {
+    func testTheBackdropIsOnePanelOfUntintedGlassFillingTheWindow() throws {
         let backdrop = PaneZoomBackdropView()
         backdrop.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
         backdrop.setShown(true, duration: 0)
         backdrop.layoutSubtreeIfNeeded()
 
+        XCTAssertEqual(backdrop.alphaValue, 1, "glass is made to be looked through")
+        // Nothing of our own is painted over or under it either — the glass is
+        // the whole panel, and a layer fill would be a dim by another name.
+        XCTAssertNil(backdrop.layer?.backgroundColor)
+
+        guard #available(macOS 26.0, *) else {
+            XCTAssertTrue(
+                backdrop.subviews.isEmpty,
+                "no glass on this OS, and no dimming stand-in either"
+            )
+            return
+        }
         XCTAssertEqual(backdrop.subviews.count, 1, "one panel, nothing layered over it")
-        let panel = try XCTUnwrap(backdrop.subviews.first)
-        XCTAssertEqual(panel.frame, backdrop.bounds, "the size of the window it covers")
+        let glass = try XCTUnwrap(backdrop.subviews.first as? NSGlassEffectView)
+        XCTAssertEqual(glass.frame, backdrop.bounds, "the size of the window it covers")
+        XCTAssertEqual(glass.style, .clear, "refracting the workspace, not darkening it")
+        XCTAssertNil(glass.tintColor, "and no wash of colour over it")
 
         // And keeps covering it: the overlay host is resized on every layout
         // pass, and a panel that stopped following would leave the app sharp
         // down one side of the card.
         backdrop.setFrameSize(NSSize(width: 900, height: 500))
         backdrop.layoutSubtreeIfNeeded()
-        XCTAssertEqual(panel.frame, backdrop.bounds, "on a resize too")
-
-        if #available(macOS 26.0, *) {
-            XCTAssertTrue(panel is NSGlassEffectView, "the system's own Liquid Glass")
-            XCTAssertEqual(backdrop.alphaValue, 1, "glass is made to be looked through")
-        } else {
-            let wash = try XCTUnwrap(panel as? NSVisualEffectView)
-            XCTAssertEqual(wash.blendingMode, .withinWindow)
-            XCTAssertEqual(wash.state, .active, "tinted whether or not the window is key")
-            XCTAssertEqual(wash.material, .sidebar)
-            // Short of 1, on purpose: at full alpha nothing of the sharp app
-            // shows through, only the material's own tint — see `shownAlpha`.
-            XCTAssertEqual(backdrop.alphaValue, 0.78)
-        }
+        XCTAssertEqual(glass.frame, backdrop.bounds, "on a resize too")
     }
 
     // MARK: - Click to activate
