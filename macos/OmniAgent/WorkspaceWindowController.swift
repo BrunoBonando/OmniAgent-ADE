@@ -340,13 +340,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             workspace.focusPane(paneID)
             closePane(nil)
         }
-        workspace.onRequestPaneMenu = { [weak self] _, anchor in
+        workspace.onRequestRenamePane = { [weak self] _ in
             guard let self else { return }
-            // The header focuses the pane before asking, so the items can be
-            // nil-targeted and travel the responder chain to *that* pane —
-            // exactly the route their keystrokes take. Positioned in the
-            // button's own flipped coordinates, so `maxY` is its bottom edge.
-            paneOptionsMenu().popUp(
+            // The header focuses the pane before asking, so the rename prompt
+            // goes to the right conversation.
+            self.renameConversation(nil)
+        }
+        workspace.onRequestColorMenu = { [weak self] _, anchor in
+            guard let self else { return }
+            self.claudeColorMenu().popUp(
                 positioning: nil,
                 at: NSPoint(x: 0, y: anchor.bounds.maxY + 4),
                 in: anchor
@@ -1294,39 +1296,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.focusedPaneID.flatMap { workspace.editorPane(for: $0) }
     }
 
-    /// The header's ⋯ menu. Nothing new lives here: it is the pane-scoped half
-    /// of the main menu, so validation, titles and behaviour stay in one place
-    /// and the button is a shortcut rather than a second implementation.
-    func paneOptionsMenu() -> NSMenu {
-        let menu = NSMenu()
-        let engine = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }?.engine
-        // Interrupt / Kill / Reattach / Focus live in the main menu with the
-        // keystrokes that are how anyone actually reaches them; repeating them
-        // here made a six-item list you had to read to find the two things the
-        // ⋯ is for.
-        let items: [(String, Selector)] = [
-            ("Rename Conversation…", #selector(renameConversation(_:)))
-        ]
-        for (title, action) in items {
-            menu.addItem(NSMenuItem(title: title, action: action, keyEquivalent: ""))
-        }
-        // `/color` is Claude's slash command and nobody else's, so the item
-        // only exists in front of a Claude terminal rather than being offered
-        // and then greyed out. A submenu rather than a colour picker: the
-        // command takes nine names and rejects everything else, `#ff00dd`
-        // included.
-        if engine == .claude {
-            let colors = NSMenuItem(title: "Change Claude Color", action: nil, keyEquivalent: "")
-            colors.submenu = claudeColorMenu()
-            menu.addItem(colors)
-        }
-        menu.addItem(.separator())
-        menu.addItem(
-            NSMenuItem(title: "Close Pane", action: Selector(("closePane:")), keyEquivalent: "")
-        )
-        return menu
-    }
-
     /// The engine badge's menu: every engine a terminal can be switched to,
     /// the one it runs now ticked, and the ones whose CLI is not on the `PATH`
     /// greyed rather than missing.
@@ -1526,6 +1495,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
               workspace.descriptor(for: paneID)?.engine == .claude
         else { return }
         workspace.terminalSurface(for: paneID)?.sendInput("/color \(color)\r")
+        // Reflect the choice back to the descriptor so the header badge updates.
+        workspace.updateDescriptor(for: paneID) { $0.claudeColor = color }
     }
 
     /// Where the new conversation name comes from. `nil` means "ask with an

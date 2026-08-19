@@ -29,6 +29,9 @@ struct PaneDescriptor: Equatable {
     /// whatever the agent reports it is working on.
     var label: String?
     var themeId: TerminalThemeId?
+    /// The active `/color` name for a Claude terminal. Sent as a slash command
+    /// and reflected back here so the header's color badge stays in sync.
+    var claudeColor: String = "default"
     /// Which "Claude 2" this terminal is, within its session. Derived on the
     /// way in and never persisted — the number is a placeholder, and storing
     /// it would make it outlive the moment it is useful for.
@@ -199,9 +202,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// The header's close button. Closing a pane ends its PTY, which only the
     /// window controller may do — this view never kills a session itself.
     var onRequestClosePane: ((String) -> Void)?
-    /// The header's ⋯ button, with the view the menu should drop from.
-    var onRequestPaneMenu: ((String, NSView) -> Void)?
-    /// The header's engine badge, clicked — same shape as the ⋯ menu, and for
+    /// The header's pencil button tapped — prompt the user to rename.
+    var onRequestRenamePane: ((String) -> Void)?
+    /// The header's color badge clicked on a Claude pane — open the color menu.
+    var onRequestColorMenu: ((String, NSView) -> Void)?
+    /// The header's engine badge, clicked — same shape as the old ⋯ menu, and for
     /// the same reason: which engines exist and what swapping one costs is
     /// the window controller's business, not this view's.
     var onRequestEngineMenu: ((String, NSView) -> Void)?
@@ -1794,9 +1799,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
 
     private weak var workspace: PaneWorkspaceView?
     private var workingRing: CAGradientLayer?
-    /// The cwd the header's branch was last resolved for, so a repeated OSC 7
-    /// carrying the same directory does not re-read `.git/HEAD`.
-    private var branchDirectory: String?
 
     init(paneID: String, surface: any PaneContentView, workspace: PaneWorkspaceView) {
         self.paneID = paneID
@@ -1822,10 +1824,15 @@ final class PaneContainerView: NSView, NSDraggingSource {
             guard let self else { return }
             self.workspace?.onRequestClosePane?(self.paneID)
         }
-        header.onMenuRequested = { [weak self] anchor in
+        header.onRenameRequested = { [weak self] in
             guard let self else { return }
             self.workspace?.focusPane(self.paneID)
-            self.workspace?.onRequestPaneMenu?(self.paneID, anchor)
+            self.workspace?.onRequestRenamePane?(self.paneID)
+        }
+        header.onColorMenuRequested = { [weak self] anchor in
+            guard let self else { return }
+            self.workspace?.focusPane(self.paneID)
+            self.workspace?.onRequestColorMenu?(self.paneID, anchor)
         }
         header.onEngineMenuRequested = { [weak self] anchor in
             guard let self else { return }
@@ -2090,35 +2097,15 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // `SessionOutline.paneLabel` is the one place that decides what a pane
         // is called, and the sidebar already used it.
         header.title = SessionOutline.paneLabel(descriptor)
-        // A browser or editor carries `.shell` as a placeholder engine;
-        // showing that badge would claim the pane runs something it does
-        // not. `nil` already hides it.
         header.engine = descriptor.kind == .terminal ? descriptor.engine : nil
-        // Only a terminal runs an engine, so only a terminal's badge opens the
-        // menu — a browser's placeholder badge is already hidden above.
         header.isEngineMenuAvailable = descriptor.kind == .terminal
-        header.isMenuAvailable = descriptor.kind == .terminal
+        header.isRenameAvailable = descriptor.kind == .terminal
+        // Color badge: only Claude terminals support `/color`.
+        header.claudeColor = descriptor.kind == .terminal && descriptor.engine == .claude
+            ? descriptor.claudeColor : nil
         // Its session's name is half the focus subtitle, so a rename has to
         // reach the bar. A no-op unless this pane is the zoomed one.
         header.refreshSubtitle()
-        // No branch badge either: a browser's or editor's `cwd` is empty and
-        // it has no repository to be on.
-        if descriptor.kind == .terminal { updateBranch(for: descriptor.cwd) }
-    }
-
-    /// Resolves the pane's branch off the main thread and hands it to the
-    /// header. Repeats for the same directory are dropped — a pane's cwd is
-    /// re-published on every OSC 7, which for a shell is every prompt.
-    private func updateBranch(for cwd: String) {
-        guard cwd != branchDirectory else { return }
-        branchDirectory = cwd
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let branch = GitBranch.forDirectory(cwd)
-            DispatchQueue.main.async {
-                guard let self, self.branchDirectory == cwd else { return }
-                self.header.branch = branch
-            }
-        }
     }
 
     func updateAccessibilityLabel(index: Int, of total: Int) {
@@ -2390,26 +2377,6 @@ final class PaneHeaderView: NSView {
         }
     }
 
-    /// The git branch, or `nil` outside a repository — in which case the badge
-    /// simply is not there, rather than showing an empty pill.
-    var branch: String? {
-        didSet {
-            guard branch != oldValue else { return }
-            branchBadge.isHidden = branch == nil
-            if let branch {
-                branchBadge.configure(
-                    icon: nil,
-                    text: branch,
-                    foreground: NSColor(srgbRed: 154 / 255, green: 154 / 255, blue: 164 / 255, alpha: 1),
-                    fill: NSColor(white: 1, alpha: 0.055),
-                    stroke: .clear,
-                    font: ShellFont.mono(12, .medium)
-                )
-            }
-            needsLayout = true
-        }
-    }
-
     /// The design's `session restore · terminal 1 of 4`, drawn only while
     /// zoomed. Never assigned from outside: it is resolved through
     /// `subtitleProvider` every time the bar could be showing it, because the
@@ -2433,10 +2400,11 @@ final class PaneHeaderView: NSView {
     var onDragOut: ((NSEvent) -> Void)?
     var onZoomRequested: (() -> Void)?
     var onCloseRequested: (() -> Void)?
-    /// The ⋯ button, handed the view to hang the menu off. The bar builds no
-    /// menu itself: what a pane can be told to do is the window controller's
-    /// business, same as closing one is.
-    var onMenuRequested: ((NSView) -> Void)?
+    /// The pencil button — fires when the user clicks ✏️ to rename. The bar
+    /// builds no dialog itself; the window controller owns the prompt.
+    var onRenameRequested: (() -> Void)?
+    /// The color badge, clicked — opens the Claude color picker menu.
+    var onColorMenuRequested: ((NSView) -> Void)?
     /// The engine badge, clicked — the badge says which agent drives this
     /// PTY, so it is also where you change it.
     var onEngineMenuRequested: ((NSView) -> Void)?
@@ -2448,13 +2416,53 @@ final class PaneHeaderView: NSView {
         }
     }
 
-    /// Every item in the menu talks to a running engine, so a browser pane has
-    /// no menu rather than an all-greyed one. The ⋯ is not part of the cluster,
-    /// so it is the one control that may still leave rather than grey out.
-    var isMenuAvailable = false {
+    /// Whether the pencil rename affordance is live. Only terminal panes can
+    /// be renamed — a browser or editor pane has no conversation to give a name.
+    var isRenameAvailable = false {
         didSet {
-            guard isMenuAvailable != oldValue else { return }
+            guard isRenameAvailable != oldValue else { return }
             applyControlState()
+        }
+    }
+
+    /// The active Claude color for this terminal, or `nil` when the pane does
+    /// not run Claude. Setting it shows/hides and updates the color badge.
+    var claudeColor: String? {
+        didSet {
+            guard claudeColor != oldValue else { return }
+            colorBadge.isHidden = claudeColor == nil
+            if let claudeColor {
+                colorBadge.configure(
+                    icon: PaneHeaderView.colorDotImage(for: claudeColor),
+                    text: "",
+                    foreground: NSColor(white: 1, alpha: 0.55),
+                    fill: NSColor(white: 1, alpha: 0.07),
+                    stroke: .clear,
+                    font: ShellFont.ui(12, .medium)
+                )
+            }
+            needsLayout = true
+        }
+    }
+
+    /// A 10×10 filled circle in the colour `/color` uses for this name.
+    static func colorDotImage(for color: String) -> NSImage {
+        let fill: NSColor
+        switch color {
+        case "red": fill = .systemRed
+        case "blue": fill = .systemBlue
+        case "green": fill = .systemGreen
+        case "yellow": fill = .systemYellow
+        case "purple": fill = .systemPurple
+        case "orange": fill = .systemOrange
+        case "pink": fill = .systemPink
+        case "cyan": fill = .systemTeal
+        default: fill = NSColor(white: 1, alpha: 0.4)
+        }
+        return NSImage(size: NSSize(width: 10, height: 10), flipped: false) { rect in
+            fill.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5)).fill()
+            return true
         }
     }
 
@@ -2499,8 +2507,10 @@ final class PaneHeaderView: NSView {
     private let titleLabel: NSTextField
     private let subtitleLabel: NSTextField
     private let engineBadge = PaneBadgeView()
-    private let branchBadge = PaneBadgeView()
-    private let menuButton: PaneHeaderButton
+    /// Color dot + chevron badge shown on Claude panes — opens the `/color` menu.
+    private let colorBadge = PaneBadgeView()
+    /// ✏️ button shown immediately after the title — tap to rename the conversation.
+    private let renamePencilButton = PanePencilButton()
     /// The cluster, in the order it reads: yellow restores the pane from a
     /// zoom, green blows it up, red closes it.
     private let restoreButton: PaneHeaderButton
@@ -2523,7 +2533,6 @@ final class PaneHeaderView: NSView {
             font: ShellFont.ui(14),
             color: NSColor(srgbRed: 92 / 255, green: 92 / 255, blue: 102 / 255, alpha: 1)
         )
-        menuButton = PaneHeaderButton(glyph: .menu)
         restoreButton = PaneHeaderButton(glyph: .restore)
         zoomButton = PaneHeaderButton(glyph: .expand)
         closeButton = PaneHeaderButton(glyph: .close)
@@ -2533,7 +2542,13 @@ final class PaneHeaderView: NSView {
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = true
         subtitleLabel.isHidden = true
         engineBadge.isHidden = true
-        branchBadge.isHidden = true
+        colorBadge.isHidden = true
+        renamePencilButton.isHidden = true
+        renamePencilButton.onClick = { [weak self] in self?.onRenameRequested?() }
+        colorBadge.onClick = { [weak self] in
+            guard let self else { return }
+            self.onColorMenuRequested?(self.colorBadge)
+        }
         zoomButton.onClick = { [weak self] in self?.onZoomRequested?() }
         // The same toggle, reached from the other side: yellow is live only
         // while this pane is zoomed, so "toggle" there can only mean "get out".
@@ -2542,15 +2557,11 @@ final class PaneHeaderView: NSView {
         restoreButton.trafficLight = .yellow
         zoomButton.trafficLight = .green
         closeButton.trafficLight = .red
-        menuButton.onClick = { [weak self] in
-            guard let self else { return }
-            self.onMenuRequested?(self.menuButton)
-        }
         // Added left to right, the order they are laid out in, so the subview
         // order a reader — or a test — walks is the order on screen.
         let views: [NSView] = [
-            mark, titleLabel, subtitleLabel, engineBadge, branchBadge,
-            menuButton, restoreButton, zoomButton, closeButton,
+            mark, titleLabel, renamePencilButton, subtitleLabel, colorBadge, engineBadge,
+            restoreButton, zoomButton, closeButton,
         ]
         for view in views { addSubview(view) }
         // Same reason the surface applies its cursor state up front: the header
@@ -2579,8 +2590,7 @@ final class PaneHeaderView: NSView {
         }
         titleLabel.textColor = isFocused
             ? NSColor(srgbRed: 240 / 255, green: 241 / 255, blue: 248 / 255, alpha: 1)
-            // The muted grey the branch badge already uses — an unselected pane
-            // stays perfectly readable, it just stops competing.
+            // An unselected pane stays perfectly readable, it just stops competing.
             : NSColor(srgbRed: 154 / 255, green: 154 / 255, blue: 164 / 255, alpha: 1)
     }
 
@@ -2598,7 +2608,7 @@ final class PaneHeaderView: NSView {
         restoreButton.isEnabled = isZoomed
         zoomButton.isEnabled = isZoomAvailable && !isZoomed
         closeButton.isEnabled = !isZoomed
-        menuButton.isHidden = !isMenuAvailable
+        renamePencilButton.isHidden = !isRenameAvailable
         needsLayout = true
     }
 
@@ -2658,13 +2668,11 @@ final class PaneHeaderView: NSView {
 
         // Right to left: the controls first, then whichever badges still fit.
         // The title takes what is left, which is what makes a narrow pane drop
-        // the branch and then the engine rather than clipping its own name.
+        // the engine rather than clipping its own name.
         var right = bounds.maxX - currentTrailingInset
         // Right to left, so the cluster reads yellow, green, red — and abutting,
-        // which puts 20pt between disc centres exactly as macOS does. Only the
-        // ⋯ ever hides, and when it does its slot goes back to the title rather
-        // than leaving a gap where a button used to be.
-        for button in [closeButton, zoomButton, restoreButton, menuButton] where !button.isHidden {
+        // which puts 20pt between disc centres exactly as macOS does.
+        for button in [closeButton, zoomButton, restoreButton] where !button.isHidden {
             let size = button.intrinsicContentSize
             right -= size.width
             button.frame = CGRect(
@@ -2677,7 +2685,9 @@ final class PaneHeaderView: NSView {
 
         let titleLeft = mark.frame.maxX + gap
         let minimumTitleWidth: CGFloat = 40
-        for badge in [branchBadge, engineBadge] where !badge.isHidden {
+        // Color badge (Claude only) sits left of the engine badge, same as the
+        // old branch badge — it drops before the engine if there is no room.
+        for badge in [colorBadge, engineBadge] where !badge.isHidden {
             let size = badge.intrinsicContentSize
             let candidate = right - gap - size.width
             guard candidate - titleLeft >= minimumTitleWidth else {
@@ -2694,44 +2704,74 @@ final class PaneHeaderView: NSView {
         }
 
         let available = max(0, right - gap - titleLeft)
-        var titleWidth = available
+
+        // Pencil button reservation: placed immediately after the title text.
+        let pencilSize = renamePencilButton.fittingSize
+        let pencilGap: CGFloat = 4
+        let pencilReserve: CGFloat = renamePencilButton.isHidden ? 0 : pencilSize.width + pencilGap
+
+        let titleNatural = ceil(titleLabel.fittingSize.width)
+        let titleHeight = ceil(titleLabel.fittingSize.height)
+        var titleWidth: CGFloat
         if !subtitleLabel.isHidden {
-            // The design has the subtitle directly after the name, with the
-            // flexible span moved to their right — so the title stops
-            // stretching here and takes its natural width. The name is served
-            // first: a subtitle that would leave it under its own width, or
-            // under the 40pt the badges drop against, goes rather than
-            // ellipsising the terminal's name to describe where it sits.
-            // `fittingSize`, not `intrinsicContentSize`: a label reports an
-            // intrinsic width about 4pt narrower than the cell it actually
-            // draws in, so a frame taken from the intrinsic value ellipsises
-            // text that fits. The grid never noticed, because there the title
-            // takes the slack and is never measured.
+            // Zoomed: title + pencil + subtitle. The subtitle describes where
+            // the pane sits; the pencil sits between name and subtitle so it is
+            // still visually coupled to the title.
             let subtitleSize = subtitleLabel.fittingSize
-            let wanted = ceil(titleLabel.fittingSize.width)
             let subtitleWidth = ceil(subtitleSize.width)
-            let room = available - gap - subtitleWidth
-            if room >= max(minimumTitleWidth, wanted) {
-                titleWidth = wanted
-                let subtitleHeight = ceil(subtitleSize.height)
+            let subtitleHeight = ceil(subtitleSize.height)
+            let room = available - pencilReserve - gap - subtitleWidth
+            if room >= max(minimumTitleWidth, titleNatural) {
+                titleWidth = titleNatural
+                var afterTitle: CGFloat
+                if !renamePencilButton.isHidden {
+                    let pencilX = titleLeft + titleWidth + pencilGap
+                    renamePencilButton.frame = CGRect(
+                        x: pencilX,
+                        y: (bounds.height - pencilSize.height) / 2,
+                        width: pencilSize.width,
+                        height: pencilSize.height
+                    )
+                    afterTitle = pencilX + pencilSize.width + gap
+                } else {
+                    // Pencil absent: subtitle directly after the name at the
+                    // design's own gap, not the smaller pencil gap.
+                    afterTitle = titleLeft + titleWidth + gap
+                }
                 subtitleLabel.frame = CGRect(
-                    x: titleLeft + titleWidth + gap,
+                    x: afterTitle,
                     y: (bounds.height - subtitleHeight) / 2,
                     width: subtitleWidth,
                     height: subtitleHeight
                 )
             } else {
+                // Not enough space — drop subtitle and pencil; just the title.
                 subtitleLabel.frame = .zero
+                renamePencilButton.frame = .zero
+                titleWidth = min(titleNatural, available)
+            }
+        } else {
+            // Non-zoomed: title at natural width, pencil immediately after.
+            titleWidth = min(titleNatural, max(0, available - pencilReserve))
+            if !renamePencilButton.isHidden {
+                let pencilX = titleLeft + titleWidth + pencilGap
+                if pencilX + pencilSize.width <= right {
+                    renamePencilButton.frame = CGRect(
+                        x: pencilX,
+                        y: (bounds.height - pencilSize.height) / 2,
+                        width: pencilSize.width,
+                        height: pencilSize.height
+                    )
+                } else {
+                    renamePencilButton.frame = .zero
+                }
             }
         }
 
-        // `fittingSize` here too, for the same reason as the widths above and so
-        // the next author never has to wonder which of the two this file trusts.
-        let titleHeight = ceil(titleLabel.fittingSize.height)
         titleLabel.frame = CGRect(
             x: titleLeft,
             y: (bounds.height - titleHeight) / 2,
-            width: titleWidth,
+            width: max(0, titleWidth),
             height: titleHeight
         )
     }
@@ -2985,6 +3025,78 @@ final class PaneBadgeView: NSView {
         chevron.lineJoinStyle = .round
         foreground.withAlphaComponent(0.75).setStroke()
         chevron.stroke()
+    }
+}
+
+/// The ✏️ button that appears to the right of the pane title, indicating the
+/// conversation can be renamed. Dims at rest, brightens on hover, and shows
+/// a "Rename conversation" tooltip for discoverability.
+final class PanePencilButton: NSView {
+    var onClick: (() -> Void)?
+
+    private var isHovered = false {
+        didSet { alphaValue = isHovered ? 1 : 0.5 }
+    }
+    private var tracking: NSTrackingArea?
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        alphaValue = 0.5
+        toolTip = "Rename conversation"
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Rename conversation")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    override var isFlipped: Bool { true }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 16, height: 16) }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = onClick != nil }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        isHovered = false
+        onClick?()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let emoji = "✏️"
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11)]
+        let size = (emoji as NSString).size(withAttributes: attrs)
+        (emoji as NSString).draw(
+            at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2),
+            withAttributes: attrs
+        )
     }
 }
 

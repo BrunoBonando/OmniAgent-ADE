@@ -1936,11 +1936,11 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertNil(card.header.subtitle, "the grid header has no subtitle to show")
         XCTAssertEqual(
             controls(in: card.header),
-            ["Pane options", Self.restoreText, "Zoom this pane", "Close this pane"]
+            [Self.restoreText, "Zoom this pane", "Close this pane"]
         )
         XCTAssertEqual(
             liveControls(in: card.header),
-            ["Pane options", "Zoom this pane", "Close this pane"],
+            ["Zoom this pane", "Close this pane"],
             "with nothing to come back from, yellow is the one disc that is off"
         )
         // For eyeballing the cluster in both treatments — see
@@ -1964,13 +1964,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(card.header.subtitle, "session restore · terminal 3 of 4")
         XCTAssertEqual(
             controls(in: card.header),
-            ["Pane options", Self.restoreText, "Zoom this pane", "Close this pane"],
-            "the same four controls in the same places — a zoom moves none of them"
+            [Self.restoreText, "Zoom this pane", "Close this pane"],
+            "the same three controls in the same places — a zoom moves none of them"
         )
         XCTAssertEqual(
             liveControls(in: card.header),
-            ["Pane options", Self.restoreText],
-            "and the live pair invert: yellow comes on, green and red go off"
+            [Self.restoreText],
+            "and the live controls invert: yellow comes on, green and red go off"
         )
 
         window.displayIfNeeded()
@@ -1988,7 +1988,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertNil(card.header.subtitle)
         XCTAssertEqual(
             liveControls(in: card.header),
-            ["Pane options", "Zoom this pane", "Close this pane"]
+            ["Zoom this pane", "Close this pane"]
         )
     }
 

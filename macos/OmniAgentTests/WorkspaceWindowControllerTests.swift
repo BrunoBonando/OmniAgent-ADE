@@ -1394,86 +1394,35 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertNil(controller.lastFocusedPaneOnLaunch, "spent once, so a reconnect never re-steals focus")
     }
 
-    func testThePaneHeaderMenuButtonHasAMenuToOpen() {
+    func testThePaneHeaderRenameAndColorCallbacksAreWired() {
         let controller = makeController()
 
         XCTAssertNotNil(
-            controller.workspaceView.onRequestPaneMenu,
-            "the ⋯ button asked and nobody answered, so clicking it did nothing"
+            controller.workspaceView.onRequestRenamePane,
+            "pencil button tapped and nobody answered"
         )
-        let menu = controller.paneOptionsMenu()
+        XCTAssertNotNil(
+            controller.workspaceView.onRequestColorMenu,
+            "color badge tapped and nobody answered"
+        )
+    }
+
+    func testTheColorMenuIsClaudeOnlyAndHasAllColors() {
+        let controller = makeController()
+        let menu = controller.claudeColorMenu()
         XCTAssertEqual(
             menu.items.map(\.title),
-            ["Rename Conversation…", "Use Option as Meta", "", "Close Pane"]
-        )
-        XCTAssertTrue(
-            menu.items.allSatisfy { $0.isSeparatorItem || ($0.action != nil && $0.target == nil) },
-            "nil targets are what send each item down the responder chain to the focused pane"
-        )
-    }
-
-    func testEveryItemInTheMenuNamesSomethingThatExists() {
-        // Half the items are `Selector(("…"))` string literals, because the
-        // methods live on classes this one cannot see. A typo in one of those
-        // compiles happily and greys the item out at runtime with nothing said,
-        // which is the exact failure the ⋯ button already had once.
-        let controller = makeController()
-        let surface = makeSurface()
-        for item in controller.paneOptionsMenu().items where !item.isSeparatorItem {
-            guard let action = item.action else {
-                XCTAssertNotNil(item.submenu, "\(item.title) does nothing and opens nothing")
-                continue
-            }
-            XCTAssertTrue(
-                controller.responds(to: action) || surface.terminalView.responds(to: action),
-                "\(item.title) sends \(action), which nothing in the pane's responder chain implements"
-            )
-        }
-    }
-
-    func testTheColorItemIsClaudeOnly() {
-        let controller = makeController()
-        controller.applyRestoredPanes(
-            WorkspaceRestoration.plan(
-                fromLayout: PersistedLayoutCodec.serialize([
-                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-sh", group: "grp-1"),
-                    PersistedTab(project: "alpha", engine: .claude, cwd: "/a", id: "sess-cl", group: "grp-1"),
-                ])
-            )
-        )
-
-        controller.workspaceView.focusPane("sess-sh")
-        XCTAssertFalse(
-            controller.paneOptionsMenu().items.contains { $0.title == "Change Claude Color" },
-            "a shell terminal has no /color, so offering it is offering nothing"
-        )
-        XCTAssertFalse(
-            controller.paneOptionsMenu().items.contains { $0.title == "Change Model" },
-            "nor a /model"
-        )
-
-        controller.workspaceView.focusPane("sess-cl")
-        let colors = controller.paneOptionsMenu().items.first { $0.title == "Change Claude Color" }
-        XCTAssertEqual(
-            colors?.submenu?.items.map(\.title),
             ["Red", "Blue", "Green", "Yellow", "Purple", "Orange", "Pink", "Cyan", "Default"],
             "/color takes these names and rejects everything else, hex included"
         )
         XCTAssertEqual(
-            colors?.submenu?.items.map { $0.representedObject as? String },
+            menu.items.map { $0.representedObject as? String },
             WorkspaceWindowController.claudeColors,
             "the lowercase name is what gets typed at the terminal"
         )
         XCTAssertTrue(
-            colors?.submenu?.items.allSatisfy { $0.image != nil } == true,
+            menu.items.allSatisfy { $0.image != nil },
             "the swatch is what makes a list of colour words pickable at a glance"
-        )
-
-        let models = controller.paneOptionsMenu().items.first { $0.title == "Change Model" }
-        XCTAssertEqual(
-            models?.submenu?.items.map { $0.representedObject as? String },
-            WorkspaceWindowController.claudeModels.map(\.1),
-            "the alias is what gets typed after /model"
         )
     }
 
@@ -1546,34 +1495,27 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
-    func testCommandOptionOIsClaimedByMenuBeforeSwiftTermKittyKeyDown() throws {
+    /// ⌥-as-Meta is standard behaviour here and has no toggle. SwiftTerm's
+    /// built-in ⌘⌥O would still turn it off from inside `keyDown`, so the
+    /// keystroke is swallowed in `performKeyEquivalent` before it lands.
+    func testCommandOptionODoesNotTurnOffOptionAsMeta() throws {
         ApplicationMenus.install()
-        let command = try XCTUnwrap(NSApp.mainMenu?
-            .item(withTitle: "Session")?
-            .submenu?
-            .item(withTitle: "Use Option as Meta"))
+        XCTAssertNil(
+            NSApp.mainMenu?.item(withTitle: "Session")?.submenu?
+                .item(withTitle: "Use Option as Meta"),
+            "the toggle is gone from the menu"
+        )
         let (surface, window) = makeAttachedSurface()
         defer { window.close() }
         let delegate = RecordingTerminalDelegate()
         surface.terminalView.terminalDelegate = delegate
-        surface.terminalView.feed(
-            byteArray: Array("\u{1b}[>1u".utf8)[...]
-        )
+        surface.terminalView.feed(byteArray: Array("\u{1b}[>1u".utf8)[...])
         XCTAssertFalse(surface.terminalView.terminal.keyboardEnhancementFlags.isEmpty)
         let modalSession = NSApp.beginModalSession(for: window)
         defer { NSApp.endModalSession(modalSession) }
         _ = NSApp.runModalSession(modalSession)
         window.makeKeyAndOrderFront(nil)
         XCTAssertTrue(window.makeFirstResponder(surface.terminalView))
-
-        XCTAssertNil(command.target)
-        XCTAssertEqual(command.keyEquivalent, "o")
-        XCTAssertEqual(command.keyEquivalentModifierMask, [.command, .option])
-        let action = try XCTUnwrap(command.action)
-        XCTAssertTrue(
-            NSApp.target(forAction: action, to: nil, from: command) as? NativeTerminalView
-                === surface.terminalView
-        )
         XCTAssertTrue(surface.terminalView.optionAsMetaKey)
 
         let event = try XCTUnwrap(
@@ -1590,12 +1532,11 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 keyCode: 31
             )
         )
-        XCTAssertTrue(try XCTUnwrap(NSApp.mainMenu).performKeyEquivalent(with: event))
+        XCTAssertFalse(try XCTUnwrap(NSApp.mainMenu).performKeyEquivalent(with: event))
+        XCTAssertTrue(window.performKeyEquivalent(with: event), "swallowed by the terminal view")
 
-        XCTAssertFalse(surface.terminalView.optionAsMetaKey)
+        XCTAssertTrue(surface.terminalView.optionAsMetaKey, "still Meta")
         XCTAssertTrue(delegate.bytes.isEmpty)
-        XCTAssertTrue(surface.terminalView.validateMenuItem(command))
-        XCTAssertEqual(command.state, .off)
     }
 
     /// The one-line mechanism the whole feature rides on: `.hover` matches
