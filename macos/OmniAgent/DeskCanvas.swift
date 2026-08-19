@@ -76,12 +76,16 @@ struct DeskCanvasLayout: Equatable {
 /// **Direction.** `viewPoint = canvasPoint * scale + origin`, with
 /// `canvasPoint(from:)` its exact inverse. `transform` scales *then*
 /// translates, so `m41`/`m42` are `origin` unscaled — which assumes the
-/// layer it is installed on anchors at its corner. **Verify that anchor before
-/// trusting this** — Task 5's `PaneWorkspaceCanvasModeTests` asserts
-/// `workspace.layer!.anchorPoint` explicitly for exactly this reason. AppKit's
-/// default is `(0.5, 0.5)`, and with a centred anchor `applyCamera()` must
-/// compose the recentring itself rather than assigning `camera.transform`
-/// unchanged.
+/// layer it is installed on anchors at its corner. That anchor was verified
+/// rather than assumed, and it holds: `sublayerTransform` pivots about the
+/// parent layer's **anchor point** (measured — a sublayer at 100 under a 0.5
+/// scale renders at 50 with an anchor of `(0, 0)` and at 350 with
+/// `(0.5, 0.5)`, and `isGeometryFlipped` does not change it), and AppKit gives
+/// a layer-backed `NSView` an anchor of `(0, 0)` with `position` at the
+/// frame's origin — *not* UIKit's centred default. So
+/// `PaneWorkspaceView.applyCamera()` installs `camera.transform` unchanged.
+/// Both halves are asserted in `PaneWorkspaceCanvasModeTests`; if either ever
+/// changes, `applyCamera()` has to compose the recentring itself.
 struct DeskCamera: Equatable {
     var scale: CGFloat
     var origin: CGPoint

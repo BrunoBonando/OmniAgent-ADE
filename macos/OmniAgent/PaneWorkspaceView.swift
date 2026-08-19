@@ -1040,7 +1040,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     private func updateVisibility() {
         validateZoom()
         updateZoomAvailability()
-        let visible = Set(paneIDs)
+        // Canvas mode puts every session on screen at its own card, so the
+        // visible set is every pane in a grid rather than only the active
+        // session's. Viewport culling and the chip threshold narrow it again
+        // later; the base rule here is "laid out means on screen".
+        let visible = Set(isCanvasMode ? allPaneIDs : paneIDs)
         for (id, container) in containers {
             let onScreen = visible.contains(id)
             container.isHidden = !onScreen
@@ -1419,6 +1423,172 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         sourceID != targetID && grid?.contains(sourceID) == true && grid?.contains(targetID) == true
     }
 
+    // MARK: - Canvas mode
+
+    /// The second layout mode. Normal mode: `activeGroup`'s grid fills `bounds`
+    /// and every other session is hidden. Canvas mode: *every* session's grid is
+    /// laid out at its own card rect in canvas coordinates, and `camera` decides
+    /// what is on screen.
+    ///
+    /// Canvas coordinates are this view's own, which is **flipped**
+    /// (`isFlipped == true`) while the window is not — the same convention
+    /// `PaneDividerView.mouseDragged` already depends on: "The workspace view is
+    /// flipped, the window is not: a downward drag is a *smaller* window y but a
+    /// *larger* workspace y." Node positions and the camera origin are in that
+    /// flipped space, y growing downward.
+    var canvasMode: Bool {
+        get { isCanvasMode }
+        set {
+            guard newValue != isCanvasMode else { return }
+            if newValue {
+                // Focus mode ends at the canvas door, and it has to end
+                // *synchronously*. The card lives in the window's content view
+                // (`installOverlayHost`), which is not under this view's
+                // `sublayerTransform` — a card left up would float at full size
+                // over a zoomed-out canvas — and `applyZoom` tracks exactly one
+                // `overlayPaneID`, whose comment records what a second owner
+                // costs: "A live terminal and its session, off screen with no
+                // way back."
+                setZoomed(nil)
+                // `setZoomed` only *schedules* the landing (0.38s later, via
+                // `DispatchQueue.main.asyncAfter` — never an animation group's
+                // completion, which is not guaranteed to arrive with no window
+                // or under Reduce Motion), and the canvas layout pass below does
+                // not run `applyZoom`, so nothing would ever bring the card home.
+                // Landing it here is idempotent: `landCard` clears
+                // `overlayIsCollapsing`, so the scheduled `finishZoomTransition`
+                // then finds nothing collapsing and does nothing.
+                finishZoomTransition(zoomTransitionToken)
+            } else {
+                // Normal mode must carry no transform at all.
+                camera = DeskCamera(scale: 1, origin: .zero)
+                // And no node rects either: `canvasLayout` is what a click is
+                // resolved against, and a stale one would answer for a canvas
+                // that is not on screen.
+                canvasLayout = nil
+            }
+            isCanvasMode = newValue
+            updateVisibility()
+            updateLayout()
+        }
+    }
+
+    private var isCanvasMode = false
+
+    /// The camera, as one transform on `layer.sublayerTransform`.
+    ///
+    /// `sublayerTransform` rather than a scale on this view or on each card: it
+    /// applies to every sublayer without touching the view's own frame or any
+    /// container's frame, so container frames stay in canvas coordinates and
+    /// nothing downstream — `PaneGrid`, `place`, the resize coalescer, the PTY —
+    /// learns that a zoom happened. An ancestor transform never calls
+    /// `setFrameSize` on a descendant, so a camera move costs zero PTY resizes.
+    /// Edges and chips added later are sublayers of the same layer and inherit
+    /// it for free.
+    var camera = DeskCamera(scale: 1, origin: .zero) {
+        didSet {
+            guard camera != oldValue else { return }
+            applyCamera()
+        }
+    }
+
+    /// The organigram laid out in canvas mode. `nil` means "derive it from the
+    /// panes this view already holds" — `derivedCanvasRoot()`.
+    var canvasRoot: DeskNode? {
+        didSet {
+            guard isCanvasMode, canvasRoot != oldValue else { return }
+            updateLayout()
+        }
+    }
+
+    /// Nodes the user has dragged, by **node** id, in canvas coordinates.
+    /// Handed straight to `DeskCanvas.layout`, which excludes them from packing.
+    var canvasPins: [String: CGPoint] = [:] {
+        didSet {
+            guard isCanvasMode, canvasPins != oldValue else { return }
+            updateLayout()
+        }
+    }
+
+    /// The node rects the last canvas pass produced — what `DeskCamera.fitAll`
+    /// fits (`contentRect`) and what hit testing resolves a click against.
+    private(set) var canvasLayout: DeskCanvasLayout?
+
+    /// A session card is exactly the Desk viewport, which is this view's own
+    /// bounds: that is what makes "the camera at 1.0 over this card" and "you are
+    /// in that session" the same picture. Every card is therefore the same
+    /// rectangle — a 1-pane session and a 12-pane session are the same size —
+    /// and resizing the window re-lays out the whole canvas.
+    var canvasCardSize: CGSize { bounds.size }
+
+    /// `camera.transform` unchanged, and that is a measured claim rather than a
+    /// hopeful one.
+    ///
+    /// `DeskCamera.transform` is written for a top-left origin —
+    /// `viewPoint = scale * canvasPoint + origin`, exactly what
+    /// `DeskCamera.canvasPoint(from:)` inverts — so it is only the right
+    /// transform to install if `sublayerTransform` scales sublayers about the
+    /// bounds *corner*. Two facts, both measured in
+    /// `PaneWorkspaceCanvasModeTests` rather than assumed, say that it does:
+    /// `sublayerTransform` pivots about the parent layer's **anchor point** (a
+    /// sublayer at 100 under a 0.5 scale renders at 50 with an anchor of
+    /// `(0, 0)` and at 350 with `(0.5, 0.5)`, and `isGeometryFlipped` does not
+    /// change that), and AppKit gives a layer-backed `NSView` an anchor of
+    /// `(0, 0)` with `position` at the frame's origin — not UIKit's centred
+    /// default. A centred anchor would need `translate((scale - 1) * centre)`
+    /// folded in here; a corner anchor needs nothing, so nothing is done.
+    ///
+    /// At the identity camera the transform is identity, so normal mode carries
+    /// no transform at all.
+    private func applyCamera() {
+        guard let layer else { return }
+        // Actions off: the camera's own moves are explicit `CABasicAnimation`s
+        // added by key, and CoreAnimation's implicit 0.25s action underneath one
+        // of those is a second animation on the same property.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.sublayerTransform = camera.transform
+        CATransaction.commit()
+    }
+
+    /// The organigram this view can derive on its own: the account at the root,
+    /// one workspace node per project — the Desk level is folded into it, since
+    /// it is 1:1 with a workspace and as its own level only makes the tree
+    /// taller — and one session node per group, in `groupOrder`'s first-seen
+    /// order.
+    ///
+    /// A node id **is** the thing it names: a session node's id is its group id,
+    /// a workspace node's id is its project id, the root's is `"root"`. No
+    /// prefixing scheme and no join table, which is what makes
+    /// `canvasLayout.frames[group]` a card rect directly.
+    func derivedCanvasRoot() -> DeskNode {
+        var projectOrder: [String] = []
+        var sessionsByProject: [String: [DeskNode]] = [:]
+        for group in groupOrder {
+            let project = grids[group]?.paneIDs()
+                .compactMap { descriptors[$0]?.project }
+                .first { !$0.isEmpty } ?? ""
+            if sessionsByProject[project] == nil {
+                projectOrder.append(project)
+                sessionsByProject[project] = []
+            }
+            sessionsByProject[project]?.append(
+                DeskNode(id: group, kind: .session(group), children: [])
+            )
+        }
+        return DeskNode(
+            id: "root",
+            kind: .root,
+            children: projectOrder.map { project in
+                DeskNode(
+                    id: project,
+                    kind: .workspace(project),
+                    children: sessionsByProject[project] ?? []
+                )
+            }
+        )
+    }
+
     // MARK: - Occlusion
 
     /// Fully occluded panes stop asking for draws. Output keeps being parsed
@@ -1449,6 +1619,9 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// Applies the grid's calculated frames. Every pane whose frame actually
     /// moved schedules a coalesced PTY resize.
     func updateLayout() {
+        // Canvas mode answers the same question differently: every session's
+        // grid at its own card rect, not `activeGroup`'s filling `bounds`.
+        if isCanvasMode { return updateCanvasLayout() }
         guard let grid else {
             dividerViews.forEach { $0.removeFromSuperview() }
             dividerViews = []
@@ -1470,6 +1643,71 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         syncDividerViews(layout.dividers)
         syncHolePlaceholders(layout, holeIDs: grid.cells.filter(\.isHole).map(\.id))
         applyZoom()
+        updateAccessibilityLabels()
+        refreshFocusSubtitles()
+    }
+
+    /// Canvas mode's layout pass: every session's grid at its own card rect in
+    /// canvas coordinates, plus the camera.
+    ///
+    /// The card rects come from `DeskCanvas.layout`. A session node's id **is**
+    /// its group id and a workspace node's id **is** its project id, so
+    /// `layout.frames[group]` is the card rect directly.
+    private func updateCanvasLayout() {
+        let root = canvasRoot ?? derivedCanvasRoot()
+        let layout = DeskCanvas.layout(root: root, cardSize: canvasCardSize, pinned: canvasPins)
+        canvasLayout = layout
+        var holes: [CGRect] = []
+        var activeDividers: [PaneDivider] = []
+        for group in groupOrder {
+            guard let grid = grids[group] else { continue }
+            guard let card = layout.frames[group] else {
+                // A session the tree does not name has no card to sit in. Not
+                // torn down — this view never kills a session — simply not on
+                // the canvas.
+                // Deliberately no `isHidden` write here. `updateVisibility()`
+                // is the sole owner of per-pane visibility and suspension —
+                // `setSuspendsDrawing`'s comment records the bug that arises
+                // when something else writes it ("assigning the flag directly
+                // un-suspended them") — and a group with no card rect is
+                // exactly what the viewport rule there resolves to nothing.
+                continue
+            }
+            // The same `gridInset` normal mode applies to `bounds`, applied to
+            // the card instead: a card *is* the Desk viewport, so the panes
+            // inside it sit exactly where scale 1.0 shows them.
+            let cardLayout = grid.layout(
+                in: card.insetBy(dx: Self.gridInset, dy: Self.gridInset),
+                dividerThickness: Self.dividerThickness
+            )
+            for cell in grid.cells {
+                guard let frame = cardLayout.frames[cell.id] else { continue }
+                guard let paneID = cell.paneID else {
+                    holes.append(frame)
+                    continue
+                }
+                // The overlay guard normal mode makes, for the same reason it
+                // makes it: "Whatever is in the overlay host — the card, or one
+                // still shrinking out of it — has a frame in that host's
+                // coordinates, and `applyZoom` is what sets it. Guarded on
+                // parentage rather than on zoom state, which changes one layout
+                // pass earlier." Entering canvas mode lands the card first, so
+                // this is normally empty — but a pane still on its way home must
+                // never be reframed into canvas coordinates behind
+                // `applyZoom`'s back.
+                guard paneID != overlayPaneID, let container = containers[paneID] else { continue }
+                place(container, at: frame)
+            }
+            if group == activeGroup { activeDividers = cardLayout.dividers }
+        }
+        // Only the on-camera session's seams. A `PaneDividerView` is painted the
+        // canvas's own background colour, so a card without them looks identical
+        // — and `moveDivider` resolves a drag against `grid`, the *active*
+        // session's, so a seam belonging to another card could only ever move the
+        // wrong one.
+        syncDividerViews(activeDividers)
+        syncCanvasHolePlaceholders(holes)
+        applyCamera()
         updateAccessibilityLabels()
         refreshFocusSubtitles()
     }
@@ -1498,14 +1736,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             holePlaceholders.removeLast().removeFromSuperview()
         }
         while holePlaceholders.count < holeIDs.count {
-            let placeholder = PaneHolePlaceholderView(
-                onActivate: { [weak self] in self?.onRequestNewPane?() },
-                onActivateBrowser: { [weak self] in self?.onRequestNewBrowserPane?() },
-                onActivateEditor: { [weak self] in self?.onRequestNewEditorPane?() }
-            )
-            placeholder.onDropEditorTab = { [weak self] payload in
-                self?.onEditorTabDropOnHole?(payload)
-            }
+            let placeholder = makeHolePlaceholder()
             holePlaceholders.append(placeholder)
             addSubview(placeholder, positioned: .below, relativeTo: subviews.first)
         }
@@ -1526,6 +1757,44 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         for (view, divider) in zip(dividerViews, dividers) {
             view.divider = divider
             view.frame = divider.frame
+        }
+    }
+
+    /// One hole tile, wired to this view's callbacks. Extracted so canvas mode
+    /// can build the same tile while pooling by frame instead of by cell id.
+    private func makeHolePlaceholder() -> PaneHolePlaceholderView {
+        let placeholder = PaneHolePlaceholderView(
+            onActivate: { [weak self] in self?.onRequestNewPane?() },
+            onActivateBrowser: { [weak self] in self?.onRequestNewBrowserPane?() },
+            onActivateEditor: { [weak self] in self?.onRequestNewEditorPane?() }
+        )
+        placeholder.onDropEditorTab = { [weak self] payload in
+            self?.onEditorTabDropOnHole?(payload)
+        }
+        return placeholder
+    }
+
+    /// Canvas mode's hole tiles: every card's, pooled by frame, seated below the
+    /// containers exactly as `syncHolePlaceholders` seats them. A hole's cell id
+    /// is only unique *inside* one grid — `PaneGrid.holeID(_:)` numbers from 0
+    /// per grid — so the canvas cannot key its tiles the way that one does.
+    ///
+    /// The tiles' callbacks carry no group (`onRequestNewPane` and friends never
+    /// have), so only the card the camera is over may be clickable — which is
+    /// what the identity-scale interactivity rule already guarantees: below 1.0
+    /// nothing in a pane takes input, and at 1.0 exactly one card fills the
+    /// viewport and it is `activeGroup`'s.
+    private func syncCanvasHolePlaceholders(_ frames: [CGRect]) {
+        while holePlaceholders.count > frames.count {
+            holePlaceholders.removeLast().removeFromSuperview()
+        }
+        while holePlaceholders.count < frames.count {
+            let placeholder = makeHolePlaceholder()
+            holePlaceholders.append(placeholder)
+            addSubview(placeholder, positioned: .below, relativeTo: subviews.first)
+        }
+        for (placeholder, frame) in zip(holePlaceholders, frames) {
+            placeholder.frame = frame
         }
     }
 

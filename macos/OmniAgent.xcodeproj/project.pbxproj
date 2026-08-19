@@ -45,6 +45,7 @@
 		2ADA9E4CC4CE4F37B25A421B /* EditorPaneViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BF1B274379647B88A0DBA04 /* EditorPaneViewTests.swift */; };
 		3C1E9A5F7D0B42E1A8460F31 /* EditorPaneIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A44D2B60E9C41D8B5721CA3 /* EditorPaneIntegrationTests.swift */; };
 		1ECF599C46245E2BA8447FC1 /* GitFileContentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE0A2CB26F101E0CCC68EFBA /* GitFileContentTests.swift */; };
+		FD4C61B478ED4F0BB9AD83A9 /* PaneWorkspaceCanvasModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00EE8F1E07540A09980F775 /* PaneWorkspaceCanvasModeTests.swift */; };
 		5B2F70C41A8E4D6C9E33A017 /* DoublePressDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D48E1B36C2F4A70B15D8E22 /* DoublePressDetectorTests.swift */; };
 		F2729C0CEE50441882BFD7A7 /* MediaTabViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C15DA4028034799A71F586F /* MediaTabViewTests.swift */; };
 		1B7BF5CE3D794B919522855C /* EditorTabStripViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */; };
@@ -186,6 +187,7 @@
 		9BF1B274379647B88A0DBA04 /* EditorPaneViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneViewTests.swift; sourceTree = "<group>"; };
 		7A44D2B60E9C41D8B5721CA3 /* EditorPaneIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneIntegrationTests.swift; sourceTree = "<group>"; };
 		BE0A2CB26F101E0CCC68EFBA /* GitFileContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitFileContentTests.swift; sourceTree = "<group>"; };
+		D00EE8F1E07540A09980F775 /* PaneWorkspaceCanvasModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneWorkspaceCanvasModeTests.swift; sourceTree = "<group>"; };
 		9D48E1B36C2F4A70B15D8E22 /* DoublePressDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoublePressDetectorTests.swift; sourceTree = "<group>"; };
 		6C15DA4028034799A71F586F /* MediaTabViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaTabViewTests.swift; sourceTree = "<group>"; };
 		F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTabStripViewTests.swift; sourceTree = "<group>"; };
@@ -365,6 +367,7 @@
 				20000000000000000000000E /* PaneGridTests.swift */,
 				515737526BA746E7B0775D9D /* DeskCanvasTests.swift */,
 				200000000000000000000010 /* PaneWorkspaceViewTests.swift */,
+				D00EE8F1E07540A09980F775 /* PaneWorkspaceCanvasModeTests.swift */,
 				20000000000000000000091 /* BrowserPaneViewTests.swift */,
 				20000000000000000000093 /* BrowserPanesTests.swift */,
 				200000000000000000000B1 /* EditorPaneModelTests.swift */,
@@ -604,6 +607,7 @@
 				10000000000000000000000D /* PaneGridTests.swift in Sources */,
 				BE203811DF334A88BCEB06D8 /* DeskCanvasTests.swift in Sources */,
 				10000000000000000000000F /* PaneWorkspaceViewTests.swift in Sources */,
+				FD4C61B478ED4F0BB9AD83A9 /* PaneWorkspaceCanvasModeTests.swift in Sources */,
 				10000000000000000000091 /* BrowserPaneViewTests.swift in Sources */,
 				10000000000000000000093 /* BrowserPanesTests.swift in Sources */,
 				100000000000000000000B1 /* EditorPaneModelTests.swift in Sources */,
