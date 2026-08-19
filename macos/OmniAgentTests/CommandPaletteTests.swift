@@ -641,23 +641,23 @@ final class CommandPaletteTests: XCTestCase {
 
     // MARK: - the glass
 
-    func testFocusModeAndTheSpotlightAreTheSameSheetOfGlass() throws {
+    func testFocusModeGlassesTheWorkspaceAndTheSpotlightLeavesItAlone() throws {
         guard let sheet = WorkspaceGlass.sheet() else {
-            throw XCTSkip("no Liquid Glass before macOS 26 — both surfaces leave the sheet out")
+            throw XCTSkip("no Liquid Glass before macOS 26 — focus mode leaves the sheet out")
         }
         XCTAssertEqual(sheet.alphaValue, WorkspaceGlass.strength, accuracy: 0.001)
         XCTAssertLessThan(WorkspaceGlass.strength, 1, "short of full strength: the workspace stays recognisable")
 
-        // Both surfaces take the sheet from the same place rather than each
-        // configuring their own — that is what keeps them from drifting.
         let focus = PaneZoomBackdropView()
         let focusGlass = try XCTUnwrap(focus.subviews.first)
-        let spotlight = SpotlightGlassScrimWindow()
-        let spotlightGlass = try XCTUnwrap(spotlight.contentView)
-
         XCTAssertEqual(focusGlass.alphaValue, WorkspaceGlass.strength, accuracy: 0.001)
-        XCTAssertEqual(spotlightGlass.alphaValue, WorkspaceGlass.strength, accuracy: 0.001)
-        XCTAssertEqual(String(describing: type(of: focusGlass)), String(describing: type(of: spotlightGlass)))
+
+        // The spotlight's scrim carries no glass at all: it is a click-catcher
+        // over an untouched workspace, and only the panel itself is a surface.
+        let spotlight = SpotlightScrimWindow()
+        let scrim = try XCTUnwrap(spotlight.contentView)
+        XCTAssertTrue(scrim.subviews.isEmpty, "no sheet inside the scrim")
+        XCTAssertNotEqual(String(describing: type(of: scrim)), String(describing: type(of: focusGlass)))
     }
 
     // MARK: - fixtures

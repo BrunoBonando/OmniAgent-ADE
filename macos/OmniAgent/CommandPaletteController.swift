@@ -1,23 +1,22 @@
 import AppKit
 
-/// The spotlight (⌃Space, or ⌘K): a glass bar over a glassed workspace, and —
-/// once something is typed — a row of category tags and the results under it.
+/// The spotlight (⌃Space, or ⌘K): a glass bar over the untouched workspace,
+/// and — once something is typed — a row of category tags and the results
+/// under it.
 ///
 /// An `NSPanel` rather than a sheet so it can be dismissed with Escape without
 /// unwinding a modal session, and so the workspace behind it stays visible
 /// while you read the list. All filtering and selection lives in
 /// `CommandPaletteModel`; this is the keyboard and the pixels.
 ///
-/// **The glass.** Both surfaces are macOS 26's own `NSGlassEffectView`, the
-/// system material rather than a stand-in: `SpotlightGlassScrimWindow` lays one
-/// clear, untinted sheet over the whole workspace — the same treatment focus
-/// mode uses, which refracts rather than darkens — and the panel is a second
-/// sheet with a slight navy gradient over it, which is all that separates it
-/// from the sheet behind. Below macOS 26 both fall back to
-/// `NSVisualEffectView`, which does blur here because these are *separate
-/// windows* over the workspace: `.behindWindow` blending has something behind
-/// it to work with, which a view inside the workspace window never does (see
-/// `PaneZoomBackdropView`).
+/// **The glass.** Only the panel is glass — macOS 26's own `NSGlassEffectView`
+/// with a slight navy gradient over it, falling back to `NSVisualEffectView`
+/// below 26, which does blur here because the panel is a *separate window*
+/// over the workspace: `.behindWindow` blending has something behind it to
+/// work with, which a view inside the workspace window never does (see
+/// `PaneZoomBackdropView`). The workspace itself is left alone;
+/// `SpotlightScrimWindow` behind the panel is invisible and only catches the
+/// click that means "close".
 final class CommandPaletteController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate,
     NSTextFieldDelegate {
     /// Raised with the chosen row's action. The palette closes first, so the
@@ -30,7 +29,7 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
     private let scrollView = NSScrollView()
     private let tagBar = SpotlightTagBar()
     private let rule = NSView()
-    private let scrim = SpotlightGlassScrimWindow()
+    private let scrim = SpotlightScrimWindow()
     private let content = NSView()
     /// The tint that separates the panel from the glass behind it. A layer
     /// rather than the glass view's own `tintColor`, because a flat wash of
@@ -208,7 +207,7 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
                 window.parent?.removeChildWindow(window)
                 scrim.addChildWindow(window, ordered: .above)
             }
-            scrim.fadeIn()
+            scrim.show()
             // A third of the way down, where Spotlight sits — and where the
             // panel can grow downwards without walking off the window.
             window.setFrameOrigin(
@@ -650,11 +649,11 @@ final class PaletteRowView: NSTableCellView {
     }
 }
 
-/// The sheet of glass the spotlight sits on: one clear, untinted pane over the
-/// whole workspace — focus mode's treatment, which refracts what is behind it
-/// rather than darkening it. It also catches the click that lands outside the
-/// panel and treats it as "close".
-final class SpotlightGlassScrimWindow: NSWindow {
+/// What the spotlight sits on: an invisible window over the whole workspace,
+/// there only to catch the click that lands outside the panel and treat it as
+/// "close". Deliberately not glass — the workspace behind the spotlight stays
+/// exactly as it was.
+final class SpotlightScrimWindow: NSWindow {
     var onClick: (() -> Void)?
 
     init() {
@@ -663,39 +662,22 @@ final class SpotlightGlassScrimWindow: NSWindow {
         hasShadow = false
         backgroundColor = .clear
         level = .floating
-        // Hides and returns with the panel, which does the same — otherwise
-        // switching apps would leave the workspace glassed with nothing on it.
+        // Hides and returns with the panel, which does the same.
         hidesOnDeactivate = true
-        alphaValue = 0
         let click = ScrimClickView { [weak self] in self?.onClick?() }
         click.autoresizingMask = [.width, .height]
-        // `WorkspaceGlass` is the app's one sheet — the same material at the
-        // same strength focus mode uses, rather than a second setting of it.
-        // Below macOS 26 there is no sheet and the click-catcher stands alone:
-        // every pre-26 stand-in dims the workspace instead of glassing it.
-        if let sheet = WorkspaceGlass.sheet() {
-            sheet.autoresizingMask = [.width, .height]
-            if #available(macOS 26.0, *), let glass = sheet as? NSGlassEffectView {
-                glass.contentView = click
-            }
-            contentView = sheet
-        } else {
-            contentView = click
-        }
+        contentView = click
     }
 
     /// Never key: the search field's window has to keep the keyboard.
     override var canBecomeKey: Bool { false }
 
-    func fadeIn() {
+    /// Nothing to fade — the scrim draws nothing. Opaque enough to be hit by a
+    /// click (a window at alpha 0 is not), invisible because its view is.
+    func show() {
         contentView?.frame = NSRect(origin: .zero, size: frame.size)
-        contentView?.subviews.forEach { $0.frame = NSRect(origin: .zero, size: frame.size) }
-        alphaValue = 0
+        alphaValue = 1
         orderFront(nil)
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.14
-            animator().alphaValue = 1
-        }
     }
 }
 
