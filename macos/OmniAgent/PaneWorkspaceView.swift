@@ -1751,10 +1751,16 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// what a pane ask is and when something belongs in one.
     private(set) var askOverlay: PaneAskOverlayView?
 
+    /// What a still-unanswered ask owes its caller. Cleared the instant an
+    /// option or the cancel fires, so only a card torn down *without* an
+    /// answer pays it — see `dismissAsk`.
+    private var unansweredCancel: (() -> Void)?
+
     /// Puts `title`/`message` on glass over this pane and waits. Exactly one
-    /// of `options` runs, or `onCancel` if the card is dismissed with Esc or a
-    /// click outside it — so a caller with an in-flight decision to settle
-    /// (the editor's save prompt) always hears back exactly once.
+    /// of `options` runs, or `onCancel` if the card is dismissed with Esc, a
+    /// click outside it, or another ask taking its place — so a caller with an
+    /// in-flight decision to settle (the editor's save prompt) always hears
+    /// back exactly once.
     func presentAsk(
         title: String,
         message: String,
@@ -1763,6 +1769,19 @@ final class PaneContainerView: NSView, NSDraggingSource {
         onCancel: @escaping () -> Void = {}
     ) {
         dismissAsk()
+        // A question nobody can see is a question nobody answers. This pane
+        // may be in a session that is not on screen (`allPaneIDs` — the quit
+        // walk asks about every pane in every session), in a window that is
+        // behind another app, or behind a miniaturised one; the `NSAlert` this
+        // replaced was app-modal and could be none of those. `focusPane` is
+        // what brings another session to the screen, and the window and the
+        // app are brought forward the way that alert brought them.
+        workspace?.focusPane(paneID)
+        if let window {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+        }
+        NSApp.activate()
         // Every answer takes the card down first: an option that reopens the
         // pane's own prompt (the editor's "save, then it is still dirty, ask
         // again") would otherwise be dismissed by the ask it just replaced.
@@ -1772,17 +1791,20 @@ final class PaneContainerView: NSView, NSDraggingSource {
             icon: icon,
             options: options.map { option in
                 PaneAskOption(option.title, isPrimary: option.isPrimary) { [weak self] in
+                    self?.unansweredCancel = nil
                     self?.dismissAsk()
                     option.action()
                 }
             }
         )
         overlay.onCancel = { [weak self] in
+            self?.unansweredCancel = nil
             self?.dismissAsk()
             onCancel()
         }
         addSubview(overlay, positioned: .above, relativeTo: nil)
         askOverlay = overlay
+        unansweredCancel = onCancel
         needsLayout = true
         window?.makeFirstResponder(overlay)
     }
@@ -1792,9 +1814,19 @@ final class PaneContainerView: NSView, NSDraggingSource {
         let hadKeyboard = window?.firstResponder === overlay
         overlay.removeFromSuperview()
         askOverlay = nil
+        // Whoever asked hears back even when the card goes away without being
+        // answered — a second ask replacing it, or a caller taking it down.
+        // The editor has two independent askers (the save walk and the
+        // watcher's on-disk conflict), and they were only ever safe together
+        // because both were a blocking `runModal`. Dropping one silently
+        // stranded its completion: `editorPaneDrainInFlight` stuck on, editor
+        // persistence off for the session, and a ⌘Q that never gets its answer.
+        let owed = unansweredCancel
+        unansweredCancel = nil
         // Hand the keyboard back to whatever the pane holds — a cancelled
         // question must leave the terminal exactly as it found it.
         if hadKeyboard { workspace?.focusPane(paneID) }
+        owed?()
     }
 
     private weak var workspace: PaneWorkspaceView?

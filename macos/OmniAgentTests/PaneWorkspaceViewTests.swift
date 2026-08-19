@@ -687,6 +687,74 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertNil(container.askOverlay)
     }
 
+    /// A pane in a session that is not on screen still gets its question seen:
+    /// the quit walk asks about every pane in every session, and a card drawn
+    /// on a hidden pane is a quit that never gets its answer.
+    func testAnAskOnAnOffScreenSessionBringsThatSessionToTheScreen() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 1)
+        defer { window.close() }
+        let visible = try XCTUnwrap(workspace.paneIDs.first)
+        var hidden = makeDescriptor("other-session-pane")
+        hidden.group = "session-2"
+        XCTAssertTrue(workspace.addPane(hidden))
+        workspace.focusPane(visible)
+        XCTAssertFalse(workspace.paneIDs.contains("other-session-pane"), "it is off screen")
+
+        let container = try XCTUnwrap(workspace.container(for: "other-session-pane"))
+        container.presentAsk(
+            title: "Save changes to a.swift?",
+            message: "There are edits that are not on disk.",
+            icon: nil,
+            options: [PaneAskOption("Save", isPrimary: true) {}]
+        )
+
+        XCTAssertTrue(
+            workspace.paneIDs.contains("other-session-pane"),
+            "asking switched to the session that is asking"
+        )
+        XCTAssertNotNil(container.askOverlay)
+    }
+
+    /// An ask replaced by another ask pays out the first one's cancel. Both of
+    /// the editor's askers (the save walk, the watcher's on-disk conflict) hold
+    /// a completion that gates quitting and pane persistence; dropping one
+    /// silently wedges both.
+    func testAnAskReplacedByAnotherAnswersTheFirstOnesCaller() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 1)
+        defer { window.close() }
+        let paneID = try XCTUnwrap(workspace.paneIDs.first)
+        let container = try XCTUnwrap(workspace.container(for: paneID))
+
+        var stranded = true
+        container.presentAsk(
+            title: "Save changes to a.swift?",
+            message: "There are edits that are not on disk.",
+            icon: nil,
+            options: [PaneAskOption("Save", isPrimary: true) { stranded = false }],
+            onCancel: { stranded = false }
+        )
+        container.presentAsk(
+            title: "a.swift changed on disk",
+            message: "An agent wrote it while you were being asked about it.",
+            icon: nil,
+            options: [PaneAskOption("Take Disk", isPrimary: true) {}]
+        )
+        XCTAssertFalse(stranded, "the save prompt's caller heard back when its card was replaced")
+
+        // And an answered card owes nothing: cancel must not fire on top of it.
+        var cancelled = false
+        container.presentAsk(
+            title: "Start over with Shell?",
+            message: "This terminal's conversation ends here.",
+            icon: nil,
+            options: [PaneAskOption("Switch", isPrimary: true) {}],
+            onCancel: { cancelled = true }
+        )
+        try XCTUnwrap(container.askOverlay).options.last?.action()
+        XCTAssertFalse(cancelled, "an answered ask is not also a cancelled one")
+        XCTAssertNil(container.askOverlay)
+    }
+
     /// A render of the third row, for eyeballing rather than for CI: nine
     /// panes (the ninth alone on the bottom row, three empty cells beside it)
     /// and a full twelve. Drops PNGs when `PANE_RENDER_DIR` is set; the
