@@ -72,7 +72,9 @@ final class PaneAskOverlayView: NSView {
     private static let padding: CGFloat = 22
     private static let iconSize: CGFloat = 30
     private static let buttonHeight: CGFloat = 26
-    private static let fieldHeight: CGFloat = 28
+    private static let fieldHeight: CGFloat = 30
+    /// Breathing room either side of the text, inside the pill.
+    private static let fieldInset: CGFloat = 10
     private static let cardRadius: CGFloat = 16
 
     /// The glass, on macOS 26. Two panels: the pane-sized one that puts the
@@ -109,6 +111,9 @@ final class PaneAskOverlayView: NSView {
     private let titleLabel: NSTextField
     private let messageLabel: NSTextField
     private let field: NSTextField?
+    /// The rounded well behind the field. Chrome only — the field itself draws
+    /// no background, so its height can be the height of one line of text.
+    private let fieldWell = NSView()
     private let buttons: [PaneApprovalButton]
     private var cardFrame: NSRect = .zero
     /// One answer per card, whichever route it arrives by. Return in the field
@@ -118,21 +123,27 @@ final class PaneAskOverlayView: NSView {
 
     init(title: String, message: String, icon: NSImage?, input: String?, options: [PaneAskOption]) {
         self.options = options
+        // The pill is its own view and the field sits centred inside it, rather
+        // than the field drawing its own background: `NSTextFieldCell` puts
+        // text at the top of whatever height it is given, so a field stretched
+        // to pill height wears its text six points high. Sized to the line it
+        // holds, it cannot.
         field = input.map { seed in
             let field = NSTextField(string: seed)
             field.font = ShellFont.ui(13)
             field.textColor = NSColor(srgbRed: 240 / 255, green: 240 / 255, blue: 244 / 255, alpha: 1)
             field.isBezeled = false
-            field.drawsBackground = true
-            field.backgroundColor = NSColor(white: 1, alpha: 0.08)
+            field.drawsBackground = false
             field.focusRingType = .none
-            field.wantsLayer = true
-            field.layer?.cornerRadius = 7
-            field.layer?.cornerCurve = .continuous
-            field.layer?.masksToBounds = true
-            field.layer?.borderWidth = 1
-            field.layer?.borderColor = NSColor(white: 1, alpha: 0.16).cgColor
             return field
+        }
+        if field != nil {
+            fieldWell.wantsLayer = true
+            fieldWell.layer?.backgroundColor = NSColor(white: 1, alpha: 0.08).cgColor
+            fieldWell.layer?.cornerRadius = 8
+            fieldWell.layer?.cornerCurve = .continuous
+            fieldWell.layer?.borderWidth = 1
+            fieldWell.layer?.borderColor = NSColor(white: 1, alpha: 0.16).cgColor
         }
         titleLabel = Self.label(title, font: ShellFont.ui(15, .semibold), color: NSColor(
             srgbRed: 240 / 255, green: 240 / 255, blue: 244 / 255, alpha: 1
@@ -189,8 +200,9 @@ final class PaneAskOverlayView: NSView {
             button.onClick = { [weak self] in self?.choose(index) }
         }
         field?.delegate = self
-        for view in [scrim, cardGlass, cardTint, iconView, titleLabel, messageLabel, field]
-            .compactMap({ $0 }) + (buttons as [NSView])
+        for view in [scrim, cardGlass, cardTint, iconView, titleLabel, messageLabel]
+            .compactMap({ $0 }) + (field == nil ? [] : [fieldWell, field!] as [NSView])
+            + (buttons as [NSView])
         {
             addSubview(view)
         }
@@ -267,9 +279,15 @@ final class PaneAskOverlayView: NSView {
         let width = min(Self.cardWidth, max(160, bounds.width - 32))
         let content = width - padding * 2
         let titleHeight = Self.height(of: titleLabel, width: content)
-        let messageHeight = Self.height(of: messageLabel, width: content)
+        // A card with nothing to add under its title leaves no gap for one:
+        // "Rename this conversation" over a field explains itself, and a line
+        // of prose under it was the awkward part.
+        let messageHeight = messageLabel.stringValue.isEmpty
+            ? 0
+            : Self.height(of: messageLabel, width: content)
+        let messageBlock = messageHeight > 0 ? messageHeight + 8 : 0
         let fieldBlock = field == nil ? 0 : Self.fieldHeight + 14
-        let height = padding + Self.iconSize + 12 + titleHeight + 8 + messageHeight
+        let height = padding + Self.iconSize + 12 + titleHeight + messageBlock
             + 18 + fieldBlock + Self.buttonHeight + padding
         cardFrame = NSRect(
             x: ((bounds.width - width) / 2).rounded(),
@@ -289,15 +307,34 @@ final class PaneAskOverlayView: NSView {
         )
         y += Self.iconSize + 12
         titleLabel.frame = NSRect(x: cardFrame.minX + padding, y: y, width: content, height: titleHeight)
-        y += titleHeight + 8
-        messageLabel.frame = NSRect(x: cardFrame.minX + padding, y: y, width: content, height: messageHeight)
-        y += messageHeight + 18
+        y += titleHeight
+        messageLabel.isHidden = messageHeight == 0
+        if messageHeight > 0 {
+            y += 8
+            messageLabel.frame = NSRect(
+                x: cardFrame.minX + padding,
+                y: y,
+                width: content,
+                height: messageHeight
+            )
+            y += messageHeight
+        }
+        y += 18
         if let field {
-            field.frame = NSRect(
+            fieldWell.frame = NSRect(
                 x: cardFrame.minX + padding,
                 y: y,
                 width: content,
                 height: Self.fieldHeight
+            )
+            // Centred on the line it actually holds, and inset from the pill's
+            // rounded ends so the text is not sitting on the border.
+            let line = ceil(field.intrinsicContentSize.height)
+            field.frame = NSRect(
+                x: fieldWell.frame.minX + Self.fieldInset,
+                y: fieldWell.frame.minY + ((Self.fieldHeight - line) / 2).rounded(),
+                width: content - Self.fieldInset * 2,
+                height: line
             )
             y += Self.fieldHeight + 14
         }

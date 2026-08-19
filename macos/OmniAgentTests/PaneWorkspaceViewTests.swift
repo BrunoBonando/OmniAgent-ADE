@@ -689,9 +689,10 @@ final class PaneWorkspaceViewTests: XCTestCase {
         // The same card with a text field: its height is built from measured
         // text plus the field, so the field is the part that can push a button
         // off the bottom if the arithmetic is wrong.
+        // No message, exactly as the rename asks it: the card has to close the
+        // gap the subtitle used to fill rather than leave a hole in the middle.
         container.presentAsk(
-            title: "Rename Conversation",
-            message: "Renames this pane and tells the agent, with /rename.",
+            title: "Rename this conversation",
             icon: NSImage(systemSymbolName: "pencil", accessibilityDescription: nil),
             input: "Ingest",
             options: [
