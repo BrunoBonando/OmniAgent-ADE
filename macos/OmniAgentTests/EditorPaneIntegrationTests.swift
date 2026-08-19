@@ -569,14 +569,14 @@ final class EditorPaneIntegrationTests: XCTestCase {
         controller.showWindow(nil)
 
         controller.showCommandPalette(nil)
-        XCTAssertFalse(controller.palette.model.matches.contains { $0.action == .showAllChanges })
+        XCTAssertFalse(controller.palette.model.commands.contains { $0.action == .showAllChanges })
         controller.palette.dismiss()
 
         try XCTUnwrap(controller.shellSidebar.onGitStatusChanged)(
             GitStatus(root: URL(fileURLWithPath: "/w"), badges: ["a.swift": .modified])
         )
         controller.showCommandPalette(nil)
-        XCTAssertTrue(controller.palette.model.matches.contains { $0.action == .showAllChanges })
+        XCTAssertTrue(controller.palette.model.commands.contains { $0.action == .showAllChanges })
         controller.palette.dismiss()
 
         controller.run(.showAllChanges)

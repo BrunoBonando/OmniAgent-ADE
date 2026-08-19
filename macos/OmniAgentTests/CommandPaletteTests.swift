@@ -16,10 +16,8 @@ final class CommandPaletteTests: XCTestCase {
         )
 
         let switches = commands.filter { if case .focusPane = $0.action { return true } else { return false } }
-        XCTAssertEqual(switches.map(\.title), [
-            "migrate — alpha · Build",
-            "Shell 1 — beta · Session 1",
-        ])
+        XCTAssertEqual(switches.map(\.title), ["migrate", "Shell 1"])
+        XCTAssertEqual(switches.map(\.subtitle), ["alpha · Build", "beta · Session 1"], "the location is its own line")
         XCTAssertEqual(switches.map(\.detail), ["shell", "shell"])
     }
 
@@ -152,7 +150,7 @@ final class CommandPaletteTests: XCTestCase {
             focusedPaneID: nil,
             unreadNotifications: 0
         )
-        XCTAssertEqual(noLabels.first { $0.id == "focus:a" }?.title, "Shell 1 — alpha · Session 1")
+        XCTAssertEqual(noLabels.first { $0.id == "focus:a" }?.subtitle, "alpha · Session 1")
 
         let withLabels = CommandPaletteModel.build(
             panes: [pane("a", project: "alpha", group: "g1")],
@@ -161,7 +159,7 @@ final class CommandPaletteTests: XCTestCase {
             unreadNotifications: 0,
             projectLabels: ["alpha": "Alpha Project"]
         )
-        XCTAssertEqual(withLabels.first { $0.id == "focus:a" }?.title, "Shell 1 — Alpha Project · Session 1")
+        XCTAssertEqual(withLabels.first { $0.id == "focus:a" }?.subtitle, "Alpha Project · Session 1")
     }
 
     /// Task 12: the focused editor's active *file* tab can be diffed from the
@@ -285,14 +283,82 @@ final class CommandPaletteTests: XCTestCase {
         )
     }
 
-    func testAnEmptyOrWhitespaceQueryShowsEverything() {
+    func testAnEmptyOrWhitespaceQueryShowsNothingAtAll() {
         var model = CommandPaletteModel(commands: sample)
         model.update(query: "   ")
-        XCTAssertEqual(model.matches.count, sample.count)
+        XCTAssertEqual(model.matches, [], "the bar and only the bar until something is typed")
+        XCTAssertEqual(model.sectionTags, [nil], "no categories to tag, either")
+    }
+
+    // MARK: - the tags
+
+    func testTheTagsAreAllFollowedByEveryCategoryTheQueryFound() {
+        var model = CommandPaletteModel(commands: CommandPaletteModel.build(
+            panes: [
+                pane("t", project: "spot", group: "g1", label: "spotlight terminal"),
+                pane("w", project: "spot", group: "g1", label: "spotlight browser", kind: .browser),
+            ],
+            paneOrder: ["t", "w"],
+            focusedPaneID: nil,
+            unreadNotifications: 0
+        ))
+        model.update(query: "spotlight")
+
+        // "All" first, then only what was found — never a category with
+        // nothing behind it. `.brain` is there because a query always offers
+        // the brain-search row.
+        XCTAssertEqual(model.sectionTags, [nil, .terminals, .browsers, .brain])
+    }
+
+    func testChoosingATagNarrowsTheListButNeverTheTags() {
+        var model = CommandPaletteModel(commands: CommandPaletteModel.build(
+            panes: [
+                pane("t", project: "spot", group: "g1", label: "spotlight terminal"),
+                pane("w", project: "spot", group: "g1", label: "spotlight browser", kind: .browser),
+            ],
+            paneOrder: ["t", "w"],
+            focusedPaneID: nil,
+            unreadNotifications: 0
+        ))
+        model.update(query: "spotlight")
+        model.select(section: .browsers)
+
+        XCTAssertEqual(model.matches.map(\.id), ["focus:w"])
+        XCTAssertEqual(
+            model.sectionTags, [nil, .terminals, .browsers, .brain],
+            "the tags come from what the query found, so filtering can never hide the tag back to All"
+        )
+    }
+
+    func testTabWrapsThroughTheTagsAndAQueryThatLosesOneFallsBackToAll() {
+        var model = CommandPaletteModel(commands: CommandPaletteModel.build(
+            panes: [pane("w", project: "spot", group: "g1", label: "spotlight browser", kind: .browser)],
+            paneOrder: ["w"],
+            focusedPaneID: nil,
+            unreadNotifications: 0
+        ))
+        model.update(query: "spotlight")
+        XCTAssertEqual(model.sectionTags, [nil, .browsers, .brain])
+
+        model.cycleSection(by: 1)
+        XCTAssertEqual(model.selectedSection, .browsers)
+        model.cycleSection(by: 1)
+        XCTAssertEqual(model.selectedSection, .brain)
+        model.cycleSection(by: 1)
+        XCTAssertNil(model.selectedSection, "⇥ wraps around a short, closed ring")
+        model.cycleSection(by: -1)
+        XCTAssertEqual(model.selectedSection, .brain, "and ⇧⇥ goes back the other way")
+
+        // Refine the query past the browser and the tag it stood on is gone —
+        // holding it would filter the list to nothing with no way back.
+        model.select(section: .browsers)
+        model.update(query: "spotlight terminal that is not there")
+        XCTAssertNil(model.selectedSection)
     }
 
     func testTypingReturnsTheHighlightToTheTop() {
         var model = CommandPaletteModel(commands: sample)
+        model.update(query: "a")
         model.moveSelection(by: 2)
         XCTAssertEqual(model.selectedIndex, 2)
 
@@ -304,12 +370,13 @@ final class CommandPaletteTests: XCTestCase {
 
     func testSelectionClampsRatherThanWrapping() {
         var model = CommandPaletteModel(commands: sample)
+        model.update(query: "a")
 
         model.moveSelection(by: -1)
         XCTAssertEqual(model.selectedIndex, 0, "up at the top stays at the top")
 
         model.moveSelection(by: 99)
-        XCTAssertEqual(model.selectedIndex, sample.count - 1, "down at the bottom stays at the bottom")
+        XCTAssertEqual(model.selectedIndex, model.matches.count - 1, "down at the bottom stays at the bottom")
     }
 
     func testAQueryThatMatchesNoActionStillOffersTheSearchBrainRow() {
@@ -329,7 +396,8 @@ final class CommandPaletteTests: XCTestCase {
 
         XCTAssertEqual(model.query, "")
         XCTAssertEqual(model.selectedIndex, 0)
-        XCTAssertEqual(model.matches.map(\.id), ["focus:a"])
+        XCTAssertEqual(model.matches, [], "a cleared query shows nothing again")
+        XCTAssertEqual(model.commands.map(\.id), ["focus:a"])
     }
 
     func testEveryOpenFileIsAGoToRowOncePerPathNoMatterHowManyPanesHoldIt() {
@@ -349,7 +417,7 @@ final class CommandPaletteTests: XCTestCase {
 
         let files = commands.filter { if case .openFile = $0.action { return true } else { return false } }
         XCTAssertEqual(files.map(\.title), ["main.swift", "README.md"], "the filename is the row, Spotlight-style")
-        XCTAssertEqual(files.map(\.detail), ["src", "repo"])
+        XCTAssertEqual(files.map(\.subtitle), ["/repo/src", "/repo"], "the folder is the location line")
         XCTAssertEqual(files.first?.action, .openFile(path: "/repo/src/main.swift"))
     }
 
@@ -376,8 +444,7 @@ final class CommandPaletteTests: XCTestCase {
     }
 
     func testRowsComeOutInSectionOrderSoAGroupIsJustARunOfRows() {
-        var model = CommandPaletteModel(
-            commands: CommandPaletteModel.build(
+        let commands = CommandPaletteModel.build(
                 panes: [
                     pane("web", project: "alpha", group: "g1", kind: .browser),
                     pane("t1", project: "alpha", group: "g1"),
@@ -390,25 +457,23 @@ final class CommandPaletteTests: XCTestCase {
                 focusedPaneID: nil,
                 unreadNotifications: 0
             )
-        )
-        model.update(query: "")
 
         // Consecutive runs, never interleaved: the table can insert one
         // heading wherever the section changes and stop there.
         var runs: [PaletteSection] = []
-        for command in model.matches where runs.last != command.section {
+        for command in commands where runs.last != command.section {
             runs.append(command.section)
         }
         XCTAssertEqual(runs, [.terminals, .browsers, .files, .actions])
 
         // Panes keep the outline's own order inside their section.
         XCTAssertEqual(
-            model.matches.filter { $0.section == .terminals }.map(\.id),
+            commands.filter { $0.section == .terminals }.map(\.id),
             ["focus:t1", "focus:t2"]
         )
         // The editor pane sits with the files it holds.
         XCTAssertEqual(
-            model.matches.filter { $0.section == .files }.map(\.id),
+            commands.filter { $0.section == .files }.map(\.id),
             ["focus:ed", "file:/repo/main.swift"]
         )
     }
@@ -436,6 +501,7 @@ final class CommandPaletteTests: XCTestCase {
             openWhenRun.append(controller.window?.isVisible == true)
         }
         controller.present(commands: sample, over: nil)
+        controller.setQuery("switch")
 
         controller.runSelected()
 
@@ -446,13 +512,45 @@ final class CommandPaletteTests: XCTestCase {
     func testThePanelIsRebuiltFromScratchOnEveryOpen() {
         let controller = CommandPaletteController()
         controller.present(commands: sample, over: nil)
-        controller.moveSelection(by: 2)
-        XCTAssertEqual(controller.model.selectedIndex, 2)
+        controller.setQuery("pane")
+        controller.moveSelection(by: 1)
+        XCTAssertEqual(controller.model.selectedIndex, 1)
 
         controller.present(commands: [sample[1]], over: nil)
 
-        XCTAssertEqual(controller.model.matches.map(\.id), ["new-pane"])
+        XCTAssertEqual(controller.model.matches, [], "a fresh open is an empty query, and an empty query shows nothing")
         XCTAssertEqual(controller.model.selectedIndex, 0)
+        controller.setQuery("pane")
+        XCTAssertEqual(controller.model.matches.map(\.id), ["new-pane", "search-brain"])
+        controller.dismiss()
+    }
+
+    func testThePanelIsJustTheBarUntilSomethingIsTyped() {
+        let controller = CommandPaletteController()
+        controller.present(commands: sample, over: nil)
+        XCTAssertEqual(controller.window?.frame.height, CommandPaletteController.barHeight)
+
+        controller.setQuery("pane")
+        XCTAssertGreaterThan(
+            controller.window?.frame.height ?? 0,
+            CommandPaletteController.barHeight,
+            "results unfold under the bar"
+        )
+
+        controller.setQuery("")
+        XCTAssertEqual(controller.window?.frame.height, CommandPaletteController.barHeight, "and fold away again")
+        controller.dismiss()
+    }
+
+    func testTheBarStaysPutWhileTheResultsGrowBeneathIt() {
+        let controller = CommandPaletteController()
+        controller.present(commands: sample, over: nil)
+        controller.window?.setFrameOrigin(NSPoint(x: 100, y: 400))
+        let top = controller.window?.frame.maxY ?? 0
+
+        controller.setQuery("pane")
+
+        XCTAssertEqual(controller.window?.frame.maxY ?? 0, top, accuracy: 0.5)
         controller.dismiss()
     }
 
