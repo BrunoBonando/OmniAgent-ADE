@@ -39,6 +39,235 @@ final class SessionOutlineTests: XCTestCase {
         XCTAssertFalse(tree[0].sessions[0].isCurrent)
     }
 
+    // MARK: - currentSessionGroupID — the strict "who has focus" answer
+    // Ported from `describe("currentSessionGroupId")`.
+
+    func testTheCurrentSessionIsTheOneHoldingTheFocusedPane() {
+        let panes = [
+            pane("a", project: "p1", group: "g1"),
+            pane("b", project: "p1", group: "g2"),
+        ]
+        XCTAssertEqual(SessionOutline.currentSessionGroupID(panes, focusedPaneID: "b"), "g2")
+    }
+
+    func testTheCurrentSessionIsTheImplicitOneForAFocusedPreGroupingPane() {
+        let panes = [pane("a", project: "p1", group: WorkspaceRestoration.ungroupedSessionID)]
+        XCTAssertEqual(
+            SessionOutline.currentSessionGroupID(panes, focusedPaneID: "a"),
+            WorkspaceRestoration.ungroupedSessionID,
+            "a pane with no stored group already carries the sentinel — resolved once at the restore boundary"
+        )
+    }
+
+    func testThereIsNoCurrentSessionWithNothingFocusedOrAStaleFocusID() {
+        let panes = [pane("a", project: "p1", group: "g1")]
+        XCTAssertNil(SessionOutline.currentSessionGroupID(panes, focusedPaneID: nil))
+        XCTAssertNil(
+            SessionOutline.currentSessionGroupID(panes, focusedPaneID: "ghost"),
+            "a focus id naming no live pane is not a session — that is what visibleSessionGroupID falls back for"
+        )
+    }
+
+    // MARK: - visibleSessionGroupID — which session this project puts on screen
+    // Ported from `describe("visibleSessionGroupId")`.
+
+    func testTheVisibleSessionIsTheFocusedPanesWhenTheFocusedPaneIsInThisProject() {
+        let panes = [
+            pane("a", project: "p1", group: "g1"),
+            pane("b", project: "p1", group: "g2"),
+        ]
+        XCTAssertEqual(SessionOutline.visibleSessionGroupID(panes, project: "p1", focusedPaneID: "b"), "g2")
+    }
+
+    /// Selecting a workspace in the sidebar does not move focus, so the
+    /// focused pane routinely belongs to a different project than the one
+    /// being rendered. The topmost session is the one the eye lands on.
+    func testTheVisibleSessionFallsBackToTheProjectsFirstWhenFocusIsInAnotherProject() {
+        let panes = [
+            pane("a", project: "p1", group: "g1"),
+            pane("b", project: "p1", group: "g2"),
+            pane("c", project: "p2", group: "g3"),
+        ]
+        XCTAssertEqual(SessionOutline.visibleSessionGroupID(panes, project: "p1", focusedPaneID: "c"), "g1")
+        XCTAssertEqual(
+            SessionOutline.currentSessionGroupID(panes, focusedPaneID: "c"),
+            "g3",
+            "the strict answer here is g3 — the two questions really do differ, and that is the whole point"
+        )
+    }
+
+    func testTheVisibleSessionFallsBackToTheProjectsFirstWhenNothingIsFocused() {
+        let panes = [
+            pane("a", project: "p1", group: "g1"),
+            pane("b", project: "p1", group: "g2"),
+        ]
+        XCTAssertEqual(SessionOutline.visibleSessionGroupID(panes, project: "p1", focusedPaneID: nil), "g1")
+    }
+
+    func testThereIsNoVisibleSessionForAProjectWithNoPanes() {
+        let panes = [pane("a", project: "p1", group: "g1")]
+        XCTAssertNil(SessionOutline.visibleSessionGroupID(panes, project: "p2", focusedPaneID: "a"))
+    }
+
+    /// It is also the JOIN target for a new pane: `nil` means "this project
+    /// has no panes at all", which is what makes the caller's
+    /// `existingGroup ?? SessionOutline.newSessionGroupID()` correct.
+    func testTheVisibleSessionIsNilOnAnEmptyProjectSoTheCallerMintsAFreshGroup() {
+        XCTAssertNil(SessionOutline.visibleSessionGroupID([pane("z", project: "p2", group: "g9")], project: "p1", focusedPaneID: "z"))
+        XCTAssertNil(SessionOutline.visibleSessionGroupID([], project: "p1", focusedPaneID: nil))
+    }
+
+    func testTheVisibleSessionIsTheImplicitOneForPreGroupingPanes() {
+        let panes = [
+            pane("a", project: "p1", group: WorkspaceRestoration.ungroupedSessionID),
+            pane("b", project: "p1", group: WorkspaceRestoration.ungroupedSessionID),
+        ]
+        XCTAssertEqual(
+            SessionOutline.visibleSessionGroupID(panes, project: "p1", focusedPaneID: "b"),
+            WorkspaceRestoration.ungroupedSessionID
+        )
+        XCTAssertEqual(
+            SessionOutline.visibleSessionGroupID(panes, project: "p1", focusedPaneID: nil),
+            WorkspaceRestoration.ungroupedSessionID
+        )
+    }
+
+    func testTheVisibleSessionSurvivesAStaleFocusIDRatherThanBlankingTheGrid() {
+        let panes = [
+            pane("a", project: "p1", group: "g1"),
+            pane("b", project: "p1", group: "g2"),
+        ]
+        XCTAssertEqual(SessionOutline.visibleSessionGroupID(panes, project: "p1", focusedPaneID: "gone"), "g1")
+    }
+
+    /// The grid and the sidebar's accent rail must never point at different
+    /// sessions, so the focused case has to agree with `group`'s `isCurrent`
+    /// by construction.
+    func testTheVisibleSessionAgreesWithTheSessionTheOutlineMarksCurrent() throws {
+        let panes = [
+            pane("a", project: "p1", group: "g1"),
+            pane("b", project: "p1", group: "g2"),
+        ]
+        let visible = SessionOutline.visibleSessionGroupID(panes, project: "p1", focusedPaneID: "b")
+        let marked = try XCTUnwrap(
+            SessionOutline.group(panes, focusedPaneID: "b")
+                .first { $0.project == "p1" }?
+                .sessions.first(where: \.isCurrent)?.id
+        )
+        XCTAssertEqual(visible, marked)
+    }
+
+    // MARK: - adjacentSessionTab — stepping sideways between sessions
+    // Ported from `describe("adjacentSessionTab")`. The oracle is one line
+    // whose end behaviour is entirely JS out-of-range indexing:
+    //   sessions[(currentIndex === -1 ? 0 : currentIndex) + offset]?.tabs[0] ?? null
+    // Index -1 and index >= count are both `undefined` there and both trap
+    // in Swift, so the port guards explicitly and never wraps.
+
+    private var steppingFixture: [PaneDescriptor] {
+        [
+            pane("first", project: "p1", group: "g1"),
+            pane("second", project: "p1", group: "g2"),
+            pane("second-pane", project: "p1", group: "g2"),
+            pane("third", project: "p1", group: "g3"),
+        ]
+    }
+
+    func testSteppingForwardLandsOnTheFirstPaneOfTheNextSession() {
+        XCTAssertEqual(
+            SessionOutline.adjacentSessionTab(steppingFixture, project: "p1", focusedPaneID: "second-pane", offset: 1)?.sessionID,
+            "third",
+            "the next session's FIRST pane, not its focused one"
+        )
+    }
+
+    func testSteppingBackLandsOnTheFirstPaneOfThePreviousSession() {
+        XCTAssertEqual(
+            SessionOutline.adjacentSessionTab(steppingFixture, project: "p1", focusedPaneID: "second", offset: -1)?.sessionID,
+            "first"
+        )
+    }
+
+    func testSteppingStopsAtBothOuterSessionBoundariesWithoutWrapping() {
+        XCTAssertNil(
+            SessionOutline.adjacentSessionTab(steppingFixture, project: "p1", focusedPaneID: "first", offset: -1),
+            "index -1 is nil, not the last session"
+        )
+        XCTAssertNil(
+            SessionOutline.adjacentSessionTab(steppingFixture, project: "p1", focusedPaneID: "third", offset: 1),
+            "index == count is nil, not the first session"
+        )
+    }
+
+    /// The guard is the behaviour, not a defensive extra: a clamp into
+    /// `0..<count` would make both of these return a session instead of nil.
+    func testSteppingByALargeOffsetIsNilRatherThanAClampOrATrap() {
+        XCTAssertNil(SessionOutline.adjacentSessionTab(steppingFixture, project: "p1", focusedPaneID: "second", offset: -5))
+        XCTAssertNil(SessionOutline.adjacentSessionTab(steppingFixture, project: "p1", focusedPaneID: "second", offset: 5))
+        XCTAssertNil(
+            SessionOutline.adjacentSessionTab([], project: "p1", focusedPaneID: nil, offset: 1),
+            "and an empty project steps nowhere"
+        )
+    }
+
+    /// No session in this project is current, so the walk starts from index
+    /// 0 — offset +1 is therefore the project's SECOND session, and offset
+    /// -1 computes index -1 and is nil.
+    func testSteppingStartsFromTheFirstSessionWhenFocusIsOutsideTheProject() {
+        let panes = steppingFixture + [pane("other", project: "p2", group: "g4")]
+        XCTAssertEqual(
+            SessionOutline.adjacentSessionTab(panes, project: "p1", focusedPaneID: "other", offset: 1)?.sessionID,
+            "second"
+        )
+        XCTAssertNil(SessionOutline.adjacentSessionTab(panes, project: "p1", focusedPaneID: "other", offset: -1))
+    }
+
+    // MARK: - sessionEngineBreakdown — which engines are running in a session
+    // Ported from `describe("sessionEngineBreakdown")`. The oracle takes a
+    // `SessionGroup` and reads `session.tabs`; `SessionGroupNode` carries
+    // only `paneIDs`, so the Swift signature takes the descriptors and the
+    // group id instead.
+
+    func testTheEngineBreakdownCountsEachEngineOnceInFirstSeenOrderWithItsOwnTally() {
+        let panes = [
+            pane("a", project: "p1", group: "g1", engine: .claude),
+            pane("b", project: "p1", group: "g1", engine: .shell),
+            pane("c", project: "p1", group: "g1", engine: .claude),
+        ]
+        let breakdown = SessionOutline.sessionEngineBreakdown(panes, group: "g1")
+        // Tuples are not Equatable, so the two projections are compared
+        // rather than the array itself.
+        XCTAssertEqual(breakdown.map(\.engine), [.claude, .shell], "first-seen order, each engine once")
+        XCTAssertEqual(breakdown.map(\.count), [2, 1])
+    }
+
+    func testTheEngineBreakdownCountsOnlyTheSessionItWasAskedAbout() {
+        let panes = [
+            pane("a", project: "p1", group: "g1", engine: .claude),
+            pane("b", project: "p1", group: "g2", engine: .codex),
+        ]
+        XCTAssertEqual(SessionOutline.sessionEngineBreakdown(panes, group: "g2").map(\.engine), [.codex])
+        XCTAssertTrue(
+            SessionOutline.sessionEngineBreakdown(panes, group: "g-nothing").isEmpty,
+            "a session with no panes has no engines"
+        )
+    }
+
+    /// A browser or editor pane carries `.shell` as a placeholder, not as an
+    /// identity — the same reason `nextPaneNumber` gives them their own
+    /// ladder. Counting them would make a card claim a shell that is not
+    /// running.
+    func testTheEngineBreakdownIgnoresBrowserAndEditorPanesWhoseEngineIsAPlaceholder() {
+        let panes = [
+            pane("a", project: "p1", group: "g1", engine: .claude),
+            pane("w", project: "p1", group: "g1", engine: .shell, kind: .browser),
+            pane("e", project: "p1", group: "g1", engine: .shell, kind: .editor),
+        ]
+        let breakdown = SessionOutline.sessionEngineBreakdown(panes, group: "g1")
+        XCTAssertEqual(breakdown.map(\.engine), [.claude])
+        XCTAssertEqual(breakdown.map(\.count), [1])
+    }
+
     func testAStoredNameIsShownAndAnUnnamedSessionGetsTheLowestFreeNumber() {
         let tree = SessionOutline.group(
             [
@@ -295,22 +524,135 @@ final class SessionOutlineTests: XCTestCase {
         XCTAssertFalse(SessionOutline.isGeneratedPaneName("Browser tab 2"))
     }
 
+    // MARK: - newSessionGroupID
+    // Ported from `describe("newSessionGroupId")`. `SessionOutline`'s
+    // `groupCounter` is a bare `private static var` that is never reset
+    // between tests, so distinctness is the only thing that may be asserted
+    // — never an absolute value.
+
+    func testFiftySuccessiveSessionGroupIDsAreAllDistinct() {
+        let ids = Set((0..<50).map { _ in SessionOutline.newSessionGroupID() })
+        XCTAssertEqual(ids.count, 50)
+    }
+
+    /// A group id `SessionIdentifier.isValid` rejects is silently dropped by
+    /// `PersistedLayoutCodec.serialize`, which would un-group every pane on
+    /// the next launch.
+    func testAMintedSessionGroupIDIsOneTheLayoutPersisterWillKeep() {
+        XCTAssertTrue(SessionIdentifier.isValid(SessionOutline.newSessionGroupID()))
+    }
+
+    // MARK: - group — the oracle cases the existing port did not cover
+
+    func testUnnamedSessionsAreNumberedPerProjectAndStoreNoName() {
+        let tree = SessionOutline.group(
+            [
+                pane("a", project: "p1", group: "g1"),
+                pane("b", project: "p1", group: "g2"),
+                pane("c", project: "p2", group: "g9"),
+            ],
+            focusedPaneID: nil
+        )
+        XCTAssertEqual(tree[0].sessions.map(\.label), ["Session 1", "Session 2"])
+        XCTAssertEqual(tree[1].sessions.map(\.label), ["Session 1"], "numbering restarts per project")
+        XCTAssertEqual(
+            tree[0].sessions.map(\.name),
+            [nil, nil],
+            "and nothing was stored — these are derived defaults"
+        )
+    }
+
+    func testTwoSessionsEachCarryTheirOwnRoot() {
+        let tree = SessionOutline.group(
+            [
+                pane("a", project: "p1", group: "g1", cwd: "/repo"),
+                pane("b", project: "p1", group: "g1", cwd: "/repo/packages/api"),
+                pane("c", project: "p1", group: "g2", cwd: "/repo/packages/web"),
+            ],
+            focusedPaneID: nil
+        )
+        XCTAssertEqual(tree[0].sessions.map(\.cwd), ["/repo", "/repo/packages/web"])
+    }
+
+    func testPreGroupingPanesCollectIntoOneImplicitSessionPerProject() {
+        let tree = SessionOutline.group(
+            [
+                pane("a", project: "p1", group: WorkspaceRestoration.ungroupedSessionID),
+                pane("b", project: "p1", group: WorkspaceRestoration.ungroupedSessionID),
+                pane("c", project: "p2", group: WorkspaceRestoration.ungroupedSessionID),
+            ],
+            focusedPaneID: nil
+        )
+        XCTAssertEqual(tree[0].sessions.count, 1)
+        XCTAssertEqual(tree[0].sessions[0].id, WorkspaceRestoration.ungroupedSessionID)
+        XCTAssertEqual(tree[0].sessions[0].paneIDs, ["a", "b"])
+        XCTAssertEqual(tree[1].sessions[0].id, WorkspaceRestoration.ungroupedSessionID)
+    }
+
+    func testNoPanesMakeAnEmptyTree() {
+        XCTAssertTrue(SessionOutline.group([], focusedPaneID: nil).isEmpty)
+    }
+
+    /// The regression stored names exist to kill: labelling was positional
+    /// at first — "the 2nd session in this project is Session 2" — which
+    /// quietly renamed every session below one that closed.
+    func testAStoredNameStaysStableWhenAnEarlierSessionCloses() {
+        let all = [
+            pane("a", project: "p1", group: "g1", groupLabel: "Session 1"),
+            pane("b", project: "p1", group: "g2", groupLabel: "Session 2"),
+        ]
+        let afterClosingTheFirst = SessionOutline.group(Array(all.dropFirst()), focusedPaneID: nil)
+        XCTAssertEqual(afterClosingTheFirst[0].sessions[0].label, "Session 2")
+    }
+
+    // MARK: - nextSessionName — the oracle cases the existing port did not cover
+
+    func testTheNextSessionNameSkipsANumberTheUserTypedOntoASession() {
+        let live = [
+            pane("a", project: "p1", group: "g1", groupLabel: "Session 1"),
+            pane("b", project: "p1", group: "g2", groupLabel: "Session 2"),
+        ]
+        XCTAssertEqual(SessionOutline.nextSessionName(live, project: "p1"), "Session 3")
+    }
+
+    /// "Taken" means the name a session *shows*, stored or derived, because
+    /// the collision that matters is two rows reading the same.
+    func testTheNextSessionNameSkipsDerivedNamesToo() {
+        XCTAssertEqual(
+            SessionOutline.nextSessionName([pane("a", project: "p1", group: "g1")], project: "p1"),
+            "Session 2"
+        )
+    }
+
+    func testANonNumericSessionNameOccupiesNoNumber() {
+        XCTAssertEqual(
+            SessionOutline.nextSessionName(
+                [pane("a", project: "p1", group: "g1", groupLabel: "auth refactor")],
+                project: "p1"
+            ),
+            "Session 1"
+        )
+    }
+
     private func pane(
         _ id: String,
         project: String,
         group: String,
         groupLabel: String? = nil,
         cwd: String = "/",
-        label: String? = nil
+        label: String? = nil,
+        engine: Engine = .shell,
+        kind: PaneKind = .terminal
     ) -> PaneDescriptor {
         PaneDescriptor(
             sessionID: id,
             group: group,
             groupLabel: groupLabel,
             project: project,
-            engine: .shell,
+            engine: engine,
             cwd: cwd,
-            label: label
+            label: label,
+            kind: kind
         )
     }
 }
