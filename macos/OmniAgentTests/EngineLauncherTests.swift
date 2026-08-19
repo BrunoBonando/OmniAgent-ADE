@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 
 @testable import OmniAgent
 
@@ -190,6 +191,150 @@ final class EngineLauncherTests: XCTestCase {
         XCTAssertEqual(
             EngineLauncher.command(for: .antigravity, conversationID: "abc", resolve: resolve),
             ["/bin/agy"]
+        )
+    }
+}
+
+/// Switching the engine a terminal runs: the badge that opens the menu, the
+/// menu itself, and the confirmation that stands between a live conversation
+/// and losing it.
+final class EngineSwitchTests: XCTestCase {
+    /// The list the menu is built from. Every engine is reachable — a menu
+    /// that quietly omitted one would be a dead end for whoever added it.
+    func testEveryEngineIsSelectableWithTheShellLast() {
+        XCTAssertEqual(Set(EngineLauncher.selectable), Set(Engine.allCases))
+        XCTAssertEqual(EngineLauncher.selectable.last, .shell)
+        XCTAssertEqual(EngineLauncher.selectable.count, Engine.allCases.count, "no duplicates")
+    }
+
+    func testIsInstalledReadsThePathThroughTheInjectedResolver() {
+        let resolve: (String) -> String? = { $0 == "claude" ? "/bin/claude" : nil }
+        XCTAssertTrue(EngineLauncher.isInstalled(.claude, resolve: resolve))
+        XCTAssertFalse(EngineLauncher.isInstalled(.codex, resolve: resolve))
+    }
+
+    /// The badge is only a button in front of a terminal, and only then does
+    /// it grow the chevron that says so.
+    func testOnlyATerminalsEngineBadgeOpensTheMenu() {
+        let badge = PaneBadgeView()
+        badge.configure(
+            icon: nil,
+            text: "Claude Code",
+            foreground: .white,
+            fill: .clear,
+            stroke: .clear,
+            font: ShellFont.ui(12, .semibold)
+        )
+        let plain = badge.intrinsicContentSize.width
+        var opened = false
+        badge.onClick = { opened = true }
+        XCTAssertGreaterThan(badge.intrinsicContentSize.width, plain, "the chevron takes room")
+        XCTAssertTrue(badge.accessibilityPerformPress())
+        XCTAssertTrue(opened)
+    }
+
+    func testTheMenuTicksTheRunningEngineAndRefusesToReselectIt() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let paneID = try XCTUnwrap(controller.workspaceView.paneIDs.first)
+        controller.workspaceView.updateDescriptor(for: paneID) { $0.engine = .claude }
+
+        let menu = controller.engineMenu(for: paneID)
+        XCTAssertEqual(menu.items.count, EngineLauncher.selectable.count)
+        let claude = try XCTUnwrap(menu.items.first { $0.title.hasPrefix("Claude Code") })
+        XCTAssertEqual(claude.state, .on)
+        XCTAssertFalse(claude.isEnabled, "the engine already running is not a choice")
+        XCTAssertTrue(menu.items.filter { $0.state == .on }.count == 1)
+    }
+
+    /// Nothing typed, nothing to lose — the swap happens on the spot.
+    func testAnUntypedTerminalSwitchesEngineWithoutAsking() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.sessionKiller = { _ in }
+        controller.sessionEnsurer = { _ in }
+        let workspace = controller.workspaceView
+        let paneID = try XCTUnwrap(workspace.paneIDs.first)
+        workspace.updateDescriptor(for: paneID) { $0.engine = .claude }
+
+        controller.requestEngineSwitch(paneID, to: .shell)
+
+        XCTAssertNil(workspace.descriptor(for: paneID), "the old pane and its conversation are gone")
+        let replacement = try XCTUnwrap(workspace.paneIDs.first)
+        XCTAssertNotEqual(replacement, paneID, "a new conversation needs a new session id")
+        XCTAssertEqual(workspace.descriptor(for: replacement)?.engine, .shell)
+        XCTAssertEqual(workspace.paneIDs.count, 1)
+    }
+
+    /// Typed in, so it asks — and changes nothing until the card is answered.
+    func testATypedTerminalAsksBeforeItsConversationIsThrownAway() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.sessionKiller = { _ in }
+        controller.sessionEnsurer = { _ in }
+        let workspace = controller.workspaceView
+        let paneID = try XCTUnwrap(workspace.paneIDs.first)
+        workspace.updateDescriptor(for: paneID) { $0.engine = .claude }
+        let surface = try XCTUnwrap(workspace.terminalSurface(for: paneID))
+        surface.send(source: surface.terminalView, data: ArraySlice([UInt8(0x68)]))
+
+        controller.requestEngineSwitch(paneID, to: .shell)
+
+        let container = try XCTUnwrap(workspace.container(for: paneID))
+        let card = try XCTUnwrap(container.askOverlay)
+        XCTAssertEqual(workspace.descriptor(for: paneID)?.engine, .claude, "nothing has happened yet")
+        // Stay, then the switch — and the card is asking about the engine it
+        // is offering, not warning about the one being left.
+        XCTAssertEqual(card.options.map(\.title), ["Stay", "Switch to Shell"])
+        XCTAssertEqual(card.icon, Engine.shell.iconImage)
+
+        // Cancel leaves the terminal exactly as it was.
+        card.onCancel?()
+        XCTAssertNil(container.askOverlay)
+        XCTAssertEqual(workspace.descriptor(for: paneID)?.engine, .claude)
+
+        // Confirm is the only path that swaps it.
+        controller.requestEngineSwitch(paneID, to: .shell)
+        try XCTUnwrap(container.askOverlay).options.last?.action()
+        XCTAssertNil(workspace.descriptor(for: paneID))
+        XCTAssertEqual(workspace.descriptor(for: workspace.paneIDs[0])?.engine, .shell)
+    }
+
+    /// The replacement lands in the cell the old pane held. A swap that seated
+    /// the new terminal at the end of the grid would move every pane after it
+    /// for no reason the user asked for.
+    func testTheReplacementKeepsThePanesPlaceInTheGrid() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.sessionKiller = { _ in }
+        controller.sessionEnsurer = { _ in }
+        let workspace = controller.workspaceView
+        controller.newTerminalPane(nil)
+        controller.newTerminalPane(nil)
+        let before = workspace.paneIDs
+        XCTAssertEqual(before.count, 3)
+        let target = before[1]
+
+        XCTAssertTrue(controller.replaceEngine(target, with: .shell))
+
+        let after = workspace.paneIDs
+        XCTAssertEqual(after.count, 3)
+        XCTAssertEqual(after[0], before[0])
+        XCTAssertEqual(after[2], before[2])
+        XCTAssertNotEqual(after[1], target)
+        XCTAssertEqual(workspace.descriptor(for: after[1])?.engine, .shell)
+    }
+
+    private func makeController() -> WorkspaceWindowController {
+        WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-engine-switch-test.sock")
+            ),
+            sessionID: "native-terminal"
         )
     }
 }

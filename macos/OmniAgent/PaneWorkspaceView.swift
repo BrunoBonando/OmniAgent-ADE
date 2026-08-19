@@ -201,6 +201,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     var onRequestClosePane: ((String) -> Void)?
     /// The header's ⋯ button, with the view the menu should drop from.
     var onRequestPaneMenu: ((String, NSView) -> Void)?
+    /// The header's engine badge, clicked — same shape as the ⋯ menu, and for
+    /// the same reason: which engines exist and what swapping one costs is
+    /// the window controller's business, not this view's.
+    var onRequestEngineMenu: ((String, NSView) -> Void)?
     var onFocusedPaneChanged: ((String?) -> Void)?
     /// Raised when the set of panes, their order, or one pane's metadata
     /// changed — i.e. exactly when the `layout` settings row would no longer
@@ -1738,6 +1742,56 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// `awaitingApproval`, and nothing else would tell the buttons to change.
     private var approvalPollTimer: Timer?
 
+    /// The pane ask on screen, while one is up — see `PaneAskOverlayView` for
+    /// what a pane ask is and when something belongs in one.
+    private(set) var askOverlay: PaneAskOverlayView?
+
+    /// Puts `title`/`message` on glass over this pane and waits. Exactly one
+    /// of `options` runs, or `onCancel` if the card is dismissed with Esc or a
+    /// click outside it — so a caller with an in-flight decision to settle
+    /// (the editor's save prompt) always hears back exactly once.
+    func presentAsk(
+        title: String,
+        message: String,
+        icon: NSImage?,
+        options: [PaneAskOption],
+        onCancel: @escaping () -> Void = {}
+    ) {
+        dismissAsk()
+        // Every answer takes the card down first: an option that reopens the
+        // pane's own prompt (the editor's "save, then it is still dirty, ask
+        // again") would otherwise be dismissed by the ask it just replaced.
+        let overlay = PaneAskOverlayView(
+            title: title,
+            message: message,
+            icon: icon,
+            options: options.map { option in
+                PaneAskOption(option.title, isPrimary: option.isPrimary) { [weak self] in
+                    self?.dismissAsk()
+                    option.action()
+                }
+            }
+        )
+        overlay.onCancel = { [weak self] in
+            self?.dismissAsk()
+            onCancel()
+        }
+        addSubview(overlay, positioned: .above, relativeTo: nil)
+        askOverlay = overlay
+        needsLayout = true
+        window?.makeFirstResponder(overlay)
+    }
+
+    func dismissAsk() {
+        guard let overlay = askOverlay else { return }
+        let hadKeyboard = window?.firstResponder === overlay
+        overlay.removeFromSuperview()
+        askOverlay = nil
+        // Hand the keyboard back to whatever the pane holds — a cancelled
+        // question must leave the terminal exactly as it found it.
+        if hadKeyboard { workspace?.focusPane(paneID) }
+    }
+
     private weak var workspace: PaneWorkspaceView?
     private var workingRing: CAGradientLayer?
     /// The cwd the header's branch was last resolved for, so a repeated OSC 7
@@ -1772,6 +1826,11 @@ final class PaneContainerView: NSView, NSDraggingSource {
             guard let self else { return }
             self.workspace?.focusPane(self.paneID)
             self.workspace?.onRequestPaneMenu?(self.paneID, anchor)
+        }
+        header.onEngineMenuRequested = { [weak self] anchor in
+            guard let self else { return }
+            self.workspace?.focusPane(self.paneID)
+            self.workspace?.onRequestEngineMenu?(self.paneID, anchor)
         }
         // The design's `session restore · terminal 1 of 4`. A closure rather
         // than a stored string because the ordinal is a fact about the
@@ -1863,6 +1922,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
             height: barHeight
         )
         dropHighlight.frame = bounds
+        askOverlay?.frame = bounds
         workingRing?.frame = bounds
     }
 
@@ -2034,6 +2094,9 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // showing that badge would claim the pane runs something it does
         // not. `nil` already hides it.
         header.engine = descriptor.kind == .terminal ? descriptor.engine : nil
+        // Only a terminal runs an engine, so only a terminal's badge opens the
+        // menu — a browser's placeholder badge is already hidden above.
+        header.isEngineMenuAvailable = descriptor.kind == .terminal
         header.isMenuAvailable = descriptor.kind == .terminal
         // Its session's name is half the focus subtitle, so a rename has to
         // reach the bar. A no-op unless this pane is the zoomed one.
@@ -2374,6 +2437,9 @@ final class PaneHeaderView: NSView {
     /// menu itself: what a pane can be told to do is the window controller's
     /// business, same as closing one is.
     var onMenuRequested: ((NSView) -> Void)?
+    /// The engine badge, clicked — the badge says which agent drives this
+    /// PTY, so it is also where you change it.
+    var onEngineMenuRequested: ((NSView) -> Void)?
 
     var isZoomAvailable = false {
         didSet {
@@ -2389,6 +2455,24 @@ final class PaneHeaderView: NSView {
         didSet {
             guard isMenuAvailable != oldValue else { return }
             applyControlState()
+        }
+    }
+
+    /// Whether the engine badge opens the engine menu. Only a terminal runs an
+    /// engine — a browser or editor pane carries a placeholder `.shell` the
+    /// badge already hides, and a badge that opened a menu about it would be
+    /// offering to swap an engine the pane does not have.
+    var isEngineMenuAvailable = false {
+        didSet {
+            guard isEngineMenuAvailable != oldValue else { return }
+            engineBadge.onClick = isEngineMenuAvailable
+                ? { [weak self] in
+                    guard let self else { return }
+                    self.onEngineMenuRequested?(self.engineBadge)
+                }
+                : nil
+            // The chevron changes the badge's width.
+            needsLayout = true
         }
     }
 
@@ -2744,6 +2828,7 @@ final class PaneBadgeView: NSView {
     private static let iconSize: CGFloat = 15
     private static let horizontalInset: CGFloat = 7
     private static let gap: CGFloat = 5
+    private static let chevron: CGFloat = 7
 
     private var icon: NSImage?
     private var text = ""
@@ -2751,6 +2836,28 @@ final class PaneBadgeView: NSView {
     private var fill: NSColor = .clear
     private var stroke: NSColor = .clear
     private var font: NSFont = .systemFont(ofSize: 12)
+
+    /// Set to make the badge a button: it grows a chevron, lights under the
+    /// pointer and drops a menu. The engine badge has one, the branch badge
+    /// does not — a branch is a fact, an engine is a choice.
+    var onClick: (() -> Void)? {
+        didSet {
+            let clickable = onClick != nil
+            setAccessibilityElement(clickable)
+            setAccessibilityRole(clickable ? .popUpButton : .unknown)
+            invalidateIntrinsicContentSize()
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+            // The badge learns it is a button *after* it is in the hierarchy —
+            // the header only hears which engine a pane runs once the
+            // descriptor arrives — so its hover region has to be built now
+            // rather than at whatever frame change happens to come next.
+            updateTrackingAreas()
+        }
+    }
+
+    private var isHovered = false { didSet { needsDisplay = true } }
+    private var tracking: NSTrackingArea?
 
     init() {
         super.init(frame: .zero)
@@ -2787,9 +2894,47 @@ final class PaneBadgeView: NSView {
         let textWidth = (text as NSString).size(withAttributes: [.font: font]).width
         let iconWidth = icon == nil ? 0 : Self.iconSize + Self.gap
         return NSSize(
-            width: ceil(Self.horizontalInset * 2 + iconWidth + textWidth),
+            width: ceil(Self.horizontalInset * 2 + iconWidth + textWidth + chevronWidth),
             height: Self.height
         )
+    }
+
+    private var chevronWidth: CGFloat { onClick == nil ? 0 : Self.chevron + Self.gap }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        guard onClick != nil else { return }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = onClick != nil }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { onClick != nil }
+
+    override func resetCursorRects() {
+        guard onClick != nil else { return }
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    /// On the way *down*, the way every menu button on macOS opens — and the
+    /// click is swallowed either way so it never reaches the header's
+    /// drag-the-pane-out handler behind it.
+    override func mouseDown(with event: NSEvent) {
+        guard let onClick else { return }
+        isHovered = false
+        onClick()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return onClick != nil
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -2797,6 +2942,13 @@ final class PaneBadgeView: NSView {
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.25, dy: 0.25), xRadius: 5, yRadius: 5)
         fill.setFill()
         path.fill()
+        // The hover lift, on the badge's own hue: a pill that opens a menu has
+        // to say so before it is clicked, and the engine colours are the whole
+        // point of the badge — brightening them beats a grey wash over them.
+        if isHovered {
+            foreground.withAlphaComponent(0.16).setFill()
+            path.fill()
+        }
         if stroke != .clear {
             stroke.setStroke()
             path.lineWidth = 0.5
@@ -2819,6 +2971,286 @@ final class PaneBadgeView: NSView {
             at: NSPoint(x: left, y: (bounds.height - size.height) / 2),
             withAttributes: attributes
         )
+        guard onClick != nil else { return }
+        // A 7pt ⌄ in the badge's own colour, dimmed — the affordance, not a
+        // second thing to read.
+        let x = left + ceil(size.width) + Self.gap
+        let mid = bounds.height / 2
+        let chevron = NSBezierPath()
+        chevron.move(to: NSPoint(x: x, y: mid - 1.5))
+        chevron.line(to: NSPoint(x: x + Self.chevron / 2, y: mid + 2))
+        chevron.line(to: NSPoint(x: x + Self.chevron, y: mid - 1.5))
+        chevron.lineWidth = 1.3
+        chevron.lineCapStyle = .round
+        chevron.lineJoinStyle = .round
+        foreground.withAlphaComponent(0.75).setStroke()
+        chevron.stroke()
+    }
+}
+
+/// One answer on a **pane ask** — the label, and what pressing it does.
+struct PaneAskOption {
+    let title: String
+    /// The filled accent button. At most one per ask, always drawn rightmost,
+    /// and the one Return activates.
+    let isPrimary: Bool
+    let action: () -> Void
+
+    init(_ title: String, isPrimary: Bool = false, action: @escaping () -> Void) {
+        self.title = title
+        self.isPrimary = isPrimary
+        self.action = action
+    }
+}
+
+/// # Pane ask
+///
+/// The one way a pane asks a question that must be answered before it can go
+/// on: the pane itself goes behind Liquid Glass and the question sits in the
+/// middle of it. Which of twelve panes is asking is then answered by *where
+/// the card is*, before a word of it is read.
+///
+/// Deliberately not an `NSAlert`. A sheet hangs off the window and says
+/// nothing about which pane it means — and what is being decided (this
+/// terminal's conversation, this editor's unsaved buffer) is on screen right
+/// behind the glass, which is the whole argument for the decision.
+///
+/// **Every blocking pane-scoped question goes through here**: swapping a
+/// terminal's engine, closing an editor tab over unsaved edits, a file that
+/// changed on disk under a dirty buffer. Anything new that the user must
+/// answer before *their pane* can continue belongs here too, not in an alert.
+/// Window-scoped questions (quitting, "which pane should this link open in?")
+/// are not pane asks and stay alerts — they are not about one pane.
+///
+/// Two deliberate departures from the amber card this replaced. The glass is
+/// navy, the same wash Spotlight (`CommandPaletteController`) wears, because
+/// amber in this app means "an agent is blocked and waiting" and a question
+/// about the user's own next move is not that. And the icon is the *subject*
+/// of the question — the engine being switched to, the file about to be lost —
+/// not a warning triangle, which said "danger" where the answer is a choice.
+final class PaneAskOverlayView: NSView {
+    /// Esc, or a click on the glass outside the card — the way clicking
+    /// outside a popover dismisses it.
+    var onCancel: (() -> Void)?
+
+    /// The answers, left to right as they are drawn.
+    private(set) var options: [PaneAskOption]
+
+    /// The pane accent, not the approval bar's amber. See the note above.
+    static let accent = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 1)
+
+    private static let cardWidth: CGFloat = 330
+    private static let padding: CGFloat = 22
+    private static let iconSize: CGFloat = 30
+    private static let buttonHeight: CGFloat = 26
+    private static let cardRadius: CGFloat = 16
+
+    /// The glass, on macOS 26. Two panels: the pane-sized one that puts the
+    /// pane behind glass, and the card's own. `nil` before 26, where `draw`
+    /// paints flat navy instead — every pre-26 stand-in for glass inside one
+    /// window's compositing tree is a flat tint with no blur anyway (see
+    /// `PaneZoomBackdropView`), so it may as well be an honest fill.
+    private let scrim: NSView?
+    private let cardGlass: NSView?
+    /// The navy wash over the card's glass, as its own view so it can sit
+    /// between the glass and the text. Spotlight's construction exactly:
+    /// `.regular` glass with a gradient tint in front of it, rather than the
+    /// glass view's flat `tintColor`.
+    private let cardTint = NSView()
+    private let cardTintLayer = CAGradientLayer()
+    /// Spotlight's own navy, top-down, copied rather than shared: the palette
+    /// is a separate window with a separate life, and reaching into it for two
+    /// colours would tie a pane's overlay to whatever that panel does next.
+    private static let navyTint = [
+        NSColor(srgbRed: 0.11, green: 0.16, blue: 0.38, alpha: 0.40).cgColor,
+        NSColor(srgbRed: 0.05, green: 0.08, blue: 0.22, alpha: 0.14).cgColor,
+    ]
+    /// The subject of the question, for the test that the right one is shown.
+    var icon: NSImage? { iconView.image }
+
+    private let iconView = NSImageView()
+    private let titleLabel: NSTextField
+    private let messageLabel: NSTextField
+    private let buttons: [PaneApprovalButton]
+    private var cardFrame: NSRect = .zero
+
+    init(title: String, message: String, icon: NSImage?, options: [PaneAskOption]) {
+        self.options = options
+        titleLabel = Self.label(title, font: ShellFont.ui(15, .semibold), color: NSColor(
+            srgbRed: 240 / 255, green: 240 / 255, blue: 244 / 255, alpha: 1
+        ))
+        messageLabel = Self.label(message, font: ShellFont.ui(13), color: NSColor(
+            srgbRed: 176 / 255, green: 180 / 255, blue: 198 / 255, alpha: 1
+        ))
+        buttons = options.map {
+            PaneApprovalButton(title: $0.title, isPrimary: $0.isPrimary, tint: Self.accent)
+        }
+        if #available(macOS 26.0, *) {
+            let pane = NSGlassEffectView()
+            pane.style = .regular
+            // The one flat tint in here: the pane behind the question keeps its
+            // shape and loses its detail, which is what a scrim is for.
+            pane.tintColor = NSColor(srgbRed: 0.05, green: 0.08, blue: 0.22, alpha: 0.38)
+            scrim = pane
+            let card = NSGlassEffectView()
+            card.style = .regular
+            card.cornerRadius = Self.cardRadius
+            // No tint: `cardTint` is the card's colour, gradient like Spotlight's.
+            card.tintColor = nil
+            cardGlass = card
+        } else {
+            scrim = nil
+            cardGlass = nil
+        }
+        super.init(frame: .zero)
+        wantsLayer = true
+        iconView.image = icon
+        // Only reaches the template engine marks (Shell, Copilot) and the SF
+        // symbols the editor asks with; the colour brand logos ignore it.
+        iconView.contentTintColor = NSColor(white: 1, alpha: 0.92)
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        cardTint.wantsLayer = true
+        cardTintLayer.colors = Self.navyTint
+        cardTintLayer.startPoint = CGPoint(x: 0.5, y: 1)
+        cardTintLayer.endPoint = CGPoint(x: 0.5, y: 0)
+        cardTint.layer?.addSublayer(cardTintLayer)
+        cardTint.layer?.cornerRadius = Self.cardRadius
+        cardTint.layer?.cornerCurve = .continuous
+        cardTint.layer?.masksToBounds = true
+        cardTint.layer?.borderWidth = 1
+        cardTint.layer?.borderColor = NSColor(white: 1, alpha: 0.16).cgColor
+        for (index, button) in buttons.enumerated() {
+            button.onClick = { [weak self] in self?.options[index].action() }
+        }
+        for view in [scrim, cardGlass, cardTint, iconView, titleLabel, messageLabel].compactMap({ $0 })
+            + (buttons as [NSView])
+        {
+            addSubview(view)
+        }
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel(title)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    private static func label(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = font
+        field.textColor = color
+        field.alignment = .center
+        field.lineBreakMode = .byWordWrapping
+        field.maximumNumberOfLines = 0
+        return field
+    }
+
+    override var isFlipped: Bool { true }
+
+    /// The card takes the keyboard while it is up, so Return and Esc answer
+    /// it and nothing else reaches the pane underneath — a question about
+    /// throwing work away must not be answered by typing into it.
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 36, 76: // Return, Enter
+            guard let primary = options.first(where: { $0.isPrimary }) else { return NSSound.beep() }
+            primary.action()
+        case 53: onCancel?() // Esc
+        default: NSSound.beep()
+        }
+    }
+
+    /// A click on the glass is a cancel. Inside the card it is swallowed and
+    /// nothing else.
+    override func mouseDown(with event: NSEvent) {
+        guard !cardFrame.contains(convert(event.locationInWindow, from: nil)) else { return }
+        onCancel?()
+    }
+
+    override func layout() {
+        super.layout()
+        scrim?.frame = bounds
+        let padding = Self.padding
+        let width = min(Self.cardWidth, max(160, bounds.width - 32))
+        let content = width - padding * 2
+        let titleHeight = Self.height(of: titleLabel, width: content)
+        let messageHeight = Self.height(of: messageLabel, width: content)
+        let height = padding + Self.iconSize + 12 + titleHeight + 8 + messageHeight
+            + 18 + Self.buttonHeight + padding
+        cardFrame = NSRect(
+            x: ((bounds.width - width) / 2).rounded(),
+            y: max(0, ((bounds.height - height) / 2)).rounded(),
+            width: width,
+            height: height
+        )
+        cardGlass?.frame = cardFrame
+        cardTint.frame = cardFrame
+        cardTintLayer.frame = cardTint.bounds
+        var y = cardFrame.minY + padding
+        iconView.frame = NSRect(
+            x: cardFrame.midX - Self.iconSize / 2,
+            y: y,
+            width: Self.iconSize,
+            height: Self.iconSize
+        )
+        y += Self.iconSize + 12
+        titleLabel.frame = NSRect(x: cardFrame.minX + padding, y: y, width: content, height: titleHeight)
+        y += titleHeight + 8
+        messageLabel.frame = NSRect(x: cardFrame.minX + padding, y: y, width: content, height: messageHeight)
+        y += messageHeight + 18
+        // Given order, left to right, with the primary last — where every
+        // macOS dialog puts the button you are most likely to want, so the
+        // muscle memory is already correct.
+        let gap: CGFloat = 9
+        let widths = buttons.map { $0.intrinsicContentSize.width }
+        let total = widths.reduce(0, +) + gap * CGFloat(max(0, buttons.count - 1))
+        var x = cardFrame.midX - total / 2
+        for (button, buttonWidth) in zip(buttons, widths) {
+            button.frame = NSRect(x: x, y: y, width: buttonWidth, height: Self.buttonHeight)
+            x += buttonWidth + gap
+        }
+    }
+
+    /// Wrapped-text height, measured off the string rather than asked of the
+    /// cell: the message is two or three lines and the card's height is built
+    /// from it, so it has to be right before the field is ever laid out.
+    private static func height(of field: NSTextField, width: CGFloat) -> CGFloat {
+        let font = field.font ?? ShellFont.ui(13)
+        let rect = (field.stringValue as NSString).boundingRect(
+            with: NSSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        )
+        return ceil(rect.height)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        // Only before macOS 26, where there is no glass to ask for. With the
+        // panels present this would be painting *behind* them, and the scrim
+        // samples the window backing — so it would darken its own input.
+        guard scrim == nil else { return }
+        NSColor(srgbRed: 0.03, green: 0.05, blue: 0.13, alpha: 0.72).setFill()
+        bounds.fill()
+        let card = NSBezierPath(
+            roundedRect: cardFrame,
+            xRadius: Self.cardRadius,
+            yRadius: Self.cardRadius
+        )
+        NSColor(srgbRed: 0.09, green: 0.12, blue: 0.26, alpha: 1).setFill()
+        card.fill()
+        NSColor(white: 1, alpha: 0.16).setStroke()
+        let ring = NSBezierPath(
+            roundedRect: cardFrame.insetBy(dx: 0.5, dy: 0.5),
+            xRadius: Self.cardRadius,
+            yRadius: Self.cardRadius
+        )
+        ring.lineWidth = 1
+        ring.stroke()
     }
 }
 

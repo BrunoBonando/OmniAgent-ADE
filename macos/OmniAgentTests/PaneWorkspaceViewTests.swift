@@ -645,6 +645,48 @@ final class PaneWorkspaceViewTests: XCTestCase {
         try? png.write(to: directory.appendingPathComponent("\(name).png"))
     }
 
+    /// A pane ask sits centred over the pane that asked, with every part of
+    /// the card inside the card. Drops a PNG when `PANE_RENDER_DIR` is set.
+    func testAPaneAskCoversItsOwnPaneAndCentresTheCard() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 4)
+        defer { window.close() }
+        let paneID = try XCTUnwrap(workspace.paneIDs.last)
+        let container = try XCTUnwrap(workspace.container(for: paneID))
+
+        var chosen: String?
+        container.presentAsk(
+            title: "Start over with Shell?",
+            message: "This terminal's conversation with Claude Code ends here. "
+                + "Shell opens a fresh one in its place, in the same folder.",
+            icon: Engine.shell.iconImage,
+            options: [
+                PaneAskOption("Stay") { chosen = "Stay" },
+                PaneAskOption("Switch to Shell", isPrimary: true) { chosen = "Switch" },
+            ]
+        )
+        window.displayIfNeeded()
+        workspace.layoutSubtreeIfNeeded()
+
+        let card = try XCTUnwrap(container.askOverlay)
+        XCTAssertEqual(card.frame, container.bounds, "the glass covers the whole pane, and only it")
+        saveRenderForInspection(try XCTUnwrap(render(container)), named: "pane-ask")
+
+        // Every subview inside the overlay, and the buttons in the given order
+        // across the middle — the card is built from measured text, so a
+        // message one line longer must not push a button off it.
+        for view in card.subviews {
+            XCTAssertTrue(card.bounds.contains(view.frame), "\(view) escaped the card")
+        }
+        let buttons = card.subviews.compactMap { $0 as? PaneApprovalButton }
+        XCTAssertEqual(buttons.map(\.title), ["Stay", "Switch to Shell"])
+        XCTAssertLessThan(buttons[0].frame.maxX, buttons[1].frame.minX, "primary on the right")
+
+        // And answering it takes the glass down exactly once.
+        buttons[1].onClick?()
+        XCTAssertEqual(chosen, "Switch")
+        XCTAssertNil(container.askOverlay)
+    }
+
     /// A render of the third row, for eyeballing rather than for CI: nine
     /// panes (the ninth alone on the bottom row, three empty cells beside it)
     /// and a full twelve. Drops PNGs when `PANE_RENDER_DIR` is set; the

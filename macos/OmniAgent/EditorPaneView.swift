@@ -475,7 +475,9 @@ final class EditorPaneView: NSView, PaneContentView {
         webHost.setContent(path: path, content: content)
     }
 
-    private static func defaultConfirmConflict(_ name: String, _ decide: @escaping (Bool) -> Void) {
+    /// The fallback when a pane ask has nowhere to appear; see
+    /// `WorkspaceWindowController.wireEditorPane`.
+    static func defaultConfirmConflict(_ name: String, _ decide: @escaping (Bool) -> Void) {
         let alert = NSAlert()
         alert.messageText = "\(name) changed on disk"
         alert.informativeText =
@@ -1237,7 +1239,9 @@ final class EditorPaneView: NSView, PaneContentView {
         webHost.webViewWebContentProcessDidTerminate(webHost.webView)
     }
 
-    private static func defaultConfirmSave(_ name: String, _ decide: @escaping (EditorSaveDecision) -> Void) {
+    /// The fallback when a pane ask has nowhere to appear; see
+    /// `WorkspaceWindowController.wireEditorPane`.
+    static func defaultConfirmSave(_ name: String, _ decide: @escaping (EditorSaveDecision) -> Void) {
         let alert = NSAlert()
         alert.messageText = "Save changes to \(name)?"
         alert.informativeText = "Your changes will be lost if you don't save them."

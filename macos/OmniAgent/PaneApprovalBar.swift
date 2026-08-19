@@ -175,6 +175,10 @@ final class PaneApprovalBarView: NSView {
 final class PaneApprovalButton: NSView {
     let title: String
     let isPrimary: Bool
+    /// What a primary button is filled with. Amber in the approval bar, where
+    /// it means "an agent is waiting"; the pane accent in a pane ask, which is
+    /// a choice rather than a warning (see `PaneAskOverlayView`).
+    let tint: NSColor
     var onClick: (() -> Void)?
 
     private var isHovered = false { didSet { needsDisplay = true } }
@@ -184,9 +188,10 @@ final class PaneApprovalButton: NSView {
     private var clickHandled = false
     private var tracking: NSTrackingArea?
 
-    init(title: String, isPrimary: Bool) {
+    init(title: String, isPrimary: Bool, tint: NSColor = PaneApprovalBarView.amber) {
         self.title = title
         self.isPrimary = isPrimary
+        self.tint = tint
         super.init(frame: .zero)
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
@@ -277,7 +282,7 @@ final class PaneApprovalButton: NSView {
         let pill = NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6)
         let textColor: NSColor
         if isPrimary {
-            var fill = PaneApprovalBarView.amber
+            var fill = tint
             if isPressed {
                 fill = fill.blended(withFraction: 0.18, of: .black) ?? fill
             } else if isHovered {
@@ -285,7 +290,10 @@ final class PaneApprovalButton: NSView {
             }
             fill.setFill()
             pill.fill()
-            textColor = NSColor(srgbRed: 26 / 255, green: 20 / 255, blue: 0, alpha: 1)
+            // The label is the fill taken almost to black rather than one
+            // hardcoded brown: both tints this button wears are light enough
+            // to need dark text, and each keeps its own hue doing it.
+            textColor = tint.blended(withFraction: 0.86, of: .black) ?? .black
         } else {
             if isPressed || isHovered {
                 NSColor(white: 1, alpha: isPressed ? 0.16 : 0.08).setFill()

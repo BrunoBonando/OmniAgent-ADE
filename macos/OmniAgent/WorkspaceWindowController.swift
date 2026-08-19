@@ -344,6 +344,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 in: anchor
             )
         }
+        workspace.onRequestEngineMenu = { [weak self] paneID, anchor in
+            guard let self else { return }
+            engineMenu(for: paneID).popUp(
+                positioning: nil,
+                at: NSPoint(x: 0, y: anchor.bounds.maxY + 4),
+                in: anchor
+            )
+        }
         workspace.onPanesChanged = { [weak self] in
             self?.persistLayout()
             self?.persistBrowserPanes()
@@ -1281,8 +1289,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // here made a six-item list you had to read to find the two things the
         // ⋯ is for.
         let items: [(String, Selector)] = [
-            ("Rename Conversation…", #selector(renameConversation(_:))),
-            ("Use Option as Meta", Selector(("toggleOptionAsMeta:"))),
+            ("Rename Conversation…", #selector(renameConversation(_:)))
         ]
         for (title, action) in items {
             menu.addItem(NSMenuItem(title: title, action: action, keyEquivalent: ""))
@@ -1293,9 +1300,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // command takes nine names and rejects everything else, `#ff00dd`
         // included.
         if engine == .claude {
-            let models = NSMenuItem(title: "Change Model", action: nil, keyEquivalent: "")
-            models.submenu = claudeModelMenu()
-            menu.addItem(models)
             let colors = NSMenuItem(title: "Change Claude Color", action: nil, keyEquivalent: "")
             colors.submenu = claudeColorMenu()
             menu.addItem(colors)
@@ -1305,6 +1309,131 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             NSMenuItem(title: "Close Pane", action: Selector(("closePane:")), keyEquivalent: "")
         )
         return menu
+    }
+
+    /// The engine badge's menu: every engine a terminal can be switched to,
+    /// the one it runs now ticked, and the ones whose CLI is not on the `PATH`
+    /// greyed rather than missing.
+    ///
+    /// `EngineLauncher.selectable` is the list — the single place engines are
+    /// enumerated, so one added there (a custom engine, later) shows up here
+    /// with nothing else to change. Items are targeted at this controller and
+    /// carry the pane id rather than reading the focused one, so the menu
+    /// answers for the badge that opened it even if focus has moved since.
+    func engineMenu(for paneID: String) -> NSMenu {
+        let menu = NSMenu()
+        // Every item's enabled state is decided right here; letting AppKit
+        // re-derive it would grey the lot, since `validateMenuItem` knows
+        // nothing about `switchEngine(_:)`.
+        menu.autoenablesItems = false
+        let current = workspace.descriptor(for: paneID)?.engine
+        for engine in EngineLauncher.selectable {
+            let installed = EngineLauncher.isInstalled(engine)
+            let item = NSMenuItem(
+                title: installed ? engine.badgeTitle : "\(engine.badgeTitle) — not installed",
+                action: #selector(switchEngine(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = EngineChoice(paneID: paneID, engine: engine)
+            item.state = engine == current ? .on : .off
+            item.isEnabled = installed && engine != current
+            if let icon = engine.iconImage?.copy() as? NSImage {
+                icon.size = NSSize(width: 14, height: 14)
+                item.image = icon
+            }
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    /// What one row of that menu carries. A box rather than a tuple because
+    /// `representedObject` is `Any?` and a struct survives the round trip with
+    /// its names intact.
+    final class EngineChoice: NSObject {
+        let paneID: String
+        let engine: Engine
+
+        init(paneID: String, engine: Engine) {
+            self.paneID = paneID
+            self.engine = engine
+        }
+    }
+
+    @objc func switchEngine(_ sender: Any?) {
+        guard let choice = (sender as? NSMenuItem)?.representedObject as? EngineChoice else { return }
+        requestEngineSwitch(choice.paneID, to: choice.engine)
+    }
+
+    /// Swapping a terminal's engine throws its conversation away: a different
+    /// agent means a different process with its own history, not the old
+    /// conversation under new management. So it asks first — in the pane
+    /// itself, where the conversation it is about to lose is on screen —
+    /// whenever there is anything to lose. A terminal nobody has typed in has
+    /// nothing to lose and switches on the spot.
+    func requestEngineSwitch(_ paneID: String, to engine: Engine) {
+        guard let descriptor = workspace.descriptor(for: paneID),
+              descriptor.kind == .terminal,
+              descriptor.engine != engine
+        else { return }
+        let typed = workspace.terminalSurface(for: paneID)?.hasUserInput ?? false
+        guard typed, let container = workspace.container(for: paneID) else {
+            replaceEngine(paneID, with: engine)
+            return
+        }
+        // A pane ask, not an alert — and its icon is the engine being switched
+        // *to*, so the card shows you what you are choosing rather than
+        // warning you about it (see `PaneAskOverlayView`).
+        container.presentAsk(
+            title: "Start over with \(engine.displayName)?",
+            message: "This terminal's conversation with \(descriptor.engine.displayName) ends here. "
+                + "\(engine.displayName) opens a fresh one in its place, in the same folder.",
+            icon: engine.iconImage,
+            options: [
+                PaneAskOption("Stay") {},
+                PaneAskOption("Switch to \(engine.displayName)", isPrimary: true) { [weak self] in
+                    self?.replaceEngine(paneID, with: engine)
+                },
+            ]
+        )
+    }
+
+    /// The swap itself — the pane is *replaced*, not restarted in place.
+    ///
+    /// A terminal's session id is what its Claude conversation is derived from
+    /// (`ClaudeConversation`), and an id that has already written one can
+    /// never claim it again — so "a new conversation" has to mean a new
+    /// session id, and a pane's id is its session id. The replacement is
+    /// seated back into the cell the old one held, so nothing moves on screen.
+    @discardableResult
+    func replaceEngine(_ paneID: String, with engine: Engine) -> Bool {
+        guard let old = workspace.descriptor(for: paneID), old.kind == .terminal else { return false }
+        let order = workspace.paneIDs
+        killSession(paneID)
+        readySessions.remove(paneID)
+        sessionStatus.removeValue(forKey: paneID)
+        lastStatus.removeValue(forKey: paneID)
+        workspace.closePane(paneID)
+        let newID = UUID().uuidString
+        guard addPane(
+            RestoredPane(
+                sessionID: newID,
+                reattaches: false,
+                project: old.project,
+                engine: engine,
+                cwd: old.cwd,
+                // The name the user typed is theirs, not the old engine's, so
+                // it carries over. A generated one is dropped by `addPane`.
+                label: old.label,
+                themeId: old.themeId,
+                group: old.group,
+                groupLabel: old.groupLabel
+            ),
+            startSession: true
+        ) else { return false }
+        workspace.reorderPanes(order.map { $0 == paneID ? newID : $0 })
+        workspace.focusPane(newID)
+        return true
     }
 
     /// The ⋯ menu's "Rename Conversation…" — one name for both halves of a
@@ -1326,45 +1455,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard descriptor.engine != .shell else { return }
             workspace.terminalSurface(for: paneID)?.sendInput("/rename \(named)\r")
         }
-    }
-
-    /// What `/model` is given. Aliases rather than the full ids they resolve to:
-    /// an id changes with every model release and these do not, and typing a
-    /// stale one at Claude gets an error instead of a model.
-    static let claudeModels = [
-        ("Default", "default"),
-        ("Opus", "opus"),
-        ("Opus · 1M context", "opus[1m]"),
-        ("Sonnet", "sonnet"),
-        ("Sonnet · 1M context", "sonnet[1m]"),
-        ("Haiku", "haiku"),
-        ("Opus Plan Mode", "opusplan"),
-    ]
-
-    func claudeModelMenu() -> NSMenu {
-        let menu = NSMenu()
-        for (title, alias) in Self.claudeModels {
-            let item = NSMenuItem(
-                title: title,
-                action: #selector(changeClaudeModel(_:)),
-                keyEquivalent: ""
-            )
-            item.representedObject = alias
-            menu.addItem(item)
-        }
-        return menu
-    }
-
-    /// One alias off that submenu, typed at the terminal. Claude answers with
-    /// its own confirmation, so nothing here tracks which model is current —
-    /// the terminal is the source of truth and a checkmark here would be a
-    /// second one, wrong the moment `/model` is typed by hand.
-    @objc func changeClaudeModel(_ sender: Any?) {
-        guard let alias = (sender as? NSMenuItem)?.representedObject as? String,
-              let paneID = workspace.focusedPaneID,
-              workspace.descriptor(for: paneID)?.engine == .claude
-        else { return }
-        workspace.terminalSurface(for: paneID)?.sendInput("/model \(alias)\r")
     }
 
     /// The names `/color` accepts; anything else comes back as
@@ -2133,7 +2223,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// mistaken for the state to persist.
     private var editorPaneDrainInFlight = false
 
-
     /// Writes the live editor panes back to their own row. Refused until that
     /// row has actually been read — `persistLayout`'s reasoning again. Tab
     /// mutations already flow through `onStateChange` -> `updateDescriptor` ->
@@ -2303,6 +2392,51 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // knows *which pane*, and the broker below owns the rules.
         editor.onTabDroppedInStrip = { [weak self] payload, index in
             self?.handleEditorTabDrop(payload, intoPane: sessionID, at: index)
+        }
+        // Both of the editor's blocking questions are pane asks: they are about
+        // *this* pane's buffer, and a window sheet would not say which pane
+        // that is. The alert defaults stay as the fallback for a pane that has
+        // no container yet — a question with nowhere to appear must still be
+        // answerable.
+        editor.confirmSave = { [weak self] name, decide in
+            guard let container = self?.workspace.container(for: sessionID) else {
+                EditorPaneView.defaultConfirmSave(name, decide)
+                return
+            }
+            container.presentAsk(
+                title: "Save changes to \(name)?",
+                message: "This file has edits that are not on disk. "
+                    + "Closing it without saving loses them.",
+                icon: NSImage(systemSymbolName: "doc.badge.ellipsis", accessibilityDescription: nil),
+                options: [
+                    PaneAskOption("Don't Save") { decide(.discard) },
+                    PaneAskOption("Cancel") { decide(.cancel) },
+                    PaneAskOption("Save", isPrimary: true) { decide(.save) },
+                ],
+                onCancel: { decide(.cancel) }
+            )
+        }
+        editor.confirmConflict = { [weak self] name, decide in
+            guard let container = self?.workspace.container(for: sessionID) else {
+                EditorPaneView.defaultConfirmConflict(name, decide)
+                return
+            }
+            container.presentAsk(
+                title: "\(name) changed on disk",
+                message: "You have unsaved edits, and the file was modified outside the editor "
+                    + "(probably by an agent).",
+                icon: NSImage(
+                    systemSymbolName: "arrow.triangle.2.circlepath",
+                    accessibilityDescription: nil
+                ),
+                // Dismissing keeps what is in front of you, which is the only
+                // answer here that destroys nothing.
+                options: [
+                    PaneAskOption("Keep Mine") { decide(false) },
+                    PaneAskOption("Take Disk", isPrimary: true) { decide(true) },
+                ],
+                onCancel: { decide(false) }
+            )
         }
         // A pane created after the status landed would otherwise render
         // "not a git repository" inside a repository.
