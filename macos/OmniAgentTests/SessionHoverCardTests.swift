@@ -291,15 +291,21 @@ final class SessionHoverCardTests: XCTestCase {
         let size = SessionHoverCardController.panelSize(card: NSSize(width: 280, height: 140))
         XCTAssertEqual(size.width, 280 + HoverCardShellView.lane, "the drop gets a lane of its own")
 
-        let middle = SessionHoverCardController.frame(
-            size: size,
-            row: NSRect(x: 110, y: 500, width: 238, height: 26),
-            container: window
-        )
+        let row = NSRect(x: 110, y: 500, width: 238, height: 26)
+        let middle = SessionHoverCardController.frame(size: size, row: row, container: window)
         // The *card* sits `gap` past the row; the lane it points across is to
         // the left of that.
         XCTAssertEqual(middle.minX + HoverCardShellView.lane, 348 + SessionHoverCardController.gap)
-        XCTAssertEqual(middle.maxY, 526 + 6, "top-aligned with the row")
+        // And the tip is level with the row's centre — where its icon is, both
+        // being centred on it. This is the alignment the card is placed from.
+        XCTAssertEqual(middle.maxY - HoverCardShellView.tipInset, row.midY, accuracy: 0.01)
+        XCTAssertEqual(
+            middle.minY + HoverCardShellView(frame: NSRect(origin: .zero, size: middle.size))
+                .dropFrame(centerY: row.midY - middle.minY).midY,
+            row.midY,
+            accuracy: 0.01,
+            "and the head is not clamped away from it"
+        )
 
         // A row at the very bottom pushes the card up rather than off.
         let low = SessionHoverCardController.frame(
@@ -332,15 +338,16 @@ final class SessionHoverCardTests: XCTestCase {
         XCTAssertEqual(
             middle.maxX + HoverCardShellView.neck,
             HoverCardShellView.lane,
-            "the drop sits a neck's width from the card"
+            accuracy: 0.01,
+            "the head sits a neck's width from the card"
         )
         XCTAssertGreaterThan(middle.minX, 0, "and inside the panel, or the bridge is clipped")
 
-        // A row level with the very top of the card pulls the drop down to
+        // A row level with the very top of the card pulls the head down to
         // where the card's edge is straight.
         let high = shell.dropFrame(centerY: 139)
         XCTAssertLessThan(high.midY, 139)
-        XCTAssertGreaterThanOrEqual(high.midY, 140 - SessionHoverCardController.cornerRadius - 7)
+        XCTAssertGreaterThanOrEqual(high.midY, 140 - HoverCardShellView.tipInset - 0.01)
 
         // Animation off under Reduce Motion is the caller's business; pointing
         // is not.

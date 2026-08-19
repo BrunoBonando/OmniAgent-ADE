@@ -640,15 +640,35 @@ final class HoverCardBodyView: NSView {
 /// `CommandPaletteController.glassHost` uses, and the drop to a tinted circle,
 /// which points without pretending to flow.
 final class HoverCardShellView: NSView {
-    /// The column the drop lives in, left of the card.
-    static let lane: CGFloat = 20
-    static let dropSize: CGFloat = 14
-    /// Between the drop and the card — the neck of the merge. Wide enough to
-    /// read as two things joined, narrow enough that they *do* join.
-    static let neck: CGFloat = 5
+    /// The arrowhead is a square of glass turned 45°, so its leading corner is
+    /// a point. `NSGlassEffectView` offers a rounded rectangle and nothing
+    /// else, and a rounded rectangle on its corner is an arrow — the merge with
+    /// the card swallows the two corners facing it, which leaves a tapered head
+    /// on a liquid neck rather than a diamond stuck to a box.
+    static let dropSize: CGFloat = 13
+    /// Rounded just enough not to alias. This is the "sharper" in the tip.
+    static let dropCorner: CGFloat = 2
+    /// The turned square's bounding box — the width the head really occupies.
+    static var tipSpan: CGFloat { dropSize * 2.squareRoot() }
+    /// Between the head and the card. Wide enough to read as two things
+    /// joined, narrow enough that they *do* join.
+    static let neck: CGFloat = 4
+    /// The column the head lives in, left of the card, plus a point of air so
+    /// the tip is never flush against the window's own edge.
+    static var lane: CGFloat { tipSpan + neck + 1 }
+    /// How far below the card's top edge the tip sits. Clear of the corner, so
+    /// the bridge always leaves from a straight edge — and the card is placed
+    /// *from this*, which is what makes the tip line up with the row's icon
+    /// instead of being shoved down by its own clamp.
+    static var tipInset: CGFloat { SessionHoverCardController.cornerRadius + tipSpan / 2 }
 
     let body = HoverCardBodyView()
     private let card: NSView
+    /// The arrowhead's bounding box. The head is rotated inside it and never
+    /// moved again: setting `frame` on a view with a `frameCenterRotation`
+    /// resizes its *bounds* to keep the bounding box, which would quietly
+    /// shrink the arrow every time the card slid to another row.
+    private let dropBox = NSView()
     private let drop: NSView
     private let host: NSView
     private let wrapper = NSView()
@@ -681,7 +701,7 @@ final class HoverCardShellView: NSView {
             card = glass
 
             let bead = NSGlassEffectView()
-            bead.cornerRadius = Self.dropSize / 2
+            bead.cornerRadius = Self.dropCorner
             // The same navy the card's gradient settles on, so the bridge
             // between them is one material rather than two.
             bead.tintColor = NSColor(srgbRed: 0.07, green: 0.08, blue: 0.13, alpha: 0.5)
@@ -701,7 +721,7 @@ final class HoverCardShellView: NSView {
             )
             let bead = NSView()
             bead.wantsLayer = true
-            bead.layer?.cornerRadius = Self.dropSize / 2
+            bead.layer?.cornerRadius = Self.dropCorner
             bead.layer?.backgroundColor = NSColor(
                 srgbRed: 0.12,
                 green: 0.13,
@@ -719,7 +739,16 @@ final class HoverCardShellView: NSView {
         // fallback's plain host does not.
         if wrapper.superview == nil { host.addSubview(wrapper) }
         wrapper.addSubview(card)
-        wrapper.addSubview(drop)
+        wrapper.addSubview(dropBox)
+        dropBox.addSubview(drop)
+        // Turned once, here, and thereafter only ever moved by its box.
+        drop.frame = NSRect(
+            x: (Self.tipSpan - Self.dropSize) / 2,
+            y: (Self.tipSpan - Self.dropSize) / 2,
+            width: Self.dropSize,
+            height: Self.dropSize
+        )
+        drop.frameCenterRotation = 45
     }
 
     @available(*, unavailable)
@@ -730,7 +759,7 @@ final class HoverCardShellView: NSView {
         host.frame = bounds
         wrapper.frame = bounds
         card.frame = NSRect(x: Self.lane, y: 0, width: max(0, bounds.width - Self.lane), height: bounds.height)
-        drop.frame = dropFrame(centerY: dropCenterY)
+        dropBox.frame = dropFrame(centerY: dropCenterY)
     }
 
     /// Points the drop at `centerY`. Animated when the card slides from one row
@@ -740,26 +769,28 @@ final class HoverCardShellView: NSView {
         dropCenterY = centerY
         let frame = dropFrame(centerY: centerY)
         guard animated, !ShellMotion.reduced else {
-            drop.frame = frame
+            dropBox.frame = frame
             return
         }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.22
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 0.85, 0.25, 1)
-            drop.animator().frame = frame
+            dropBox.animator().frame = frame
         }
     }
 
-    /// Where the drop sits for a given row centre, kept far enough from the
-    /// card's own corners that the bridge always leaves from a straight edge.
+    /// Where the arrowhead sits for a given row centre. The clamp only bites
+    /// when a screen edge has already pushed the card off its natural place —
+    /// `SessionHoverCardController.frame` positions the card so the tip lands
+    /// exactly on the row's centre, which is where its icon is.
     func dropFrame(centerY: CGFloat) -> NSRect {
-        let inset = SessionHoverCardController.cornerRadius + Self.dropSize / 2
+        let inset = Self.tipInset
         let y = min(max(centerY, min(inset, bounds.height / 2)), max(bounds.height - inset, bounds.height / 2))
         return NSRect(
-            x: Self.lane - Self.neck - Self.dropSize,
-            y: y - Self.dropSize / 2,
-            width: Self.dropSize,
-            height: Self.dropSize
+            x: Self.lane - Self.neck - Self.tipSpan,
+            y: y - Self.tipSpan / 2,
+            width: Self.tipSpan,
+            height: Self.tipSpan
         )
     }
 }
@@ -798,8 +829,9 @@ final class SessionHoverCardController {
     /// deciding whether to come.
     static let openDelay: TimeInterval = 0.12
     static let tickInterval: TimeInterval = 0.1
-    /// Between the row's right edge and the card.
-    static let gap: CGFloat = 12
+    /// Between the row's right edge and the card — the arrowhead's lane, plus
+    /// enough that its tip lands just off the row rather than on top of it.
+    static var gap: CGFloat { HoverCardShellView.lane + 4 }
     static let cornerRadius: CGFloat = 16
     /// How far the card slides in, and back out.
     static let slide: CGFloat = 6
@@ -888,16 +920,22 @@ final class SessionHoverCardController {
         })
     }
 
-    /// Where the panel goes: the card top-aligned with its row and `gap` past
-    /// the sidebar's edge, always fully inside the window.
+    /// Where the panel goes: the arrowhead level with the row's centre — which
+    /// is where the row's icon is, both being centred on it — and the card
+    /// `gap` past the sidebar's edge, always fully inside the window.
     ///
-    /// `size` is the whole panel, drop lane included, so the lane comes back
-    /// off the left — the drop belongs in the space between the row and the
+    /// Placed from the tip rather than from the card's top edge. Top-aligning
+    /// the card put the row's centre inside the corner radius, where the head
+    /// cannot go, so its own clamp shoved it a few points down: the arrow was
+    /// always slightly below the icon it was pointing at.
+    ///
+    /// `size` is the whole panel, arrow lane included, so the lane comes back
+    /// off the left — the head belongs in the space between the row and the
     /// card, which is exactly what it is pointing across.
     static func frame(size: NSSize, row: NSRect, container: NSRect) -> NSRect {
         var origin = NSPoint(
             x: row.maxX + gap - HoverCardShellView.lane,
-            y: row.maxY + 6 - size.height
+            y: row.midY + HoverCardShellView.tipInset - size.height
         )
         origin.x = min(origin.x, container.maxX - size.width - 8)
         origin.x = max(origin.x, container.minX + 8)
