@@ -123,4 +123,83 @@ final class DeskCanvasNodeViewsTests: XCTestCase {
         let copy = DeskCanvasEdgeLayer(layer: original)
         XCTAssertTrue(copy.action(forKey: "path") is NSNull, "the copy is still a DeskCanvasEdgeLayer")
     }
+
+    // MARK: - Chips
+
+    /// The chip is frame-driven: `DeskCanvas.layout` owns every rect
+    /// (`chipWidthFraction` of a session card's width), so the view has no
+    /// intrinsic size of its own and everything it draws is a fraction of
+    /// `bounds`. That is what keeps it legible at fit-all, where a fixed 13pt
+    /// label would be 2pt of screen.
+    func testTheChipHasNoOpinionAboutItsOwnSizeAndTakesTheFrameItIsGiven() {
+        let chip = DeskCanvasChipView(role: .workspace)
+        chip.frame = CGRect(x: 0, y: 0, width: 300, height: 120)
+
+        XCTAssertEqual(chip.intrinsicContentSize.width, NSView.noIntrinsicMetric, "the layout sizes it")
+        XCTAssertEqual(chip.intrinsicContentSize.height, NSView.noIntrinsicMetric)
+        XCTAssertEqual(chip.bounds.size, CGSize(width: 300, height: 120))
+    }
+
+    /// Flipped, like the canvas it sits in — `PaneWorkspaceView.isFlipped` is
+    /// `true` and the node rects are in that space, so a chip that disagreed
+    /// would draw its tile at the bottom relative to every other node. Asserted
+    /// directly rather than through the PNG: `CALayer.render(in:)` skips the
+    /// compositor's geometry flips and cannot see this.
+    func testTheChipIsFlippedLikeTheCanvasItSitsIn() {
+        XCTAssertTrue(DeskCanvasChipView(role: .account).isFlipped)
+        XCTAssertTrue(DeskCanvasChipView(role: .workspace).isFlipped)
+    }
+
+    /// Selection is a stroke change, not a layout change — the arrows walk the
+    /// selection and a relayout per keypress is not free.
+    ///
+    /// Only the layout half is asserted here, and deliberately: `needsDisplay`'s
+    /// *getter* answers `false` on a layer-backed view no matter what
+    /// `setNeedsDisplay(_:)` was told (measured — the backing layer's own
+    /// `needsDisplay()` is the flag that moves, and offscreen it is already
+    /// `true` and never clears, so neither one can witness a redraw). The redraw
+    /// half is asserted where it can actually be seen, by
+    /// `testSelectingTheWorkspaceChipDrawsTheAccentRingRatherThanTheCardStroke`,
+    /// which renders both states and compares the pixels.
+    func testSelectingAChipDoesNotLayItOutAgain() {
+        let chip = DeskCanvasChipView(role: .workspace)
+        chip.frame = CGRect(x: 0, y: 0, width: 300, height: 120)
+        let window = show(chip)
+        defer { window.close() }
+        XCTAssertFalse(chip.needsLayout, "a laid-out chip starts clean")
+
+        chip.isSelected = true
+
+        XCTAssertFalse(chip.needsLayout, "and nothing moves")
+    }
+
+    /// Not an accessibility element: the canvas is a picture of state, and every
+    /// node it draws is already reachable through the sidebar tree, which is the
+    /// surface assistive clients navigate.
+    func testAChipIsNotAnAccessibilityElement() {
+        XCTAssertFalse(DeskCanvasChipView(role: .workspace).isAccessibilityElement())
+    }
+
+    // MARK: - Helpers
+
+    /// A window, because a layer-backed view with no window never runs
+    /// `draw(_:)` and the render comes back empty — the test would then pass for
+    /// the wrong reason.
+    private func show(_ view: NSView) -> NSWindow {
+        let window = NSWindow(
+            contentRect: view.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        // See `PaneWorkspaceViewTests.makeAttachedWorkspace`: an `NSWindow` that
+        // releases itself on close, while ARC still holds it, frees the window
+        // early and SIGSEGVs a later, unrelated test on an autorelease drain
+        // inside a CA commit.
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        window.displayIfNeeded()
+        view.layoutSubtreeIfNeeded()
+        return window
+    }
 }

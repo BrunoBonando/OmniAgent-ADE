@@ -78,3 +78,79 @@ final class DeskCanvasEdgeLayer: CAShapeLayer {
         return path
     }
 }
+
+/// One node of the organigram that is not a session card: the `You` account
+/// node and a workspace node.
+///
+/// The two differ only in what they carry, so they are one view with one
+/// `Role`, the way `ShellTileView` serves the sidebar's 34pt workspace card and
+/// its 22pt account avatar from one class.
+///
+/// The per-pane level-of-detail chip is deliberately **not** a role here:
+/// `PaneChipView` owns it, because it lives inside `PaneContainerView` as a
+/// fourth sibling and has to be threaded through `applyLayout()` and
+/// `roundChildren(inside:)` — constraints this class does not share, and a
+/// second class drawing the same thing is how the two drift.
+///
+/// Frame-driven and proportional. `DeskCanvas.layout` owns every rect
+/// (`chipWidthFraction` of a session card's width), and every size below is a
+/// fraction of `bounds` — a fixed 13pt label would be 2pt of screen at fit-all,
+/// which is the only zoom where these are the thing being read.
+///
+/// Drawn in `draw(_:)` rather than composed from `NSTextField`s: a chip is four
+/// shapes and two strings, it never takes a click (`PaneWorkspaceView.hitTest`
+/// answers for the whole canvas below identity scale), and one `draw(_:)` is one
+/// layer to composite instead of five.
+final class DeskCanvasChipView: NSView {
+    enum Role: Equatable {
+        /// `You` — a circular avatar over a name.
+        case account
+        /// A workspace — the gradient tile, the name, and a session count.
+        case workspace
+    }
+
+    let role: Role
+
+    /// The keyboard selection ring. A stroke change only: the arrows walk the
+    /// selection and a relayout per keypress is not free.
+    var isSelected = false {
+        didSet {
+            guard oldValue != isSelected else { return }
+            needsDisplay = true
+        }
+    }
+
+    private var title = ""
+    private var detail: String?
+    private var tint: (NSColor, NSColor)?
+    private var status: RemoteSessionStatus?
+
+    init(role: Role) {
+        self.role = role
+        super.init(frame: .zero)
+        wantsLayer = true
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    /// Flipped, like the canvas it sits in — `PaneWorkspaceView.isFlipped` is
+    /// `true` and the node rects are in that space.
+    override var isFlipped: Bool { true }
+
+    func apply(
+        title: String,
+        detail: String?,
+        tint: (NSColor, NSColor)?,
+        status: RemoteSessionStatus?
+    ) {
+        self.title = title
+        self.detail = detail
+        self.tint = tint
+        self.status = status
+        needsDisplay = true
+    }
+}
