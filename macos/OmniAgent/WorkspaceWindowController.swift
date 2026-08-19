@@ -403,34 +403,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         hoverCard.rowFrame = { [weak self] target in self?.shellSidebar.rowFrameOnScreen(for: target) }
         shellSidebar.onNewSession = { [weak self] in self?.newSession(nil) }
         shellSidebar.onNewTerminal = { [weak self] in
-            guard let self else { return }
-            let panes = self.workspace.allPaneIDs.compactMap { self.workspace.descriptor(for: $0) }
-            let current = SessionOutline.group(panes, focusedPaneID: self.workspace.focusedPaneID)
-                .flatMap(\.sessions)
-                .first(where: \.isCurrent)
-            guard let current else { return }
-            self.newPane(in: current)
+            guard let self, let session = self.visibleSession() else { return }
+            self.newPane(in: session)
         }
         shellSidebar.onNewBrowser = { [weak self] in
-            guard let self else { return }
-            // The same current-session lookup `onNewTerminal` uses: the row
-            // lives under the session it adds to.
-            let panes = self.workspace.allPaneIDs.compactMap { self.workspace.descriptor(for: $0) }
-            let current = SessionOutline.group(panes, focusedPaneID: self.workspace.focusedPaneID)
-                .flatMap(\.sessions)
-                .first(where: \.isCurrent)
-            guard let current else { return }
-            self.newBrowser(in: current)
+            // The same visible-session lookup: the row lives under the session
+            // it adds to, and that is the session on screen.
+            guard let self, let session = self.visibleSession() else { return }
+            self.newBrowser(in: session)
         }
         shellSidebar.onNewEditor = { [weak self] in
-            guard let self else { return }
-            // The same current-session lookup the two rows above use.
-            let panes = self.workspace.allPaneIDs.compactMap { self.workspace.descriptor(for: $0) }
-            let current = SessionOutline.group(panes, focusedPaneID: self.workspace.focusedPaneID)
-                .flatMap(\.sessions)
-                .first(where: \.isCurrent)
-            guard let current else { return }
-            self.newEditor(in: current)
+            // The same visible-session lookup the two rows above use.
+            guard let self, let session = self.visibleSession() else { return }
+            self.newEditor(in: session)
         }
         shellSidebar.onOpenFile = { [weak self] url, pinned in
             self?.openFileInEditor(url, pinned: pinned)
@@ -898,6 +883,49 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @objc func newTerminalPane(_ sender: Any?) {
         newPane(in: nil)
     }
+
+    /// The session a new pane should join: the one the project on screen is
+    /// showing, not the one holding focus. What the sidebar's three "new pane"
+    /// rows resolve their target with.
+    ///
+    /// Those are different answers more often than they look. Selecting a
+    /// workspace in the sidebar deliberately does not move focus, so
+    /// `focusedPaneID` routinely names a pane in another project;
+    /// `SessionOutline.visibleSessionGroupID` falls back to the project's
+    /// first-seen session there, where the strict "current" answer is `nil` and
+    /// the row does nothing at all.
+    ///
+    /// `nil` only when the project genuinely has no panes — which is what makes
+    /// the callers' `?? SessionOutline.newSessionGroupID()` correct rather than
+    /// a swallowed failure.
+    private func visibleSession() -> SessionGroupNode? {
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        // A window that has not picked a workspace yet — Level 1, or the
+        // bootstrap pane, whose project is `""` and so never selects one —
+        // still has a project on screen: the focused pane's own. Without this
+        // fallback the three rows do nothing at all before a workspace has
+        // been selected, which is the same silence this change exists to
+        // remove rather than move.
+        let onScreen = selectedProjectID
+            ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0)?.project }
+        guard
+            let project = onScreen,
+            let group = SessionOutline.visibleSessionGroupID(
+                panes,
+                project: project,
+                focusedPaneID: workspace.focusedPaneID
+            )
+        else { return nil }
+        return SessionOutline.group(panes, focusedPaneID: workspace.focusedPaneID)
+            .first { $0.project == project }?
+            .sessions
+            .first { $0.id == group }
+    }
+
+    /// The three sidebar rows set their closures up in `init`, so a test cannot
+    /// invoke them; this is the same call they make.
+    @discardableResult
+    func newPaneInVisibleSessionForTesting() -> Bool { newPane(in: visibleSession()) }
 
     /// Adds one pane seeded from an explicit session, or — with `nil` — from
     /// whatever currently has focus.
