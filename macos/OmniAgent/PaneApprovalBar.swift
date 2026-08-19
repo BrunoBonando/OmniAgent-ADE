@@ -215,15 +215,20 @@ final class PaneApprovalButton: NSView {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
         // `.inVisibleRect` keeps the hover region correct through the bar's
-        // relayouts, which move these buttons on every rebuild.
+        // relayouts, which move these buttons on every rebuild — and it is why
+        // the pointing hand rides on `.cursorUpdate` rather than a cursor rect:
+        // cursor rects are frames the window caches, and every one of these
+        // buttons is laid out by hand and moves.
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
             owner: self
         )
         addTrackingArea(area)
         tracking = area
     }
+
+    override func cursorUpdate(with event: NSEvent) { NSCursor.pointingHand.set() }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
     override func mouseExited(with event: NSEvent) { isHovered = false }
