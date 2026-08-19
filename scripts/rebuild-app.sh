@@ -129,12 +129,19 @@ fi
 # that changes nothing daemon-side and would rather not interrupt a running
 # agent.
 was_running=no
-if pgrep -f "/Applications/OmniAgent.app/Contents/MacOS/OmniAgent$" >/dev/null 2>&1; then
+# `-a` for the same reason the daemon block below spells out: pgrep excludes its
+# own ancestors, and when the rebuild runs from a terminal pane inside OmniAgent
+# -- the normal case -- the app IS an ancestor of this shell. So this check was
+# a silent no-op exactly where it matters, the quit never happened, and the
+# install replaced the bundle under a still-running app: the new binary sat in
+# /Applications while the old process kept the screen, which read as "the change
+# did not ship".
+if pgrep -a -f "/Applications/OmniAgent.app/Contents/MacOS/OmniAgent$" >/dev/null 2>&1; then
   was_running=yes
   echo "Quitting the running OmniAgent..."
   osascript -e 'quit app "OmniAgent"' >/dev/null 2>&1 || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    pgrep -f "/Applications/OmniAgent.app/Contents/MacOS/OmniAgent$" >/dev/null 2>&1 || break
+    pgrep -a -f "/Applications/OmniAgent.app/Contents/MacOS/OmniAgent$" >/dev/null 2>&1 || break
     sleep 1
   done
 fi
