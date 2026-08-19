@@ -52,7 +52,7 @@ struct RestoredPane: Equatable {
         group: String,
         groupLabel: String?,
         claudeColor: String = "default",
-        copilotTheme: String = "auto",
+        copilotTheme: String = "default",
         kind: PaneKind = .terminal,
         browserURL: String = "",
         editorTabs: [PersistedEditorTab] = [],
@@ -139,7 +139,7 @@ enum WorkspaceRestoration {
                 group: tab.group ?? ungroupedSessionID,
                 groupLabel: tab.groupLabel,
                 claudeColor: tab.claudeColor ?? "default",
-                copilotTheme: tab.copilotTheme ?? "auto"
+                copilotTheme: tab.copilotTheme ?? "default"
             )
         }
     }
@@ -194,7 +194,7 @@ enum WorkspaceRestoration {
                 group: pane.group == ungroupedSessionID ? nil : pane.group,
                 groupLabel: pane.groupLabel,
                 claudeColor: pane.claudeColor == "default" ? nil : pane.claudeColor,
-                copilotTheme: pane.copilotTheme == "auto" ? nil : pane.copilotTheme
+                copilotTheme: pane.copilotTheme == "default" ? nil : pane.copilotTheme
             )
         }
     }

@@ -32,7 +32,7 @@ struct PaneDescriptor: Equatable {
     /// The active `/color` name for a Claude terminal. Sent as a slash command
     /// and reflected back here so the header's color badge stays in sync.
     var claudeColor: String = "default"
-    var copilotTheme: String = "auto"
+    var copilotTheme: String = "default"
     /// Which "Claude 2" this terminal is, within its session. Derived on the
     /// way in and never persisted — the number is a placeholder, and storing
     /// it would make it outlive the moment it is useful for.
@@ -59,7 +59,7 @@ struct PaneDescriptor: Equatable {
         label: String? = nil,
         themeId: TerminalThemeId? = nil,
         claudeColor: String = "default",
-        copilotTheme: String = "auto",
+        copilotTheme: String = "default",
         kind: PaneKind = .terminal,
         browserURL: String = "",
         editorTabs: [PersistedEditorTab] = [],
@@ -1771,7 +1771,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// back exactly once.
     func presentAsk(
         title: String,
-        message: String,
+        message: String = "",
         icon: NSImage?,
         input: String? = nil,
         options: [PaneAskOption],
@@ -2547,33 +2547,36 @@ final class PaneHeaderView: NSView {
     static func themeIcon(for theme: String) -> NSImage {
         NSImage(size: NSSize(width: 10, height: 10), flipped: false) { rect in
             let r = rect.insetBy(dx: 0.5, dy: 0.5)
+            let fill: NSColor
+            let stroke: NSColor
             switch theme {
-            case "light":
-                NSColor(white: 0.92, alpha: 1).setFill()
-                NSBezierPath(ovalIn: r).fill()
-                NSColor(white: 0.6, alpha: 0.5).setStroke()
-                let path = NSBezierPath(ovalIn: r.insetBy(dx: 0.25, dy: 0.25))
-                path.lineWidth = 0.5
-                path.stroke()
-            case "dark":
-                NSColor(white: 0.18, alpha: 1).setFill()
-                NSBezierPath(ovalIn: r).fill()
-                NSColor(white: 1, alpha: 0.2).setStroke()
-                let path = NSBezierPath(ovalIn: r.insetBy(dx: 0.25, dy: 0.25))
-                path.lineWidth = 0.5
-                path.stroke()
-            default: // "auto"
-                let full = NSBezierPath(ovalIn: r)
-                full.addClip()
-                NSColor(white: 0.18, alpha: 1).setFill()
-                NSRect(x: r.minX, y: r.minY, width: r.width / 2, height: r.height).fill()
-                NSColor(white: 0.92, alpha: 1).setFill()
-                NSRect(x: r.midX, y: r.minY, width: r.width / 2, height: r.height).fill()
-                NSColor(white: 0.5, alpha: 0.3).setStroke()
-                let path = NSBezierPath(ovalIn: r.insetBy(dx: 0.25, dy: 0.25))
-                path.lineWidth = 0.5
-                path.stroke()
+            case "github":
+                // GitHub's signature dark navy
+                fill = NSColor(srgbRed: 36 / 255, green: 41 / 255, blue: 47 / 255, alpha: 1)
+                stroke = NSColor(white: 1, alpha: 0.18)
+            case "dim":
+                // Muted mid-grey — visibly dimmed
+                fill = NSColor(white: 0.38, alpha: 1)
+                stroke = NSColor(white: 1, alpha: 0.15)
+            case "high-contrast":
+                // Full black with a crisp white ring — maximum contrast
+                fill = .black
+                stroke = NSColor(white: 1, alpha: 0.7)
+            case "colorblind":
+                // Orange — the hue that stays distinguishable across the most
+                // common forms of colour-vision deficiency
+                fill = NSColor(srgbRed: 230 / 255, green: 138 / 255, blue: 0, alpha: 1)
+                stroke = NSColor(white: 1, alpha: 0.2)
+            default: // "default"
+                fill = NSColor(white: 0.65, alpha: 1)
+                stroke = NSColor(white: 1, alpha: 0.12)
             }
+            fill.setFill()
+            NSBezierPath(ovalIn: r).fill()
+            stroke.setStroke()
+            let ring = NSBezierPath(ovalIn: r.insetBy(dx: 0.25, dy: 0.25))
+            ring.lineWidth = 0.5
+            ring.stroke()
             return true
         }
     }

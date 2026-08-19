@@ -1474,7 +1474,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // `command not found` in the user's scrollback.
             guard descriptor.engine != .shell else { return }
             workspace.terminalSurface(for: paneID)?.sendInput("/rename \(named)\r")
+            lastSyncedName[paneID] = named
         }
+    }
+
+    /// The last name each pane's engine was told to use, so the title it
+    /// reports back afterwards does not bounce another `/rename` at it.
+    private(set) var lastSyncedName: [String: String] = [:]
+
+    /// Half the sync: the pane header follows the agent's reported title on
+    /// its own, and this tells the agent to call the conversation the same
+    /// thing, so its `/resume` list reads like the sidebar does.
+    func syncConversationName(_ paneID: String, to title: String) {
+        guard let descriptor = workspace.descriptor(for: paneID),
+              descriptor.engine != .shell,   // no `/rename` to type at a plain shell
+              descriptor.label == nil,       // a hand-typed name is already the agreed one
+              lastSyncedName[paneID] != title
+        else { return }
+        lastSyncedName[paneID] = title
+        workspace.terminalSurface(for: paneID)?.sendInput("/rename \(title)\r")
     }
 
     /// The names `/color` accepts; anything else comes back as
@@ -1533,8 +1551,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.updateDescriptor(for: paneID) { $0.claudeColor = color }
     }
 
-    /// The `/theme` modes Copilot CLI accepts.
-    static let copilotThemes = ["auto", "dark", "light"]
+    /// The `/settings theme` modes Copilot CLI accepts.
+    static let copilotThemes = ["default", "github", "dim", "high-contrast", "colorblind"]
 
     func copilotThemeMenu() -> NSMenu {
         let menu = NSMenu()
@@ -1556,7 +1574,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
               let paneID = workspace.focusedPaneID,
               workspace.descriptor(for: paneID)?.engine == .copilot
         else { return }
-        workspace.terminalSurface(for: paneID)?.sendInput("/theme \(theme)\r")
+        workspace.terminalSurface(for: paneID)?.sendInput("/settings theme \(theme)\r")
         workspace.updateDescriptor(for: paneID) { $0.copilotTheme = theme }
     }
 
@@ -1581,8 +1599,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         if let container = paneID.flatMap({ workspace.container(for: $0) }) {
             container.presentAsk(
-                title: "Rename Conversation",
-                message: "Renames this pane and tells the agent, with /rename.",
+                title: "Rename this conversation",
                 icon: NSImage(systemSymbolName: "pencil", accessibilityDescription: nil),
                 input: current,
                 options: [
@@ -2437,6 +2454,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // back to "Claude Code" — see `isEngineBrandTitle`.
                 guard !SessionOutline.isEngineBrandTitle(title) else { return }
                 workspace.updateDescriptor(for: sessionID) { $0.title = title }
+                if workspace.focusedPaneID == sessionID { refreshTitle() }
+                syncConversationName(sessionID, to: title)
+            }
+            surface?.onClearCommand = { [weak self] in
+                guard let self else { return }
+                // `/clear` starts a new conversation, so the name the last one
+                // earned is gone with it — back to "Claude 2" until the fresh
+                // one says what it is doing.
+                workspace.updateDescriptor(for: sessionID) {
+                    $0.title = ""
+                    $0.label = nil
+                }
+                lastSyncedName.removeValue(forKey: sessionID)
                 if workspace.focusedPaneID == sessionID { refreshTitle() }
             }
             surface?.onDirectoryChange = { [weak self] directory in
