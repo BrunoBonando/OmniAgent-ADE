@@ -660,8 +660,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
                 + "Shell opens a fresh one in its place, in the same folder.",
             icon: Engine.shell.iconImage,
             options: [
-                PaneAskOption("Stay") { chosen = "Stay" },
-                PaneAskOption("Switch to Shell", isPrimary: true) { chosen = "Switch" },
+                PaneAskOption("Stay") { _ in chosen = "Stay" },
+                PaneAskOption("Switch to Shell", isPrimary: true) { _ in chosen = "Switch" },
             ]
         )
         window.displayIfNeeded()
@@ -685,6 +685,28 @@ final class PaneWorkspaceViewTests: XCTestCase {
         buttons[1].onClick?()
         XCTAssertEqual(chosen, "Switch")
         XCTAssertNil(container.askOverlay)
+
+        // The same card with a text field: its height is built from measured
+        // text plus the field, so the field is the part that can push a button
+        // off the bottom if the arithmetic is wrong.
+        container.presentAsk(
+            title: "Rename Conversation",
+            message: "Renames this pane and tells the agent, with /rename.",
+            icon: NSImage(systemSymbolName: "pencil", accessibilityDescription: nil),
+            input: "Ingest",
+            options: [
+                PaneAskOption("Cancel") { _ in },
+                PaneAskOption("Rename", isPrimary: true) { _ in },
+            ]
+        )
+        window.displayIfNeeded()
+        workspace.layoutSubtreeIfNeeded()
+        let rename = try XCTUnwrap(container.askOverlay)
+        saveRenderForInspection(try XCTUnwrap(render(container)), named: "pane-ask-rename")
+        for view in rename.subviews {
+            XCTAssertTrue(rename.bounds.contains(view.frame), "\(view) escaped the card")
+        }
+        XCTAssertEqual(rename.text, "Ingest")
     }
 
     /// A pane in a session that is not on screen still gets its question seen:
@@ -705,7 +727,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
             title: "Save changes to a.swift?",
             message: "There are edits that are not on disk.",
             icon: nil,
-            options: [PaneAskOption("Save", isPrimary: true) {}]
+            options: [PaneAskOption("Save", isPrimary: true) { _ in }]
         )
 
         XCTAssertTrue(
@@ -730,14 +752,14 @@ final class PaneWorkspaceViewTests: XCTestCase {
             title: "Save changes to a.swift?",
             message: "There are edits that are not on disk.",
             icon: nil,
-            options: [PaneAskOption("Save", isPrimary: true) { stranded = false }],
+            options: [PaneAskOption("Save", isPrimary: true) { _ in stranded = false }],
             onCancel: { stranded = false }
         )
         container.presentAsk(
             title: "a.swift changed on disk",
             message: "An agent wrote it while you were being asked about it.",
             icon: nil,
-            options: [PaneAskOption("Take Disk", isPrimary: true) {}]
+            options: [PaneAskOption("Take Disk", isPrimary: true) { _ in }]
         )
         XCTAssertFalse(stranded, "the save prompt's caller heard back when its card was replaced")
 
@@ -747,10 +769,10 @@ final class PaneWorkspaceViewTests: XCTestCase {
             title: "Start over with Shell?",
             message: "This terminal's conversation ends here.",
             icon: nil,
-            options: [PaneAskOption("Switch", isPrimary: true) {}],
+            options: [PaneAskOption("Switch", isPrimary: true) { _ in }],
             onCancel: { cancelled = true }
         )
-        try XCTUnwrap(container.askOverlay).options.last?.action()
+        try XCTUnwrap(container.askOverlay).choose(0)
         XCTAssertFalse(cancelled, "an answered ask is not also a cancelled one")
         XCTAssertNil(container.askOverlay)
     }

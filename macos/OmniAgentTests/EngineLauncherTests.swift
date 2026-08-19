@@ -298,7 +298,7 @@ final class EngineSwitchTests: XCTestCase {
 
         // Confirm is the only path that swaps it.
         controller.requestEngineSwitch(paneID, to: .shell)
-        try XCTUnwrap(container.askOverlay).options.last?.action()
+        try XCTUnwrap(container.askOverlay).choose(1)
         XCTAssertNil(workspace.descriptor(for: paneID))
         XCTAssertEqual(workspace.descriptor(for: workspace.paneIDs[0])?.engine, .shell)
     }

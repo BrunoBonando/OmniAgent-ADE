@@ -1375,8 +1375,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 + "\(engine.displayName) opens a fresh one in its place, in the same folder.",
             icon: engine.iconImage,
             options: [
-                PaneAskOption("Stay") {},
-                PaneAskOption("Switch to \(engine.displayName)", isPrimary: true) { [weak self] in
+                PaneAskOption("Stay") { _ in },
+                PaneAskOption("Switch to \(engine.displayName)", isPrimary: true) { [weak self] _ in
                     self?.replaceEngine(paneID, with: engine)
                 },
             ]
@@ -1430,7 +1430,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
               let descriptor = workspace.descriptor(for: paneID),
               descriptor.kind == .terminal
         else { return }
-        askForConversationName(current: descriptor.label ?? descriptor.title) { [weak self] name in
+        askForConversationName(
+            current: descriptor.label ?? descriptor.title,
+            paneID: paneID
+        ) { [weak self] name in
             guard let self,
                   let named = name?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !named.isEmpty
@@ -1504,9 +1507,32 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// does, so the rename can run without blocking on a modal.
     var conversationNamePrompt: ((String, @escaping (String?) -> Void) -> Void)?
 
-    private func askForConversationName(current: String, completion: @escaping (String?) -> Void) {
+    /// The rename prompt, on the pane being renamed. `paneID` is what makes it
+    /// a pane ask rather than a sheet: the name being changed belongs to *that*
+    /// terminal, and a sheet hanging off the window says nothing about which of
+    /// twelve it means. Falls back to the sheet only when the pane has no
+    /// container to draw on.
+    private func askForConversationName(
+        current: String,
+        paneID: String?,
+        completion: @escaping (String?) -> Void
+    ) {
         if let conversationNamePrompt {
             conversationNamePrompt(current, completion)
+            return
+        }
+        if let container = paneID.flatMap({ workspace.container(for: $0) }) {
+            container.presentAsk(
+                title: "Rename Conversation",
+                message: "Renames this pane and tells the agent, with /rename.",
+                icon: NSImage(systemSymbolName: "pencil", accessibilityDescription: nil),
+                input: current,
+                options: [
+                    PaneAskOption("Cancel") { _ in completion(nil) },
+                    PaneAskOption("Rename", isPrimary: true) { name in completion(name) },
+                ],
+                onCancel: { completion(nil) }
+            )
             return
         }
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
@@ -2444,9 +2470,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     + "Closing it without saving loses them.",
                 icon: NSImage(systemSymbolName: "doc.badge.ellipsis", accessibilityDescription: nil),
                 options: [
-                    PaneAskOption("Don't Save") { decide(.discard) },
-                    PaneAskOption("Cancel") { decide(.cancel) },
-                    PaneAskOption("Save", isPrimary: true) { decide(.save) },
+                    PaneAskOption("Don't Save") { _ in decide(.discard) },
+                    PaneAskOption("Cancel") { _ in decide(.cancel) },
+                    PaneAskOption("Save", isPrimary: true) { _ in decide(.save) },
                 ],
                 onCancel: { decide(.cancel) }
             )
@@ -2467,8 +2493,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // Dismissing keeps what is in front of you, which is the only
                 // answer here that destroys nothing.
                 options: [
-                    PaneAskOption("Keep Mine") { decide(false) },
-                    PaneAskOption("Take Disk", isPrimary: true) { decide(true) },
+                    PaneAskOption("Keep Mine") { _ in decide(false) },
+                    PaneAskOption("Take Disk", isPrimary: true) { _ in decide(true) },
                 ],
                 onCancel: { decide(false) }
             )

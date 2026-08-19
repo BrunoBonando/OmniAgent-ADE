@@ -1448,6 +1448,63 @@ final class WorkspaceWindowControllerTests: XCTestCase {
     }
 
 
+    /// The real prompt — no test seam — is a pane ask on the pane being
+    /// renamed, seeded with the current name, and typing into it renames both
+    /// halves. A sheet on the window could not say which of twelve panes it
+    /// meant.
+    func testRenamingAsksOnThePaneItself() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .claude, cwd: "/a", id: "sess-cl", group: "grp-1"),
+                ])
+            )
+        )
+        controller.workspaceView.focusPane("sess-cl")
+        controller.workspaceView.updateDescriptor(for: "sess-cl") { $0.label = "Ingest" }
+
+        controller.renameConversation(nil)
+
+        let container = try XCTUnwrap(controller.workspaceView.container(for: "sess-cl"))
+        let card = try XCTUnwrap(container.askOverlay)
+        XCTAssertEqual(card.text, "Ingest", "the field opens on the name being changed")
+        XCTAssertEqual(card.options.map(\.title), ["Cancel", "Rename"])
+
+        card.type("Ingest rewrite")
+        card.choose(1)
+        XCTAssertNil(container.askOverlay)
+        XCTAssertEqual(controller.workspaceView.descriptor(for: "sess-cl")?.label, "Ingest rewrite")
+    }
+
+    /// Cancelling changes nothing — and an ask answered once may not also
+    /// report a cancel, or every caller settles its decision twice.
+    func testCancellingTheRenameLeavesTheNameAlone() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .claude, cwd: "/a", id: "sess-cl", group: "grp-1"),
+                ])
+            )
+        )
+        controller.workspaceView.focusPane("sess-cl")
+        controller.workspaceView.updateDescriptor(for: "sess-cl") { $0.label = "Ingest" }
+
+        controller.renameConversation(nil)
+        let container = try XCTUnwrap(controller.workspaceView.container(for: "sess-cl"))
+        let card = try XCTUnwrap(container.askOverlay)
+        card.type("something else")
+        card.onCancel?()
+
+        XCTAssertNil(container.askOverlay)
+        XCTAssertEqual(controller.workspaceView.descriptor(for: "sess-cl")?.label, "Ingest")
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(
