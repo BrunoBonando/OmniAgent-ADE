@@ -161,23 +161,24 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
     static func glassHost(
         _ content: NSView,
         size: NSSize,
-        cornerRadius: CGFloat = CommandPaletteController.cornerRadius,
-        clear: Bool = false
+        cornerRadius: CGFloat = CommandPaletteController.cornerRadius
     ) -> NSView {
         let frame = NSRect(origin: .zero, size: size)
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView(frame: frame)
             glass.autoresizingMask = [.width, .height]
             glass.cornerRadius = cornerRadius
-            // `.clear` for the sheet over the workspace — `.regular` carries
-            // the material's own dimming fill, and the surroundings are meant
-            // to stay as bright as they were, just glassed.
-            glass.style = clear ? .clear : .regular
+            // Full strength, unlike `WorkspaceGlass`: this sheet has the
+            // search field and the results inside it, and `alphaValue` fades a
+            // view's whole subtree — softening the panel would soften the text
+            // it exists to show. The navy gradient over it is what separates it
+            // from the softened sheet behind.
+            glass.style = .regular
             glass.contentView = content
             return glass
         }
         let effect = NSVisualEffectView(frame: frame)
-        effect.material = clear ? .fullScreenUI : .hudWindow
+        effect.material = .hudWindow
         effect.blendingMode = .behindWindow
         effect.state = .active
         effect.autoresizingMask = [.width, .height]
@@ -668,12 +669,19 @@ final class SpotlightGlassScrimWindow: NSWindow {
         alphaValue = 0
         let click = ScrimClickView { [weak self] in self?.onClick?() }
         click.autoresizingMask = [.width, .height]
-        contentView = CommandPaletteController.glassHost(
-            click,
-            size: .zero,
-            cornerRadius: 0,
-            clear: true
-        )
+        // `WorkspaceGlass` is the app's one sheet — the same material at the
+        // same strength focus mode uses, rather than a second setting of it.
+        // Below macOS 26 there is no sheet and the click-catcher stands alone:
+        // every pre-26 stand-in dims the workspace instead of glassing it.
+        if let sheet = WorkspaceGlass.sheet() {
+            sheet.autoresizingMask = [.width, .height]
+            if #available(macOS 26.0, *), let glass = sheet as? NSGlassEffectView {
+                glass.contentView = click
+            }
+            contentView = sheet
+        } else {
+            contentView = click
+        }
     }
 
     /// Never key: the search field's window has to keep the keyboard.

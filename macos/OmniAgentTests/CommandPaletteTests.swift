@@ -554,6 +554,27 @@ final class CommandPaletteTests: XCTestCase {
         controller.dismiss()
     }
 
+    // MARK: - the glass
+
+    func testFocusModeAndTheSpotlightAreTheSameSheetOfGlass() throws {
+        guard let sheet = WorkspaceGlass.sheet() else {
+            throw XCTSkip("no Liquid Glass before macOS 26 — both surfaces leave the sheet out")
+        }
+        XCTAssertEqual(sheet.alphaValue, WorkspaceGlass.strength, accuracy: 0.001)
+        XCTAssertLessThan(WorkspaceGlass.strength, 1, "short of full strength: the workspace stays recognisable")
+
+        // Both surfaces take the sheet from the same place rather than each
+        // configuring their own — that is what keeps them from drifting.
+        let focus = PaneZoomBackdropView()
+        let focusGlass = try XCTUnwrap(focus.subviews.first)
+        let spotlight = SpotlightGlassScrimWindow()
+        let spotlightGlass = try XCTUnwrap(spotlight.contentView)
+
+        XCTAssertEqual(focusGlass.alphaValue, WorkspaceGlass.strength, accuracy: 0.001)
+        XCTAssertEqual(spotlightGlass.alphaValue, WorkspaceGlass.strength, accuracy: 0.001)
+        XCTAssertEqual(String(describing: type(of: focusGlass)), String(describing: type(of: spotlightGlass)))
+    }
+
     // MARK: - fixtures
 
     private let sample: [PaletteCommand] = [

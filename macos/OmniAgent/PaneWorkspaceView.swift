@@ -3257,6 +3257,36 @@ final class PaneAskOverlayView: NSView {
     }
 }
 
+/// The one sheet of glass this app lays over the workspace.
+///
+/// Focus mode's backdrop and the spotlight's surround are the same material at
+/// the same strength, from here — they are the same gesture ("push the
+/// workspace back, keep it readable") and had drifted into two settings of it.
+///
+/// `.clear`, untinted, and deliberately short of full strength: the material at
+/// `1` frosts the workspace hard enough that you stop recognising which pane is
+/// which, which is the one thing a backdrop over your own work must not do.
+/// `strength` is what "a bit less" means — enough of the sharp original left in
+/// the composite to read the shapes through it.
+enum WorkspaceGlass {
+    static let strength: CGFloat = 0.62
+
+    /// The sheet, or `nil` before macOS 26 — where there is no glass to ask
+    /// for and every stand-in dims rather than refracts, so the callers leave
+    /// it out entirely.
+    static func sheet(cornerRadius: CGFloat = 0) -> NSView? {
+        guard #available(macOS 26.0, *) else { return nil }
+        let glass = NSGlassEffectView()
+        glass.style = .clear
+        // Explicitly none: a tint is a wash of colour over everything behind
+        // the sheet, which is exactly the darkening this exists without.
+        glass.tintColor = nil
+        glass.cornerRadius = cornerRadius
+        glass.alphaValue = strength
+        return glass
+    }
+}
+
 /// The glass a zoomed pane sits on: one panel the size of the window, with the
 /// card in front of it — macOS 26's own Liquid Glass (`NSGlassEffectView`), the
 /// system material itself rather than a stand-in for it, so what is behind it in
@@ -3287,16 +3317,7 @@ final class PaneZoomBackdropView: NSView {
     private var isShown = false
 
     init() {
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.style = .clear
-            // Explicitly none: a tint is a wash of colour over everything behind
-            // the panel, which is exactly the darkening this panel exists without.
-            glass.tintColor = nil
-            effect = glass
-        } else {
-            effect = nil
-        }
+        effect = WorkspaceGlass.sheet()
         super.init(frame: .zero)
         // Explicit, though an effect view is layer-backed anyway: this view does
         // not *have* a `layer` until it joins a hierarchy, and the card's shadow
