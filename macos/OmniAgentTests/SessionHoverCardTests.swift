@@ -147,9 +147,9 @@ final class SessionHoverCardTests: XCTestCase {
         XCTAssertEqual(model.tail?.count, HoverCardModel.tailLimit + 1)
     }
 
-    /// Ready is the mark alone, green: the card saying "nothing running"
-    /// without spending a word on it. The last line an idle pane printed is not
-    /// news, and a mark pulsing beside it would be a lie.
+    /// Ready is the green mark and the word: the last line an idle pane printed
+    /// is not news, and a mark pulsing beside it would be a lie about what the
+    /// pane is doing.
     func testAReadyTerminalIsTheMarkAloneAndNoOutputLine() {
         let model = HoverCardModel.pane(
             terminal(),
@@ -163,11 +163,11 @@ final class SessionHoverCardTests: XCTestCase {
         XCTAssertFalse(model.pulses)
         XCTAssertNil(model.timing)
         XCTAssertNil(model.totals)
-        XCTAssertNil(model.tail, "settled: no line, whatever the terminal still shows")
-        XCTAssertTrue(model.mark, "but the mark is there, green")
+        XCTAssertNil(model.tail, "settled: no output line, whatever the terminal still shows")
+        XCTAssertTrue(model.mark, "but the mark is there, green, beside the word")
     }
 
-    /// And the body follows it: the row stays, the words go.
+    /// And the body follows it: the row stays, and says the state instead.
     func testTheWorkingLineIsAMarkWithWordsAndThenAMarkWithout() {
         let body = HoverCardBodyView()
         body.tailField.animates = false
@@ -190,9 +190,16 @@ final class SessionHoverCardTests: XCTestCase {
         XCTAssertNotNil(body.workingMark.layer?.animation(forKey: "om-pulse") ?? nil)
 
         body.apply(HoverCardModel.pane(terminal(), status: .ready, activity: nil, now: t0))
-        XCTAssertTrue(body.tailField.isHidden, "ready is the mark alone")
+        XCTAssertEqual(body.tailField.typedText, "Ready", "the state in a word when there is no work")
+        XCTAssertEqual(body.tailField.textColor, ShellPalette.green, "in the mark's own colour")
         XCTAssertEqual(body.workingMark.contentTintColor, ShellPalette.green)
         XCTAssertNil(body.workingMark.layer?.animation(forKey: "om-pulse") ?? nil, "and it is still")
+
+        // Amber follows the same rule, so the card never has a state it can
+        // show only as a colour.
+        body.apply(HoverCardModel.pane(terminal(), status: .awaitingApproval, activity: nil, now: t0))
+        XCTAssertEqual(body.tailField.typedText, "Waiting for you")
+        XCTAssertEqual(body.tailField.textColor, ShellPalette.amber)
     }
 
     func testAWaitingTerminalSaysSo() {

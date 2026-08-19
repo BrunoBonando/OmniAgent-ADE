@@ -391,6 +391,14 @@ final class TypingTextField: NSTextField {
         startTyping()
     }
 
+    /// The line's colour, caret included — blue while the agent is working,
+    /// the status colour when it is not.
+    func setColor(_ color: NSColor) {
+        guard textColor != color else { return }
+        textColor = color
+        caret.backgroundColor = color.withAlphaComponent(0.85).cgColor
+    }
+
     /// Drops what is on screen without animating — used when the card swaps to
     /// a different row, where continuing to type would splice two panes'
     /// output into one sentence.
@@ -527,8 +535,10 @@ final class HoverCardBodyView: NSView {
     let metaField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkMuted)
     let timingField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkTertiary)
     let totalsField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkFaint)
-    /// The working line: blue, because it is the one thing on the card that is
-    /// happening rather than being reported.
+    /// The state line. Working, it is the agent's own current line, in blue —
+    /// the one thing on the card that is happening rather than being reported.
+    /// Otherwise it is the state in a word, in that state's colour: `Ready`
+    /// green, `Waiting for you` amber.
     let tailField = TypingTextField(font: ShellFont.mono(11.5), color: ShellPalette.blue)
     /// The OmniAgent mark in front of that line, pulsing — standing in for the
     /// blinking bullet the agent puts there itself. Same glyph, same pulse and
@@ -628,15 +638,15 @@ final class HoverCardBodyView: NSView {
         rule.isHidden = !model.mark
         tailRow.isHidden = !model.mark
         workingMark.apply(color: model.accent, pulses: model.pulses)
-        if let tail = model.tail {
-            tailField.isHidden = false
+        if model.mark {
+            // Working: the agent's line, blue. Otherwise the state itself,
+            // wearing the same colour as the mark beside it.
+            tailField.setColor(model.tail == nil ? model.accent : ShellPalette.blue)
             // A different row is a different sentence: continuing the type
             // would splice two panes' output together.
             if !sameRow { tailField.reset() }
-            tailField.setLine(tail)
+            tailField.setLine(model.tail ?? model.status)
         } else {
-            // Not working: the mark stands alone in its status colour.
-            tailField.isHidden = true
             tailField.reset()
         }
         needsLayout = true
