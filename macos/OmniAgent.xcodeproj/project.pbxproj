@@ -25,6 +25,7 @@
 		43DFECC6CB8F4285921E6A5A /* DeskCanvasState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 371418F52B4143BE9B762348 /* DeskCanvasState.swift */; };
 		71021CF2EFA24E0285BFFFDA /* EditorFileClass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B9844312A440D4A5A932C5 /* EditorFileClass.swift */; };
 		68F9BD406F6C7DDABE533A9D /* GitFileContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = C43E2B4CEEE6E8798AE14F29 /* GitFileContent.swift */; };
+		C8E5716D35494A029A309845 /* PaneChipView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 405D7DD97ED24F13AEC1C23B /* PaneChipView.swift */; };
 		E4A1C60B27D34F19B0C55A83 /* DoublePressDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F8D45A9B1E64C7290EA3D16 /* DoublePressDetector.swift */; };
 		40187BB1C8BB496BBDF4129A /* EditorWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 804C0D63AE9348399ED44B65 /* EditorWebView.swift */; };
 		8F133DE140464FFEBCA301BD /* EditorPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C05BB92321E4D168F6F8F55 /* EditorPaneView.swift */; };
@@ -173,6 +174,7 @@
 		371418F52B4143BE9B762348 /* DeskCanvasState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCanvasState.swift; sourceTree = "<group>"; };
 		08B9844312A440D4A5A932C5 /* EditorFileClass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorFileClass.swift; sourceTree = "<group>"; };
 		C43E2B4CEEE6E8798AE14F29 /* GitFileContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitFileContent.swift; sourceTree = "<group>"; };
+		405D7DD97ED24F13AEC1C23B /* PaneChipView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneChipView.swift; sourceTree = "<group>"; };
 		2F8D45A9B1E64C7290EA3D16 /* DoublePressDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoublePressDetector.swift; sourceTree = "<group>"; };
 		804C0D63AE9348399ED44B65 /* EditorWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorWebView.swift; sourceTree = "<group>"; };
 		9C05BB92321E4D168F6F8F55 /* EditorPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneView.swift; sourceTree = "<group>"; };
@@ -315,6 +317,7 @@
 				371418F52B4143BE9B762348 /* DeskCanvasState.swift */,
 				08B9844312A440D4A5A932C5 /* EditorFileClass.swift */,
 				C43E2B4CEEE6E8798AE14F29 /* GitFileContent.swift */,
+				405D7DD97ED24F13AEC1C23B /* PaneChipView.swift */,
 				2F8D45A9B1E64C7290EA3D16 /* DoublePressDetector.swift */,
 				1422F1A7E3B9416382854F44 /* MediaTabView.swift */,
 				CF6FC80108EE44A497708D9A /* EditorTabStripView.swift */,
@@ -558,6 +561,7 @@
 				43DFECC6CB8F4285921E6A5A /* DeskCanvasState.swift in Sources */,
 				71021CF2EFA24E0285BFFFDA /* EditorFileClass.swift in Sources */,
 				68F9BD406F6C7DDABE533A9D /* GitFileContent.swift in Sources */,
+				C8E5716D35494A029A309845 /* PaneChipView.swift in Sources */,
 				E4A1C60B27D34F19B0C55A83 /* DoublePressDetector.swift in Sources */,
 				6B338221C82340A48C81D8A6 /* MediaTabView.swift in Sources */,
 				12571DF89D0D4288891BDAFE /* EditorTabStripView.swift in Sources */,

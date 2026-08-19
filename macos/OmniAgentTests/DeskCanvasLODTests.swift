@@ -155,6 +155,142 @@ final class DeskCanvasLODTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(workspace.container(for: "s2-p1")).isHidden)
     }
 
+    // MARK: - The chip threshold
+
+    /// Below `DeskCanvas.lodThreshold` a pane surface carries no information —
+    /// at 0.2 a 12pt glyph is 2.4pt — so the surface comes down and a chip
+    /// takes its place. Hidden, not suspended: hiding is the only thing that
+    /// stops SwiftTerm's own draw path.
+    func testAnOnScreenSessionBelowTheThresholdHidesItsSurfacesAndShowsChips() throws {
+        let workspace = makeCanvasWorkspace(sessions: 2, panesEach: 2)
+        let both = try XCTUnwrap(workspace.canvasRect(forGroup: "grp-1"))
+            .union(try XCTUnwrap(workspace.canvasRect(forGroup: "grp-2")))
+
+        workspace.camera = DeskCamera.focus(
+            on: both.insetBy(dx: -both.width * 4.5, dy: -both.height * 4.5),
+            in: workspace.bounds
+        )
+
+        XCTAssertLessThan(
+            workspace.camera.scale,
+            DeskCanvas.lodThreshold,
+            "the fixture must actually be below the chip threshold"
+        )
+        XCTAssertTrue(workspace.showsChips)
+
+        for id in ["s1-p1", "s1-p2", "s2-p1", "s2-p2"] {
+            let container = try XCTUnwrap(workspace.container(for: id))
+            XCTAssertFalse(container.isHidden, "\(id)'s card is on camera")
+            XCTAssertTrue(container.isChipped, "\(id) is drawn as a chip")
+            XCTAssertTrue(container.surface.isHidden, "\(id)'s surface is down, not merely suspended")
+            XCTAssertTrue(container.header.isHidden, "and so is its 3pt header")
+            XCTAssertFalse(container.chip.isHidden)
+            XCTAssertEqual(
+                container.chip.frame,
+                container.bounds.insetBy(
+                    dx: PaneContainerView.borderWidth,
+                    dy: PaneContainerView.borderWidth
+                ),
+                "the chip fills the pane inside its 1pt ring"
+            )
+        }
+    }
+
+    /// The chip carries what the header carries — engine, name, status —
+    /// because at this scale the header cannot.
+    func testTheChipCarriesTheEngineTheNameAndTheStatus() throws {
+        let workspace = makeCanvasWorkspace(sessions: 1, panesEach: 1)
+        workspace.updateDescriptor(for: "s1-p1") { $0.label = "Ingest rewrite" }
+        workspace.setStatus(.awaitingApproval, for: "s1-p1")
+
+        let chip = try XCTUnwrap(workspace.container(for: "s1-p1")).chip
+
+        XCTAssertEqual(chip.title, "Ingest rewrite")
+        XCTAssertEqual(chip.engine, .claude)
+        XCTAssertEqual(chip.status, .awaitingApproval)
+    }
+
+    /// A browser or editor carries `.shell` as a placeholder engine, and a chip
+    /// claiming it runs one would say a thing that is not true — the header
+    /// already refuses this for exactly the same reason.
+    func testANonTerminalPanesChipShowsNoEngine() throws {
+        let workspace = makeCanvasWorkspace(sessions: 1, panesEach: 1)
+        XCTAssertTrue(
+            workspace.addPane(
+                PaneDescriptor(
+                    sessionID: "web-1",
+                    group: "grp-1",
+                    kind: .browser,
+                    browserURL: "https://example.com"
+                )
+            )
+        )
+
+        XCTAssertNil(try XCTUnwrap(workspace.container(for: "web-1")).chip.engine)
+        XCTAssertEqual(try XCTUnwrap(workspace.container(for: "web-1")).chip.title, "https://example.com")
+    }
+
+    /// `roundChildren(inside:)` resolves `maskedCorners` in each child's **own**
+    /// coordinate space, and its comment records what getting that wrong cost:
+    /// "Naming `MaxY` \"the bottom\" for every child put the unflipped terminal
+    /// surface's rounding at its *top* on screen … The offscreen render harness
+    /// cannot show the difference (`CALayer.render(in:)` skips the compositor's
+    /// geometry flips), which is how it went unseen."
+    ///
+    /// The chip fills the container on its own, so it takes all four corners
+    /// and no flip can matter. That is what this pins — a PNG never could.
+    func testTheChipTakesAllFourCornersSoNoGeometryFlipCanRoundItUpsideDown() throws {
+        let workspace = makeCanvasWorkspace(sessions: 1, panesEach: 2)
+        let chip = try XCTUnwrap(workspace.container(for: "s1-p1")).chip
+
+        XCTAssertEqual(
+            try XCTUnwrap(chip.layer?.maskedCorners),
+            [
+                .layerMinXMinYCorner, .layerMaxXMinYCorner,
+                .layerMinXMaxYCorner, .layerMaxXMaxYCorner,
+            ],
+            "all four, so the chip's rounding reads the same whichever way its layer is flipped"
+        )
+        XCTAssertEqual(
+            chip.layer?.cornerRadius,
+            PaneContainerView.cornerRadius - PaneContainerView.borderWidth,
+            "concentric inside the container's, one border width smaller"
+        )
+    }
+
+    /// Coming back above the threshold, the surface must be told to paint.
+    /// While it was hidden its `setNeedsDisplay` scheduled nothing, and
+    /// `MacTerminalView.draw(_:)` is `if metalView != nil { return }` — so
+    /// `needsDisplay = true` is a no-op once Metal is on and an idle terminal
+    /// would sit there showing a stale drawable.
+    ///
+    /// `drawRequestCount` is the right assertion *here* and only here: this
+    /// test asserts a draw was requested, which is exactly what the counter
+    /// counts. It is the wrong assertion for anything claiming a pane stopped
+    /// drawing.
+    func testASurfaceComingBackAboveTheThresholdIsRepaintedNotLeftOnItsLastDrawable() throws {
+        let workspace = makeCanvasWorkspace(sessions: 1, panesEach: 1)
+        let card = try XCTUnwrap(workspace.canvasRect(forGroup: "grp-1"))
+        workspace.camera = DeskCamera.focus(
+            on: card.insetBy(dx: -card.width * 4.5, dy: -card.height * 4.5),
+            in: workspace.bounds
+        )
+        XCTAssertTrue(try XCTUnwrap(workspace.container(for: "s1-p1")).isChipped)
+        let before = try XCTUnwrap(workspace.container(for: "s1-p1")).terminalSurface.drawRequestCount
+
+        workspace.camera = DeskCamera.focus(on: card, in: workspace.bounds)
+
+        let container = try XCTUnwrap(workspace.container(for: "s1-p1"))
+        XCTAssertFalse(container.isChipped)
+        XCTAssertFalse(container.surface.isHidden)
+        XCTAssertTrue(container.chip.isHidden)
+        XCTAssertGreaterThan(
+            container.terminalSurface.drawRequestCount,
+            before,
+            "the surface is kicked once on the way back up"
+        )
+    }
+
     // MARK: - Helpers
 
     /// `PaneWorkspaceViewTests.makeWorkspace(panes:)`'s shape, with one grid

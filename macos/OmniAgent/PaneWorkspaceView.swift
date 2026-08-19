@@ -1044,6 +1044,18 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         canvasLayout?.frames[group]
     }
 
+    /// Whether the camera is far enough out that pane surfaces carry no
+    /// information: at `DeskCanvas.lodThreshold` 12pt type is 2.4pt. Below it
+    /// the surfaces come down and chips take their place.
+    ///
+    /// Not a compromise on live miniatures — there is nothing in those pixels,
+    /// only cost. SwiftTerm has no lever for it either: `metalScaleFactorOverride`
+    /// looks like one and is clamped by `max(1, …)`, so a shrunken terminal
+    /// still rasterizes at full backing scale.
+    var showsChips: Bool {
+        canvasMode && camera.scale < DeskCanvas.lodThreshold
+    }
+
     /// The rect visibility is measured against while the camera is travelling.
     ///
     /// `flyCamera(to:)` sets `camera` to its destination at the *start* of the
@@ -1096,10 +1108,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         validateZoom()
         updateZoomAvailability()
         let visible = onScreenPaneIDs()
+        let chips = showsChips
         for (id, container) in containers {
             let onScreen = visible.contains(id)
             container.isHidden = !onScreen
             container.surface.suspendsDrawing = suspendsDrawing || !onScreen
+            container.isChipped = onScreen && chips
         }
     }
 
@@ -2046,6 +2060,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
         didSet {
             guard status != oldValue else { return }
             header.status = status
+            chip.status = status
             // The unselected pane's veil is tinted by the same status.
             (surface as? TerminalSurfaceView)?.wash.status = status
             updateApprovalBar()
@@ -2081,6 +2096,49 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// The drop tint, as a top-most sibling rather than a fill in `draw(_:)`,
     /// for the same compositing reason.
     let dropHighlight = PaneDropOverlayView()
+
+    /// The level-of-detail stand-in — see `PaneChipView`. A sibling of
+    /// `header`/`surface`/`approvalBar`, because `surface` is `let`.
+    let chip = PaneChipView()
+
+    /// Whether this pane is drawn as a chip instead of as itself.
+    ///
+    /// The surface is **hidden**, not merely suspended: `suspendsDrawing`
+    /// gates only the extra renderer kick `TerminalSurfaceView.feed` posts,
+    /// while SwiftTerm keeps calling `setNeedsDisplay` on every feed. A hidden
+    /// view is not composited and its `setNeedsDisplay` schedules nothing.
+    ///
+    /// The header goes down with it. It carries the same three facts the chip
+    /// does — mark, engine, name — and at the scale a chip exists for it is
+    /// three points tall: two labels for one pane, one of them unreadable.
+    /// The approval bar needs no such treatment; the chip is opaque, fills the
+    /// pane and is stacked above it.
+    ///
+    /// Written only by `PaneWorkspaceView.updateVisibility()`, which is the
+    /// sole owner of per-pane visibility. Anything that assigns this from
+    /// elsewhere is overwritten by that method's next call — the same trap
+    /// `setSuspendsDrawing`'s comment already records for `suspendsDrawing`.
+    var isChipped = false {
+        didSet {
+            guard isChipped != oldValue else { return }
+            chip.isHidden = !isChipped
+            surface.isHidden = isChipped
+            header.isHidden = isChipped
+            // Directly, not through `needsLayout`: a chip that arrives one
+            // layout pass later is a blank pane for a frame, and the windowless
+            // test host never turns a run loop to deliver that pass at all.
+            applyLayout()
+            // Un-hiding is not a repaint. While the surface was down its own
+            // `setNeedsDisplay` scheduled nothing, and `MacTerminalView.draw(_:)`
+            // opens with `if metalView != nil { return }` — so the CG-path nudge
+            // `suspendsDrawing`'s didSet does is a no-op once Metal is on, and an
+            // idle terminal would come back showing a stale drawable until its
+            // next byte arrives. `requestRendererDraw()` is the primitive that
+            // actually paints; it is not on `PaneContentView`, hence the cast —
+            // the same one `approvalBar.onChoose` makes.
+            if !isChipped { (surface as? TerminalSurfaceView)?.requestRendererDraw() }
+        }
+    }
 
     /// The design's amber strip along the bottom while the agent is blocked on
     /// a question — the question text plus one clickable button per on-screen
@@ -2263,6 +2321,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
             (self?.surface as? TerminalSurfaceView)?.sendInput(input)
         }
         addSubview(approvalBar)
+        chip.isHidden = true
+        addSubview(chip)
         addSubview(dropHighlight, positioned: .above, relativeTo: nil)
         updateChrome()
         registerForDraggedTypes([PaneWorkspaceView.paneDragType, PaneWorkspaceView.editorTabDragType])
@@ -2316,6 +2376,11 @@ final class PaneContainerView: NSView, NSDraggingSource {
             width: width,
             height: barHeight
         )
+        // The whole pane inside its 1pt ring: the chip replaces the header and
+        // the surface together, so it takes the box both of them shared.
+        // Framed on every pass, hidden or not, so it is right the instant it
+        // is shown.
+        chip.frame = CGRect(x: inset, y: inset, width: width, height: max(0, bounds.height - inset * 2))
         dropHighlight.frame = bounds
         askOverlay?.frame = bounds
         workingRing?.frame = bounds
@@ -2359,6 +2424,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
         let inner = max(0, radius - Self.borderWidth)
         header.wantsLayer = true
         surface.wantsLayer = true
+        chip.wantsLayer = true
         // The screen-bottom corner pair belongs to whichever child sits on the
         // bottom edge — the approval bar takes it over while it is showing.
         func screenBottom(of child: NSView) -> CACornerMask {
@@ -2375,6 +2441,11 @@ final class PaneContainerView: NSView, NSDraggingSource {
             (header as NSView, screenTop(of: header)),
             (surface as NSView, approvalBar.isHidden ? screenBottom(of: surface) : []),
             (approvalBar as NSView, screenBottom(of: approvalBar)),
+            // The chip is the only child on both edges at once, so it takes
+            // both pairs — which is also why the flip cannot bite here, and why
+            // it is written as the union of the two helpers rather than as a
+            // four-corner literal the next author would have to re-derive.
+            (chip as NSView, screenTop(of: chip).union(screenBottom(of: chip))),
         ] {
             child.layer?.cornerRadius = inner
             child.layer?.cornerCurve = .continuous
@@ -2486,6 +2557,10 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // is called, and the sidebar already used it.
         header.title = SessionOutline.paneLabel(descriptor)
         header.engine = descriptor.kind == .terminal ? descriptor.engine : nil
+        // The chip says the same three things the header says, from the same
+        // two expressions, so the two can never disagree about a pane.
+        chip.title = header.title
+        chip.engine = header.engine
         header.isEngineMenuAvailable = descriptor.kind == .terminal
         header.isRenameAvailable = descriptor.kind == .terminal
         // Color badge: only Claude terminals support `/color`.
