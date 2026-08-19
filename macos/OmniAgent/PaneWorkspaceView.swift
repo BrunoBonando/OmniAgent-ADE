@@ -2448,6 +2448,78 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         [node.id] + node.children.flatMap(deskSubtreeIDs(of:))
     }
 
+    override func mouseDown(with event: NSEvent) {
+        guard isCanvasMode, !camera.isIdentity else { return super.mouseDown(with: event) }
+        // Below identity the canvas holds the keyboard: arrows move the node
+        // selection, ↩ enters, and nothing typed can reach a terminal nobody
+        // can read.
+        window?.makeFirstResponder(self)
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        guard let id = canvasNode(at: viewPoint), let frame = canvasLayout?.frames[id] else {
+            selectedNodeID = nil
+            return
+        }
+        selectedNodeID = id
+        if event.clickCount == 2 {
+            enterCanvasNode(id)
+            return
+        }
+        draggingNodeID = id
+        didDragNode = false
+        dragOriginInCanvas = camera.canvasPoint(from: viewPoint)
+        dragNodeOriginInCanvas = frame.origin
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isCanvasMode, !camera.isIdentity, let id = draggingNodeID else {
+            return super.mouseDragged(with: event)
+        }
+        let canvasPoint = camera.canvasPoint(from: convert(event.locationInWindow, from: nil))
+        let delta = CGPoint(
+            x: canvasPoint.x - dragOriginInCanvas.x,
+            y: canvasPoint.y - dragOriginInCanvas.y
+        )
+        if !didDragNode, hypot(delta.x, delta.y) < Self.canvasDragThreshold { return }
+        didDragNode = true
+        moveNode(id, to: CGPoint(
+            x: dragNodeOriginInCanvas.x + delta.x,
+            y: dragNodeOriginInCanvas.y + delta.y
+        ))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isCanvasMode, !camera.isIdentity else { return super.mouseUp(with: event) }
+        draggingNodeID = nil
+        didDragNode = false
+    }
+
+    /// One operation for every way in — a double-click, `↩` on a selection, a
+    /// pinch that reached the ceiling, a session shortcut: *animate the camera
+    /// so that rect maps onto the viewport*. A session node lands in the
+    /// session; a chip node frames its subtree, because there is no session to
+    /// be in.
+    func enterCanvasNode(_ id: String) {
+        guard isCanvasMode, let node = deskNode(id, in: canvasTree) else { return }
+        switch node.kind {
+        case .session(let group):
+            enterSession(group)
+        case .root, .workspace:
+            guard let rect = canvasSubtreeRect(of: node) else { return }
+            flyCamera(to: DeskCamera.focus(on: rect, in: bounds)
+                .clamped(minScale: minimumCanvasScale, in: bounds))
+        }
+    }
+
+    private func canvasSubtreeRect(of node: DeskNode) -> CGRect? {
+        guard let layout = canvasLayout else { return nil }
+        var rect = layout.frames[node.id]
+        for child in node.children {
+            guard let childRect = canvasSubtreeRect(of: child) else { continue }
+            rect = rect.map { $0.union(childRect) } ?? childRect
+        }
+        return rect
+    }
+
     private func hasNeighbor(_ direction: PaneDirection) -> Bool {
         guard let focusedPaneID else { return false }
         return grid?.neighbor(of: focusedPaneID, direction: direction) != nil

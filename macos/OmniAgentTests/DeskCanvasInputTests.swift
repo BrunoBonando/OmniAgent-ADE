@@ -217,6 +217,63 @@ final class DeskCanvasInputTests: XCTestCase {
         XCTAssertEqual(announced.last?[node]?.x, 900, "carrying the new pin")
     }
 
+    // MARK: - The mouse
+
+    /// A twitch is a click, not a drag — and the threshold is in canvas units,
+    /// because at 0.2 a 3pt window twitch is 15pt of canvas.
+    func testATwitchSelectsANodeWhileARealDragMovesIt() throws {
+        let (workspace, window) = makeAttachedCanvasWorkspace(sessions: 2)
+        defer { window.close() }
+        let layout = try XCTUnwrap(workspace.canvasLayout)
+        let node = try XCTUnwrap(nodeID(forGroup: workspace.groupIDs[0], in: workspace))
+        let rect = try XCTUnwrap(layout.frames[node])
+        workspace.camera = DeskCamera.fitAll(content: layout.contentRect, in: workspace.bounds)
+        let start = viewToWindow(canvas: CGPoint(x: rect.midX, y: rect.midY), workspace)
+
+        workspace.mouseDown(with: mouseEvent(.leftMouseDown, at: start, in: window))
+        workspace.mouseDragged(with: mouseEvent(
+            .leftMouseDragged,
+            at: CGPoint(x: start.x + 0.2, y: start.y),
+            in: window
+        ))
+        workspace.mouseUp(with: mouseEvent(.leftMouseUp, at: start, in: window))
+
+        XCTAssertEqual(workspace.selectedNodeID, node, "a twitch is a click, and a click selects")
+        XCTAssertTrue(workspace.canvasPins.isEmpty, "and pins nothing")
+
+        let far = CGPoint(x: start.x + 300, y: start.y)
+        workspace.mouseDown(with: mouseEvent(.leftMouseDown, at: start, in: window))
+        workspace.mouseDragged(with: mouseEvent(.leftMouseDragged, at: far, in: window))
+        workspace.mouseUp(with: mouseEvent(.leftMouseUp, at: far, in: window))
+
+        XCTAssertNotNil(workspace.canvasPins[node], "300pt of window travel is a drag")
+    }
+
+    /// Double-click is one of the four ways in, and they all resolve to the same
+    /// operation: animate the camera so that rect maps onto the viewport. With a
+    /// window the flight is a real 0.38s animation whose landing is scheduled
+    /// with `DispatchQueue.main.asyncAfter`, so the run loop has to be spun for
+    /// it — `DeskCameraFlightTests` waits the same way.
+    func testDoubleClickingASessionCardEntersThatSession() throws {
+        let (workspace, window) = makeAttachedCanvasWorkspace(sessions: 3)
+        defer { window.close() }
+        let layout = try XCTUnwrap(workspace.canvasLayout)
+        let group = workspace.groupIDs[1]
+        let node = try XCTUnwrap(nodeID(forGroup: group, in: workspace))
+        let rect = try XCTUnwrap(layout.frames[node])
+        workspace.camera = DeskCamera.fitAll(content: layout.contentRect, in: workspace.bounds)
+        let point = viewToWindow(canvas: CGPoint(x: rect.midX, y: rect.midY), workspace)
+
+        workspace.mouseDown(with: mouseEvent(.leftMouseDown, at: point, clicks: 2, in: window))
+        workspace.mouseUp(with: mouseEvent(.leftMouseUp, at: point, clicks: 2, in: window))
+        RunLoop.current.run(
+            until: Date().addingTimeInterval(PaneWorkspaceView.zoomTransitionDuration + 0.2)
+        )
+
+        XCTAssertEqual(workspace.activeGroup, group)
+        XCTAssertTrue(workspace.canvasPins.isEmpty, "entering is not a drag")
+    }
+
     // MARK: - Helpers
 
     /// One session per group, one pane each, sized like the real Desk. Mirrors
