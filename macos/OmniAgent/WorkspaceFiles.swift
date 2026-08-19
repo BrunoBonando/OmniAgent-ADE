@@ -207,6 +207,17 @@ struct GitStatus {
         return GitStatus(root: repoRoot, badges: parse(porcelainZ: output))
     }
 
+    /// Every file git tracks, repository-relative, for the spotlight to search.
+    /// Empty for any failure at all, exactly like `load`. **Never call this on
+    /// the main thread.**
+    ///
+    /// Tracked files only: what git ignores — `node_modules`, `target`, build
+    /// output — is precisely what nobody spotlights for.
+    static func trackedFiles(repoRoot: URL) -> [String] {
+        guard let output = runGit(["ls-files", "-z"], in: repoRoot) else { return [] }
+        return output.split(separator: "\0").map(String.init)
+    }
+
     /// Load off the main thread and answer on it.
     ///
     /// The whole reason this type exists as a snapshot: the subprocess runs

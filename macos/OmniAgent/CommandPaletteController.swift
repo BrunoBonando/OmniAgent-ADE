@@ -193,8 +193,13 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
 
     /// Opens over `parent`, rebuilt from scratch so the list can never offer a
     /// pane that closed while the palette was shut.
-    func present(commands: [PaletteCommand], over parent: NSWindow?) {
-        model.reset(commands: commands)
+    func present(
+        commands: [PaletteCommand],
+        files: [String] = [],
+        filesRoot: URL? = nil,
+        over parent: NSWindow?
+    ) {
+        model.reset(commands: commands, files: files, filesRoot: filesRoot)
         field.stringValue = ""
         reloadResults()
         // Strict stacking without fighting window levels: the scrim is a child
@@ -325,7 +330,9 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         display = []
         var current: PaletteSection?
         for (index, command) in model.matches.enumerated() {
-            if model.selectedSection == nil, command.section != current {
+            // An informational row ("No matches") is not a category, so it
+            // never brings a heading with it.
+            if model.selectedSection == nil, command.action != .noop, command.section != current {
                 display.append(.header(command.section))
                 current = command.section
             }

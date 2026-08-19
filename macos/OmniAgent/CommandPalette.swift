@@ -129,9 +129,25 @@ struct CommandPaletteModel: Equatable {
     /// The chosen tag, or `nil` for "All".
     private(set) var selectedSection: PaletteSection?
 
-    init(commands: [PaletteCommand] = []) {
+    /// Every tracked file in the workspace's repository, repository-relative,
+    /// and the root they hang off. Held as paths rather than rows and matched
+    /// at query time: a repository has thousands of files and the palette
+    /// shows a handful, so turning them all into rows on every open is work
+    /// nobody sees.
+    private(set) var files: [String] = []
+    private(set) var filesRoot: URL?
+
+    init(commands: [PaletteCommand] = [], files: [String] = [], filesRoot: URL? = nil) {
         self.commands = commands
+        self.files = files
+        self.filesRoot = filesRoot
     }
+
+    /// How many repository files one query may show. The list is a shortcut to
+    /// a file you can name, not a directory listing — a query loose enough to
+    /// match hundreds is a query to narrow.
+    /// ponytail: a flat scan over the path list; an index if a repo outgrows it.
+    static let fileMatchLimit = 12
 
     /// Rebuilt from the live workspace every time the palette opens, so it
     /// can never offer a pane that closed while it was shut.
@@ -376,8 +392,19 @@ struct CommandPaletteModel: Equatable {
     /// simply not there — no synthetic trailing row offering to search
     /// something else.
     var matches: [PaletteCommand] {
-        guard let section = selectedSection else { return found }
-        return found.filter { $0.section == section }
+        let rows = selectedSection.map { section in found.filter { $0.section == section } } ?? found
+        guard rows.isEmpty, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return rows }
+        // Something rather than a bar that silently refuses to grow: a query
+        // that finds nothing should say so.
+        return [
+            PaletteCommand(
+                id: "no-matches",
+                title: "No matches",
+                detail: nil,
+                action: .noop,
+                subtitle: "Nothing here matches \u{201C}\(query.trimmingCharacters(in: .whitespacesAndNewlines))\u{201D}"
+            )
+        ]
     }
 
     /// Everything the query found, before the tag narrows it — what the tag
@@ -386,7 +413,42 @@ struct CommandPaletteModel: Equatable {
     var found: [PaletteCommand] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
-        return commands.filter { $0.matches(trimmed.lowercased()) }
+        let needle = trimmed.lowercased()
+        let rows = commands.filter { $0.matches(needle) } + fileRows(matching: needle)
+        // Grouped rather than sorted: rows have to arrive in section order for
+        // the headings to be a walk instead of a sort, and the repository
+        // files join the files the editors already have open.
+        return PaletteSection.allCases.flatMap { section in rows.filter { $0.section == section } }
+    }
+
+    /// Repository files the query names, minus the ones an editor already has
+    /// open — those are rows already, and going to the open tab beats opening
+    /// the file a second time.
+    private func fileRows(matching needle: String) -> [PaletteCommand] {
+        guard let root = filesRoot else { return [] }
+        let open = Set(commands.compactMap { command -> String? in
+            if case let .openFile(path) = command.action { return path }
+            return nil
+        })
+        var rows: [PaletteCommand] = []
+        for relative in files where relative.lowercased().contains(needle) {
+            let path = root.appendingPathComponent(relative).path
+            guard !open.contains(path) else { continue }
+            let folder = (relative as NSString).deletingLastPathComponent
+            rows.append(
+                PaletteCommand(
+                    id: "file:\(path)",
+                    title: (relative as NSString).lastPathComponent,
+                    detail: nil,
+                    action: .openFile(path: path),
+                    keywords: relative,
+                    section: .files,
+                    subtitle: folder.isEmpty ? root.lastPathComponent : folder
+                )
+            )
+            if rows.count == Self.fileMatchLimit { break }
+        }
+        return rows
     }
 
     /// The tags under the field: `nil` — "All" — first, then every section
@@ -402,8 +464,10 @@ struct CommandPaletteModel: Equatable {
         return rows[selectedIndex]
     }
 
-    mutating func reset(commands: [PaletteCommand]) {
+    mutating func reset(commands: [PaletteCommand], files: [String] = [], filesRoot: URL? = nil) {
         self.commands = commands
+        self.files = files
+        self.filesRoot = filesRoot
         query = ""
         selectedIndex = 0
         selectedSection = nil

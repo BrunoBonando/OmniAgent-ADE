@@ -267,9 +267,13 @@ final class CommandPaletteTests: XCTestCase {
 
     func testNoSyntheticRowIsAppendedToWhatTheQueryFound() {
         var model = CommandPaletteModel(commands: sample)
-        model.update(query: "graph")
+        model.update(query: "pane")
 
-        XCTAssertEqual(model.matches, [], "nothing matched, so the list is empty — no 'Search brain for …' row")
+        XCTAssertEqual(
+            model.matches.map(\.id),
+            ["focus:a", "new-pane", "close-pane"],
+            "what the query matched and nothing else — no 'Search brain for …' row"
+        )
     }
 
     // MARK: - filtering and selection
@@ -454,12 +458,108 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(model.selectedIndex, model.matches.count - 1, "down at the bottom stays at the bottom")
     }
 
-    func testAQueryThatMatchesNothingShowsNothing() {
+    func testAQueryThatMatchesNothingSaysSo() {
         var model = CommandPaletteModel(commands: sample)
         model.update(query: "zzzz")
 
-        XCTAssertEqual(model.matches, [])
-        XCTAssertNil(model.selected)
+        XCTAssertEqual(model.matches.map(\.id), ["no-matches"], "the palette answers rather than refusing to grow")
+        XCTAssertEqual(model.matches.first?.subtitle, "Nothing here matches \u{201C}zzzz\u{201D}")
+        XCTAssertEqual(model.matches.first?.action, .noop)
+        XCTAssertEqual(model.found, [], "and it is not a match — the tags stay empty")
+
+        model.update(query: "")
+        XCTAssertEqual(model.matches, [], "an empty field is still just the bar")
+    }
+
+    func testANarrowedTagWithNothingLeftSaysSoToo() {
+        var model = CommandPaletteModel(commands: CommandPaletteModel.build(
+            panes: [
+                pane("t", project: "spot", group: "g1", label: "spotlight terminal"),
+                pane("w", project: "spot", group: "g1", label: "spotlight browser", kind: .browser),
+            ],
+            paneOrder: ["t", "w"],
+            focusedPaneID: nil,
+            unreadNotifications: 0
+        ))
+        model.update(query: "spotlight")
+        model.select(section: .files)
+
+        XCTAssertEqual(model.matches.map(\.id), ["no-matches"])
+    }
+
+    // MARK: - the repository's files
+
+    func testTheQueryFindsFilesTheEditorsHaveNotOpened() {
+        var model = CommandPaletteModel(
+            commands: sample,
+            files: ["src/token.swift", "docs/DESIGN.md", "README.md"],
+            filesRoot: URL(fileURLWithPath: "/repo")
+        )
+        model.update(query: "token")
+
+        XCTAssertEqual(model.matches.map(\.id), ["file:/repo/src/token.swift"])
+        XCTAssertEqual(model.matches.first?.title, "token.swift")
+        XCTAssertEqual(model.matches.first?.subtitle, "src", "where it is, the way every other row says where it is")
+        XCTAssertEqual(model.matches.first?.action, .openFile(path: "/repo/src/token.swift"))
+        XCTAssertEqual(model.matches.first?.section, .files)
+
+        model.update(query: "src/")
+        XCTAssertEqual(model.matches.map(\.id), ["file:/repo/src/token.swift"], "the path matches as well as the name")
+    }
+
+    func testAFileAlreadyOpenInAnEditorIsOneRowNotTwo() {
+        let open = CommandPaletteModel.build(
+            panes: [
+                pane(
+                    "ed",
+                    project: "alpha",
+                    group: "g1",
+                    kind: .editor,
+                    editorTabs: [PersistedEditorTab(path: "/repo/src/token.swift", kind: "file", pinned: true)]
+                )
+            ],
+            paneOrder: ["ed"],
+            focusedPaneID: "ed",
+            unreadNotifications: 0
+        )
+        var model = CommandPaletteModel(
+            commands: open,
+            files: ["src/token.swift"],
+            filesRoot: URL(fileURLWithPath: "/repo")
+        )
+        model.update(query: "token")
+
+        XCTAssertEqual(
+            model.matches.filter { $0.section == .files }.map(\.id),
+            ["file:/repo/src/token.swift"],
+            "the open tab wins — going to it beats opening the file a second time"
+        )
+    }
+
+    func testAFileSearchIsCappedAndSitsInItsOwnSection() {
+        var model = CommandPaletteModel(
+            commands: sample,
+            files: (0..<40).map { "src/pane\($0).swift" },
+            filesRoot: URL(fileURLWithPath: "/repo")
+        )
+        model.update(query: "pane")
+
+        let files = model.matches.filter { $0.section == .files }
+        XCTAssertEqual(files.count, CommandPaletteModel.fileMatchLimit, "a loose query is a query to narrow, not a directory listing")
+        XCTAssertEqual(
+            model.matches.map(\.section).reduce(into: [PaletteSection]()) { runs, section in
+                if runs.last != section { runs.append(section) }
+            },
+            [.files, .actions],
+            "one run per section, in the palette's own section order — Files before Actions"
+        )
+    }
+
+    func testWithNoRepositoryThereAreNoFileRows() {
+        var model = CommandPaletteModel(commands: sample, files: ["src/token.swift"], filesRoot: nil)
+        model.update(query: "token")
+
+        XCTAssertEqual(model.matches.map(\.id), ["no-matches"])
     }
 
     func testResetClearsTheQueryAndTheHighlightAlongWithTheList() {
