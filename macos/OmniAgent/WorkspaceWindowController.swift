@@ -155,6 +155,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// session exits and when the user closes it (`closePane`), so it holds
     /// only live panes; `private(set)` so the test that pins that can see it.
     private(set) var lastStatus: [String: RemoteSessionStatus] = [:]
+    /// `lastStatus` remembers *what*; this remembers *when* and *how often* —
+    /// when the current run of work began, how long a pane has been busy in
+    /// total, how many tools it has run. Only the sidebar's hover card reads
+    /// it, and nothing else in the app records it.
+    private(set) var activity = PaneActivityLedger()
+    /// The card itself. Owned here rather than by the sidebar because it is a
+    /// window, and a view cannot own one of those.
+    let hoverCard = SessionHoverCardController()
     let notifier: SessionNotifier
     /// The notification feed's two flags, for exactly the reasons the layout's
     /// two above exist.
@@ -372,6 +380,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.onRenamePane = { [weak self] paneID, name in
             self?.renamePane(paneID, to: name)
         }
+        shellSidebar.onHoverTarget = { [weak self] target in
+            guard let self else { return }
+            hoverCard.hover(target, in: window)
+        }
+        hoverCard.provider = { [weak self] target in self?.hoverCardModel(for: target) }
+        hoverCard.rowFrame = { [weak self] target in self?.shellSidebar.rowFrameOnScreen(for: target) }
         shellSidebar.onNewSession = { [weak self] in self?.newSession(nil) }
         shellSidebar.onNewTerminal = { [weak self] in
             guard let self else { return }
@@ -709,6 +723,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             }
             readySessions.remove(event.id)
             lastStatus.removeValue(forKey: event.id)
+            activity.forget(paneID: event.id)
             applySessionStatus("Session ended", for: event.id)
             workspace.setStatus(nil, for: event.id)
             reloadOutline()
@@ -1256,6 +1271,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // clears it for a session that ends on its own; this is the path
         // where the *user* closes the pane.
         lastStatus.removeValue(forKey: focused)
+        activity.forget(paneID: focused)
         workspace.closePane(focused)
     }
 
@@ -1413,6 +1429,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         readySessions.remove(paneID)
         sessionStatus.removeValue(forKey: paneID)
         lastStatus.removeValue(forKey: paneID)
+        activity.forget(paneID: paneID)
         workspace.closePane(paneID)
         let newID = UUID().uuidString
         guard addPane(
@@ -1694,6 +1711,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             killSession(id)
             readySessions.remove(id)
             lastStatus.removeValue(forKey: id)
+            activity.forget(paneID: id)
         }
     }
 
@@ -1918,12 +1936,52 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         return true
     }
 
+    /// What the sidebar's hover card shows for one row, assembled fresh every
+    /// tick. The window is the only place that holds all four sources at once
+    /// — the descriptor, the status, the activity ledger and the live pane —
+    /// so it assembles, and `HoverCardModel` owns the wording.
+    func hoverCardModel(for target: SessionHoverCardController.Target) -> HoverCardModel? {
+        let now = Date().timeIntervalSince1970 * 1000
+        switch target {
+        case .pane(let paneID):
+            guard let pane = workspace.descriptor(for: paneID) else { return nil }
+            return .pane(
+                pane,
+                status: lastStatus[paneID],
+                activity: activity.activity(for: paneID),
+                editor: workspace.editorPane(for: paneID)?.model,
+                tail: workspace.terminalSurface(for: paneID)?.lastOutputLine(),
+                now: now
+            )
+        case .session(let sessionID):
+            let all = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+            guard let node = SessionOutline.group(all, focusedPaneID: workspace.focusedPaneID)
+                .flatMap(\.sessions)
+                .first(where: { $0.id == sessionID })
+            else { return nil }
+            var byID: [String: PaneDescriptor] = [:]
+            for pane in all { byID[pane.sessionID] = pane }
+            return .session(
+                node,
+                panes: byID,
+                statuses: lastStatus,
+                ledger: activity,
+                now: now
+            )
+        }
+    }
+
     /// Turns one status event into the feed's decision. The window is the
     /// only place that knows the two "is the user looking at this" facts, so
     /// it assembles the context and `NotificationFeed` owns the rule.
     func recordNotification(for event: SessionStatusEvent) {
         let previous = lastStatus[event.id]
         lastStatus[event.id] = event.status
+        activity.record(
+            paneID: event.id,
+            status: event.status,
+            at: Date().timeIntervalSince1970 * 1000
+        )
         notifier.record(
             NotificationContext(
                 event: event,

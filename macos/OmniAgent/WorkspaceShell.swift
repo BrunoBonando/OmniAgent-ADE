@@ -728,6 +728,10 @@ class ShellRowView: NSView {
     /// Painted under the row on hover, unless the row is already selected.
     var hoverEnabled = true
     var hoverFill: NSColor = ShellPalette.hover
+    /// The pointer arriving (`true`) and leaving (`false`). The base class
+    /// already owns the tracking area every row needs for its hover fill, so
+    /// the sidebar's hover card rides along on it rather than adding a second.
+    var onHover: ((Bool) -> Void)?
     private(set) var isHovered = false
     private var tracking: NSTrackingArea?
 
@@ -748,11 +752,13 @@ class ShellRowView: NSView {
     override func mouseEntered(with event: NSEvent) {
         isHovered = true
         refreshBackground()
+        onHover?(true)
     }
 
     override func mouseExited(with event: NSEvent) {
         isHovered = false
         refreshBackground()
+        onHover?(false)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -1779,6 +1785,9 @@ final class SessionsTreeView: NSView {
     var onNewEditor: (() -> Void)?
     var onRenameSession: ((SessionGroupNode, String) -> Void)?
     var onRenamePane: ((String, String) -> Void)?
+    /// The pointer resting on a row, or leaving one (`nil`) — what raises the
+    /// hover card.
+    var onHoverTarget: ((SessionHoverCardController.Target?) -> Void)?
 
     private let countField = ShellFont.label(font: ShellFont.mono(12, .semibold), color: ShellPalette.inkFainter)
     private let rows = NSStackView()
@@ -1923,6 +1932,9 @@ final class SessionsTreeView: NSView {
                 }
             }
             row.onRename = { [weak self] name in self?.onRenameSession?(session, name) }
+            row.onHover = { [weak self] inside in
+                self?.onHoverTarget?(inside ? .session(session.id) : nil)
+            }
             rows.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
 
@@ -1936,6 +1948,9 @@ final class SessionsTreeView: NSView {
                 )
                 terminal.onPress = { [weak self] in self?.onSelectPane?(paneID) }
                 terminal.onRename = { [weak self] name in self?.onRenamePane?(paneID, name) }
+                terminal.onHover = { [weak self] inside in
+                    self?.onHoverTarget?(inside ? .pane(paneID) : nil)
+                }
                 rows.addArrangedSubview(terminal)
                 terminal.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
             }
@@ -1970,6 +1985,19 @@ final class SessionsTreeView: NSView {
             focusedPaneID: lastRender.focusedPaneID,
             statuses: lastRender.statuses
         )
+    }
+
+    /// The row a hover target names, in whatever the last `reload` built.
+    /// Looked up by id rather than remembered, because every status event
+    /// throws these rows away and makes new ones — a card holding the view it
+    /// opened over would be pointing at a corpse a second later.
+    func rowView(for target: SessionHoverCardController.Target) -> NSView? {
+        rows.arrangedSubviews.first { view in
+            switch target {
+            case .pane(let id): return (view as? TerminalRowView)?.paneID == id
+            case .session(let id): return (view as? SessionRowView)?.session.id == id
+            }
+        }
     }
 }
 
@@ -2556,6 +2584,9 @@ final class WorkspaceSidebarView: NSView {
     var onNewEditor: (() -> Void)?
     var onRenameSession: ((SessionGroupNode, String) -> Void)?
     var onRenamePane: ((String, String) -> Void)?
+    /// The sessions tree's hovers, forwarded to the controller — which owns
+    /// the hover card, because the card is a window and the sidebar is a view.
+    var onHoverTarget: ((SessionHoverCardController.Target?) -> Void)?
     var onOpenSettings: (() -> Void)?
     /// The FILES tree's `(url, pinned)`, forwarded to the controller.
     var onOpenFile: ((URL, Bool) -> Void)?
@@ -2639,6 +2670,7 @@ final class WorkspaceSidebarView: NSView {
         sessionsTree.onRenameSession = { [weak self] session, name in
             self?.onRenameSession?(session, name)
         }
+        sessionsTree.onHoverTarget = { [weak self] target in self?.onHoverTarget?(target) }
         for view in [track, picker, level2, accountRow] { view.translatesAutoresizingMaskIntoConstraints = false }
         addSubview(track)
         addSubview(accountRow)
@@ -2879,6 +2911,20 @@ final class WorkspaceSidebarView: NSView {
     }
 
     /// Everything the sessions half of Level 2 renders.
+    /// Where a hovered row sits on screen right now, or `nil` if it is gone or
+    /// slid off with Level 1. The hover card asks this every tick rather than
+    /// remembering a frame: the rows are rebuilt constantly, and the sidebar
+    /// itself slides.
+    func rowFrameOnScreen(for target: SessionHoverCardController.Target) -> NSRect? {
+        guard let row = sessionsTree.rowView(for: target),
+              let window = row.window,
+              row.superview != nil,
+              !row.isHiddenOrHasHiddenAncestor,
+              row.bounds.width > 0
+        else { return nil }
+        return window.convertToScreen(row.convert(row.bounds, to: nil))
+    }
+
     func reloadSessions(
         panes: [PaneDescriptor],
         focusedPaneID: String?,

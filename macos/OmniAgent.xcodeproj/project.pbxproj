@@ -31,6 +31,8 @@
 		12571DF89D0D4288891BDAFE /* EditorTabStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF6FC80108EE44A497708D9A /* EditorTabStripView.swift */; };
 		A14D8E2F5C7B41A69D3E0011 /* EditorTabDrag.swift in Sources */ = {isa = PBXBuildFile; fileRef = A14D8E2F5C7B41A69D3E0010 /* EditorTabDrag.swift */; };
 		10000000000000000000094 /* PaneApprovalBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000094 /* PaneApprovalBar.swift */; };
+		10000000000000000000097 /* SessionHoverCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000097 /* SessionHoverCardTests.swift */; };
+		10000000000000000000096 /* SessionHoverCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000096 /* SessionHoverCard.swift */; };
 		10000000000000000000095 /* PaneApprovalBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000095 /* PaneApprovalBarTests.swift */; };
 		10000000000000000000093 /* BrowserPanesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000093 /* BrowserPanesTests.swift */; };
 		100000000000000000000B1 /* EditorPaneModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000B1 /* EditorPaneModelTests.swift */; };
@@ -182,6 +184,8 @@
 		F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTabStripViewTests.swift; sourceTree = "<group>"; };
 		A14D8E2F5C7B41A69D3E0020 /* EditorTabDragTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTabDragTests.swift; sourceTree = "<group>"; };
 		20000000000000000000094 /* PaneApprovalBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBar.swift; sourceTree = "<group>"; };
+		20000000000000000000097 /* SessionHoverCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHoverCardTests.swift; sourceTree = "<group>"; };
+		20000000000000000000096 /* SessionHoverCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHoverCard.swift; sourceTree = "<group>"; };
 		20000000000000000000095 /* PaneApprovalBarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBarTests.swift; sourceTree = "<group>"; };
 		20000000000000000000000B /* WorkspaceWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowController.swift; sourceTree = "<group>"; };
 		20000000000000000000000C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -302,6 +306,7 @@
 				804C0D63AE9348399ED44B65 /* EditorWebView.swift */,
 				9C05BB92321E4D168F6F8F55 /* EditorPaneView.swift */,
 				20000000000000000000094 /* PaneApprovalBar.swift */,
+				20000000000000000000096 /* SessionHoverCard.swift */,
 				20000000000000000000000A /* TerminalSurfaceView.swift */,
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
 				20000000000000000000000C /* AppDelegate.swift */,
@@ -389,6 +394,7 @@
 				20000000000000000000041 /* DaemonPersistenceControllerTests.swift */,
 				20000000000000000000043 /* DaemonServiceRegistrarTests.swift */,
 				20000000000000000000051 /* WorkspaceShellTests.swift */,
+				20000000000000000000097 /* SessionHoverCardTests.swift */,
 				20000000000000000000061 /* WorkspaceFilesTests.swift */,
 				20000000000000000000071 /* EngineLauncherTests.swift */,
 			);
@@ -536,6 +542,7 @@
 				40187BB1C8BB496BBDF4129A /* EditorWebView.swift in Sources */,
 				8F133DE140464FFEBCA301BD /* EditorPaneView.swift in Sources */,
 				10000000000000000000094 /* PaneApprovalBar.swift in Sources */,
+				10000000000000000000096 /* SessionHoverCard.swift in Sources */,
 				100000000000000000000009 /* TerminalSurfaceView.swift in Sources */,
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
 				10000000000000000000000B /* AppDelegate.swift in Sources */,
@@ -617,6 +624,7 @@
 				10000000000000000000040 /* DaemonPersistenceControllerTests.swift in Sources */,
 				10000000000000000000042 /* DaemonServiceRegistrarTests.swift in Sources */,
 				10000000000000000000051 /* WorkspaceShellTests.swift in Sources */,
+				10000000000000000000097 /* SessionHoverCardTests.swift in Sources */,
 				10000000000000000000061 /* WorkspaceFilesTests.swift in Sources */,
 				10000000000000000000071 /* EngineLauncherTests.swift in Sources */,
 			);
@@ -660,7 +668,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 35;
+				CURRENT_PROJECT_VERSION = 7;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_TESTABILITY = YES;
@@ -675,7 +683,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 2026.8.18;
+				MARKETING_VERSION = 2026.8.19;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = digital.bruno.omniagent;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -691,7 +699,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 35;
+				CURRENT_PROJECT_VERSION = 7;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -705,7 +713,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 2026.8.18;
+				MARKETING_VERSION = 2026.8.19;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = digital.bruno.omniagent;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -761,7 +769,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 35;
+				CURRENT_PROJECT_VERSION = 7;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -775,7 +783,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 2026.8.18;
+				MARKETING_VERSION = 2026.8.19;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = "digital.bruno.omniagent.preview";
 				PRODUCT_NAME = "$(TARGET_NAME)";
