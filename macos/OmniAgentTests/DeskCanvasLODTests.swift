@@ -299,10 +299,15 @@ final class DeskCanvasLODTests: XCTestCase {
     ///
     /// The focus *ring* is untouched: which pane you will land on is still
     /// worth showing.
+    ///
+    /// The focused pane is the **active** session's, and the camera is then
+    /// moved off it — which is what `exitToCanvas` does. Focusing another
+    /// session's pane would no longer hold the camera still: since Task 7 that
+    /// is an *entry*, and it lands the session it names.
     func testNoCursorBlinksWhileTheCameraIsOutOnTheCanvas() throws {
         let workspace = makeCanvasWorkspace(sessions: 2, panesEach: 1)
-        workspace.focusPane("s1-p1")
-        let card = try XCTUnwrap(workspace.canvasRect(forGroup: "grp-1"))
+        workspace.focusPane("s2-p1")
+        let card = try XCTUnwrap(workspace.canvasRect(forGroup: "grp-2"))
 
         workspace.camera = DeskCamera.focus(
             on: card.insetBy(dx: -card.width * 4.5, dy: -card.height * 4.5),
@@ -310,8 +315,8 @@ final class DeskCanvasLODTests: XCTestCase {
         )
 
         XCTAssertFalse(workspace.camera.isIdentity, "the fixture must be off identity")
-        let focused = try XCTUnwrap(workspace.container(for: "s1-p1"))
-        XCTAssertEqual(workspace.focusedPaneID, "s1-p1", "focus is remembered, only the blink is off")
+        let focused = try XCTUnwrap(workspace.container(for: "s2-p1"))
+        XCTAssertEqual(workspace.focusedPaneID, "s2-p1", "focus is remembered, only the blink is off")
         XCTAssertTrue(focused.isFocused, "and the ring still says which pane it is")
         XCTAssertFalse(focused.isSelected)
         XCTAssertFalse(focused.terminalSurface.isSelected)
@@ -327,20 +332,21 @@ final class DeskCanvasLODTests: XCTestCase {
     /// file is correct again, and the pane is being typed into.
     func testTheFocusedPaneBlinksAgainOnceTheCameraHasLandedAtIdentity() throws {
         let workspace = makeCanvasWorkspace(sessions: 2, panesEach: 1)
-        workspace.focusPane("s1-p1")
-        let card = try XCTUnwrap(workspace.canvasRect(forGroup: "grp-1"))
+        // The active session's pane, for the reason the test above records.
+        workspace.focusPane("s2-p1")
+        let card = try XCTUnwrap(workspace.canvasRect(forGroup: "grp-2"))
         workspace.camera = DeskCamera.focus(
             on: card.insetBy(dx: -card.width * 4.5, dy: -card.height * 4.5),
             in: workspace.bounds
         )
-        XCTAssertFalse(try XCTUnwrap(workspace.container(for: "s1-p1")).isSelected)
+        XCTAssertFalse(try XCTUnwrap(workspace.container(for: "s2-p1")).isSelected)
 
         // Identity by construction — `isIdentity` is "scale exactly 1 and an
         // integral origin", which this is wherever the tidy tree put the cards.
         workspace.camera = DeskCamera(scale: 1, origin: .zero)
 
         XCTAssertTrue(workspace.camera.isIdentity)
-        let focused = try XCTUnwrap(workspace.container(for: "s1-p1"))
+        let focused = try XCTUnwrap(workspace.container(for: "s2-p1"))
         XCTAssertTrue(focused.isSelected)
         XCTAssertTrue(focused.terminalSurface.isSelected)
         XCTAssertEqual(focused.terminalSurface.terminalView.terminal.options.cursorStyle, .blinkBlock)

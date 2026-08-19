@@ -1154,6 +1154,222 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
     }
 
+    // MARK: - Desk canvas camera
+
+    /// The animation's key on this view's layer, named after the property it
+    /// animates the way `zoomLayer` keys by `animation.keyPath`.
+    static let cameraFlightKey = "sublayerTransform"
+
+    /// Which flight is current. Same discipline as `zoomTransitionToken`: a
+    /// completion does nothing unless the number it was given is still this one,
+    /// or an entry's completion lands a session the exit that followed it has
+    /// already flown away from.
+    private var cameraFlightToken = 0
+
+    /// The session this flight is an entry into, or `nil` for a flight that is
+    /// only a move — `fitAll`, a pan, a free zoom. Read once, on arrival.
+    private var pendingSessionEntry: String?
+
+    /// The pane a focus request is waiting on the flight for. `focusPane` cannot
+    /// focus across the canvas — the pane it wants is not on screen until the
+    /// camera gets there — so it names the pane and the landing does the rest.
+    private var pendingFocusPaneID: String?
+
+    /// Where the next flight begins when the presentation layer cannot answer.
+    /// Exactly `place`'s `start:` parameter and for exactly its reason: "a pane
+    /// that has just been reparented, whose presented position is still the one
+    /// it had in the view it left." Here it is a camera re-seated by a mode
+    /// change — the content moved into canvas coordinates this turn, and the
+    /// transform still presented belongs to the layout before it.
+    private var cameraFlightStart: DeskCamera?
+
+    /// What `fitAll` fits. `bounds` until the first canvas pass has run, so a
+    /// fit asked for before there is a canvas is a stationary camera rather than
+    /// a jump to nowhere.
+    var canvasContentRect: CGRect { canvasLayout?.contentRect ?? bounds }
+
+    /// Which session's card a canvas point falls in. A session node's id **is**
+    /// its group id — the same string `PaneDescriptor.group` and `activeGroup`
+    /// carry — so this is a lookup rather than a walk of the tree, and the
+    /// `grids` check is what keeps the root and workspace nodes out of it.
+    func sessionCard(containing point: CGPoint) -> String? {
+        canvasLayout?.frames
+            .first { grids[$0.key] != nil && $0.value.contains(point) }?
+            .key
+    }
+
+    /// The canvas's one animation, and the operation every way into and out of a
+    /// session resolves to: move the camera so a rect maps onto the viewport.
+    ///
+    /// The model value lands immediately and the *layer* is animated into it
+    /// from where it is presented — `place`'s discipline, for `place`'s reason:
+    /// everything downstream (hit testing, `canvasRect`, the next gesture) reads
+    /// the model, and only the eye reads the interpolation.
+    ///
+    /// A raw `CABasicAnimation`, never `NSView.animator()`, and `place` records
+    /// why: "The animator wraps each group's frame change in an
+    /// `_NSWindowTransformAnimation`, and instrumenting the transitions showed
+    /// two of those alive on one view whenever a second transition began inside
+    /// the first's 0.32s."
+    func flyCamera(to target: DeskCamera) {
+        // Before anything else, so a flight still in flight — animated or the
+        // instant Reduce Motion kind — can no longer land on this one's behalf.
+        cameraFlightToken += 1
+        let token = cameraFlightToken
+        // Read before the model moves: once `camera` is assigned the layer is
+        // already at the destination, and the presented value is the only record
+        // of where the eye currently is.
+        let from = cameraFlightStart?.transform
+            ?? layer?.presentation()?.sublayerTransform
+            ?? layer?.sublayerTransform
+            ?? CATransform3DIdentity
+        cameraFlightStart = nil
+        // Both ends of the flight stay on screen for its duration. `camera`'s
+        // setter re-derives the visible set, and it is assigned to the
+        // *destination* on frame one — so without this the card being left is
+        // hidden while the eye is still looking straight at it.
+        transitionViewport = camera.canvasViewport(in: bounds)
+            .union(target.canvasViewport(in: bounds))
+        camera = target
+        // Reduced motion still flies, it just lands instantly — and so does a
+        // flight in a view with no window, where, as `setZoomed` puts it, "an
+        // animation group's completion is not guaranteed to arrive at all.
+        // Sequencing the landing behind one that never comes would strand the
+        // transition half-done": here, a camera parked between two sessions with
+        // no pane accepting input.
+        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            finishCameraFlight(token)
+            return
+        }
+        let flight = CABasicAnimation(keyPath: Self.cameraFlightKey)
+        flight.fromValue = NSValue(caTransform3D: from)
+        flight.toValue = NSValue(caTransform3D: target.transform)
+        // The zoom's own duration and curve, so canvas zoom and pane focus zoom
+        // read as one system rather than as two animations that happen to be
+        // near each other.
+        flight.duration = Self.zoomTransitionDuration
+        flight.timingFunction = Self.zoomTimingFunction
+        layer?.add(flight, forKey: Self.cameraFlightKey)
+        // Scheduled rather than handed to the animation's delegate, for the same
+        // reason `setZoomed` schedules `finishZoomTransition`. A stale timer is
+        // harmless: `finishCameraFlight` refuses any token but the current one.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.zoomTransitionDuration) {
+            [weak self] in
+            self?.finishCameraFlight(token)
+        }
+    }
+
+    /// The end of one flight's 0.38s, gated on the token so it only ever acts
+    /// for the flight it was created by.
+    private func finishCameraFlight(_ token: Int) {
+        guard token == cameraFlightToken else { return }
+        // By key rather than `removeAllAnimations()`, following `landCard`:
+        // "these two are the only ones this code adds, and yanking whatever else
+        // a layer happens to be running is how you break something you did not
+        // write." This view's layer is the shell's too.
+        layer?.removeAnimation(forKey: Self.cameraFlightKey)
+        // The flight is over, so the union of its two ends stops being the
+        // visible set and the camera's own viewport takes over again.
+        transitionViewport = nil
+        // Gated on the pending entry rather than on `camera.isIdentity`: the two
+        // mean the same thing while the tidy tree places cards at integral
+        // origins, and if it ever does not, a flight that refused to land would
+        // strand the camera mid-air with nothing accepting input. The snap in
+        // `landSession` fixes the fraction either way.
+        guard let group = pendingSessionEntry else { return }
+        pendingSessionEntry = nil
+        landSession(group)
+    }
+
+    /// The end of an entry: the camera has arrived over one card at scale 1, and
+    /// the view goes back to the single-session layout it has always had. The
+    /// two are the same pixels — a card is exactly the viewport — so this is a
+    /// change of bookkeeping, not a cut.
+    ///
+    /// It is also the only way `sublayerTransform` becomes a true identity. A
+    /// card at canvas x=1600 leaves the camera's origin at -1600, and every
+    /// `event.locationInWindow` conversion in this file — the dividers, the hole
+    /// tiles, the header buttons, the editor-tab drop zones — is blind to that
+    /// translation. Panes accept input at identity and nowhere else, which is
+    /// why leaving `canvasMode` on here would not do: on the canvas the arriving
+    /// card is drawn at its node rect, so "identity" and "this card fills the
+    /// viewport" are the same picture only once normal mode has laid that card
+    /// out in `bounds` again.
+    private func landSession(_ group: String) {
+        guard grids[group] != nil else { return }
+        activeGroup = group
+        // Back to the single-session layout, which lays `activeGroup`'s grid out
+        // in `bounds` — the same pixels the camera is looking at this instant,
+        // since a card *is* the viewport. The setter re-seats the camera at the
+        // identity and drops the node rects with it.
+        canvasMode = false
+        camera = DeskCamera(scale: 1, origin: .zero)
+        // Explicitly, with actions off, so the snap is a snap: a residual scale
+        // of 1.0000001 left behind by the interpolation is what makes the text
+        // permanently soft.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.sublayerTransform = CATransform3DIdentity
+        CATransaction.commit()
+        updateVisibility()
+        updateLayout()
+        let requested = pendingFocusPaneID.flatMap {
+            grids[group]?.contains($0) == true ? $0 : nil
+        }
+        pendingFocusPaneID = nil
+        if let target = requested ?? paneIDs.first { focusPane(target) }
+        // Or the blink is left behind: "a focus-moving path that skips this
+        // helper leaves the blink behind the blur on a pane nobody can see, and
+        // reads as a cursor bug rather than a focus-mode one." Called from here
+        // rather than from `focusPane(_:)`, which `setZoomed` calls itself and
+        // would re-enter.
+        carryCardToFocusedPane()
+    }
+
+    /// One of the four ways in — a click on a card, a double-click, a session
+    /// shortcut, or a zoom that reaches identity over one card — and all four
+    /// are this: fly the camera so that card's rect maps onto the viewport, then
+    /// land.
+    func enterSession(_ group: String) {
+        guard grids[group] != nil else { return }
+        guard canvasMode else {
+            // Off the canvas the instant switch is still the right answer, and
+            // it is the one every existing caller and test expects.
+            activateGroup(group)
+            return
+        }
+        guard
+            bounds.width > 0, bounds.height > 0,
+            let card = canvasRect(forGroup: group)
+        else { return }
+        pendingSessionEntry = group
+        flyCamera(to: DeskCamera.focus(on: card, in: bounds))
+    }
+
+    /// The way out — ⌘0, Esc, or a pinch that went the other way — and the same
+    /// operation as the way in, aimed at `fitAll` instead of at one card.
+    func exitToCanvas() {
+        pendingSessionEntry = nil
+        pendingFocusPaneID = nil
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        if !canvasMode {
+            // Join the canvas *where the session already is*, so the mode change
+            // shows nothing: `canvasMode` lays every group out at its node rect,
+            // and this camera puts the one that was filling `bounds` back
+            // exactly where it was. Both happen in this turn, before CA commits,
+            // so no frame is ever drawn with the layout changed and the camera
+            // not — and the flight is told to start here rather than from the
+            // presented transform, which still belongs to the old layout.
+            canvasMode = true
+            if let group = activeGroup, let card = canvasRect(forGroup: group) {
+                let seat = DeskCamera.focus(on: card, in: bounds)
+                camera = seat
+                cameraFlightStart = seat
+            }
+        }
+        flyCamera(to: DeskCamera.fitAll(content: canvasContentRect, in: bounds))
+    }
+
     /// Removes a pane, reflowing the grid down a rung when the count drops. If
     /// the closed pane had focus, focus falls to its previous neighbour in fill
     /// order (its left/above sibling), else the next one.
@@ -1274,6 +1490,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // session rows and pane rows both already call through here, so
         // selecting either one switches sessions without a second code path.
         if activeGroup != group {
+            // On the canvas the session is flown to rather than swapped in
+            // underneath the user. The switch still happens — `landSession`
+            // does it when the camera arrives — so every caller still ends up
+            // with `sessionID` focused, one camera move later.
+            if canvasMode {
+                pendingFocusPaneID = sessionID
+                enterSession(group)
+                return
+            }
             activeGroup = group
             updateVisibility()
             updateLayout()
