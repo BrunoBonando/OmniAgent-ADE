@@ -26,6 +26,8 @@ struct RestoredPane: Equatable {
     /// `tab.group ?? UNGROUPED_SESSION_ID` reads it.
     let group: String
     let groupLabel: String?
+    let claudeColor: String
+    let copilotTheme: String
     /// What the pane holds. The shared `layout` row only ever describes
     /// terminals; a `.browser` or `.editor` pane restores from its own
     /// native-only row.
@@ -49,6 +51,8 @@ struct RestoredPane: Equatable {
         themeId: TerminalThemeId?,
         group: String,
         groupLabel: String?,
+        claudeColor: String = "default",
+        copilotTheme: String = "auto",
         kind: PaneKind = .terminal,
         browserURL: String = "",
         editorTabs: [PersistedEditorTab] = [],
@@ -63,6 +67,8 @@ struct RestoredPane: Equatable {
         self.themeId = themeId
         self.group = group
         self.groupLabel = groupLabel
+        self.claudeColor = claudeColor
+        self.copilotTheme = copilotTheme
         self.kind = kind
         self.browserURL = browserURL
         self.editorTabs = editorTabs
@@ -131,7 +137,9 @@ enum WorkspaceRestoration {
                 label: tab.label,
                 themeId: tab.themeId,
                 group: tab.group ?? ungroupedSessionID,
-                groupLabel: tab.groupLabel
+                groupLabel: tab.groupLabel,
+                claudeColor: tab.claudeColor ?? "default",
+                copilotTheme: tab.copilotTheme ?? "auto"
             )
         }
     }
@@ -184,7 +192,9 @@ enum WorkspaceRestoration {
                 // The ungrouped sentinel is the *absence* of a group, and
                 // the web build stores absence by omitting the field.
                 group: pane.group == ungroupedSessionID ? nil : pane.group,
-                groupLabel: pane.groupLabel
+                groupLabel: pane.groupLabel,
+                claudeColor: pane.claudeColor == "default" ? nil : pane.claudeColor,
+                copilotTheme: pane.copilotTheme == "auto" ? nil : pane.copilotTheme
             )
         }
     }

@@ -32,6 +32,7 @@ struct PaneDescriptor: Equatable {
     /// The active `/color` name for a Claude terminal. Sent as a slash command
     /// and reflected back here so the header's color badge stays in sync.
     var claudeColor: String = "default"
+    var copilotTheme: String = "auto"
     /// Which "Claude 2" this terminal is, within its session. Derived on the
     /// way in and never persisted — the number is a placeholder, and storing
     /// it would make it outlive the moment it is useful for.
@@ -57,6 +58,8 @@ struct PaneDescriptor: Equatable {
         cwd: String = "",
         label: String? = nil,
         themeId: TerminalThemeId? = nil,
+        claudeColor: String = "default",
+        copilotTheme: String = "auto",
         kind: PaneKind = .terminal,
         browserURL: String = "",
         editorTabs: [PersistedEditorTab] = [],
@@ -71,6 +74,8 @@ struct PaneDescriptor: Equatable {
         self.cwd = cwd
         self.label = label
         self.themeId = themeId
+        self.claudeColor = claudeColor
+        self.copilotTheme = copilotTheme
         self.kind = kind
         self.browserURL = browserURL
         self.editorTabs = editorTabs
@@ -90,6 +95,8 @@ struct PaneDescriptor: Equatable {
             cwd: pane.cwd,
             label: pane.label,
             themeId: pane.themeId,
+            claudeColor: pane.claudeColor,
+            copilotTheme: pane.copilotTheme,
             kind: pane.kind,
             browserURL: pane.browserURL,
             editorTabs: pane.editorTabs,
@@ -206,6 +213,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     var onRequestRenamePane: ((String) -> Void)?
     /// The header's color badge clicked on a Claude pane — open the color menu.
     var onRequestColorMenu: ((String, NSView) -> Void)?
+    var onRequestThemeMenu: ((String, NSView) -> Void)?
     /// The header's engine badge, clicked — same shape as the old ⋯ menu, and for
     /// the same reason: which engines exist and what swapping one costs is
     /// the window controller's business, not this view's.
@@ -1872,6 +1880,11 @@ final class PaneContainerView: NSView, NSDraggingSource {
             self.workspace?.focusPane(self.paneID)
             self.workspace?.onRequestColorMenu?(self.paneID, anchor)
         }
+        header.onThemeMenuRequested = { [weak self] anchor in
+            guard let self else { return }
+            self.workspace?.focusPane(self.paneID)
+            self.workspace?.onRequestThemeMenu?(self.paneID, anchor)
+        }
         header.onEngineMenuRequested = { [weak self] anchor in
             guard let self else { return }
             self.workspace?.focusPane(self.paneID)
@@ -2141,6 +2154,9 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // Color badge: only Claude terminals support `/color`.
         header.claudeColor = descriptor.kind == .terminal && descriptor.engine == .claude
             ? descriptor.claudeColor : nil
+        // Copilot theme badge: only Copilot terminals support `/theme`.
+        header.copilotTheme = descriptor.kind == .terminal && descriptor.engine == .copilot
+            ? descriptor.copilotTheme : nil
         // Its session's name is half the focus subtitle, so a rename has to
         // reach the bar. A no-op unless this pane is the zoomed one.
         header.refreshSubtitle()
@@ -2441,8 +2457,6 @@ final class PaneHeaderView: NSView {
     /// The pencil button — fires when the user clicks ✏️ to rename. The bar
     /// builds no dialog itself; the window controller owns the prompt.
     var onRenameRequested: (() -> Void)?
-    /// The color badge, clicked — opens the Claude color picker menu.
-    var onColorMenuRequested: ((NSView) -> Void)?
     /// The engine badge, clicked — the badge says which agent drives this
     /// PTY, so it is also where you change it.
     var onEngineMenuRequested: ((NSView) -> Void)?
@@ -2483,6 +2497,31 @@ final class PaneHeaderView: NSView {
         }
     }
 
+    /// The active Copilot theme for this terminal, or `nil` when the pane does
+    /// not run Copilot. Setting it shows/hides and updates the theme badge.
+    var copilotTheme: String? {
+        didSet {
+            guard copilotTheme != oldValue else { return }
+            themeBadge.isHidden = copilotTheme == nil
+            if let copilotTheme {
+                themeBadge.configure(
+                    icon: PaneHeaderView.themeIcon(for: copilotTheme),
+                    text: "",
+                    foreground: NSColor(white: 1, alpha: 0.55),
+                    fill: NSColor(white: 1, alpha: 0.07),
+                    stroke: .clear,
+                    font: ShellFont.ui(12, .medium)
+                )
+            }
+            needsLayout = true
+        }
+    }
+
+    /// The color badge, clicked — opens the Claude color picker menu.
+    var onColorMenuRequested: ((NSView) -> Void)?
+    /// The theme badge, clicked — opens the Copilot theme picker menu.
+    var onThemeMenuRequested: ((NSView) -> Void)?
+
     /// A 10×10 filled circle in the colour `/color` uses for this name.
     static func colorDotImage(for color: String) -> NSImage {
         let fill: NSColor
@@ -2500,6 +2539,41 @@ final class PaneHeaderView: NSView {
         return NSImage(size: NSSize(width: 10, height: 10), flipped: false) { rect in
             fill.setFill()
             NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5)).fill()
+            return true
+        }
+    }
+
+    /// A 10×10 icon representing the theme mode.
+    static func themeIcon(for theme: String) -> NSImage {
+        NSImage(size: NSSize(width: 10, height: 10), flipped: false) { rect in
+            let r = rect.insetBy(dx: 0.5, dy: 0.5)
+            switch theme {
+            case "light":
+                NSColor(white: 0.92, alpha: 1).setFill()
+                NSBezierPath(ovalIn: r).fill()
+                NSColor(white: 0.6, alpha: 0.5).setStroke()
+                let path = NSBezierPath(ovalIn: r.insetBy(dx: 0.25, dy: 0.25))
+                path.lineWidth = 0.5
+                path.stroke()
+            case "dark":
+                NSColor(white: 0.18, alpha: 1).setFill()
+                NSBezierPath(ovalIn: r).fill()
+                NSColor(white: 1, alpha: 0.2).setStroke()
+                let path = NSBezierPath(ovalIn: r.insetBy(dx: 0.25, dy: 0.25))
+                path.lineWidth = 0.5
+                path.stroke()
+            default: // "auto"
+                let full = NSBezierPath(ovalIn: r)
+                full.addClip()
+                NSColor(white: 0.18, alpha: 1).setFill()
+                NSRect(x: r.minX, y: r.minY, width: r.width / 2, height: r.height).fill()
+                NSColor(white: 0.92, alpha: 1).setFill()
+                NSRect(x: r.midX, y: r.minY, width: r.width / 2, height: r.height).fill()
+                NSColor(white: 0.5, alpha: 0.3).setStroke()
+                let path = NSBezierPath(ovalIn: r.insetBy(dx: 0.25, dy: 0.25))
+                path.lineWidth = 0.5
+                path.stroke()
+            }
             return true
         }
     }
@@ -2547,6 +2621,10 @@ final class PaneHeaderView: NSView {
     private let engineBadge = PaneBadgeView()
     /// Color dot + chevron badge shown on Claude panes — opens the `/color` menu.
     private let colorBadge = PaneBadgeView()
+    /// Theme badge shown on Copilot panes — opens the `/theme` menu.
+    private let themeBadge = PaneBadgeView()
+    /// Thin vertical rule between the badge group and the traffic-light cluster.
+    private let clusterSeparator = PaneHeaderSeparatorView()
     /// ✏️ button shown immediately after the title — tap to rename the conversation.
     private let renamePencilButton = PanePencilButton()
     /// The cluster, in the order it reads: yellow restores the pane from a
@@ -2581,11 +2659,16 @@ final class PaneHeaderView: NSView {
         subtitleLabel.isHidden = true
         engineBadge.isHidden = true
         colorBadge.isHidden = true
+        themeBadge.isHidden = true
         renamePencilButton.isHidden = true
         renamePencilButton.onClick = { [weak self] in self?.onRenameRequested?() }
         colorBadge.onClick = { [weak self] in
             guard let self else { return }
             self.onColorMenuRequested?(self.colorBadge)
+        }
+        themeBadge.onClick = { [weak self] in
+            guard let self else { return }
+            self.onThemeMenuRequested?(self.themeBadge)
         }
         zoomButton.onClick = { [weak self] in self?.onZoomRequested?() }
         // The same toggle, reached from the other side: yellow is live only
@@ -2598,8 +2681,8 @@ final class PaneHeaderView: NSView {
         // Added left to right, the order they are laid out in, so the subview
         // order a reader — or a test — walks is the order on screen.
         let views: [NSView] = [
-            mark, titleLabel, renamePencilButton, subtitleLabel, colorBadge, engineBadge,
-            restoreButton, zoomButton, closeButton,
+            mark, titleLabel, renamePencilButton, subtitleLabel, themeBadge, colorBadge, engineBadge,
+            clusterSeparator, restoreButton, zoomButton, closeButton,
         ]
         for view in views { addSubview(view) }
         // Same reason the surface applies its cursor state up front: the header
@@ -2721,11 +2804,23 @@ final class PaneHeaderView: NSView {
             )
         }
 
+        // Separator between the cluster and the right-side badges — 6pt air
+        // on each side so it reads as a divider, not a smudge.
+        let sepHeight: CGFloat = 12
+        right -= 6
+        clusterSeparator.frame = CGRect(
+            x: right - 1,
+            y: (bounds.height - sepHeight) / 2,
+            width: 1,
+            height: sepHeight
+        )
+        right -= 7  // 1pt separator + 6pt gap to badges
+
         let titleLeft = mark.frame.maxX + gap
         let minimumTitleWidth: CGFloat = 40
         // Color badge (Claude only) sits left of the engine badge, same as the
         // old branch badge — it drops before the engine if there is no room.
-        for badge in [colorBadge, engineBadge] where !badge.isHidden {
+        for badge in [themeBadge, colorBadge, engineBadge] where !badge.isHidden {
             let size = badge.intrinsicContentSize
             let candidate = right - gap - size.width
             guard candidate - titleLeft >= minimumTitleWidth else {
@@ -3136,6 +3231,19 @@ final class PanePencilButton: NSView {
             withAttributes: attrs
         )
     }
+}
+
+/// A thin vertical hairline between the badge group and the traffic-light
+/// cluster, so the two areas read as distinct regions without heavy chrome.
+private final class PaneHeaderSeparatorView: NSView {
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(white: 1, alpha: 0.12).cgColor
+        setAccessibilityElement(false)
+    }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 }
 
 /// The glass a zoomed pane sits on: one panel the size of the window, with the

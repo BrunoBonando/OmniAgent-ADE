@@ -57,6 +57,8 @@ struct PersistedTab: Equatable {
     var themeId: TerminalThemeId?
     var group: String?
     var groupLabel: String?
+    var claudeColor: String?
+    var copilotTheme: String?
 
     init(
         project: String,
@@ -66,7 +68,9 @@ struct PersistedTab: Equatable {
         label: String? = nil,
         themeId: TerminalThemeId? = nil,
         group: String? = nil,
-        groupLabel: String? = nil
+        groupLabel: String? = nil,
+        claudeColor: String? = nil,
+        copilotTheme: String? = nil
     ) {
         self.project = project
         self.engine = engine
@@ -76,6 +80,8 @@ struct PersistedTab: Equatable {
         self.themeId = themeId
         self.group = group
         self.groupLabel = groupLabel
+        self.claudeColor = claudeColor
+        self.copilotTheme = copilotTheme
     }
 }
 
@@ -143,6 +149,8 @@ enum PersistedLayoutCodec {
                 dict["groupLabel"] = trimmed
             }
         }
+        if let v = tab.claudeColor { dict["claudeColor"] = v }
+        if let v = tab.copilotTheme { dict["copilotTheme"] = v }
         return dict
     }
 
@@ -225,7 +233,9 @@ enum PersistedLayoutCodec {
             label: dict["label"] as? String,
             themeId: themeId,
             group: group,
-            groupLabel: groupLabel
+            groupLabel: groupLabel,
+            claudeColor: dict["claudeColor"] as? String,
+            copilotTheme: dict["copilotTheme"] as? String
         )
     }
 }

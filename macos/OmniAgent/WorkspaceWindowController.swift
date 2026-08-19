@@ -354,6 +354,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 in: anchor
             )
         }
+        workspace.onRequestThemeMenu = { [weak self] _, anchor in
+            guard let self else { return }
+            self.copilotThemeMenu().popUp(
+                positioning: nil,
+                at: NSPoint(x: 0, y: anchor.bounds.maxY + 4),
+                in: anchor
+            )
+        }
         workspace.onRequestEngineMenu = { [weak self] paneID, anchor in
             guard let self else { return }
             engineMenu(for: paneID).popUp(
@@ -1523,6 +1531,33 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.terminalSurface(for: paneID)?.sendInput("/color \(color)\r")
         // Reflect the choice back to the descriptor so the header badge updates.
         workspace.updateDescriptor(for: paneID) { $0.claudeColor = color }
+    }
+
+    /// The `/theme` modes Copilot CLI accepts.
+    static let copilotThemes = ["auto", "dark", "light"]
+
+    func copilotThemeMenu() -> NSMenu {
+        let menu = NSMenu()
+        for theme in Self.copilotThemes {
+            let item = NSMenuItem(
+                title: theme.capitalized,
+                action: #selector(changeCopilotTheme(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = theme
+            item.image = PaneHeaderView.themeIcon(for: theme).copy() as? NSImage
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc func changeCopilotTheme(_ sender: Any?) {
+        guard let theme = (sender as? NSMenuItem)?.representedObject as? String,
+              let paneID = workspace.focusedPaneID,
+              workspace.descriptor(for: paneID)?.engine == .copilot
+        else { return }
+        workspace.terminalSurface(for: paneID)?.sendInput("/theme \(theme)\r")
+        workspace.updateDescriptor(for: paneID) { $0.copilotTheme = theme }
     }
 
     /// Where the new conversation name comes from. `nil` means "ask with an
