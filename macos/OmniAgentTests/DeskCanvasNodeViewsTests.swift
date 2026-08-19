@@ -71,4 +71,56 @@ final class DeskCanvasNodeViewsTests: XCTestCase {
 
         XCTAssertTrue(DeskCanvasEdgeLayer.path(for: layout).isEmpty, "nothing to draw, nothing drawn")
     }
+
+    /// The camera is a `sublayerTransform`, which scales the stroke along with
+    /// everything else: at `fitAll` a 1pt line is 0.2pt, under one device pixel,
+    /// and the connectors fade out exactly when the tree is the only thing on
+    /// screen. The width is divided back out.
+    func testTheConnectorStrokeIsDividedBackOutOfTheCameraScale() {
+        let layout = DeskCanvasLayout(
+            frames: [
+                "a": CGRect(x: 0, y: 0, width: 100, height: 40),
+                "b": CGRect(x: 0, y: 100, width: 100, height: 40),
+            ],
+            edges: [DeskEdge(from: "a", to: "b")],
+            contentRect: CGRect(x: 0, y: 0, width: 100, height: 140)
+        )
+        let edgeLayer = DeskCanvasEdgeLayer()
+
+        edgeLayer.apply(layout, scale: 1)
+        XCTAssertEqual(edgeLayer.lineWidth, DeskCanvasEdgeLayer.strokeWidth, accuracy: 0.001)
+
+        edgeLayer.apply(layout, scale: 0.2)
+        XCTAssertEqual(
+            edgeLayer.lineWidth,
+            DeskCanvasEdgeLayer.strokeWidth / 0.2,
+            accuracy: 0.001,
+            "five times as wide in canvas units, one point on screen"
+        )
+
+        edgeLayer.apply(layout, scale: 0)
+        XCTAssertEqual(edgeLayer.lineWidth, DeskCanvasEdgeLayer.strokeWidth, accuracy: 0.001, "no divide by zero")
+    }
+
+    /// `CAShapeLayer` animates `path` and `lineWidth` implicitly, and the camera
+    /// changes `lineWidth` on every frame of a pinch.
+    func testTheEdgeLayerRefusesImplicitAnimationsOnEveryKey() {
+        let edgeLayer = DeskCanvasEdgeLayer()
+        for key in ["path", "lineWidth", "strokeColor", "position"] {
+            XCTAssertTrue(
+                edgeLayer.action(forKey: key) is NSNull,
+                "\(key) must not animate itself sixty times a second"
+            )
+        }
+    }
+
+    /// Core Animation copies a layer through `init(layer:)` to build the
+    /// presentation layer. A subclass that does not implement it gets a copy
+    /// with none of its own state — and the presentation layer is what is on
+    /// screen during any animation the canvas runs over it.
+    func testTheEdgeLayerSurvivesCoreAnimationsCopyInitializer() {
+        let original = DeskCanvasEdgeLayer()
+        let copy = DeskCanvasEdgeLayer(layer: original)
+        XCTAssertTrue(copy.action(forKey: "path") is NSNull, "the copy is still a DeskCanvasEdgeLayer")
+    }
 }
