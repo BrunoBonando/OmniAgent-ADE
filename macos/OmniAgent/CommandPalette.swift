@@ -118,12 +118,10 @@ struct PaletteCommand: Equatable {
 /// The ⌘K palette's contents and filtering — the native port of
 /// `ui/src/components/CommandPalette.tsx`'s action list.
 ///
-/// **Brain search.** Task 6a-2 routed `search_brain` through the daemon, so
-/// the row Task 6b-1 deliberately left out ("it comes back when the query
-/// does") is back: `matches` appends a synthetic "Search brain for …" row
-/// whenever the query is non-empty. Running it is `WorkspaceWindowController`'s
-/// job (same split every other action already has) — this model only ever
-/// describes the row, never calls `SessionConnection.search` itself.
+/// **No brain-search row.** The list is what the query matched and nothing
+/// else — the synthetic "Search brain for …" row is gone (2026-08-19). The
+/// `.searchBrain` action and `WorkspaceWindowController`'s handler for it
+/// remain, with nothing offering them.
 struct CommandPaletteModel: Equatable {
     private(set) var commands: [PaletteCommand]
     private(set) var query = ""
@@ -374,8 +372,9 @@ struct CommandPaletteModel: Equatable {
     ///
     /// Order is preserved and matching is a case-insensitive substring,
     /// deliberately not a fuzzy score: the list is short and stable ordering
-    /// is what makes muscle memory work. A non-empty query always ends with
-    /// the "Search brain for …" row, whether or not anything else matched.
+    /// is what makes muscle memory work. What the query does not match is
+    /// simply not there — no synthetic trailing row offering to search
+    /// something else.
     var matches: [PaletteCommand] {
         guard let section = selectedSection else { return found }
         return found.filter { $0.section == section }
@@ -387,18 +386,7 @@ struct CommandPaletteModel: Equatable {
     var found: [PaletteCommand] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
-        let needle = trimmed.lowercased()
-        var rows = commands.filter { $0.matches(needle) }
-        rows.append(
-            PaletteCommand(
-                id: "search-brain",
-                title: "Search brain for \u{201C}\(trimmed)\u{201D}",
-                detail: nil,
-                action: .searchBrain(query: trimmed),
-                section: .brain
-            )
-        )
-        return rows
+        return commands.filter { $0.matches(trimmed.lowercased()) }
     }
 
     /// The tags under the field: `nil` — "All" — first, then every section

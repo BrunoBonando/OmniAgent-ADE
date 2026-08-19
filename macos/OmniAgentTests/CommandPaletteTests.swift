@@ -265,17 +265,11 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(with.first { $0.action == .showAllChanges }?.title, "Show all changes")
     }
 
-    // MARK: - brain search (Task 6a-2/6b-2)
-
-    func testTheSearchBrainRowIsAbsentWithNoQueryAndAppearsOnceThereIsOne() {
+    func testNoSyntheticRowIsAppendedToWhatTheQueryFound() {
         var model = CommandPaletteModel(commands: sample)
-        XCTAssertNil(model.matches.first { $0.id == "search-brain" }, "no query, nothing to search for yet")
-
         model.update(query: "graph")
-        let row = model.matches.first { $0.id == "search-brain" }
-        XCTAssertEqual(row?.title, "Search brain for \u{201C}graph\u{201D}")
-        XCTAssertEqual(row?.action, .searchBrain(query: "graph"))
-        XCTAssertEqual(model.matches.last?.id, "search-brain", "always trails the real matches")
+
+        XCTAssertEqual(model.matches, [], "nothing matched, so the list is empty — no 'Search brain for …' row")
     }
 
     // MARK: - filtering and selection
@@ -287,8 +281,7 @@ final class CommandPaletteTests: XCTestCase {
 
         XCTAssertEqual(
             model.matches.map(\.id),
-            ["focus:a", "new-pane", "close-pane", "search-brain"],
-            "a non-empty query always trails with the search-brain row too"
+            ["focus:a", "new-pane", "close-pane"]
         )
     }
 
@@ -390,9 +383,8 @@ final class CommandPaletteTests: XCTestCase {
         model.update(query: "spotlight")
 
         // "All" first, then only what was found — never a category with
-        // nothing behind it. `.brain` is there because a query always offers
-        // the brain-search row.
-        XCTAssertEqual(model.sectionTags, [nil, .terminals, .browsers, .brain])
+        // nothing behind it.
+        XCTAssertEqual(model.sectionTags, [nil, .terminals, .browsers])
     }
 
     func testChoosingATagNarrowsTheListButNeverTheTags() {
@@ -410,7 +402,7 @@ final class CommandPaletteTests: XCTestCase {
 
         XCTAssertEqual(model.matches.map(\.id), ["focus:w"])
         XCTAssertEqual(
-            model.sectionTags, [nil, .terminals, .browsers, .brain],
+            model.sectionTags, [nil, .terminals, .browsers],
             "the tags come from what the query found, so filtering can never hide the tag back to All"
         )
     }
@@ -423,16 +415,14 @@ final class CommandPaletteTests: XCTestCase {
             unreadNotifications: 0
         ))
         model.update(query: "spotlight")
-        XCTAssertEqual(model.sectionTags, [nil, .browsers, .brain])
+        XCTAssertEqual(model.sectionTags, [nil, .browsers])
 
         model.cycleSection(by: 1)
         XCTAssertEqual(model.selectedSection, .browsers)
         model.cycleSection(by: 1)
-        XCTAssertEqual(model.selectedSection, .brain)
-        model.cycleSection(by: 1)
         XCTAssertNil(model.selectedSection, "⇥ wraps around a short, closed ring")
         model.cycleSection(by: -1)
-        XCTAssertEqual(model.selectedSection, .brain, "and ⇧⇥ goes back the other way")
+        XCTAssertEqual(model.selectedSection, .browsers, "and ⇧⇥ goes back the other way")
 
         // Refine the query past the browser and the tag it stood on is gone —
         // holding it would filter the list to nothing with no way back.
@@ -464,12 +454,12 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(model.selectedIndex, model.matches.count - 1, "down at the bottom stays at the bottom")
     }
 
-    func testAQueryThatMatchesNoActionStillOffersTheSearchBrainRow() {
+    func testAQueryThatMatchesNothingShowsNothing() {
         var model = CommandPaletteModel(commands: sample)
         model.update(query: "zzzz")
 
-        XCTAssertEqual(model.matches.map(\.id), ["search-brain"], "nothing to switch to, but always something to search for")
-        XCTAssertEqual(model.selected?.action, .searchBrain(query: "zzzz"))
+        XCTAssertEqual(model.matches, [])
+        XCTAssertNil(model.selected)
     }
 
     func testResetClearsTheQueryAndTheHighlightAlongWithTheList() {
@@ -563,18 +553,6 @@ final class CommandPaletteTests: XCTestCase {
         )
     }
 
-    func testTheBrainSearchRowIsItsOwnTrailingSection() {
-        var model = CommandPaletteModel(commands: CommandPaletteModel.build(
-            panes: [pane("a", project: "alpha", group: "g1")],
-            paneOrder: ["a"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
-        ))
-        model.update(query: "alpha")
-
-        XCTAssertEqual(model.matches.last?.section, .brain)
-    }
-
     // MARK: - the panel
 
     func testThePanelRunsTheHighlightedRowAndClosesFirst() {
@@ -606,7 +584,7 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(controller.model.matches, [], "a fresh open is an empty query, and an empty query shows nothing")
         XCTAssertEqual(controller.model.selectedIndex, 0)
         controller.setQuery("pane")
-        XCTAssertEqual(controller.model.matches.map(\.id), ["new-pane", "search-brain"])
+        XCTAssertEqual(controller.model.matches.map(\.id), ["new-pane"])
         controller.dismiss()
     }
 
@@ -637,6 +615,29 @@ final class CommandPaletteTests: XCTestCase {
 
         XCTAssertEqual(controller.window?.frame.maxY ?? 0, top, accuracy: 0.5)
         controller.dismiss()
+    }
+
+    func testAClickOnTheScrimClosesTheSpotlight() throws {
+        let scrim = SpotlightScrimWindow()
+        var clicks = 0
+        scrim.onClick = { clicks += 1 }
+        let catcher = try XCTUnwrap(scrim.contentView)
+        let click = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: 5, y: 5),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: scrim.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+
+        XCTAssertTrue(catcher.acceptsFirstMouse(for: click), "the scrim's window is never key, so the click must count anyway")
+        catcher.mouseDown(with: click)
+
+        XCTAssertEqual(clicks, 1)
     }
 
     // MARK: - the glass

@@ -102,6 +102,9 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
+        // `.bezelBorder` is the default and it drew a hairline rectangle
+        // around the results — a box inside the glass panel's rounded edge.
+        scrollView.borderType = .noBorder
         scrollView.automaticallyAdjustsContentInsets = false
 
         tagBar.onSelect = { [weak self] section in
@@ -694,6 +697,11 @@ private final class ScrimClickView: NSView {
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is unavailable")
     }
+
+    /// The scrim's window can never be key, so without this the click that
+    /// should close the spotlight is swallowed activating a window that
+    /// refuses to activate.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) { onClick() }
 }
