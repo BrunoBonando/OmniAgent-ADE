@@ -3087,10 +3087,12 @@ final class PaneAskOverlayView: NSView {
         }
         if #available(macOS 26.0, *) {
             let pane = NSGlassEffectView()
-            pane.style = .regular
-            // The one flat tint in here: the pane behind the question keeps its
-            // shape and loses its detail, which is what a scrim is for.
-            pane.tintColor = NSColor(srgbRed: 0.05, green: 0.08, blue: 0.22, alpha: 0.38)
+            // `.clear`, untinted — the same call focus mode makes, for the same
+            // reason: the pane behind the question is glassed, not coloured and
+            // not dimmed. A tint here is a wash over everything behind the
+            // panel, which puts the card's navy on the surroundings too.
+            pane.style = .clear
+            pane.tintColor = nil
             scrim = pane
             let card = NSGlassEffectView()
             card.style = .regular
@@ -3234,7 +3236,8 @@ final class PaneAskOverlayView: NSView {
         // panels present this would be painting *behind* them, and the scrim
         // samples the window backing — so it would darken its own input.
         guard scrim == nil else { return }
-        NSColor(srgbRed: 0.03, green: 0.05, blue: 0.13, alpha: 0.72).setFill()
+        // Neutral, not navy: only the card is tinted.
+        NSColor(white: 0, alpha: 0.62).setFill()
         bounds.fill()
         let card = NSBezierPath(
             roundedRect: cardFrame,

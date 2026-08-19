@@ -17,6 +17,48 @@ final class NativeTerminalView: TerminalView, NSMenuItemValidation {
     /// rather than being spent on raising the window.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// ⇧⏎ must insert a newline in a coding agent's prompt, not submit it.
+    /// AppKit maps ⏎ and ⇧⏎ to the same `insertNewline:` command, so SwiftTerm
+    /// sent a bare CR for both and every agent read ⇧⏎ as "send".
+    /// Taken here rather than in `keyDown`, which SwiftTerm declares `public`
+    /// (not `open`) and so cannot be overridden from this module.
+    /// `performKeyEquivalent` runs before the key event is delivered to the
+    /// first responder, and reaches every view in the window — hence the
+    /// focus check.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard window?.firstResponder === self,
+              let bytes = Self.overrideBytes(
+                  keyCode: event.keyCode,
+                  modifiers: event.modifierFlags,
+                  kittyActive: !(terminal?.keyboardEnhancementFlags.isEmpty ?? true)
+              )
+        else { return super.performKeyEquivalent(with: event) }
+        send(bytes)
+        return true
+    }
+
+    /// ESC CR is what Claude Code's own `/terminal-setup` writes into iTerm2
+    /// and VS Code for ⇧⏎, and it is byte-identical to ⌥⏎, which already
+    /// works here — so one sequence covers every agent that accepts either.
+    ///
+    /// When the app has switched on the kitty keyboard protocol it asked to
+    /// see modifiers itself, and SwiftTerm already encodes ⇧⏎ as CSI 13;2u.
+    static func overrideBytes(
+        keyCode: UInt16,
+        modifiers: NSEvent.ModifierFlags,
+        kittyActive: Bool
+    ) -> [UInt8]? {
+        let returnKeys: Set<UInt16> = [36, 76]  // ⏎ and the keypad's enter
+        guard returnKeys.contains(keyCode), !kittyActive else { return nil }
+        // Only the four modifiers that change what a key means: caps lock and
+        // the numeric-pad/function bits ride along on a real event and would
+        // break an equality test against `.shift` alone.
+        guard modifiers.intersection([.shift, .control, .option, .command]) == .shift else {
+            return nil
+        }
+        return [0x1b, 0x0d]
+    }
+
     override func accessibilityPerformPress() -> Bool {
         window?.makeFirstResponder(self)
         return true

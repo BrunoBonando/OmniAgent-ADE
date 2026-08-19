@@ -395,3 +395,78 @@ final class PaneApprovalBarInWorkspaceTests: XCTestCase {
         XCTAssertEqual(sent, ["\r"])
     }
 }
+
+/// ⇧⏎ has to reach the agent as something other than a bare CR, or it submits
+/// the prompt instead of adding a line to it.
+final class TerminalReturnKeyTests: XCTestCase {
+    func testShiftReturnSendsEscapeCR() {
+        XCTAssertEqual(
+            NativeTerminalView.overrideBytes(keyCode: 36, modifiers: .shift, kittyActive: false),
+            [0x1b, 0x0d]
+        )
+        XCTAssertEqual(
+            NativeTerminalView.overrideBytes(keyCode: 76, modifiers: .shift, kittyActive: false),
+            [0x1b, 0x0d]
+        )
+    }
+
+    func testEverythingElseIsLeftToSwiftTerm() {
+        // Plain ⏎, ⌃⏎/⌥⏎ (SwiftTerm's own meta path), a non-return key, and
+        // ⇧⏎ while the app drives the kitty keyboard protocol itself.
+        XCTAssertNil(NativeTerminalView.overrideBytes(keyCode: 36, modifiers: [], kittyActive: false))
+        XCTAssertNil(NativeTerminalView.overrideBytes(keyCode: 36, modifiers: [.shift, .option], kittyActive: false))
+        XCTAssertNil(NativeTerminalView.overrideBytes(keyCode: 0, modifiers: .shift, kittyActive: false))
+        XCTAssertNil(NativeTerminalView.overrideBytes(keyCode: 36, modifiers: .shift, kittyActive: true))
+        // Caps lock / numeric-pad bits ride along and must not defeat it.
+        XCTAssertEqual(
+            NativeTerminalView.overrideBytes(
+                keyCode: 76, modifiers: [.shift, .numericPad, .capsLock], kittyActive: false),
+            [0x1b, 0x0d]
+        )
+    }
+
+    /// The routing half: `performKeyEquivalent` is only consulted for every
+    /// key-down by AppKit's own dispatch, so this pins that the window really
+    /// hands ⇧⏎ to a focused terminal before the first responder sees it.
+    func testTheWindowRoutesShiftReturnToTheFocusedTerminal() {
+        let surface = TerminalSurfaceView(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-shift-return-test.sock")
+            ),
+            sessionID: "pane-1"
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = surface
+        window.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(window.makeFirstResponder(surface.terminalView))
+
+        XCTAssertFalse(
+            window.performKeyEquivalent(with: returnEvent(shift: false)),
+            "plain ⏎ must be left to SwiftTerm's own key handling"
+        )
+        XCTAssertTrue(
+            window.performKeyEquivalent(with: returnEvent(shift: true)),
+            "⇧⏎ never reached the terminal view"
+        )
+    }
+
+    private func returnEvent(shift: Bool) -> NSEvent {
+        NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: shift ? .shift : [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\r",
+            charactersIgnoringModifiers: "\r",
+            isARepeat: false,
+            keyCode: 36
+        )!
+    }
+}
