@@ -2259,6 +2259,107 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
     }
 
+    // MARK: - Canvas input
+
+    /// The node the arrows walk and `↩` enters. `nil` when the pointer last
+    /// landed on empty canvas.
+    var selectedNodeID: String? {
+        didSet {
+            guard oldValue != selectedNodeID else { return }
+            onCanvasSelectionChanged?(selectedNodeID)
+        }
+    }
+
+    /// Fired when a drag ends having pinned something — the persistence task's
+    /// save hook for the `desk_canvas_native` row.
+    var onCanvasPinsChanged: (([String: CGPoint]) -> Void)?
+
+    /// Fired when the selected node changes, so the chips can draw their ring
+    /// without this section knowing what a chip is.
+    var onCanvasSelectionChanged: ((String?) -> Void)?
+
+    /// One ⌘+ / ⌘- step. Multiplicative, so in and out are exact inverses.
+    static let canvasZoomStep: CGFloat = 1.25
+
+    /// How far a node has to travel before a click becomes a drag, in **canvas**
+    /// units rather than window units. `PaneHeaderView.mouseDragged`'s 4pt
+    /// threshold is the window-space equivalent, and it is only ever read at
+    /// identity scale; at 0.2 a 3pt window twitch is 15pt of canvas and would
+    /// throw a node across the tree.
+    static let canvasDragThreshold: CGFloat = 3
+
+    private var draggingNodeID: String?
+    private var dragOriginInCanvas: CGPoint = .zero
+    private var dragNodeOriginInCanvas: CGPoint = .zero
+    private var didDragNode = false
+
+    /// The tree the canvas is actually laid out from: whatever was handed in,
+    /// and the derived one when nothing was. `canvasRoot` is `nil` by default
+    /// and `nil` means "derive it" — the same thing `updateCanvasLayout()`
+    /// means by it. Every reader here goes through this rather than through
+    /// `canvasRoot`, or a hit test would resolve against a tree the layout pass
+    /// never used, which is to say against nothing at all.
+    private var canvasTree: DeskNode { canvasRoot ?? derivedCanvasRoot() }
+
+    /// The zoom floor: the whole tree on screen. Derived from `fitAll` rather
+    /// than kept as a constant, because the floor moves when a session opens, a
+    /// node is dragged, or the window is resized.
+    var minimumCanvasScale: CGFloat {
+        guard
+            let content = canvasLayout?.contentRect,
+            content.width > 0, content.height > 0,
+            bounds.width > 0, bounds.height > 0
+        else { return DeskCamera.maxScale }
+        return min(DeskCamera.maxScale, DeskCamera.fitAll(content: content, in: bounds).scale)
+    }
+
+    /// The correctness boundary the whole design rests on.
+    ///
+    /// `NSView` coordinate conversion and `event.locationInWindow` are blind to
+    /// a `CALayer` transform, and this file has roughly ten call sites that
+    /// depend on them: `PaneDividerView.mouseDragged`'s window-space delta and
+    /// its `resetCursorRects`, `PaneHeaderView.mouseDragged`'s 4pt travel
+    /// threshold, `PaneHeaderButton.mouseUp`'s
+    /// `bounds.contains(convert(event.locationInWindow, from: nil))` and its
+    /// `.activeInKeyWindow, .inVisibleRect` tracking areas,
+    /// `PaneHolePlaceholderView.mouseMoved`/`mouseUp`/`dispatch(at:)`/
+    /// `updateTrackingAreas`/`resetCursorRects`, `applyZoom`'s
+    /// `convert(container.frame, to: host)`, `collapseZoom`'s
+    /// `convert(cell, to: host)`, and `PaneContainerView.editorTabDropZone`.
+    ///
+    /// At `camera.isIdentity` the `sublayerTransform` *is* identity, so every
+    /// one of those is already correct and this defers to `super` — the panes
+    /// behave exactly as they do with no canvas at all. Below identity scale the
+    /// canvas is the answer to every hit and no descendant ever sees a mouse
+    /// event, which is what keeps those ten sites right. This is not a feature
+    /// cut; it is the invariant.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard isCanvasMode, !camera.isIdentity else { return super.hitTest(point) }
+        // `point` arrives in the SUPERVIEW's coordinates, so containment is
+        // against `frame`, not `bounds`: this view is flipped and its superview
+        // is not, and `bounds` is the flipped space on the other side of that.
+        return frame.contains(point) ? self : nil
+    }
+
+    /// The node under a point given in this view's own (flipped) coordinates.
+    ///
+    /// Smallest area first, ties broken by id. Nodes are allowed to overlap —
+    /// v1 has no collision avoidance, "it is the user's canvas" — so the answer
+    /// has to be both deterministic and the one the eye picked: a chip dropped
+    /// on a card is what you clicked, not the card behind it.
+    func canvasNode(at viewPoint: CGPoint) -> String? {
+        guard let layout = canvasLayout else { return nil }
+        let canvasPoint = camera.canvasPoint(from: viewPoint)
+        return layout.frames
+            .filter { $0.value.contains(canvasPoint) }
+            .min { first, second in
+                let a = first.value.width * first.value.height
+                let b = second.value.width * second.value.height
+                return a == b ? first.key < second.key : a < b
+            }?
+            .key
+    }
+
     private func hasNeighbor(_ direction: PaneDirection) -> Bool {
         guard let focusedPaneID else { return false }
         return grid?.neighbor(of: focusedPaneID, direction: direction) != nil
