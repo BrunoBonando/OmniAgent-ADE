@@ -274,6 +274,30 @@ final class DeskCanvasInputTests: XCTestCase {
         XCTAssertTrue(workspace.canvasPins.isEmpty, "entering is not a drag")
     }
 
+    // MARK: - Cost
+
+    /// A node drag translates a whole session card sixty times a second and
+    /// changes no pane's *size*. `place` used to schedule a PTY resize on any
+    /// frame change, which was right when every frame change was a grid reflow;
+    /// `flushResize` does not dedupe — it sends whatever is pending — so at
+    /// eight sessions that was 96 `resize` frames per display refresh for a
+    /// geometry the daemon already has.
+    func testTranslatingANodeSendsNoPtyResizeBecauseNoPaneChangedSize() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let node = try XCTUnwrap(nodeID(forGroup: workspace.groupIDs[0], in: workspace))
+        workspace.resizeCoalescer.flush()
+        let before = workspace.allPaneIDs.compactMap { workspace.terminalSurface(for: $0)?.resizeSendCount }
+        XCTAssertEqual(before.count, 3, "three terminals in the fixture")
+
+        for step in 1...20 {
+            workspace.moveNode(node, to: CGPoint(x: 500 + CGFloat(step) * 7, y: 500))
+        }
+        workspace.resizeCoalescer.flush()
+
+        let after = workspace.allPaneIDs.compactMap { workspace.terminalSurface(for: $0)?.resizeSendCount }
+        XCTAssertEqual(after, before, "twenty translation steps, not one resize")
+    }
+
     // MARK: - Helpers
 
     /// One session per group, one pane each, sized like the real Desk. Mirrors

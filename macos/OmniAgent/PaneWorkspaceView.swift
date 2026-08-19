@@ -952,6 +952,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// begins while another is still in flight.
     private func place(_ container: PaneContainerView, at frame: NSRect, from start: NSRect? = nil) {
         guard container.frame != frame || start != nil else { return }
+        // Whether the PTY's geometry actually changed — captured before anything
+        // below reassigns `container.frame`. This used to schedule on any frame
+        // change, which was right when every frame change was a grid reflow; a
+        // canvas node drag translates a whole card sixty times a second and
+        // changes no pane's size, and `flushResize` does not dedupe. `start !=
+        // nil` counts as a resize regardless: that is the reparenting case,
+        // where the backing scale can change without the point size doing so.
+        let resized = container.frame.size != frame.size || start != nil
         let from: (position: CGPoint, size: CGSize)?
         if let start, let layer = container.layer {
             // Through the frame rather than by computing a centre: `position` is
@@ -978,7 +986,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         if zoomTransition > 0, let layer = container.layer, let from {
             zoomLayer(layer, fromPosition: from.position, fromSize: from.size, toSize: frame.size)
         }
-        container.surface.scheduleResize()
+        if resized { container.surface.scheduleResize() }
     }
 
     /// One move of the transition, as the pair of layer animations that expresses
