@@ -1253,6 +1253,29 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             }
             return
         }
+        // A terminal that has been typed into is a conversation, and closing it
+        // kills the session — the same loss the engine switch asks about, so it
+        // asks the same way and by the same rule: one nobody has typed in has
+        // nothing to lose and goes on the spot. A browser pane never asks; its
+        // page is a URL away.
+        if let descriptor = workspace.descriptor(for: focused),
+           descriptor.kind == .terminal,
+           workspace.terminalSurface(for: focused)?.hasUserInput == true,
+           let container = workspace.container(for: focused) {
+            container.presentAsk(
+                title: "Close this terminal?",
+                message: "The \(descriptor.engine.displayName) conversation running here ends with "
+                    + "it, and so does anything the terminal is still doing.",
+                icon: descriptor.engine.iconImage,
+                options: [
+                    PaneAskOption("Keep") { _ in },
+                    PaneAskOption("Close Terminal", isPrimary: true) { [weak self] _ in
+                        self?.destroyPane(focused)
+                    },
+                ]
+            )
+            return
+        }
         destroyPane(focused)
     }
 

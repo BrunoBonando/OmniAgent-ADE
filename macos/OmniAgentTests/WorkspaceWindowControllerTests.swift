@@ -1505,6 +1505,55 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.workspaceView.descriptor(for: "sess-cl")?.label, "Ingest")
     }
 
+    /// Closing a terminal that has been typed into kills a conversation, so it
+    /// asks first — on the pane it is about — and changes nothing until the
+    /// card is answered. Same rule the engine switch follows.
+    func testClosingATypedTerminalAsksOnThePaneFirst() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.sessionKiller = { _ in }
+        controller.sessionEnsurer = { _ in }
+        let workspace = controller.workspaceView
+        let paneID = try XCTUnwrap(workspace.paneIDs.first)
+        let surface = try XCTUnwrap(workspace.terminalSurface(for: paneID))
+        surface.send(source: surface.terminalView, data: ArraySlice([UInt8(0x68)]))
+        workspace.focusPane(paneID)
+
+        controller.closePane(nil)
+
+        let container = try XCTUnwrap(workspace.container(for: paneID))
+        let card = try XCTUnwrap(container.askOverlay)
+        XCTAssertEqual(card.options.map(\.title), ["Keep", "Close Terminal"])
+        XCTAssertNotNil(workspace.descriptor(for: paneID), "nothing has happened yet")
+
+        // Keep leaves the terminal exactly as it was.
+        card.choose(0)
+        XCTAssertNil(container.askOverlay)
+        XCTAssertNotNil(workspace.descriptor(for: paneID))
+
+        controller.closePane(nil)
+        try XCTUnwrap(container.askOverlay).choose(1)
+        XCTAssertNil(workspace.descriptor(for: paneID), "and Close is the path that ends it")
+    }
+
+    /// A terminal nobody has typed in has nothing to lose and closes on the
+    /// spot — a confirmation on every ⌘W would be a tax, not a safeguard.
+    func testClosingAnUntypedTerminalDoesNotAsk() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.sessionKiller = { _ in }
+        controller.sessionEnsurer = { _ in }
+        let workspace = controller.workspaceView
+        let paneID = try XCTUnwrap(workspace.paneIDs.first)
+        workspace.focusPane(paneID)
+
+        controller.closePane(nil)
+
+        XCTAssertNil(workspace.descriptor(for: paneID))
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(
