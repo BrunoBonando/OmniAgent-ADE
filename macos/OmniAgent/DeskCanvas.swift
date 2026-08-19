@@ -190,6 +190,27 @@ struct DeskCamera: Equatable {
     }
 }
 
+extension DeskCamera {
+    /// The part of the canvas `bounds` is showing, in canvas coordinates —
+    /// the rect viewport culling is measured against.
+    ///
+    /// Two mapped corners bound it exactly: the camera is a scale and a
+    /// translation with no rotation, so the image of an axis-aligned rect is
+    /// an axis-aligned rect. `min`/`abs` rather than assuming an orientation,
+    /// because the canvas lives in `PaneWorkspaceView`'s **flipped** space
+    /// (`isFlipped == true`, y growing downward) and the window's is not.
+    func canvasViewport(in bounds: CGRect) -> CGRect {
+        let near = canvasPoint(from: CGPoint(x: bounds.minX, y: bounds.minY))
+        let far = canvasPoint(from: CGPoint(x: bounds.maxX, y: bounds.maxY))
+        return CGRect(
+            x: min(near.x, far.x),
+            y: min(near.y, far.y),
+            width: abs(far.x - near.x),
+            height: abs(far.y - near.y)
+        )
+    }
+}
+
 enum DeskCanvas {
     /// Chip node width as a fraction of a session card's width.
     static let chipWidthFraction: CGFloat = 0.25

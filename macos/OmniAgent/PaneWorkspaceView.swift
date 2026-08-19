@@ -1032,19 +1032,70 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return true
     }
 
+    /// The card rect one session occupies in canvas coordinates — the frame
+    /// the tidy tree gave its node.
+    ///
+    /// Keyed by group id, because a session node's id *is* its group id:
+    /// `DeskNode.Kind.session` "carries the group id used everywhere else in
+    /// the app". This is the only reader of `canvasLayout` in the level-of-
+    /// detail path, deliberately, so the whole path re-anchors here if the
+    /// layout pass ever stores its result somewhere else.
+    func canvasRect(forGroup group: String) -> CGRect? {
+        canvasLayout?.frames[group]
+    }
+
+    /// The rect visibility is measured against while the camera is travelling.
+    ///
+    /// `flyCamera(to:)` sets `camera` to its destination at the *start* of the
+    /// animation — the model layer value leads, the presentation layer catches
+    /// up — so without this every card but the destination would be hidden on
+    /// frame one and the user would watch the tree blink out from under a
+    /// camera still moving through it. The flight sets this to the union of
+    /// both ends and clears it on arrival.
+    var transitionViewport: CGRect? {
+        didSet {
+            guard transitionViewport != oldValue else { return }
+            updateVisibility()
+        }
+    }
+
+    /// The panes AppKit is allowed to display.
+    ///
+    /// Normal mode: the active session's, unchanged. Canvas mode: every
+    /// session's, minus the cards the camera cannot see. Culling is what the
+    /// ≤12-to-≤96 jump needs — on the canvas nothing else takes a pane out of
+    /// the compositor.
+    private func onScreenPaneIDs() -> Set<String> {
+        guard isCanvasMode else { return Set(paneIDs) }
+        let viewport = transitionViewport ?? camera.canvasViewport(in: bounds)
+        var ids: Set<String> = []
+        for group in groupOrder {
+            guard let rect = canvasRect(forGroup: group), rect.intersects(viewport) else { continue }
+            ids.formUnion(grids[group]?.paneIDs() ?? [])
+        }
+        return ids
+    }
+
     /// Only the active session's panes are on screen. The others are hidden,
     /// never torn down: closing a pane is what ends a PTY, and switching
     /// sessions must not. A hidden pane keeps parsing output into SwiftTerm's
     /// bounded buffer — so its scrollback is intact when you come back — and
     /// only stops drawing, the same trade an occluded window makes.
+    ///
+    /// In canvas mode every session is on screen at once, so "which session"
+    /// becomes the camera's question: a card whose node rect misses the
+    /// viewport is hidden.
+    ///
+    /// `isHidden` is the load-bearing half and `suspendsDrawing` is the
+    /// belt-and-braces half, not the other way round. `suspendsDrawing` gates
+    /// exactly one thing — the extra renderer kick `TerminalSurfaceView.feed`
+    /// posts — while SwiftTerm's own `feedFinish() -> queuePendingDisplay() ->
+    /// setNeedsDisplay` path runs on every feed regardless. A hidden view is
+    /// not composited and its `setNeedsDisplay` schedules nothing.
     private func updateVisibility() {
         validateZoom()
         updateZoomAvailability()
-        // Canvas mode puts every session on screen at its own card, so the
-        // visible set is every pane in a grid rather than only the active
-        // session's. Viewport culling and the chip threshold narrow it again
-        // later; the base rule here is "laid out means on screen".
-        let visible = Set(isCanvasMode ? allPaneIDs : paneIDs)
+        let visible = onScreenPaneIDs()
         for (id, container) in containers {
             let onScreen = visible.contains(id)
             container.isHidden = !onScreen
@@ -1468,6 +1519,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
                 canvasLayout = nil
             }
             isCanvasMode = newValue
+            // Unconditionally, and before the layout pass rather than after it:
+            // `updateVisibility` is what runs `validateZoom`, and `updateLayout`
+            // ends in `applyZoom`, which would otherwise act on a zoom this mode
+            // change has just invalidated. On the way *in* the canvas pass calls
+            // `updateVisibility` again from its own tail, once the node rects the
+            // camera is measured against exist; on the way *out* this call is the
+            // only one, and skipping it would leave every other session's panes
+            // unhidden on top of the active one.
             updateVisibility()
             updateLayout()
         }
@@ -1489,6 +1548,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         didSet {
             guard camera != oldValue else { return }
             applyCamera()
+            // An ancestor transform moves no frame, so no layout pass follows a
+            // camera move and this is the only thing that re-derives what is on
+            // screen. Every path that changes the camera must come through the
+            // setter for that reason.
+            updateVisibility()
         }
     }
 
@@ -1710,6 +1774,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         applyCamera()
         updateAccessibilityLabels()
         refreshFocusSubtitles()
+        // Canvas mode's visible set is a function of the node rects this pass
+        // just computed and of the camera, and nothing else recomputes it when
+        // a window resize re-lays the canvas out.
+        updateVisibility()
     }
 
     /// The focused card's subtitle counts panes ("terminal 3 of 4"), so it goes
