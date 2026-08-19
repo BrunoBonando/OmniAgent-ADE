@@ -597,6 +597,83 @@ final class SessionHoverCardTests: XCTestCase {
         XCTAssertNil(TerminalSurfaceView.lastOutputLine(of: terminal))
     }
 
+    /// A screen captured off the live daemon, rebuilt row for row: real glyphs,
+    /// real columns, real wrapping. It is here because every rule in
+    /// `lastOutputLine` was wrong against it in some way — the answer it used
+    /// to give was `──────── Special Tooltip ──`, the separator the terminal
+    /// hangs its tab name on, which is flush with the margin, has words in it,
+    /// sits below everything else, and never changes.
+    func testARealClaudeScreenAnswersWithItsLowestBullet() throws {
+        let terminal = Terminal(
+            delegate: SilentTerminalDelegate(),
+            options: TerminalOptions(cols: 114, rows: 45)
+        )
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J")
+        // (row, column, text) exactly as the capture had them: bullets flush at
+        // column 1 with their text at column 3, tool echoes at 3, tool output
+        // further in, and the chrome at the bottom.
+        let screen: [(Int, Int, String)] = [
+            (2, 1, "❯ Your forgot the word Ready in green as well."),
+            (4, 1, "⏺ Misread that one — logo and the word, both green:"),
+            (6, 3, "Ran 3 shell commands"),
+            (10, 1, "⏺ Committing the Ready line, then going after the real screen instead of guessing:"),
+            (14, 1, "⏺ Write(crates/omniagent-pty-daemon/examples/peek.rs)"),
+            (15, 3, "⎿  Wrote 94 lines to crates/omniagent-pty-daemon/examples/peek.rs"),
+            (16, 7, "1 //! Throwaway probe: dumps a live session's replay snapshot to a file"),
+            (25, 6, "… +84 lines"),
+            (27, 1, "❯ Check it at [Image #2] the last blinking dot row"),
+            (30, 1, "⏺ Now I can test against the real thing instead of guessing at glyphs."),
+            // The running line: its bullet is blinked off in this frame, so all
+            // that marks it is the column its text starts in.
+            (32, 3, "Running 5 shell commands · 2s…"),
+            (33, 3, "⎿  $ SCRATCH=/private/tmp/claude-501/-Users-bonando-Documents"),
+            (34, 6, "6-1da3acb072b5/scratchpad; (./target/debug/examples/peek 2>&1 & PID=$!;"),
+            (37, 1, "⏺ Background command \"SCRATCH=/private/tmp/claude-501\""),
+            // Its own wrapped remainder — flush with the margin, and not a line
+            // of its own.
+            (38, 1, "b-cffd-5dae-acd6-1da3acb072b5/scratchpad && ./target/debug/examples/peek"),
+            (39, 1, "with exit code 144"),
+            (41, 1, "✶ Caramelizing… (5m 40s · ↓ 11.1k tokens)"),
+            (42, 76, "✔ Update installed · Restart to update"),
+            (43, 1, String(repeating: "─", count: 95) + " Special Tooltip ──"),
+            (44, 1, "❯ "),
+            (45, 1, "──⏵⏵ auto mode on (shift+tab to cycle) · ← for agents ──────"),
+        ]
+        for (row, column, text) in screen {
+            terminal.feed(text: "\u{1b}[\(row);\(column)H" + text)
+        }
+
+        XCTAssertEqual(
+            TerminalSurfaceView.lastOutputLine(of: terminal),
+            "Background command \"SCRATCH=/private/tmp/claude-501\"",
+            "the lowest bullet, not the tab-name separator under everything"
+        )
+    }
+
+    /// And when the lowest thing on the screen is a *blinked-off* bullet, that
+    /// is the one — the running line, which is the whole point.
+    func testTheRunningLineWinsWhileItsBulletIsBlinkedOff() throws {
+        let terminal = Terminal(
+            delegate: SilentTerminalDelegate(),
+            options: TerminalOptions(cols: 90, rows: 12)
+        )
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J")
+        let screen: [(Int, Int, String)] = [
+            (1, 1, "⏺ Now I can test against the real thing instead of guessing:"),
+            (3, 3, "Running 1 shell command…"),
+            (4, 3, "⎿  $ cargo build -p omniagent-pty-daemon --example peek"),
+            (5, 7, "Compiling omniagent-pty-daemon v0.1.0"),
+            (7, 1, "✶ Caramelizing… (5m 40s · ↓ 11.1k tokens)"),
+            (8, 1, String(repeating: "─", count: 70) + " Special Tooltip ──"),
+            (9, 1, "❯ "),
+        ]
+        for (row, column, text) in screen {
+            terminal.feed(text: "\u{1b}[\(row);\(column)H" + text)
+        }
+
+        XCTAssertEqual(TerminalSurfaceView.lastOutputLine(of: terminal), "Running 1 shell command…")
+    }
+
     // MARK: - Helpers
 
     private final class SilentTerminalDelegate: TerminalDelegate {
