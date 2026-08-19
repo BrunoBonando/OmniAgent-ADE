@@ -291,6 +291,149 @@ final class DeskCanvasLODTests: XCTestCase {
         )
     }
 
+    // MARK: - Blink suppression
+
+    /// Nothing blinks while the camera is out on the canvas. A blinking cursor
+    /// is a 0.7s `Timer` forcing a full-resolution Metal frame, and at canvas
+    /// scale the caret it is drawing is two points tall.
+    ///
+    /// The focus *ring* is untouched: which pane you will land on is still
+    /// worth showing.
+    func testNoCursorBlinksWhileTheCameraIsOutOnTheCanvas() throws {
+        let workspace = makeCanvasWorkspace(sessions: 2, panesEach: 1)
+        workspace.focusPane("s1-p1")
+        let card = try XCTUnwrap(workspace.canvasRect(forGroup: "grp-1"))
+
+        workspace.camera = DeskCamera.focus(
+            on: card.insetBy(dx: -card.width * 4.5, dy: -card.height * 4.5),
+            in: workspace.bounds
+        )
+
+        XCTAssertFalse(workspace.camera.isIdentity, "the fixture must be off identity")
+        let focused = try XCTUnwrap(workspace.container(for: "s1-p1"))
+        XCTAssertEqual(workspace.focusedPaneID, "s1-p1", "focus is remembered, only the blink is off")
+        XCTAssertTrue(focused.isFocused, "and the ring still says which pane it is")
+        XCTAssertFalse(focused.isSelected)
+        XCTAssertFalse(focused.terminalSurface.isSelected)
+        XCTAssertEqual(
+            focused.terminalSurface.terminalView.terminal.options.cursorStyle,
+            .steadyBlock,
+            "the style is swapped for its steady twin, which is what stops the timer"
+        )
+    }
+
+    /// It comes back the moment the camera lands, and only then: at identity
+    /// scale the transform *is* identity, every coordinate conversion in this
+    /// file is correct again, and the pane is being typed into.
+    func testTheFocusedPaneBlinksAgainOnceTheCameraHasLandedAtIdentity() throws {
+        let workspace = makeCanvasWorkspace(sessions: 2, panesEach: 1)
+        workspace.focusPane("s1-p1")
+        let card = try XCTUnwrap(workspace.canvasRect(forGroup: "grp-1"))
+        workspace.camera = DeskCamera.focus(
+            on: card.insetBy(dx: -card.width * 4.5, dy: -card.height * 4.5),
+            in: workspace.bounds
+        )
+        XCTAssertFalse(try XCTUnwrap(workspace.container(for: "s1-p1")).isSelected)
+
+        // Identity by construction — `isIdentity` is "scale exactly 1 and an
+        // integral origin", which this is wherever the tidy tree put the cards.
+        workspace.camera = DeskCamera(scale: 1, origin: .zero)
+
+        XCTAssertTrue(workspace.camera.isIdentity)
+        let focused = try XCTUnwrap(workspace.container(for: "s1-p1"))
+        XCTAssertTrue(focused.isSelected)
+        XCTAssertTrue(focused.terminalSurface.isSelected)
+        XCTAssertEqual(focused.terminalSurface.terminalView.terminal.options.cursorStyle, .blinkBlock)
+    }
+
+    /// And only the session the camera is on. `adoptFocus` is the click path,
+    /// and it sets `focusedPaneID` without touching `activeGroup` — so a pane
+    /// in a session the camera is not on can hold focus, and must not blink at
+    /// full resolution behind the one you are looking at.
+    func testASessionTheCameraIsNotOnNeverBlinksEvenAtIdentity() throws {
+        let workspace = makeCanvasWorkspace(sessions: 2, panesEach: 1)
+        workspace.camera = DeskCamera(scale: 1, origin: .zero)
+        XCTAssertEqual(workspace.activeGroup, "grp-2", "the last pane added owns the active session")
+
+        let foreign = try XCTUnwrap(workspace.container(for: "s1-p1"))
+        workspace.adoptFocus(from: foreign.surface)
+
+        XCTAssertEqual(workspace.focusedPaneID, "s1-p1")
+        XCTAssertEqual(workspace.activeGroup, "grp-2", "adoptFocus does not switch sessions")
+        XCTAssertFalse(foreign.isSelected, "a session the camera is not on holds no blink")
+        XCTAssertEqual(foreign.terminalSurface.terminalView.terminal.options.cursorStyle, .steadyBlock)
+        XCTAssertFalse(try XCTUnwrap(workspace.container(for: "s2-p1")).isSelected, "and neither does any other")
+    }
+
+    /// Normal mode is exactly what it was: the focused pane blinks, everything
+    /// else holds a steady cursor of the same shape.
+    func testNormalModeStillGivesTheFocusedPaneItsBlink() throws {
+        let workspace = makeCanvasWorkspace(sessions: 2, panesEach: 2)
+        workspace.canvasMode = false
+
+        workspace.focusPane("s1-p2")
+
+        let focused = try XCTUnwrap(workspace.container(for: "s1-p2"))
+        XCTAssertTrue(focused.isSelected)
+        XCTAssertEqual(focused.terminalSurface.terminalView.terminal.options.cursorStyle, .blinkBlock)
+        XCTAssertEqual(
+            try XCTUnwrap(workspace.container(for: "s1-p1")).terminalSurface
+                .terminalView.terminal.options.cursorStyle,
+            .steadyBlock
+        )
+    }
+
+    // MARK: - Lifecycle
+
+    /// Culling, chipping and deselecting are all rendering decisions. None of
+    /// them may reach the daemon: `PaneWorkspaceView` "never kills a session
+    /// itself", and `WorkspaceWindowController.killSession` is the one funnel
+    /// `sessionKiller` watches.
+    ///
+    /// A guard, not a driver — it is expected to pass the first time it runs.
+    /// It exists so a later change that reaps "invisible" panes fails here
+    /// instead of in someone's terminal.
+    func testLevelOfDetailNeverKillsASession() throws {
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-desk-canvas-lod-test.sock")
+            ),
+            sessionID: "native-terminal"
+        )
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var killed: [String] = []
+        controller.sessionKiller = { killed.append($0) }
+
+        let workspace = controller.workspaceView
+        XCTAssertTrue(workspace.addPane(PaneDescriptor(sessionID: "far-1", group: "grp-far")))
+        let before = workspace.allPaneIDs.sorted()
+
+        // Activate the group *before* canvas mode, so the focused pane is
+        // already in the active session. Task 7 makes a cross-session
+        // `focusPane` in canvas mode a camera flight — focus does not move
+        // until the flight lands — and a test that focuses across sessions and
+        // asserts immediately would race it.
+        workspace.activateGroup("grp-far")
+        workspace.canvasMode = true
+        workspace.layoutSubtreeIfNeeded()
+        let card = try XCTUnwrap(workspace.canvasRect(forGroup: "grp-far"))
+        // On camera at identity, then culled, then chipped, then back out.
+        workspace.camera = DeskCamera.focus(on: card, in: workspace.bounds)
+        workspace.camera = DeskCamera.focus(
+            on: try XCTUnwrap(workspace.canvasRect(forGroup: try XCTUnwrap(workspace.groupIDs.first))),
+            in: workspace.bounds
+        )
+        workspace.camera = DeskCamera.focus(
+            on: card.insetBy(dx: -card.width * 9, dy: -card.height * 9),
+            in: workspace.bounds
+        )
+        workspace.canvasMode = false
+
+        XCTAssertEqual(killed, [], "level of detail is a rendering decision, never a lifecycle one")
+        XCTAssertEqual(workspace.allPaneIDs.sorted(), before, "and nothing was torn down")
+    }
+
     // MARK: - Helpers
 
     /// `PaneWorkspaceViewTests.makeWorkspace(panes:)`'s shape, with one grid

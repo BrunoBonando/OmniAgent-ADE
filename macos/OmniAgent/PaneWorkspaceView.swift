@@ -1115,6 +1115,43 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             container.surface.suspendsDrawing = suspendsDrawing || !onScreen
             container.isChipped = onScreen && chips
         }
+        // The camera decides who may blink as much as it decides who is on
+        // screen, and a camera move runs this pass and no other.
+        updateSelection()
+    }
+
+    /// The one pane whose cursor may blink, and the only one wearing the
+    /// selected treatment.
+    ///
+    /// A blinking cursor is a 0.7s repeating `Timer` forcing a
+    /// full-resolution Metal frame, driven by the cursor *style* alone and
+    /// immune to `suspendsDrawing`; `TerminalSurfaceView.isSelected`'s `didSet`
+    /// swapping in `steadyTwin(of:)` is the only thing that stops it.
+    ///
+    /// Normal mode: the focused pane, exactly as before. Canvas mode: nobody,
+    /// unless the camera has landed at identity on the focused pane's own
+    /// session — which is precisely the state in which a pane accepts input at
+    /// all, since every coordinate conversion in this file is blind to the
+    /// camera's layer transform below it.
+    private var selectablePaneID: String? {
+        guard isCanvasMode else { return focusedPaneID }
+        guard
+            let focusedPaneID,
+            descriptors[focusedPaneID]?.group == activeGroup,
+            camera.isIdentity
+        else { return nil }
+        return focusedPaneID
+    }
+
+    /// One writer for selection, the way `updateVisibility` is the one writer
+    /// for `isHidden`/`suspendsDrawing`. Reached from both the focus pass and
+    /// the visibility pass, because either the focused pane or the camera can
+    /// change the answer and neither implies the other.
+    private func updateSelection() {
+        let selected = selectablePaneID
+        for (id, container) in containers {
+            container.isSelected = id == selected
+        }
     }
 
     /// Removes a pane, reflowing the grid down a rung when the count drops. If
@@ -1340,6 +1377,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         for (id, container) in containers {
             container.isFocused = id == focusedPaneID
         }
+        updateSelection()
     }
 
     /// The name the sidebar prints for a session: the one stored on its panes,
@@ -2047,10 +2085,25 @@ final class PaneContainerView: NSView, NSDraggingSource {
         didSet {
             guard isFocused != oldValue else { return }
             header.isFocused = isFocused
+            updateChrome()
+        }
+    }
+
+    /// Whether this is the pane the cursor blinks in.
+    ///
+    /// Split out of `isFocused` for the canvas. A blinking cursor is a 0.7s
+    /// repeating `Timer` that calls `setNeedsDisplay` on the Metal view; below
+    /// identity scale nothing is being typed into and that frame draws a caret
+    /// nobody can see. `PaneWorkspaceView.selectablePaneID` answers "which
+    /// pane, if any", and in normal mode its answer is the focused pane — so
+    /// the two move together exactly as they did when this was one line inside
+    /// `isFocused`'s `didSet`.
+    var isSelected = false {
+        didSet {
+            guard isSelected != oldValue else { return }
             // The cursor is part of "which pane am I typing into": only this
             // one blinks (see `TerminalSurfaceView.isSelected`).
-            surface.isSelected = isFocused
-            updateChrome()
+            surface.isSelected = isSelected
         }
     }
 
