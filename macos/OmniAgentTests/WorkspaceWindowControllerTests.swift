@@ -1412,6 +1412,25 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    func testEveryItemInTheMenuNamesSomethingThatExists() {
+        // Half the items are `Selector(("…"))` string literals, because the
+        // methods live on classes this one cannot see. A typo in one of those
+        // compiles happily and greys the item out at runtime with nothing said,
+        // which is the exact failure the ⋯ button already had once.
+        let controller = makeController()
+        let surface = makeSurface()
+        for item in controller.paneOptionsMenu().items where !item.isSeparatorItem {
+            guard let action = item.action else {
+                XCTAssertNotNil(item.submenu, "\(item.title) does nothing and opens nothing")
+                continue
+            }
+            XCTAssertTrue(
+                controller.responds(to: action) || surface.terminalView.responds(to: action),
+                "\(item.title) sends \(action), which nothing in the pane's responder chain implements"
+            )
+        }
+    }
+
     func testTheColorItemIsClaudeOnly() {
         let controller = makeController()
         controller.applyRestoredPanes(
