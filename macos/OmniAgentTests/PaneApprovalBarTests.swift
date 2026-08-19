@@ -425,6 +425,32 @@ final class TerminalReturnKeyTests: XCTestCase {
         )
     }
 
+    /// ⌥ is Meta, so a layout whose brackets live on ⌥8/⌥9 could not type
+    /// one at all until the composed character was let through.
+    func testOptionComposedPunctuationIsSentLiterally() {
+        XCTAssertEqual(
+            NativeTerminalView.composedOptionText(modifiers: .option, characters: "]"),
+            "]"
+        )
+        XCTAssertEqual(
+            NativeTerminalView.composedOptionText(modifiers: [.option, .shift], characters: "}"),
+            "}"
+        )
+    }
+
+    func testMetaChordsStillReachSwiftTerm() {
+        // ⌥b/⌥f compose a letter, ⌥⌫ composes nothing, ⌥⏎ composes CR, and
+        // ⌃/⌘ chords are not this at all. Bare punctuation has no ⌥ to pass.
+        XCTAssertNil(NativeTerminalView.composedOptionText(modifiers: .option, characters: "∫"))
+        XCTAssertNil(NativeTerminalView.composedOptionText(modifiers: .option, characters: ""))
+        XCTAssertNil(NativeTerminalView.composedOptionText(modifiers: .option, characters: "\r"))
+        XCTAssertNil(NativeTerminalView.composedOptionText(modifiers: .option, characters: "9"))
+        XCTAssertNil(
+            NativeTerminalView.composedOptionText(modifiers: [.option, .control], characters: "]")
+        )
+        XCTAssertNil(NativeTerminalView.composedOptionText(modifiers: [], characters: "]"))
+    }
+
     /// The routing half: `performKeyEquivalent` is only consulted for every
     /// key-down by AppKit's own dispatch, so this pins that the window really
     /// hands ⇧⏎ to a focused terminal before the first responder sees it.
