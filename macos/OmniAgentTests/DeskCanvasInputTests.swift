@@ -155,6 +155,68 @@ final class DeskCanvasInputTests: XCTestCase {
         XCTAssertEqual(workspace.activeGroup, group, "the pinch landed in that session")
     }
 
+    // MARK: - Node drag
+
+    /// Dragging a node translates it *and its subtree*, and pins everything it
+    /// moved. The subtree, not just its root: `DeskCanvas.layout` excludes a
+    /// pinned node from packing but keeps packing everything else, so a pinned
+    /// parent whose children were left unpinned would watch its children walk
+    /// straight back to the slot the packer still holds for them.
+    func testDraggingANodeCarriesItsSubtreeAndPinsEveryNodeItMoved() throws {
+        let workspace = makeCanvasWorkspace(sessions: 2)
+        let layout = try XCTUnwrap(workspace.canvasLayout)
+        let parent = try XCTUnwrap(
+            firstWorkspaceNode(in: tree(workspace)),
+            "the tree must have a workspace node between the account and the sessions"
+        )
+        let before = try XCTUnwrap(layout.frames[parent.id])
+        let child = try XCTUnwrap(parent.children.first?.id)
+        let childBefore = try XCTUnwrap(layout.frames[child])
+
+        workspace.moveNode(parent.id, to: CGPoint(x: before.origin.x + 400, y: before.origin.y + 150))
+
+        let after = try XCTUnwrap(workspace.canvasLayout?.frames[parent.id])
+        XCTAssertEqual(after.origin.x, before.origin.x + 400, accuracy: 0.01, "it lands where it was dropped")
+        XCTAssertEqual(after.origin.y, before.origin.y + 150, accuracy: 0.01)
+
+        let childAfter = try XCTUnwrap(workspace.canvasLayout?.frames[child])
+        XCTAssertEqual(childAfter.origin.x, childBefore.origin.x + 400, accuracy: 0.01, "the subtree comes with it")
+        XCTAssertEqual(childAfter.origin.y, childBefore.origin.y + 150, accuracy: 0.01)
+
+        XCTAssertNotNil(workspace.canvasPins[parent.id], "the dragged node is pinned")
+        XCTAssertNotNil(workspace.canvasPins[child], "and so is everything it carried")
+    }
+
+    /// The pin is an absolute canvas position, not an offset from an auto slot,
+    /// so a relayout leaves it exactly where it was put.
+    func testAPinnedNodeStaysPutAcrossARelayout() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let node = try XCTUnwrap(nodeID(forGroup: workspace.groupIDs[0], in: workspace))
+        let target = CGPoint(x: 4000, y: 2500)
+
+        workspace.moveNode(node, to: target)
+        workspace.updateLayout()
+        workspace.updateLayout()
+
+        let placed = try XCTUnwrap(workspace.canvasLayout?.frames[node])
+        XCTAssertEqual(placed.origin.x, target.x, accuracy: 0.01)
+        XCTAssertEqual(placed.origin.y, target.y, accuracy: 0.01)
+    }
+
+    /// The pins have to reach the `desk_canvas_native` row, and the drag is the
+    /// only thing that knows a drag happened.
+    func testMovingANodeAnnouncesThePinsSoTheyCanBeSaved() throws {
+        let workspace = makeCanvasWorkspace(sessions: 2)
+        var announced: [[String: CGPoint]] = []
+        workspace.onCanvasPinsChanged = { announced.append($0) }
+        let node = try XCTUnwrap(nodeID(forGroup: workspace.groupIDs[1], in: workspace))
+
+        workspace.moveNode(node, to: CGPoint(x: 900, y: 900))
+
+        XCTAssertEqual(announced.count, 1, "one announcement per move")
+        XCTAssertEqual(announced.last?[node]?.x, 900, "carrying the new pin")
+    }
+
     // MARK: - Helpers
 
     /// One session per group, one pane each, sized like the real Desk. Mirrors

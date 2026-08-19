@@ -2419,6 +2419,35 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return nil
     }
 
+    /// Moves `id` to an absolute canvas position, carrying its whole subtree by
+    /// the same delta and pinning every node it moved.
+    ///
+    /// Absolute, not an offset from an auto slot: a pinned node is excluded from
+    /// packing entirely and its unpinned siblings close the gap, so there is no
+    /// slot left to be an offset from. The subtree is pinned as well as its
+    /// root — a pinned parent with unpinned children would keep its position
+    /// while the packer walked the children back under the empty slot.
+    func moveNode(_ id: String, to canvasPoint: CGPoint) {
+        guard
+            isCanvasMode,
+            let node = deskNode(id, in: canvasTree),
+            let frame = canvasLayout?.frames[id]
+        else { return }
+        let delta = CGPoint(x: canvasPoint.x - frame.origin.x, y: canvasPoint.y - frame.origin.y)
+        var pins = canvasPins
+        for moved in deskSubtreeIDs(of: node) {
+            guard let origin = canvasLayout?.frames[moved]?.origin else { continue }
+            pins[moved] = CGPoint(x: origin.x + delta.x, y: origin.y + delta.y)
+        }
+        canvasPins = pins
+        updateLayout()
+        onCanvasPinsChanged?(pins)
+    }
+
+    private func deskSubtreeIDs(of node: DeskNode) -> [String] {
+        [node.id] + node.children.flatMap(deskSubtreeIDs(of:))
+    }
+
     private func hasNeighbor(_ direction: PaneDirection) -> Bool {
         guard let focusedPaneID else { return false }
         return grid?.neighbor(of: focusedPaneID, direction: direction) != nil
