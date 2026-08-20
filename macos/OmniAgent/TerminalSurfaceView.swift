@@ -519,6 +519,25 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         return Array(lines.suffix(limit))
     }
 
+    /// Keeps the last line the screen gave rather than letting a blank read
+    /// wipe it.
+    ///
+    /// The screen is read ten times a second, and a repaint is not atomic: a
+    /// poll can land on a frame the agent has cleared and not finished drawing,
+    /// where there is no bullet to find. Answering `nil` there is momentarily
+    /// true and useless — the card drops the line and shows the status word
+    /// instead, and at ten reads a second what that looks like is the line
+    /// flickering against `Working`. The line is only ever replaced by another
+    /// line.
+    struct OutputLineHold {
+        private(set) var line: String?
+
+        mutating func update(_ next: String?) -> String? {
+            if let next { line = next }
+            return line
+        }
+    }
+
     /// What this terminal is *doing*, as one line — what the sidebar's hover
     /// card types out.
     ///
@@ -526,8 +545,10 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     /// which serialises the whole buffer: this is polled ten times a second for
     /// as long as a card is open, and the scrollback is thousands of lines.
     func lastOutputLine() -> String? {
-        Self.lastOutputLine(of: terminalView.terminal)
+        outputLineHold.update(Self.lastOutputLine(of: terminalView.terminal))
     }
+
+    private var outputLineHold = OutputLineHold()
 
     /// Free of the view, like `tailLines`, so a bare `Terminal` can drive it.
     ///

@@ -108,7 +108,11 @@ struct HoverCardModel: Equatable {
 
     /// How much of the output line the card shows. The ask was the beginning
     /// of the line and an ellipsis, not the line.
-    static let tailLimit = 38
+    /// Three lines' worth of the card's own width. Past that the field
+    /// truncates where the third line actually ends, which no character
+    /// count can know; this only stops a runaway line being typed out in
+    /// full behind the truncation.
+    static let tailLimit = 120
 }
 
 extension HoverCardModel {
@@ -335,6 +339,8 @@ final class TypingTextField: NSTextField {
     private static let tick: TimeInterval = 1.0 / 60
     /// How long the caret lingers after the last character.
     static let caretLinger: TimeInterval = 0.4
+    /// How many lines the agent's line may run to before it is truncated.
+    static let maximumLines = 3
 
     /// Off under Reduce Motion and in tests: the text lands whole.
     var animates = true
@@ -344,6 +350,20 @@ final class TypingTextField: NSTextField {
     private var timer: Timer?
     private var caretTimer: Timer?
     private let caret = CALayer()
+    /// One text layout, asked two questions: how tall the finished line will
+    /// be, and where its last glyph ends. Both need real line breaking — the
+    /// field wraps, so neither is a width division.
+    private let measured = (
+        storage: NSTextStorage(),
+        manager: NSLayoutManager(),
+        container: NSTextContainer(size: .zero)
+    )
+    /// A cell configured exactly like this field's own, asked how tall a
+    /// string wants to be. The layout above breaks lines the same way, but not
+    /// to the same *height* — a text field's cell has padding of its own, and
+    /// reserving three of the wrong unit is what leaves the third row drawn
+    /// past the bottom of the field and truncated away.
+    private let probe = NSTextFieldCell(textCell: "")
 
     init(font: NSFont, color: NSColor) {
         super.init(frame: .zero)
@@ -351,14 +371,25 @@ final class TypingTextField: NSTextField {
         isBordered = false
         isSelectable = false
         drawsBackground = false
-        usesSingleLineMode = true
-        cell?.wraps = false
+        usesSingleLineMode = false
+        cell?.wraps = true
         cell?.truncatesLastVisibleLine = true
-        lineBreakMode = .byTruncatingTail
+        maximumNumberOfLines = Self.maximumLines
+        // Word wrapping *plus* `truncatesLastVisibleLine` is what gives "wrap
+        // to three rows, then an ellipsis". `.byTruncatingTail` on its own
+        // never wraps at all — it ellipsises the first line and stops.
+        lineBreakMode = .byWordWrapping
         self.font = font
         textColor = color
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
+        measured.container.lineFragmentPadding = 0
+        measured.container.maximumNumberOfLines = Self.maximumLines
+        probe.wraps = true
+        probe.truncatesLastVisibleLine = true
+        probe.lineBreakMode = .byWordWrapping
+        measured.manager.addTextContainer(measured.container)
+        measured.storage.addLayoutManager(measured.manager)
         caret.backgroundColor = color.withAlphaComponent(0.85).cgColor
         caret.cornerRadius = 0.75
         caret.opacity = 0
@@ -387,8 +418,55 @@ final class TypingTextField: NSTextField {
             return
         }
         shown = String(next.commonPrefix(with: shown))
+        invalidateIntrinsicContentSize()
         render()
         startTyping()
+    }
+
+    /// Tall enough for the *finished* line, not the prefix on screen. Typing
+    /// grows the string a line at a time, and a card sized to what is typed so
+    /// far would grow a row under the reader twice on the way through every
+    /// message.
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: height(of: goal))
+    }
+
+    /// One line as the cell itself measures one — the unit every height here
+    /// is counted in, and what the mark beside the line is centred on.
+    var singleLineHeight: CGFloat { probeHeight("M") }
+
+    private func probeHeight(_ text: String) -> CGFloat {
+        guard let font else { return 0 }
+        probe.font = font
+        probe.stringValue = text
+        let width = wrapWidth > 0 ? wrapWidth : .greatestFiniteMagnitude
+        return ceil(
+            probe.cellSize(
+                forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)
+            ).height
+        )
+    }
+
+    private var wrapWidth: CGFloat {
+        preferredMaxLayoutWidth > 0 ? preferredMaxLayoutWidth : bounds.width
+    }
+
+    private func layOut(_ text: String) -> NSLayoutManager? {
+        guard let font, wrapWidth > 0 else { return nil }
+        measured.container.size = NSSize(width: wrapWidth, height: .greatestFiniteMagnitude)
+        measured.storage.setAttributedString(
+            NSAttributedString(string: text, attributes: [.font: font])
+        )
+        measured.manager.ensureLayout(for: measured.container)
+        return measured.manager
+    }
+
+    private func height(of text: String) -> CGFloat {
+        let unit = singleLineHeight
+        guard unit > 0 else { return NSView.noIntrinsicMetric }
+        guard !text.isEmpty else { return unit }
+        let rows = min(Self.maximumLines, max(1, Int((probeHeight(text) / unit).rounded())))
+        return unit * CGFloat(rows)
     }
 
     /// The line's colour, caret included — blue while the agent is working,
@@ -407,6 +485,7 @@ final class TypingTextField: NSTextField {
         goal = ""
         shown = ""
         caret.opacity = 0
+        invalidateIntrinsicContentSize()
         render()
     }
 
@@ -467,15 +546,27 @@ final class TypingTextField: NSTextField {
     }
 
     private func layoutCaret() {
-        guard let font else { return }
-        let width = (shown as NSString).size(withAttributes: [.font: font]).width
-        let height = ceil(font.ascender - font.descender)
-        // Never past the right edge: a truncated line has nowhere left to put
-        // a caret, and one sitting outside the card would look like a bug.
-        let x = min(width + 2, max(0, bounds.width - 2))
+        guard font != nil else { return }
+        let unit = singleLineHeight
+        var frame = NSRect(x: 0, y: bounds.height - unit, width: 1.5, height: unit)
+        if !shown.isEmpty, let manager = layOut(shown), manager.numberOfGlyphs > 0 {
+            let last = NSRange(location: manager.numberOfGlyphs - 1, length: 1)
+            let glyph = manager.boundingRect(forGlyphRange: last, in: measured.container)
+            let fragment = manager.lineFragmentRect(forGlyphAt: last.location, effectiveRange: nil)
+            // Which row the last glyph landed on, counted in the layout's own
+            // line height and then paid out in the cell's — the two agree on
+            // where words break, not on how tall a row is.
+            let row = fragment.height > 0 ? Int((fragment.minY / fragment.height).rounded()) : 0
+            // Never past the right edge: a truncated line has nowhere left to
+            // put a caret, and one sitting outside the card would look like a
+            // bug.
+            frame.origin.x = min(glyph.maxX + 2, max(0, bounds.width - 2))
+            // The layout is top-down and the field is not flipped.
+            frame.origin.y = bounds.height - unit * CGFloat(row + 1)
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        caret.frame = NSRect(x: x, y: (bounds.height - height) / 2, width: 1.5, height: height)
+        caret.frame = frame
         CATransaction.commit()
     }
 }
@@ -530,6 +621,8 @@ final class HoverWorkingMarkView: NSImageView {
 final class HoverCardBodyView: NSView {
     static let width: CGFloat = 280
     static let inset: CGFloat = 14
+    /// Between the mark and the line it marks.
+    static let markGap: CGFloat = 6
 
     let titleField = ShellFont.label(font: ShellFont.ui(15, .semibold), color: ShellPalette.ink)
     let metaField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkMuted)
@@ -547,7 +640,7 @@ final class HoverCardBodyView: NSView {
     let workingMark = HoverWorkingMarkView()
     let engineIcon = NSImageView()
     private let rule = NSView()
-    private let tailRow = NSStackView()
+    private let tailRow = NSView()
     private let stack = NSStackView()
 
     init() {
@@ -570,12 +663,11 @@ final class HoverCardBodyView: NSView {
         rule.layer?.backgroundColor = ShellPalette.hairlineStrong.cgColor
         rule.translatesAutoresizingMaskIntoConstraints = false
 
-        tailRow.orientation = .horizontal
-        tailRow.alignment = .centerY
-        tailRow.spacing = 6
+        // Not a stack, because the mark belongs on the *first* line of a line
+        // that may run to three — a fixed drop from the top, not a centring.
         tailRow.translatesAutoresizingMaskIntoConstraints = false
-        tailRow.addArrangedSubview(workingMark)
-        tailRow.addArrangedSubview(tailField)
+        tailRow.addSubview(workingMark)
+        tailRow.addSubview(tailField)
 
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -590,6 +682,11 @@ final class HoverCardBodyView: NSView {
         addSubview(stack)
 
         let content = Self.width - Self.inset * 2
+        // Fixed, and set before anything measures with it: the field has to
+        // break lines at the width the layout gives it, and an unset one
+        // measures as a single endless line.
+        tailField.preferredMaxLayoutWidth = content - HoverWorkingMarkView.size - Self.markGap
+
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: Self.inset - 1),
@@ -604,6 +701,18 @@ final class HoverCardBodyView: NSView {
             timingField.widthAnchor.constraint(equalToConstant: content),
             totalsField.widthAnchor.constraint(equalToConstant: content),
             tailRow.widthAnchor.constraint(equalToConstant: content),
+            workingMark.leadingAnchor.constraint(equalTo: tailRow.leadingAnchor),
+            workingMark.topAnchor.constraint(
+                equalTo: tailRow.topAnchor,
+                constant: (tailField.singleLineHeight - HoverWorkingMarkView.size) / 2
+            ),
+            tailField.leadingAnchor.constraint(
+                equalTo: workingMark.trailingAnchor,
+                constant: Self.markGap
+            ),
+            tailField.trailingAnchor.constraint(equalTo: tailRow.trailingAnchor),
+            tailField.topAnchor.constraint(equalTo: tailRow.topAnchor),
+            tailField.bottomAnchor.constraint(equalTo: tailRow.bottomAnchor),
         ])
     }
 

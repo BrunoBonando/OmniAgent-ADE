@@ -95,7 +95,7 @@ final class SessionHoverCardTests: XCTestCase {
     }
 
     func testTheTailIsTheBeginningOfTheLineAndAnEllipsis() {
-        let long = String(repeating: "x", count: 100)
+        let long = String(repeating: "x", count: HoverCardModel.tailLimit + 40)
         let snipped = HoverCardModel.snippet(long)
         XCTAssertEqual(snipped?.count, HoverCardModel.tailLimit + 1)
         XCTAssertTrue(snipped?.hasSuffix("…") ?? false)
@@ -134,7 +134,7 @@ final class SessionHoverCardTests: XCTestCase {
             terminal(),
             status: .thinking,
             activity: ledger.activity(for: "a"),
-            tail: "Editing SessionConnection.swift and a great deal more besides",
+            tail: String(repeating: "Editing SessionConnection.swift. ", count: 8),
             now: t0 + 252_000
         )
 
@@ -737,10 +737,89 @@ final class SessionHoverCardTests: XCTestCase {
         )
     }
 
+    // MARK: - The line, held
+
+    /// A read that comes back empty is a frame the agent had cleared and not
+    /// finished redrawing, not news that it stopped working. At ten reads a
+    /// second, answering `nil` there is what the flicker between the line and
+    /// `Working` actually was.
+    func testABlankReadKeepsTheLineItAlreadyHad() {
+        var hold = TerminalSurfaceView.OutputLineHold()
+
+        XCTAssertNil(hold.update(nil), "nothing read yet is still nothing")
+        XCTAssertEqual(hold.update("Running 1 shell command…"), "Running 1 shell command…")
+        XCTAssertEqual(
+            hold.update(nil), "Running 1 shell command…",
+            "a torn frame does not wipe the line"
+        )
+        XCTAssertEqual(
+            hold.update("Editing SessionHoverCard.swift"), "Editing SessionHoverCard.swift",
+            "only another line replaces a line"
+        )
+    }
+
+    // MARK: - Three lines
+
+    /// The line runs to three rows now, and the card is as tall as the line
+    /// needs — but no taller, so a short one does not sit in a hole.
+    func testTheCardGrowsWithTheLineUpToThreeRows() {
+        let body = HoverCardBodyView()
+        body.tailField.animates = false
+
+        let heights = [
+            "Editing.",
+            String(repeating: "Editing SessionHoverCard.swift. ", count: 2),
+            String(repeating: "Editing SessionHoverCard.swift. ", count: 6),
+            String(repeating: "Editing SessionHoverCard.swift. ", count: 30),
+        ].map { tail -> CGFloat in
+            body.apply(model(tail: tail))
+            return body.cardSize.height
+        }
+
+        XCTAssertLessThan(heights[0], heights[1], "two rows is taller than one")
+        XCTAssertLessThan(heights[1], heights[2], "three rows is taller than two")
+        XCTAssertEqual(heights[2], heights[3], "and three is where it stops")
+    }
+
+    /// Height is reserved for the finished line, not the prefix on screen:
+    /// otherwise the card gains a row under the reader twice on the way
+    /// through every message.
+    func testTheCardDoesNotGrowRowByRowWhileItTypes() {
+        let body = HoverCardBodyView()
+        body.tailField.animates = true
+        let tail = String(repeating: "Editing SessionHoverCard.swift. ", count: 6)
+
+        body.apply(model(tail: tail))
+        let whileTyping = body.cardSize.height
+        XCTAssertTrue(body.tailField.isTyping, "the fixture has to still be mid-type")
+        XCTAssertLessThan(
+            body.tailField.typedText.count, tail.count,
+            "and only part of it on screen"
+        )
+
+        body.tailField.animates = false
+        body.tailField.setLine(tail + " ")
+        body.tailField.setLine(tail)
+        XCTAssertEqual(body.cardSize.height, whileTyping, "the same height throughout")
+    }
+
     // MARK: - Helpers
 
     private final class SilentTerminalDelegate: TerminalDelegate {
         func send(source: Terminal, data: ArraySlice<UInt8>) {}
+    }
+
+    /// A working pane's card with a given line on it.
+    private func model(tail: String) -> HoverCardModel {
+        var ledger = PaneActivityLedger()
+        ledger.record(paneID: "a", status: .thinking, at: t0)
+        return HoverCardModel.pane(
+            terminal(),
+            status: .thinking,
+            activity: ledger.activity(for: "a"),
+            tail: tail,
+            now: t0 + 12_000
+        )
     }
 
     private func terminal() -> PaneDescriptor {
