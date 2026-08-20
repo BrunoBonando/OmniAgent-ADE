@@ -286,7 +286,6 @@ enum ShellGlyph {
     case folderOpen
     case file
     case magnifier
-    case gear
 
     /// - Parameter box: the SVG's own viewBox side (16 or 24), so the path can
     ///   be written in the document's coordinates and scaled once here.
@@ -443,24 +442,6 @@ enum ShellGlyph {
             path.move(to: NSPoint(x: 10.4, y: 10.4))
             path.line(to: NSPoint(x: 13.4, y: 13.4))
             path.stroke()
-        case .gear:
-            path.lineWidth = 1.2
-            path.appendOval(in: NSRect(x: 5.8, y: 5.8, width: 4.4, height: 4.4))
-            path.stroke()
-            let spokes = NSBezierPath()
-            spokes.lineWidth = 1.1
-            spokes.lineCapStyle = .round
-            let pairs: [(CGFloat, CGFloat, CGFloat, CGFloat)] = [
-                (8, 1.8, 8, 3.4), (8, 12.6, 8, 14.2),
-                (1.8, 8, 3.4, 8), (12.6, 8, 14.2, 8),
-                (3.6, 3.6, 4.7, 4.7), (11.3, 11.3, 12.4, 12.4),
-                (12.4, 3.6, 11.3, 4.7), (4.7, 11.3, 3.6, 12.4),
-            ]
-            for (x1, y1, x2, y2) in pairs {
-                spokes.move(to: NSPoint(x: x1, y: y1))
-                spokes.line(to: NSPoint(x: x2, y: y2))
-            }
-            spokes.stroke()
         }
         NSGraphicsContext.restoreGraphicsState()
     }

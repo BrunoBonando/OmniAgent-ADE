@@ -206,6 +206,13 @@ final class SidebarSectionHeaderView: NSView {
 final class SidebarAccountRowView: NSView {
     var onOpenSettings: (() -> Void)?
 
+    /// The chip's own height, and half of it its capsule radius. Fixed rather
+    /// than derived from the label's padding because the row is now a card:
+    /// the sidebar insets it from its own edges so it clears the window's
+    /// corner curve — on macOS 26 that curve is wide enough that an
+    /// edge-to-edge footer tucks its avatar under the bevel.
+    static let height: CGFloat = 44
+
     private let nameField = ShellFont.label(
         "Not signed in",
         font: ShellFont.ui(13.5, .medium),
@@ -222,9 +229,19 @@ final class SidebarAccountRowView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        // No fill: the footer used to carry its own faint wash, which read as
-        // a slab on the flat column. The hairline above is the whole divide.
         translatesAutoresizingMaskIntoConstraints = false
+
+        // Liquid Glass where there is glass to ask for. Before macOS 26 there
+        // is none, and every stand-in dims rather than refracts, so the
+        // fallback is the plainest thing that still reads as a card.
+        let glass = WorkspaceGlass.sheet(cornerRadius: Self.height / 2)
+        if glass == nil {
+            layer?.cornerRadius = Self.height / 2
+            layer?.cornerCurve = .continuous
+            layer?.backgroundColor = NSColor(white: 1, alpha: 0.05).cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = ShellPalette.hairlineStrong.cgColor
+        }
 
         let avatar = NSView()
         avatar.wantsLayer = true
@@ -243,22 +260,28 @@ final class SidebarAccountRowView: NSView {
         avatar.addSubview(person)
 
         gear.wantsLayer = true
-        gear.layer?.cornerRadius = 5
+        gear.layer?.cornerRadius = 6
         gear.hoverFill = NSColor(white: 1, alpha: 0.09)
         gear.onPress = { [weak self] in self?.onOpenSettings?() }
         gear.setAccessibilityLabel("Settings")
         gear.translatesAutoresizingMaskIntoConstraints = false
-        let gearGlyph = ShellGlyphView(.gear, color: ShellPalette.chevron, size: 20)
+        // The system gear, not the hand-drawn one this used to carry: a ring
+        // with eight straight spokes is the brightness glyph, and at 20pt it
+        // read as one.
+        let gearGlyph = NSImageView()
+        gearGlyph.image = NSImage(
+            systemSymbolName: "gearshape",
+            accessibilityDescription: "Settings"
+        )?.withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        gearGlyph.contentTintColor = ShellPalette.chevron
+        gearGlyph.translatesAutoresizingMaskIntoConstraints = false
         gear.addSubview(gearGlyph)
 
-        let separator = ShellSeparator(color: ShellPalette.hairlineStrong)
-        for view in [separator, avatar, nameField, gear] { addSubview(view) }
+        for view in [glass, avatar, nameField, gear].compactMap({ $0 }) { addSubview(view) }
         NSLayoutConstraint.activate([
-            separator.topAnchor.constraint(equalTo: topAnchor),
-            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            heightAnchor.constraint(equalToConstant: Self.height),
 
-            avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 11),
             avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
             avatar.widthAnchor.constraint(equalToConstant: ShellMetrics.accountAvatar),
             avatar.heightAnchor.constraint(equalToConstant: ShellMetrics.accountAvatar),
@@ -267,16 +290,24 @@ final class SidebarAccountRowView: NSView {
 
             nameField.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: 8),
             nameField.trailingAnchor.constraint(equalTo: gear.leadingAnchor, constant: -6),
-            nameField.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            nameField.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            nameField.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             gear.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             gear.centerYAnchor.constraint(equalTo: centerYAnchor),
-            gear.widthAnchor.constraint(equalToConstant: 20),
-            gear.heightAnchor.constraint(equalToConstant: 20),
+            gear.widthAnchor.constraint(equalToConstant: 24),
+            gear.heightAnchor.constraint(equalToConstant: 24),
             gearGlyph.centerXAnchor.constraint(equalTo: gear.centerXAnchor),
             gearGlyph.centerYAnchor.constraint(equalTo: gear.centerYAnchor),
         ])
+        if let glass {
+            glass.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                glass.leadingAnchor.constraint(equalTo: leadingAnchor),
+                glass.trailingAnchor.constraint(equalTo: trailingAnchor),
+                glass.topAnchor.constraint(equalTo: topAnchor),
+                glass.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ])
+        }
         nameField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -388,11 +419,11 @@ final class NavigationSidebarView: NSView {
             scroll.topAnchor.constraint(equalTo: workspacesHeader.bottomAnchor, constant: 2),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: accountRow.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: accountRow.topAnchor, constant: -8),
 
-            accountRow.leadingAnchor.constraint(equalTo: leadingAnchor),
-            accountRow.trailingAnchor.constraint(equalTo: trailingAnchor),
-            accountRow.bottomAnchor.constraint(equalTo: bottomAnchor),
+            accountRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            accountRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            accountRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
         ])
 
         applyDestination(.terminals)

@@ -89,11 +89,16 @@ final class NavigationSidebarTests: XCTestCase {
 
     // MARK: - Account row
 
+    /// Pinned to the floor, but inset from it: the chip is a card that has to
+    /// clear the window's corner curve, not a strip flush with the edges.
     func testTheAccountRowIsPinnedAtTheBottom() {
         let sidebar = makeSidebar()
         XCTAssertTrue(sidebar.accountRow.superview === sidebar)
-        XCTAssertEqual(sidebar.accountRow.frame.minY, 0, accuracy: 0.5, "pinned to the bottom edge")
-        XCTAssertEqual(sidebar.accountRow.frame.width, sidebar.bounds.width, accuracy: 0.5)
+        XCTAssertEqual(sidebar.accountRow.frame.minY, 10, accuracy: 0.5, "inset off the bottom edge")
+        XCTAssertEqual(
+            sidebar.accountRow.frame.width, sidebar.bounds.width - 16, accuracy: 0.5,
+            "inset from both side edges"
+        )
         // Everything else sits above it.
         for sibling in sidebar.subviews where sibling !== sidebar.accountRow {
             XCTAssertGreaterThanOrEqual(
@@ -307,7 +312,7 @@ final class NavigationSidebarTests: XCTestCase {
                 "\(type(of: above)) should sit above \(type(of: below))"
             )
         }
-        XCTAssertEqual(sidebar.accountRow.frame.minY, 0, accuracy: 0.5)
+        XCTAssertEqual(sidebar.accountRow.frame.minY, 10, accuracy: 0.5)
     }
 
     // MARK: - Helpers
