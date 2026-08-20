@@ -243,7 +243,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         self.makeSurface = makeSurface
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor(srgbRed: 4 / 255, green: 6 / 255, blue: 9 / 255, alpha: 1).cgColor
+        layer?.backgroundColor = Self.normalBackgroundColor.cgColor
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         // Kind-neutral: the grid holds browsers as well as terminals now.
@@ -1052,6 +1052,72 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         canvasLayout?.frames[group]
     }
 
+    /// Inside a session the ground is never seen, so it stays the near-black a
+    /// terminal wants behind it.
+    static let normalBackgroundColor = NSColor(srgbRed: 4 / 255, green: 6 / 255, blue: 9 / 255, alpha: 1)
+
+    /// The canvas's ground: a desaturated slate, deliberately *lighter* than
+    /// `PaneContainerView.paneBackgroundColor`. That difference is the whole
+    /// spatial illusion — the cards have to read as objects lying on a surface,
+    /// and a black card on a black field is a hole in the screen instead.
+    static let canvasBackgroundColor = NSColor(srgbRed: 25 / 255, green: 28 / 255, blue: 34 / 255, alpha: 1)
+
+    private static let gridMinorColor = NSColor(white: 1, alpha: 0.045)
+    private static let gridMajorColor = NSColor(white: 1, alpha: 0.09)
+
+    /// The grid, drawn by the **view** rather than by a sublayer.
+    ///
+    /// `layer.sublayerTransform` is the camera, and it reaches every sublayer —
+    /// so a grid layer would be scaled with the content, and its 1pt lines
+    /// would be 0.2pt at `fitAll`, under a device pixel, exactly where the grid
+    /// is needed most. A view's own `draw(_:)` is not a sublayer and carries no
+    /// transform, so the lines stay hairline at every zoom and only their
+    /// *spacing* follows the camera. It is the same problem
+    /// `DeskCanvasEdgeLayer.apply(_:scale:)` solves by dividing the stroke back
+    /// out, answered the cheaper way for something that covers the whole view.
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard isCanvasMode, bounds.width > 0, bounds.height > 0 else { return }
+        Self.canvasBackgroundColor.setFill()
+        dirtyRect.fill()
+
+        let spacing = DeskGrid.spacing(forScale: camera.scale)
+        let verticals = DeskGrid.lines(
+            origin: camera.origin.x, scale: camera.scale, span: bounds.width, spacing: spacing
+        )
+        let horizontals = DeskGrid.lines(
+            origin: camera.origin.y, scale: camera.scale, span: bounds.height, spacing: spacing
+        )
+        guard !verticals.isEmpty || !horizontals.isEmpty else { return }
+
+        // Two paths, two strokes, rather than a stroke per line: a decade of
+        // grid across a wide window is a few hundred segments, and a few
+        // hundred `stroke()` calls is a few hundred state changes for one
+        // colour. The same "one path" argument `DeskCanvasEdgeLayer` makes.
+        let minor = NSBezierPath()
+        let major = NSBezierPath()
+        minor.lineWidth = 1
+        major.lineWidth = 1
+        for line in verticals {
+            // Half-point offset so a 1pt line lands *on* a device pixel column
+            // rather than straddling two and rendering as a 2px smear.
+            let x = line.position.rounded() + 0.5
+            let path = line.isMajor ? major : minor
+            path.move(to: CGPoint(x: x, y: 0))
+            path.line(to: CGPoint(x: x, y: bounds.height))
+        }
+        for line in horizontals {
+            let y = line.position.rounded() + 0.5
+            let path = line.isMajor ? major : minor
+            path.move(to: CGPoint(x: 0, y: y))
+            path.line(to: CGPoint(x: bounds.width, y: y))
+        }
+        Self.gridMinorColor.setStroke()
+        minor.stroke()
+        Self.gridMajorColor.setStroke()
+        major.stroke()
+    }
+
     /// Whether the camera is far enough out that pane surfaces carry no
     /// information: at `DeskCanvas.lodThreshold` 12pt type is 2.4pt. Below it
     /// the surfaces come down and chips take their place.
@@ -1526,16 +1592,22 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // screen. This is the single rule that makes the sidebar work: its
         // session rows and pane rows both already call through here, so
         // selecting either one switches sessions without a second code path.
+        // On the canvas, *anywhere but already inside that session* is a
+        // flight. `activeGroup` alone is the wrong test: it is whichever session
+        // was last landed in, and it keeps that value while the camera is out
+        // over the whole organigram — so a sidebar click on a pane of the
+        // last-visited session used to focus a pane the user cannot see, on a
+        // card the camera never moved to. `isIdentityTransform` is the question
+        // that actually matters: is this session filling the screen right now.
+        if canvasMode, activeGroup != group || !camera.isIdentityTransform {
+            // The switch still happens — `landSession` does it when the camera
+            // arrives — so every caller still ends up with `sessionID` focused,
+            // one camera move later.
+            pendingFocusPaneID = sessionID
+            enterSession(group)
+            return
+        }
         if activeGroup != group {
-            // On the canvas the session is flown to rather than swapped in
-            // underneath the user. The switch still happens — `landSession`
-            // does it when the camera arrives — so every caller still ends up
-            // with `sessionID` focused, one camera move later.
-            if canvasMode {
-                pendingFocusPaneID = sessionID
-                enterSession(group)
-                return
-            }
             activeGroup = group
             updateVisibility()
             updateLayout()
@@ -1840,6 +1912,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
                 canvasEdges.removeFromSuperlayer()
             }
             isCanvasMode = newValue
+            // The ground changes with the mode — slate and grid on the canvas,
+            // the near-black a terminal wants inside a session — and `draw(_:)`
+            // is the only thing that paints either.
+            needsDisplay = true
             // Unconditionally, and before the layout pass rather than after it:
             // `updateVisibility` is what runs `validateZoom`, and `updateLayout`
             // ends in `applyZoom`, which would otherwise act on a zoom this mode
@@ -1869,6 +1945,13 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         didSet {
             guard camera != oldValue else { return }
             applyCamera()
+            // The grid is drawn by this view rather than by a sublayer, so the
+            // camera does not carry it and nothing else would repaint it. See
+            // `draw(_:)`.
+            needsDisplay = true
+            // What the zoom readout is for. Raised per change, not debounced:
+            // it is a label, and a label that lags a pinch is worse than none.
+            onCameraChanged?()
             // An ancestor transform moves no frame, so no layout pass follows a
             // camera move and this is the only thing that re-derives what is on
             // screen. Every path that changes the camera must come through the
@@ -1915,6 +1998,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// suppression cannot help with a value that genuinely differs every frame,
     /// so `persistDeskCanvas` debounces instead.
     var onDeskCanvasChanged: (() -> Void)?
+
+    /// Raised on every camera change, undebounced, for chrome that has to track
+    /// the zoom — the readout in the corner. Distinct from
+    /// `onDeskCanvasChanged`, which exists to *persist* and is debounced for it:
+    /// a label updated on a debounce lags the pinch that caused it.
+    var onCameraChanged: (() -> Void)?
 
     /// True while a camera flight into a session is still in the air.
     ///
@@ -2722,6 +2811,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         let viewPoint = convert(event.locationInWindow, from: nil)
         guard let id = canvasNode(at: viewPoint), let frame = canvasLayout?.frames[id] else {
             selectedNodeID = nil
+            // Empty space is the canvas itself, and dragging it moves the
+            // camera — the other half of "scroll zooms". A node under the
+            // pointer still wins, because dragging an object moves the object.
+            beginCanvasPan(at: viewPoint)
             return
         }
         selectedNodeID = id
@@ -2736,10 +2829,18 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard canvasOwnsInput, let id = draggingNodeID else {
-            return super.mouseDragged(with: event)
+        guard canvasOwnsInput else { return super.mouseDragged(with: event) }
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        // A pan is measured in view points and handed straight to the camera:
+        // the content must keep up with the pointer exactly, which is what
+        // moving the origin by the pointer's own delta means.
+        if let last = panLastViewPoint {
+            panCanvas(by: CGSize(width: viewPoint.x - last.x, height: viewPoint.y - last.y))
+            panLastViewPoint = viewPoint
+            return
         }
-        let canvasPoint = camera.canvasPoint(from: convert(event.locationInWindow, from: nil))
+        guard let id = draggingNodeID else { return super.mouseDragged(with: event) }
+        let canvasPoint = camera.canvasPoint(from: viewPoint)
         let delta = CGPoint(
             x: canvasPoint.x - dragOriginInCanvas.x,
             y: canvasPoint.y - dragOriginInCanvas.y
@@ -2754,6 +2855,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 
     override func mouseUp(with event: NSEvent) {
         guard canvasOwnsInput else { return super.mouseUp(with: event) }
+        endCanvasPan()
         draggingNodeID = nil
         didDragNode = false
     }
@@ -2882,21 +2984,55 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         pinchCanvas(by: 1 + event.magnification, about: convert(event.locationInWindow, from: nil))
     }
 
+    /// Scroll zooms about the pointer; it does not pan.
+    ///
+    /// The spatial-canvas convention — Miro, Figma, every map — and what the
+    /// canvas needs, because panning is now the drag. A mouse has one wheel and
+    /// two axes to travel, so the wheel cannot be the pan without stranding
+    /// half the canvas behind a modifier.
+    ///
+    /// `scrollingDeltaY`, not `deltaY`: the precise-device value is in points
+    /// and already carries the natural-scroll direction, while `deltaY` is in
+    /// wheel "lines" and a trackpad rounds small moves to zero. A wheel with no
+    /// precise deltas reports whole lines, which need a coarser divisor or one
+    /// click would be imperceptible.
+    ///
+    /// Multiplied rather than added, because scale is multiplicative: a fixed
+    /// step crawls at 1.0 and leaps at `fitAll`.
     override func scrollWheel(with event: NSEvent) {
         guard canvasOwnsInput else { return super.scrollWheel(with: event) }
-        if event.modifierFlags.contains(.command) {
-            pinchCanvas(
-                by: 1 + event.scrollingDeltaY / 200,
-                about: convert(event.locationInWindow, from: nil)
-            )
-            return
-        }
-        // `scrollingDeltaX/Y`, not `deltaX/Y`: the precise-device values are in
-        // points and already carry the natural-scroll direction, while `deltaY`
-        // is in wheel "lines" and a trackpad rounds small moves to zero. In this
-        // flipped space a positive `scrollingDeltaY` moves the content down,
-        // which is a larger origin y.
-        panCanvas(by: CGSize(width: event.scrollingDeltaX, height: event.scrollingDeltaY))
+        let unit = event.hasPreciseScrollingDeltas
+            ? event.scrollingDeltaY / 200
+            : event.scrollingDeltaY / 12
+        guard unit != 0, unit.isFinite else { return }
+        // Clamped so one violent flick cannot invert the factor (a negative
+        // scale mirrors the whole canvas) or cross the whole zoom range in a
+        // single event.
+        let factor = min(2, max(0.5, 1 + unit))
+        pinchCanvas(by: factor, about: convert(event.locationInWindow, from: nil))
+    }
+
+    /// Where a canvas pan last saw the pointer, or `nil` when the drag in
+    /// progress is a node drag rather than a pan.
+    private var panLastViewPoint: CGPoint?
+
+    /// Whether this view pushed the closed-hand cursor and still owes a `pop()`.
+    /// `NSCursor`'s stack is global and unbalanced pushes leak into every other
+    /// view in the window.
+    private var didPushPanCursor = false
+
+    private func beginCanvasPan(at viewPoint: CGPoint) {
+        panLastViewPoint = viewPoint
+        guard window != nil, !didPushPanCursor else { return }
+        NSCursor.closedHand.push()
+        didPushPanCursor = true
+    }
+
+    private func endCanvasPan() {
+        panLastViewPoint = nil
+        guard didPushPanCursor else { return }
+        NSCursor.pop()
+        didPushPanCursor = false
     }
 
     private func hasNeighbor(_ direction: PaneDirection) -> Bool {
@@ -3036,12 +3172,15 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// sole owner of per-pane visibility. Anything that assigns this from
     /// elsewhere is overwritten by that method's next call — the same trap
     /// `setSuspendsDrawing`'s comment already records for `suspendsDrawing`.
+    /// How long a pane takes to become its placeholder, and back.
+    static let chipFadeDuration: TimeInterval = 0.18
+    private static let chipFadeKey = "chipFade"
+    private var chipFadeToken = 0
+
     var isChipped = false {
         didSet {
             guard isChipped != oldValue else { return }
-            chip.isHidden = !isChipped
-            surface.isHidden = isChipped
-            header.isHidden = isChipped
+            crossfadeChip()
             // Directly, not through `needsLayout`: a chip that arrives one
             // layout pass later is a blank pane for a frame, and the windowless
             // test host never turns a run loop to deliver that pass at all.
@@ -3056,6 +3195,79 @@ final class PaneContainerView: NSView, NSDraggingSource {
             // the same one `approvalBar.onChoose` makes.
             if !isChipped { (surface as? TerminalSurfaceView)?.requestRendererDraw() }
         }
+    }
+
+    /// The swap between a live pane and its placeholder, as a fade rather than
+    /// a cut.
+    ///
+    /// A pane that pops into a placeholder mid-zoom reads as a glitch at
+    /// exactly the moment the user is moving the camera and watching for
+    /// motion. Both are up for the length of the fade, then the loser is hidden
+    /// — hidden, not merely faded, because `isHidden` is the whole point of the
+    /// level of detail: a view at opacity 0 is still composited and still
+    /// answers `setNeedsDisplay`.
+    ///
+    /// Follows the file's two animation rules: raw `CABasicAnimation` rather
+    /// than `NSView.animator()`, and a settle scheduled on
+    /// `DispatchQueue.main.asyncAfter` behind a token rather than an animation
+    /// group's completion, which is not guaranteed to arrive at all. With no
+    /// window or under Reduce Motion it settles synchronously — so the
+    /// windowless test host sees the final state the instant `isChipped` is
+    /// written, exactly as it did before there was a fade.
+    private func crossfadeChip() {
+        chipFadeToken += 1
+        let token = chipFadeToken
+        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            settleChipFade(token)
+            return
+        }
+        chip.isHidden = false
+        surface.isHidden = false
+        header.isHidden = false
+        // The chip is sized and seated by the same pass that sizes the surface,
+        // and it has to be in place *before* it is faded in rather than one
+        // layout later — a placeholder that arrives after its own fade is a
+        // blank rectangle for the length of it.
+        applyLayout()
+        fadeChipMember(chip, to: isChipped ? 1 : 0)
+        fadeChipMember(surface, to: isChipped ? 0 : 1)
+        fadeChipMember(header, to: isChipped ? 0 : 1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.chipFadeDuration) { [weak self] in
+            self?.settleChipFade(token)
+        }
+    }
+
+    private func fadeChipMember(_ view: NSView, to opacity: Float) {
+        view.wantsLayer = true
+        guard let layer = view.layer else { return }
+        // By key, never `removeAllAnimations()`: a pane crossing the threshold
+        // twice in one flick would otherwise yank whatever else its layer is
+        // running — the trap `landCard`'s comment records.
+        layer.removeAnimation(forKey: Self.chipFadeKey)
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = layer.presentation()?.opacity ?? layer.opacity
+        fade.toValue = opacity
+        fade.duration = Self.chipFadeDuration
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.opacity = opacity
+        layer.add(fade, forKey: Self.chipFadeKey)
+    }
+
+    /// The state the fade was always heading for, applied by whichever of the
+    /// two paths gets there first.
+    private func settleChipFade(_ token: Int) {
+        guard token == chipFadeToken else { return }
+        chip.layer?.removeAnimation(forKey: Self.chipFadeKey)
+        surface.layer?.removeAnimation(forKey: Self.chipFadeKey)
+        header.layer?.removeAnimation(forKey: Self.chipFadeKey)
+        chip.layer?.opacity = 1
+        surface.layer?.opacity = 1
+        header.layer?.opacity = 1
+        chip.isHidden = !isChipped
+        surface.isHidden = isChipped
+        header.isHidden = isChipped
+        applyLayout()
+        if !isChipped { (surface as? TerminalSurfaceView)?.requestRendererDraw() }
     }
 
     /// The design's amber strip along the bottom while the agent is blocked on
@@ -3479,6 +3691,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // two expressions, so the two can never disagree about a pane.
         chip.title = header.title
         chip.engine = header.engine
+        // What the placeholder draws: a terminal, a browser or a file viewer.
+        chip.kind = descriptor.kind
         header.isEngineMenuAvailable = descriptor.kind == .terminal
         header.isRenameAvailable = descriptor.kind == .terminal
         // Color badge: only Claude terminals support `/color`.

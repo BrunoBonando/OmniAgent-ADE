@@ -109,6 +109,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// views and their PTY attachment along with it.
     private let contentContainer = NSView()
     private let placeholder = WorkspacePlaceholderView()
+
+    /// The canvas's zoom readout. A sibling of `workspace`, never a subview of
+    /// it — see `DeskZoomReadoutView`.
+    let deskZoomReadout = DeskZoomReadoutView()
     /// Which destination is on screen. `applyDestination` is the only writer;
     /// ⌘↩ reads it because focus mode is about a terminal, and off Terminals the
     /// pane workspace is hidden entirely.
@@ -392,6 +396,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.adjustWindowForRowCount()
         }
         workspace.onDeskCanvasChanged = { [weak self] in self?.persistDeskCanvas() }
+        workspace.onCameraChanged = { [weak self] in self?.updateDeskZoomReadout() }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
         usageRecorder.onStoreChanged = { [weak self] store in self?.persistUsageAnalytics(store) }
         shellSidebar.onSelectPane = { [weak self] id in self?.workspace.focusPane(id) }
@@ -550,6 +555,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         placeholder.translatesAutoresizingMaskIntoConstraints = false
         contentContainer.addSubview(workspace)
         contentContainer.addSubview(placeholder)
+        installDeskZoomReadout()
         for view in [workspace, placeholder] as [NSView] {
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
@@ -637,6 +643,34 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.deskCanvasLoaded = isTerminals
         placeholder.isHidden = isTerminals
         if !isTerminals { placeholder.show(destination) }
+        // A destination change moves the readout in or out of existence without
+        // necessarily moving the camera, so it cannot ride on `onCameraChanged`.
+        updateDeskZoomReadout()
+    }
+
+    /// Bottom-right, over the canvas, clear of the panes.
+    private func installDeskZoomReadout() {
+        deskZoomReadout.translatesAutoresizingMaskIntoConstraints = false
+        deskZoomReadout.isHidden = true
+        contentContainer.addSubview(deskZoomReadout)
+        NSLayoutConstraint.activate([
+            deskZoomReadout.trailingAnchor.constraint(
+                equalTo: contentContainer.trailingAnchor, constant: -16
+            ),
+            deskZoomReadout.bottomAnchor.constraint(
+                equalTo: contentContainer.bottomAnchor, constant: -16
+            ),
+        ])
+    }
+
+    /// Shown exactly while the canvas is what the user is flying over.
+    ///
+    /// Not inside a session: there the camera is the identity by construction,
+    /// so the readout would be a permanent "100%" — a number that never changes
+    /// and answers nothing, sitting on top of a terminal's last line.
+    func updateDeskZoomReadout() {
+        deskZoomReadout.scale = workspace.camera.scale
+        deskZoomReadout.isHidden = !(workspace.canvasMode && destination == .terminals)
     }
 
     /// What the Desk was showing when it was last left, so coming back to it is
@@ -2697,12 +2731,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // session. Overwriting the camera mid-flight would show the wrong
         // place for 0.38s, and `exitToCanvas` would cancel the arrival
         // outright: the restore's whole point, undone by its own last step.
+        // The canvas always opens on the whole organigram, whatever camera a
+        // previous run left behind. A launch that restores a camera zoomed into
+        // one card opens on a screen that looks like a single session with no
+        // sign that anything else exists — the one view where the spatial model
+        // is invisible. `state.camera` is therefore read and ignored; see
+        // `persistDeskCanvas`, which stops writing it.
         if workspace.canvasMode, !workspace.isEnteringSession {
-            if let camera = state.camera {
-                workspace.camera = camera
-            } else {
-                workspace.exitToCanvas()
-            }
+            workspace.exitToCanvas()
         }
         // Last, deliberately, where its browser and editor siblings open the
         // gate first: both assignments above raise `onDeskCanvasChanged`, and
@@ -2739,7 +2775,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // have flown into a session before the quarter-second is up. Each
         // change re-schedules, so the value that survives is still the last
         // one.
-        let state = DeskCanvasState(pinned: workspace.canvasPins, camera: workspace.camera)
+        // `camera: nil` on purpose. The canvas opens on `fitAll` every time —
+        // see `applyRestoredDeskCanvas` — so a stored camera is a field nothing
+        // reads. `DeskCanvasState.camera` and the codec's handling of it are
+        // left in place: they are covered by their own tests, and an old row
+        // that still carries a camera has to keep parsing.
+        let state = DeskCanvasState(pinned: workspace.canvasPins, camera: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.deskCanvasWriteDelay) { [weak self] in
             guard let self, token == deskCanvasWriteToken else { return }
             write(DeskCanvasCodec.serialize(state), to: SettingsKey.deskCanvas)

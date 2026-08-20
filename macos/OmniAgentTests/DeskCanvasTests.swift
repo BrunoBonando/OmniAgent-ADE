@@ -521,3 +521,76 @@ final class DeskCanvasTests: XCTestCase {
         )
     }
 }
+
+/// The canvas's ground. Pure geometry, so it is checked without a window for
+/// the same reason `DeskCanvasTests` is.
+final class DeskGridTests: XCTestCase {
+
+    /// The whole point of a stepped grid: zoomed out, the base cell would be
+    /// sub-pixel and the field would be a flat wash, so the spacing steps up
+    /// instead. Catches a grid that draws `baseSpacing` at every scale.
+    func testTheCellStepsUpADecadeRatherThanCollapsingIntoAWash() {
+        let atIdentity = DeskGrid.spacing(forScale: 1)
+        let farOut = DeskGrid.spacing(forScale: 0.05)
+
+        XCTAssertEqual(atIdentity, DeskGrid.baseSpacing, "at 1.0 the base cell is already legible")
+        XCTAssertGreaterThan(farOut, atIdentity, "zoomed out, the cell grows")
+        XCTAssertGreaterThanOrEqual(
+            farOut * 0.05, DeskGrid.minCellOnScreen,
+            "and it grows until the cell on screen is legible"
+        )
+    }
+
+    /// A degenerate or non-finite scale must answer a usable number rather than
+    /// spinning in the step loop — a wrong grid is cosmetic, a hung main thread
+    /// is not.
+    func testADegenerateScaleAnswersTheBaseCellRatherThanLooping() {
+        for scale in [CGFloat(0), -1, .nan, .infinity] {
+            XCTAssertEqual(DeskGrid.spacing(forScale: scale), DeskGrid.baseSpacing)
+        }
+    }
+
+    /// The heavy lines are pinned to canvas coordinates, not to screen ones. Key
+    /// them off the screen position instead and they swim through the field as
+    /// the origin moves — the tell that a grid is painted on the window rather
+    /// than on the canvas.
+    func testTheMajorLinesStayOnTheSameCanvasCoordinatesUnderAPan() {
+        let spacing = DeskGrid.baseSpacing
+        let scale: CGFloat = 1
+        let before = DeskGrid.lines(origin: 0, scale: scale, span: 1000, spacing: spacing)
+        // Pan by exactly one cell: every line moves one slot along, so the line
+        // that was major is still major and it is still the same canvas line.
+        let after = DeskGrid.lines(origin: spacing, scale: scale, span: 1000, spacing: spacing)
+
+        let majorBefore = before.filter(\.isMajor).map(\.position)
+        let majorAfter = after.filter(\.isMajor).map(\.position)
+        XCTAssertFalse(majorBefore.isEmpty, "the fixture's premise")
+        for position in majorAfter where position - spacing >= 0 {
+            XCTAssertTrue(
+                majorBefore.contains { abs($0 - (position - spacing)) < 0.001 },
+                "a major line at \(position) was major one cell back too"
+            )
+        }
+    }
+
+    /// Under a point apart there is no grid left, only a fill — and a bounded
+    /// list, so a camera in a strange state cannot ask for a million segments.
+    func testLinesRefusesToDrawAFieldTooDenseToRead() {
+        XCTAssertTrue(
+            DeskGrid.lines(origin: 0, scale: 0.001, span: 1000, spacing: 1).isEmpty,
+            "a sub-point step is a fill, not a grid"
+        )
+        XCTAssertTrue(DeskGrid.lines(origin: 0, scale: 1, span: 0, spacing: 64).isEmpty)
+        XCTAssertTrue(DeskGrid.lines(origin: .nan, scale: 1, span: 100, spacing: 64).isEmpty)
+    }
+
+    /// Every line it does answer is inside the span it was asked about.
+    func testEveryLineFallsInsideTheSpan() {
+        let lines = DeskGrid.lines(origin: -320, scale: 0.4, span: 1200, spacing: 64)
+        XCTAssertFalse(lines.isEmpty)
+        for line in lines {
+            XCTAssertGreaterThanOrEqual(line.position, 0)
+            XCTAssertLessThanOrEqual(line.position, 1200)
+        }
+    }
+}

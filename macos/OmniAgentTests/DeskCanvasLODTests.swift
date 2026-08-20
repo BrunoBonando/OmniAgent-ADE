@@ -472,6 +472,47 @@ final class DeskCanvasLODTests: XCTestCase {
     /// per session and canvas mode already on. Terminals only: the level-of-
     /// detail rules are kind-neutral and a WKWebView pane costs the test host
     /// a renderer process for nothing.
+    // MARK: - The placeholder is the pane's kind, and it fades
+
+    /// A chip draws what the pane *is*. At this size no title is readable, so
+    /// the shape has to carry the identity — a window of code, a window of
+    /// output, a web page — and the shape is chosen by `kind`.
+    func testTheChipTakesItsKindFromThePaneItStandsFor() throws {
+        let workspace = makeCanvasWorkspace(sessions: 1, panesEach: 1)
+        let container = try XCTUnwrap(workspace.container(for: "s1-p1"))
+
+        workspace.updateDescriptor(for: "s1-p1") { $0.kind = .editor }
+        XCTAssertEqual(container.chip.kind, .editor, "a file pane draws as a file")
+
+        workspace.updateDescriptor(for: "s1-p1") { $0.kind = .browser }
+        XCTAssertEqual(container.chip.kind, .browser)
+    }
+
+    /// The swap is a fade, but with no window it still lands in the same turn.
+    ///
+    /// The whole level-of-detail win is `isHidden` — a view at opacity 0 is
+    /// still composited and still answers `setNeedsDisplay` — so a crossfade
+    /// that forgot to settle would quietly keep ninety-six terminals in the
+    /// compositor. And the windowless test host turns no run loop, so a settle
+    /// behind `asyncAfter` alone would never arrive here at all.
+    func testTheChipCrossfadeStillSettlesSynchronouslyWithNoWindow() throws {
+        let workspace = makeCanvasWorkspace(sessions: 1, panesEach: 1)
+        let container = try XCTUnwrap(workspace.container(for: "s1-p1"))
+        XCTAssertNil(container.window, "the fixture's premise")
+
+        container.isChipped = true
+
+        XCTAssertFalse(container.chip.isHidden, "the placeholder is up")
+        XCTAssertTrue(container.surface.isHidden, "and the terminal is out of the compositor")
+        XCTAssertTrue(container.header.isHidden)
+
+        container.isChipped = false
+
+        XCTAssertTrue(container.chip.isHidden)
+        XCTAssertFalse(container.surface.isHidden, "and back again")
+        XCTAssertFalse(container.header.isHidden)
+    }
+
     private func makeCanvasWorkspace(sessions: Int, panesEach: Int) -> PaneWorkspaceView {
         let connection = SessionConnection(
             socketURL: URL(fileURLWithPath: "/tmp/omniagent-desk-canvas-lod-test.sock")

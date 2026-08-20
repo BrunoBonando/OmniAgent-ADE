@@ -610,6 +610,133 @@ final class DeskCanvasInputTests: XCTestCase {
     /// rules are kind-neutral and a WKWebView pane costs the test host a
     /// renderer process for nothing. The socket is one nobody is listening on:
     /// the Debug `test` path deliberately never builds the Rust daemon.
+    // MARK: - Miro's two rules: scroll zooms, drag pans
+
+    /// Scroll zooms about the pointer and does not move the camera sideways.
+    /// It used to pan, with zoom behind ⌘ — which strands a one-wheel mouse,
+    /// since the wheel cannot be the pan without a modifier for the other axis.
+    func testScrollingZoomsAboutThePointerInsteadOfPanning() throws {
+        let (workspace, window) = makeAttachedCanvasWorkspace(sessions: 2)
+        defer { window.close() }
+        let layout = try XCTUnwrap(workspace.canvasLayout)
+        workspace.camera = DeskCamera.fitAll(content: layout.contentRect, in: workspace.bounds)
+        let before = workspace.camera
+        let event = scrollEvent(deltaY: 10, at: CGPoint(x: 300, y: 200), in: window)
+        // Read the pointer back off the event rather than assuming it: a
+        // `CGEvent`'s location is in screen space and AppKit maps it, so the
+        // handler's own `convert(event.locationInWindow, from: nil)` is the
+        // only honest answer to "where was the pointer".
+        let pointer = workspace.convert(event.locationInWindow, from: nil)
+        // What sits under the pointer before the zoom has to still be there
+        // after it, which is the whole difference between zooming and jumping.
+        let anchored = before.canvasPoint(from: pointer)
+
+        workspace.scrollWheel(with: event)
+
+        XCTAssertGreaterThan(workspace.camera.scale, before.scale, "a scroll changed the scale")
+        let after = workspace.camera.canvasPoint(from: pointer)
+        XCTAssertEqual(after.x, anchored.x, accuracy: 0.5, "the point under the pointer held still")
+        XCTAssertEqual(after.y, anchored.y, accuracy: 0.5)
+    }
+
+    /// And it zooms both ways.
+    func testScrollingTheOtherWayZoomsOut() throws {
+        let (workspace, window) = makeAttachedCanvasWorkspace(sessions: 2)
+        defer { window.close() }
+        workspace.camera = DeskCamera(scale: 0.6, origin: .zero)
+
+        workspace.scrollWheel(with: scrollEvent(deltaY: -10, at: CGPoint(x: 600, y: 400), in: window))
+
+        XCTAssertLessThan(workspace.camera.scale, 0.6)
+    }
+
+    /// One violent flick cannot invert the factor. A negative scale mirrors the
+    /// entire canvas and nothing in the clamp range brings it back.
+    func testAViolentScrollCannotInvertTheScale() throws {
+        let (workspace, window) = makeAttachedCanvasWorkspace(sessions: 2)
+        defer { window.close() }
+        workspace.camera = DeskCamera(scale: 0.6, origin: .zero)
+
+        workspace.scrollWheel(with: scrollEvent(deltaY: -9000, at: CGPoint(x: 600, y: 400), in: window))
+
+        XCTAssertGreaterThan(workspace.camera.scale, 0, "still a forward-facing camera")
+    }
+
+    /// Dragging empty canvas moves the camera by exactly the pointer's own
+    /// travel — anything else and the canvas slides out from under the hand —
+    /// and pins nothing, because empty space is not a node.
+    func testDraggingEmptyCanvasPansTheCameraAndPinsNothing() throws {
+        let (workspace, window) = makeAttachedCanvasWorkspace(sessions: 2)
+        defer { window.close() }
+        let layout = try XCTUnwrap(workspace.canvasLayout)
+        workspace.camera = DeskCamera.fitAll(content: layout.contentRect, in: workspace.bounds)
+        let before = workspace.camera
+        // A corner the tidy tree never reaches, so this is empty canvas.
+        let start = workspace.convert(CGPoint(x: 8, y: 8), to: nil)
+        XCTAssertNil(workspace.canvasNode(at: CGPoint(x: 8, y: 8)), "the fixture's premise")
+
+        workspace.mouseDown(with: mouseEvent(.leftMouseDown, at: start, in: window))
+        let moved = CGPoint(x: start.x + 120, y: start.y + 40)
+        workspace.mouseDragged(with: mouseEvent(.leftMouseDragged, at: moved, in: window))
+        workspace.mouseUp(with: mouseEvent(.leftMouseUp, at: moved, in: window))
+
+        XCTAssertEqual(workspace.camera.scale, before.scale, accuracy: 0.0001, "a pan is not a zoom")
+        XCTAssertEqual(
+            workspace.camera.origin.x - before.origin.x, 120, accuracy: 0.5,
+            "the camera kept up with the pointer exactly"
+        )
+        XCTAssertTrue(workspace.canvasPins.isEmpty, "empty space is not a node and pins nothing")
+        XCTAssertNil(workspace.selectedNodeID, "and selects nothing")
+    }
+
+    /// The sidebar's job on the canvas: clicking a pane flies to its session
+    /// even when that session is already `activeGroup`.
+    ///
+    /// `activeGroup` alone is the wrong test — it holds whichever session was
+    /// last landed in, and keeps that value while the camera is out over the
+    /// whole organigram. On that test a sidebar click focused a pane the user
+    /// could not see, on a card the camera never moved to.
+    func testClickingAPaneOfTheLastVisitedSessionStillFliesToIt() throws {
+        let workspace = makeCanvasWorkspace(sessions: 2)
+        let group = workspace.groupIDs[0]
+        workspace.enterSession(group)
+        XCTAssertEqual(workspace.activeGroup, group, "the fixture's premise: it is the active one")
+        workspace.exitToCanvas()
+        XCTAssertTrue(workspace.canvasMode, "back on the organigram")
+        XCTAssertLessThan(workspace.camera.scale, 1, "with the camera out")
+
+        workspace.focusPane("pane-1")
+
+        XCTAssertTrue(
+            workspace.camera.isIdentityTransform,
+            "the camera flew to the card rather than focusing a pane nobody can see"
+        )
+        XCTAssertEqual(workspace.focusedPaneID, "pane-1")
+    }
+
+    private func scrollEvent(
+        deltaY: CGFloat,
+        at viewPoint: CGPoint,
+        in window: NSWindow
+    ) -> NSEvent {
+        let windowPoint = window.contentView?.convert(viewPoint, from: nil) ?? viewPoint
+        // `CGEvent` rather than `NSEvent.mouseEvent`: AppKit exposes no
+        // initializer that carries a scrolling delta, and a scroll with a zero
+        // delta would prove nothing about a handler that reads it.
+        // swiftlint:disable:next force_unwrapping
+        let cg = CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .pixel,
+            wheelCount: 1,
+            wheel1: Int32(deltaY),
+            wheel2: 0,
+            wheel3: 0
+        )!
+        cg.location = CGPoint(x: windowPoint.x, y: windowPoint.y)
+        // swiftlint:disable:next force_unwrapping
+        return NSEvent(cgEvent: cg)!
+    }
+
     private func makeCanvasWorkspace(sessions: Int) -> PaneWorkspaceView {
         let connection = SessionConnection(
             socketURL: URL(fileURLWithPath: "/tmp/omniagent-desk-canvas-input-test.sock")

@@ -272,10 +272,10 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         )
     }
 
-    /// Restore hands the view its pinned nodes and its camera, and from then on
-    /// a change writes the row back. Debounced: a camera being dragged around
-    /// changes every frame, so `write`'s unchanged-value suppression cannot
-    /// help and only a settle can.
+    /// Restore hands the view its pinned nodes — and deliberately *not* the
+    /// stored camera — and from then on a change writes the row back.
+    /// Debounced: a canvas being dragged around changes every frame, so
+    /// `write`'s unchanged-value suppression cannot help and only a settle can.
     func testPinningANodeWritesTheCanvasRowOnceTheRowHasBeenRead() throws {
         let controller = makeEmptyController()
         defer { controller.close() }
@@ -289,7 +289,11 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
             )
         )
         XCTAssertEqual(controller.workspaceView.canvasPins["grp-1"], CGPoint(x: 10, y: 20))
-        XCTAssertEqual(controller.workspaceView.camera.scale, 0.5, accuracy: 0.0001)
+        // The camera in the row is read and ignored: the canvas always opens on
+        // the whole organigram. Catches a restore quietly wired back up — a
+        // launch parked inside one card looks like a workspace with one session
+        // in it and no sign the rest exist.
+        XCTAssertNotEqual(controller.workspaceView.camera.scale, 0.5, accuracy: 0.0001)
 
         controller.workspaceView.canvasPins["grp-2"] = CGPoint(x: 80, y: 90)
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
@@ -414,6 +418,34 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         RunLoop.current.run(
             until: Date().addingTimeInterval(PaneWorkspaceView.zoomTransitionDuration + 0.2)
         )
+    }
+
+    // MARK: - The zoom readout
+
+    /// The readout answers the one question a zoomable surface cannot answer
+    /// for itself — how big is what I am looking at — so it is up exactly while
+    /// the canvas is what the user is flying over, and nowhere else.
+    func testTheZoomReadoutIsUpOnTheCanvasAndGoneEverywhereElse() {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+
+        controller.applyDestination(.terminals)
+        XCTAssertFalse(controller.deskZoomReadout.isHidden, "the canvas has a zoom to report")
+
+        controller.applyDestination(.dashboard)
+        XCTAssertTrue(controller.deskZoomReadout.isHidden, "and nothing else does")
+    }
+
+    /// It tracks the camera as the camera moves, undebounced — a label that
+    /// lags the pinch that caused it is worse than no label.
+    func testTheZoomReadoutFollowsTheCamera() {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.applyDestination(.terminals)
+
+        controller.workspaceView.camera = DeskCamera(scale: 0.42, origin: .zero)
+
+        XCTAssertEqual(controller.deskZoomReadout.scale, 0.42, accuracy: 0.0001)
     }
 
     private func makeEmptyController() -> WorkspaceWindowController {

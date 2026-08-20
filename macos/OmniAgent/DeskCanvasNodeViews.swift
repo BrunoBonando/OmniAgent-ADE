@@ -279,3 +279,65 @@ final class DeskCanvasChipView: NSView {
         }
     }
 }
+
+/// The zoom readout: how far out the camera is, in the corner, as a percentage.
+///
+/// The canvas's only persistent chrome, and it earns the space by answering the
+/// one question a zoomable surface cannot answer for itself — *how big is what
+/// I am looking at*. Without it, two cards at 40% and 80% look like two cards,
+/// and the only way to find out is to zoom until something familiar appears.
+///
+/// A sibling of `PaneWorkspaceView` rather than a subview of it, deliberately:
+/// `layer.sublayerTransform` is the camera and it reaches every sublayer, so a
+/// readout inside the canvas would be scaled by the very number it is
+/// reporting.
+final class DeskZoomReadoutView: NSView {
+    private let label = NSTextField(labelWithString: "")
+    private static let inset: CGFloat = 10
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.cornerCurve = .continuous
+        layer?.backgroundColor = NSColor(white: 0.10, alpha: 0.72).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor(white: 1, alpha: 0.08).cgColor
+
+        // Monospaced digits, not the plain system font: this label changes on
+        // every frame of a pinch, and proportional figures make the pill twitch
+        // wider and narrower as the digits change — motion the eye reads as a
+        // glitch in the thing it is trying to measure.
+        label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        label.textColor = ShellPalette.inkSecondary
+        label.alignment = .right
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.inset),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+        ])
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    /// The percentage the camera is at. Rounded to whole percent — a canvas is
+    /// not a measuring instrument, and a decimal place here is noise that
+    /// changes every frame.
+    var scale: CGFloat = 1 {
+        didSet {
+            let percent = max(1, Int((scale * 100).rounded()))
+            let text = "\(percent)%"
+            guard text != label.stringValue else { return }
+            label.stringValue = text
+            setAccessibilityLabel("Zoom \(text)")
+        }
+    }
+}

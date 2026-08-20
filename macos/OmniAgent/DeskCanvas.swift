@@ -445,3 +445,86 @@ enum DeskCanvas {
         }
     }
 }
+
+/// The canvas's ground.
+///
+/// A black field gives the eye nothing to hold: pan it and, until a card
+/// crosses the viewport, nothing on screen changes and the canvas reads as
+/// broken rather than as empty. A grid is the cheapest possible answer — it
+/// makes motion, direction and scale legible with no content at all.
+///
+/// Two tiers, the way a drafting sheet is ruled: a fine cell everywhere and a
+/// heavier line every fifth one. A single-weight field is uniform noise and
+/// reads as texture; the fifth line is what turns texture into measure.
+///
+/// Pure and static so the geometry is checkable without a window, the same
+/// reason `DeskCanvasEdgeLayer.path(for:)` is.
+enum DeskGrid {
+    /// The cell, in canvas points at scale 1.
+    static let baseSpacing: CGFloat = 64
+
+    /// Every fifth line is the heavy one.
+    static let majorEvery = 5
+
+    /// Below this the cells are tighter than the eye separates them and the
+    /// grid collapses into a flat wash, so the spacing steps up a decade
+    /// instead. This is what keeps the grid useful from `fitAll` to identity
+    /// without ever drawing thousands of lines.
+    static let minCellOnScreen: CGFloat = 12
+
+    /// The cell size to draw at this camera scale: `baseSpacing` stepped by
+    /// whole factors of `majorEvery` until it lands in a legible band.
+    ///
+    /// Stepping by the *same* factor the major lines use is what keeps the
+    /// tiers coherent across a zoom: a major line at one decade becomes a minor
+    /// line at the next, so the field densifies without the grid appearing to
+    /// jump to an unrelated rhythm.
+    static func spacing(forScale scale: CGFloat) -> CGFloat {
+        guard scale > 0, scale.isFinite else { return baseSpacing }
+        let factor = CGFloat(majorEvery)
+        var spacing = baseSpacing
+        // Bounded rather than `while true`: a denormal scale that slips past the
+        // guard above would otherwise spin here forever, and a wrong grid is a
+        // cosmetic bug where a hung main thread is not.
+        var steps = 0
+        while spacing * scale < minCellOnScreen, steps < 16 {
+            spacing *= factor
+            steps += 1
+        }
+        while spacing * scale > minCellOnScreen * factor * 2, steps < 32 {
+            spacing /= factor
+            steps += 1
+        }
+        return spacing
+    }
+
+    /// Where the grid lines cross one axis, in **view** points, paired with
+    /// whether each is a major line.
+    ///
+    /// The major flag rides on the line's canvas *index*, not on its position
+    /// on screen, so the heavy lines stay pinned to the same canvas coordinates
+    /// while you pan. Keyed off the screen position instead, they would swim
+    /// through the field as the origin moved — the tell that a grid is painted
+    /// on the window rather than on the canvas.
+    static func lines(
+        origin: CGFloat,
+        scale: CGFloat,
+        span: CGFloat,
+        spacing: CGFloat
+    ) -> [(position: CGFloat, isMajor: Bool)] {
+        guard
+            scale > 0, scale.isFinite,
+            spacing > 0, spacing.isFinite,
+            span > 0, origin.isFinite
+        else { return [] }
+        let step = spacing * scale
+        // Under a point apart there is no grid left to draw, only a fill.
+        guard step >= 1 else { return [] }
+        let first = Int(ceil((0 - origin) / step))
+        let last = Int(floor((span - origin) / step))
+        guard last >= first, last - first <= 4096 else { return [] }
+        return (first...last).map { index in
+            (origin + CGFloat(index) * step, index % majorEvery == 0)
+        }
+    }
+}
