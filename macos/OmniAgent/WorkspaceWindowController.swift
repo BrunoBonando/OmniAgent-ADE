@@ -1112,14 +1112,34 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.editorPaneDrainInFlight = false
             completion(proceed)
         }
-        walkDirtyEditorPanes(completion: finish)
+        walkDirtyEditorPanes(in: workspace.allPaneIDs, completion: finish)
     }
 
-    private func walkDirtyEditorPanes(completion: @escaping (Bool) -> Void) {
+    /// `promptDirtyEditorTabs` scoped to one set of panes — Delete-session's
+    /// and Remove-workspace's share of ⌘W's gate. Their destroy loops dispose
+    /// every Monaco buffer in the group, the only copy of any unsaved work,
+    /// so the same drain runs first: `true` means every buffer resolved
+    /// (saved or deliberately discarded) and the destroy may proceed; `false`
+    /// means the user cancelled and nothing may be destroyed.
+    ///
+    /// A cancelled walk still resolved some tabs, so the row is republished —
+    /// `closePane`'s rule for its own cancel, not the quit path's: the app
+    /// keeps running with the half-drained pane on screen, and disk should
+    /// say what the screen says.
+    func drainEditorPanes(in paneIDs: [String], completion: @escaping (Bool) -> Void) {
+        editorPaneDrainInFlight = true
+        walkDirtyEditorPanes(in: paneIDs) { [weak self] proceed in
+            self?.editorPaneDrainInFlight = false
+            if !proceed { self?.persistEditorPanes() }
+            completion(proceed)
+        }
+    }
+
+    private func walkDirtyEditorPanes(in paneIDs: [String], completion: @escaping (Bool) -> Void) {
         // Every pane holding a buffer, not just those whose *flag* says dirty:
         // `closeAllTabsAfterConfirmation` reconciles with the page and
         // completes immediately when there is genuinely nothing to ask about.
-        let editors = workspace.allPaneIDs
+        let editors = paneIDs
             .compactMap { workspace.editorPane(for: $0) }
             .filter(\.hasLoadedBuffers)
         func step(_ remaining: [EditorPaneView]) {
@@ -2680,20 +2700,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     private func performRemoveWorkspace(_ id: String) {
-        // Sessions first: `destroyPane` kills each terminal's daemon
-        // session and does the per-pane bookkeeping, exactly as ⌘W does —
-        // one close path, not two that drift.
+        // ⌘W's gate before ⌘W's destroy: an editor pane in the workspace can
+        // be holding the only copy of unsaved work, so every buffer is
+        // drained with save prompts first, and a cancel there aborts the
+        // whole removal with the panes intact.
         let paneIDs = workspace.allPaneIDs.filter { workspace.descriptor(for: $0)?.project == id }
-        for paneID in paneIDs {
-            destroyPane(paneID)
+        drainEditorPanes(in: paneIDs) { [weak self] proceed in
+            guard proceed, let self else { return }
+            // `destroyPane` kills each terminal's daemon session and does
+            // the per-pane bookkeeping — one close path, not two that drift.
+            for paneID in paneIDs {
+                destroyPane(paneID)
+            }
+            closedWorkspaceIDs.insert(id)
+            persistClosedWorkspaces()
+            if selectedProjectID == id {
+                selectedProjectID = nil
+                selectInitialWorkspaceIfNeeded(animated: false)
+            }
+            reloadOutline()
         }
-        closedWorkspaceIDs.insert(id)
-        persistClosedWorkspaces()
-        if selectedProjectID == id {
-            selectedProjectID = nil
-            selectInitialWorkspaceIfNeeded(animated: false)
-        }
-        reloadOutline()
     }
 
     private func restoreWorkspaceCustomizationsIfNeeded() {
@@ -2865,16 +2891,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     private func performDeleteSession(_ session: SessionGroupNode) {
-        // `destroyPane` is the one close path — daemon kills and per-pane
-        // bookkeeping included, exactly as ⌘W and Remove-workspace do.
-        for paneID in session.paneIDs {
-            destroyPane(paneID)
+        // ⌘W's gate before ⌘W's destroy: an editor pane in the group can be
+        // holding the only copy of unsaved work, so every buffer is drained
+        // with save prompts first, and a cancel there aborts the whole
+        // deletion with the panes intact.
+        drainEditorPanes(in: session.paneIDs) { [weak self] proceed in
+            guard proceed, let self else { return }
+            // `destroyPane` is the one close path — daemon kills and per-pane
+            // bookkeeping included, exactly as ⌘W's proceed branch and
+            // Remove-workspace's.
+            for paneID in session.paneIDs {
+                destroyPane(paneID)
+            }
+            // Prune rather than a single removal: the group's own entry goes,
+            // and so does any child's now-dangling parent pointer.
+            sessionMeta = SessionMeta.pruned(sessionMeta, live: liveSessionGroups())
+            persistSessionMeta()
+            reloadOutline()
         }
-        // Prune rather than a single removal: the group's own entry goes,
-        // and so does any child's now-dangling parent pointer.
-        sessionMeta = SessionMeta.pruned(sessionMeta, live: liveSessionGroups())
-        persistSessionMeta()
-        reloadOutline()
     }
 
     /// Every group a live pane carries — what session-meta pruning trusts.

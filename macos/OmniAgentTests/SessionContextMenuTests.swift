@@ -402,7 +402,58 @@ final class SessionContextMenuTests: XCTestCase {
         XCTAssertEqual(tree.renderedSessionIDs, ["g-1"])
     }
 
+    /// A session holding an editor pane with unsaved work gets ⌘W's gate,
+    /// not `destroyPane`'s unguarded half: the delete drains the dirty tabs
+    /// with save prompts first, and a cancel there aborts the whole deletion
+    /// with every pane — and the unsaved buffer — intact.
+    func testDeleteSessionDrainsDirtyEditorPanesBeforeDestroying() throws {
+        let controller = makeController(panes: [
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-1", group: "g-1"),
+        ])
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.appLocator = { _ in nil }
+        var killed: [String] = []
+        controller.sessionKiller = { killed.append($0) }
+        controller.applyRestoredSessionMeta(nil)
+        controller.sessionDeletionConfirmer = { _, _, completion in completion(true) }
+        // An editor pane in the session, holding an unsaved buffer.
+        controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: true)
+        let workspace = controller.workspaceView
+        let editorID = try XCTUnwrap(workspace.focusedPaneID)
+        let pane = try XCTUnwrap(workspace.editorPane(for: editorID))
+        pane.modelForTesting { $0.setDirty(true, at: 0) }
+        let tree = controller.shellSidebar.workspacesTree
+        let session = try XCTUnwrap(sessionRow(in: tree, group: "g-1")).session
+        XCTAssertTrue(session.paneIDs.count >= 2, "the editor pane joined the session")
+
+        // Cancelling the save prompt aborts the deletion — nothing dies.
+        pane.confirmSave = { _, decide in decide(.cancel) }
+        controller.deleteSession(session)
+        XCTAssertEqual(killed, [])
+        XCTAssertNotNil(workspace.descriptor(for: "s-1"), "cancel kept the terminal")
+        XCTAssertNotNil(workspace.editorPane(for: editorID), "…and the editor pane")
+        XCTAssertEqual(pane.model.tabs.count, 1, "…and the unsaved buffer with it")
+
+        // Discarding resolves the drain and the whole session goes.
+        pane.confirmSave = { _, decide in decide(.discard) }
+        controller.deleteSession(session)
+        XCTAssertEqual(killed, ["s-1"])
+        XCTAssertNil(workspace.descriptor(for: "s-1"))
+        XCTAssertNil(workspace.editorPane(for: editorID))
+    }
+
     // MARK: - Helpers
+
+    private func makeTempFile(_ name: String, _ contents: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("session-menu-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(name)
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
 
     private func makeController(panes: [PersistedTab]) -> WorkspaceWindowController {
         let controller = WorkspaceWindowController(
