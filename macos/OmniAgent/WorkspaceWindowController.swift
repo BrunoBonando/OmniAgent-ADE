@@ -387,6 +387,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             defer: false
         )
         window.title = "OmniAgent"
+        // The title still exists (Cmd+`/Mission Control/menu bar want it),
+        // it just doesn't reserve a row in the chrome — `refreshTitle()`
+        // below keeps it current for those, not for display here.
+        window.titleVisibility = .hidden
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = NSColor(
             srgbRed: 8 / 255,

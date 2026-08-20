@@ -1305,7 +1305,8 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         defer { controller.close() }
         let toolbar = try XCTUnwrap(controller.window?.toolbar)
 
-        XCTAssertEqual(controller.window?.toolbarStyle, .unified)
+        XCTAssertEqual(controller.window?.toolbarStyle, .unifiedCompact)
+        XCTAssertEqual(controller.window?.titleVisibility, .hidden)
         let identifiers = controller.toolbarDefaultItemIdentifiers(toolbar)
         XCTAssertEqual(
             identifiers,

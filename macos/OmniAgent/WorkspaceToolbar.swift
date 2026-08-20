@@ -38,7 +38,12 @@ extension WorkspaceWindowController: NSToolbarDelegate, NSToolbarItemValidation 
         toolbar.allowsUserCustomization = true
         toolbar.autosavesConfiguration = true
         window.toolbar = toolbar
-        window.toolbarStyle = .unified
+        // `.unifiedCompact`, not `.unified`: the latter reserves height for a
+        // full-size title-plus-subtitle row (what Finder/Mail use); the
+        // former is the single slim row Xcode/Notes/Copilot use, and is what
+        // `titleVisibility = .hidden` below is actually for — there is no
+        // title text to make room for.
+        window.toolbarStyle = .unifiedCompact
     }
 
     public func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
