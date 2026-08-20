@@ -695,16 +695,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // What the sidebar behavior gave for free: the column keeps its width
         // when the window resizes, the panes absorb it.
         sidebarItem.holdingPriority = NSLayoutConstraint.Priority(200)
-        // The design draws the sidebar at 238pt (`flex:none;width:238px`), and
-        // that is where it opens — but it is a starting width, not a cage.
-        // Both bounds used to be pinned to it, which made the divider
-        // immovable: a sidebar holding session names and a file tree is
-        // exactly the thing a user wants wider or narrower depending on what
-        // they are doing.
-        //
-        // The floor is the design's own width less what the widest nav row can
-        // give up; the ceiling keeps the pane grid the larger half on any
-        // window this app opens at.
+        // A range, not a cage: a sidebar holding session names and a file tree
+        // is exactly the thing a user wants wider or narrower depending on
+        // what they are doing. See `ShellMetrics` for what each bound is for —
+        // and note the floor doubles as the opening width, since the autosaved
+        // divider position is clamped to it.
         sidebarItem.minimumThickness = ShellMetrics.sidebarMinimumWidth
         sidebarItem.maximumThickness = ShellMetrics.sidebarMaximumWidth
         sidebarItem.canCollapse = true

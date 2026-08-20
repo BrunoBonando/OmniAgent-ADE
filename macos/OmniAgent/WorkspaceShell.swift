@@ -172,13 +172,16 @@ enum ShellPalette {
 /// of them have to agree across view classes (the nav row's 3pt bar and the
 /// sessions rail's 18pt indent line up by construction, not by coincidence).
 enum ShellMetrics {
-    static let sidebarWidth: CGFloat = 238
-    /// How far the sidebar may be dragged. `sidebarWidth` is where it opens;
-    /// these are the limits it may be dragged between, chosen so the nav rows
-    /// still read at the floor and the terminals keep the larger half at the
-    /// ceiling.
-    static let sidebarMinimumWidth: CGFloat = 190
-    static let sidebarMaximumWidth: CGFloat = 460
+    /// The design width, and what offscreen renders are sized at.
+    static let sidebarWidth: CGFloat = 280
+    /// How far the sidebar may be dragged. The *live* width is whatever the
+    /// divider was last left at (`NSSplitView` autosaves it) clamped to these,
+    /// so the floor is the width the column actually opens at for anyone who
+    /// has dragged it down — it is the number to move to make the menu bigger,
+    /// not `sidebarWidth`. The ceiling keeps the pane grid the larger half on
+    /// any window this app opens at.
+    static let sidebarMinimumWidth: CGFloat = 240
+    static let sidebarMaximumWidth: CGFloat = 560
     static let navRowInset = NSEdgeInsets(top: 8, left: 9, bottom: 8, right: 9)
     static let navBarWidth: CGFloat = 3
     static let navIconTile: CGFloat = 22
