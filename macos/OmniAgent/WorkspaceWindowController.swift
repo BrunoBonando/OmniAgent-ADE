@@ -175,9 +175,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private(set) var lastStatusEventAt: [String: Double] = [:]
     /// `lastStatus` remembers *what*; this remembers *when* and *how often* —
     /// when the current run of work began, how long a pane has been busy in
-    /// total, how many tools it has run. Only the sidebar's hover card reads
-    /// it, and nothing else in the app records it.
+    /// total, how many tools it has run. The sidebar's hover card and the
+    /// review panel's Insights header both read it.
     private(set) var activity = PaneActivityLedger()
+    /// The ledger keeps totals; this keeps the *series* — every status hop
+    /// with its timestamp, per pane, since launch — because the Insights
+    /// timeline needs the when of each hop, not just the sums. Fed from the
+    /// same `onStatus` fan-out (`recordNotification`), forgotten wherever
+    /// the ledger forgets.
+    private(set) var statusSeries = PaneStatusSeriesRecorder()
     /// The card itself. Owned here rather than by the sidebar because it is a
     /// window, and a view cannot own one of those.
     let hoverCard = SessionHoverCardController()
@@ -296,6 +302,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// `syncReviewPanelBrowser` rescans the showing session's terminals for
     /// dev-server ports on every activation.
     let reviewPanelBrowser = ReviewPanelBrowserView()
+    /// The Insights tab's real content — the same single-instance rule;
+    /// `syncReviewPanelInsights` re-reads the showing session's status
+    /// series and ledger totals on activation and on every status event
+    /// while the tab is showing.
+    let reviewPanelInsights = ReviewPanelInsightsView()
     private(set) var reviewPanelItem: NSSplitViewItem?
     /// The session group whose state the panel is currently showing —
     /// updated on every `activeGroup` change, so a tab edit lands in the
@@ -495,6 +506,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         reviewPanelChanges.onOpenDiffRequest = { [weak self] url in self?.openDiffInEditor(url) }
         reviewPanel.setContent(reviewPanelBrowser, for: .browser)
+        reviewPanel.setContent(reviewPanelInsights, for: .insights)
         workspace.onDeskCanvasChanged = { [weak self] in self?.persistDeskCanvas() }
         workspace.onCameraChanged = { [weak self] in self?.updateDeskZoomReadout() }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
@@ -1022,6 +1034,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             lastStatus.removeValue(forKey: event.id)
             lastStatusEventAt.removeValue(forKey: event.id)
             activity.forget(paneID: event.id)
+            statusSeries.forget(paneID: event.id)
             applySessionStatus("Session ended", for: event.id)
             workspace.setStatus(nil, for: event.id)
             reloadOutline()
@@ -1649,6 +1662,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         lastStatus.removeValue(forKey: focused)
         lastStatusEventAt.removeValue(forKey: focused)
         activity.forget(paneID: focused)
+        statusSeries.forget(paneID: focused)
         workspace.closePane(focused)
     }
 
@@ -1775,6 +1789,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         lastStatus.removeValue(forKey: paneID)
         lastStatusEventAt.removeValue(forKey: paneID)
         activity.forget(paneID: paneID)
+        statusSeries.forget(paneID: paneID)
         workspace.closePane(paneID)
         let newID = UUID().uuidString
         guard addPane(
@@ -2159,6 +2174,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             lastStatus.removeValue(forKey: id)
             lastStatusEventAt.removeValue(forKey: id)
             activity.forget(paneID: id)
+            statusSeries.forget(paneID: id)
         }
     }
 
@@ -2977,6 +2993,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         syncReviewPanelFiles()
         syncReviewPanelChanges()
         syncReviewPanelBrowser()
+        syncReviewPanelInsights()
     }
 
     /// The panel's tab set or selection changed under the user's hands —
@@ -2993,6 +3010,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         syncReviewPanelFiles()
         syncReviewPanelChanges()
         syncReviewPanelBrowser()
+        syncReviewPanelInsights()
     }
 
     /// Puts the showing session's persisted Files state into the tab —
@@ -3038,6 +3056,37 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         else { return }
         reviewPanelBrowser.updatePortSuggestions(
             fromTerminalLines: sessionTerminalTail(for: group)
+        )
+    }
+
+    /// Feeds the Insights tab the showing session's status series and ledger
+    /// totals — on activation and on every status event while it shows, so
+    /// the timeline is always the stream as of now. Guarded like its
+    /// siblings: a tab nobody is looking at costs nothing.
+    private func syncReviewPanelInsights() {
+        guard
+            reviewPanelItem?.isCollapsed == false,
+            reviewPanel.activeTab == .insights,
+            let group = reviewPanelGroup
+        else { return }
+        let now = Date().timeIntervalSince1970 * 1000
+        // Terminal panes only: status events are a terminal session's
+        // speech, and a browser or editor lane would sit forever blank.
+        let paneIDs = workspace.allPaneIDs.filter {
+            workspace.descriptor(for: $0)?.group == group
+                && workspace.descriptor(for: $0)?.kind == .terminal
+        }
+        let lanes = paneIDs.map { id in
+            ReviewPanelInsightsView.Lane(
+                paneID: id,
+                title: workspace.descriptor(for: id).map(SessionOutline.paneLabel) ?? id,
+                segments: statusSeries.segments(for: id, until: now)
+            )
+        }
+        reviewPanelInsights.apply(
+            lanes: lanes,
+            activities: paneIDs.compactMap { activity.activity(for: $0) },
+            now: now
         )
     }
 
@@ -3246,6 +3295,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             status: event.status,
             at: Date().timeIntervalSince1970 * 1000
         )
+        statusSeries.record(
+            paneID: event.id,
+            status: event.status,
+            at: Date().timeIntervalSince1970 * 1000
+        )
+        // The Insights tab shows this very event stream: while it is on
+        // screen, each event redraws it (guarded inside to visible+active,
+        // so a closed panel costs nothing).
+        syncReviewPanelInsights()
         notifier.record(
             NotificationContext(
                 event: event,

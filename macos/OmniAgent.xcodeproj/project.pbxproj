@@ -56,6 +56,8 @@
 		4C7A2E5FB9D14038A220262D /* ReviewPanelChangesViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A220262C /* ReviewPanelChangesViewTests.swift */; };
 		4C7A2E5FB9D14038A220262F /* ReviewPanelBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A220262E /* ReviewPanelBrowserView.swift */; };
 		4C7A2E5FB9D14038A2202631 /* ReviewPanelBrowserViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A2202630 /* ReviewPanelBrowserViewTests.swift */; };
+		4C7A2E5FB9D14038A2202633 /* ReviewPanelInsightsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A2202632 /* ReviewPanelInsightsView.swift */; };
+		4C7A2E5FB9D14038A2202635 /* ReviewPanelInsightsViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A2202634 /* ReviewPanelInsightsViewTests.swift */; };
 		3A7E4B21D95C4F6E8A102028 /* NavigationSidebarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */; };
 		10000000000000000000098 /* PaneAsk.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000098 /* PaneAsk.swift */; };
 		10000000000000000000095 /* PaneApprovalBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000095 /* PaneApprovalBarTests.swift */; };
@@ -251,6 +253,8 @@
 		4C7A2E5FB9D14038A220262C /* ReviewPanelChangesViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPanelChangesViewTests.swift; sourceTree = "<group>"; };
 		4C7A2E5FB9D14038A220262E /* ReviewPanelBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPanelBrowserView.swift; sourceTree = "<group>"; };
 		4C7A2E5FB9D14038A2202630 /* ReviewPanelBrowserViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPanelBrowserViewTests.swift; sourceTree = "<group>"; };
+		4C7A2E5FB9D14038A2202632 /* ReviewPanelInsightsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPanelInsightsView.swift; sourceTree = "<group>"; };
+		4C7A2E5FB9D14038A2202634 /* ReviewPanelInsightsViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPanelInsightsViewTests.swift; sourceTree = "<group>"; };
 		3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationSidebarTests.swift; sourceTree = "<group>"; };
 		20000000000000000000098 /* PaneAsk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAsk.swift; sourceTree = "<group>"; };
 		20000000000000000000095 /* PaneApprovalBarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBarTests.swift; sourceTree = "<group>"; };
@@ -392,6 +396,7 @@
 				4C7A2E5FB9D14038A2202626 /* ReviewPanelFilesView.swift */,
 				4C7A2E5FB9D14038A220262A /* ReviewPanelChangesView.swift */,
 				4C7A2E5FB9D14038A220262E /* ReviewPanelBrowserView.swift */,
+				4C7A2E5FB9D14038A2202632 /* ReviewPanelInsightsView.swift */,
 				20000000000000000000098 /* PaneAsk.swift */,
 				20000000000000000000000A /* TerminalSurfaceView.swift */,
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
@@ -481,6 +486,7 @@
 				4C7A2E5FB9D14038A2202628 /* ReviewPanelFilesViewTests.swift */,
 				4C7A2E5FB9D14038A220262C /* ReviewPanelChangesViewTests.swift */,
 				4C7A2E5FB9D14038A2202630 /* ReviewPanelBrowserViewTests.swift */,
+				4C7A2E5FB9D14038A2202634 /* ReviewPanelInsightsViewTests.swift */,
 				2000000000000000000002D /* SettingsStoreTests.swift */,
 				200000000000000000000A1 /* AuthClientTests.swift */,
 				2000000000000000000002E /* AuthGateStateTests.swift */,
@@ -663,6 +669,7 @@
 				4C7A2E5FB9D14038A2202627 /* ReviewPanelFilesView.swift in Sources */,
 				4C7A2E5FB9D14038A220262B /* ReviewPanelChangesView.swift in Sources */,
 				4C7A2E5FB9D14038A220262F /* ReviewPanelBrowserView.swift in Sources */,
+				4C7A2E5FB9D14038A2202633 /* ReviewPanelInsightsView.swift in Sources */,
 				10000000000000000000098 /* PaneAsk.swift in Sources */,
 				100000000000000000000009 /* TerminalSurfaceView.swift in Sources */,
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
@@ -746,6 +753,7 @@
 				4C7A2E5FB9D14038A2202629 /* ReviewPanelFilesViewTests.swift in Sources */,
 				4C7A2E5FB9D14038A220262D /* ReviewPanelChangesViewTests.swift in Sources */,
 				4C7A2E5FB9D14038A2202631 /* ReviewPanelBrowserViewTests.swift in Sources */,
+				4C7A2E5FB9D14038A2202635 /* ReviewPanelInsightsViewTests.swift in Sources */,
 				1000000000000000000002C /* SettingsStoreTests.swift in Sources */,
 				100000000000000000000A1 /* AuthClientTests.swift in Sources */,
 				1000000000000000000002D /* AuthGateStateTests.swift in Sources */,
