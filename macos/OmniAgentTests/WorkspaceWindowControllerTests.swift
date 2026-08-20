@@ -1358,6 +1358,30 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.titleBar.isReviewToggleVisible)
     }
 
+    /// Hiding the real green button took full screen with it: the bar's own
+    /// was wired to `zoom`, and these menus are hand-built, so AppKit never
+    /// filled in an Enter Full Screen item to fall back on. Both routes are
+    /// pinned here.
+    func testFullScreenSurvivesTheWindowDrawingItsOwnButtons() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        let window = try XCTUnwrap(controller.window)
+
+        XCTAssertTrue(
+            window.collectionBehavior.contains(.fullScreenPrimary),
+            "the window must actually be willing to go full screen"
+        )
+
+        ApplicationMenus.install()
+        let item = try XCTUnwrap(
+            NSApp.mainMenu?.item(withTitle: "View")?.submenu?.item(withTitle: "Toggle Full Screen")
+        )
+        XCTAssertNil(item.target, "it travels the responder chain to the window")
+        XCTAssertEqual(item.action, #selector(NSWindow.toggleFullScreen(_:)))
+        XCTAssertEqual(item.keyEquivalent, "f")
+        XCTAssertEqual(item.keyEquivalentModifierMask, [.command, .control], "⌃⌘F")
+    }
+
     /// The toggles have to reach *this* controller. They dispatch through the
     /// responder chain, where `NSSplitViewController` sits ahead of it — so
     /// the sidebar action must be a name the split does not answer, or the

@@ -91,11 +91,14 @@ final class WorkspaceTitleBarView: NSView {
         didSet { reviewButton.isHidden = !isReviewToggleVisible }
     }
 
-    /// Both are driven by the live sidebar width in `layout`: the toggle sits
-    /// at the column's right edge, inside it, and the name starts after the
-    /// column ends. Held as constraints rather than frames so everything else
-    /// in the bar stays declarative.
-    private var sidebarButtonLeading: NSLayoutConstraint!
+    /// The session's name starts where the sidebar column ends, so this one
+    /// follows the divider — see `layout`. Held as a constraint rather than a
+    /// frame so everything else in the bar stays declarative.
+    ///
+    /// The sidebar toggle deliberately does *not* get the same treatment: it
+    /// is pinned beside the window buttons. It used to ride the column's
+    /// right edge, which put it under the pointer that had just pressed it
+    /// and then moved it — a control that walks away when you use it.
     private var titleLeading: NSLayoutConstraint!
 
     init() {
@@ -112,10 +115,22 @@ final class WorkspaceTitleBarView: NSView {
         // reason to know about windows.
         closeButton.setAccessibilityLabel("Close window")
         minimizeButton.setAccessibilityLabel("Minimize window")
-        zoomButton.setAccessibilityLabel("Zoom window")
+        zoomButton.setAccessibilityLabel("Toggle Full Screen")
         closeButton.onClick = { [weak self] in self?.window?.performClose(nil) }
         minimizeButton.onClick = { [weak self] in self?.window?.miniaturize(nil) }
-        zoomButton.onClick = { [weak self] in self?.window?.zoom(nil) }
+        // The green button's actual contract, which is not "zoom": a click
+        // enters full screen and ⌥-click zooms. Wiring it to `zoom` alone —
+        // as the first cut of this bar did — silently removed the only way
+        // into full screen this app has, since its menus are hand-built and
+        // carry no Enter Full Screen item for AppKit to fill in.
+        zoomButton.onClick = { [weak self] in
+            guard let window = self?.window else { return }
+            if NSEvent.modifierFlags.contains(.option) {
+                window.zoom(nil)
+            } else {
+                window.toggleFullScreen(nil)
+            }
+        }
 
         reviewButton.isHidden = true
 
@@ -123,10 +138,6 @@ final class WorkspaceTitleBarView: NSView {
         addSubview(titleField)
         for view in controls { view.translatesAutoresizingMaskIntoConstraints = false }
 
-        sidebarButtonLeading = sidebarButton.leadingAnchor.constraint(
-            equalTo: leadingAnchor,
-            constant: Self.lightsWidth + 16
-        )
         titleLeading = titleField.leadingAnchor.constraint(equalTo: leadingAnchor)
 
         var constraints: [NSLayoutConstraint] = [
@@ -142,7 +153,10 @@ final class WorkspaceTitleBarView: NSView {
                 constant: Self.lightSpacing
             ),
 
-            sidebarButtonLeading,
+            sidebarButton.leadingAnchor.constraint(
+                equalTo: zoomButton.trailingAnchor,
+                constant: Self.columnInset
+            ),
             sidebarButton.widthAnchor.constraint(equalToConstant: Self.buttonSize),
             sidebarButton.heightAnchor.constraint(equalToConstant: Self.buttonSize),
 
@@ -178,18 +192,13 @@ final class WorkspaceTitleBarView: NSView {
         [closeButton, minimizeButton, zoomButton, sidebarButton, reviewButton]
     }
 
-    /// The sidebar toggle rides the column's right edge, from the inside, and
-    /// the session's name starts where the column ends. With the column
-    /// collapsed both fall back to sitting after the lights, so neither ends
-    /// up off the left of the bar.
+    /// The session's name starts where the sidebar column ends — and, with the
+    /// column collapsed or narrower than the buttons, after the toggle
+    /// instead, so it never lands underneath them.
     override func layout() {
         let column = max(0, sidebarWidthProvider?() ?? 0)
-        let afterLights = Self.lightsWidth + 16
-        sidebarButtonLeading.constant = max(afterLights, column - Self.columnInset - Self.buttonSize)
-        titleLeading.constant = max(
-            sidebarButtonLeading.constant + Self.buttonSize + Self.columnInset,
-            column + Self.columnInset
-        )
+        let afterButtons = Self.lightsWidth + Self.columnInset + Self.buttonSize + Self.columnInset
+        titleLeading.constant = max(afterButtons, column + Self.columnInset)
         super.layout()
     }
 

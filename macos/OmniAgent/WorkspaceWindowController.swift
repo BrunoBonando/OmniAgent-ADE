@@ -415,6 +415,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             window.standardWindowButton(button)?.isHidden = true
         }
+        // Said rather than inherited: the bar's green button is the only route
+        // into full screen this app has — the menus are hand-built and carry
+        // no Enter Full Screen item — so it is worth one line to be certain
+        // the window will go, instead of trusting a default.
+        window.collectionBehavior.insert(.fullScreenPrimary)
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = NSColor(
             srgbRed: 8 / 255,

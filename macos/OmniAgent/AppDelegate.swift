@@ -206,6 +206,13 @@ enum ApplicationMenus {
         view.addItem(
             item("Toggle Review Panel", Selector(("toggleReviewPanel:")), "b", [.command, .option])
         )
+        view.addItem(.separator())
+        // ⌃⌘F, the system-standard chord. AppKit fills this item in for apps
+        // that let it build the View menu; these menus are hand-built, so
+        // without it the window's green button is the only way in or out.
+        view.addItem(
+            item("Toggle Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control])
+        )
 
         let session = NSMenu(title: "Session")
         main.addItem(withSubmenu: session)
