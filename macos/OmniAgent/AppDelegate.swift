@@ -244,6 +244,39 @@ enum ApplicationMenus {
             panes.addItem(selection)
         }
 
+        // The Desk destination's own commands — the spatial canvas, not one
+        // terminal. A separate menu from "Session" above, which is deliberately
+        // left as it is: its items (Interrupt, Kill Session, Reattach) are one
+        // PTY's verbs, and the user-facing Session these commands move between
+        // is a *group* of those. Renaming that menu would be churn in an
+        // unrelated place; naming this one after the destination it belongs to
+        // keeps the two apart where the user looks for them.
+        let desk = NSMenu(title: "Desk")
+        main.addItem(withSubmenu: desk)
+        // ⌘0, the reset-the-zoom digit every canvas app uses. Free here: ⌘1…⌘9
+        // are pane selection and stop at nine.
+        desk.addItem(item("Zoom In", Selector(("zoomCanvasIn:")), "="))
+        desk.addItem(item("Zoom Out", Selector(("zoomCanvasOut:")), "-"))
+        desk.addItem(item("Zoom to Fit", Selector(("zoomDeskToFit:")), "0"))
+        desk.addItem(item("Enter Session", Selector(("enterFocusedSession:"))))
+        desk.addItem(.separator())
+        // ⇧⌘[ / ⇧⌘], the system's own previous/next-tab chords, both unbound
+        // here. The web build steps sessions with ⌃↑/⌃↓, which collide with
+        // Mission Control and App Exposé.
+        desk.addItem(item("Previous Session", Selector(("previousSession:")), "[", [.command, .shift]))
+        desk.addItem(item("Next Session", Selector(("nextSession:")), "]", [.command, .shift]))
+        desk.addItem(.separator())
+        // ⌃1…⌃9, the `selectPane:` loop's shape with Control instead of
+        // Command: no plain-Control chord but ⌃Space (Spotlight) is bound
+        // anywhere in this app. macOS ships "Switch to Desktop N" on the same
+        // chords once a second Desktop exists, and the system binding wins —
+        // ⌥⌘1…⌥⌘9 is the fallback if that ever bites.
+        for index in 1...9 {
+            let selection = item("Session \(index)", Selector(("selectSession:")), "\(index)", [.control])
+            selection.tag = index
+            desk.addItem(selection)
+        }
+
         let window = NSMenu(title: "Window")
         main.addItem(withSubmenu: window)
         // ⌃⌘S rather than AppKit's own ⌃⌘S-free default: `toggleSidebar:` here

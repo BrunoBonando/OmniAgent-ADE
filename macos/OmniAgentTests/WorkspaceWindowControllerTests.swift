@@ -769,6 +769,95 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    /// Selecting a workspace does not move focus, so focus routinely belongs to
+    /// another project. The "new terminal" row under a project must still add to
+    /// that project — under the current rule it silently did nothing.
+    func testNewTerminalAddsToTheVisibleSessionWhenFocusIsInAnotherProject() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "alpha-1", group: "grp-alpha"),
+                    PersistedTab(project: "beta", engine: .shell, cwd: "/b", id: "beta-1", group: "grp-beta"),
+                ])
+            )
+        )
+        controller.selectWorkspace(id: "alpha", animated: false)
+        workspace.focusPane("beta-1")
+
+        let before = Set(workspace.allPaneIDs)
+        XCTAssertTrue(controller.newPaneInVisibleSessionForTesting())
+
+        XCTAssertEqual(workspace.allPaneIDs.count, before.count + 1, "the row did nothing")
+        // Found by difference rather than `allPaneIDs.last`: that array runs
+        // session by session, so a pane added to the *first* session is not
+        // last in it.
+        let added = try XCTUnwrap(
+            Set(workspace.allPaneIDs).subtracting(before).first.flatMap { workspace.descriptor(for: $0) }
+        )
+        XCTAssertEqual(added.project, "alpha", "it joined the project on screen, not the one holding focus")
+        XCTAssertEqual(added.group, "grp-alpha")
+    }
+
+    /// The visible rule agrees with the current rule whenever focus *is* in the
+    /// project on screen — the change must not move panes that were landing
+    /// correctly before.
+    func testNewTerminalStillJoinsTheFocusedSessionWhenFocusIsInThisProject() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "alpha-1", group: "grp-one"),
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "alpha-2", group: "grp-two"),
+                ])
+            )
+        )
+        controller.selectWorkspace(id: "alpha", animated: false)
+        workspace.focusPane("alpha-2")
+
+        let before = Set(workspace.allPaneIDs)
+        XCTAssertTrue(controller.newPaneInVisibleSessionForTesting())
+
+        let added = try XCTUnwrap(
+            Set(workspace.allPaneIDs).subtracting(before).first.flatMap { workspace.descriptor(for: $0) }
+        )
+        XCTAssertEqual(added.group, "grp-two", "focus is in this project, so its session still wins")
+    }
+
+    /// A window that has not picked a workspace — Level 1, or a bootstrap pane,
+    /// whose project is `""` and so never selects one — still has a session on
+    /// screen: the focused pane's. Resolving the target from `selectedProjectID`
+    /// alone left all three rows doing nothing there, which is the same silence
+    /// the visible-session rule exists to remove rather than move.
+    func testNewTerminalStillAddsBeforeAnyWorkspaceHasBeenSelected() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        XCTAssertNil(
+            controller.selectedProjectID,
+            "the bootstrap pane carries no project, so no workspace was selected"
+        )
+
+        let before = Set(workspace.allPaneIDs)
+        XCTAssertTrue(controller.newPaneInVisibleSessionForTesting())
+
+        let added = try XCTUnwrap(
+            Set(workspace.allPaneIDs).subtracting(before).first.flatMap { workspace.descriptor(for: $0) }
+        )
+        XCTAssertEqual(
+            added.group,
+            workspace.descriptor(for: "native-terminal")?.group,
+            "it joined the focused pane's session"
+        )
+    }
+
     // MARK: - Persistence
 
     func testTheLayoutRowIsWrittenOnlyAfterRestorationAndOnlyWhenItActuallyChanged() throws {
@@ -1228,6 +1317,8 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 WorkspaceWindowController.ToolbarItem.newEditor,
                 WorkspaceWindowController.ToolbarItem.closePane,
                 .flexibleSpace,
+                WorkspaceWindowController.ToolbarItem.zoomToFit,
+                WorkspaceWindowController.ToolbarItem.enterSession,
                 WorkspaceWindowController.ToolbarItem.palette,
             ]
         )
@@ -1388,6 +1479,17 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.workspaceView.activeGroup, "grp-2", "the last restored pane won, so far")
 
         controller.applyRestoredBrowserPanes([])
+        // On the Desk the workspace is in canvas mode, where `focusPane` flies
+        // the camera to the session rather than swapping the grid out from
+        // under it — so the answer arrives one camera flight later, at
+        // `landSession`, instead of on this line. Pumped until it lands rather
+        // than for a fixed 0.38s: the landing is a `DispatchQueue.main`
+        // deadline, and a fixed wait that only just covers it fails whenever a
+        // loaded machine runs the whole class instead of this one test.
+        let landed = Date().addingTimeInterval(5)
+        while controller.workspaceView.activeGroup != "grp-1", Date() < landed {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
 
         XCTAssertEqual(controller.workspaceView.focusedPaneID, "sess-a")
         XCTAssertEqual(controller.workspaceView.activeGroup, "grp-1")
