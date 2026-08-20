@@ -646,10 +646,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         window.setFrameAutosaveName(Self.frameAutosaveName)
     }
 
-    /// The split: sidebar item on the left (kept, so the sidebar still gets
-    /// the system's translucency, collapse animation, remembered width and the
-    /// standard `toggleSidebar:` action), the destination container on the
-    /// right. The sidebar's *content* is `NavigationSidebarView`, the flat
+    /// The split: the sidebar column on the left, the destination container on
+    /// the right. The sidebar's *content* is `NavigationSidebarView`, the flat
     /// column of the 2026-08-20 redesign.
     private func installSplitView(on window: NSWindow) {
         workspace.translatesAutoresizingMaskIntoConstraints = false
@@ -687,7 +685,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let content = NSViewController()
         content.view = contentContainer
         let split = NSSplitViewController()
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        // A plain split item, NOT `sidebarWithViewController:`. macOS 26 draws
+        // a `.sidebar` item as an inset, rounded, floating slab — the rounded
+        // edges Bruno is looking at. Nothing here wanted that chrome: the
+        // toggle below collapses `splitViewItems.first` itself and never calls
+        // AppKit's `toggleSidebar:`, and the column paints its own flat
+        // background, so the system material was only ever covered up.
+        let sidebarItem = NSSplitViewItem(viewController: sidebar)
+        // What the sidebar behavior gave for free: the column keeps its width
+        // when the window resizes, the panes absorb it.
+        sidebarItem.holdingPriority = NSLayoutConstraint.Priority(200)
         // The design draws the sidebar at 238pt (`flex:none;width:238px`), and
         // that is where it opens — but it is a starting width, not a cage.
         // Both bounds used to be pinned to it, which made the divider
