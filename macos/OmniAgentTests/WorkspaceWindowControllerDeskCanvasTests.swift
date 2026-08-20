@@ -16,7 +16,7 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         let controller = makeEmptyController()
         defer { controller.close() }
 
-        controller.applyDestination(.dashboard)
+        controller.applyDestination(.home)
         XCTAssertFalse(controller.workspaceView.canvasMode, "off the Desk there is no canvas to lay out")
         XCTAssertTrue(controller.workspaceView.isHidden)
 
@@ -36,7 +36,7 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         let controller = makeEmptyController()
         defer { controller.close() }
 
-        controller.applyDestination(.board)
+        controller.applyDestination(.todo)
         XCTAssertFalse(controller.workspaceView.deskCanvasLoaded)
 
         controller.applyDestination(.terminals)
@@ -53,7 +53,7 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         defer { controller.close() }
         let host = controller.workspaceView.superview
 
-        controller.applyDestination(.board)
+        controller.applyDestination(.todo)
         controller.applyDestination(.terminals)
 
         XCTAssertNotNil(host)
@@ -72,7 +72,7 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         let seat = DeskCamera(scale: 0.4, origin: CGPoint(x: -120, y: -80))
         controller.workspaceView.camera = seat
 
-        controller.applyDestination(.dashboard)
+        controller.applyDestination(.home)
         XCTAssertFalse(controller.workspaceView.canvasMode, "off the Desk there is no canvas to lay out")
 
         controller.applyDestination(.terminals)
@@ -100,7 +100,7 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         XCTAssertFalse(controller.workspaceView.canvasMode, "landing a session turns canvas mode off")
         XCTAssertEqual(controller.currentDeskSessionGroup(), "grp-1")
 
-        controller.applyDestination(.dashboard)
+        controller.applyDestination(.home)
         controller.applyDestination(.terminals)
 
         XCTAssertFalse(controller.workspaceView.canvasMode, "left inside a session, back inside it")
@@ -123,7 +123,7 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
 
         controller.workspaceView.focusPane("sess-a")
         XCTAssertTrue(controller.workspaceView.isEnteringSession, "the entry is still in the air")
-        controller.applyDestination(.dashboard)
+        controller.applyDestination(.home)
         settleCameraFlight()
         controller.applyDestination(.terminals)
 
@@ -432,7 +432,7 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         controller.applyDestination(.terminals)
         XCTAssertFalse(controller.deskZoomReadout.isHidden, "the canvas has a zoom to report")
 
-        controller.applyDestination(.dashboard)
+        controller.applyDestination(.home)
         XCTAssertTrue(controller.deskZoomReadout.isHidden, "and nothing else does")
     }
 

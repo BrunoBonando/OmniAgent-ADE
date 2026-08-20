@@ -2278,11 +2278,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
     }
 
-    /// What the root node is called. `WorkspaceAccountRowView` puts
-    /// `NSFullUserName()` beside the sidebar's avatar and nothing hands this view
-    /// a display name of its own, so the canvas says the same thing the sidebar
-    /// does — and falls back to the spec's own word for the node on a system
-    /// that has none.
+    /// What the root node is called. Nothing hands this view a display name
+    /// of its own, so it uses the machine account's — and falls back to the
+    /// spec's own word for the node on a system that has none. (The sidebar's
+    /// account row is a "Not signed in" placeholder since the 2026-08-20
+    /// redesign; this canvas node is about the person at the keyboard, not an
+    /// account.)
     private var accountDisplayName: String {
         let name = NSFullUserName()
         return name.isEmpty ? "You" : name

@@ -213,21 +213,22 @@ final class EditorPaneIntegrationTests: XCTestCase {
         )
     }
 
-    /// The hole tile's third dock button and the sidebar's "New editor" row
-    /// both reach the same method the menu item does.
-    func testTheHoleTileAndTheSidebarRowBothOpenAnEditorPane() throws {
+    /// The hole tile's third dock button reaches the same method the menu
+    /// item does — `newEditor(in:)`, which the redesigned sidebar no longer
+    /// wraps in a row of its own.
+    func testTheHoleTileAndTheDirectCallBothOpenAnEditorPane() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
         let workspace = controller.workspaceView
 
         try XCTUnwrap(workspace.onRequestNewEditorPane)()
-        try XCTUnwrap(controller.shellSidebar.onNewEditor)()
+        XCTAssertTrue(controller.newEditor(in: nil))
 
         XCTAssertEqual(
             workspace.allPaneIDs.filter { workspace.descriptor(for: $0)?.kind == .editor }.count,
             2,
-            "the hole tile and the sidebar row each opened one"
+            "the hole tile and the direct call each opened one"
         )
     }
 
@@ -384,15 +385,16 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertEqual(pane.model.tabs.map(\.kind), [.media])
     }
 
-    /// The chain the sidebar completes: `WorkspaceSidebarView.onOpenFile` is
-    /// wired to the controller, carrying the pinned flag through untouched.
-    func testTheSidebarsOpenFileCallbackReachesTheEditor() throws {
+    /// The controller's own entry point carries the pinned flag through
+    /// untouched — what the palette (and, soon, the review panel's tree)
+    /// route their opens through.
+    func testTheControllersOpenFileEntryPointReachesTheEditor() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
         let file = try makeTempFile("a.swift", "x")
 
-        try XCTUnwrap(controller.shellSidebar.onOpenFile)(file, true)
+        controller.openFileInEditor(file, pinned: true)
 
         let workspace = controller.workspaceView
         let editors = workspace.allPaneIDs.filter { workspace.descriptor(for: $0)?.kind == .editor }
@@ -489,15 +491,15 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertEqual(pane.model.tabs.map(\.kind), [.diff])
     }
 
-    /// The sidebar's badge click is the third entry point, and it goes through
-    /// the same chain the file rows already use.
-    func testTheSidebarsBadgeClickReachesTheEditor() throws {
+    /// `openDiffInEditor` is the diff entry point every surface routes
+    /// through — the palette today, the review panel's tree tomorrow.
+    func testTheDiffEntryPointReachesTheEditor() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
         let file = try makeTempFile("a.swift", "x")
 
-        try XCTUnwrap(controller.shellSidebar.onOpenDiff)(file)
+        controller.openDiffInEditor(file)
 
         let pane = try XCTUnwrap(firstEditorPane(in: controller))
         XCTAssertEqual(pane.model.tabs.map(\.kind), [.diff])
@@ -519,9 +521,9 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertEqual(pane.model.tabs.filter { $0.kind == .changes }.count, 1)
     }
 
-    /// The sidebar owns the `git status`; every editor pane is told, including
-    /// panes created after it landed — otherwise a pane opened later would
-    /// show "not a git repository" in a repository.
+    /// The controller owns the `git status`; every editor pane is told,
+    /// including panes created after it landed — otherwise a pane opened
+    /// later would show "not a git repository" in a repository.
     func testGitStatusReachesEveryEditorPaneIncludingNewOnes() throws {
         let controller = makeController()
         defer { controller.close() }
@@ -530,9 +532,7 @@ final class EditorPaneIntegrationTests: XCTestCase {
         let existing = try XCTUnwrap(controller.workspaceView.focusedPaneID)
         let root = try makeTempFile("a.swift", "x").deletingLastPathComponent()
 
-        try XCTUnwrap(controller.shellSidebar.onGitStatusChanged)(
-            GitStatus(root: root, badges: ["a.swift": .modified])
-        )
+        controller.applyGitStatus(GitStatus(root: root, badges: ["a.swift": .modified]))
 
         XCTAssertEqual(
             controller.workspaceView.editorPane(for: existing)?.changedPaths,
@@ -548,19 +548,6 @@ final class EditorPaneIntegrationTests: XCTestCase {
         )
     }
 
-    /// The FILES header's +N −M counts are the button: clicking them opens the
-    /// repo-wide overview.
-    func testTheFilesHeaderOpensTheChangesOverview() throws {
-        let controller = makeController()
-        defer { controller.close() }
-        controller.showWindow(nil)
-
-        try XCTUnwrap(controller.shellSidebar.onOpenAllChanges)()
-
-        let pane = try XCTUnwrap(firstEditorPane(in: controller))
-        XCTAssertEqual(pane.model.tabs.map(\.kind), [.changes])
-    }
-
     /// The palette row exists only where there is a repository to describe,
     /// and running it opens the same tab the header does.
     func testThePaletteOffersAllChangesOnlyOnceTheWorkspaceIsARepo() throws {
@@ -572,7 +559,7 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertFalse(controller.palette.model.commands.contains { $0.action == .showAllChanges })
         controller.palette.dismiss()
 
-        try XCTUnwrap(controller.shellSidebar.onGitStatusChanged)(
+        controller.applyGitStatus(
             GitStatus(root: URL(fileURLWithPath: "/w"), badges: ["a.swift": .modified])
         )
         controller.showCommandPalette(nil)

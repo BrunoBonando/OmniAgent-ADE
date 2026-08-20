@@ -35,6 +35,8 @@
 		10000000000000000000094 /* PaneApprovalBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000094 /* PaneApprovalBar.swift */; };
 		10000000000000000000097 /* SessionHoverCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000097 /* SessionHoverCardTests.swift */; };
 		10000000000000000000096 /* SessionHoverCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000096 /* SessionHoverCard.swift */; };
+		3A7E4B21D95C4F6E8A102026 /* NavigationSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A7E4B21D95C4F6E8A102027 /* NavigationSidebar.swift */; };
+		3A7E4B21D95C4F6E8A102028 /* NavigationSidebarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */; };
 		10000000000000000000098 /* PaneAsk.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000098 /* PaneAsk.swift */; };
 		10000000000000000000095 /* PaneApprovalBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000095 /* PaneApprovalBarTests.swift */; };
 		10000000000000000000093 /* BrowserPanesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000093 /* BrowserPanesTests.swift */; };
@@ -208,6 +210,8 @@
 		20000000000000000000094 /* PaneApprovalBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBar.swift; sourceTree = "<group>"; };
 		20000000000000000000097 /* SessionHoverCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHoverCardTests.swift; sourceTree = "<group>"; };
 		20000000000000000000096 /* SessionHoverCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHoverCard.swift; sourceTree = "<group>"; };
+		3A7E4B21D95C4F6E8A102027 /* NavigationSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationSidebar.swift; sourceTree = "<group>"; };
+		3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationSidebarTests.swift; sourceTree = "<group>"; };
 		20000000000000000000098 /* PaneAsk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAsk.swift; sourceTree = "<group>"; };
 		20000000000000000000095 /* PaneApprovalBarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBarTests.swift; sourceTree = "<group>"; };
 		20000000000000000000000B /* WorkspaceWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowController.swift; sourceTree = "<group>"; };
@@ -336,6 +340,7 @@
 				9C05BB92321E4D168F6F8F55 /* EditorPaneView.swift */,
 				20000000000000000000094 /* PaneApprovalBar.swift */,
 				20000000000000000000096 /* SessionHoverCard.swift */,
+				3A7E4B21D95C4F6E8A102027 /* NavigationSidebar.swift */,
 				20000000000000000000098 /* PaneAsk.swift */,
 				20000000000000000000000A /* TerminalSurfaceView.swift */,
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
@@ -415,6 +420,7 @@
 				20000000000000000000001A /* SessionNotifierTests.swift */,
 				20000000000000000000001D /* SessionOutlineTests.swift */,
 				200000000000000000000021 /* CommandPaletteTests.swift */,
+				3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */,
 				2000000000000000000002D /* SettingsStoreTests.swift */,
 				200000000000000000000A1 /* AuthClientTests.swift */,
 				2000000000000000000002E /* AuthGateStateTests.swift */,
@@ -585,6 +591,7 @@
 				8F133DE140464FFEBCA301BD /* EditorPaneView.swift in Sources */,
 				10000000000000000000094 /* PaneApprovalBar.swift in Sources */,
 				10000000000000000000096 /* SessionHoverCard.swift in Sources */,
+				3A7E4B21D95C4F6E8A102026 /* NavigationSidebar.swift in Sources */,
 				10000000000000000000098 /* PaneAsk.swift in Sources */,
 				100000000000000000000009 /* TerminalSurfaceView.swift in Sources */,
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
@@ -658,6 +665,7 @@
 				100000000000000000000019 /* SessionNotifierTests.swift in Sources */,
 				10000000000000000000001C /* SessionOutlineTests.swift in Sources */,
 				100000000000000000000020 /* CommandPaletteTests.swift in Sources */,
+				3A7E4B21D95C4F6E8A102028 /* NavigationSidebarTests.swift in Sources */,
 				1000000000000000000002C /* SettingsStoreTests.swift in Sources */,
 				100000000000000000000A1 /* AuthClientTests.swift in Sources */,
 				1000000000000000000002D /* AuthGateStateTests.swift in Sources */,

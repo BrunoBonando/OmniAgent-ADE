@@ -159,7 +159,7 @@ extension HoverCardModel {
                 accent: ShellDotsView.color(for: status),
                 pulses: ShellDotsView.pulses(status),
                 engine: pane.engine,
-                meta: pane.cwd.isEmpty ? nil : WorkspaceBackRowView.abbreviate(pane.cwd),
+                meta: pane.cwd.isEmpty ? nil : ShellPath.abbreviate(pane.cwd),
                 timing: timingLine(activity, now: now),
                 totals: totalsLine(activity, now: now),
                 // Only while it is working. A settled pane's last line is not
@@ -219,7 +219,7 @@ extension HoverCardModel {
             accent: accent,
             pulses: working > 0,
             engine: nil,
-            meta: session.cwd.isEmpty ? nil : WorkspaceBackRowView.abbreviate(session.cwd),
+            meta: session.cwd.isEmpty ? nil : ShellPath.abbreviate(session.cwd),
             timing: longest.map { "working \(duration($0))" },
             totals: counts.joined(separator: " · "),
             tail: nil
@@ -268,13 +268,13 @@ extension HoverCardModel {
 
     private static func editorMeta(pane: PaneDescriptor, editor: EditorPaneModel?) -> String? {
         if let path = editor?.activeTab?.path, !path.isEmpty {
-            return WorkspaceBackRowView.abbreviate(path)
+            return ShellPath.abbreviate(path)
         }
         let persisted = pane.editorTabs.indices.contains(pane.editorActiveIndex)
             ? pane.editorTabs[pane.editorActiveIndex].path
             : pane.editorTabs.first?.path
         guard let persisted, !persisted.isEmpty else { return nil }
-        return WorkspaceBackRowView.abbreviate(persisted)
+        return ShellPath.abbreviate(persisted)
     }
 
     private static func editorTotals(pane: PaneDescriptor, editor: EditorPaneModel?) -> String? {

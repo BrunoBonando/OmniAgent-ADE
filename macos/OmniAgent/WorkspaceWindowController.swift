@@ -97,12 +97,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The pane rectangle. Reachable because the window's content view is now
     /// a split view — the workspace is one half of it, not the whole thing.
     var workspaceView: PaneWorkspaceView { workspace }
-    /// The design's two-level sidebar. It draws the sessions tree itself —
-    /// the design's rows carry engine logos, per-pane status dots and a grid
-    /// badge, none of which an `NSOutlineView` cell can lay out that way, so
-    /// the old `SessionOutlineView` is gone. `SessionOutline`'s grouping rules
-    /// live on and are what the tree is built from.
-    let shellSidebar = WorkspaceSidebarView()
+    /// The flat Copilot-style sidebar (the 2026-08-20 redesign). It draws the
+    /// sessions tree itself — the rows carry engine logos and per-pane status
+    /// dots, none of which an `NSOutlineView` cell can lay out that way.
+    /// `SessionOutline`'s grouping rules live on and are what the tree is
+    /// built from.
+    let shellSidebar = NavigationSidebarView()
     /// The content half of the split: the pane workspace and the placeholder
     /// both live here permanently, and the destination only toggles which is
     /// hidden. Unmounting `PaneWorkspaceView` would tear down live SwiftTerm
@@ -121,11 +121,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// ⌘↩ reads it because focus mode is about a terminal, and off Terminals the
     /// pane workspace is hidden entirely.
     private(set) var destination: WorkspaceDestination = .terminals
-    /// Everything `listProjects` last returned — the picker's rows, and where
-    /// a selected id is resolved back to a label and path.
+    /// Everything `listProjects` last returned, and where a selected id is
+    /// resolved back to a label and path.
     private(set) var workspaces: [BrainProjectSummary] = []
-    /// The workspace Level 2 is about. `nil` means "none open", which pins the
-    /// sidebar on the picker.
+    /// The open workspace — what the sidebar's sessions tree is scoped to.
+    /// `nil` means "none open".
     private(set) var selectedProjectID: String?
     let palette = CommandPaletteController()
     private var readySessions: Set<String> = []
@@ -423,46 +423,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         hoverCard.provider = { [weak self] target in self?.hoverCardModel(for: target) }
         hoverCard.rowFrame = { [weak self] target in self?.shellSidebar.rowFrameOnScreen(for: target) }
         shellSidebar.onNewSession = { [weak self] in self?.newSession(nil) }
-        shellSidebar.onNewTerminal = { [weak self] in
-            guard let self, let session = self.visibleSession() else { return }
-            self.newPane(in: session)
-        }
-        shellSidebar.onNewBrowser = { [weak self] in
-            // The same visible-session lookup: the row lives under the session
-            // it adds to, and that is the session on screen.
-            guard let self, let session = self.visibleSession() else { return }
-            self.newBrowser(in: session)
-        }
-        shellSidebar.onNewEditor = { [weak self] in
-            // The same visible-session lookup the two rows above use.
-            guard let self, let session = self.visibleSession() else { return }
-            self.newEditor(in: session)
-        }
-        shellSidebar.onOpenFile = { [weak self] url, pinned in
-            self?.openFileInEditor(url, pinned: pinned)
-        }
-        shellSidebar.onOpenDiff = { [weak self] url in self?.openDiffInEditor(url) }
-        shellSidebar.onOpenAllChanges = { [weak self] in self?.openChangesOverview() }
-        // The sidebar owns the `git status`; the editor panes render it. Held
-        // here as well so a pane created *later* can be seeded with it — see
-        // the editor branch of `addPane`.
-        shellSidebar.onGitStatusChanged = { [weak self] status in
-            guard let self else { return }
-            latestGitStatus = status
-            for id in workspace.allPaneIDs {
-                workspace.editorPane(for: id)?.setGitStatus(status)
-            }
-            // The spotlight searches the repository's files, and this is the
-            // one place that already knows when the repository changed.
-            guard let root = status?.root else {
-                repoFiles = []
-                return
-            }
-            DispatchQueue.global(qos: .utility).async {
-                let files = GitStatus.trackedFiles(repoRoot: root)
-                DispatchQueue.main.async { self.repoFiles = files }
-            }
-        }
+        // Search fires the spotlight and is deliberately not a selection —
+        // the same panel ⌃Space and ⌘K raise.
+        shellSidebar.onSearch = { [weak self] in self?.showCommandPalette(nil) }
         shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
         // Asking the login shell for its PATH spawns a shell; do it now, off
         // the main thread, so the first terminal does not wait for it.
@@ -548,12 +511,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         window.setFrameAutosaveName(Self.frameAutosaveName)
     }
 
-    /// The split: sidebar item on the left (kept, so the outline still gets
+    /// The split: sidebar item on the left (kept, so the sidebar still gets
     /// the system's translucency, collapse animation, remembered width and the
     /// standard `toggleSidebar:` action), the destination container on the
-    /// right. Only the sidebar's *content* changed in step 1 — the outline is
-    /// now nested inside `WorkspaceSidebarView`'s Level 2 rather than being
-    /// the whole pane.
+    /// right. The sidebar's *content* is `NavigationSidebarView`, the flat
+    /// column of the 2026-08-20 redesign.
     private func installSplitView(on window: NSWindow) {
         workspace.translatesAutoresizingMaskIntoConstraints = false
         placeholder.translatesAutoresizingMaskIntoConstraints = false
@@ -580,15 +542,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             ])
         }
 
-        shellSidebar.onSelectWorkspace = { [weak self] chosen in
-            self?.selectWorkspace(id: chosen.id)
-        }
         shellSidebar.onSelectDestination = { [weak self] destination in
             self?.applyDestination(destination)
         }
-        // The design's "New workspace" opens a folder picker and starts there —
-        // the one flow that still asks, because the folder is the new thing.
-        shellSidebar.onNewWorkspace = { [weak self] in self?.openWorkspaceFolder(nil) }
         applyDestination(.terminals)
 
         let sidebar = NSViewController()
@@ -713,7 +669,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private var deskReturn: DeskReturn?
 
     /// Called on the way *off* the Desk, and only from a destination that was
-    /// the Desk — two Dashboard selections in a row must not overwrite what the
+    /// the Desk — two Home selections in a row must not overwrite what the
     /// first one recorded with the mode the first one turned off.
     private func rememberDeskState() {
         // A flight still in the air is neither state: `canvasMode` is on but
@@ -751,7 +707,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         deskReturn = nil
     }
 
-    /// Opens a workspace in Level 2 and scopes the outline to it.
+    /// Opens a workspace and scopes the sidebar's sessions tree to it.
     func selectWorkspace(id: String, animated: Bool = true) {
         selectedProjectID = id
         let summary = workspaces.first { $0.id == id }
@@ -760,37 +716,64 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 label: SessionOutline.projectLabel(id, labels: projectLabels),
                 path: nil
             )
-        shellSidebar.showWorkspace(summary, animated: animated)
-        // The FILES tree follows the workspace. Prefer the brain's recorded
+        // The repository follows the workspace. Prefer the brain's recorded
         // path; fall back to the cwd of a pane in this project, which is what
         // a session opened by folder picker will have.
         let paneCwd = workspace.allPaneIDs
             .compactMap { workspace.descriptor(for: $0) }
             .first { $0.project == id }?
             .cwd
-        let directory = summary.path ?? paneCwd
-        shellSidebar.setFilesRoot(directory.map { URL(fileURLWithPath: $0) })
+        refreshGitStatus(for: summary.path ?? paneCwd)
         reloadOutline()
     }
 
+    /// The sidebar's FILES tree used to own the `git status` load; with the
+    /// tree gone from the sidebar (it returns inside the review panel) the
+    /// controller loads it directly when a workspace is selected. Off the
+    /// main thread — a cold `git status` on a large repository is tens of
+    /// milliseconds.
+    private func refreshGitStatus(for directory: String?) {
+        guard let directory, !directory.isEmpty else {
+            applyGitStatus(nil)
+            return
+        }
+        let url = URL(fileURLWithPath: directory)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let status = GitStatus.repoRoot(for: url).flatMap { GitStatus.load(repoRoot: $0) }
+            DispatchQueue.main.async { self?.applyGitStatus(status) }
+        }
+    }
+
+    /// Fans a fresh `git status` out to everything that renders it. Held in
+    /// `latestGitStatus` as well so a pane created *later* can be seeded with
+    /// it — see the editor branch of `addPane`. Internal so the tests can
+    /// hand a status in without a repository.
+    func applyGitStatus(_ status: GitStatus?) {
+        latestGitStatus = status
+        for id in workspace.allPaneIDs {
+            workspace.editorPane(for: id)?.setGitStatus(status)
+        }
+        // The spotlight searches the repository's files, and this is the
+        // one place that already knows when the repository changed.
+        guard let root = status?.root else {
+            repoFiles = []
+            return
+        }
+        DispatchQueue.global(qos: .utility).async {
+            let files = GitStatus.trackedFiles(repoRoot: root)
+            DispatchQueue.main.async { self.repoFiles = files }
+        }
+    }
+
     /// With panes already restored there is a workspace to be in, so the app
-    /// opens on Level 2 rather than making the user pick what is already
-    /// there. With no panes at all the picker stays up — the design's own
-    /// first-run screen.
+    /// opens scoped to it rather than making the user pick what is already
+    /// there.
     private func selectInitialWorkspaceIfNeeded(animated: Bool) {
         guard selectedProjectID == nil else { return }
         let focused = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0)?.project }
         let anyPane = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0)?.project }.first
         guard let project = focused ?? anyPane, !project.isEmpty else { return }
         selectWorkspace(id: project, animated: animated)
-    }
-
-    /// Sessions per project id — the picker's card meta line, and the count
-    /// badge on the Terminals row.
-    private func sessionCounts() -> [String: Int] {
-        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
-        return SessionOutline.group(panes, focusedPaneID: nil)
-            .reduce(into: [:]) { counts, node in counts[node.project] = node.sessions.count }
     }
 
     /// One pane, one fresh session — the Task 4/5 shape, kept for callers
@@ -1039,27 +1022,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     /// The session a new pane should join: the one the project on screen is
-    /// showing, not the one holding focus. What the sidebar's three "new pane"
-    /// rows resolve their target with.
+    /// showing, not the one holding focus.
     ///
     /// Those are different answers more often than they look. Selecting a
-    /// workspace in the sidebar deliberately does not move focus, so
-    /// `focusedPaneID` routinely names a pane in another project;
+    /// workspace deliberately does not move focus, so `focusedPaneID`
+    /// routinely names a pane in another project;
     /// `SessionOutline.visibleSessionGroupID` falls back to the project's
-    /// first-seen session there, where the strict "current" answer is `nil` and
-    /// the row does nothing at all.
+    /// first-seen session there, where the strict "current" answer is `nil`.
     ///
     /// `nil` only when the project genuinely has no panes — which is what makes
     /// the callers' `?? SessionOutline.newSessionGroupID()` correct rather than
     /// a swallowed failure.
     private func visibleSession() -> SessionGroupNode? {
         let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
-        // A window that has not picked a workspace yet — Level 1, or the
-        // bootstrap pane, whose project is `""` and so never selects one —
-        // still has a project on screen: the focused pane's own. Without this
-        // fallback the three rows do nothing at all before a workspace has
-        // been selected, which is the same silence this change exists to
-        // remove rather than move.
+        // A window that has not picked a workspace yet — the bootstrap pane,
+        // whose project is `""`, never selects one — still has a project on
+        // screen: the focused pane's own.
         let onScreen = selectedProjectID
             ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0)?.project }
         guard
@@ -1076,8 +1054,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             .first { $0.id == group }
     }
 
-    /// The three sidebar rows set their closures up in `init`, so a test cannot
-    /// invoke them; this is the same call they make.
+    /// `visibleSession` is private; this is the same call the callers make.
     @discardableResult
     func newPaneInVisibleSessionForTesting() -> Bool { newPane(in: visibleSession()) }
 
@@ -2264,11 +2241,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     // MARK: - Session outline
 
-    /// Scoped to the open workspace since step 1: Level 2 is *about* one
-    /// workspace, so its tree shows that workspace's sessions and no one
-    /// else's. With none open (the picker is up) the unfiltered tree is kept
-    /// — it is off-screen, and filtering it to nothing would only make the
-    /// slide back reveal an empty pane for a frame.
+    /// Scoped to the open workspace: the sidebar's tree shows that
+    /// workspace's sessions and no one else's. With none open the unfiltered
+    /// tree is kept, so a fresh window still shows what exists.
     private func reloadOutline() {
         let all = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
         shellSidebar.reloadSessions(
@@ -2277,7 +2252,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             statuses: lastStatus,
             project: selectedProjectID
         )
-        shellSidebar.setWorkspaces(workspaces, sessionCounts: sessionCounts())
     }
 
     /// The project directory every project-label-aware surface
@@ -2328,9 +2302,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard workspace.descriptor(for: sessionID) != nil else { return false }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
-        // A pane lives on the Desk. Revealing one from Dashboard or Board used
-        // to focus it behind whichever destination was showing — the caret
-        // moved, the screen did not.
+        // A pane lives on the Desk. Revealing one from Home or the To Do List
+        // used to focus it behind whichever destination was showing — the
+        // caret moved, the screen did not.
         if destination != .terminals { applyDestination(.terminals) }
         workspace.focusPane(sessionID)
         // In focus mode the card is the only terminal the user can see, so

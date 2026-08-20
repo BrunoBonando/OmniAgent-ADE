@@ -594,7 +594,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
         XCTAssertTrue(controller.validateMenuItem(item), "enabled on Terminals")
 
-        controller.applyDestination(.dashboard)
+        controller.applyDestination(.home)
 
         XCTAssertFalse(controller.validateMenuItem(item), "and greyed out off it")
         controller.toggleFocusMode(nil)
