@@ -386,8 +386,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         usageRecorder.onStoreChanged = { [weak self] store in self?.persistUsageAnalytics(store) }
         shellSidebar.onSelectPane = { [weak self] id in self?.workspace.focusPane(id) }
         shellSidebar.onSelectSession = { [weak self] session in
-            guard let first = session.paneIDs.first else { return }
-            self?.workspace.focusPane(first)
+            // The one entry path. This used to call `workspace.focusPane(first)`
+            // directly, which in canvas mode would swap the grid out from under
+            // a camera pointed somewhere else.
+            self?.enterDeskSession(session.id)
         }
         shellSidebar.onRenameSession = { [weak self] session, name in
             self?.renameSession(session, to: name)
@@ -1742,6 +1744,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return destination == .terminals
         case #selector(enterFocusedSession(_:)):
             return destination == .terminals && currentDeskSessionGroup() != nil
+        case #selector(nextSession(_:)):
+            return destination == .terminals && stepTarget(by: 1) != nil
+        case #selector(previousSession(_:)):
+            return destination == .terminals && stepTarget(by: -1) != nil
+        case #selector(selectSession(_:)):
+            // Nine menu items, rarely nine sessions: the ones past the end are
+            // greyed out rather than silently doing nothing.
+            return destination == .terminals && deskSession(at: menuItem.tag) != nil
         default:
             return true
         }
@@ -2030,6 +2040,53 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @objc func enterFocusedSession(_ sender: Any?) {
         guard let group = currentDeskSessionGroup() else { return }
         enterDeskSession(group)
+    }
+
+    /// ⌃1…⌃9. The `selectPane:` precedent exactly — the digit rides on the
+    /// menu item's tag — but scoped to the sessions of the *selected project*,
+    /// because that is what the sidebar is showing rows for.
+    @objc func selectSession(_ sender: Any?) {
+        guard let index = (sender as? NSMenuItem)?.tag, index >= 1,
+              let node = deskSession(at: index) else { return }
+        enterDeskSession(node.id)
+    }
+
+    @objc func nextSession(_ sender: Any?) { stepSession(by: 1) }
+
+    @objc func previousSession(_ sender: Any?) { stepSession(by: -1) }
+
+    /// What `stepSession` would land on — split out so `validateMenuItem` greys
+    /// the item out on exactly the condition the command refuses on.
+    ///
+    /// `adjacentSessionTab` answers with a *pane*, the web build's own shape,
+    /// and both ends stop rather than wrap: index -1 and index >= count are
+    /// both "nothing there", which is why nothing here is a modulo.
+    private func stepTarget(by offset: Int) -> PaneDescriptor? {
+        guard let project = selectedProjectID else { return nil }
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        return SessionOutline.adjacentSessionTab(
+            panes,
+            project: project,
+            focusedPaneID: workspace.focusedPaneID,
+            offset: offset
+        )
+    }
+
+    /// ⇧⌘] / ⇧⌘[.
+    private func stepSession(by offset: Int) {
+        guard let target = stepTarget(by: offset) else { return }
+        enterDeskSession(target.group)
+    }
+
+    /// The 1-based Nth session of the selected project, or nil past the end.
+    private func deskSession(at index: Int) -> SessionGroupNode? {
+        guard let project = selectedProjectID else { return nil }
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        let sessions = SessionOutline.group(panes, focusedPaneID: workspace.focusedPaneID)
+            .first { $0.project == project }?
+            .sessions ?? []
+        guard sessions.indices.contains(index - 1) else { return nil }
+        return sessions[index - 1]
     }
 
     /// The palette's "results mode": the same panel, its rows swapped for
