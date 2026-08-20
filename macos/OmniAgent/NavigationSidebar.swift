@@ -222,7 +222,8 @@ final class SidebarAccountRowView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = ShellPalette.accountFill.cgColor
+        // No fill: the footer used to carry its own faint wash, which read as
+        // a slab on the flat column. The hairline above is the whole divide.
         translatesAutoresizingMaskIntoConstraints = false
 
         let avatar = NSView()
@@ -328,7 +329,7 @@ final class NavigationSidebarView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = ShellPalette.panel.cgColor
+        layer?.backgroundColor = ShellPalette.content.cgColor
 
         navRows = SidebarNavItem.allCases.map { item in
             let row = SidebarNavRowView(item: item)

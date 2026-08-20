@@ -65,7 +65,9 @@ enum WorkspaceDestination: String, CaseIterable {
 /// `.darkAqua` with its own near-black ground, and the design specifies exact
 /// values that must not drift with the user's system accent.
 enum ShellPalette {
-    static let panel = srgb(23, 23, 26, 0.94)
+    // One surface, left and right: the sidebar used to be a lighter,
+    // translucent `panel` tone, which read as a raised slab next to the flat
+    // content. There is no second background token any more.
     static let content = srgb(10, 10, 12)
 
     static let ink = srgb(240, 240, 244)
@@ -109,7 +111,6 @@ enum ShellPalette {
     static let cardStroke = NSColor(white: 1, alpha: 0.09)
     static let cardStrokeHover = NSColor(white: 1, alpha: 0.2)
     static let backRowFill = NSColor(white: 1, alpha: 0.03)
-    static let accountFill = NSColor(white: 1, alpha: 0.02)
     static let fieldFill = NSColor(white: 1, alpha: 0.05)
     static let dashedStroke = NSColor(white: 1, alpha: 0.16)
 
