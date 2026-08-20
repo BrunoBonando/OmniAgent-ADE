@@ -180,6 +180,125 @@ final class DeskCanvasNodeViewsTests: XCTestCase {
         XCTAssertFalse(DeskCanvasChipView(role: .workspace).isAccessibilityElement())
     }
 
+
+    // MARK: - Offscreen render (repo convention: verify AppKit layout by
+    // rendering the real view to a PNG from a test — screen capture is
+    // unavailable in background sessions). Pass the output directory via
+    // `TEST_RUNNER_PANE_RENDER_DIR=/tmp/desk-chips ./macos/build.sh test`;
+    // xcodebuild strips the `TEST_RUNNER_` prefix before handing the variable to
+    // the test host, and unset it is a no-op.
+    //
+    // KNOWN BLIND SPOT: `CALayer.render(in:)` does not apply the compositor's
+    // geometry flips. It cannot catch an orientation mistake — the pane
+    // `maskedCorners` bug "looked perfectly concentric offscreen while the real
+    // screen showed the ring pinching out at the bottom corners". The chip's
+    // flipped-ness is asserted directly by
+    // `testTheChipIsFlippedLikeTheCanvasItSitsIn` for exactly that reason; this
+    // render proves it drew something, not which way up.
+
+    func testTheWorkspaceChipDrawsItsTileAndItsNameRatherThanAFlatSheet() throws {
+        let chip = DeskCanvasChipView(role: .workspace)
+        chip.frame = CGRect(x: 0, y: 0, width: 300, height: 120)
+        chip.apply(
+            title: "OmniAgent ADE",
+            detail: ShellPalette.sessionCountLabel(3),
+            tint: ShellPalette.avatarGradient(forID: "omniagent-ade"),
+            status: nil
+        )
+        let window = show(chip)
+        defer { window.close() }
+
+        let rep = try XCTUnwrap(render(chip), "the harness sizes the bitmap from bounds; nil means a zero-size chip")
+        saveRenderForInspection(rep, named: "desk-canvas-chip-workspace")
+
+        XCTAssertEqual(rep.pixelsWide, 300, "the harness allocates Int(bounds.width) pixels")
+        XCTAssertEqual(rep.pixelsHigh, 120)
+        XCTAssertGreaterThan(distinctColours(in: rep), 5, "render is a flat sheet — the chip drew nothing")
+    }
+
+    /// The account node is the same class with the round avatar, and it is the
+    /// only other `Role` — a role that draws nothing would sail past every
+    /// assertion above, all of which use `.workspace`.
+    func testTheAccountChipDrawsItsAvatarRatherThanAFlatSheet() throws {
+        let chip = DeskCanvasChipView(role: .account)
+        chip.frame = CGRect(x: 0, y: 0, width: 300, height: 120)
+        chip.apply(
+            title: "Bruno Bonando",
+            detail: nil,
+            tint: ShellPalette.avatarGradient(forID: "bruno"),
+            status: nil
+        )
+        let window = show(chip)
+        defer { window.close() }
+
+        let rep = try XCTUnwrap(render(chip))
+        saveRenderForInspection(rep, named: "desk-canvas-chip-account")
+
+        XCTAssertGreaterThan(distinctColours(in: rep), 5, "render is a flat sheet — the account chip drew nothing")
+    }
+
+    /// The other half of "selection is a stroke change": the selected chip is
+    /// ringed in the accent, the unselected one in the neutral card stroke.
+    ///
+    /// The redraw is forced with `display()` rather than left to
+    /// `displayIfNeeded()`, which was measured to redraw an offscreen
+    /// layer-backed view whether or not it was invalidated — so a
+    /// `displayIfNeeded` here would pass with the `isSelected` invalidation
+    /// deleted, and claim to prove something it does not. What this asserts is
+    /// the drawing: selected and unselected are different pictures.
+    func testSelectingTheWorkspaceChipDrawsTheAccentRingRatherThanTheCardStroke() throws {
+        let chip = DeskCanvasChipView(role: .workspace)
+        chip.frame = CGRect(x: 0, y: 0, width: 300, height: 120)
+        chip.apply(
+            title: "OmniAgent ADE",
+            detail: ShellPalette.sessionCountLabel(3),
+            tint: ShellPalette.avatarGradient(forID: "omniagent-ade"),
+            status: nil
+        )
+        let window = show(chip)
+        defer { window.close() }
+        let plain = try XCTUnwrap(render(chip))
+
+        chip.isSelected = true
+        chip.display()
+        let ringed = try XCTUnwrap(render(chip))
+        saveRenderForInspection(ringed, named: "desk-canvas-chip-workspace-selected")
+
+        XCTAssertGreaterThan(
+            blueOverRedAlongTheTopEdge(of: ringed),
+            blueOverRedAlongTheTopEdge(of: plain) + 0.05,
+            "the selection ring is drawn in the accent, and the unselected one is not"
+        )
+    }
+
+
+    /// The failure the offscreen render found and no assertion had: a chip is
+    /// `DeskCanvas.chipSize(forCard:)` — the card at 0.25 — so it carries the
+    /// Desk viewport's aspect, around 1.6:1. Sizing the type from the height
+    /// alone put a 54pt title in a 135pt column and drew every workspace as
+    /// "Om…". The type is scaled by a unit capped at a fraction of the width
+    /// instead, and this is what holds it there.
+    func testAWorkspaceNameFitsTheColumnTheLayoutActuallyGivesIt() {
+        for card in [CGSize(width: 1440, height: 900), CGSize(width: 1200, height: 800), CGSize(width: 1600, height: 1000)] {
+            let bounds = NSRect(origin: .zero, size: DeskCanvas.chipSize(forCard: card))
+            let metrics = DeskCanvasChipView.metrics(in: bounds, hasDetail: true)
+
+            let title = ("OmniAgent ADE" as NSString).size(withAttributes: [.font: metrics.titleFont])
+            XCTAssertLessThanOrEqual(
+                title.width,
+                metrics.title.width,
+                "a \(Int(bounds.width))x\(Int(bounds.height)) chip truncates the workspace name"
+            )
+            let detail = (ShellPalette.sessionCountLabel(3) as NSString)
+                .size(withAttributes: [.font: metrics.detailFont])
+            XCTAssertLessThanOrEqual(detail.width, metrics.detail.width, "and its session count")
+            XCTAssertLessThanOrEqual(metrics.detail.maxX, bounds.maxX, "the text column stays inside the chip")
+            XCTAssertGreaterThanOrEqual(metrics.title.minY, bounds.minY, "and the block stays inside it vertically")
+            XCTAssertLessThanOrEqual(metrics.detail.maxY, bounds.maxY)
+        }
+    }
+
+
     // MARK: - Helpers
 
     /// A window, because a layer-backed view with no window never runs
@@ -201,5 +320,68 @@ final class DeskCanvasNodeViewsTests: XCTestCase {
         window.displayIfNeeded()
         view.layoutSubtreeIfNeeded()
         return window
+    }
+
+    /// How blue the chip's top border reads: the accent stroke is
+    /// srgb(139, 149, 255) and the neutral one is white at 9%, so blue-minus-red
+    /// separates them without depending on where exactly the stroke lands.
+    private func blueOverRedAlongTheTopEdge(of rep: NSBitmapImageRep) -> CGFloat {
+        var best: CGFloat = 0
+        for y in 2..<min(8, rep.pixelsHigh) {
+            for x in stride(from: 20, to: max(21, rep.pixelsWide - 20), by: 4) {
+                guard let colour = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                best = max(best, (colour.blueComponent - colour.redComponent) * colour.alphaComponent)
+            }
+        }
+        return best
+    }
+
+    private func distinctColours(in rep: NSBitmapImageRep) -> Int {
+        var seen = Set<String>()
+        for x in stride(from: 2, to: rep.pixelsWide - 2, by: max(1, rep.pixelsWide / 20)) {
+            for y in stride(from: 2, to: rep.pixelsHigh - 2, by: max(1, rep.pixelsHigh / 20)) {
+                guard let colour = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                seen.insert([
+                    Int(colour.redComponent * 255),
+                    Int(colour.greenComponent * 255),
+                    Int(colour.blueComponent * 255),
+                ].map(String.init).joined(separator: "-"))
+            }
+        }
+        return seen.count
+    }
+
+    /// Renders a view's whole layer tree, gradients included — `cacheDisplay`
+    /// draws `draw(_:)` output only, which is nothing here.
+    private func render(_ view: NSView) -> NSBitmapImageRep? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(view.bounds.width),
+            pixelsHigh: Int(view.bounds.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .calibratedRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        view.layer?.render(in: context.cgContext)
+        return rep
+    }
+
+    /// Nothing reads this in CI; it exists so Bruno can eyeball a render.
+    /// `xcodebuild test`'s `TEST_RUNNER_` prefix is stripped and the rest handed
+    /// straight to the test host's environment, so
+    /// `TEST_RUNNER_PANE_RENDER_DIR=/tmp/panes ./macos/build.sh test` drops a PNG
+    /// per named render there; unset, this is a no-op.
+    private func saveRenderForInspection(_ rep: NSBitmapImageRep, named name: String) {
+        guard
+            let dir = ProcessInfo.processInfo.environment["PANE_RENDER_DIR"],
+            let png = rep.representation(using: .png, properties: [:])
+        else { return }
+        let directory = URL(fileURLWithPath: dir, isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? png.write(to: directory.appendingPathComponent("\(name).png"))
     }
 }

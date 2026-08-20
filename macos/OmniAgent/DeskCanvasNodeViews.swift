@@ -123,6 +123,11 @@ final class DeskCanvasChipView: NSView {
     private var title = ""
     private var detail: String?
     private var tint: (NSColor, NSColor)?
+    /// Carried but not drawn: neither of the two roles has a status of its own —
+    /// a workspace's is the sum of its sessions', and each session already draws
+    /// its own. It stays in `apply(...)`'s signature because a session-level
+    /// role is the obvious next one, and a chip that has to be rebuilt to gain a
+    /// field is a chip that loses its selection ring mid-arrow-walk.
     private var status: RemoteSessionStatus?
 
     init(role: Role) {
@@ -152,5 +157,125 @@ final class DeskCanvasChipView: NSView {
         self.tint = tint
         self.status = status
         needsDisplay = true
+    }
+
+    /// The chip's geometry, as one pure function of its bounds so it can be
+    /// checked without a window — the same reason
+    /// `DeskCanvasEdgeLayer.path(for:)` is static.
+    ///
+    /// Every size is a fraction of one `unit`, and the unit is capped by the
+    /// **width**: a chip is `DeskCanvas.chipSize(forCard:)`, the card at 0.25,
+    /// so it carries the Desk viewport's own aspect — around 1.6:1, not the
+    /// 2.5:1 box these constants were first tuned against. Deriving them from
+    /// the height alone put a 54pt title in a 135pt column and truncated every
+    /// workspace name to "Om…", which the offscreen render caught and no
+    /// assertion did; `testAWorkspaceNameFitsTheColumnTheLayoutActuallyGivesIt`
+    /// is the assertion now.
+    struct Metrics {
+        let unit: CGFloat
+        let cornerRadius: CGFloat
+        let body: NSRect
+        let tile: NSRect
+        let title: NSRect
+        let detail: NSRect
+        let titleFont: NSFont
+        let detailFont: NSFont
+    }
+
+    static func metrics(in bounds: NSRect, hasDetail: Bool) -> Metrics {
+        let unit = min(bounds.height, bounds.width * 0.34)
+        let inset = unit * 0.18
+        let tileSide = unit * 0.46
+        let tile = NSRect(
+            x: inset,
+            y: (bounds.height - tileSide) / 2,
+            width: tileSide,
+            height: tileSide
+        )
+        let textX = tile.maxX + inset * 0.75
+        let textWidth = max(0, bounds.width - textX - inset)
+        let titleHeight = unit * 0.30
+        let detailHeight = unit * 0.26
+        let block = hasDetail ? titleHeight + detailHeight : titleHeight
+        let top = (bounds.height - block) / 2
+        return Metrics(
+            unit: unit,
+            cornerRadius: unit * 0.18,
+            body: bounds.insetBy(dx: unit * 0.03, dy: unit * 0.03),
+            tile: tile,
+            title: NSRect(x: textX, y: top, width: textWidth, height: titleHeight),
+            detail: NSRect(x: textX, y: top + titleHeight, width: textWidth, height: detailHeight),
+            titleFont: ShellFont.ui(unit * 0.24, .semibold),
+            detailFont: ShellFont.ui(unit * 0.19, .regular)
+        )
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard bounds.height > 0, bounds.width > 0 else { return }
+        let hasDetail = detail?.isEmpty == false
+        let metrics = Self.metrics(in: bounds, hasDetail: hasDetail)
+
+        let body = NSBezierPath(
+            roundedRect: metrics.body,
+            xRadius: metrics.cornerRadius,
+            yRadius: metrics.cornerRadius
+        )
+        ShellPalette.cardFill.setFill()
+        body.fill()
+        (isSelected ? ShellPalette.accent : ShellPalette.cardStroke).setStroke()
+        body.lineWidth = metrics.unit * (isSelected ? 0.035 : 0.014)
+        body.stroke()
+
+        drawLeading(in: metrics.tile)
+
+        guard metrics.title.width > 0 else { return }
+        draw(title, in: metrics.title, font: metrics.titleFont, color: ShellPalette.ink)
+        if let detail, hasDetail {
+            draw(detail, in: metrics.detail, font: metrics.detailFont, color: ShellPalette.inkTertiary)
+        }
+    }
+
+    private func draw(
+        _ text: String,
+        in rect: NSRect,
+        font: NSFont,
+        color: NSColor,
+        centred: Bool = false
+    ) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        paragraph.alignment = centred ? .center : .left
+        NSAttributedString(string: text, attributes: [
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: paragraph,
+        ]).draw(in: rect)
+    }
+
+    /// The account's avatar is a circle and a workspace's tile is a rounded
+    /// square — the same two shapes the sidebar already uses for the same two
+    /// things.
+    private func drawLeading(in rect: NSRect) {
+        switch role {
+        case .account, .workspace:
+            let path = role == .account
+                ? NSBezierPath(ovalIn: rect)
+                : NSBezierPath(roundedRect: rect, xRadius: rect.height * 0.28, yRadius: rect.height * 0.28)
+            NSGraphicsContext.saveGraphicsState()
+            path.addClip()
+            let colours = tint ?? (ShellPalette.accent, ShellPalette.accent)
+            // 150° in the design's CSS runs top-left to bottom-right;
+            // `NSGradient`'s angle is counter-clockwise from east, which puts the
+            // same ramp at -60 — exactly as `ShellTileView` does it.
+            NSGradient(starting: colours.0, ending: colours.1)?.draw(in: rect, angle: -60)
+            NSGraphicsContext.restoreGraphicsState()
+            draw(
+                ShellPalette.initials(title),
+                in: rect.insetBy(dx: 0, dy: rect.height * 0.3),
+                font: ShellFont.ui(rect.height * 0.4, .bold),
+                color: .white,
+                centred: true
+            )
+        }
     }
 }
