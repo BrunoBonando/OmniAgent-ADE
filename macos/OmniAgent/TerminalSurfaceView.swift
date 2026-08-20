@@ -541,8 +541,9 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     /// *blinking*, so half the time it is not on the screen to be found — which
     /// is why `bulletLine` looks for the bullet's column as well as the bullet.
     ///
-    /// With no bullet anywhere — a plain shell — three rules stand in, and they
-    /// cost a shell nothing, having none of what they skip:
+    /// With no bullet and no agent furniture anywhere — a plain shell — three
+    /// rules stand in, and they cost a shell nothing, having none of what they
+    /// skip:
     ///
     /// 1. **Everything at and below the input box is chrome.** The box is the
     ///    bottom-most `›`/`❯` prompt line. This one applies either way.
@@ -558,8 +559,18 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     static func lastOutputLine(of terminal: Terminal) -> String? {
         let rows = visibleRows(of: terminal)
         // A screen with bullets on it is an agent's, and its bullets are the
-        // answer. One with none is a shell's, and the rules below stand in.
+        // answer.
         if rows.contains(where: { isBullet($0.body) }) { return bulletLine(in: rows) }
+        // An agent that has just compacted its transcript is the one screen
+        // wearing an agent's furniture with not a single bullet left on it, and
+        // the honest answer there is none: the action it is about to report has
+        // not been printed yet. The shell rules below would answer regardless,
+        // out of the furniture underneath — the separator the terminal hangs
+        // its tab name on, or the `/compact` the user typed to get here. The
+        // `\u{23BF}` a tool result hangs from is what gives the screen away; a
+        // shell has no reason to draw one.
+        if rows.contains(where: { $0.body.first == "\u{23BF}" }) { return nil }
+        // Neither bullets nor that: a shell, and the rules below stand in.
         return reportingLine(in: rows)
     }
 

@@ -674,6 +674,69 @@ final class SessionHoverCardTests: XCTestCase {
         XCTAssertEqual(TerminalSurfaceView.lastOutputLine(of: terminal), "Running 1 shell command…")
     }
 
+    /// The screen a compacted transcript leaves behind, captured off the live
+    /// daemon: every bullet gone, the agent's own `⎿` echoes still there, and
+    /// underneath them the separator its tab name hangs on. The shell rules
+    /// used to answer with that separator here, because a screen with no bullet
+    /// on it was taken for a shell's.
+    func testACompactedTranscriptHasNothingToReport() throws {
+        let terminal = Terminal(
+            delegate: SilentTerminalDelegate(),
+            options: TerminalOptions(cols: 54, rows: 42)
+        )
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J")
+        let screen: [(Int, Int, String)] = [
+            // What is left of the last answer: its bullet went with the
+            // transcript, so only its wrapped body is on the screen.
+            (2, 3, "Two of these I could have caught before shipping and"),
+            (13, 3, "may still want tuning now that the chips aren't"),
+            (14, 3, "distorting it."),
+            (16, 1, "✻ Sautéed for 24m 20s"),
+            (18, 1, "❯ /compact"),
+            (19, 3, "⎿  Compacted (ctrl+o to see full summary)"),
+            (20, 3, "⎿  Read macos/OmniAgent/PaneChipView.swift (274"),
+            (21, 6, "lines)"),
+            (32, 3, "⎿  Skills restored (frontend-design:frontend-design)"),
+            (33, 14, "✔ Update installed · Restart to update"),
+            (34, 1, String(repeating: "─", count: 24) + " Desk view spatial zoom work ─"),
+            (35, 1, "❯ "),
+            (36, 1, String(repeating: "─", count: 54)),
+            (41, 3, "⏵⏵ auto mode on (shift+tab to cycle) · ← for agen…"),
+        ]
+        for (row, column, text) in screen {
+            terminal.feed(text: "\u{1b}[\(row);\(column)H" + text)
+        }
+
+        XCTAssertNil(
+            TerminalSurfaceView.lastOutputLine(of: terminal),
+            "no bullet left to read, so nothing — not the tab-name separator"
+        )
+    }
+
+    /// And the same screen without the agent's echoes on it *is* a shell, which
+    /// still gets an answer out of the rules that stand in for bullets.
+    func testAShellStillReportsItsLowestLine() throws {
+        let terminal = Terminal(
+            delegate: SilentTerminalDelegate(),
+            options: TerminalOptions(cols: 54, rows: 8)
+        )
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J")
+        let screen: [(Int, Int, String)] = [
+            (1, 1, "$ cargo build -p omniagent-pty-daemon"),
+            (2, 3, "Compiling omniagent-pty-daemon v0.1.0"),
+            (4, 1, "Finished dev profile in 3.41s"),
+            (6, 1, "❯ "),
+        ]
+        for (row, column, text) in screen {
+            terminal.feed(text: "\u{1b}[\(row);\(column)H" + text)
+        }
+
+        XCTAssertEqual(
+            TerminalSurfaceView.lastOutputLine(of: terminal),
+            "Finished dev profile in 3.41s"
+        )
+    }
+
     // MARK: - Helpers
 
     private final class SilentTerminalDelegate: TerminalDelegate {
