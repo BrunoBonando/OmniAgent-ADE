@@ -10,8 +10,11 @@ import SwiftTerm
 final class PaneWorkspaceViewTests: XCTestCase {
     // MARK: - Shapes
 
+    /// At `fullLadderWidth` — the ladder is the shape whenever there is room
+    /// for it. What happens when there is not is
+    /// `testANarrowWindowTradesColumnsForRows`.
     func testAddingPanesWalksTheApprovedLadderAndCapsAtTwelve() {
-        let workspace = makeWorkspace(panes: 1)
+        let workspace = makeWorkspace(panes: 1, width: Self.fullLadderWidth)
         let expected: [(cols: Int, rows: Int)] = [
             (1, 1), (2, 1), (2, 2), (2, 2), (3, 2), (3, 2), (4, 2), (4, 2),
             (4, 3), (4, 3), (4, 3), (4, 3),
@@ -29,11 +32,198 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(workspace.paneIDs.count, PaneGrid.maxPanes)
     }
 
+    /// The founder's brief, 2026-08-20: "I don't want anything to feel
+    /// squeezed. If the terminal part feels squeezed, then it should diminish
+    /// the number of columns and increase the number of rows." A window with
+    /// room for two comfortable panes across gets two columns however many
+    /// panes are in it — and takes the ladder's columns back the moment the
+    /// window is wide enough to hold them.
+    func testANarrowWindowTradesColumnsForRows() {
+        let workspace = makeWorkspace(panes: 6)
+        let order = workspace.paneIDs
+        XCTAssertEqual(workspace.grid?.cols, 2, "a laptop fits two comfortable panes across")
+        XCTAssertEqual(workspace.grid?.rows, 3, "the sixth pane grows a row instead")
+
+        workspace.frame = CGRect(x: 0, y: 0, width: Self.fullLadderWidth, height: 800)
+        XCTAssertEqual(workspace.grid?.cols, 3, "room for the ladder's rung again")
+        XCTAssertEqual(workspace.grid?.rows, 2)
+
+        workspace.frame = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        XCTAssertEqual(workspace.grid?.cols, 2, "and back")
+        XCTAssertEqual(workspace.paneIDs, order, "no pane changed places on the way")
+
+        // Narrower still, with few enough panes that a single column of them
+        // is still a shape and not a filmstrip.
+        let narrow = makeWorkspace(panes: 3, width: 700)
+        XCTAssertFalse(narrow.isFilmstrip)
+        XCTAssertEqual(narrow.grid?.cols, 1, "one comfortable pane across")
+        XCTAssertEqual(narrow.grid?.rows, 3)
+    }
+
+    /// The rule both halves of the reflow exist to keep, at every count a
+    /// laptop-sized window can be asked for: nothing on screen is ever smaller
+    /// than a terminal worth reading. Either the grid found a shape where every
+    /// pane clears it, or the filmstrip did — where only the hero has to,
+    /// because the rail is pictures rather than terminals.
+    func testNoPaneOnScreenIsSmallerThanAComfortableTerminal() {
+        for count in 1...PaneGrid.maxPanes {
+            let workspace = makeWorkspace(panes: count)
+            let measured: [CGRect]
+            if workspace.isFilmstrip {
+                let hero = try? XCTUnwrap(workspace.filmstripHeroID)
+                measured = [hero.flatMap { workspace.container(for: $0)?.frame }].compactMap { $0 }
+                XCTAssertEqual(measured.count, 1, "\(count) panes: a hero")
+            } else {
+                measured = workspace.paneIDs.compactMap { workspace.container(for: $0)?.frame }
+                XCTAssertEqual(measured.count, count)
+            }
+            for frame in measured {
+                XCTAssertGreaterThanOrEqual(
+                    frame.width,
+                    PaneWorkspaceView.comfortablePaneWidth,
+                    "\(count) panes at 1200pt"
+                )
+                XCTAssertGreaterThanOrEqual(
+                    frame.height,
+                    PaneWorkspaceView.comfortablePaneHeight,
+                    "\(count) panes at 1200pt"
+                )
+            }
+        }
+    }
+
+    // MARK: - The filmstrip
+
+    /// Past the last rung a grid can hold comfortably, the workspace stops
+    /// tiling: the focused pane takes the width, the rest become chips in a
+    /// rail, and the height that would have been squeezed out of them becomes
+    /// scroll (founder brief, 2026-08-20).
+    func testTooManyPanesForTheWindowBecomeAFilmstrip() throws {
+        let workspace = makeWorkspace(panes: 6)
+        XCTAssertFalse(workspace.isFilmstrip, "six still tile: 2x3 clears both floors")
+
+        XCTAssertTrue(workspace.addPane(makeDescriptor("pane-7")))
+        XCTAssertTrue(workspace.isFilmstrip, "a fourth row would not")
+        let hero = try XCTUnwrap(workspace.filmstripHeroID)
+        XCTAssertEqual(hero, "pane-7", "the new pane took focus, so it is the one on show")
+        XCTAssertEqual(workspace.filmstripRailIDs.count, 6)
+
+        let layout = try XCTUnwrap(workspace.filmstripLayout)
+        XCTAssertEqual(workspace.container(for: hero)?.frame, layout.hero)
+        XCTAssertEqual(layout.hero.width, workspace.gridBounds.width - PaneWorkspaceView.filmstripRailWidth - 6)
+        XCTAssertGreaterThan(layout.maxScroll, 0, "six chips do not fit: the rail scrolls")
+        XCTAssertTrue(workspace.holePlaceholders.isEmpty, "a filmstrip has no holes to fill")
+
+        for id in workspace.filmstripRailIDs {
+            let chip = try XCTUnwrap(workspace.container(for: id))
+            XCTAssertTrue(chip.isChipped, "\(id) is a picture, not a terminal")
+            XCTAssertEqual(chip.frame.width, PaneWorkspaceView.filmstripRailWidth)
+        }
+        XCTAssertFalse(
+            try XCTUnwrap(workspace.container(for: hero)).isChipped,
+            "the hero is the live one"
+        )
+    }
+
+    /// The rail is where a terminal waits, not where it is resized to fit. A
+    /// pane parked in a 196pt chip keeps the geometry it had at full size, so
+    /// its scrollback comes back the shape it left.
+    func testAPaneInTheRailKeepsItsTerminalGeometry() throws {
+        let workspace = makeWorkspace(panes: 6)
+        let heroWidth = try XCTUnwrap(workspace.container(for: "pane-1")?.surface.frame.width)
+
+        XCTAssertTrue(workspace.addPane(makeDescriptor("pane-7")))
+        XCTAssertTrue(workspace.isFilmstrip)
+        let railed = try XCTUnwrap(workspace.container(for: "pane-1"))
+        XCTAssertEqual(railed.frame.width, PaneWorkspaceView.filmstripRailWidth, "the box shrank")
+        XCTAssertEqual(railed.surface.frame.width, heroWidth, "the terminal did not")
+    }
+
+    /// Focus is the filmstrip's only control, which is what makes every focus
+    /// command — a click on a chip, ⌘3, ⌥arrow, the sidebar — a way to open a
+    /// pane. The one leaving and the one arriving trade boxes.
+    func testFocusingAChipPromotesItToHero() throws {
+        let workspace = makeWorkspace(panes: 8)
+        XCTAssertTrue(workspace.isFilmstrip)
+        let outgoing = try XCTUnwrap(workspace.filmstripHeroID)
+        let incoming = try XCTUnwrap(workspace.filmstripRailIDs.first)
+
+        // Exactly what a click on that chip resolves to.
+        let layout = try XCTUnwrap(workspace.filmstripLayout)
+        let slot = try XCTUnwrap(layout.rail.first { $0.id == incoming }).frame
+        XCTAssertEqual(layout.railPane(at: CGPoint(x: slot.midX, y: slot.midY)), incoming)
+
+        workspace.focusPane(incoming)
+        XCTAssertEqual(workspace.filmstripHeroID, incoming)
+        let promoted = try XCTUnwrap(workspace.container(for: incoming))
+        XCTAssertFalse(promoted.isChipped)
+        XCTAssertEqual(promoted.frame, workspace.filmstripLayout?.hero)
+        XCTAssertTrue(
+            try XCTUnwrap(workspace.container(for: outgoing)).isChipped,
+            "and the one it replaced went to the rail"
+        )
+        XCTAssertTrue(workspace.filmstripRailIDs.contains(outgoing))
+    }
+
+    /// The filmstrip in pixels: hero on the right, chips down the left, the
+    /// rail scrolled. Drops a PNG when `PANE_RENDER_DIR` is set.
+    func testTheFilmstripRendersAsAHeroBesideARailOfChips() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 8)
+        defer { window.close() }
+        XCTAssertTrue(workspace.isFilmstrip)
+        window.displayIfNeeded()
+        workspace.layoutSubtreeIfNeeded()
+        let rep = try XCTUnwrap(render(workspace))
+        saveRenderForInspection(rep, named: "filmstrip-8-panes")
+
+        let layout = try XCTUnwrap(workspace.filmstripLayout)
+        // Nothing of the hero is in the rail's column and nothing of the rail
+        // is in the hero's: the two never overlap, whatever the scroll.
+        for item in layout.rail {
+            XCTAssertLessThanOrEqual(item.frame.maxX, layout.hero.minX)
+        }
+    }
+
+    /// ⌥↑/⌥↓ walk the rail, since that is the only arrangement on screen.
+    func testTheArrowsWalkTheRailInTheFilmstrip() throws {
+        let workspace = makeWorkspace(panes: 8)
+        XCTAssertTrue(workspace.isFilmstrip)
+        let ids = workspace.paneIDs
+        workspace.focusPane(ids[0])
+
+        XCTAssertTrue(workspace.focusNeighbor(.down))
+        XCTAssertEqual(workspace.filmstripHeroID, ids[1])
+        XCTAssertTrue(workspace.focusNeighbor(.up))
+        XCTAssertEqual(workspace.filmstripHeroID, ids[0])
+        XCTAssertFalse(workspace.focusNeighbor(.up), "the rail does not wrap")
+        XCTAssertFalse(workspace.focusNeighbor(.left), "and it has no sideways")
+        XCTAssertEqual(workspace.filmstripHeroID, ids[0])
+    }
+
+    /// It is a shape, not a mode: give the window enough room and the grid
+    /// comes back with every pane where the ladder puts it.
+    func testAWideEnoughWindowTilesAgain() {
+        let workspace = makeWorkspace(panes: 8)
+        XCTAssertTrue(workspace.isFilmstrip)
+
+        workspace.frame = CGRect(x: 0, y: 0, width: Self.fullLadderWidth, height: 800)
+        XCTAssertFalse(workspace.isFilmstrip, "four columns of two clear both floors")
+        XCTAssertEqual(workspace.grid?.cols, 4)
+        XCTAssertEqual(workspace.grid?.rows, 2)
+        XCTAssertNil(workspace.filmstripLayout)
+        for id in workspace.paneIDs {
+            XCTAssertFalse(workspace.container(for: id)?.isChipped ?? true, "\(id) is live again")
+        }
+
+        workspace.frame = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        XCTAssertTrue(workspace.isFilmstrip, "and back")
+    }
+
     /// The ninth pane opens the third row at column 0 and the three cells
     /// beside it stay empty, each one an add-a-pane placeholder, until panes
     /// 10-12 replace them left to right.
     func testTheNinthPaneOpensAThirdRowWithThreeEmptyCellsBesideIt() {
-        let workspace = makeWorkspace(panes: 8)
+        let workspace = makeWorkspace(panes: 8, width: Self.fullLadderWidth)
         XCTAssertTrue(workspace.holePlaceholders.isEmpty, "the 4x2 rung is full")
 
         XCTAssertTrue(workspace.addPane(makeDescriptor("pane-9")))
@@ -789,7 +979,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
     /// and a full twelve. Drops PNGs when `PANE_RENDER_DIR` is set; the
     /// assertions below hold either way.
     func testThirdRowRendersAsThreeRowsOfFour() throws {
-        let (workspace, window) = makeAttachedWorkspace(panes: 8)
+        let (workspace, window) = makeAttachedWorkspace(panes: 8, width: Self.fullLadderWidth)
         defer { window.close() }
 
         for index in 9...PaneGrid.maxPanes {
@@ -2310,7 +2500,21 @@ final class PaneWorkspaceViewTests: XCTestCase {
     /// Panes are added one at a time, exactly as ⌘T does, so the fill order
     /// carries the 2 -> 3 lower-left rule: four panes end up as columns
     /// [pane-1, pane-3] and [pane-2, pane-4].
-    private func makeWorkspace(panes: Int) -> PaneWorkspaceView {
+    /// Wide enough that the count-driven ladder is never capped by
+    /// `comfortablePaneWidth` — four columns of comfortable panes plus their
+    /// seams and the grid inset. The shape a test at this width sees is the
+    /// pure ladder; `makeWorkspace`'s default 1200 is a laptop, where the
+    /// squeeze rule has an opinion of its own.
+    private static let fullLadderWidth: CGFloat = {
+        let needed = 4 * (PaneWorkspaceView.comfortablePaneWidth + PaneWorkspaceView.dividerThickness)
+            + 2 * PaneWorkspaceView.gridInset
+        // Rounded up to a multiple of four so the four columns divide exactly:
+        // `layout` rounds each edge to a whole point, and a width that does not
+        // divide leaves one column a point wider than its neighbours.
+        return (needed / 4).rounded(.up) * 4
+    }()
+
+    private func makeWorkspace(panes: Int, width: CGFloat = 1200) -> PaneWorkspaceView {
         let connection = SessionConnection(
             socketURL: URL(fileURLWithPath: "/tmp/omniagent-pane-workspace-test.sock")
         )
@@ -2329,17 +2533,20 @@ final class PaneWorkspaceViewTests: XCTestCase {
                 )
             }
         }
-        workspace.frame = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        workspace.frame = CGRect(x: 0, y: 0, width: width, height: 800)
         for index in 1...panes {
             XCTAssertTrue(workspace.addPane(makeDescriptor("pane-\(index)")))
         }
         return workspace
     }
 
-    private func makeAttachedWorkspace(panes: Int) -> (PaneWorkspaceView, NSWindow) {
-        let workspace = makeWorkspace(panes: panes)
+    private func makeAttachedWorkspace(
+        panes: Int,
+        width: CGFloat = 1200
+    ) -> (PaneWorkspaceView, NSWindow) {
+        let workspace = makeWorkspace(panes: panes, width: width)
         let window = WorkspaceWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 1200, height: 800),
+            contentRect: CGRect(x: 0, y: 0, width: width, height: 800),
             styleMask: [.titled, .resizable],
             backing: .buffered,
             defer: false

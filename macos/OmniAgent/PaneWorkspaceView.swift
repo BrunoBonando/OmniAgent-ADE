@@ -175,9 +175,35 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return (CGFloat(comfortableTerminalColumns) * cell).rounded() + 24
     }()
 
+    /// The shortest a pane may get before the workspace stops tiling
+    /// altogether and `PaneFilmstrip` takes over: `comfortableTerminalRows`
+    /// lines of the terminal's own font, plus the header above them.
+    static let comfortablePaneHeight: CGFloat = {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let line = (font.ascender - font.descender + font.leading).rounded(.up)
+        return CGFloat(comfortableTerminalRows) * line + PaneHeaderView.height
+    }()
+
+    /// Rows of text below which a terminal can no longer show a command and
+    /// its answer at the same time, which is the least a pane can be worth.
+    /// Trading columns for rows has to stop somewhere, and this is where.
+    static let comfortableTerminalRows = 14
+
+    /// How wide the filmstrip's rail is. Fixed rather than a fraction: a chip
+    /// is a picture of a pane, and a picture does not need to grow with the
+    /// window — everything the window gives goes to the pane you are reading.
+    // ponytail: not draggable. Make the seam a real divider only if the fixed
+    // width turns out to be wrong on an external display.
+    static let filmstripRailWidth: CGFloat = 196
+
     /// Columns of text a terminal needs before it stops reading as squeezed.
-    /// Below 60 an agent's output wraps mid-thought.
-    static let comfortableTerminalColumns = 60
+    ///
+    /// Width first, and deliberately: an agent's output that wraps mid-thought
+    /// is lost to the eye, while the rows the trade costs come straight back
+    /// out of scrollback. 55 is the widest floor that still leaves four panes
+    /// as a 2x2 in a sidebar-open window on a laptop — anything higher stacks
+    /// them into a single column, which the founder's brief does not ask for.
+    static let comfortableTerminalColumns = 55
     /// `padding:7px` around the design's pane grid — without it the outermost
     /// panes' rounded corners are cut off by the window edge.
     static let gridInset: CGFloat = 7
@@ -227,6 +253,39 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
     }
     private(set) var focusedPaneID: String?
+
+    /// Whether the active session is past the last shape a grid can hold
+    /// comfortably and is drawn as `PaneFilmstrip` instead. Decided by
+    /// `reflowForSize()` on every layout pass, from the window's size and the
+    /// pane count alone — there is no mode to switch into and nothing to
+    /// persist.
+    private(set) var isFilmstrip = false
+
+    /// The pane the filmstrip draws at full size: the focused one.
+    ///
+    /// Focus and "the one you are looking at" are the same thing here, and
+    /// saying so once is what makes every existing focus command a filmstrip
+    /// command — ⌘1-9, ⌥arrows, the sidebar, the palette and a click on a chip
+    /// all promote a pane to hero without a second code path.
+    var filmstripHeroID: String? {
+        guard let ids = grid?.paneIDs(), !ids.isEmpty else { return nil }
+        if let focused = focusedPaneID, ids.contains(focused) { return focused }
+        return ids.first
+    }
+
+    /// Everybody else, in pane order — the chips in the rail. Empty whenever
+    /// the grid is doing the work.
+    var filmstripRailIDs: [String] {
+        guard isFilmstrip, let hero = filmstripHeroID else { return [] }
+        return grid?.paneIDs().filter { $0 != hero } ?? []
+    }
+
+    /// The rail's scroll offset in points, and the last layout it was applied
+    /// to — kept so a click and a wheel event can be answered without
+    /// recalculating the geometry they are asking about.
+    private var filmstripScroll: CGFloat = 0
+    private(set) var filmstripLayout: PaneFilmstrip.Layout?
+
     let resizeCoalescer = PaneResizeCoalescer()
 
     /// Raised when a pane wants to exist or stop existing — the window
@@ -949,7 +1008,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// shrunk out of focus is heading, and the only thing the overlay needs from
     /// the grid it is covering.
     private func gridFrame(for sessionID: String) -> NSRect? {
-        grid?.layout(in: gridBounds, dividerThickness: Self.dividerThickness).frames[sessionID]
+        // Where a card being shrunk out of focus is heading is wherever the
+        // layout in force would put that pane — a grid cell, or the hero box /
+        // a rail slot when the filmstrip is the layout in force.
+        if isFilmstrip, let layout = filmstripLayout {
+            if sessionID == filmstripHeroID { return layout.hero }
+            return layout.rail.first { $0.id == sessionID }?.frame
+        }
+        return grid?.layout(in: gridBounds, dividerThickness: Self.dividerThickness).frames[sessionID]
     }
 
     /// The overlay lives in the window rather than in this view, so it does not
@@ -1024,7 +1090,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         if zoomTransition > 0, let layer = container.layer, let from {
             zoomLayer(layer, fromPosition: from.position, fromSize: from.size, toSize: frame.size)
         }
-        if resized { container.surface.scheduleResize() }
+        // Not for a chip: on the canvas a chipped pane's box never changes size
+        // anyway, and in the filmstrip's rail it changes to a fifth of one —
+        // reflowing a terminal to twenty columns behind a picture of itself
+        // would cost the scrollback its shape for nothing.
+        if resized, !container.isChipped { container.surface.scheduleResize() }
     }
 
     /// One move of the transition, as the pair of layer animations that expresses
@@ -1178,11 +1248,18 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         updateZoomAvailability()
         let visible = onScreenPaneIDs()
         let chips = showsChips
+        // The filmstrip's rail borrows the canvas's level of detail wholesale:
+        // a pane a fifth of a window wide has nothing in its pixels either, and
+        // `PaneChipView` already draws what survives that shrink. It also keeps
+        // the terminal *off* the rail — see `place`, which does not resize a
+        // chipped pane's PTY, so a pane parked in the rail keeps the geometry
+        // it had as hero and comes back with its scrollback the shape it left.
+        let railed = Set(filmstripRailIDs)
         for (id, container) in containers {
             let onScreen = visible.contains(id)
             container.isHidden = !onScreen
             container.surface.suspendsDrawing = suspendsDrawing || !onScreen
-            container.isChipped = onScreen && chips
+            container.isChipped = onScreen && (chips || railed.contains(id))
         }
         // The camera decides who may blink as much as it decides who is on
         // screen, and a camera move runs this pass and no other.
@@ -1609,6 +1686,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
         let changed = focusedPaneID != sessionID
         focusedPaneID = sessionID
+        // In the filmstrip the focused pane *is* the one at full size, so a
+        // focus change is a layout change — and it has to land before
+        // `surface.focus()`, which cannot make a chipped pane's terminal the
+        // first responder.
+        if changed, isFilmstrip { relayoutFilmstrip() }
         updateFocusRings()
         containers[sessionID]?.surface.focus()
         if changed { onFocusedPaneChanged?(sessionID) }
@@ -1652,9 +1734,29 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 
     @discardableResult
     func focusNeighbor(_ direction: PaneDirection) -> Bool {
+        // A filmstrip has no rectangle to walk: the rail is a list, so ⌥↑/⌥↓
+        // step through it and ⌥←/⌥→ have nowhere to go. Without this the arrows
+        // would move by the cells of a grid nothing on screen is arranged in.
+        if isFilmstrip { return focusAlongRail(direction) }
         guard let focusedPaneID, let neighbor = grid?.neighbor(of: focusedPaneID, direction: direction)
         else { return false }
         focusPane(neighbor)
+        carryCardToFocusedPane()
+        return true
+    }
+
+    /// ⌥↑/⌥↓ in the filmstrip: the previous or next pane in pane order, which
+    /// is the order the rail is stacked in. Stops at both ends — the rail does
+    /// not wrap, for the reason the grid does not.
+    private func focusAlongRail(_ direction: PaneDirection) -> Bool {
+        guard direction == .up || direction == .down else { return false }
+        let ids = grid?.paneIDs() ?? []
+        guard let current = filmstripHeroID, let index = ids.firstIndex(of: current) else {
+            return false
+        }
+        let next = direction == .up ? index - 1 : index + 1
+        guard ids.indices.contains(next) else { return false }
+        focusPane(ids[next])
         carryCardToFocusedPane()
         return true
     }
@@ -2147,12 +2249,16 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         if isCanvasMode { return updateCanvasLayout() }
         // Before the frames are read, so a reshape and the placement it causes
         // are one pass and no intermediate shape is ever on screen.
-        let reflowed = reflowForWidth()
+        let reflowed = reflowForSize()
         if reflowed { zoomTransition = Self.swapTransitionDuration }
         // Restored rather than zeroed: a swap sets this around its own call to
         // this method and reads it again afterwards (`castGlideShadow`), so
         // clearing it unconditionally would cost the swap its shadow.
         defer { if reflowed { zoomTransition = 0 } }
+        // Past the ladder's last comfortable rung the workspace stops tiling.
+        // The `defer` above still runs, so the move into and out of the
+        // filmstrip is animated like any other reshape.
+        if isFilmstrip { return updateFilmstripLayout() }
         guard let grid else {
             dividerViews.forEach { $0.removeFromSuperview() }
             dividerViews = []
@@ -2191,8 +2297,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// divider survives it; a reshape resets fractions exactly as any other
     /// change of rung does.
     ///
+    /// Rows have a floor of their own (`comfortablePaneHeight`), and where
+    /// even one column cannot clear it there is no rectangle left to fall back
+    /// to: the workspace stops tiling and `PaneFilmstrip` takes the pass
+    /// instead. Both halves of the rule live here so the two never disagree
+    /// about which layout is in force.
+    ///
     /// Returns whether the caller should animate the pass.
-    private func reflowForWidth() -> Bool {
+    private func reflowForSize() -> Bool {
         guard let grid, gridBounds.width > 0, zoomTransition == 0 else { return false }
         let ids = grid.paneIDs()
         let fitting = max(1, Int(
@@ -2200,9 +2312,32 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
                 / (Self.comfortablePaneWidth + Self.dividerThickness)
         ))
         let columns = min(PaneGrid.shape(count: ids.count).cols, fitting)
-        guard columns != grid.cols, let reshaped = PaneGrid.build(ids, maxColumns: columns)
-        else { return false }
-        self.grid = reshaped
+        let rows = Int(ceil(Double(ids.count) / Double(columns)))
+        let cellHeight = (gridBounds.height - CGFloat(rows - 1) * Self.dividerThickness)
+            / CGFloat(rows)
+        // A single pane is never squeezed by its own company, however short the
+        // window: with nothing to put in the rail the filmstrip would be a
+        // narrower grid of one.
+        let filmstrip = ids.count > 1 && cellHeight < Self.comfortablePaneHeight
+        var changed = false
+        if filmstrip != isFilmstrip {
+            isFilmstrip = filmstrip
+            filmstripScroll = 0
+            if !filmstrip {
+                filmstripLayout = nil
+                layer?.masksToBounds = false
+            }
+            // The rail's chips go up (or come down) before anything is placed:
+            // `place` reads `isChipped` to decide whether the pane's PTY
+            // follows its box.
+            updateVisibility()
+            changed = true
+        }
+        if !filmstrip, columns != grid.cols, let reshaped = PaneGrid.build(ids, maxColumns: columns) {
+            self.grid = reshaped
+            changed = true
+        }
+        guard changed else { return false }
         // The swap's glide, borrowed for the same reason the swap borrows the
         // zoom's: `place` animates every pane whose frame moved during a
         // transition window, position *and* scale, so cells of different sizes
@@ -2214,6 +2349,68 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return window != nil
             && !inLiveResize
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// The filmstrip's layout pass: the focused pane at full size, every other
+    /// pane a chip in the rail.
+    ///
+    /// The same `place` every other pass uses, so a pane promoted out of the
+    /// rail glides and grows into the hero box while the one it replaces glides
+    /// and shrinks into its slot — the swap's animation, for the swap's reason.
+    private func updateFilmstripLayout() {
+        guard let hero = filmstripHeroID else { return }
+        let layout = PaneFilmstrip.layout(
+            ids: grid?.paneIDs() ?? [],
+            hero: hero,
+            in: gridBounds,
+            railWidth: Self.filmstripRailWidth,
+            gap: Self.dividerThickness,
+            scroll: filmstripScroll
+        )
+        // Stored back: the rail shortens whenever a pane closes or the hero
+        // changes, and an offset past the new end would strand the last chip
+        // above the fold.
+        filmstripScroll = layout.scroll
+        filmstripLayout = layout
+        // The one place this view clips. A rail is a scroll view's worth of
+        // content in a view that is not one, so the chips scrolled past either
+        // end have to be cut off by something; everything the grid draws is
+        // inside `bounds` already, which is why this can be switched on here
+        // and off again when the grid comes back.
+        layer?.masksToBounds = true
+        // `overlayPaneID` is skipped for the reason `updateLayout` skips it:
+        // a card in the overlay has a frame in that host's coordinates and
+        // `applyZoom` is what sets it.
+        if hero != overlayPaneID, let container = containers[hero] {
+            place(container, at: layout.hero)
+        }
+        for item in layout.rail {
+            guard item.id != overlayPaneID, let container = containers[item.id] else { continue }
+            place(container, at: item.frame)
+        }
+        // Nothing here has seams or holes: the rail's gaps are not draggable
+        // and a filmstrip has no rectangle to pad.
+        syncDividerViews([])
+        syncHolePlaceholders(PaneLayout(frames: [:], dividers: []), holeIDs: [])
+        applyZoom()
+        updateAccessibilityLabels()
+        refreshFocusSubtitles()
+    }
+
+    /// Re-lays the filmstrip out because its *hero* changed rather than because
+    /// its geometry did — the one thing `updateLayout` cannot notice on its
+    /// own, since focus is not a size.
+    private func relayoutFilmstrip() {
+        let animate = window != nil
+            && !inLiveResize
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if animate { zoomTransition = Self.swapTransitionDuration }
+        defer { if animate { zoomTransition = 0 } }
+        // Before the layout, not after: the new hero has to come out of its
+        // chip before it is given a hero-sized box, or `place` would skip its
+        // PTY resize and leave the terminal at rail geometry.
+        updateVisibility()
+        updateFilmstripLayout()
     }
 
     /// Canvas mode's layout pass: every session's grid at its own card rect in
@@ -2839,6 +3036,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     }
 
     override func mouseDown(with event: NSEvent) {
+        // A chip is not a pane you can type into, so a click on one means the
+        // only thing it can mean: show me that one. Ahead of the canvas guard
+        // because a chip click is never a canvas gesture — the filmstrip and
+        // the canvas are different layouts of the same view.
+        if isFilmstrip,
+           let id = filmstripLayout?.railPane(at: convert(event.locationInWindow, from: nil)) {
+            focusPane(id)
+            return
+        }
         guard canvasOwnsInput else { return super.mouseDown(with: event) }
         // An entry flight owns the next 0.38s and cannot be argued with: its
         // landing is already scheduled (`DispatchQueue.main.asyncAfter`,
@@ -3044,6 +3250,24 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// Multiplied rather than added, because scale is multiplicative: a fixed
     /// step crawls at 1.0 and leaps at `fitAll`.
     override func scrollWheel(with event: NSEvent) {
+        if isFilmstrip, let layout = filmstripLayout, layout.maxScroll > 0,
+           layout.railBounds.contains(convert(event.locationInWindow, from: nil)) {
+            // A wheel notch is worth far less than a trackpad point, which
+            // reports the distance the fingers actually moved.
+            let delta = event.hasPreciseScrollingDeltas
+                ? event.scrollingDeltaY
+                : event.scrollingDeltaY * 12
+            // This view is flipped and the event is not: content moving down is
+            // a smaller offset.
+            let updated = min(max(0, filmstripScroll - delta), layout.maxScroll)
+            guard updated != filmstripScroll else { return }
+            filmstripScroll = updated
+            // Straight to the layout, unanimated: the rail has to keep up with
+            // the fingers exactly, which is what "the content follows the
+            // gesture" means.
+            updateFilmstripLayout()
+            return
+        }
         guard canvasOwnsInput else { return super.scrollWheel(with: event) }
         let unit = event.hasPreciseScrollingDeltas
             ? event.scrollingDeltaY / 200
@@ -3544,12 +3768,21 @@ final class PaneContainerView: NSView, NSDraggingSource {
             height: min(headerHeight, max(0, bounds.height - inset * 2))
         )
         let barHeight = approvalBar.isHidden ? 0 : PaneApprovalBarView.height
-        surface.frame = CGRect(
-            x: inset,
-            y: inset + headerHeight,
-            width: width,
-            height: max(0, bounds.height - headerHeight - barHeight - inset * 2)
-        )
+        // A chipped pane's surface stays exactly where it was. It is down and
+        // drawing nothing, and its box is the terminal's geometry: in the
+        // filmstrip's rail that box would become a fifth of a pane, and
+        // SwiftTerm reflows on a frame change whether anyone asked it to or not
+        // — the pane would come back from the rail with its scrollback rewrapped
+        // to twenty columns. `isChipped`'s own `didSet` runs this again on the
+        // way back up, by which time the container is hero-sized.
+        if !isChipped {
+            surface.frame = CGRect(
+                x: inset,
+                y: inset + headerHeight,
+                width: width,
+                height: max(0, bounds.height - headerHeight - barHeight - inset * 2)
+            )
+        }
         approvalBar.frame = CGRect(
             x: inset,
             y: inset + headerHeight + surface.frame.height,
