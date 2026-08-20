@@ -47,7 +47,7 @@ final class WorkspaceWindow: NSWindow {
         // with focus — including an active field editor. A sidebar rename
         // (`SessionRowView` in `WorkspaceShell.swift`) and
         // the files tree's filter field (`WorkspaceFilesTreeView.filterField`,
-        // same file) both call `window.makeFirstResponder` on a plain
+        // `ReviewPanelFilesView.swift`) both call `window.makeFirstResponder` on a plain
         // `NSTextField`, which installs the shared field editor — a genuine
         // `NSTextView` with `isFieldEditor == true` — as `firstResponder` and
         // routes esc to their own `control(_:textView:doCommandBy:)` to
@@ -284,6 +284,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The panel view and its split item — the third `NSSplitViewItem`, on
     /// the right of the session content.
     let reviewPanel = ReviewPanelView()
+    /// The Files tab's real content, mounted into the panel at init. One
+    /// instance for the window; `syncReviewPanelFiles` re-points it at each
+    /// session's own workspace and persisted state.
+    let reviewPanelFiles = ReviewPanelFilesView()
     private(set) var reviewPanelItem: NSSplitViewItem?
     /// The session group whose state the panel is currently showing —
     /// updated on every `activeGroup` change, so a tab edit lands in the
@@ -467,6 +471,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         reviewPanel.onTabsChanged = { [weak self] in self?.reviewPanelUIChanged() }
         reviewPanel.onToggleExpand = { [weak self] in self?.toggleReviewPanelExpansion() }
+        reviewPanel.setContent(reviewPanelFiles, for: .files)
+        reviewPanelFiles.onPreferencesChanged = { [weak self] in self?.reviewPanelFilesChanged() }
+        reviewPanelFiles.onOpenFileChanged = { [weak self] _ in self?.reviewPanelFilesChanged() }
+        // Badge and header clicks route to the same editor-pane flows the
+        // old sidebar tree fed, so a diff always opens the same way.
+        reviewPanelFiles.onOpenDiff = { [weak self] url in self?.openDiffInEditor(url) }
+        reviewPanelFiles.onOpenAllChanges = { [weak self] in self?.openChangesOverview() }
         workspace.onDeskCanvasChanged = { [weak self] in self?.persistDeskCanvas() }
         workspace.onCameraChanged = { [weak self] in self?.updateDeskZoomReadout() }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
@@ -2946,6 +2957,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let visible = destination == .terminals && state.open
         setReviewPanelCollapsed(!visible)
         if visible, let width = state.width { applyReviewPanelWidth(CGFloat(width)) }
+        syncReviewPanelFiles()
     }
 
     /// The panel's tab set or selection changed under the user's hands —
@@ -2957,6 +2969,52 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         state.activeTab = reviewPanel.activeTab?.rawValue ?? ""
         reviewPanelStates[group] = state
         persistReviewPanel()
+        // Selecting the Files tab is what makes its content current — the
+        // one moment its tree is worth (re)pointing at the session.
+        syncReviewPanelFiles()
+    }
+
+    /// Puts the showing session's persisted Files state into the tab —
+    /// lazily: only while the panel is open on the Files tab, so a listing
+    /// and a `git status` are never paid for a tab nobody is looking at.
+    private func syncReviewPanelFiles() {
+        guard
+            reviewPanelItem?.isCollapsed == false,
+            reviewPanel.activeTab == .files,
+            let group = reviewPanelGroup
+        else { return }
+        let state = reviewPanelState(for: group)
+        reviewPanelFiles.apply(
+            root: reviewPanelRoot(for: group),
+            openFile: state.openFile,
+            treePosition: state.treePosition,
+            showHidden: state.showHidden
+        )
+    }
+
+    /// The Files tab's user-made changes (gear preferences, open file) —
+    /// recorded against the session the panel is showing, like every other
+    /// panel edit.
+    private func reviewPanelFilesChanged() {
+        guard let group = reviewPanelGroup else { return }
+        var state = reviewPanelState(for: group)
+        state.treePosition = reviewPanelFiles.treePosition.rawValue
+        state.showHidden = reviewPanelFiles.showsHiddenFiles
+        state.openFile = reviewPanelFiles.currentOpenFilePath
+        reviewPanelStates[group] = state
+        persistReviewPanel()
+    }
+
+    /// The workspace the Files tab lists for one session group: the group's
+    /// project directory, or a live pane's cwd when nothing is recorded.
+    private func reviewPanelRoot(for group: String) -> URL? {
+        let descriptor = workspace.allPaneIDs
+            .compactMap { workspace.descriptor(for: $0) }
+            .first { $0.group == group }
+        let path = workspaceDirectory(for: descriptor?.project)
+            ?? descriptor.flatMap { $0.cwd.isEmpty ? nil : $0.cwd }
+        guard let path, !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
     }
 
     /// The tab bar's expand-to-full-width toggle. Transient — see

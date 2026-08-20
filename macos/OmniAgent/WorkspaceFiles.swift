@@ -83,7 +83,12 @@ enum WorkspaceFiles {
     /// perfectly ordinary thing for a sidebar to be pointed at (a deleted
     /// project root, a permission-denied folder), and the honest answer is
     /// an empty level rather than an error the tree has nowhere to put.
-    static func children(of url: URL) -> [WorkspaceFileNode] {
+    ///
+    /// `includingHidden` lifts the leading-dot rule for the Files tab's
+    /// "Show hidden files" preference — but `skippedDirectoryNames` still
+    /// applies, so `.git` (and `node_modules` & co.) never get a row even
+    /// then: they are large, uninteresting, and expensive to enumerate.
+    static func children(of url: URL, includingHidden: Bool = false) -> [WorkspaceFileNode] {
         let contents: [URL]
         do {
             contents = try FileManager.default.contentsOfDirectory(
@@ -99,7 +104,7 @@ enum WorkspaceFiles {
         nodes.reserveCapacity(contents.count)
         for child in contents {
             let name = child.lastPathComponent
-            guard !name.isEmpty, !name.hasPrefix(".") else { continue }
+            guard !name.isEmpty, includingHidden || !name.hasPrefix(".") else { continue }
             let isDirectory = isDirectory(child)
             if isDirectory, skippedDirectoryNames.contains(name) { continue }
             nodes.append(
@@ -149,9 +154,13 @@ enum WorkspaceFiles {
     /// UI can rely on: a network volume or a cold directory with tens of
     /// thousands of entries makes `contentsOfDirectory` block for as long as
     /// it takes. Expanding a folder must never be able to freeze the window.
-    static func list(_ url: URL, completion: @escaping ([WorkspaceFileNode]) -> Void) {
+    static func list(
+        _ url: URL,
+        includingHidden: Bool = false,
+        completion: @escaping ([WorkspaceFileNode]) -> Void
+    ) {
         listQueue.async {
-            let nodes = children(of: url)
+            let nodes = children(of: url, includingHidden: includingHidden)
             DispatchQueue.main.async { completion(nodes) }
         }
     }

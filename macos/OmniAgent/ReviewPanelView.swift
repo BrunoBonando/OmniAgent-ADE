@@ -206,6 +206,9 @@ final class ReviewPanelView: NSView {
     private let contentContainer = NSView()
     private(set) var tabItems: [ReviewPanelTabItemView] = []
     private(set) var placeholders: [ReviewPanelTab: ReviewPanelPlaceholderView] = [:]
+    /// Real tab contents, registered by the controller. A tab with a view
+    /// here never grows a placeholder.
+    private(set) var contentViews: [ReviewPanelTab: NSView] = [:]
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -320,6 +323,25 @@ final class ReviewPanelView: NSView {
         return menu
     }
 
+    /// Mounts a tab's real content, replacing (and preventing) its
+    /// placeholder. The view is added once and shown/hidden with the
+    /// selection, so its state survives tab switches.
+    func setContent(_ view: NSView, for tab: ReviewPanelTab) {
+        contentViews[tab]?.removeFromSuperview()
+        placeholders[tab]?.removeFromSuperview()
+        placeholders[tab] = nil
+        contentViews[tab] = view
+        view.translatesAutoresizingMaskIntoConstraints = false
+        contentContainer.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+            view.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+            view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
+        ])
+        updateContent()
+    }
+
     /// The controller owns the split geometry, so it tells the panel which
     /// way its toggle now points rather than the button deciding for itself.
     func setExpanded(_ expanded: Bool) {
@@ -361,10 +383,10 @@ final class ReviewPanelView: NSView {
     }
 
     private func updateContent() {
-        // Placeholders are created on first use and kept — the next tasks
-        // swap this dictionary's values for the real views, and a hidden
-        // view keeps its state where a recreated one would not.
-        if let tab = activeTab, placeholders[tab] == nil {
+        // Placeholders stand in only for tabs with no registered content —
+        // created on first use and kept, because a hidden view keeps its
+        // state where a recreated one would not.
+        if let tab = activeTab, contentViews[tab] == nil, placeholders[tab] == nil {
             let placeholder = ReviewPanelPlaceholderView(tab: tab)
             placeholders[tab] = placeholder
             contentContainer.addSubview(placeholder)
@@ -376,5 +398,6 @@ final class ReviewPanelView: NSView {
             ])
         }
         for (tab, view) in placeholders { view.isHidden = tab != activeTab }
+        for (tab, view) in contentViews { view.isHidden = tab != activeTab }
     }
 }
