@@ -65,10 +65,16 @@ enum WorkspaceDestination: String, CaseIterable {
 /// `.darkAqua` with its own near-black ground, and the design specifies exact
 /// values that must not drift with the user's system accent.
 enum ShellPalette {
-    // One surface, left and right: the sidebar used to be a lighter,
-    // translucent `panel` tone, which read as a raised slab next to the flat
-    // content. There is no second background token any more.
     static let content = srgb(10, 10, 12)
+
+    /// The sidebar's ground: a top-lit blue-black sheet, so the column reads as
+    /// glass over the flat `content` black rather than a second slab of it.
+    /// A gradient, not `NSGlassEffectView` — that is macOS 26 only (this app
+    /// deploys to 14), and its blur samples what is behind the view, which
+    /// here is the window's own opaque near-black.
+    static let sidebarGlass = NSGradient(
+        colors: [srgb(28, 32, 52), srgb(13, 14, 22)]
+    )!
 
     static let ink = srgb(240, 240, 244)
     static let inkNav = srgb(176, 176, 186)

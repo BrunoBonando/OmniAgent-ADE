@@ -329,7 +329,6 @@ final class NavigationSidebarView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = ShellPalette.content.cgColor
 
         navRows = SidebarNavItem.allCases.map { item in
             let row = SidebarNavRowView(item: item)
@@ -401,6 +400,13 @@ final class NavigationSidebarView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// Top-lit, so the column has a light source and the content black beside
+    /// it does not. `draw` rather than a layer of its own: the gradient then
+    /// follows the divider whenever it is dragged, with nothing to resize.
+    override func draw(_ dirtyRect: NSRect) {
+        ShellPalette.sidebarGlass.draw(in: bounds, angle: -90)
+    }
 
     /// Lights the row for `destination`, or none: Desk (`.terminals`) has no
     /// sidebar row any more — its content is entered through the sessions
