@@ -113,6 +113,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The canvas's zoom readout. A sibling of `workspace`, never a subview of
     /// it — see `DeskZoomReadoutView`.
     let deskZoomReadout = DeskZoomReadoutView()
+
+    /// The canvas's ground. A sibling *behind* `workspace` — see `DeskGridView`
+    /// for why it is not inside it.
+    let deskGrid = DeskGridView()
     /// Which destination is on screen. `applyDestination` is the only writer;
     /// ⌘↩ reads it because focus mode is about a terminal, and off Terminals the
     /// pane workspace is hidden entirely.
@@ -553,8 +557,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func installSplitView(on window: NSWindow) {
         workspace.translatesAutoresizingMaskIntoConstraints = false
         placeholder.translatesAutoresizingMaskIntoConstraints = false
+        // Behind the canvas, and added first so it is: the canvas's own backing
+        // layer goes clear in canvas mode precisely so this shows through.
+        deskGrid.translatesAutoresizingMaskIntoConstraints = false
+        deskGrid.isHidden = true
+        contentContainer.addSubview(deskGrid)
         contentContainer.addSubview(workspace)
         contentContainer.addSubview(placeholder)
+        NSLayoutConstraint.activate([
+            deskGrid.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+            deskGrid.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+            deskGrid.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+            deskGrid.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
+        ])
         installDeskZoomReadout()
         for view in [workspace, placeholder] as [NSView] {
             NSLayoutConstraint.activate([
@@ -669,8 +684,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// so the readout would be a permanent "100%" — a number that never changes
     /// and answers nothing, sitting on top of a terminal's last line.
     func updateDeskZoomReadout() {
+        let onCanvas = workspace.canvasMode && destination == .terminals
         deskZoomReadout.scale = workspace.camera.scale
-        deskZoomReadout.isHidden = !(workspace.canvasMode && destination == .terminals)
+        deskZoomReadout.isHidden = !onCanvas
+        // The ground goes with it: inside a session the card fills the viewport
+        // and there is no ground to see, and off the Desk there is no canvas.
+        deskGrid.camera = workspace.camera
+        deskGrid.isHidden = !onCanvas
     }
 
     /// What the Desk was showing when it was last left, so coming back to it is

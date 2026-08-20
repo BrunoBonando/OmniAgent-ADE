@@ -254,14 +254,20 @@ enum DeskCanvas {
     /// as a fraction of a card's height. Same reasoning as `siblingGapFraction`.
     static let levelGapFraction: CGFloat = 0.3
 
-    /// A chip is the card at `chipWidthFraction` scale — same aspect, so the
-    /// tree reads as one family of rectangles at any zoom, and one constant
-    /// governs both dimensions. Rounded, so no chip lands on a half-point.
+    /// A chip's height, as a fraction of its own width.
+    ///
+    /// Not the card's aspect. A chip holds one row — a mark and a name — and
+    /// giving it the card's proportions made a 400x250 box around a 40pt row:
+    /// a mostly-empty rectangle far larger than the thing it labels, which
+    /// pushed the tidy tree's packing around and made the account node the
+    /// biggest object on a canvas of live sessions.
+    static let chipAspect: CGFloat = 0.24
+
+    /// A chip is `chipWidthFraction` of a card wide and `chipAspect` of that
+    /// tall. Rounded, so no chip lands on a half-point.
     static func chipSize(forCard cardSize: CGSize) -> CGSize {
-        CGSize(
-            width: (cardSize.width * chipWidthFraction).rounded(),
-            height: (cardSize.height * chipWidthFraction).rounded()
-        )
+        let width = (cardSize.width * chipWidthFraction).rounded()
+        return CGSize(width: width, height: (width * chipAspect).rounded())
     }
 
     /// A session card is ALWAYS `cardSize`, one pane or twelve — a card is the
@@ -470,7 +476,7 @@ enum DeskGrid {
     /// grid collapses into a flat wash, so the spacing steps up a decade
     /// instead. This is what keeps the grid useful from `fitAll` to identity
     /// without ever drawing thousands of lines.
-    static let minCellOnScreen: CGFloat = 12
+    static let minCellOnScreen: CGFloat = 20
 
     /// The cell size to draw at this camera scale: `baseSpacing` stepped by
     /// whole factors of `majorEvery` until it lands in a legible band.

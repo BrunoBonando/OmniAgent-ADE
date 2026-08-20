@@ -30,15 +30,24 @@ final class DeskCanvasTests: XCTestCase {
             cardSize,
             "a session card is exactly the Desk viewport, one pane or twelve"
         )
+        // A chip holds one row — a mark and a name — so its height comes from
+        // its own width, not from the card's aspect. Given the card's
+        // proportions it was a 300x200 box around a 40pt row: a mostly-empty
+        // rectangle bigger than the thing it labels, shoving the packing around.
         XCTAssertEqual(
             try XCTUnwrap(layout.frames["root"]).size,
-            CGSize(width: 300, height: 200),
-            "the You chip is the card at chipWidthFraction"
+            CGSize(width: 300, height: 72),
+            "the You chip is a compact card, not a quarter-size session card"
         )
         XCTAssertEqual(
             try XCTUnwrap(layout.frames["OmniAgent-ADE"]).size,
-            CGSize(width: 300, height: 200),
+            CGSize(width: 300, height: 72),
             "so is the workspace chip"
+        )
+        XCTAssertLessThan(
+            DeskCanvas.chipSize(forCard: cardSize).height,
+            DeskCanvas.chipSize(forCard: cardSize).width,
+            "a chip is wider than it is tall — it is a label, not a card"
         )
         XCTAssertEqual(
             DeskCanvas.chipSize(forCard: cardSize).width,
@@ -147,7 +156,7 @@ final class DeskCanvasTests: XCTestCase {
         XCTAssertEqual(layout.edges, [], "nothing to connect")
         XCTAssertEqual(
             layout.contentRect,
-            CGRect(x: 0, y: 0, width: 300, height: 200),
+            CGRect(x: 0, y: 0, width: 300, height: 72),
             "contentRect never collapses to zero while a node exists — fitAll would divide by it"
         )
     }
@@ -520,6 +529,79 @@ final class DeskCanvasTests: XCTestCase {
             ]
         )
     }
+}
+
+/// `DeskGridView` itself — the ground, as opposed to `DeskGrid`'s geometry.
+final class DeskGridViewTests: XCTestCase {
+
+    /// It must never answer a hit test. It sits behind the canvas, which owns
+    /// every event on the Desk; a grid that took a click would take it *off*
+    /// the canvas, and node selection and panning would both die.
+    func testTheGroundNeverTakesAClick() {
+        let grid = DeskGridView()
+        grid.frame = CGRect(x: 0, y: 0, width: 800, height: 600)
+
+        XCTAssertNil(grid.hitTest(CGPoint(x: 400, y: 300)))
+    }
+
+    /// The camera actually drives what is painted, checked by painting it.
+    ///
+    /// Asserted against the pixels rather than against `needsDisplay`, which a
+    /// layer-backed view outside a window answers for its own reasons. This is
+    /// the property that failed in the shipped build: the grid was drawn in
+    /// `PaneWorkspaceView.draw(_:)`, clipped to whatever rect the chips had
+    /// dirtied, so the ground appeared in two rectangles and nowhere else.
+    func testTheGroundIsPaintedAcrossTheWholeViewAndFollowsTheCamera() throws {
+        func pixels(_ camera: DeskCamera) throws -> Data {
+            let grid = DeskGridView()
+            grid.frame = CGRect(x: 0, y: 0, width: 400, height: 300)
+            grid.camera = camera
+            let rep = try XCTUnwrap(grid.bitmapImageRepForCachingDisplay(in: grid.bounds))
+            grid.cacheDisplay(in: grid.bounds, to: rep)
+            return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        }
+
+        let far = try pixels(DeskCamera(scale: 0.2, origin: .zero))
+        let near = try pixels(DeskCamera(scale: 0.9, origin: .zero))
+        let panned = try pixels(DeskCamera(scale: 0.2, origin: CGPoint(x: 17, y: 0)))
+
+        XCTAssertNotEqual(far, near, "a different scale is a different grid")
+        XCTAssertNotEqual(far, panned, "and so is a different origin")
+    }
+
+    /// Every corner of the view is ground, not the black that was there before.
+    /// One sampled corner is enough to catch a grid that only paints where
+    /// something else happened to invalidate it.
+    func testEveryCornerOfTheViewIsGround() throws {
+        let grid = DeskGridView()
+        grid.frame = CGRect(x: 0, y: 0, width: 400, height: 300)
+        grid.camera = DeskCamera(scale: 0.19, origin: CGPoint(x: 133, y: 299))
+        let rep = try XCTUnwrap(grid.bitmapImageRepForCachingDisplay(in: grid.bounds))
+        grid.cacheDisplay(in: grid.bounds, to: rep)
+
+        // A lower bound rather than an equality: a corner may land on a grid
+        // line, and a line only ever *brightens* the ground. What this has to
+        // separate is ground from the void that was there before — 0.13 against
+        // 0.0 — not one shade of ground from another.
+        let floor = try XCTUnwrap(
+            DeskGridView.backgroundColor.usingColorSpace(.sRGB)
+        ).brightnessComponent * 0.75
+        for point in [
+            NSPoint(x: 1, y: 1),
+            NSPoint(x: rep.pixelsWide - 2, y: 1),
+            NSPoint(x: 1, y: rep.pixelsHigh - 2),
+            NSPoint(x: rep.pixelsWide - 2, y: rep.pixelsHigh - 2),
+        ] {
+            let colour = try XCTUnwrap(
+                rep.colorAt(x: Int(point.x), y: Int(point.y))?.usingColorSpace(.sRGB)
+            )
+            XCTAssertGreaterThan(
+                colour.brightnessComponent, floor,
+                "the corner at \(point) is ground, not the void"
+            )
+        }
+    }
+
 }
 
 /// The canvas's ground. Pure geometry, so it is checked without a window for

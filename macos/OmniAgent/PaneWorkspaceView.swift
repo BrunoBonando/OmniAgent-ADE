@@ -1056,66 +1056,23 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// terminal wants behind it.
     static let normalBackgroundColor = NSColor(srgbRed: 4 / 255, green: 6 / 255, blue: 9 / 255, alpha: 1)
 
-    /// The canvas's ground: a desaturated slate, deliberately *lighter* than
-    /// `PaneContainerView.paneBackgroundColor`. That difference is the whole
-    /// spatial illusion — the cards have to read as objects lying on a surface,
-    /// and a black card on a black field is a hole in the screen instead.
-    static let canvasBackgroundColor = NSColor(srgbRed: 25 / 255, green: 28 / 255, blue: 34 / 255, alpha: 1)
-
-    private static let gridMinorColor = NSColor(white: 1, alpha: 0.045)
-    private static let gridMajorColor = NSColor(white: 1, alpha: 0.09)
-
-    /// The grid, drawn by the **view** rather than by a sublayer.
+    /// The canvas's ground is painted by `DeskGridView`, a **sibling** behind
+    /// this view rather than anything inside it.
     ///
-    /// `layer.sublayerTransform` is the camera, and it reaches every sublayer —
-    /// so a grid layer would be scaled with the content, and its 1pt lines
-    /// would be 0.2pt at `fitAll`, under a device pixel, exactly where the grid
-    /// is needed most. A view's own `draw(_:)` is not a sublayer and carries no
-    /// transform, so the lines stay hairline at every zoom and only their
-    /// *spacing* follows the camera. It is the same problem
-    /// `DeskCanvasEdgeLayer.apply(_:scale:)` solves by dividing the stroke back
-    /// out, answered the cheaper way for something that covers the whole view.
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard isCanvasMode, bounds.width > 0, bounds.height > 0 else { return }
-        Self.canvasBackgroundColor.setFill()
-        dirtyRect.fill()
-
-        let spacing = DeskGrid.spacing(forScale: camera.scale)
-        let verticals = DeskGrid.lines(
-            origin: camera.origin.x, scale: camera.scale, span: bounds.width, spacing: spacing
-        )
-        let horizontals = DeskGrid.lines(
-            origin: camera.origin.y, scale: camera.scale, span: bounds.height, spacing: spacing
-        )
-        guard !verticals.isEmpty || !horizontals.isEmpty else { return }
-
-        // Two paths, two strokes, rather than a stroke per line: a decade of
-        // grid across a wide window is a few hundred segments, and a few
-        // hundred `stroke()` calls is a few hundred state changes for one
-        // colour. The same "one path" argument `DeskCanvasEdgeLayer` makes.
-        let minor = NSBezierPath()
-        let major = NSBezierPath()
-        minor.lineWidth = 1
-        major.lineWidth = 1
-        for line in verticals {
-            // Half-point offset so a 1pt line lands *on* a device pixel column
-            // rather than straddling two and rendering as a 2px smear.
-            let x = line.position.rounded() + 0.5
-            let path = line.isMajor ? major : minor
-            path.move(to: CGPoint(x: x, y: 0))
-            path.line(to: CGPoint(x: x, y: bounds.height))
-        }
-        for line in horizontals {
-            let y = line.position.rounded() + 0.5
-            let path = line.isMajor ? major : minor
-            path.move(to: CGPoint(x: 0, y: y))
-            path.line(to: CGPoint(x: bounds.width, y: y))
-        }
-        Self.gridMinorColor.setStroke()
-        minor.stroke()
-        Self.gridMajorColor.setStroke()
-        major.stroke()
+    /// It lived here first, in `draw(_:)`, and was wrong: AppKit calls `draw`
+    /// with whatever rect happens to be dirty, and after the first full pass
+    /// the only things invalidating this view are its own subviews. The grid
+    /// was painted in the chips' frames and nowhere else — a field of ground
+    /// exactly where the content is, and black everywhere the eye actually
+    /// needed a reference. A sibling has no subviews of its own, so its only
+    /// invalidation is the whole-view one the camera raises.
+    ///
+    /// Which is also why this view's own background goes clear on the canvas:
+    /// it is in front of the grid, and an opaque backing layer would hide it.
+    private func updateCanvasBackground() {
+        layer?.backgroundColor = isCanvasMode
+            ? NSColor.clear.cgColor
+            : Self.normalBackgroundColor.cgColor
     }
 
     /// Whether the camera is far enough out that pane surfaces carry no
@@ -1912,10 +1869,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
                 canvasEdges.removeFromSuperlayer()
             }
             isCanvasMode = newValue
-            // The ground changes with the mode — slate and grid on the canvas,
-            // the near-black a terminal wants inside a session — and `draw(_:)`
-            // is the only thing that paints either.
-            needsDisplay = true
+            updateCanvasBackground()
             // Unconditionally, and before the layout pass rather than after it:
             // `updateVisibility` is what runs `validateZoom`, and `updateLayout`
             // ends in `applyZoom`, which would otherwise act on a zoom this mode
@@ -1945,11 +1899,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         didSet {
             guard camera != oldValue else { return }
             applyCamera()
-            // The grid is drawn by this view rather than by a sublayer, so the
-            // camera does not carry it and nothing else would repaint it. See
-            // `draw(_:)`.
-            needsDisplay = true
-            // What the zoom readout is for. Raised per change, not debounced:
+            // What the grid and the zoom readout are both driven by. Raised per change, not debounced:
             // it is a label, and a label that lags a pinch is worse than none.
             onCameraChanged?()
             // An ancestor transform moves no frame, so no layout pass follows a
