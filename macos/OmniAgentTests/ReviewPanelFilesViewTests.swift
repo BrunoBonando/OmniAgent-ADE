@@ -301,6 +301,147 @@ final class ReviewPanelFilesViewTests: XCTestCase {
         XCTAssertEqual(persisted["g-1"]?.openFile, url.path)
     }
 
+    // MARK: - Pixels
+
+    /// Offscreen render of the whole panel with the Files tab active — the
+    /// flat sidebar's pattern: constraints alone can pass while a view drew
+    /// nothing, so every block must show a channel spread in the bitmap.
+    /// Drops a PNG when `PANE_RENDER_DIR` is set
+    /// (`TEST_RUNNER_PANE_RENDER_DIR` through `build.sh`).
+    func testThePanelRendersTheFilesTabInPixels() throws {
+        let panel = ReviewPanelView()
+        let files = ReviewPanelFilesView()
+        panel.setContent(files, for: .files)
+        panel.load(tabs: ReviewPanelTab.defaultTabs, active: .files)
+
+        let directory = try makeTempDirectory(containing: "alpha.swift", "beta.swift")
+        files.apply(root: directory, openFile: nil, treePosition: nil, showHidden: nil)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 480),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = panel
+
+        try awaitFileRow(named: "alpha.swift", in: files.tree)
+        try awaitFileRow(named: "beta.swift", in: files.tree)
+
+        // A green marker anchors which end of the bitmap is up — the sidebar
+        // render test's pattern. Top-left corner: the tab stack's 8pt leading
+        // inset keeps that spot empty. The panel is not flipped, so the
+        // view's top is `bounds.maxY`.
+        let marker = NSView(
+            frame: NSRect(x: 0, y: panel.bounds.height - 6, width: 10, height: 6)
+        )
+        marker.wantsLayer = true
+        marker.layer?.backgroundColor = NSColor.green.cgColor
+        panel.addSubview(marker)
+
+        window.makeKeyAndOrderFront(nil)
+        panel.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+
+        let image = try XCTUnwrap(render(panel))
+        saveRenderForInspection(image, named: "review-panel-files")
+
+        func pixel(_ x: Int, _ y: Int) -> NSColor {
+            image.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) ?? .black
+        }
+        let anchor = try XCTUnwrap(
+            (0..<image.pixelsHigh).first {
+                pixel(3, $0).greenComponent > 0.8 && pixel(3, $0).redComponent < 0.4
+            },
+            "the marker has to show up, or the render proves nothing"
+        )
+        let topDown = anchor < image.pixelsHigh / 2
+        func bitmapRow(forViewY viewY: Int) -> Int {
+            topDown ? image.pixelsHigh - 1 - viewY : viewY
+        }
+
+        /// The widest channel spread across the block's pixels — a block
+        /// that drew nothing is flat panel background, spread ≈ 0.
+        func spread(_ view: NSView) -> CGFloat {
+            let rect = view.convert(view.bounds, to: panel).intersection(panel.bounds)
+            guard !rect.isEmpty else {
+                XCTFail("\(type(of: view)) has no on-screen frame")
+                return 0
+            }
+            var lows: [CGFloat] = [1, 1, 1]
+            var highs: [CGFloat] = [0, 0, 0]
+            for x in Int(rect.minX)..<Int(rect.maxX) {
+                for viewY in Int(rect.minY)..<Int(rect.maxY) {
+                    let color = pixel(x, bitmapRow(forViewY: viewY))
+                    let channels = [color.redComponent, color.greenComponent, color.blueComponent]
+                    for (index, value) in channels.enumerated() {
+                        lows[index] = min(lows[index], value)
+                        highs[index] = max(highs[index], value)
+                    }
+                }
+            }
+            return zip(lows, highs).map { $1 - $0 }.max() ?? 0
+        }
+
+        // The tab bar: both default tabs drew, and Files wears the selection.
+        XCTAssertEqual(panel.tabItems.map(\.tab), [.changes, .files])
+        for item in panel.tabItems {
+            XCTAssertGreaterThan(spread(item), 0.1, "the \(item.tab.title) tab rendered nothing")
+        }
+        let filesItem = try XCTUnwrap(panel.tabItems.first { $0.tab == .files })
+        XCTAssertTrue(filesItem.isSelected, "the Files tab is the active one")
+        XCTAssertGreaterThan(spread(panel.addButton), 0.08, "the + button rendered nothing")
+        XCTAssertGreaterThan(spread(panel.expandButton), 0.08, "the expand toggle rendered nothing")
+
+        // The Files content: controls-bar buttons, both file rows, and the
+        // viewer's click-a-file placeholder.
+        XCTAssertGreaterThan(spread(files.gearButton), 0.08, "the gear rendered nothing")
+        XCTAssertGreaterThan(spread(files.hideTreeButton), 0.08, "the hide-tree toggle rendered nothing")
+        let rows = files.tree.descendants(WorkspaceFileRowView.self)
+        XCTAssertEqual(rows.map(\.node.name), ["alpha.swift", "beta.swift"])
+        for row in rows {
+            XCTAssertGreaterThan(spread(row), 0.1, "the \(row.node.name) row rendered nothing")
+        }
+        XCTAssertGreaterThan(
+            spread(files.viewerContainer), 0.08,
+            "the viewer's empty placeholder rendered nothing"
+        )
+    }
+
+    /// Renders the view's whole layer tree — `cacheDisplay` draws `draw(_:)`
+    /// output only. The pane workspace render tests' pattern.
+    private func render(_ view: NSView) -> NSBitmapImageRep? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(view.bounds.width),
+            pixelsHigh: Int(view.bounds.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .calibratedRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        view.layer?.render(in: context.cgContext)
+        return rep
+    }
+
+    /// Nothing reads this in CI; it exists so Bruno can eyeball a render.
+    /// `TEST_RUNNER_PANE_RENDER_DIR=/tmp/panes ./macos/build.sh test` drops a
+    /// PNG per named render there; unset, this is a no-op.
+    private func saveRenderForInspection(_ rep: NSBitmapImageRep, named name: String) {
+        guard
+            let dir = ProcessInfo.processInfo.environment["PANE_RENDER_DIR"],
+            let png = rep.representation(using: .png, properties: [:])
+        else { return }
+        let directory = URL(fileURLWithPath: dir, isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? png.write(to: directory.appendingPathComponent("\(name).png"))
+    }
+
     // MARK: - Helpers
 
     private func makeFiles() -> ReviewPanelFilesView {

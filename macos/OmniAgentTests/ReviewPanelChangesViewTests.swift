@@ -224,6 +224,144 @@ final class ReviewPanelChangesViewTests: XCTestCase {
         XCTAssertEqual(spy.shownLists.last?.map(\.path), ["a.txt", "b.txt"])
     }
 
+    // MARK: - Pixels
+
+    /// Offscreen render of the empty state — the flat sidebar's pattern:
+    /// the centred stack's constraints can hold while the glyph or a line
+    /// drew nothing, so each block must show a channel spread in the bitmap.
+    /// Drops a PNG when `PANE_RENDER_DIR` is set
+    /// (`TEST_RUNNER_PANE_RENDER_DIR` through `build.sh`).
+    func testTheChangesEmptyStateRendersInPixels() throws {
+        let plain = FileManager.default.temporaryDirectory
+            .appendingPathComponent("review-changes-render-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: plain) }
+        let changes = makeChanges()
+        let spy = RendererSpy()
+        changes.rendererForTesting = spy
+        var settled = false
+
+        changes.setRoot(plain)
+        changes.refresh { settled = true }
+        try awaitCondition("the load settles") { settled }
+        XCTAssertFalse(changes.emptyStateView.isHidden, "a non-repo shows the empty state")
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 480),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = changes
+
+        // A green marker anchors which end of the bitmap is up — the sidebar
+        // render test's pattern. This view IS flipped, so its top is y = 0,
+        // and the top-left corner is the controls bar's empty leading edge
+        // (the summary field is blank outside a repository).
+        let marker = NSView(frame: NSRect(x: 0, y: 0, width: 10, height: 6))
+        marker.wantsLayer = true
+        marker.layer?.backgroundColor = NSColor.green.cgColor
+        changes.addSubview(marker)
+
+        window.makeKeyAndOrderFront(nil)
+        changes.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+
+        let image = try XCTUnwrap(render(changes))
+        saveRenderForInspection(image, named: "review-panel-changes-empty")
+
+        func pixel(_ x: Int, _ y: Int) -> NSColor {
+            image.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) ?? .black
+        }
+        let anchor = try XCTUnwrap(
+            (0..<image.pixelsHigh).first {
+                pixel(3, $0).greenComponent > 0.8 && pixel(3, $0).redComponent < 0.4
+            },
+            "the marker has to show up, or the render proves nothing"
+        )
+        // The marker sits at the view's top. In this flipped view a rect's
+        // minY is measured from the top, so top-down bitmaps map directly.
+        let topDown = anchor < image.pixelsHigh / 2
+        func bitmapRow(forViewY viewY: Int) -> Int {
+            topDown ? viewY : image.pixelsHigh - 1 - viewY
+        }
+
+        /// The widest channel spread across the block's pixels — a block
+        /// that drew nothing is flat panel background, spread ≈ 0.
+        func spread(_ view: NSView) -> CGFloat {
+            let rect = view.convert(view.bounds, to: changes).intersection(changes.bounds)
+            guard !rect.isEmpty else {
+                XCTFail("\(type(of: view)) has no on-screen frame")
+                return 0
+            }
+            var lows: [CGFloat] = [1, 1, 1]
+            var highs: [CGFloat] = [0, 0, 0]
+            for x in Int(rect.minX)..<Int(rect.maxX) {
+                for viewY in Int(rect.minY)..<Int(rect.maxY) {
+                    let color = pixel(x, bitmapRow(forViewY: viewY))
+                    let channels = [color.redComponent, color.greenComponent, color.blueComponent]
+                    for (index, value) in channels.enumerated() {
+                        lows[index] = min(lows[index], value)
+                        highs[index] = max(highs[index], value)
+                    }
+                }
+            }
+            return zip(lows, highs).map { $1 - $0 }.max() ?? 0
+        }
+
+        XCTAssertGreaterThan(spread(changes.emptyGlyph), 0.08, "the plus-minus glyph rendered nothing")
+        XCTAssertGreaterThan(spread(changes.emptyTitleField), 0.1, "the title line rendered nothing")
+        XCTAssertGreaterThan(spread(changes.emptySubtitleField), 0.08, "the subtitle rendered nothing")
+        XCTAssertGreaterThan(spread(changes.refreshButton), 0.08, "the refresh button rendered nothing")
+
+        // And the glyph sits above its two lines, centred in the content
+        // area — the spec's layout, in the same flipped coordinates.
+        func top(_ view: NSView) -> CGFloat { view.convert(view.bounds, to: changes).minY }
+        XCTAssertLessThan(top(changes.emptyGlyph), top(changes.emptyTitleField))
+        XCTAssertLessThan(top(changes.emptyTitleField), top(changes.emptySubtitleField))
+    }
+
+    /// Renders the view's whole layer tree — `cacheDisplay` draws `draw(_:)`
+    /// output only. The pane workspace render tests' pattern, plus one turn:
+    /// `layer.render(in:)` ignores the root layer's `geometryFlipped`, so a
+    /// flipped view comes out mirrored; pre-flipping the context keeps the
+    /// inspection PNG legible (the marker anchoring absorbs either way up).
+    private func render(_ view: NSView) -> NSBitmapImageRep? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(view.bounds.width),
+            pixelsHigh: Int(view.bounds.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .calibratedRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        if view.isFlipped {
+            context.cgContext.translateBy(x: 0, y: CGFloat(rep.pixelsHigh))
+            context.cgContext.scaleBy(x: 1, y: -1)
+        }
+        view.layer?.render(in: context.cgContext)
+        return rep
+    }
+
+    /// Nothing reads this in CI; it exists so Bruno can eyeball a render.
+    /// `TEST_RUNNER_PANE_RENDER_DIR=/tmp/panes ./macos/build.sh test` drops a
+    /// PNG per named render there; unset, this is a no-op.
+    private func saveRenderForInspection(_ rep: NSBitmapImageRep, named name: String) {
+        guard
+            let dir = ProcessInfo.processInfo.environment["PANE_RENDER_DIR"],
+            let png = rep.representation(using: .png, properties: [:])
+        else { return }
+        let directory = URL(fileURLWithPath: dir, isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? png.write(to: directory.appendingPathComponent("\(name).png"))
+    }
+
     // MARK: - Helpers
 
     private func makeChanges() -> ReviewPanelChangesView {
