@@ -1944,7 +1944,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(backdrop.subviews.count, 1, "one panel, nothing layered over it")
         let glass = try XCTUnwrap(backdrop.subviews.first as? NSGlassEffectView)
         XCTAssertEqual(glass.frame, backdrop.bounds, "the size of the window it covers")
-        XCTAssertEqual(glass.style, .clear, "refracting the workspace, not darkening it")
+        XCTAssertEqual(glass.style, .regular, "the approval card's material: frosting that shows over flat fills too")
         XCTAssertNil(glass.tintColor, "and no wash of colour over it")
 
         // And keeps covering it: the overlay host is resized on every layout

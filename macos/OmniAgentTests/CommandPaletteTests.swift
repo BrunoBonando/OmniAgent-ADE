@@ -795,12 +795,14 @@ final class CommandPaletteTests: XCTestCase {
         guard let sheet = WorkspaceGlass.sheet() else {
             throw XCTSkip("no Liquid Glass before macOS 26 — focus mode leaves the sheet out")
         }
-        XCTAssertEqual(sheet.alphaValue, WorkspaceGlass.strength, accuracy: 0.001)
-        XCTAssertLessThan(WorkspaceGlass.strength, 1, "short of full strength: the workspace stays recognisable")
+        // The approval card's material exactly: `.regular`, untinted, full
+        // strength. Anything softer stops reading as glass over the opaque
+        // header bars the sheet also covers.
+        XCTAssertEqual(sheet.alphaValue, 1, accuracy: 0.001)
 
         let focus = PaneZoomBackdropView()
         let focusGlass = try XCTUnwrap(focus.subviews.first)
-        XCTAssertEqual(focusGlass.alphaValue, WorkspaceGlass.strength, accuracy: 0.001)
+        XCTAssertEqual(focusGlass.alphaValue, 1, accuracy: 0.001)
 
         // The spotlight's scrim carries no glass at all: it is a click-catcher
         // over an untouched workspace, and only the panel itself is a surface.

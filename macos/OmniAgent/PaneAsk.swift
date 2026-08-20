@@ -408,30 +408,27 @@ final class PaneAskOverlayView: NSView {
 
 /// The one sheet of glass this app lays over the workspace.
 ///
-/// Focus mode's backdrop and the spotlight's surround are the same material at
-/// the same strength, from here — they are the same gesture ("push the
-/// workspace back, keep it readable") and had drifted into two settings of it.
+/// The same material as the approval card's pane panel above — `.regular`,
+/// untinted, at full strength — because that is the one that reads as glass on
+/// screen. `.clear` at 0.85 was the earlier setting and it refracted terminal
+/// text nicely while doing almost nothing over a flat opaque fill, so a focused
+/// pane's surroundings looked half-glassed: sharp header bars floating in a
+/// wash. `.regular` carries the material's own frosting, which shows on flat
+/// fills too, and full strength keeps none of the sharp original bleeding
+/// through.
 ///
-/// `.clear`, untinted, and just short of full strength. `strength` is the one
-/// knob, and it was found by walking it: at `1` the material frosts hard enough
-/// that you stop recognising which pane is which, and at `0.62` so much of the
-/// sharp original comes back through that it reads as a transparent wash rather
-/// than as glass. `0.85` is the frost that still leaves the workspace legible.
+/// Still no `tintColor`: a tint is a wash of colour over everything behind the
+/// sheet, and this exists to push the workspace back, not to darken it.
+///
+/// `nil` before macOS 26 — there is no glass to ask for and every stand-in dims
+/// rather than refracts, so the callers leave it out entirely.
 enum WorkspaceGlass {
-    static let strength: CGFloat = 0.85
-
-    /// The sheet, or `nil` before macOS 26 — where there is no glass to ask
-    /// for and every stand-in dims rather than refracts, so the callers leave
-    /// it out entirely.
     static func sheet(cornerRadius: CGFloat = 0) -> NSView? {
         guard #available(macOS 26.0, *) else { return nil }
         let glass = NSGlassEffectView()
-        glass.style = .clear
-        // Explicitly none: a tint is a wash of colour over everything behind
-        // the sheet, which is exactly the darkening this exists without.
+        glass.style = .regular
         glass.tintColor = nil
         glass.cornerRadius = cornerRadius
-        glass.alphaValue = strength
         return glass
     }
 }
