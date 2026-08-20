@@ -109,6 +109,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// views and their PTY attachment along with it.
     private let contentContainer = NSView()
     private let placeholder = WorkspacePlaceholderView()
+    /// The window's drawn title bar — window buttons, the sidebar toggle, the
+    /// running session's name, the review toggle. Replaced the `NSToolbar`.
+    let titleBar = WorkspaceTitleBarView()
+    /// The split itself. `window.contentViewController` is a container that
+    /// holds the title bar above it, so the old
+    /// `contentViewController as? NSSplitViewController` no longer resolves —
+    /// this is the way to it.
+    private(set) var splitController: NSSplitViewController?
 
     /// The canvas's zoom readout. A sibling of `workspace`, never a subview of
     /// it — see `DeskZoomReadoutView`.
@@ -382,7 +390,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
         let window = WorkspaceWindow(
             contentRect: WorkspaceWindowController.defaultContentRect(),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            // `.fullSizeContentView` is what removes the chrome row entirely:
+            // the content starts at the window's top edge and
+            // `WorkspaceTitleBarView` is the only bar there is. The other
+            // three stay in the mask — close/minimize/resize still work, it is
+            // only AppKit's *drawing* of the buttons that goes away below.
+            // Same recipe `AuthGateWindowController` uses for the login window.
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -391,6 +405,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // it just doesn't reserve a row in the chrome — `refreshTitle()`
         // below keeps it current for those, not for display here.
         window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        // The three real buttons, hidden so the bar can draw its own in the
+        // place its layout puts them. Hidden rather than dropped from the
+        // style mask, which would also take the behaviours with them.
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(button)?.isHidden = true
+        }
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = NSColor(
             srgbRed: 8 / 255,
@@ -402,7 +423,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
         super.init(window: window)
         installSplitView(on: window)
-        installToolbar(on: window)
         restoreWindowFrame(window)
         window.delegate = self
         window.onFirstResponderChange = { [weak self] responder in
@@ -491,6 +511,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         workspace.onActiveGroupChanged = { [weak self] group in
             self?.reviewPanelSessionDidChange(to: group)
+            // The bar names the session on screen, so switching sessions
+            // renames it — and a session going away empties it.
+            self?.refreshTitle()
         }
         reviewPanel.onTabsChanged = { [weak self] in self?.reviewPanelUIChanged() }
         reviewPanel.onToggleExpand = { [weak self] in self?.toggleReviewPanelExpansion() }
@@ -737,7 +760,29 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         reviewItem.holdingPriority = NSLayoutConstraint.Priority(251)
         split.addSplitViewItem(reviewItem)
         reviewPanelItem = reviewItem
-        window.contentViewController = split
+        splitController = split
+
+        // The window's own bar, above the split rather than over it: the
+        // columns start below the chrome, so nothing has to be inset around
+        // it. `contentViewController` is a plain container now — read the
+        // split through `splitController`, never by casting it back.
+        let container = NSViewController()
+        container.view = NSView()
+        container.addChild(split)
+        split.view.translatesAutoresizingMaskIntoConstraints = false
+        container.view.addSubview(titleBar)
+        container.view.addSubview(split.view)
+        NSLayoutConstraint.activate([
+            titleBar.topAnchor.constraint(equalTo: container.view.topAnchor),
+            titleBar.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
+            titleBar.trailingAnchor.constraint(equalTo: container.view.trailingAnchor),
+
+            split.view.topAnchor.constraint(equalTo: titleBar.bottomAnchor),
+            split.view.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
+            split.view.trailingAnchor.constraint(equalTo: container.view.trailingAnchor),
+            split.view.bottomAnchor.constraint(equalTo: container.view.bottomAnchor),
+        ])
+        window.contentViewController = container
     }
 
     /// Swaps the destination. `isHidden`, never add/remove: see
@@ -780,6 +825,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.deskCanvasLoaded = isTerminals
         placeholder.isHidden = isTerminals
         if !isTerminals { placeholder.show(destination) }
+        // Home and To Do List name no session, so the bar goes blank and its
+        // review toggle goes away entirely.
+        refreshTitle()
         // The review panel reviews the session on screen, and Home/To Do
         // List show no session — collapsed there, and back to the session's
         // own recorded state on the way back in.
@@ -2473,8 +2521,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// no `.sidebar`-behavior item to act on: the toolbar button greyed out
     /// and ⌃⌘S did nothing. Nothing answers this name but us.
     @objc func toggleWorkspaceSidebar(_ sender: Any?) {
-        (window?.contentViewController as? NSSplitViewController)?
-            .splitViewItems.first?
+        splitController?.splitViewItems.first?
             .animator().isCollapsed.toggle()
     }
 
@@ -3230,7 +3277,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// items' minimums.
     private func applyReviewPanelWidth(_ width: CGFloat) {
         guard
-            let split = (window?.contentViewController as? NSSplitViewController)?.splitView,
+            let split = splitController?.splitView,
             split.frame.width > 0
         else { return }
         let position = split.frame.width - min(width, split.frame.width) - split.dividerThickness
@@ -4554,7 +4601,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         refreshTitle()
     }
 
-    private func refreshTitle() {
+    /// The bar shows the running session's name and nothing else — no app
+    /// name, no status suffix, and nothing at all away from the Desk, where
+    /// there is no session to name.
+    ///
+    /// `window.title` is deliberately left alone below. Nothing draws it any
+    /// more, but Mission Control, ⌘` and the Window menu all still read it,
+    /// and "OmniAgent — Reconnecting" identifies a window in those lists where
+    /// a bare "Session 1" would not.
+    func refreshTitle() {
+        titleBar.title = currentSessionName()
+        titleBar.isReviewToggleVisible = destination == .terminals && workspace.activeGroup != nil
+
         if let connectionStatus {
             window?.title = "OmniAgent — \(connectionStatus)"
             return
@@ -4566,6 +4624,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let paneTitle = workspace.focusedPaneID
             .flatMap { workspace.descriptor(for: $0)?.title } ?? ""
         window?.title = paneTitle.isEmpty ? "OmniAgent" : paneTitle
+    }
+
+    /// What the sidebar calls the session on screen — the same
+    /// `SessionOutline` naming rule, so the bar and the tree can never print
+    /// two different names for one session (including the derived
+    /// `Session N` a session nobody has named gets).
+    private func currentSessionName() -> String {
+        guard destination == .terminals, let group = workspace.activeGroup else { return "" }
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        return SessionOutline.group(panes, focusedPaneID: workspace.focusedPaneID)
+            .flatMap(\.sessions)
+            .first { $0.id == group }?
+            .label ?? ""
     }
 }
 

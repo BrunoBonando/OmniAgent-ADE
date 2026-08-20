@@ -1304,66 +1304,82 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(sidebar.keyEquivalentModifierMask, [.command, .control])
     }
 
-    func testTheToolbarCarriesOnlyCommandsThatAlsoExistElsewhereAndTargetsTheResponderChain() throws {
+    /// The window draws its own bar: no `NSToolbar`, no system title row, and
+    /// the three real window buttons hidden so the bar's own can stand where
+    /// its layout puts them.
+    func testTheWindowWearsItsOwnTitleBarAndNoSystemChrome() throws {
         let controller = makeController()
         defer { controller.close() }
-        let toolbar = try XCTUnwrap(controller.window?.toolbar)
+        let window = try XCTUnwrap(controller.window)
 
-        XCTAssertEqual(controller.window?.toolbarStyle, .unifiedCompact)
-        XCTAssertEqual(controller.window?.titleVisibility, .hidden)
-        let identifiers = controller.toolbarDefaultItemIdentifiers(toolbar)
+        XCTAssertNil(window.toolbar, "the toolbar is gone, not restyled")
+        XCTAssertEqual(window.titleVisibility, .hidden)
+        XCTAssertTrue(window.titlebarAppearsTransparent)
+        XCTAssertTrue(
+            window.styleMask.contains(.fullSizeContentView),
+            "the content starts at the top edge, so the drawn bar is the only bar"
+        )
+        // Still closable/minimizable/resizable — only the drawing goes.
+        for behaviour in [NSWindow.StyleMask.closable, .miniaturizable, .resizable] {
+            XCTAssertTrue(window.styleMask.contains(behaviour))
+        }
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            XCTAssertEqual(window.standardWindowButton(button)?.isHidden, true)
+        }
+        XCTAssertNotNil(controller.titleBar.superview, "the bar is installed, not just built")
+    }
+
+    /// The bar names the session on screen, and names nothing anywhere else —
+    /// no app name, no fallback. The review toggle goes with it: gone, not
+    /// greyed out, since a disabled control invites a click that cannot work.
+    func testTheBarNamesTheRunningSessionAndEmptiesOffTheDesk() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        let session = controller.titleBar.title
+        XCTAssertFalse(session.isEmpty, "a session is on screen, so the bar names it")
+        XCTAssertNotEqual(session, "OmniAgent", "the app's name is not a session name")
         XCTAssertEqual(
-            identifiers,
+            session,
+            controller.titleBar.titleFieldForTesting.stringValue,
+            "what it holds is what it draws"
+        )
+        XCTAssertTrue(controller.titleBar.isReviewToggleVisible)
+
+        controller.applyDestination(.home)
+
+        XCTAssertEqual(controller.titleBar.title, "", "Home names no session")
+        XCTAssertEqual(controller.titleBar.titleFieldForTesting.stringValue, "")
+        XCTAssertFalse(controller.titleBar.isReviewToggleVisible, "and offers nothing to review")
+
+        controller.applyDestination(.terminals)
+        XCTAssertEqual(controller.titleBar.title, session, "and it comes back on the way in")
+        XCTAssertTrue(controller.titleBar.isReviewToggleVisible)
+    }
+
+    /// The toggles have to reach *this* controller. They dispatch through the
+    /// responder chain, where `NSSplitViewController` sits ahead of it — so
+    /// the sidebar action must be a name the split does not answer, or the
+    /// split swallows the press (it has no `.sidebar`-behavior item to act on).
+    func testTheTitleBarButtonsTravelTheResponderChainPastTheSplit() throws {
+        let controller = makeController()
+        defer { controller.close() }
+
+        let buttons = controller.titleBar.controlsForTesting.compactMap { $0 as? WorkspaceTitleBarButton }
+        XCTAssertEqual(buttons.count, 2, "the sidebar and review toggles")
+        XCTAssertEqual(
+            buttons.map(\.action),
             [
-                WorkspaceWindowController.ToolbarItem.sidebar,
-                .sidebarTrackingSeparator,
-                .flexibleSpace,
-                WorkspaceWindowController.ToolbarItem.reviewPanel,
+                #selector(WorkspaceWindowController.toggleWorkspaceSidebar(_:)),
+                #selector(WorkspaceWindowController.toggleReviewPanel(_:)),
             ]
         )
-        // The sidebar button reaches *us*. Items target `nil` and travel the
-        // responder chain, where `NSSplitViewController` sits ahead of this
-        // controller — so the action must be a name it does not answer, or it
-        // swallows the press and greys the button out (it has no
-        // `.sidebar`-behavior item to act on).
-        let toggle = try XCTUnwrap(
-            controller.toolbar(
-                toolbar,
-                itemForItemIdentifier: WorkspaceWindowController.ToolbarItem.sidebar,
-                willBeInsertedIntoToolbar: true
-            )
-        )
-        let action = try XCTUnwrap(toggle.action)
-        XCTAssertEqual(action, #selector(WorkspaceWindowController.toggleWorkspaceSidebar(_:)))
         XCTAssertFalse(
-            (controller.window?.contentViewController as? NSSplitViewController)?
-                .responds(to: action) ?? true,
+            controller.splitController?
+                .responds(to: #selector(WorkspaceWindowController.toggleWorkspaceSidebar(_:))) ?? true,
             "NSSplitViewController must not answer this selector first"
         )
-        XCTAssertTrue(controller.validateToolbarItem(toggle))
-
-        // The demoted items stay reachable from the customization palette —
-        // slimming the default row must not delete the buttons themselves.
-        let allowed = controller.toolbarAllowedItemIdentifiers(toolbar)
-        for demoted in [
-            WorkspaceWindowController.ToolbarItem.newPane,
-            WorkspaceWindowController.ToolbarItem.newBrowser,
-            WorkspaceWindowController.ToolbarItem.newEditor,
-            WorkspaceWindowController.ToolbarItem.closePane,
-            WorkspaceWindowController.ToolbarItem.zoomToFit,
-            WorkspaceWindowController.ToolbarItem.enterSession,
-            WorkspaceWindowController.ToolbarItem.palette,
-        ] {
-            XCTAssertTrue(allowed.contains(demoted), "\(demoted.rawValue) survives in the palette")
-        }
-        for identifier in allowed where !identifier.rawValue.hasPrefix("NS") {
-            let item = try XCTUnwrap(
-                controller.toolbar(toolbar, itemForItemIdentifier: identifier, willBeInsertedIntoToolbar: true)
-            )
-            XCTAssertNil(item.target, "\(identifier.rawValue) travels the responder chain")
-            XCTAssertNotNil(item.action)
-            XCTAssertNotNil(item.image, "\(identifier.rawValue) has a symbol")
-        }
     }
 
     func testTheViewMenuCarriesToggleReviewPanelOnCmdOptB() throws {
@@ -1394,30 +1410,10 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         defer { controller.close() }
         XCTAssertTrue(controller.validateMenuItem(probe))
 
-        let toolbar = try XCTUnwrap(controller.window?.toolbar)
-        let button = try XCTUnwrap(
-            controller.toolbar(
-                toolbar,
-                itemForItemIdentifier: WorkspaceWindowController.ToolbarItem.reviewPanel,
-                willBeInsertedIntoToolbar: true
-            )
-        )
-        XCTAssertTrue(controller.validateToolbarItem(button))
-    }
-
-    func testTheToolbarSharesTheMenusEnablementRuleRatherThanAddingASecondOne() throws {
-        let controller = makeEmptyController()
-        defer { controller.close() }
-        let toolbar = try XCTUnwrap(controller.window?.toolbar)
-        let closePane = try XCTUnwrap(
-            controller.toolbar(toolbar, itemForItemIdentifier: WorkspaceWindowController.ToolbarItem.closePane, willBeInsertedIntoToolbar: true)
-        )
-
-        XCTAssertFalse(controller.validateToolbarItem(closePane), "no pane, nothing to close")
-
-        controller.applyRestoredPanes([])
-
-        XCTAssertTrue(controller.validateToolbarItem(closePane))
+        // The bar's own affordance answers to the same rule — and it answers
+        // by being there at all rather than by greying out.
+        XCTAssertTrue(controller.titleBar.isReviewToggleVisible)
+        XCTAssertFalse(empty.titleBar.isReviewToggleVisible)
     }
 
     func testEveryPaletteActionRunsTheSameCodeTheMenuItemDoes() throws {
@@ -1442,7 +1438,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.run(.closePane(sessionID: "sess-b"))
         XCTAssertFalse(controller.workspaceView.paneIDs.contains("sess-b"))
 
-        let split = try XCTUnwrap(controller.window?.contentViewController as? NSSplitViewController)
+        let split = try XCTUnwrap(controller.splitController)
         let collapsed = split.splitViewItems[0].isCollapsed
         controller.run(.toggleSidebar)
         XCTAssertNotEqual(split.splitViewItems[0].isCollapsed, collapsed)
@@ -1458,7 +1454,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.showWindow(nil)
         let window = try XCTUnwrap(controller.window)
         window.setFrame(NSRect(x: 0, y: 0, width: 1400, height: 800), display: true)
-        let split = try XCTUnwrap(window.contentViewController as? NSSplitViewController)
+        let split = try XCTUnwrap(controller.splitController)
         split.view.layoutSubtreeIfNeeded()
 
         split.splitView.setPosition(380, ofDividerAt: 0)

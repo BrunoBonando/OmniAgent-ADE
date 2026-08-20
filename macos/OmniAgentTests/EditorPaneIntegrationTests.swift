@@ -240,24 +240,10 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertEqual(item.keyEquivalent, "e")
         XCTAssertEqual(item.keyEquivalentModifierMask, [.command, .shift], "⇧⌘E")
 
-        let controller = makeController()
-        defer { controller.close() }
-        let toolbar = try XCTUnwrap(controller.window?.toolbar)
-        // Demoted from the default row when the toolbar slimmed down, but the
-        // button itself lives on in the customization palette.
-        XCTAssertTrue(
-            controller.toolbarAllowedItemIdentifiers(toolbar)
-                .contains(WorkspaceWindowController.ToolbarItem.newEditor)
-        )
-        let button = try XCTUnwrap(
-            controller.toolbar(
-                toolbar,
-                itemForItemIdentifier: WorkspaceWindowController.ToolbarItem.newEditor,
-                willBeInsertedIntoToolbar: true
-            )
-        )
-        XCTAssertEqual(button.action, #selector(WorkspaceWindowController.newEditorPane(_:)))
-        XCTAssertNil(button.target, "it travels the responder chain, like every other item")
+        // The toolbar that used to carry a demoted button for this is gone
+        // (the window draws its own bar now). ⇧⌘E above is the surface; the
+        // menu item travels the responder chain to reach the controller.
+        XCTAssertNil(item.target, "it travels the responder chain, like every other item")
     }
 
     // MARK: - Opening from the FILES tree (Task 11)
