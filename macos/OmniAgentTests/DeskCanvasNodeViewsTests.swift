@@ -299,7 +299,179 @@ final class DeskCanvasNodeViewsTests: XCTestCase {
     }
 
 
+    // MARK: - Installed on the canvas
+
+    /// The chips and the edge layer are only worth building if something puts
+    /// them on the canvas. This is that assertion: after a canvas layout pass
+    /// there is exactly one chip per non-session node, each at its node's frame,
+    /// and the edge layer has been handed a path.
+    func testACanvasLayoutPassInstallsAChipPerNonSessionNodeAndOneEdgePath() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        workspace.layoutSubtreeIfNeeded()
+
+        let layout = try XCTUnwrap(workspace.canvasLayout)
+        let root = workspace.derivedCanvasRoot()
+        var expected: [String] = []
+        func walk(_ node: DeskNode) {
+            if case .session = node.kind {} else { expected.append(node.id) }
+            node.children.forEach(walk)
+        }
+        walk(root)
+
+        XCTAssertEqual(
+            Set(workspace.canvasChipIDsForTesting),
+            Set(expected),
+            "one chip per root/workspace node, and none for a session — a session's card is its own grid"
+        )
+        for id in expected {
+            let chip = try XCTUnwrap(workspace.canvasChipForTesting(id))
+            XCTAssertEqual(chip.frame, layout.frames[id], "\(id)'s chip sits at its node frame")
+            XCTAssertFalse(chip.isHidden)
+            XCTAssertTrue(
+                chip.superview === workspace,
+                "and in the workspace's own view tree, or the camera's sublayerTransform does not carry it"
+            )
+        }
+        XCTAssertFalse(layout.edges.isEmpty, "a three-session tree has edges")
+        XCTAssertNotNil(workspace.canvasEdgePathForTesting, "the edge layer was never given a path")
+    }
+
+    /// Normal mode lays one session out in `bounds` and knows nothing about the
+    /// organigram, so a chip left behind would hang over the panes at a canvas
+    /// frame no pass recomputes — and `landSession` turns canvas mode off on
+    /// every single entry into a session.
+    func testLeavingCanvasModeTakesTheChipsAndTheConnectorsWithIt() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let chip = try XCTUnwrap(workspace.canvasChipForTesting("root"), "the fixture's premise")
+        XCTAssertTrue(
+            workspace.layer?.sublayers?.contains { $0 is DeskCanvasEdgeLayer } ?? false,
+            "and the connectors are installed too"
+        )
+
+        workspace.canvasMode = false
+
+        XCTAssertTrue(workspace.canvasChipIDsForTesting.isEmpty)
+        XCTAssertNil(chip.superview, "out of the view tree, not merely forgotten")
+        XCTAssertFalse(workspace.subviews.contains { $0 is DeskCanvasChipView })
+        XCTAssertFalse(workspace.layer?.sublayers?.contains { $0 is DeskCanvasEdgeLayer } ?? false)
+    }
+
+    /// `lineWidth` is in canvas units, so a hairline at fit-all would vanish and
+    /// a hairline at identity would be a slab. The edge layer compensates, and
+    /// nothing else can do it for it — note the camera runs no layout pass, so
+    /// the assignment below is the whole hook.
+    func testTheEdgeLineWidthIsCompensatedForTheCamera() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        workspace.layoutSubtreeIfNeeded()
+        let content = try XCTUnwrap(workspace.canvasLayout?.contentRect)
+
+        workspace.camera = DeskCamera.fitAll(content: content, in: workspace.bounds)
+        let wide = workspace.canvasEdgeLineWidthForTesting
+
+        workspace.camera = DeskCamera(scale: 1, origin: .zero)
+        let narrow = workspace.canvasEdgeLineWidthForTesting
+
+        XCTAssertEqual(narrow, DeskCanvasEdgeLayer.strokeWidth, accuracy: 0.001, "one point on screen at identity")
+        XCTAssertGreaterThan(wide, narrow, "zoomed out, the stroke must be fatter in canvas units to stay visible")
+    }
+
+    /// The arrows walk `selectedNodeID` and a keypress runs no layout pass, so
+    /// without a hook of its own the ring would only appear the next time
+    /// something else happened to re-lay the canvas out — which on a still
+    /// canvas is never.
+    func testWalkingTheSelectionMovesTheRingWithoutALayoutPass() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let root = try XCTUnwrap(workspace.canvasChipForTesting("root"))
+        XCTAssertFalse(root.isSelected, "nothing is selected to begin with")
+        // Drained first: installing the chips marked the canvas for layout, and
+        // with no window nothing ever comes along to clear that — the flag is
+        // only evidence once it starts out down.
+        workspace.layoutSubtreeIfNeeded()
+        XCTAssertFalse(workspace.needsLayout, "the fixture's premise")
+
+        workspace.selectedNodeID = "root"
+        XCTAssertTrue(root.isSelected)
+        XCTAssertFalse(workspace.needsLayout, "and nothing was re-laid-out to do it")
+
+        workspace.selectedNodeID = nil
+        XCTAssertFalse(root.isSelected, "and it comes off again")
+    }
+
+    // MARK: - The assembled canvas
+
+    /// Spec §6: an offscreen render at fit-all and at identity. Run with
+    /// `TEST_RUNNER_PANE_RENDER_DIR=/tmp/desk-canvas ./macos/build.sh test` to
+    /// keep the PNGs and look at them.
+    ///
+    /// Known blind spot, and why the assertions below are about content rather
+    /// than geometry: `CALayer.render(in:)` skips the compositor's geometry
+    /// flips, so this harness cannot see an upside-down `maskedCorners` — the
+    /// trap `roundChildren(inside:)`'s own comment records.
+    func testTheAssembledCanvasRendersAtFitAllAndAtIdentity() throws {
+        let workspace = makeCanvasWorkspace(sessions: 3)
+        let window = show(workspace)
+        defer { window.close() }
+        workspace.layoutSubtreeIfNeeded()
+        let content = try XCTUnwrap(workspace.canvasLayout?.contentRect)
+
+        workspace.camera = DeskCamera.fitAll(content: content, in: workspace.bounds)
+        workspace.layoutSubtreeIfNeeded()
+        let wide = try XCTUnwrap(render(workspace))
+        saveRenderForInspection(wide, named: "desk-canvas-fit-all")
+        XCTAssertGreaterThan(
+            distinctColours(in: wide),
+            5,
+            "fit-all is a flat sheet — the tree drew nothing"
+        )
+
+        let group = try XCTUnwrap(workspace.groupIDs.first)
+        workspace.enterSession(group)
+        // The flight is 0.38s and its landing is scheduled, not delegated — the
+        // render is meant to be of a session the camera has arrived in, and a
+        // completion left pending here would fire into a closed window during
+        // some later, unrelated test.
+        RunLoop.current.run(
+            until: Date().addingTimeInterval(PaneWorkspaceView.zoomTransitionDuration + 0.2)
+        )
+        workspace.layoutSubtreeIfNeeded()
+        let close = try XCTUnwrap(render(workspace))
+        saveRenderForInspection(close, named: "desk-canvas-identity")
+        XCTAssertTrue(workspace.camera.isIdentity, "the render must be of a landed camera, not a mid-flight one")
+        XCTAssertEqual(workspace.activeGroup, group, "and of the session that was entered")
+        XCTAssertGreaterThan(
+            distinctColours(in: close, samples: 120),
+            5,
+            "identity is a flat sheet — the session's own chrome drew nothing"
+        )
+    }
+
     // MARK: - Helpers
+    /// One session per group, one pane each, sized like the real Desk. Mirrors
+    /// `DeskCanvasInputTests.makeCanvasWorkspace(sessions:)`, whose helpers are
+    /// private to that class. Terminals only: the organigram is kind-neutral and
+    /// a WKWebView pane costs the test host a renderer process for nothing. The
+    /// socket is one nobody is listening on — the Debug `test` path deliberately
+    /// never builds the Rust daemon.
+    private func makeCanvasWorkspace(sessions: Int) -> PaneWorkspaceView {
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: "/tmp/omniagent-desk-canvas-chrome-test.sock")
+        )
+        let workspace = PaneWorkspaceView { descriptor in
+            TerminalSurfaceView(connection: connection, sessionID: descriptor.sessionID)
+        }
+        workspace.frame = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        for index in 1...sessions {
+            XCTAssertTrue(workspace.addPane(PaneDescriptor(
+                sessionID: "pane-\(index)",
+                group: "sess-grp-\(index)",
+                groupLabel: nil,
+                title: ""
+            )))
+        }
+        workspace.canvasMode = true
+        return workspace
+    }
+
 
     /// A window, because a layer-backed view with no window never runs
     /// `draw(_:)` and the render comes back empty — the test would then pass for
@@ -336,10 +508,15 @@ final class DeskCanvasNodeViewsTests: XCTestCase {
         return best
     }
 
-    private func distinctColours(in rep: NSBitmapImageRep) -> Int {
+    /// `samples` is the grid this walks, per axis. The 20 the chip renders use
+    /// is plenty for a 300x120 chip that is nearly all content; a 1200x800
+    /// render of one session is ~95% flat terminal, and a 20x20 grid lands
+    /// almost entirely inside it — the drawing that proves anything happened is
+    /// a 26pt header strip a coarse sample steps straight over.
+    private func distinctColours(in rep: NSBitmapImageRep, samples: Int = 20) -> Int {
         var seen = Set<String>()
-        for x in stride(from: 2, to: rep.pixelsWide - 2, by: max(1, rep.pixelsWide / 20)) {
-            for y in stride(from: 2, to: rep.pixelsHigh - 2, by: max(1, rep.pixelsHigh / 20)) {
+        for x in stride(from: 2, to: rep.pixelsWide - 2, by: max(1, rep.pixelsWide / samples)) {
+            for y in stride(from: 2, to: rep.pixelsHigh - 2, by: max(1, rep.pixelsHigh / samples)) {
                 guard let colour = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
                 seen.insert([
                     Int(colour.redComponent * 255),

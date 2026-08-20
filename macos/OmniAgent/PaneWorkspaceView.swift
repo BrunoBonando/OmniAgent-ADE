@@ -1823,6 +1823,13 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
                 // resolved against, and a stale one would answer for a canvas
                 // that is not on screen.
                 canvasLayout = nil
+                // And no organigram. Normal mode lays one session out in
+                // `bounds` and knows nothing about chips or connectors, so
+                // anything left behind would hang over the panes at a canvas
+                // frame no pass recomputes.
+                canvasChips.values.forEach { $0.removeFromSuperview() }
+                canvasChips.removeAll()
+                canvasEdges.removeFromSuperlayer()
             }
             isCanvasMode = newValue
             // Unconditionally, and before the layout pass rather than after it:
@@ -1884,6 +1891,20 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// fits (`contentRect`) and what hit testing resolves a click against.
     private(set) var canvasLayout: DeskCanvasLayout?
 
+    /// Node id -> chip, for the organigram's non-session nodes only. A session
+    /// node needs no chip: its card *is* its pane grid, drawn by the same
+    /// layout pass that positions everything else.
+    ///
+    /// Pooled by node id rather than rebuilt each pass, the way
+    /// `syncHolePlaceholders(_:holeIDs:)` pools hole tiles — a chip rebuilt
+    /// every layout would drop the keyboard selection ring mid-arrow-walk.
+    private var canvasChips: [String: DeskCanvasChipView] = [:]
+
+    /// Every connector as one path. One layer, not one per edge: the tree is
+    /// redrawn whenever a node moves, and N layers would each need their own
+    /// `lineWidth` compensation.
+    private let canvasEdges = DeskCanvasEdgeLayer()
+
     /// A session card is exactly the Desk viewport, which is this view's own
     /// bounds: that is what makes "the camera at 1.0 over this card" and "you are
     /// in that session" the same picture. Every card is therefore the same
@@ -1919,6 +1940,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         CATransaction.setDisableActions(true)
         layer.sublayerTransform = camera.transform
         CATransaction.commit()
+        // The connectors are strokes in canvas units under that same transform,
+        // so the camera scale is what says how many screen points one of those
+        // is worth — and a camera move runs no layout pass, which makes this the
+        // only hook the compensation has. `nil` in normal mode, where there is
+        // no organigram to stroke.
+        if let canvasLayout { canvasEdges.apply(canvasLayout, scale: camera.scale) }
     }
 
     /// The organigram this view can derive on its own: the account at the root,
@@ -2080,11 +2107,108 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         applyCamera()
         updateAccessibilityLabels()
         refreshFocusSubtitles()
+        syncCanvasChrome(layout, root: root)
         // Canvas mode's visible set is a function of the node rects this pass
         // just computed and of the camera, and nothing else recomputes it when
         // a window resize re-lays the canvas out.
         updateVisibility()
     }
+
+    /// Positions the organigram's chips and connectors for `layout`.
+    ///
+    /// Chips go **below** every pane container, the same `positioned:`
+    /// relationship `syncCanvasHolePlaceholders(_:)` uses, so a card always
+    /// composites over the tree rather than the other way round; the connectors
+    /// go below even those, as sublayer 0.
+    ///
+    /// Only the root and workspace nodes get one. A session's chip would be a
+    /// label pasted over its own live grid — below `DeskCanvas.lodThreshold`
+    /// that grid already draws itself as `PaneChipView`s, which is the
+    /// level-of-detail answer and not this one.
+    private func syncCanvasChrome(_ layout: DeskCanvasLayout, root: DeskNode) {
+        var live: Set<String> = []
+        func walk(_ node: DeskNode) {
+            // `defer`, so the early return a session node takes below still
+            // walks the rest of the tree underneath it.
+            defer { node.children.forEach(walk) }
+            let role: DeskCanvasChipView.Role
+            switch node.kind {
+            case .session: return          // a session's card is its grid
+            case .root: role = .account
+            case .workspace: role = .workspace
+            }
+            guard let frame = layout.frames[node.id] else { return }
+            live.insert(node.id)
+            let chip: DeskCanvasChipView
+            if let existing = canvasChips[node.id] {
+                chip = existing
+            } else {
+                chip = DeskCanvasChipView(role: role)
+                canvasChips[node.id] = chip
+                addSubview(chip, positioned: .below, relativeTo: nil)
+            }
+            chip.frame = frame
+            chip.isSelected = (selectedNodeID == node.id)
+            switch node.kind {
+            case .root:
+                chip.apply(title: accountDisplayName, detail: nil, tint: nil, status: nil)
+            case .workspace(let project):
+                // The chip derives its own initials from the title it is given
+                // (`DeskCanvasChipView.drawLeading`), so this hands it the name
+                // and the tile follows — and the name is what
+                // `testAWorkspaceNameFitsTheColumnTheLayoutActuallyGivesIt`
+                // sizes the title column against.
+                chip.apply(
+                    title: SessionOutline.projectLabel(project),
+                    detail: ShellPalette.sessionCountLabel(node.children.count),
+                    tint: ShellPalette.avatarGradient(forID: project),
+                    status: nil
+                )
+            case .session:
+                return
+            }
+        }
+        walk(root)
+        for (id, chip) in canvasChips where !live.contains(id) {
+            chip.removeFromSuperview()
+            canvasChips.removeValue(forKey: id)
+        }
+        if canvasEdges.superlayer !== layer {
+            layer?.insertSublayer(canvasEdges, at: 0)
+        }
+        canvasEdges.apply(layout, scale: camera.scale)
+    }
+
+    /// The chips' selection rings, without a layout pass. The arrows walk
+    /// `selectedNodeID` and nothing else re-runs the canvas pass for a keypress,
+    /// so this is the ring's only hook between one layout and the next — and the
+    /// ring is a redraw, which is exactly what `DeskCanvasChipView.isSelected`
+    /// costs.
+    private func updateCanvasChipSelection() {
+        for (id, chip) in canvasChips {
+            chip.isSelected = (id == selectedNodeID)
+        }
+    }
+
+    /// What the root node is called. `WorkspaceAccountRowView` puts
+    /// `NSFullUserName()` beside the sidebar's avatar and nothing hands this view
+    /// a display name of its own, so the canvas says the same thing the sidebar
+    /// does — and falls back to the spec's own word for the node on a system
+    /// that has none.
+    private var accountDisplayName: String {
+        let name = NSFullUserName()
+        return name.isEmpty ? "You" : name
+    }
+
+    // MARK: - Testing seams
+
+    /// `canvasChips` and `canvasEdges` are private — nothing outside this file
+    /// has business reaching into the organigram's view tree — and these four
+    /// are how the tests see that a layout pass actually installed it.
+    var canvasChipIDsForTesting: [String] { Array(canvasChips.keys) }
+    func canvasChipForTesting(_ id: String) -> DeskCanvasChipView? { canvasChips[id] }
+    var canvasEdgePathForTesting: CGPath? { canvasEdges.path }
+    var canvasEdgeLineWidthForTesting: CGFloat { canvasEdges.lineWidth }
 
     /// The focused card's subtitle counts panes ("terminal 3 of 4"), so it goes
     /// stale whenever the on-screen set changes without anything touching the
@@ -2299,6 +2423,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     var selectedNodeID: String? {
         didSet {
             guard oldValue != selectedNodeID else { return }
+            // Before the callback, and not through it: the callback belongs to
+            // whoever owns this view, and the ring on this view's own chips is
+            // not theirs to have to remember.
+            updateCanvasChipSelection()
             onCanvasSelectionChanged?(selectedNodeID)
         }
     }
