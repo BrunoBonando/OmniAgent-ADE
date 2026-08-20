@@ -440,6 +440,52 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         connection.write(sessionID: sessionID, bytes: Data(text.utf8))
     }
 
+    /// Sends a command to the PTY without corrupting whatever the user has
+    /// half-typed on the current input line.
+    ///
+    /// Sequence:
+    ///  1. Read the cursor line to capture the typed text.
+    ///  2. Ctrl+E  — move to end of line (handles mid-line cursor positions).
+    ///  3. Ctrl+U  — kill from end back to the start, clearing the input.
+    ///  4. Send the command.
+    ///  5. After 100 ms — retype the saved text so the user's draft is back.
+    ///
+    /// 100 ms is comfortably longer than any built-in agent slash-command
+    /// (`/color`, `/settings theme`) needs to print its one-line confirmation
+    /// and return to the prompt, so the restore lands on a clean input line.
+    func sendCommandClearingInput(_ command: String) {
+        let saved = typedInput()
+        // Ctrl+E (end of line) then Ctrl+U (kill to beginning) — covers both
+        // readline and TUI input handlers used by Claude and Copilot.
+        sendInput("\u{05}\u{15}")
+        sendInput(command + "\r")
+        guard !saved.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.sendInput(saved)
+        }
+    }
+
+    /// The text currently typed on the cursor's input line, with the prompt
+    /// prefix stripped. Returns `""` when nothing is typed or the cursor row
+    /// contains no recognisable prompt.
+    ///
+    /// Reads the rendered screen rather than an internal buffer — robust
+    /// against every shell and TUI that renders its own prompt.
+    private func typedInput() -> String {
+        let terminal: Terminal = terminalView.terminal
+        let (_, cursorY) = terminal.getCursorLocation()
+        guard let line = terminal.getLine(row: cursorY) else { return "" }
+        let full = line.translateToString(trimRight: true)
+            .replacingOccurrences(of: "\0", with: " ")
+        guard !full.isEmpty else { return "" }
+        if let match = full.range(of: #"[›❯>$#%]\s+"#,
+                                   options: [.regularExpression],
+                                   range: full.startIndex..<full.endIndex) {
+            return String(full[match.upperBound...])
+        }
+        return ""
+    }
+
     /// The tail of the terminal's text, trailing blank rows dropped — what
     /// `ApprovalPrompt.parse` reads the on-screen dialog out of.
     func visibleTailLines(limit: Int = 40) -> [String] {

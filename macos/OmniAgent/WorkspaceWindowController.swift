@@ -1565,7 +1565,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
               let paneID = workspace.focusedPaneID,
               workspace.descriptor(for: paneID)?.engine == .claude
         else { return }
-        workspace.terminalSurface(for: paneID)?.sendInput("/color \(color)\r")
+        workspace.terminalSurface(for: paneID)?.sendCommandClearingInput("/color \(color)")
         // Reflect the choice back to the descriptor so the header badge updates.
         workspace.updateDescriptor(for: paneID) { $0.claudeColor = color }
     }
@@ -1593,7 +1593,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
               let paneID = workspace.focusedPaneID,
               workspace.descriptor(for: paneID)?.engine == .copilot
         else { return }
-        workspace.terminalSurface(for: paneID)?.sendInput("/settings theme \(theme)\r")
+        workspace.terminalSurface(for: paneID)?.sendCommandClearingInput("/settings theme \(theme)")
         workspace.updateDescriptor(for: paneID) { $0.copilotTheme = theme }
     }
 
