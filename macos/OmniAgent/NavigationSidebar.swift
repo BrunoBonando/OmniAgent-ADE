@@ -117,10 +117,52 @@ final class SidebarNavRowView: ShellRowView {
 
 // MARK: - Section header
 
-/// The "Workspaces" section header. Its group-by and plus buttons arrive in a
-/// later task of the same redesign.
+/// One of the section header's small icon buttons — an SF Symbol in a
+/// 20-point hover square, the same symbol vocabulary as the nav rows above.
+final class SidebarHeaderButtonView: ShellRowView {
+    /// Which symbol this button wears — a fact for tests, since the image
+    /// itself does not answer.
+    let symbolName: String
+
+    init(symbol: String, label: String) {
+        symbolName = symbol
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        layer?.cornerCurve = .continuous
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = NSImageView()
+        icon.image = NSImage(
+            systemSymbolName: symbol,
+            accessibilityDescription: label
+        )?.withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+        icon.contentTintColor = ShellPalette.chevron
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(icon)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 20),
+            heightAnchor.constraint(equalToConstant: 20),
+            icon.centerXAnchor.constraint(equalTo: centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        setAccessibilityLabel(label)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
+/// The "Workspaces" section header: the tracked title on the left, the
+/// group-by and plus icon buttons on the right. The buttons only report
+/// presses — the sidebar builds the menus and pops them, because the menus
+/// read state (the tree's mode, the rendered workspaces) the header never
+/// holds.
 final class SidebarSectionHeaderView: NSView {
     private let titleField: NSTextField
+
+    let groupButton = SidebarHeaderButtonView(symbol: "rectangle.grid.1x2", label: "Group by")
+    let plusButton = SidebarHeaderButtonView(symbol: "plus", label: "Add")
 
     init(title: String) {
         titleField = ShellFont.label(
@@ -131,15 +173,22 @@ final class SidebarSectionHeaderView: NSView {
         )
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        addSubview(titleField)
+        for view in [titleField, groupButton, plusButton] { addSubview(view) }
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 22),
             titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 17),
-            titleField.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
+            titleField.trailingAnchor.constraint(
+                lessThanOrEqualTo: groupButton.leadingAnchor, constant: -8
+            ),
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            plusButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            plusButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            groupButton.trailingAnchor.constraint(equalTo: plusButton.leadingAnchor, constant: -2),
+            groupButton.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         setAccessibilityElement(true)
-        setAccessibilityRole(.staticText)
+        setAccessibilityRole(.group)
         setAccessibilityLabel(title)
     }
 
@@ -253,12 +302,21 @@ final class NavigationSidebarView: NSView {
     /// the hover card, because the card is a window and the sidebar is a view.
     var onHoverTarget: ((SessionHoverCardController.Target?) -> Void)?
     var onOpenSettings: (() -> Void)?
+    /// The plus menu's "Start session in" — a workspace id; the controller
+    /// resolves it to a directory and starts the session there.
+    var onStartSession: ((String) -> Void)?
+    /// The plus menu's "Local folder or repository…" — the existing
+    /// add-workspace folder chooser.
+    var onAddLocalFolder: (() -> Void)?
 
     private(set) var navRows: [SidebarNavRowView] = []
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
     let workspacesTree = WorkspacesTreeView()
     let accountRow = SidebarAccountRowView()
     private(set) var destination: WorkspaceDestination = .terminals
+    /// What the plus menu lists: every workspace the tree currently renders,
+    /// in render order.
+    private(set) var workspaceMenuEntries: [(id: String, label: String)] = []
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -292,6 +350,14 @@ final class NavigationSidebarView: NSView {
         let scroll = ShellScrollView(documentView: workspacesTree)
 
         accountRow.onOpenSettings = { [weak self] in self?.onOpenSettings?() }
+        workspacesHeader.groupButton.onPress = { [weak self] in
+            guard let self else { return }
+            pop(makeGroupByMenu(), from: workspacesHeader.groupButton)
+        }
+        workspacesHeader.plusButton.onPress = { [weak self] in
+            guard let self else { return }
+            pop(makePlusMenu(), from: workspacesHeader.plusButton)
+        }
         workspacesTree.onSelectSession = { [weak self] session in self?.onSelectSession?(session) }
         workspacesTree.onRenameSession = { [weak self] session, name in
             self?.onRenameSession?(session, name)
@@ -342,7 +408,8 @@ final class NavigationSidebarView: NSView {
         panes: [PaneDescriptor],
         focusedPaneID: String?,
         statuses: [String: RemoteSessionStatus],
-        projectLabels: [String: String]
+        projectLabels: [String: String],
+        eventTimes: [String: Double] = [:]
     ) {
         let grouped = SessionOutline.group(panes, focusedPaneID: focusedPaneID)
         var entries: [WorkspaceTreeEntry] = []
@@ -366,7 +433,42 @@ final class NavigationSidebarView: NSView {
                 )
             )
         }
-        workspacesTree.reload(entries: entries, focusedPaneID: focusedPaneID, statuses: statuses)
+        workspaceMenuEntries = entries.map { ($0.id, $0.label) }
+        workspacesTree.reload(
+            entries: entries,
+            focusedPaneID: focusedPaneID,
+            statuses: statuses,
+            eventTimes: eventTimes
+        )
+    }
+
+    // MARK: - The header's menus
+
+    /// The group-by menu, built fresh per pop so the checkmark always reads
+    /// the tree's current mode. Selecting a mode re-renders the tree on the
+    /// spot and persists the choice.
+    func makeGroupByMenu() -> NSMenu {
+        WorkspacesHeaderMenus.groupBy(current: workspacesTree.groupMode) { [weak self] mode in
+            self?.workspacesTree.setGroupMode(mode)
+        }
+    }
+
+    /// The plus menu over whatever the tree currently renders.
+    func makePlusMenu() -> NSMenu {
+        WorkspacesHeaderMenus.plus(
+            workspaces: workspaceMenuEntries,
+            startSession: { [weak self] id in self?.onStartSession?(id) },
+            addLocalFolder: { [weak self] in self?.onAddLocalFolder?() }
+        )
+    }
+
+    /// Drops the menu just under its button, left-aligned with it.
+    private func pop(_ menu: NSMenu, from button: NSView) {
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: 0, y: button.bounds.minY - 6),
+            in: button
+        )
     }
 
     /// Where a hovered row sits on screen right now, or `nil` if it is gone.

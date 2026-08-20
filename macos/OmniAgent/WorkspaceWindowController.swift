@@ -168,6 +168,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// session exits and when the user closes it (`closePane`), so it holds
     /// only live panes; `private(set)` so the test that pins that can see it.
     private(set) var lastStatus: [String: RemoteSessionStatus] = [:]
+    /// When each pane last reported a status event (ms since epoch, the
+    /// activity ledger's clock) — what the sidebar's "Last updated" grouping
+    /// sorts by. Written and cleared strictly alongside `lastStatus`, so the
+    /// pair can never disagree about which panes are live.
+    private(set) var lastStatusEventAt: [String: Double] = [:]
     /// `lastStatus` remembers *what*; this remembers *when* and *how often* —
     /// when the current run of work began, how long a pane has been busy in
     /// total, how many tools it has run. Only the sidebar's hover card reads
@@ -433,6 +438,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // the same panel ⌃Space and ⌘K raise.
         shellSidebar.onSearch = { [weak self] in self?.showCommandPalette(nil) }
         shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
+        // The header's plus menu: a session in any listed workspace, or a
+        // brand new workspace from a folder (the one flow where a chooser is
+        // the whole point).
+        shellSidebar.onStartSession = { [weak self] projectID in
+            guard let self else { return }
+            startSession(
+                inDirectory: workspaceDirectory(for: projectID) ?? "",
+                project: projectID
+            )
+        }
+        shellSidebar.onAddLocalFolder = { [weak self] in self?.openWorkspaceFolder(nil) }
         // Asking the login shell for its PATH spawns a shell; do it now, off
         // the main thread, so the first terminal does not wait for it.
         EngineLauncher.prewarm()
@@ -879,6 +895,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             }
             readySessions.remove(event.id)
             lastStatus.removeValue(forKey: event.id)
+            lastStatusEventAt.removeValue(forKey: event.id)
             activity.forget(paneID: event.id)
             applySessionStatus("Session ended", for: event.id)
             workspace.setStatus(nil, for: event.id)
@@ -1491,6 +1508,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // clears it for a session that ends on its own; this is the path
         // where the *user* closes the pane.
         lastStatus.removeValue(forKey: focused)
+        lastStatusEventAt.removeValue(forKey: focused)
         activity.forget(paneID: focused)
         workspace.closePane(focused)
     }
@@ -1616,6 +1634,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         readySessions.remove(paneID)
         sessionStatus.removeValue(forKey: paneID)
         lastStatus.removeValue(forKey: paneID)
+        lastStatusEventAt.removeValue(forKey: paneID)
         activity.forget(paneID: paneID)
         workspace.closePane(paneID)
         let newID = UUID().uuidString
@@ -1988,6 +2007,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             killSession(id)
             readySessions.remove(id)
             lastStatus.removeValue(forKey: id)
+            lastStatusEventAt.removeValue(forKey: id)
             activity.forget(paneID: id)
         }
     }
@@ -2261,7 +2281,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             panes: all,
             focusedPaneID: workspace.focusedPaneID,
             statuses: lastStatus,
-            projectLabels: projectLabels
+            projectLabels: projectLabels,
+            eventTimes: lastStatusEventAt
         )
     }
 
@@ -2374,6 +2395,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     func recordNotification(for event: SessionStatusEvent) {
         let previous = lastStatus[event.id]
         lastStatus[event.id] = event.status
+        lastStatusEventAt[event.id] = Date().timeIntervalSince1970 * 1000
         activity.record(
             paneID: event.id,
             status: event.status,

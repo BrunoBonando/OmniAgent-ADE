@@ -102,9 +102,45 @@ final class WorkspaceEmptyRowView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 }
 
-/// The tree itself: workspace rows, each expanding to its session rows (or
-/// the dim empty row). Selection, rename and the hover card all ride on the
-/// session rows; the workspace rows only fold.
+/// A Status-mode bucket header — "Needs attention" / "Working" / "Idle".
+/// The section-header voice, sitting directly over the session rows it
+/// groups where a workspace row would otherwise be.
+final class WorkspacesBucketHeaderView: NSView {
+    private let titleField: NSTextField
+
+    var title: String { titleField.stringValue }
+
+    init(title: String) {
+        titleField = ShellFont.label(
+            title,
+            font: ShellFont.ui(11, .semibold),
+            color: ShellPalette.inkMuted,
+            tracking: 0.4
+        )
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        addSubview(titleField)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 24),
+            titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
+            titleField.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
+            titleField.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+        ])
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(title)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
+/// The tree itself, in whichever of the header's three shapes is chosen:
+/// Project (workspace rows, each expanding to its session rows or the dim
+/// empty row), Status (sessions bucketed under Needs attention / Working /
+/// Idle headers), or Last updated (a flat most-recent-event-first list).
+/// Selection, rename and the hover card all ride on the session rows; the
+/// workspace rows only fold.
 final class WorkspacesTreeView: NSView {
     var onSelectSession: ((SessionGroupNode) -> Void)?
     var onRenameSession: ((SessionGroupNode, String) -> Void)?
@@ -116,9 +152,14 @@ final class WorkspacesTreeView: NSView {
     /// Stored inverted — absent means expanded — so a brand new workspace
     /// opens showing its sessions without anyone having to opt in.
     static let collapsedDefaultsKey = "OmniAgentWorkspacesTreeCollapsed"
+    /// The header's group-by choice, persisted by raw value. Absent means
+    /// `.project` — the spec's default.
+    static let groupModeDefaultsKey = "OmniAgentWorkspacesGroupBy"
 
     private let defaults: UserDefaults
     private var collapsed: Set<String>
+    /// Which of the three shapes renders. `setGroupMode` is the only writer.
+    private(set) var groupMode: WorkspacesGroupMode
     private let rows = NSStackView()
     /// What the last `reload` actually drew, so a test can assert the tree's
     /// shape without walking the stack view.
@@ -126,13 +167,18 @@ final class WorkspacesTreeView: NSView {
     /// The session rows on screen, in order — collapsed workspaces contribute
     /// nothing.
     private(set) var renderedSessionIDs: [String] = []
+    /// The Status-mode bucket headers on screen, in order — empty in the
+    /// other two modes.
+    private(set) var renderedBucketTitles: [String] = []
 
-    /// What `reload` was last handed, so toggling a disclosure can re-render
-    /// without the controller having to push the whole tree again.
+    /// What `reload` was last handed, so toggling a disclosure or switching
+    /// the group mode can re-render without the controller having to push the
+    /// whole tree again.
     private struct Render {
         var entries: [WorkspaceTreeEntry] = []
         var focusedPaneID: String?
         var statuses: [String: RemoteSessionStatus] = [:]
+        var eventTimes: [String: Double] = [:]
     }
 
     private var lastRender = Render()
@@ -140,6 +186,8 @@ final class WorkspacesTreeView: NSView {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         collapsed = Set(defaults.stringArray(forKey: Self.collapsedDefaultsKey) ?? [])
+        groupMode = defaults.string(forKey: Self.groupModeDefaultsKey)
+            .flatMap(WorkspacesGroupMode.init(rawValue:)) ?? .project
         super.init(frame: .zero)
 
         rows.orientation = .vertical
@@ -162,17 +210,45 @@ final class WorkspacesTreeView: NSView {
     func reload(
         entries: [WorkspaceTreeEntry],
         focusedPaneID: String?,
-        statuses: [String: RemoteSessionStatus]
+        statuses: [String: RemoteSessionStatus],
+        eventTimes: [String: Double] = [:]
     ) {
-        lastRender = Render(entries: entries, focusedPaneID: focusedPaneID, statuses: statuses)
-        renderedWorkspaceIDs = entries.map(\.id)
+        lastRender = Render(
+            entries: entries,
+            focusedPaneID: focusedPaneID,
+            statuses: statuses,
+            eventTimes: eventTimes
+        )
+        renderedWorkspaceIDs = []
         renderedSessionIDs = []
+        renderedBucketTitles = []
 
         for view in rows.arrangedSubviews {
             rows.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
 
+        switch groupMode {
+        case .project: renderProjectTree(entries)
+        case .status: renderStatusBuckets(entries)
+        case .lastUpdated: renderLastUpdated(entries)
+        }
+    }
+
+    /// The header's group-by choice. Persists, then re-renders on the spot
+    /// from what the last `reload` handed over — the controller does not have
+    /// to know the shape changed.
+    func setGroupMode(_ mode: WorkspacesGroupMode) {
+        guard mode != groupMode else { return }
+        groupMode = mode
+        defaults.set(mode.rawValue, forKey: Self.groupModeDefaultsKey)
+        rerender()
+    }
+
+    /// Project mode: the workspace tree, sessions inline under their
+    /// disclosure rows.
+    private func renderProjectTree(_ entries: [WorkspaceTreeEntry]) {
+        renderedWorkspaceIDs = entries.map(\.id)
         for entry in entries {
             let expanded = !collapsed.contains(entry.id)
             let workspaceRow = WorkspaceRowView(id: entry.id, label: entry.label, expanded: expanded)
@@ -184,30 +260,66 @@ final class WorkspacesTreeView: NSView {
                 add(WorkspaceEmptyRowView())
                 continue
             }
-            for session in entry.sessions {
-                renderedSessionIDs.append(session.id)
-                let row = SessionRowView(
-                    session: session,
-                    statuses: session.paneIDs.map { statuses[$0] },
-                    // The focused pane's ask is on screen already — it counts
-                    // as seen, the same rule the pane's approval bar applies.
-                    awaitingCount: session.paneIDs
-                        .filter { statuses[$0] == .awaitingApproval && $0 != focusedPaneID }
-                        .count
-                )
-                row.onPress = { [weak self] in self?.onSelectSession?(session) }
-                row.onRename = { [weak self] name in self?.onRenameSession?(session, name) }
-                row.onHover = { [weak self] inside in
-                    self?.onHoverTarget?(inside ? .session(session.id) : nil)
-                }
-                add(row)
-            }
+            for session in entry.sessions { addSessionRow(session) }
         }
+    }
+
+    /// Status mode: every session, bucketed under Needs attention / Working /
+    /// Idle. Workspace rows (and the fold) sit this mode out.
+    private func renderStatusBuckets(_ entries: [WorkspaceTreeEntry]) {
+        let buckets = WorkspacesGrouping.statusBuckets(
+            entries.flatMap(\.sessions),
+            statuses: lastRender.statuses
+        )
+        for bucket in buckets {
+            renderedBucketTitles.append(bucket.title)
+            add(WorkspacesBucketHeaderView(title: bucket.title))
+            for session in bucket.sessions { addSessionRow(session) }
+        }
+    }
+
+    /// Last-updated mode: one flat list, most recent status event first.
+    private func renderLastUpdated(_ entries: [WorkspaceTreeEntry]) {
+        let sessions = WorkspacesGrouping.lastUpdatedFirst(
+            entries.flatMap(\.sessions),
+            eventTimes: lastRender.eventTimes
+        )
+        for session in sessions { addSessionRow(session) }
+    }
+
+    private func addSessionRow(_ session: SessionGroupNode) {
+        renderedSessionIDs.append(session.id)
+        let row = SessionRowView(
+            session: session,
+            statuses: session.paneIDs.map { lastRender.statuses[$0] },
+            // The focused pane's ask is on screen already — it counts as
+            // seen, the same rule the pane's approval bar applies.
+            awaitingCount: session.paneIDs
+                .filter {
+                    lastRender.statuses[$0] == .awaitingApproval && $0 != lastRender.focusedPaneID
+                }
+                .count
+        )
+        row.onPress = { [weak self] in self?.onSelectSession?(session) }
+        row.onRename = { [weak self] name in self?.onRenameSession?(session, name) }
+        row.onHover = { [weak self] inside in
+            self?.onHoverTarget?(inside ? .session(session.id) : nil)
+        }
+        add(row)
     }
 
     private func add(_ row: NSView) {
         rows.addArrangedSubview(row)
         row.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -16).isActive = true
+    }
+
+    private func rerender() {
+        reload(
+            entries: lastRender.entries,
+            focusedPaneID: lastRender.focusedPaneID,
+            statuses: lastRender.statuses,
+            eventTimes: lastRender.eventTimes
+        )
     }
 
     private func toggle(_ workspaceID: String) {
@@ -217,11 +329,7 @@ final class WorkspacesTreeView: NSView {
             collapsed.insert(workspaceID)
         }
         defaults.set(collapsed.sorted(), forKey: Self.collapsedDefaultsKey)
-        reload(
-            entries: lastRender.entries,
-            focusedPaneID: lastRender.focusedPaneID,
-            statuses: lastRender.statuses
-        )
+        rerender()
     }
 
     /// The row a hover target names, in whatever the last `reload` built.
