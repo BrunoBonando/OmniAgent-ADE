@@ -804,11 +804,19 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     /// The design does not draw a rename control, but dropping the capability
     /// along with the outline would be a silent regression.
     var onRename: ((String) -> Void)?
+    /// The row's context menu, built fresh per right-click by whoever can
+    /// resolve the session — `WorkspaceRowView.onContextMenu`'s contract.
+    var onContextMenu: (() -> NSMenu?)?
 
     private let titleField: NSTextField
     private let dots = ShellDotsView()
     private let bar = NSView()
     private let isCurrent: Bool
+    /// A nested session — indented under its parent, wearing the connector
+    /// and the dimmed workspace name (the 2026-08-20 redesign's §3).
+    let isNested: Bool
+    private(set) var connector: SessionRowConnectorView?
+    private(set) var workspaceTag: NSTextField?
     /// The amber waiting-inputs count, worn whenever a terminal of this
     /// session is blocked on a question — the session-level "requires
     /// attention", now that the terminal rows themselves are gone.
@@ -817,10 +825,13 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     init(
         session: SessionGroupNode,
         statuses: [RemoteSessionStatus?],
-        awaitingCount: Int = 0
+        awaitingCount: Int = 0,
+        nested: Bool = false,
+        workspaceName: String? = nil
     ) {
         self.session = session
         isCurrent = session.isCurrent
+        isNested = nested
         titleField = ShellFont.label(
             session.label,
             font: ShellFont.ui(14, session.isCurrent ? .semibold : .medium),
@@ -843,15 +854,17 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             pulsing: Set(statuses.enumerated().compactMap { ShellDotsView.pulses($1) ? $0 : nil })
         )
 
+        // Nested rows step one level right of their parent's own indent.
+        let indent: CGFloat = nested ? 14 : 0
         for view in [bar, titleField, dots] { addSubview(view) }
         NSLayoutConstraint.activate([
             // Indented under its workspace row — the folder's label column.
-            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16 + indent),
             bar.widthAnchor.constraint(equalToConstant: 2.5),
             bar.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             bar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
 
-            titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 30),
+            titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 30 + indent),
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
             titleField.trailingAnchor.constraint(equalTo: dots.leadingAnchor, constant: -8),
 
@@ -860,6 +873,37 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             topAnchor.constraint(equalTo: titleField.topAnchor, constant: -6),
             bottomAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 6),
         ])
+        if nested {
+            // The small tree connector: down from under the parent's rail,
+            // elbow toward this row's own bar.
+            let line = SessionRowConnectorView()
+            connector = line
+            addSubview(line)
+            NSLayoutConstraint.activate([
+                line.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 19),
+                line.widthAnchor.constraint(equalToConstant: 8),
+                line.topAnchor.constraint(equalTo: topAnchor),
+                line.bottomAnchor.constraint(equalTo: centerYAnchor),
+            ])
+        }
+        // The dimmed workspace name at the row's right edge — only nested
+        // rows wear it, so a child never loses which workspace it acts in.
+        var trailingEdge = trailingAnchor
+        if nested, let workspaceName, !workspaceName.isEmpty {
+            let tag = ShellFont.label(
+                workspaceName,
+                font: ShellFont.ui(11),
+                color: ShellPalette.inkFaint
+            )
+            workspaceTag = tag
+            addSubview(tag)
+            NSLayoutConstraint.activate([
+                tag.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+                tag.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ])
+            tag.setContentCompressionResistancePriority(.init(740), for: .horizontal)
+            trailingEdge = tag.leadingAnchor
+        }
         // The session-level view of "how many of mine are asking" — with the
         // pane rows gone from the sidebar, this is where a session needing
         // attention says so; the pane's own approval bar says *which* one.
@@ -869,11 +913,11 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             addSubview(badge)
             NSLayoutConstraint.activate([
                 dots.trailingAnchor.constraint(equalTo: badge.leadingAnchor, constant: -8),
-                badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+                badge.trailingAnchor.constraint(equalTo: trailingEdge, constant: -8),
                 badge.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
         } else {
-            dots.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8).isActive = true
+            dots.trailingAnchor.constraint(equalTo: trailingEdge, constant: -8).isActive = true
         }
         dots.setContentCompressionResistancePriority(.init(751), for: .horizontal)
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -894,6 +938,10 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             fill = .clear
         }
         layer?.backgroundColor = fill.cgColor
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        onContextMenu?() ?? super.menu(for: event)
     }
 
     // MARK: Rename

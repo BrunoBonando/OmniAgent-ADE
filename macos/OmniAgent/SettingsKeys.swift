@@ -107,6 +107,15 @@ enum SettingsKey {
     /// `WorkspaceCustomizationsCodec`. No TypeScript twin, by design.
     static let workspaceCustomizations = "workspace_customizations_native"
 
+    /// Native-only — the session context menu's per-session facts (the
+    /// 2026-08-20 redesign's §3): the pin and the nested-session parent,
+    /// keyed by session group id. Its own row for `browserPanes`'s reason —
+    /// fields on the shared `layout` row would be stripped by the web
+    /// build's next rewrite. One JSON object,
+    /// `{"sessions":{"<group id>":{"pinned"?,"parent"?}}}` — see
+    /// `SessionMetaCodec`. No TypeScript twin, by design.
+    static let sessionMeta = "session_meta_native"
+
     /// Native-only — `browserPanes`'s reasoning a third time: the web build
     /// rewrites the shared `layout` row and strips the fields it does not
     /// know, and it knows nothing about a canvas. The Desk canvas's pinned

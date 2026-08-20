@@ -237,6 +237,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// label and its session count. `nil` means "ask with an `NSAlert`"; a
     /// test substitutes an answer — `newSessionForLinkConfirmer`'s pattern.
     var workspaceRemovalConfirmer: ((String, Int, @escaping (Bool) -> Void) -> Void)?
+    /// The Delete-session confirmation, handed the session's label and its
+    /// pane count — `workspaceRemovalConfirmer`'s pattern.
+    var sessionDeletionConfirmer: ((String, Int, @escaping (Bool) -> Void) -> Void)?
+    /// The Open in… submenu's app detection (bundle id -> app URL) and
+    /// launch (app URL, directory to open). `nil` means the real
+    /// `NSWorkspace` on both — tests substitute a fixed catalogue and a
+    /// recorder.
+    var appLocator: ((String) -> URL?)?
+    var appOpener: ((URL, String) -> Void)?
 
     // MARK: - Task 6b-2: settings/onboarding/usage/inspector
 
@@ -260,6 +269,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private var customizationsReadCompleted = false
     private var closedWorkspacesReadDispatched = false
     private var closedWorkspacesReadCompleted = false
+    /// The `session_meta_native` row, keyed by session group id — the
+    /// session context menu's pins and nested-session parents.
+    private(set) var sessionMeta: [String: SessionMeta] = [:]
+    /// Its read/write gates, the pairs above's shape and reasoning.
+    private var sessionMetaReadDispatched = false
+    private var sessionMetaReadCompleted = false
     /// The Customize… card while one is up — window-scoped, so owned here.
     private(set) var customizeCard: WorkspaceCustomizeCard?
     let authGateCoordinator: AuthGateCoordinator
@@ -477,6 +492,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // because only it can resolve the row to a directory, a GitHub
         // remote and a stored customization.
         shellSidebar.workspaceMenuProvider = { [weak self] id in self?.workspaceContextMenu(for: id) }
+        // A session row's right-click, same reasoning: only the controller
+        // holds the pin state, the installed-app catalogue and the delete
+        // path.
+        shellSidebar.sessionMenuProvider = { [weak self] session in
+            self?.sessionContextMenu(for: session)
+        }
         // Asking the login shell for its PATH spawns a shell; do it now, off
         // the main thread, so the first terminal does not wait for it.
         EngineLauncher.prewarm()
@@ -1325,8 +1346,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     /// The session-creation half of `newSession(_:)`, without the chooser —
     /// so the naming and grouping rules are testable without a panel.
+    /// `parent` is Create-nested-session's one addition: the right-clicked
+    /// group, recorded in the session-meta row so the sidebar renders the
+    /// new session indented under it.
     @discardableResult
-    func startSession(inDirectory cwd: String, project: String) -> String? {
+    func startSession(inDirectory cwd: String, project: String, parent: String? = nil) -> String? {
         guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return nil }
         // Starting a session in a closed workspace reopens it — the web
         // build's `reopenWorkspace` rule, so the row is back the moment the
@@ -1336,6 +1360,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             persistClosedWorkspaces()
         }
         let group = SessionOutline.newSessionGroupID()
+        if let parent {
+            sessionMeta[group] = SessionMeta(pinned: false, parent: parent)
+            persistSessionMeta()
+        }
         let name = SessionOutline.nextSessionName(
             workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
             project: project
@@ -2013,6 +2041,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // each of the three is independently gated and independently re-armed,
         // so a browser read that fails must not take the canvas down with it.
         restoreDeskCanvasIfNeeded()
+        // Dispatched from here rather than from `connect` because its apply
+        // prunes against the restored groups — read before the panes exist,
+        // every entry would look vanished.
+        restoreSessionMetaIfNeeded()
     }
 
     /// Kills daemon sessions this window no longer references.
@@ -2320,7 +2352,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             statuses: lastStatus,
             projectLabels: projectLabels,
             eventTimes: lastStatusEventAt,
-            customizations: sidebarCustomizations()
+            customizations: sidebarCustomizations(),
+            sessionMeta: sessionMeta
         )
     }
 
@@ -2627,6 +2660,164 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func persistClosedWorkspaces() {
         guard closedWorkspacesReadCompleted else { return }
         write(ClosedWorkspacesCodec.serialize(closedWorkspaceIDs), to: SettingsKey.closedWorkspaces)
+    }
+
+    // MARK: - Session context menu (2026-08-20 redesign §3)
+
+    /// The session row's right-click menu, built fresh per click so the pin
+    /// item and the installed-app submenu both read the world as it is now.
+    func sessionContextMenu(for session: SessionGroupNode) -> NSMenu {
+        SessionContextMenu.build(
+            pinned: sessionMeta[session.id]?.pinned ?? false,
+            openIn: SessionContextMenu.installedApps(
+                locator: appLocator
+                    ?? { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }
+            ),
+            rename: { [weak self] in self?.beginSessionRename(session.id) },
+            togglePin: { [weak self] in
+                guard let self else { return }
+                setSessionPinned(session.id, !(sessionMeta[session.id]?.pinned ?? false))
+            },
+            openInApp: { [weak self] target in self?.openSession(session, in: target) },
+            createNested: { [weak self] in
+                guard let self else { return }
+                startSession(
+                    inDirectory: workspaceDirectory(for: session.project) ?? session.cwd,
+                    project: session.project,
+                    parent: session.id
+                )
+            },
+            delete: { [weak self] in self?.deleteSession(session) }
+        )
+    }
+
+    /// Rename from the menu is the double-click affordance made findable —
+    /// it puts the row's own inline editor up, not a dialog.
+    func beginSessionRename(_ groupID: String) {
+        (shellSidebar.workspacesTree.rowView(for: .session(groupID)) as? SessionRowView)?
+            .beginRenaming()
+    }
+
+    /// Pins (or unpins) one session and re-sorts its workspace on the spot.
+    func setSessionPinned(_ groupID: String, _ pinned: Bool) {
+        var entry = sessionMeta[groupID] ?? SessionMeta()
+        entry.pinned = pinned
+        if entry.isEmpty {
+            sessionMeta.removeValue(forKey: groupID)
+        } else {
+            sessionMeta[groupID] = entry
+        }
+        persistSessionMeta()
+        reloadOutline()
+    }
+
+    /// Open in…: the session's own cwd, in the chosen app.
+    private func openSession(_ session: SessionGroupNode, in target: SessionContextMenu.OpenTarget) {
+        let directory = session.cwd.isEmpty
+            ? (workspaceDirectory(for: session.project) ?? "")
+            : session.cwd
+        guard !directory.isEmpty else { return }
+        if let appOpener {
+            appOpener(target.url, directory)
+            return
+        }
+        NSWorkspace.shared.open(
+            [URL(fileURLWithPath: directory, isDirectory: true)],
+            withApplicationAt: target.url,
+            configuration: NSWorkspace.OpenConfiguration()
+        )
+    }
+
+    /// Delete session: confirm — naming the session and how many panes end
+    /// with it — then destroy every pane in the group and prune its meta.
+    func deleteSession(_ session: SessionGroupNode) {
+        confirmSessionDeletion(
+            label: session.label,
+            paneCount: session.paneIDs.count
+        ) { [weak self] confirmed in
+            guard confirmed else { return }
+            self?.performDeleteSession(session)
+        }
+    }
+
+    private func confirmSessionDeletion(
+        label: String,
+        paneCount: Int,
+        completion: @escaping (Bool) -> Void
+    ) {
+        if let sessionDeletionConfirmer {
+            sessionDeletionConfirmer(label, paneCount, completion)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Delete \(label)?"
+        let panes = paneCount == 1
+            ? "Its pane closes with it"
+            : "Its \(paneCount) panes close with it"
+        alert.informativeText = panes + ", and every conversation running in them ends."
+        alert.addButton(withTitle: "Delete Session")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard let window else {
+            completion(alert.runModal() == .alertFirstButtonReturn)
+            return
+        }
+        alert.beginSheetModal(for: window) { response in
+            completion(response == .alertFirstButtonReturn)
+        }
+    }
+
+    private func performDeleteSession(_ session: SessionGroupNode) {
+        // `destroyPane` is the one close path — daemon kills and per-pane
+        // bookkeeping included, exactly as ⌘W and Remove-workspace do.
+        for paneID in session.paneIDs {
+            destroyPane(paneID)
+        }
+        // Prune rather than a single removal: the group's own entry goes,
+        // and so does any child's now-dangling parent pointer.
+        sessionMeta = SessionMeta.pruned(sessionMeta, live: liveSessionGroups())
+        persistSessionMeta()
+        reloadOutline()
+    }
+
+    /// Every group a live pane carries — what session-meta pruning trusts.
+    private func liveSessionGroups() -> Set<String> {
+        Set(workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0)?.group })
+    }
+
+    private func restoreSessionMetaIfNeeded() {
+        guard !sessionMetaReadDispatched else { return }
+        sessionMetaReadDispatched = true
+        connection.getSetting(key: SettingsKey.sessionMeta) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                applyRestoredSessionMeta(raw)
+            case .failure:
+                // Re-armed for the next reconnect; the write gate stays
+                // shut — `layoutReadFailed`'s reasoning.
+                sessionMetaReadDispatched = false
+            }
+        }
+    }
+
+    /// Applies the `session_meta_native` row and opens its write gate —
+    /// split out of the read so a test can restore without a socket,
+    /// `applyRestoredPanes`'s pattern. Entries for groups no restored pane
+    /// carries are pruned here, and a prune that changed anything is
+    /// written straight back so the next launch reads the row clean.
+    func applyRestoredSessionMeta(_ raw: String?) {
+        sessionMetaReadDispatched = true
+        sessionMetaReadCompleted = true
+        let stored = SessionMetaCodec.deserialize(raw)
+        sessionMeta = SessionMeta.pruned(stored, live: liveSessionGroups())
+        if sessionMeta != stored { persistSessionMeta() }
+        reloadOutline()
+    }
+
+    private func persistSessionMeta() {
+        guard sessionMetaReadCompleted else { return }
+        write(SessionMetaCodec.serialize(sessionMeta), to: SettingsKey.sessionMeta)
     }
 
     // MARK: - Notifications

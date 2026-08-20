@@ -312,6 +312,9 @@ final class NavigationSidebarView: NSView {
     /// resolves the workspace's directory, GitHub remote and stored
     /// customization, none of which the sidebar holds.
     var workspaceMenuProvider: ((String) -> NSMenu?)?
+    /// A session row's right-click, same contract: the pin state, the
+    /// installed apps and the delete path all live on the controller.
+    var sessionMenuProvider: ((SessionGroupNode) -> NSMenu?)?
 
     private(set) var navRows: [SidebarNavRowView] = []
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
@@ -368,6 +371,9 @@ final class NavigationSidebarView: NSView {
         }
         workspacesTree.onHoverTarget = { [weak self] target in self?.onHoverTarget?(target) }
         workspacesTree.workspaceMenuProvider = { [weak self] id in self?.workspaceMenuProvider?(id) }
+        workspacesTree.sessionMenuProvider = { [weak self] session in
+            self?.sessionMenuProvider?(session)
+        }
 
         for view in [navStack, workspacesHeader, scroll, accountRow] { addSubview(view) }
         NSLayoutConstraint.activate([
@@ -415,7 +421,8 @@ final class NavigationSidebarView: NSView {
         statuses: [String: RemoteSessionStatus],
         projectLabels: [String: String],
         eventTimes: [String: Double] = [:],
-        customizations: [String: WorkspaceCustomization] = [:]
+        customizations: [String: WorkspaceCustomization] = [:],
+        sessionMeta: [String: SessionMeta] = [:]
     ) {
         let grouped = SessionOutline.group(panes, focusedPaneID: focusedPaneID)
         var entries: [WorkspaceTreeEntry] = []
@@ -449,7 +456,8 @@ final class NavigationSidebarView: NSView {
             entries: entries,
             focusedPaneID: focusedPaneID,
             statuses: statuses,
-            eventTimes: eventTimes
+            eventTimes: eventTimes,
+            meta: sessionMeta
         )
     }
 

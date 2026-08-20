@@ -158,6 +158,31 @@ final class WorkspacesBucketHeaderView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 }
 
+/// The small tree connector a nested session row wears: a hairline dropping
+/// from the row above's rail into an elbow that points at this row's own
+/// content. Spans from the row's top edge down to its vertical centre, so
+/// the elbow lands exactly beside the name.
+final class SessionRowConnectorView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath()
+        // Not flipped: the view's bottom edge sits at the row's centre.
+        path.move(to: NSPoint(x: 0.5, y: bounds.maxY))
+        path.line(to: NSPoint(x: 0.5, y: 0.5))
+        path.line(to: NSPoint(x: bounds.maxX, y: 0.5))
+        path.lineWidth = 1
+        ShellPalette.dashedStroke.setStroke()
+        path.stroke()
+    }
+}
+
 /// The tree itself, in whichever of the header's three shapes is chosen:
 /// Project (workspace rows, each expanding to its session rows or the dim
 /// empty row), Status (sessions bucketed under Needs attention / Working /
@@ -173,6 +198,9 @@ final class WorkspacesTreeView: NSView {
     /// A workspace row's right-click: whoever mounts the tree answers with
     /// the row's context menu, built fresh so it reads live state.
     var workspaceMenuProvider: ((String) -> NSMenu?)?
+    /// A session row's right-click, same contract: the menu reads live state
+    /// (the pin, the installed apps) the row never holds.
+    var sessionMenuProvider: ((SessionGroupNode) -> NSMenu?)?
 
     /// Collapsed workspace ids, persisted so the fold survives a relaunch.
     /// Stored inverted — absent means expanded — so a brand new workspace
@@ -205,6 +233,7 @@ final class WorkspacesTreeView: NSView {
         var focusedPaneID: String?
         var statuses: [String: RemoteSessionStatus] = [:]
         var eventTimes: [String: Double] = [:]
+        var meta: [String: SessionMeta] = [:]
     }
 
     private var lastRender = Render()
@@ -237,13 +266,15 @@ final class WorkspacesTreeView: NSView {
         entries: [WorkspaceTreeEntry],
         focusedPaneID: String?,
         statuses: [String: RemoteSessionStatus],
-        eventTimes: [String: Double] = [:]
+        eventTimes: [String: Double] = [:],
+        meta: [String: SessionMeta] = [:]
     ) {
         lastRender = Render(
             entries: entries,
             focusedPaneID: focusedPaneID,
             statuses: statuses,
-            eventTimes: eventTimes
+            eventTimes: eventTimes,
+            meta: meta
         )
         renderedWorkspaceIDs = []
         renderedSessionIDs = []
@@ -292,7 +323,11 @@ final class WorkspacesTreeView: NSView {
                 add(WorkspaceEmptyRowView())
                 continue
             }
-            for session in entry.sessions { addSessionRow(session) }
+            // Pinned first, nested under their parent — the session-meta
+            // arrangement, applied per workspace.
+            for (session, nested) in SessionMeta.arrange(entry.sessions, meta: lastRender.meta) {
+                addSessionRow(session, nested: nested, workspaceLabel: entry.label)
+            }
         }
     }
 
@@ -319,7 +354,11 @@ final class WorkspacesTreeView: NSView {
         for session in sessions { addSessionRow(session) }
     }
 
-    private func addSessionRow(_ session: SessionGroupNode) {
+    private func addSessionRow(
+        _ session: SessionGroupNode,
+        nested: Bool = false,
+        workspaceLabel: String? = nil
+    ) {
         renderedSessionIDs.append(session.id)
         let row = SessionRowView(
             session: session,
@@ -330,13 +369,16 @@ final class WorkspacesTreeView: NSView {
                 .filter {
                     lastRender.statuses[$0] == .awaitingApproval && $0 != lastRender.focusedPaneID
                 }
-                .count
+                .count,
+            nested: nested,
+            workspaceName: nested ? workspaceLabel : nil
         )
         row.onPress = { [weak self] in self?.onSelectSession?(session) }
         row.onRename = { [weak self] name in self?.onRenameSession?(session, name) }
         row.onHover = { [weak self] inside in
             self?.onHoverTarget?(inside ? .session(session.id) : nil)
         }
+        row.onContextMenu = { [weak self] in self?.sessionMenuProvider?(session) }
         add(row)
     }
 
@@ -350,7 +392,8 @@ final class WorkspacesTreeView: NSView {
             entries: lastRender.entries,
             focusedPaneID: lastRender.focusedPaneID,
             statuses: lastRender.statuses,
-            eventTimes: lastRender.eventTimes
+            eventTimes: lastRender.eventTimes,
+            meta: lastRender.meta
         )
     }
 
