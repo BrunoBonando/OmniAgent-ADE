@@ -1,6 +1,6 @@
 [package]
 name = "omniagent-ade"
-version = "2026.8.20+018"
+version = "2026.8.20+021"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"

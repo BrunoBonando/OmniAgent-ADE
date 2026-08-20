@@ -196,6 +196,17 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     // width turns out to be wrong on an external display.
     static let filmstripRailWidth: CGFloat = 196
 
+    /// The smallest the pane area may be and still keep the promise the rest of
+    /// this file makes: the filmstrip's rail, and one pane beside it at a size
+    /// worth reading. The window is not allowed below it (`contentMinSize` in
+    /// `WorkspaceWindowController`), which is what lets every rule above assume
+    /// there is room for one comfortable pane — the ladder can then be about
+    /// *how many* fit rather than about what to do when none do.
+    static let minimumContentSize = NSSize(
+        width: filmstripRailWidth + dividerThickness + comfortablePaneWidth + gridInset * 2,
+        height: comfortablePaneHeight + gridInset * 2
+    )
+
     /// Columns of text a terminal needs before it stops reading as squeezed.
     ///
     /// Width first, and deliberately: an agent's output that wraps mid-thought
@@ -261,23 +272,39 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// persist.
     private(set) var isFilmstrip = false
 
-    /// The pane the filmstrip draws at full size: the focused one.
+    /// The pane the filmstrip's hero column is anchored on: the focused one.
     ///
-    /// Focus and "the one you are looking at" are the same thing here, and
-    /// saying so once is what makes every existing focus command a filmstrip
-    /// command — ⌘1-9, ⌥arrows, the sidebar, the palette and a click on a chip
-    /// all promote a pane to hero without a second code path.
-    var filmstripHeroID: String? {
+    /// Focus and "the one you asked for" are the same thing here, and saying so
+    /// once is what makes every existing focus command a filmstrip command —
+    /// ⌘1-9, ⌥arrows, the sidebar, the palette and a click on a card all show a
+    /// pane without a second code path.
+    var filmstripSelectedID: String? {
         guard let ids = grid?.paneIDs(), !ids.isEmpty else { return nil }
         if let focused = focusedPaneID, ids.contains(focused) { return focused }
         return ids.first
     }
 
-    /// Everybody else, in pane order — the chips in the rail. Empty whenever
-    /// the grid is doing the work.
-    var filmstripRailIDs: [String] {
-        guard isFilmstrip, let hero = filmstripHeroID else { return [] }
-        return grid?.paneIDs().filter { $0 != hero } ?? []
+    /// The panes actually on screen beside the rail, top to bottom. Empty
+    /// whenever the grid is doing the work.
+    var filmstripHeroIDs: [String] { filmstripLayout?.heroIDs ?? [] }
+
+    /// Which cards the rail is *drawing* as selected — read off the cards
+    /// themselves rather than re-derived, so it answers what is on screen
+    /// rather than what ought to be.
+    var filmstripSelectedIDs: [String] {
+        filmstripItems.values.filter(\.isSelected).map(\.paneID)
+    }
+
+    /// How many panes fit beside the rail at a usable height. More than one
+    /// whenever the window is tall enough for two — a filmstrip is not a rule
+    /// that you may only read one terminal at a time, it is a rule that you may
+    /// not read a squeezed one (founder brief, 2026-08-20).
+    private var filmstripHeroCount: Int {
+        let rows = Int(
+            (gridBounds.height + Self.dividerThickness)
+                / (Self.comfortablePaneHeight + Self.dividerThickness)
+        )
+        return max(1, rows)
     }
 
     /// The rail's scroll offset in points, and the last layout it was applied
@@ -285,6 +312,18 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// recalculating the geometry they are asking about.
     private var filmstripScroll: CGFloat = 0
     private(set) var filmstripLayout: PaneFilmstrip.Layout?
+
+    /// One card per pane, pooled by pane id the way the hole tiles are: the
+    /// rail is rebuilt on every layout pass and rebuilding a view per pass
+    /// would throw away its layer sixty times a second during a scroll.
+    private var filmstripItems: [String: PaneFilmstripItemView] = [:]
+
+    /// Panes on their way *out* of the hero column, kept on screen for the
+    /// length of the crossfade. `onScreenPaneIDs` adds them back to the visible
+    /// set, which is the only thing that stops `updateVisibility` hiding a pane
+    /// the eye is still watching fade.
+    private var heroFading: Set<String> = []
+    private var heroFadeToken = 0
 
     let resizeCoalescer = PaneResizeCoalescer()
 
@@ -1009,11 +1048,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// the grid it is covering.
     private func gridFrame(for sessionID: String) -> NSRect? {
         // Where a card being shrunk out of focus is heading is wherever the
-        // layout in force would put that pane — a grid cell, or the hero box /
-        // a rail slot when the filmstrip is the layout in force.
+        // layout in force would put that pane: a grid cell, or a hero row when
+        // the filmstrip is the layout in force. A pane with no hero row of its
+        // own lands where the parked panes are, which is the first one.
         if isFilmstrip, let layout = filmstripLayout {
-            if sessionID == filmstripHeroID { return layout.hero }
-            return layout.rail.first { $0.id == sessionID }?.frame
+            return layout.hero.first { $0.id == sessionID }?.frame ?? layout.hero.first?.frame
         }
         return grid?.layout(in: gridBounds, dividerThickness: Self.dividerThickness).frames[sessionID]
     }
@@ -1090,11 +1129,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         if zoomTransition > 0, let layer = container.layer, let from {
             zoomLayer(layer, fromPosition: from.position, fromSize: from.size, toSize: frame.size)
         }
-        // Not for a chip: on the canvas a chipped pane's box never changes size
-        // anyway, and in the filmstrip's rail it changes to a fifth of one —
-        // reflowing a terminal to twenty columns behind a picture of itself
-        // would cost the scrollback its shape for nothing.
-        if resized, !container.isChipped { container.surface.scheduleResize() }
+        if resized { container.surface.scheduleResize() }
     }
 
     /// One move of the transition, as the pair of layer animations that expresses
@@ -1217,6 +1252,13 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// ≤12-to-≤96 jump needs — on the canvas nothing else takes a pane out of
     /// the compositor.
     private func onScreenPaneIDs() -> Set<String> {
+        // The filmstrip shows a few panes of many. The rest are hidden exactly
+        // the way another session's panes are — never torn down, still parsing
+        // output into their scrollback — plus whichever are still fading out of
+        // the hero column, which have to stay up for the length of the fade.
+        if isFilmstrip, let layout = filmstripLayout {
+            return Set(layout.heroIDs).union(heroFading)
+        }
         guard isCanvasMode else { return Set(paneIDs) }
         let viewport = transitionViewport ?? camera.canvasViewport(in: bounds)
         var ids: Set<String> = []
@@ -1248,18 +1290,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         updateZoomAvailability()
         let visible = onScreenPaneIDs()
         let chips = showsChips
-        // The filmstrip's rail borrows the canvas's level of detail wholesale:
-        // a pane a fifth of a window wide has nothing in its pixels either, and
-        // `PaneChipView` already draws what survives that shrink. It also keeps
-        // the terminal *off* the rail — see `place`, which does not resize a
-        // chipped pane's PTY, so a pane parked in the rail keeps the geometry
-        // it had as hero and comes back with its scrollback the shape it left.
-        let railed = Set(filmstripRailIDs)
         for (id, container) in containers {
             let onScreen = visible.contains(id)
             container.isHidden = !onScreen
             container.surface.suspendsDrawing = suspendsDrawing || !onScreen
-            container.isChipped = onScreen && (chips || railed.contains(id))
+            container.isChipped = onScreen && chips
         }
         // The camera decides who may blink as much as it decides who is on
         // screen, and a camera move runs this pass and no other.
@@ -1633,6 +1668,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// controller owns the status feed; this is the only way it reaches a pane.
     func setStatus(_ status: RemoteSessionStatus?, for sessionID: String) {
         containers[sessionID]?.status = status
+        // The rail's whole colour is status, and a card is not redrawn by a
+        // layout pass nobody triggered — this is the feed, so this is where it
+        // reaches the card.
+        filmstripItems[sessionID]?.status = status
     }
 
     func updateDescriptor(for sessionID: String, _ mutate: (inout PaneDescriptor) -> Void) {
@@ -1641,6 +1680,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         guard descriptors[sessionID] != descriptor else { return }
         descriptors[sessionID] = descriptor
         containers[sessionID]?.descriptorChanged(descriptor)
+        if let card = filmstripItems[sessionID] {
+            card.title = containers[sessionID]?.header.title ?? ""
+            card.detail = filmstripDetail(for: sessionID)
+        }
         updateAccessibilityLabels()
         // The card's subtitle names its *session*, and the derived `Session N`
         // for unnamed ones is a position in a list — so naming any session
@@ -1751,7 +1794,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     private func focusAlongRail(_ direction: PaneDirection) -> Bool {
         guard direction == .up || direction == .down else { return false }
         let ids = grid?.paneIDs() ?? []
-        guard let current = filmstripHeroID, let index = ids.firstIndex(of: current) else {
+        guard let current = filmstripSelectedID, let index = ids.firstIndex(of: current) else {
             return false
         }
         let next = direction == .up ? index - 1 : index + 1
@@ -2326,6 +2369,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             if !filmstrip {
                 filmstripLayout = nil
                 layer?.masksToBounds = false
+                filmstripItems.values.forEach { $0.removeFromSuperview() }
+                filmstripItems = [:]
+                heroFading = []
+                heroFadeToken += 1
+                containers.values.forEach { $0.layer?.opacity = 1 }
             }
             // The rail's chips go up (or come down) before anything is placed:
             // `place` reads `isChipped` to decide whether the pane's PTY
@@ -2358,36 +2406,48 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// rail glides and grows into the hero box while the one it replaces glides
     /// and shrinks into its slot — the swap's animation, for the swap's reason.
     private func updateFilmstripLayout() {
-        guard let hero = filmstripHeroID else { return }
+        guard let selected = filmstripSelectedID else { return }
+        let previous = Set(filmstripLayout?.heroIDs ?? [])
         let layout = PaneFilmstrip.layout(
             ids: grid?.paneIDs() ?? [],
-            hero: hero,
+            selected: selected,
+            heroCount: filmstripHeroCount,
             in: gridBounds,
             railWidth: Self.filmstripRailWidth,
             gap: Self.dividerThickness,
             scroll: filmstripScroll
         )
-        // Stored back: the rail shortens whenever a pane closes or the hero
-        // changes, and an offset past the new end would strand the last chip
-        // above the fold.
+        // Stored back: the rail shortens whenever a pane closes, and an offset
+        // past the new end would strand the last card above the fold.
         filmstripScroll = layout.scroll
         filmstripLayout = layout
         // The one place this view clips. A rail is a scroll view's worth of
-        // content in a view that is not one, so the chips scrolled past either
+        // content in a view that is not one, so the cards scrolled past either
         // end have to be cut off by something; everything the grid draws is
         // inside `bounds` already, which is why this can be switched on here
         // and off again when the grid comes back.
         layer?.masksToBounds = true
-        // `overlayPaneID` is skipped for the reason `updateLayout` skips it:
-        // a card in the overlay has a frame in that host's coordinates and
-        // `applyZoom` is what sets it.
-        if hero != overlayPaneID, let container = containers[hero] {
-            place(container, at: layout.hero)
+
+        let hero = Set(layout.heroIDs)
+        if hero != previous { updateVisibility() }
+        // Every pane takes hero geometry, on screen or not. A pane parked at
+        // the size it will be shown at is one that needs no PTY resize to be
+        // shown — selecting a card is then a fade, not a reflow — and it is the
+        // rows changing under a window resize that costs a resize, which is
+        // exactly when one is due.
+        let parked = layout.hero.first?.frame
+        for id in grid?.paneIDs() ?? [] {
+            guard id != overlayPaneID, let container = containers[id] else { continue }
+            // `overlayPaneID` is skipped for the reason `updateLayout` skips
+            // it: a card in the overlay has a frame in that host's coordinates
+            // and `applyZoom` is what sets it.
+            guard let frame = layout.hero.first(where: { $0.id == id })?.frame ?? parked else {
+                continue
+            }
+            place(container, at: frame)
         }
-        for item in layout.rail {
-            guard item.id != overlayPaneID, let container = containers[item.id] else { continue }
-            place(container, at: item.frame)
-        }
+        syncFilmstripItems(layout)
+        if hero != previous { crossfadeHero(from: previous, to: hero) }
         // Nothing here has seams or holes: the rail's gaps are not draggable
         // and a filmstrip has no rectangle to pad.
         syncDividerViews([])
@@ -2395,6 +2455,110 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         applyZoom()
         updateAccessibilityLabels()
         refreshFocusSubtitles()
+    }
+
+    /// The rail's cards: one per pane, pooled by id, each carrying the pane's
+    /// name, its engine and its live status — and marked selected when it is
+    /// one of the panes on screen. Selected is a *set*, since the hero column
+    /// holds as many panes as fit.
+    private func syncFilmstripItems(_ layout: PaneFilmstrip.Layout) {
+        let hero = Set(layout.heroIDs)
+        for item in layout.rail {
+            let card: PaneFilmstripItemView
+            if let existing = filmstripItems[item.id] {
+                card = existing
+            } else {
+                card = PaneFilmstripItemView(paneID: item.id)
+                card.onSelect = { [weak self] id in self?.focusPane(id) }
+                filmstripItems[item.id] = card
+                addSubview(card)
+            }
+            card.frame = item.frame
+            card.title = containers[item.id]?.header.title ?? ""
+            card.detail = filmstripDetail(for: item.id)
+            card.status = containers[item.id]?.status
+            card.isSelected = hero.contains(item.id)
+        }
+        let live = Set(layout.rail.map(\.id))
+        for (id, card) in filmstripItems where !live.contains(id) {
+            card.removeFromSuperview()
+            filmstripItems.removeValue(forKey: id)
+        }
+    }
+
+    /// What a card says under the pane's name. The engine for a terminal —
+    /// which agent is driving is the thing you pick a pane *by* — and what it
+    /// holds for the kinds that have no engine.
+    private func filmstripDetail(for sessionID: String) -> String {
+        guard let descriptor = descriptors[sessionID] else { return "" }
+        switch descriptor.kind {
+        case .terminal: return descriptor.engine.badgeTitle
+        case .browser: return "Browser"
+        case .editor: return "Editor"
+        }
+    }
+
+    /// The hero column changing, as a crossfade: the arriving panes fade up
+    /// from nothing and the leaving ones fade out and are then hidden.
+    ///
+    /// A fade rather than the swap's glide, because there is nothing to glide:
+    /// every pane is parked at hero geometry, so the pane arriving is already
+    /// exactly where it is going. Follows the file's animation rules — a raw
+    /// `CABasicAnimation` rather than `NSView.animator()`, and the end
+    /// scheduled rather than handed to a completion handler, token-guarded so a
+    /// second selection cannot be finished by the first one's timer.
+    private func crossfadeHero(from previous: Set<String>, to next: Set<String>) {
+        heroFadeToken += 1
+        let token = heroFadeToken
+        let leaving = previous.subtracting(next)
+        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            heroFading = []
+            for id in leaving { containers[id]?.layer?.removeAnimation(forKey: Self.heroFadeKey) }
+            for id in next { containers[id]?.layer?.opacity = 1 }
+            updateVisibility()
+            return
+        }
+        for id in next.subtracting(previous) {
+            guard let layer = containers[id]?.layer else { continue }
+            layer.opacity = 1
+            layer.add(heroFade(from: 0, to: 1), forKey: Self.heroFadeKey)
+        }
+        guard !leaving.isEmpty else { return }
+        heroFading = leaving
+        // The pass that placed the new column has already hidden these — it ran
+        // before this set existed. Un-hidden again for the length of the fade,
+        // which is the whole reason `onScreenPaneIDs` knows about it.
+        updateVisibility()
+        // Placed where they were, and left there: a pane fading out of the
+        // column must not jump to the parked frame it is about to take, which
+        // is the same frame — but for the row it is leaving, which may not be.
+        for id in leaving {
+            guard let layer = containers[id]?.layer else { continue }
+            layer.opacity = 0
+            layer.add(heroFade(from: 1, to: 0), forKey: Self.heroFadeKey)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.swapTransitionDuration) {
+            [weak self] in
+            guard let self, token == heroFadeToken else { return }
+            heroFading = []
+            for id in leaving {
+                guard let layer = containers[id]?.layer else { continue }
+                layer.removeAnimation(forKey: Self.heroFadeKey)
+                layer.opacity = 1
+            }
+            updateVisibility()
+        }
+    }
+
+    private static let heroFadeKey = "om-hero-fade"
+
+    private func heroFade(from: Float, to: Float) -> CABasicAnimation {
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = from
+        fade.toValue = to
+        fade.duration = Self.swapTransitionDuration
+        fade.timingFunction = Self.zoomTimingFunction
+        return fade
     }
 
     /// Re-lays the filmstrip out because its *hero* changed rather than because
@@ -2406,10 +2570,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         if animate { zoomTransition = Self.swapTransitionDuration }
         defer { if animate { zoomTransition = 0 } }
-        // Before the layout, not after: the new hero has to come out of its
-        // chip before it is given a hero-sized box, or `place` would skip its
-        // PTY resize and leave the terminal at rail geometry.
-        updateVisibility()
+        updateFilmstripLayout()
+        // A selection the keyboard walked past the visible end of scrolls into
+        // view. Only ever the selected card: scrolling to every pane that
+        // happens to join the hero column would yank the rail under a pointer
+        // that is on its way to a card.
+        guard let selected = filmstripSelectedID,
+              let offset = filmstripLayout?.scrollToShow(selected)
+        else { return }
+        filmstripScroll = offset
         updateFilmstripLayout()
     }
 
@@ -3036,15 +3205,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     }
 
     override func mouseDown(with event: NSEvent) {
-        // A chip is not a pane you can type into, so a click on one means the
-        // only thing it can mean: show me that one. Ahead of the canvas guard
-        // because a chip click is never a canvas gesture — the filmstrip and
-        // the canvas are different layouts of the same view.
-        if isFilmstrip,
-           let id = filmstripLayout?.railPane(at: convert(event.locationInWindow, from: nil)) {
-            focusPane(id)
-            return
-        }
         guard canvasOwnsInput else { return super.mouseDown(with: event) }
         // An entry flight owns the next 0.38s and cannot be argued with: its
         // landing is already scheduled (`DispatchQueue.main.asyncAfter`,
@@ -3768,21 +3928,12 @@ final class PaneContainerView: NSView, NSDraggingSource {
             height: min(headerHeight, max(0, bounds.height - inset * 2))
         )
         let barHeight = approvalBar.isHidden ? 0 : PaneApprovalBarView.height
-        // A chipped pane's surface stays exactly where it was. It is down and
-        // drawing nothing, and its box is the terminal's geometry: in the
-        // filmstrip's rail that box would become a fifth of a pane, and
-        // SwiftTerm reflows on a frame change whether anyone asked it to or not
-        // — the pane would come back from the rail with its scrollback rewrapped
-        // to twenty columns. `isChipped`'s own `didSet` runs this again on the
-        // way back up, by which time the container is hero-sized.
-        if !isChipped {
-            surface.frame = CGRect(
-                x: inset,
-                y: inset + headerHeight,
-                width: width,
-                height: max(0, bounds.height - headerHeight - barHeight - inset * 2)
-            )
-        }
+        surface.frame = CGRect(
+            x: inset,
+            y: inset + headerHeight,
+            width: width,
+            height: max(0, bounds.height - headerHeight - barHeight - inset * 2)
+        )
         approvalBar.frame = CGRect(
             x: inset,
             y: inset + headerHeight + surface.frame.height,

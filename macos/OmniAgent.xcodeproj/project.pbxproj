@@ -26,6 +26,7 @@
 		71021CF2EFA24E0285BFFFDA /* EditorFileClass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B9844312A440D4A5A932C5 /* EditorFileClass.swift */; };
 		68F9BD406F6C7DDABE533A9D /* GitFileContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = C43E2B4CEEE6E8798AE14F29 /* GitFileContent.swift */; };
 		A8F274672EE375B094EDE786 /* PaneFilmstrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 157B822C99ACE707C21FDF16 /* PaneFilmstrip.swift */; };
+		DC11E984BFFC0A19284D6270 /* PaneFilmstripItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A6200BA1CA6B4895D134437 /* PaneFilmstripItemView.swift */; };
 		C8E5716D35494A029A309845 /* PaneChipView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 405D7DD97ED24F13AEC1C23B /* PaneChipView.swift */; };
 		E4A1C60B27D34F19B0C55A83 /* DoublePressDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F8D45A9B1E64C7290EA3D16 /* DoublePressDetector.swift */; };
 		40187BB1C8BB496BBDF4129A /* EditorWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 804C0D63AE9348399ED44B65 /* EditorWebView.swift */; };
@@ -206,6 +207,7 @@
 		08B9844312A440D4A5A932C5 /* EditorFileClass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorFileClass.swift; sourceTree = "<group>"; };
 		C43E2B4CEEE6E8798AE14F29 /* GitFileContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitFileContent.swift; sourceTree = "<group>"; };
 		157B822C99ACE707C21FDF16 /* PaneFilmstrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneFilmstrip.swift; sourceTree = "<group>"; };
+		7A6200BA1CA6B4895D134437 /* PaneFilmstripItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneFilmstripItemView.swift; sourceTree = "<group>"; };
 		405D7DD97ED24F13AEC1C23B /* PaneChipView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneChipView.swift; sourceTree = "<group>"; };
 		2F8D45A9B1E64C7290EA3D16 /* DoublePressDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoublePressDetector.swift; sourceTree = "<group>"; };
 		804C0D63AE9348399ED44B65 /* EditorWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorWebView.swift; sourceTree = "<group>"; };
@@ -380,6 +382,7 @@
 				08B9844312A440D4A5A932C5 /* EditorFileClass.swift */,
 				C43E2B4CEEE6E8798AE14F29 /* GitFileContent.swift */,
 				157B822C99ACE707C21FDF16 /* PaneFilmstrip.swift */,
+				7A6200BA1CA6B4895D134437 /* PaneFilmstripItemView.swift */,
 				405D7DD97ED24F13AEC1C23B /* PaneChipView.swift */,
 				2F8D45A9B1E64C7290EA3D16 /* DoublePressDetector.swift */,
 				1422F1A7E3B9416382854F44 /* MediaTabView.swift */,
@@ -655,6 +658,7 @@
 				71021CF2EFA24E0285BFFFDA /* EditorFileClass.swift in Sources */,
 				68F9BD406F6C7DDABE533A9D /* GitFileContent.swift in Sources */,
 				A8F274672EE375B094EDE786 /* PaneFilmstrip.swift in Sources */,
+				DC11E984BFFC0A19284D6270 /* PaneFilmstripItemView.swift in Sources */,
 				C8E5716D35494A029A309845 /* PaneChipView.swift in Sources */,
 				E4A1C60B27D34F19B0C55A83 /* DoublePressDetector.swift in Sources */,
 				6B338221C82340A48C81D8A6 /* MediaTabView.swift in Sources */,
@@ -824,7 +828,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 18;
+				CURRENT_PROJECT_VERSION = 21;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_TESTABILITY = YES;
@@ -855,7 +859,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 18;
+				CURRENT_PROJECT_VERSION = 21;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -925,7 +929,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 18;
+				CURRENT_PROJECT_VERSION = 21;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;

@@ -70,9 +70,10 @@ final class PaneWorkspaceViewTests: XCTestCase {
             let workspace = makeWorkspace(panes: count)
             let measured: [CGRect]
             if workspace.isFilmstrip {
-                let hero = try? XCTUnwrap(workspace.filmstripHeroID)
-                measured = [hero.flatMap { workspace.container(for: $0)?.frame }].compactMap { $0 }
-                XCTAssertEqual(measured.count, 1, "\(count) panes: a hero")
+                measured = workspace.filmstripHeroIDs.compactMap {
+                    workspace.container(for: $0)?.frame
+                }
+                XCTAssertFalse(measured.isEmpty, "\(count) panes: at least one is on screen")
             } else {
                 measured = workspace.paneIDs.compactMap { workspace.container(for: $0)?.frame }
                 XCTAssertEqual(measured.count, count)
@@ -95,93 +96,113 @@ final class PaneWorkspaceViewTests: XCTestCase {
     // MARK: - The filmstrip
 
     /// Past the last rung a grid can hold comfortably, the workspace stops
-    /// tiling: the focused pane takes the width, the rest become chips in a
-    /// rail, and the height that would have been squeezed out of them becomes
-    /// scroll (founder brief, 2026-08-20).
+    /// tiling: as many panes as fit at a usable size go beside the rail, every
+    /// pane gets a card, and the ones on screen are the ones marked selected
+    /// (founder brief, 2026-08-20).
     func testTooManyPanesForTheWindowBecomeAFilmstrip() throws {
         let workspace = makeWorkspace(panes: 6)
         XCTAssertFalse(workspace.isFilmstrip, "six still tile: 2x3 clears both floors")
 
         XCTAssertTrue(workspace.addPane(makeDescriptor("pane-7")))
         XCTAssertTrue(workspace.isFilmstrip, "a fourth row would not")
-        let hero = try XCTUnwrap(workspace.filmstripHeroID)
-        XCTAssertEqual(hero, "pane-7", "the new pane took focus, so it is the one on show")
-        XCTAssertEqual(workspace.filmstripRailIDs.count, 6)
-
         let layout = try XCTUnwrap(workspace.filmstripLayout)
-        XCTAssertEqual(workspace.container(for: hero)?.frame, layout.hero)
-        XCTAssertEqual(layout.hero.width, workspace.gridBounds.width - PaneWorkspaceView.filmstripRailWidth - 6)
-        XCTAssertGreaterThan(layout.maxScroll, 0, "six chips do not fit: the rail scrolls")
+        XCTAssertEqual(workspace.filmstripSelectedID, "pane-7", "the new pane took focus")
+        XCTAssertLessThan(workspace.filmstripHeroIDs.count, workspace.paneIDs.count)
+        XCTAssertTrue(workspace.filmstripHeroIDs.contains("pane-7"), "so it is on screen")
+        XCTAssertEqual(layout.rail.map(\.id), workspace.paneIDs, "and every pane has a card")
+        XCTAssertEqual(
+            layout.hero.first?.frame.width,
+            workspace.gridBounds.width - PaneWorkspaceView.filmstripRailWidth - 6
+        )
         XCTAssertTrue(workspace.holePlaceholders.isEmpty, "a filmstrip has no holes to fill")
 
-        for id in workspace.filmstripRailIDs {
-            let chip = try XCTUnwrap(workspace.container(for: id))
-            XCTAssertTrue(chip.isChipped, "\(id) is a picture, not a terminal")
-            XCTAssertEqual(chip.frame.width, PaneWorkspaceView.filmstripRailWidth)
+        // Only the hero column is on screen; the rest are hidden, never torn
+        // down — the same trade a session switch makes.
+        for id in workspace.paneIDs {
+            let container = try XCTUnwrap(workspace.container(for: id))
+            XCTAssertEqual(
+                container.isHidden,
+                !workspace.filmstripHeroIDs.contains(id),
+                "\(id) on screen exactly when it is a hero"
+            )
+            XCTAssertFalse(container.isChipped, "the rail is cards, not shrunken panes")
         }
-        XCTAssertFalse(
-            try XCTUnwrap(workspace.container(for: hero)).isChipped,
-            "the hero is the live one"
-        )
     }
 
-    /// The rail is where a terminal waits, not where it is resized to fit. A
-    /// pane parked in a 196pt chip keeps the geometry it had at full size, so
-    /// its scrollback comes back the shape it left.
-    func testAPaneInTheRailKeepsItsTerminalGeometry() throws {
-        let workspace = makeWorkspace(panes: 6)
-        let heroWidth = try XCTUnwrap(workspace.container(for: "pane-1")?.surface.frame.width)
-
-        XCTAssertTrue(workspace.addPane(makeDescriptor("pane-7")))
+    /// Every pane is parked at hero geometry whether or not it is on screen, so
+    /// selecting one is a fade rather than a reflow — and no terminal is ever
+    /// asked to rewrap to something it is not being shown at.
+    func testEveryPaneKeepsHeroGeometryInTheFilmstrip() throws {
+        let workspace = makeWorkspace(panes: 8)
         XCTAssertTrue(workspace.isFilmstrip)
-        let railed = try XCTUnwrap(workspace.container(for: "pane-1"))
-        XCTAssertEqual(railed.frame.width, PaneWorkspaceView.filmstripRailWidth, "the box shrank")
-        XCTAssertEqual(railed.surface.frame.width, heroWidth, "the terminal did not")
+        let hero = try XCTUnwrap(workspace.filmstripLayout?.hero.first?.frame)
+        for id in workspace.paneIDs {
+            XCTAssertEqual(
+                workspace.container(for: id)?.frame.size,
+                hero.size,
+                "\(id) is ready to be shown"
+            )
+        }
+    }
+
+    /// Height is a floor, not a rule that you may read one terminal at a time:
+    /// a window tall enough for two comfortable panes shows two, and both of
+    /// their cards read as selected.
+    func testTheHeroColumnHoldsAsManyPanesAsFit() throws {
+        let workspace = makeWorkspace(panes: 8)
+        XCTAssertTrue(workspace.isFilmstrip)
+        let heroes = workspace.filmstripHeroIDs
+        XCTAssertGreaterThanOrEqual(heroes.count, 2, "800pt has room for more than one")
+        for id in heroes {
+            let container = try XCTUnwrap(workspace.container(for: id))
+            XCTAssertGreaterThanOrEqual(
+                container.frame.height,
+                PaneWorkspaceView.comfortablePaneHeight,
+                "\(id) is worth reading"
+            )
+            XCTAssertFalse(container.isHidden)
+        }
+        XCTAssertEqual(
+            Set(workspace.filmstripSelectedIDs),
+            Set(heroes),
+            "the rail marks every pane on screen, not just the focused one"
+        )
+
+        // And where two will not fit, one — never two squeezed ones.
+        workspace.frame = CGRect(x: 0, y: 0, width: 1200, height: 400)
+        XCTAssertTrue(workspace.isFilmstrip)
+        XCTAssertEqual(workspace.filmstripHeroIDs.count, 1)
+        XCTAssertEqual(workspace.filmstripSelectedIDs.count, 1)
     }
 
     /// Focus is the filmstrip's only control, which is what makes every focus
-    /// command — a click on a chip, ⌘3, ⌥arrow, the sidebar — a way to open a
-    /// pane. The one leaving and the one arriving trade boxes.
-    func testFocusingAChipPromotesItToHero() throws {
+    /// command — a click on a card, ⌘3, ⌥arrow, the sidebar — a way to open a
+    /// pane. The card stays exactly where it was in the strip.
+    func testSelectingACardShowsItWithoutMovingIt() throws {
         let workspace = makeWorkspace(panes: 8)
         XCTAssertTrue(workspace.isFilmstrip)
-        let outgoing = try XCTUnwrap(workspace.filmstripHeroID)
-        let incoming = try XCTUnwrap(workspace.filmstripRailIDs.first)
+        let order = try XCTUnwrap(workspace.filmstripLayout).rail.map(\.id)
+        let outgoing = try XCTUnwrap(workspace.filmstripHeroIDs.first)
+        let incoming = try XCTUnwrap(order.first { $0 != outgoing })
 
-        // Exactly what a click on that chip resolves to.
+        // Exactly what a click on that card resolves to.
         let layout = try XCTUnwrap(workspace.filmstripLayout)
         let slot = try XCTUnwrap(layout.rail.first { $0.id == incoming }).frame
         XCTAssertEqual(layout.railPane(at: CGPoint(x: slot.midX, y: slot.midY)), incoming)
 
         workspace.focusPane(incoming)
-        XCTAssertEqual(workspace.filmstripHeroID, incoming)
-        let promoted = try XCTUnwrap(workspace.container(for: incoming))
-        XCTAssertFalse(promoted.isChipped)
-        XCTAssertEqual(promoted.frame, workspace.filmstripLayout?.hero)
-        XCTAssertTrue(
-            try XCTUnwrap(workspace.container(for: outgoing)).isChipped,
-            "and the one it replaced went to the rail"
+        XCTAssertEqual(workspace.filmstripHeroIDs.first, incoming, "it heads the column")
+        XCTAssertFalse(try XCTUnwrap(workspace.container(for: incoming)).isHidden)
+        XCTAssertEqual(
+            workspace.filmstripLayout?.rail.map(\.id),
+            order,
+            "and the strip did not shuffle"
         )
-        XCTAssertTrue(workspace.filmstripRailIDs.contains(outgoing))
-    }
-
-    /// The filmstrip in pixels: hero on the right, chips down the left, the
-    /// rail scrolled. Drops a PNG when `PANE_RENDER_DIR` is set.
-    func testTheFilmstripRendersAsAHeroBesideARailOfChips() throws {
-        let (workspace, window) = makeAttachedWorkspace(panes: 8)
-        defer { window.close() }
-        XCTAssertTrue(workspace.isFilmstrip)
-        window.displayIfNeeded()
-        workspace.layoutSubtreeIfNeeded()
-        let rep = try XCTUnwrap(render(workspace))
-        saveRenderForInspection(rep, named: "filmstrip-8-panes")
-
-        let layout = try XCTUnwrap(workspace.filmstripLayout)
-        // Nothing of the hero is in the rail's column and nothing of the rail
-        // is in the hero's: the two never overlap, whatever the scroll.
-        for item in layout.rail {
-            XCTAssertLessThanOrEqual(item.frame.maxX, layout.hero.minX)
-        }
+        XCTAssertEqual(
+            Set(workspace.filmstripSelectedIDs),
+            Set(workspace.filmstripHeroIDs),
+            "and the marks follow the column"
+        )
     }
 
     /// ⌥↑/⌥↓ walk the rail, since that is the only arrangement on screen.
@@ -192,12 +213,35 @@ final class PaneWorkspaceViewTests: XCTestCase {
         workspace.focusPane(ids[0])
 
         XCTAssertTrue(workspace.focusNeighbor(.down))
-        XCTAssertEqual(workspace.filmstripHeroID, ids[1])
+        XCTAssertEqual(workspace.filmstripSelectedID, ids[1])
         XCTAssertTrue(workspace.focusNeighbor(.up))
-        XCTAssertEqual(workspace.filmstripHeroID, ids[0])
+        XCTAssertEqual(workspace.filmstripSelectedID, ids[0])
         XCTAssertFalse(workspace.focusNeighbor(.up), "the rail does not wrap")
         XCTAssertFalse(workspace.focusNeighbor(.left), "and it has no sideways")
-        XCTAssertEqual(workspace.filmstripHeroID, ids[0])
+        XCTAssertEqual(workspace.filmstripSelectedID, ids[0])
+    }
+
+    /// The filmstrip in pixels: hero on the right, cards down the left, the
+    /// selected one wearing its status. Drops a PNG when `PANE_RENDER_DIR` is
+    /// set.
+    func testTheFilmstripRendersAsAHeroBesideARailOfCards() throws {
+        let (workspace, window) = makeAttachedWorkspace(panes: 8)
+        defer { window.close() }
+        XCTAssertTrue(workspace.isFilmstrip)
+        workspace.setStatus(.thinking, for: workspace.paneIDs[1])
+        workspace.setStatus(.awaitingApproval, for: workspace.paneIDs[2])
+        workspace.setStatus(.error, for: workspace.paneIDs[4])
+        window.displayIfNeeded()
+        workspace.layoutSubtreeIfNeeded()
+        let rep = try XCTUnwrap(render(workspace))
+        saveRenderForInspection(rep, named: "filmstrip-8-panes")
+
+        let layout = try XCTUnwrap(workspace.filmstripLayout)
+        // Nothing of the hero column is in the rail's, and nothing of the rail
+        // is in the hero's, whatever the scroll.
+        for item in layout.rail {
+            XCTAssertLessThanOrEqual(item.frame.maxX, layout.hero[0].frame.minX)
+        }
     }
 
     /// It is a shape, not a mode: give the window enough room and the grid
