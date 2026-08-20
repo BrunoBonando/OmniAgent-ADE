@@ -1296,7 +1296,11 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
         let sidebar = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "Window")?.submenu?.item(withTitle: "Toggle Sidebar"))
         XCTAssertNil(sidebar.target)
-        XCTAssertEqual(sidebar.action, #selector(WorkspaceWindowController.toggleSidebar(_:)))
+        XCTAssertEqual(
+            sidebar.action,
+            #selector(WorkspaceWindowController.toggleWorkspaceSidebar(_:)),
+            "not AppKit's toggleSidebar: — NSSplitViewController answers that one first"
+        )
         XCTAssertEqual(sidebar.keyEquivalentModifierMask, [.command, .control])
     }
 
@@ -1317,6 +1321,27 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 WorkspaceWindowController.ToolbarItem.reviewPanel,
             ]
         )
+        // The sidebar button reaches *us*. Items target `nil` and travel the
+        // responder chain, where `NSSplitViewController` sits ahead of this
+        // controller — so the action must be a name it does not answer, or it
+        // swallows the press and greys the button out (it has no
+        // `.sidebar`-behavior item to act on).
+        let toggle = try XCTUnwrap(
+            controller.toolbar(
+                toolbar,
+                itemForItemIdentifier: WorkspaceWindowController.ToolbarItem.sidebar,
+                willBeInsertedIntoToolbar: true
+            )
+        )
+        let action = try XCTUnwrap(toggle.action)
+        XCTAssertEqual(action, #selector(WorkspaceWindowController.toggleWorkspaceSidebar(_:)))
+        XCTAssertFalse(
+            (controller.window?.contentViewController as? NSSplitViewController)?
+                .responds(to: action) ?? true,
+            "NSSplitViewController must not answer this selector first"
+        )
+        XCTAssertTrue(controller.validateToolbarItem(toggle))
+
         // The demoted items stay reachable from the customization palette —
         // slimming the default row must not delete the buttons themselves.
         let allowed = controller.toolbarAllowedItemIdentifiers(toolbar)

@@ -78,7 +78,7 @@ extension WorkspaceWindowController: NSToolbarDelegate, NSToolbarItemValidation 
     ) -> NSToolbarItem? {
         switch identifier {
         case ToolbarItem.sidebar:
-            return item(identifier, "Sidebar", "sidebar.leading", #selector(toggleSidebar(_:)))
+            return item(identifier, "Sidebar", "sidebar.leading", #selector(toggleWorkspaceSidebar(_:)))
         case ToolbarItem.newPane:
             return item(identifier, "New Pane", "plus.rectangle", #selector(newTerminalPane(_:)))
         case ToolbarItem.newBrowser:

@@ -287,11 +287,13 @@ enum ApplicationMenus {
 
         let window = NSMenu(title: "Window")
         main.addItem(withSubmenu: window)
-        // ⌃⌘S rather than AppKit's own ⌃⌘S-free default: `toggleSidebar:` here
-        // is the workspace controller's, not `NSSplitViewController`'s, so the
-        // palette row and this item run the same method.
+        // ⌃⌘S rather than AppKit's own ⌃⌘S-free default. The selector is
+        // deliberately NOT `toggleSidebar:`: `NSSplitViewController` is the
+        // content view controller and answers that name earlier in the
+        // responder chain, where it refuses to validate — there is no
+        // `.sidebar`-behavior item for it to act on.
         window.addItem(
-            item("Toggle Sidebar", Selector(("toggleSidebar:")), "s", [.command, .control])
+            item("Toggle Sidebar", Selector(("toggleWorkspaceSidebar:")), "s", [.command, .control])
         )
         // Task 6b-2's per-project brain-context panel, scoped to the
         // focused pane's project.

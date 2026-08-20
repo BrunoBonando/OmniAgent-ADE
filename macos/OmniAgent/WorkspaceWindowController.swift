@@ -713,7 +713,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         sidebarItem.canCollapse = true
         // AppKit remembers the dragged position under this name, so the width
         // survives a relaunch without anything here persisting it.
-        split.splitView.autosaveName = "OmniAgentWorkspaceSidebar"
+        //
+        // Not under XCTest: the test host IS the app, so it shares this
+        // defaults domain. Every controller a test builds was writing its
+        // throwaway window's geometry here — which is how a real sidebar ended
+        // up 332pt wide, and then collapsed, from a test run.
+        if NSClassFromString("XCTestCase") == nil {
+            split.splitView.autosaveName = "OmniAgentWorkspaceSidebar"
+        }
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
 
@@ -2297,7 +2304,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         case .reattachFocusedPane:
             workspace.focusedPaneID.flatMap { workspace.terminalSurface(for: $0) }?.reattachSession(nil)
         case .toggleSidebar:
-            toggleSidebar(nil)
+            toggleWorkspaceSidebar(nil)
         case .clearNotifications:
             notifier.clear()
         case let .searchBrain(query):
@@ -2458,7 +2465,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         palette.present(commands: rows, over: window)
     }
 
-    @objc func toggleSidebar(_ sender: Any?) {
+    /// Named away from AppKit's `toggleSidebar:` on purpose. Toolbar items and
+    /// menu items here target `nil` and travel the responder chain, and
+    /// `NSSplitViewController` — the content view controller, so *ahead* of
+    /// this object in that chain — implements `toggleSidebar:` itself. It was
+    /// swallowing both, and refusing to validate either, because the split has
+    /// no `.sidebar`-behavior item to act on: the toolbar button greyed out
+    /// and ⌃⌘S did nothing. Nothing answers this name but us.
+    @objc func toggleWorkspaceSidebar(_ sender: Any?) {
         (window?.contentViewController as? NSSplitViewController)?
             .splitViewItems.first?
             .animator().isCollapsed.toggle()
