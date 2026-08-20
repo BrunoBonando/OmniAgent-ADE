@@ -1554,6 +1554,44 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertNil(workspace.descriptor(for: paneID))
     }
 
+    /// Both halves of "the pane and the conversation are called the same
+    /// thing": the agent's reported title is typed back at it as a `/rename`,
+    /// and a `/clear` — a new conversation — puts the name back to the
+    /// numbered placeholder.
+    func testTheConversationNameFollowsTheReportedTitleAndResetsOnClear() throws {
+        let controller = makeController()
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .claude, cwd: "/a", id: "sess-cl", group: "grp-1"),
+                ])
+            )
+        )
+        let workspace = controller.workspaceView
+        let surface = try XCTUnwrap(workspace.terminalSurface(for: "sess-cl"))
+
+        surface.setTerminalTitle(source: surface.terminalView, title: "\u{2733} Ingest rewrite")
+        XCTAssertEqual(workspace.descriptor(for: "sess-cl")?.title, "Ingest rewrite")
+        XCTAssertEqual(
+            controller.lastSyncedName["sess-cl"],
+            "Ingest rewrite",
+            "the engine has to be told the name the sidebar is showing"
+        )
+
+        surface.send(source: surface.terminalView, data: ArraySlice(Array("/clear\r".utf8)))
+        let descriptor = try XCTUnwrap(workspace.descriptor(for: "sess-cl"))
+        XCTAssertEqual(descriptor.title, "")
+        XCTAssertNil(descriptor.label)
+        XCTAssertNil(controller.lastSyncedName["sess-cl"])
+        XCTAssertEqual(SessionOutline.paneLabel(descriptor), "Claude 1")
+
+        // A name the user typed is the agreed one already — the agent is not
+        // told to overwrite it with whatever it happens to be reporting.
+        workspace.updateDescriptor(for: "sess-cl") { $0.label = "Ingest" }
+        surface.setTerminalTitle(source: surface.terminalView, title: "Something else")
+        XCTAssertNil(controller.lastSyncedName["sess-cl"])
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(
