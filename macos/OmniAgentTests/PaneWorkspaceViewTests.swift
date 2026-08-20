@@ -707,6 +707,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
             XCTAssertTrue(rename.bounds.contains(view.frame), "\(view) escaped the card")
         }
         XCTAssertEqual(rename.text, "Ingest")
+
+        // The keyboard is in the field, with the whole current name selected —
+        // a rename you have to click into, or clear by hand, is a rename that
+        // makes you do the card's job for it.
+        let editor = try XCTUnwrap(window.firstResponder as? NSTextView)
+        XCTAssertEqual(editor.delegate as? NSTextField, rename.inputField)
+        XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: 6))
     }
 
     /// A pane in a session that is not on screen still gets its question seen:

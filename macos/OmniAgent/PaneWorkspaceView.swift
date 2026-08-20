@@ -1182,11 +1182,20 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// Re-applies the focused pane's first-responder status — used on window
     /// activation, where AppKit restores the window but not our intent.
     func restoreFocus() {
-        guard let focusedPaneID, containers[focusedPaneID] != nil else {
+        guard let focusedPaneID, let container = containers[focusedPaneID] else {
             if let first = paneIDs.first { focusPane(first) }
             return
         }
-        containers[focusedPaneID]?.surface.focus()
+        // A pane ask owns the keyboard for as long as it is up. This runs on
+        // window activation, and handing the terminal the keyboard back from
+        // under an unanswered question would put the next keystroke into the
+        // shell rather than into the card that is asking about it.
+        if let ask = container.askOverlay {
+            window?.makeFirstResponder(ask.firstResponderView)
+            ask.selectInput()
+            return
+        }
+        container.surface.focus()
     }
 
     /// Adopts the pane that actually holds the first responder — click-to-focus,
@@ -1816,8 +1825,14 @@ final class PaneContainerView: NSView, NSDraggingSource {
         askOverlay = overlay
         unansweredCancel = onCancel
         needsLayout = true
-        // The field when the ask has one, so a rename can be typed straight away.
+        // Laid out *before* it takes the keyboard: the card is framed in
+        // `layout`, and a text field still at `.zero` gets a zero-sized field
+        // editor — a caret you cannot see and a selection you cannot make.
+        layoutSubtreeIfNeeded()
+        // The field when the ask has one, so a rename can be typed straight away,
+        // with the whole current name selected so the first keystroke replaces it.
         window?.makeFirstResponder(overlay.firstResponderView)
+        overlay.selectInput()
     }
 
     func dismissAsk() {

@@ -107,6 +107,15 @@ final class PaneAskOverlayView: NSView {
     /// one, so a rename can be typed the moment it opens.
     var firstResponderView: NSView { field ?? self }
 
+    /// Selects everything in the field, so the seeded name is replaced by the
+    /// first keystroke rather than appended to. `makeFirstResponder` alone does
+    /// not reliably do it: the field editor is what holds a selection, and it
+    /// only exists once the field has been made first responder.
+    func selectInput() { field?.currentEditor()?.selectAll(nil) }
+
+    /// The field itself, for the test that the keyboard is actually in it.
+    var inputField: NSTextField? { field }
+
     private let iconView = NSImageView()
     private let titleLabel: NSTextField
     private let messageLabel: NSTextField
