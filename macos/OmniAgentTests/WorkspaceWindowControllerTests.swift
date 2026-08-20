@@ -1317,6 +1317,8 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 WorkspaceWindowController.ToolbarItem.newEditor,
                 WorkspaceWindowController.ToolbarItem.closePane,
                 .flexibleSpace,
+                WorkspaceWindowController.ToolbarItem.zoomToFit,
+                WorkspaceWindowController.ToolbarItem.enterSession,
                 WorkspaceWindowController.ToolbarItem.palette,
             ]
         )
@@ -1477,6 +1479,17 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.workspaceView.activeGroup, "grp-2", "the last restored pane won, so far")
 
         controller.applyRestoredBrowserPanes([])
+        // On the Desk the workspace is in canvas mode, where `focusPane` flies
+        // the camera to the session rather than swapping the grid out from
+        // under it — so the answer arrives one camera flight later, at
+        // `landSession`, instead of on this line. Pumped until it lands rather
+        // than for a fixed 0.38s: the landing is a `DispatchQueue.main`
+        // deadline, and a fixed wait that only just covers it fails whenever a
+        // loaded machine runs the whole class instead of this one test.
+        let landed = Date().addingTimeInterval(5)
+        while controller.workspaceView.activeGroup != "grp-1", Date() < landed {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
 
         XCTAssertEqual(controller.workspaceView.focusedPaneID, "sess-a")
         XCTAssertEqual(controller.workspaceView.activeGroup, "grp-1")

@@ -588,11 +588,29 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Swaps the destination. `isHidden`, never add/remove: see
     /// `contentContainer`'s own doc for why the pane workspace must stay
     /// mounted.
+    ///
+    /// DESK *is* the canvas. There is no second content root and no
+    /// `DeskCanvasView`: the one `PaneWorkspaceView` already owns every
+    /// session's grid, so selecting DESK only asks it for its second layout
+    /// mode — every group laid out at its node rect, under one camera — and
+    /// leaving asks for the first one back, so a hidden workspace is not
+    /// laying out ninety-six panes for nobody.
     func applyDestination(_ destination: WorkspaceDestination) {
         self.destination = destination
         shellSidebar.applyDestination(destination)
         let isTerminals = destination == .terminals
         workspace.isHidden = !isTerminals
+        // Canvas mode is on for the whole Desk destination — but *not* while
+        // the user is inside a session: `landSession` turns the mode off as it
+        // lands, precisely so that "the camera is at identity" and "this card
+        // fills the viewport" are the same picture and every coordinate
+        // conversion in that file stays correct. Which is why the second flag
+        // exists rather than being derived from the first: `deskCanvasLoaded`
+        // says the Desk is what is on screen, whether or not a session is
+        // filling it, and the gesture that brings you back *out* of a session
+        // is guarded on it. This is its only writer.
+        workspace.canvasMode = isTerminals
+        workspace.deskCanvasLoaded = isTerminals
         placeholder.isHidden = isTerminals
         if !isTerminals { placeholder.show(destination) }
     }
@@ -1719,6 +1737,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return destination == .terminals
                 && workspace.focusedPaneID != nil
                 && workspace.paneIDs.count >= 2
+        case #selector(zoomDeskToFit(_:)):
+            // The canvas only exists on the Desk.
+            return destination == .terminals
+        case #selector(enterFocusedSession(_:)):
+            return destination == .terminals && currentDeskSessionGroup() != nil
         default:
             return true
         }
@@ -1911,6 +1934,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             openChangesOverview()
         case .newSession:
             newSession(nil)
+        case let .enterSession(group):
+            enterDeskSession(group)
+        case .zoomDeskToFit:
+            zoomDeskToFit(nil)
         // Interrupt and reattach are the focused terminal's own responder
         // actions (`TerminalSurfaceView`), reached here directly rather than
         // re-implemented, so the palette runs the identical code the ⌘. and
@@ -1941,6 +1968,68 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         case .noop:
             break
         }
+    }
+
+    // MARK: - Desk canvas commands
+
+    /// The one way into a session, whichever surface asked.
+    ///
+    /// Below identity scale the canvas is what you are looking at, so entering
+    /// is a camera flight and `PaneWorkspaceView.enterSession` owns the
+    /// landing — including `carryCardToFocusedPane()`, without which the
+    /// blinking cursor is left behind on a pane nobody can see. Off the Desk
+    /// (or with the canvas not loaded) the old instant swap is still exactly
+    /// right, so `activateGroup` stays the other arm rather than being replaced
+    /// by it. Every surface — the toolbar button, the palette row, and the menu
+    /// items and sidebar row Task 10b routes here — lands in this one method, so
+    /// they cannot drift apart the way `run(_:)`'s doc warns about.
+    func enterDeskSession(_ group: String) {
+        if workspace.canvasMode {
+            workspace.enterSession(group)
+        } else {
+            workspace.activateGroup(group)
+        }
+        // The sidebar's current-session highlight is derived from the focused
+        // pane, which the line above has just moved.
+        reloadOutline()
+    }
+
+    /// Which session the Desk is about right now.
+    ///
+    /// Deliberately the *visible* session of the selected project first, and
+    /// only then the one holding focus: selecting a workspace does not move
+    /// focus, so focus routinely belongs to another project entirely, and
+    /// "which session should this project show" is a different question from
+    /// "which session has the cursor in it".
+    func currentDeskSessionGroup() -> String? {
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        if let project = selectedProjectID,
+           let visible = SessionOutline.visibleSessionGroupID(
+               panes,
+               project: project,
+               focusedPaneID: workspace.focusedPaneID
+           ) {
+            return visible
+        }
+        return SessionOutline.currentSessionGroupID(panes, focusedPaneID: workspace.focusedPaneID)
+    }
+
+    /// ⌘0 — the whole tree plus its margin, centred. The same operation
+    /// exiting a session performs, aimed at `fitAll` rather than at a card.
+    @objc func zoomDeskToFit(_ sender: Any?) {
+        guard destination == .terminals else { return }
+        workspace.exitToCanvas()
+    }
+
+    /// Enter whichever session the Desk is currently about. Named
+    /// `enterFocusedSession:` rather than `enterSession:` on purpose: the
+    /// latter selector would be ambiguous with
+    /// `PaneWorkspaceView.enterSession(_:)` if that ever became `@objc`, and a
+    /// responder chain that handed an `NSMenuItem` to a method expecting a
+    /// group id crashes rather than misbehaving.
+    @objc func enterFocusedSession(_ sender: Any?) {
+        guard let group = currentDeskSessionGroup() else { return }
+        enterDeskSession(group)
     }
 
     /// The palette's "results mode": the same panel, its rows swapped for

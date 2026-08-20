@@ -46,6 +46,7 @@
 		2ADA9E4CC4CE4F37B25A421B /* EditorPaneViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BF1B274379647B88A0DBA04 /* EditorPaneViewTests.swift */; };
 		3C1E9A5F7D0B42E1A8460F31 /* EditorPaneIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A44D2B60E9C41D8B5721CA3 /* EditorPaneIntegrationTests.swift */; };
 		1ECF599C46245E2BA8447FC1 /* GitFileContentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE0A2CB26F101E0CCC68EFBA /* GitFileContentTests.swift */; };
+		886AD5FC7A3C4837958280C6 /* WorkspaceWindowControllerDeskCanvasTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB9D2F62F22A4B56B0D9AAF1 /* WorkspaceWindowControllerDeskCanvasTests.swift */; };
 		6D32C137B60B4C9586F35FBC /* DeskCanvasNodeViewsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1181060562454A6FA6784749 /* DeskCanvasNodeViewsTests.swift */; };
 		6EAB469FE27B4B4D889571B0 /* DeskCanvasInputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5544AA75593B4BA4BC9E6270 /* DeskCanvasInputTests.swift */; };
 		9221AD3E21244586840226C8 /* DeskCameraFlightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 928CD3A8DE8E4A35B612FD89 /* DeskCameraFlightTests.swift */; };
@@ -194,6 +195,7 @@
 		9BF1B274379647B88A0DBA04 /* EditorPaneViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneViewTests.swift; sourceTree = "<group>"; };
 		7A44D2B60E9C41D8B5721CA3 /* EditorPaneIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneIntegrationTests.swift; sourceTree = "<group>"; };
 		BE0A2CB26F101E0CCC68EFBA /* GitFileContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitFileContentTests.swift; sourceTree = "<group>"; };
+		FB9D2F62F22A4B56B0D9AAF1 /* WorkspaceWindowControllerDeskCanvasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowControllerDeskCanvasTests.swift; sourceTree = "<group>"; };
 		1181060562454A6FA6784749 /* DeskCanvasNodeViewsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCanvasNodeViewsTests.swift; sourceTree = "<group>"; };
 		5544AA75593B4BA4BC9E6270 /* DeskCanvasInputTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCanvasInputTests.swift; sourceTree = "<group>"; };
 		928CD3A8DE8E4A35B612FD89 /* DeskCameraFlightTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCameraFlightTests.swift; sourceTree = "<group>"; };
@@ -433,6 +435,7 @@
 				20000000000000000000097 /* SessionHoverCardTests.swift */,
 				20000000000000000000061 /* WorkspaceFilesTests.swift */,
 				20000000000000000000071 /* EngineLauncherTests.swift */,
+				FB9D2F62F22A4B56B0D9AAF1 /* WorkspaceWindowControllerDeskCanvasTests.swift */,
 			);
 			path = OmniAgentTests;
 			sourceTree = "<group>";
@@ -675,6 +678,7 @@
 				10000000000000000000097 /* SessionHoverCardTests.swift in Sources */,
 				10000000000000000000061 /* WorkspaceFilesTests.swift in Sources */,
 				10000000000000000000071 /* EngineLauncherTests.swift in Sources */,
+				886AD5FC7A3C4837958280C6 /* WorkspaceWindowControllerDeskCanvasTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
