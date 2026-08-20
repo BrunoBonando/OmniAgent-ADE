@@ -1404,6 +1404,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
     // MARK: - Session outline
 
     func testTheOutlineFollowsThePanesAndTheFocusedOne() throws {
+        UserDefaults.standard.removeObject(forKey: WorkspacesTreeView.collapsedDefaultsKey)
         let controller = makeEmptyController()
         defer { controller.close() }
         controller.showWindow(nil)
@@ -1414,16 +1415,52 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 ])
             )
         )
-        let tree = controller.shellSidebar.sessionsTree
+        let tree = controller.shellSidebar.workspacesTree
+        XCTAssertEqual(tree.renderedWorkspaceIDs, ["alpha"])
         XCTAssertEqual(tree.renderedSessionIDs, ["g1"])
-        XCTAssertEqual(tree.renderedPaneIDs, ["sess-a"])
 
         controller.newTerminalPane(nil)
 
         XCTAssertEqual(tree.renderedSessionIDs, ["g1"], "the new pane joins the open session")
-        let focused = try XCTUnwrap(controller.workspaceView.focusedPaneID)
-        XCTAssertEqual(tree.renderedPaneIDs.count, 2, "the new pane appears in its session")
-        XCTAssertTrue(tree.renderedPaneIDs.contains(focused))
+        XCTAssertEqual(controller.workspaceView.paneIDs.count, 2, "and exists, without a row of its own")
+    }
+
+    /// The redesign's selection seam: a session row in ANY workspace both
+    /// selects that workspace and activates that session's panes.
+    func testClickingASessionInAnotherWorkspaceSwitchesWorkspaceAndActivatesIt() throws {
+        UserDefaults.standard.removeObject(forKey: WorkspacesTreeView.collapsedDefaultsKey)
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1"),
+                    PersistedTab(project: "beta", engine: .shell, cwd: "/b", id: "sess-b", group: "g2"),
+                ])
+            )
+        )
+        // The restore focused beta's pane last, so beta is the open workspace.
+        controller.selectWorkspace(id: "beta", animated: false)
+
+        let tree = controller.shellSidebar.workspacesTree
+        let row = try XCTUnwrap(
+            tree.descendants.compactMap { $0 as? SessionRowView }
+                .first { $0.session.project == "alpha" }
+        )
+        try XCTUnwrap(row.onPress)()
+
+        XCTAssertEqual(controller.selectedProjectID, "alpha", "the workspace follows the session")
+        // On the Desk the activation is a camera flight; pump until it lands.
+        let landed = Date().addingTimeInterval(5)
+        while controller.workspaceView.activeGroup != "g1", Date() < landed {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertEqual(controller.workspaceView.activeGroup, "g1", "and the session's panes are active")
+        let highlighted = tree.descendants.compactMap { $0 as? SessionRowView }
+            .filter(\.session.isCurrent)
+        XCTAssertEqual(highlighted.map(\.session.id), ["g1"], "the current session row is the lit one")
     }
 
     func testRenamingASessionWritesTheNameOntoEveryPaneInIt() throws {

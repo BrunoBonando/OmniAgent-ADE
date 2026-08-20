@@ -4,9 +4,9 @@ import AppKit
 // (docs/superpowers/specs/2026-08-20-copilot-nav-redesign-design.md). One
 // straight column in the existing `ShellPalette` language: fixed nav rows on
 // top (Home, To Do List, Search), then the Workspaces section holding the
-// sessions tree, and the account row pinned at the bottom. It replaces the
-// two-level sliding track `WorkspaceShell.swift` used to build; that file
-// keeps the shared tokens, glyphs and the trees this column still mounts.
+// workspaces tree (`WorkspacesTree.swift`), and the account row pinned at the
+// bottom. It replaces the two-level sliding track `WorkspaceShell.swift` used
+// to build; that file keeps the shared tokens, glyphs and row classes.
 
 // MARK: - Fixed nav rows
 
@@ -240,26 +240,23 @@ final class SidebarAccountRowView: NSView {
 // MARK: - The sidebar
 
 /// The sidebar itself: one flat column, top to bottom — nav rows, the
-/// Workspaces section with the sessions tree, the account row.
+/// Workspaces section with the workspaces tree, the account row.
 final class NavigationSidebarView: NSView {
     /// Home or To Do List was pressed (Search never routes here).
     var onSelectDestination: ((WorkspaceDestination) -> Void)?
     /// The Search row: raise the spotlight. Deliberately not a selection —
     /// the lit row stays wherever it was.
     var onSearch: (() -> Void)?
-    var onSelectPane: ((String) -> Void)?
     var onSelectSession: ((SessionGroupNode) -> Void)?
-    var onNewSession: (() -> Void)?
     var onRenameSession: ((SessionGroupNode, String) -> Void)?
-    var onRenamePane: ((String, String) -> Void)?
-    /// The sessions tree's hovers, forwarded to the controller — which owns
+    /// The workspaces tree's hovers, forwarded to the controller — which owns
     /// the hover card, because the card is a window and the sidebar is a view.
     var onHoverTarget: ((SessionHoverCardController.Target?) -> Void)?
     var onOpenSettings: (() -> Void)?
 
     private(set) var navRows: [SidebarNavRowView] = []
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
-    let sessionsTree = SessionsTreeView()
+    let workspacesTree = WorkspacesTreeView()
     let accountRow = SidebarAccountRowView()
     private(set) var destination: WorkspaceDestination = .terminals
 
@@ -292,19 +289,14 @@ final class NavigationSidebarView: NSView {
             row.widthAnchor.constraint(equalTo: navStack.widthAnchor, constant: -16).isActive = true
         }
 
-        let scroll = ShellScrollView(documentView: sessionsTree)
+        let scroll = ShellScrollView(documentView: workspacesTree)
 
         accountRow.onOpenSettings = { [weak self] in self?.onOpenSettings?() }
-        sessionsTree.onSelectPane = { [weak self] id in self?.onSelectPane?(id) }
-        sessionsTree.onSelectSession = { [weak self] session in self?.onSelectSession?(session) }
-        sessionsTree.onNewSession = { [weak self] in self?.onNewSession?() }
-        sessionsTree.onRenameSession = { [weak self] session, name in
+        workspacesTree.onSelectSession = { [weak self] session in self?.onSelectSession?(session) }
+        workspacesTree.onRenameSession = { [weak self] session, name in
             self?.onRenameSession?(session, name)
         }
-        sessionsTree.onRenamePane = { [weak self] paneID, name in
-            self?.onRenamePane?(paneID, name)
-        }
-        sessionsTree.onHoverTarget = { [weak self] target in self?.onHoverTarget?(target) }
+        workspacesTree.onHoverTarget = { [weak self] target in self?.onHoverTarget?(target) }
 
         for view in [navStack, workspacesHeader, scroll, accountRow] { addSubview(view) }
         NSLayoutConstraint.activate([
@@ -340,32 +332,48 @@ final class NavigationSidebarView: NSView {
         for row in navRows { row.apply(selected: row.item.destination == destination) }
     }
 
-    /// Everything the sessions half renders, scoped to the open workspace.
-    func reloadSessions(
+    /// Everything the Workspaces section renders: EVERY workspace, its
+    /// sessions inline — never scoped to the open one. The brain's project
+    /// list supplies the rows (so a workspace with nothing running still
+    /// shows), and the pane descriptors supply the sessions — plus a row for
+    /// any project only the panes know about (a folder opened directly).
+    func reloadWorkspaces(
+        workspaces: [BrainProjectSummary],
         panes: [PaneDescriptor],
         focusedPaneID: String?,
         statuses: [String: RemoteSessionStatus],
-        project: String?
+        projectLabels: [String: String]
     ) {
-        let scoped = project.map { id in panes.filter { $0.project == id } } ?? panes
-        let sessions = SessionOutline.group(scoped, focusedPaneID: focusedPaneID)
-            .flatMap(\.sessions)
-        var byID: [String: PaneDescriptor] = [:]
-        for pane in scoped { byID[pane.sessionID] = pane }
-
-        sessionsTree.reload(
-            sessions: sessions,
-            panes: byID,
-            focusedPaneID: focusedPaneID,
-            statuses: statuses
-        )
+        let grouped = SessionOutline.group(panes, focusedPaneID: focusedPaneID)
+        var entries: [WorkspaceTreeEntry] = []
+        var listed = Set<String>()
+        for workspace in workspaces {
+            listed.insert(workspace.id)
+            entries.append(
+                WorkspaceTreeEntry(
+                    id: workspace.id,
+                    label: workspace.label,
+                    sessions: grouped.first { $0.project == workspace.id }?.sessions ?? []
+                )
+            )
+        }
+        for node in grouped where !listed.contains(node.project) {
+            entries.append(
+                WorkspaceTreeEntry(
+                    id: node.project,
+                    label: SessionOutline.projectLabel(node.project, labels: projectLabels),
+                    sessions: node.sessions
+                )
+            )
+        }
+        workspacesTree.reload(entries: entries, focusedPaneID: focusedPaneID, statuses: statuses)
     }
 
     /// Where a hovered row sits on screen right now, or `nil` if it is gone.
     /// The hover card asks this every tick rather than remembering a frame:
     /// the rows are rebuilt constantly.
     func rowFrameOnScreen(for target: SessionHoverCardController.Target) -> NSRect? {
-        guard let row = sessionsTree.rowView(for: target),
+        guard let row = workspacesTree.rowView(for: target),
               let window = row.window,
               row.superview != nil,
               !row.isHiddenOrHasHiddenAncestor,

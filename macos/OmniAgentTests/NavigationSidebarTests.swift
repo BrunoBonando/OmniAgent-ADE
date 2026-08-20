@@ -73,18 +73,18 @@ final class NavigationSidebarTests: XCTestCase {
 
     // MARK: - Workspaces section
 
-    /// The sessions tree stays mounted, under a "Workspaces" section header
+    /// The workspaces tree stays mounted, under a "Workspaces" section header
     /// that sits between the nav rows and the tree.
     func testTheWorkspacesHeaderSitsBetweenTheNavRowsAndTheTree() throws {
         let sidebar = makeSidebar()
         XCTAssertEqual(sidebar.workspacesHeader.title, "Workspaces")
-        XCTAssertNotNil(sidebar.sessionsTree.superview, "the tree is mounted")
+        XCTAssertNotNil(sidebar.workspacesTree.superview, "the tree is mounted")
 
         func top(_ view: NSView) -> CGFloat { view.convert(view.bounds, to: sidebar).maxY }
         let lastNav = try XCTUnwrap(sidebar.navRows.last)
         // Not flipped: larger y is higher on screen.
         XCTAssertLessThan(top(sidebar.workspacesHeader), top(lastNav))
-        XCTAssertLessThanOrEqual(top(sidebar.sessionsTree), top(sidebar.workspacesHeader))
+        XCTAssertLessThanOrEqual(top(sidebar.workspacesTree), top(sidebar.workspacesHeader))
     }
 
     // MARK: - Account row

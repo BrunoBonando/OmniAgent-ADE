@@ -45,7 +45,7 @@ final class WorkspaceWindow: NSWindow {
         // But `sendEvent` runs *before* the responder chain, so left
         // unguarded it would just as happily steal esc from anything else
         // with focus — including an active field editor. A sidebar rename
-        // (`SessionRowView`/`TerminalRowView` in `WorkspaceShell.swift`) and
+        // (`SessionRowView` in `WorkspaceShell.swift`) and
         // the files tree's filter field (`WorkspaceFilesTreeView.filterField`,
         // same file) both call `window.makeFirstResponder` on a plain
         // `NSTextField`, which installs the shared field editor — a genuine
@@ -98,10 +98,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// a split view — the workspace is one half of it, not the whole thing.
     var workspaceView: PaneWorkspaceView { workspace }
     /// The flat Copilot-style sidebar (the 2026-08-20 redesign). It draws the
-    /// sessions tree itself — the rows carry engine logos and per-pane status
-    /// dots, none of which an `NSOutlineView` cell can lay out that way.
-    /// `SessionOutline`'s grouping rules live on and are what the tree is
-    /// built from.
+    /// workspaces tree itself — the session rows carry per-pane status dots
+    /// and inline rename, neither of which an `NSOutlineView` cell can lay
+    /// out that way. `SessionOutline`'s grouping rules live on and are what
+    /// the tree is built from.
     let shellSidebar = NavigationSidebarView()
     /// The content half of the split: the pane workspace and the placeholder
     /// both live here permanently, and the destination only toggles which is
@@ -403,18 +403,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.onCameraChanged = { [weak self] in self?.updateDeskZoomReadout() }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
         usageRecorder.onStoreChanged = { [weak self] store in self?.persistUsageAnalytics(store) }
-        shellSidebar.onSelectPane = { [weak self] id in self?.workspace.focusPane(id) }
         shellSidebar.onSelectSession = { [weak self] session in
+            guard let self else { return }
+            // The tree lists every workspace, so a session row is allowed to
+            // belong to a workspace that is not the open one: entering it
+            // opens that workspace first, then activates the session — the
+            // redesign's one click-through seam.
+            if !session.project.isEmpty, session.project != selectedProjectID {
+                selectWorkspace(id: session.project, animated: false)
+            }
+            // A session is pane content; from Home or To Do List the pane
+            // workspace is hidden until the destination comes back.
+            if destination != .terminals { applyDestination(.terminals) }
             // The one entry path. This used to call `workspace.focusPane(first)`
             // directly, which in canvas mode would swap the grid out from under
             // a camera pointed somewhere else.
-            self?.enterDeskSession(session.id)
+            enterDeskSession(session.id)
         }
         shellSidebar.onRenameSession = { [weak self] session, name in
             self?.renameSession(session, to: name)
-        }
-        shellSidebar.onRenamePane = { [weak self] paneID, name in
-            self?.renamePane(paneID, to: name)
         }
         shellSidebar.onHoverTarget = { [weak self] target in
             guard let self else { return }
@@ -422,7 +429,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         hoverCard.provider = { [weak self] target in self?.hoverCardModel(for: target) }
         hoverCard.rowFrame = { [weak self] target in self?.shellSidebar.rowFrameOnScreen(for: target) }
-        shellSidebar.onNewSession = { [weak self] in self?.newSession(nil) }
         // Search fires the spotlight and is deliberately not a selection —
         // the same panel ⌃Space and ⌘K raise.
         shellSidebar.onSearch = { [weak self] in self?.showCommandPalette(nil) }
@@ -707,7 +713,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         deskReturn = nil
     }
 
-    /// Opens a workspace and scopes the sidebar's sessions tree to it.
+    /// Opens a workspace: the git status, the repository the spotlight
+    /// searches and the Desk's session commands all follow it. The sidebar's
+    /// tree is NOT scoped to it any more — it lists every workspace — but it
+    /// re-renders so the current-session highlight tracks the move.
     func selectWorkspace(id: String, animated: Bool = true) {
         selectedProjectID = id
         let summary = workspaces.first { $0.id == id }
@@ -2241,16 +2250,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     // MARK: - Session outline
 
-    /// Scoped to the open workspace: the sidebar's tree shows that
-    /// workspace's sessions and no one else's. With none open the unfiltered
-    /// tree is kept, so a fresh window still shows what exists.
+    /// The sidebar's tree shows every workspace with its sessions inline —
+    /// the 2026-08-20 redesign dropped the per-workspace scoping, so this
+    /// hands over the whole picture: the brain's project list and every live
+    /// pane.
     private func reloadOutline() {
         let all = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
-        shellSidebar.reloadSessions(
+        shellSidebar.reloadWorkspaces(
+            workspaces: workspaces,
             panes: all,
             focusedPaneID: workspace.focusedPaneID,
             statuses: lastStatus,
-            project: selectedProjectID
+            projectLabels: projectLabels
         )
     }
 

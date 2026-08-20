@@ -7,6 +7,13 @@ import XCTest
 /// its rows and badges, and the files tree (headed for the review panel). The
 /// flat sidebar column itself is `NavigationSidebarTests`' subject.
 final class WorkspaceShellTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // A collapsed workspace left behind by an earlier run would fold the
+        // rows these tests assert on.
+        UserDefaults.standard.removeObject(forKey: WorkspacesTreeView.collapsedDefaultsKey)
+    }
+
     private func makeSidebar() -> NavigationSidebarView {
         let sidebar = NavigationSidebarView()
         sidebar.frame = NSRect(x: 0, y: 0, width: ShellMetrics.sidebarWidth, height: 700)
@@ -38,13 +45,13 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(makeSidebar().destination, .terminals)
     }
 
-    /// The sessions tree stays on screen for every destination — the sidebar
-    /// always shows at least the session list.
-    func testTheSessionsTreeStaysVisibleAcrossDestinations() {
+    /// The workspaces tree stays on screen for every destination — the sidebar
+    /// always shows at least the workspace list.
+    func testTheWorkspacesTreeStaysVisibleAcrossDestinations() {
         let sidebar = makeSidebar()
         for destination in WorkspaceDestination.allCases {
             sidebar.applyDestination(destination)
-            XCTAssertFalse(sidebar.sessionsTree.isHiddenOrHasHiddenAncestor)
+            XCTAssertFalse(sidebar.workspacesTree.isHiddenOrHasHiddenAncestor)
         }
     }
 
@@ -101,101 +108,142 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(ShellPalette.sessionCountLabel(4), "4 sessions")
     }
 
-    // MARK: - Sessions tree
+    // MARK: - Workspaces tree
 
-    /// Panes belonging to another workspace must not leak into this one's tree.
-    func testTheTreeIsScopedToTheOpenWorkspace() {
+    /// The 2026-08-20 redesign: the tree lists EVERY workspace with its
+    /// sessions inline underneath — never scoped to the open one.
+    func testTheTreeListsEveryWorkspaceWithItsSessionsInline() {
         let sidebar = makeSidebar()
-        sidebar.reloadSessions(
+        sidebar.reloadWorkspaces(
+            workspaces: [
+                BrainProjectSummary(id: "p1", label: "Alpha", path: nil),
+                BrainProjectSummary(id: "p2", label: "Beta", path: nil),
+            ],
             panes: [pane("a", group: "s1", project: "p1"), pane("b", group: "s2", project: "p2")],
             focusedPaneID: "a",
             statuses: [:],
-            project: "p1"
+            projectLabels: [:]
         )
-        XCTAssertEqual(sidebar.sessionsTree.renderedSessionIDs, ["s1"])
+        let tree = sidebar.workspacesTree
+        XCTAssertEqual(tree.renderedWorkspaceIDs, ["p1", "p2"])
+        XCTAssertEqual(tree.renderedSessionIDs, ["s1", "s2"])
+        XCTAssertEqual(
+            tree.descendants(WorkspaceRowView.self).map(\.workspaceID),
+            ["p1", "p2"]
+        )
     }
 
-    /// The 2026-08-20 redesign removed the per-session add-pane rows from the
-    /// sidebar: the tree renders sessions and their panes, and nothing else.
-    /// ⌘T / ⇧⌘T / ⇧⌘E, the hole tile and the palette add panes now.
-    func testTheTreeOffersNoAddPaneRows() {
+    /// A folder opened directly — panes carrying a project the brain has not
+    /// listed — still gets its workspace row.
+    func testAPaneOnlyWorkspaceStillGetsARow() {
         let sidebar = makeSidebar()
-        sidebar.reloadSessions(
+        sidebar.reloadWorkspaces(
+            workspaces: [BrainProjectSummary(id: "p1", label: "Alpha", path: nil)],
+            panes: [pane("a", group: "s9", project: "p9")],
+            focusedPaneID: nil,
+            statuses: [:],
+            projectLabels: [:]
+        )
+        XCTAssertEqual(sidebar.workspacesTree.renderedWorkspaceIDs, ["p1", "p9"])
+    }
+
+    /// Sessions are the tree's leaves now: pane rows are gone from the
+    /// sidebar entirely, as are the per-session add-pane rows. ⌘T / ⇧⌘T /
+    /// ⇧⌘E, the hole tile and the palette add panes.
+    func testTheTreeDrawsSessionsAsLeavesNeverPaneRows() {
+        let sidebar = makeSidebar()
+        sidebar.reloadWorkspaces(
+            workspaces: [],
             panes: (1..<PaneGrid.maxPanes).map { pane("t\($0)", group: "s1") },
             focusedPaneID: "t1",
             statuses: [:],
-            project: "p1"
+            projectLabels: [:]
         )
-        let rows = sidebar.sessionsTree.descendants(ShellRowView.self)
-        XCTAssertEqual(
-            rows.filter { $0 is TerminalRowView }.count,
-            PaneGrid.maxPanes - 1,
-            "every pane renders"
-        )
-        XCTAssertEqual(
-            rows.filter { !($0 is SessionRowView) && !($0 is TerminalRowView) }
-                .map { $0.accessibilityLabel() },
-            ["New session"],
-            "only the header's add-session button remains"
+        let rows = sidebar.workspacesTree.descendants(ShellRowView.self)
+        XCTAssertEqual(rows.filter { $0 is SessionRowView }.count, 1, "many panes, one session row")
+        XCTAssertTrue(
+            rows.allSatisfy { $0 is SessionRowView || $0 is WorkspaceRowView },
+            "workspace and session rows are the whole tree"
         )
     }
 
-    /// A terminal blocked on a question wears the amber pill beside its engine
-    /// icon — until it is the selected one, whose ask is on screen already.
-    func testAnAwaitingTerminalRowWearsTheBadgeUntilSelected() {
-        let awaiting = TerminalRowView(
-            pane: pane("t1", group: "s1"), focused: false, status: .awaitingApproval
+    /// A workspace with nothing running says so, dimly, instead of showing a
+    /// bare header.
+    func testAWorkspaceWithNoSessionsShowsADimEmptyRow() throws {
+        let sidebar = makeSidebar()
+        sidebar.reloadWorkspaces(
+            workspaces: [BrainProjectSummary(id: "p1", label: "Alpha", path: nil)],
+            panes: [],
+            focusedPaneID: nil,
+            statuses: [:],
+            projectLabels: [:]
         )
-        XCTAssertEqual(awaiting.awaitingBadge?.count, 1)
-        let selected = TerminalRowView(
-            pane: pane("t1", group: "s1"), focused: true, status: .awaitingApproval
-        )
-        XCTAssertNil(selected.awaitingBadge)
-        let working = TerminalRowView(
-            pane: pane("t1", group: "s1"), focused: false, status: .thinking
-        )
-        XCTAssertNil(working.awaitingBadge)
+        let empty = try XCTUnwrap(sidebar.workspacesTree.descendant(WorkspaceEmptyRowView.self))
+        XCTAssertEqual(empty.title, "No sessions yet")
     }
 
-    /// The session row aggregates its blocked terminals expanded or collapsed
-    /// — a session needing attention must be findable from the session list
-    /// alone, whether or not its terminal rows are showing.
-    func testTheSessionRowAggregatesTheWaitingCountInEitherState() {
-        for expanded in [true, false] {
-            let row = SessionRowView(
-                session: sessionNode(label: "s"),
-                expanded: expanded,
-                statuses: [.awaitingApproval],
-                awaitingCount: 2
-            )
-            XCTAssertEqual(row.awaitingBadge?.count, 2)
-        }
-        let quiet = SessionRowView(
-            session: sessionNode(label: "s"),
-            expanded: false,
-            statuses: [.ready],
-            awaitingCount: 0
-        )
-        XCTAssertNil(quiet.awaitingBadge)
+    /// The disclosure fold survives a rebuild *and* a relaunch — the tree is
+    /// thrown away and re-made on every status event, so an unpersisted fold
+    /// would pop back open within seconds.
+    func testCollapsingAWorkspacePersistsAcrossTreeRebuilds() throws {
+        let suite = "workspaces-tree-test-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let tree = WorkspacesTreeView(defaults: defaults)
+        tree.frame = NSRect(x: 0, y: 0, width: ShellMetrics.sidebarWidth, height: 500)
+        let entries = [WorkspaceTreeEntry(id: "p1", label: "Alpha", sessions: [sessionNode(label: "s")])]
+        tree.reload(entries: entries, focusedPaneID: nil, statuses: [:])
+        XCTAssertEqual(tree.renderedSessionIDs, ["s1"])
+        let row = try XCTUnwrap(tree.descendant(WorkspaceRowView.self))
+        XCTAssertTrue(row.isExpanded)
+
+        row.onPress?()
+
+        XCTAssertEqual(tree.renderedSessionIDs, [], "collapsed: the sessions leave the tree")
+        XCTAssertFalse(try XCTUnwrap(tree.descendant(WorkspaceRowView.self)).isExpanded)
+
+        // A fresh tree over the same defaults — a relaunch — keeps the fold.
+        let rebuilt = WorkspacesTreeView(defaults: defaults)
+        rebuilt.reload(entries: entries, focusedPaneID: nil, statuses: [:])
+        XCTAssertEqual(rebuilt.renderedSessionIDs, [])
     }
 
-    /// End to end through the tree: collapsing the current session rolls its
-    /// blocked terminals into one count, minus the focused one — selected
-    /// counts as seen, the same rule that clears a terminal row's own badge.
-    func testACollapsedSessionCountsItsUnseenAsks() throws {
+    /// The folder icon tells the fold state at a glance: open while expanded.
+    func testTheFolderIconShowsTheOpenVariantWhileExpanded() {
+        XCTAssertEqual(WorkspaceRowView(id: "p1", label: "A", expanded: true).folderGlyph.glyph, .folderOpen)
+        XCTAssertEqual(WorkspaceRowView(id: "p1", label: "A", expanded: false).folderGlyph.glyph, .folder)
+    }
+
+    /// The session row aggregates its blocked terminals minus the focused one
+    /// — selected counts as seen, and with pane rows gone the session row is
+    /// the only place the count can live.
+    func testASessionRowCountsItsUnseenAsks() throws {
         let sidebar = makeSidebar()
         let panes = (1...3).map { pane("t\($0)", group: "s1") }
         let statuses: [String: RemoteSessionStatus] = [
             "t1": .awaitingApproval, "t2": .awaitingApproval, "t3": .awaitingApproval,
         ]
-        sidebar.reloadSessions(
-            panes: panes, focusedPaneID: "t1", statuses: statuses, project: "p1"
+        sidebar.reloadWorkspaces(
+            workspaces: [], panes: panes, focusedPaneID: "t1", statuses: statuses, projectLabels: [:]
         )
-        let row = try XCTUnwrap(sidebar.sessionsTree.descendant(SessionRowView.self))
+        let row = try XCTUnwrap(sidebar.workspacesTree.descendant(SessionRowView.self))
         XCTAssertEqual(row.awaitingBadge?.count, 2, "three asks, one focused")
-        row.onPress?()
-        let collapsed = try XCTUnwrap(sidebar.sessionsTree.descendant(SessionRowView.self))
-        XCTAssertEqual(collapsed.awaitingBadge?.count, 2, "and collapsing keeps the count")
+    }
+
+    func testTheSessionRowShowsTheWaitingCountOnlyWhileSomethingWaits() {
+        let row = SessionRowView(
+            session: sessionNode(label: "s"),
+            statuses: [.awaitingApproval],
+            awaitingCount: 2
+        )
+        XCTAssertEqual(row.awaitingBadge?.count, 2)
+        let quiet = SessionRowView(
+            session: sessionNode(label: "s"),
+            statuses: [.ready],
+            awaitingCount: 0
+        )
+        XCTAssertNil(quiet.awaitingBadge)
     }
 
     func testStatusDotColoursFollowTheDesign() {
@@ -226,7 +274,6 @@ final class WorkspaceShellTests: XCTestCase {
     func testCommittingARenameReportsTheNewName() {
         let row = SessionRowView(
             session: sessionNode(label: "old"),
-            expanded: true,
             statuses: []
         )
         var reported: String?
@@ -241,7 +288,6 @@ final class WorkspaceShellTests: XCTestCase {
     func testAnEmptyRenameIsIgnored() {
         let row = SessionRowView(
             session: sessionNode(label: "old"),
-            expanded: true,
             statuses: []
         )
         var reported: String?

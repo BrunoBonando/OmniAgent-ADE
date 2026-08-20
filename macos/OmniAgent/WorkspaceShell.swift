@@ -2,10 +2,12 @@ import AppKit
 
 // The workspace shell's shared vocabulary, from the "OmniAgent ADE" design doc
 // (design/OmniAgent ADE.dc.html, the 2026-08-10 import): the palette, metrics,
-// glyphs and row classes every sidebar surface draws with, plus the sessions
-// tree and the files tree the surfaces mount. The sidebar *column* itself is
-// `NavigationSidebarView` (NavigationSidebar.swift) — the 2026-08-20 redesign
-// replaced this file's two-level sliding track with that one flat column.
+// glyphs and row classes every sidebar surface draws with, plus the session
+// row and the files tree the surfaces mount. The sidebar *column* itself is
+// `NavigationSidebarView` (NavigationSidebar.swift), and the workspaces tree
+// it mounts is `WorkspacesTreeView` (WorkspacesTree.swift) — the 2026-08-20
+// redesign replaced this file's two-level sliding track with that one flat
+// column.
 //
 // Every number in here — inset, corner radius, point size, alpha — is read off
 // that document rather than chosen. The design is a web mock, so its `px` are
@@ -271,6 +273,7 @@ enum ShellGlyph {
     case terminal
     case panes
     case folder
+    case folderOpen
     case file
     case magnifier
     case gear
@@ -386,6 +389,26 @@ enum ShellGlyph {
             )
             path.close()
             path.fill()
+        case .folderOpen:
+            // The closed glyph with its front swung out — the workspace row's
+            // "expanded" state. Two filled shapes: the back band with the tab,
+            // and the tilted front flap overlapping it.
+            path.move(to: NSPoint(x: 2, y: 8))
+            path.line(to: NSPoint(x: 2, y: 4.6))
+            path.line(to: NSPoint(x: 3.2, y: 3.4))
+            path.line(to: NSPoint(x: 5.6, y: 3.4))
+            path.line(to: NSPoint(x: 6.8, y: 4.8))
+            path.line(to: NSPoint(x: 13, y: 4.8))
+            path.line(to: NSPoint(x: 13, y: 8))
+            path.close()
+            path.fill()
+            let flap = NSBezierPath()
+            flap.move(to: NSPoint(x: 3.6, y: 7))
+            flap.line(to: NSPoint(x: 14.4, y: 7))
+            flap.line(to: NSPoint(x: 12.6, y: 12.6))
+            flap.line(to: NSPoint(x: 2, y: 12.6))
+            flap.close()
+            flap.fill()
         case .file:
             path.lineWidth = 1.1
             path.move(to: NSPoint(x: 3.5, y: 2.4))
@@ -732,11 +755,11 @@ class ShellRowView: NSView {
     }
 }
 
-// MARK: - Sessions tree
+// MARK: - Session rows
 
 /// The amber "inputs waiting" pill: the count of terminals blocked on a
-/// question. Worn by a collapsed session row (aggregate) and by an awaiting
-/// terminal row (its own 1) — the same badge, so the eye learns it once.
+/// question, worn by the session row — with the pane rows gone from the
+/// sidebar it is the one place the count can live.
 final class ShellAwaitingBadgeView: NSView {
     let count: Int
 
@@ -772,7 +795,9 @@ final class ShellAwaitingBadgeView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 }
 
-/// A session row — the collapsible parent of a set of terminals.
+/// A session row — the tree's leaf: name, per-pane status dots, and nothing
+/// else (the 2026-08-20 redesign removed the pane rows underneath it, so it
+/// no longer discloses anything).
 final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     let session: SessionGroupNode
     /// Double-click to rename, the affordance the old outline used to provide.
@@ -780,33 +805,25 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     /// along with the outline would be a silent regression.
     var onRename: ((String) -> Void)?
 
-    private let chevron: ShellGlyphView
     private let titleField: NSTextField
     private let dots = ShellDotsView()
     private let bar = NSView()
     private let isCurrent: Bool
     /// The amber waiting-inputs count, worn whenever a terminal of this
     /// session is blocked on a question — the session-level "requires
-    /// attention", whether or not the terminal rows are showing.
+    /// attention", now that the terminal rows themselves are gone.
     private(set) var awaitingBadge: ShellAwaitingBadgeView?
 
     init(
         session: SessionGroupNode,
-        expanded: Bool,
         statuses: [RemoteSessionStatus?],
         awaitingCount: Int = 0
     ) {
         self.session = session
         isCurrent = session.isCurrent
-        chevron = ShellGlyphView(
-            .chevronRight,
-            color: session.isCurrent ? ShellPalette.accentBright : ShellPalette.chevron,
-            size: 15,
-            lineWidth: 1.8
-        )
         titleField = ShellFont.label(
             session.label,
-            font: ShellFont.ui(14.5, session.isCurrent ? .semibold : .medium),
+            font: ShellFont.ui(14, session.isCurrent ? .semibold : .medium),
             color: session.isCurrent ? ShellPalette.ink : ShellPalette.inkSecondary
         )
         super.init(frame: .zero)
@@ -815,7 +832,6 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
         layer?.cornerRadius = 7
         layer?.cornerCurve = .continuous
         hoverEnabled = false
-        chevron.rotated = expanded
 
         bar.wantsLayer = true
         bar.layer?.cornerRadius = 2
@@ -827,17 +843,15 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             pulsing: Set(statuses.enumerated().compactMap { ShellDotsView.pulses($1) ? $0 : nil })
         )
 
-        for view in [bar, chevron, titleField, dots] { addSubview(view) }
+        for view in [bar, titleField, dots] { addSubview(view) }
         NSLayoutConstraint.activate([
-            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            // Indented under its workspace row — the folder's label column.
+            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             bar.widthAnchor.constraint(equalToConstant: 2.5),
-            bar.topAnchor.constraint(equalTo: topAnchor, constant: 7),
-            bar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
+            bar.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            bar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
 
-            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
-            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
-
-            titleField.leadingAnchor.constraint(equalTo: chevron.trailingAnchor, constant: 8),
+            titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 30),
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
             titleField.trailingAnchor.constraint(equalTo: dots.leadingAnchor, constant: -8),
 
@@ -846,10 +860,9 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             topAnchor.constraint(equalTo: titleField.topAnchor, constant: -6),
             bottomAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 6),
         ])
-        // The session-level view of "how many of mine are asking": always on
-        // while something waits, expanded or not, so a session needing
-        // attention is findable from the session list alone — the terminal
-        // rows underneath add *which* one, not *whether*.
+        // The session-level view of "how many of mine are asking" — with the
+        // pane rows gone from the sidebar, this is where a session needing
+        // attention says so; the pane's own approval bar says *which* one.
         if awaitingCount > 0 {
             let badge = ShellAwaitingBadgeView(count: awaitingCount)
             awaitingBadge = badge
@@ -870,10 +883,6 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-
-    func setExpanded(_ expanded: Bool) {
-        chevron.rotated = expanded
-    }
 
     override func refreshBackground() {
         let fill: NSColor
@@ -961,436 +970,6 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
 
     func controlTextDidEndEditing(_ obj: Notification) {
         endRenaming(commit: true)
-    }
-}
-
-/// A terminal row under its session.
-final class TerminalRowView: ShellRowView, NSTextFieldDelegate {
-    let paneID: String
-
-    /// Double-click to rename, the same affordance a session row has. A
-    /// terminal normally wears whatever the agent says it is working on; this
-    /// is how the user pins a name of their own over the top of it.
-    var onRename: ((String) -> Void)?
-
-    private let statusGlyph = NSImageView()
-    private var isFocused: Bool
-    private let titleField: NSTextField
-    /// What the row shows now — the editor opens on this, and a cancelled or
-    /// empty rename puts it back.
-    private let displayedName: String
-    /// The amber waiting pill beside the engine icon while this terminal is
-    /// blocked on a question. Selecting the terminal is what clears it — the
-    /// row is focused, the approval bar is on screen, the ask is answered.
-    private(set) var awaitingBadge: ShellAwaitingBadgeView?
-    /// The engine (or browser) icon. Held so the badge's placement against it
-    /// is a fact a test can check, not a constraint nobody ever sees again.
-    private(set) var engineIcon: NSView!
-
-    init(pane: PaneDescriptor, focused: Bool, status: RemoteSessionStatus?) {
-        paneID = pane.sessionID
-        isFocused = focused
-        displayedName = SessionOutline.paneLabel(pane)
-        titleField = ShellFont.label(
-            displayedName,
-            font: ShellFont.ui(14),
-            color: focused
-                ? ShellPalette.inkTerminal
-                : (pane.engine == .shell ? ShellPalette.inkTertiary : ShellPalette.inkSecondary)
-        )
-        super.init(frame: .zero)
-
-        wantsLayer = true
-        layer?.cornerRadius = 6
-        layer?.cornerCurve = .continuous
-        hoverEnabled = false
-        hoverFill = ShellPalette.hoverSoft
-
-        let icon: NSView
-        switch pane.kind {
-        case .browser: icon = TerminalRowView.browserIcon()
-        case .editor: icon = ShellGlyphView(.file, color: ShellPalette.fileGlyph, size: 16, lineWidth: 1.1)
-        case .terminal: icon = TerminalRowView.engineIcon(for: pane.engine)
-        }
-        engineIcon = icon
-        let title = titleField
-
-        // The design tints the OmniAgent mark per status and puts a matching
-        // glow behind it; a template image is what lets one asset do that.
-        let tint = ShellDotsView.color(for: status)
-        statusGlyph.image = OmniAgentMark.image
-        statusGlyph.contentTintColor = tint
-        statusGlyph.translatesAutoresizingMaskIntoConstraints = false
-        if status != nil {
-            statusGlyph.shadow = {
-                let shadow = NSShadow()
-                shadow.shadowColor = tint.withAlphaComponent(0.53)
-                shadow.shadowBlurRadius = 4
-                shadow.shadowOffset = .zero
-                return shadow
-            }()
-        }
-        if ShellDotsView.pulses(status), !ShellMotion.reduced {
-            let pulse = CABasicAnimation(keyPath: "opacity")
-            pulse.fromValue = 0.45
-            pulse.toValue = 1
-            pulse.duration = 0.9
-            pulse.autoreverses = true
-            pulse.repeatCount = .infinity
-            statusGlyph.wantsLayer = true
-            statusGlyph.layer?.add(pulse, forKey: "om-pulse")
-        }
-
-        for view in [icon, title, statusGlyph] { addSubview(view) }
-        title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7).isActive = true
-        // An unselected terminal blocked on a question wears the amber pill
-        // in the row's own indent, *left* of the engine icon; selecting the row
-        // retires it. Left rather than right so it never moves the icon or the
-        // name: every row's icon column stays where it is, badge or no badge,
-        // and the pill reads as a marker in the margin instead of a word
-        // wedged into the title.
-        if status == .awaitingApproval, !focused {
-            let badge = ShellAwaitingBadgeView(count: 1)
-            awaitingBadge = badge
-            addSubview(badge)
-            NSLayoutConstraint.activate([
-                badge.trailingAnchor.constraint(equalTo: icon.leadingAnchor, constant: -5),
-                badge.centerYAnchor.constraint(equalTo: centerYAnchor),
-            ])
-        }
-        NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 18),
-            icon.heightAnchor.constraint(equalToConstant: 18),
-
-            title.centerYAnchor.constraint(equalTo: centerYAnchor),
-            title.trailingAnchor.constraint(equalTo: statusGlyph.leadingAnchor, constant: -7),
-
-            statusGlyph.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            statusGlyph.centerYAnchor.constraint(equalTo: centerYAnchor),
-            statusGlyph.widthAnchor.constraint(equalToConstant: 12),
-            statusGlyph.heightAnchor.constraint(equalToConstant: 12),
-
-            topAnchor.constraint(equalTo: title.topAnchor, constant: -4),
-            bottomAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
-        ])
-        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        refreshBackground()
-        setAccessibilityLabel(SessionOutline.paneLabel(pane))
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-
-    override func refreshBackground() {
-        let fill: NSColor = (isFocused || isHovered) ? ShellPalette.hoverSoft : .clear
-        layer?.backgroundColor = fill.cgColor
-    }
-
-    /// The engine's own logo, falling back to the design's stroked terminal
-    /// glyph when the asset is missing so a row is never blank.
-    // MARK: - Rename
-
-    private(set) var isRenaming = false
-
-    /// The label doubles as the rename editor; exposed for the tests.
-    var renameField: NSTextField { titleField }
-
-    /// Commits whatever is in the editor, the way Return does.
-    func commitRenameForTesting() { endRenaming(commit: true) }
-
-    override func mouseDown(with event: NSEvent) {
-        guard event.clickCount == 2, onRename != nil else {
-            super.mouseDown(with: event)
-            return
-        }
-        beginRenaming()
-    }
-
-    /// A press that lands while the editor is up must not also select the row,
-    /// or committing a rename would focus the terminal underneath it.
-    override func mouseUp(with event: NSEvent) {
-        guard !isRenaming else { return }
-        super.mouseUp(with: event)
-    }
-
-    func beginRenaming() {
-        guard !isRenaming else { return }
-        isRenaming = true
-        titleField.isEditable = true
-        titleField.isSelectable = true
-        titleField.isBordered = false
-        titleField.drawsBackground = true
-        titleField.backgroundColor = NSColor(white: 1, alpha: 0.1)
-        titleField.focusRingType = .none
-        titleField.delegate = self
-        titleField.stringValue = displayedName
-        window?.makeFirstResponder(titleField)
-        titleField.currentEditor()?.selectAll(nil)
-    }
-
-    private func endRenaming(commit: Bool) {
-        guard isRenaming else { return }
-        let typed = titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        isRenaming = false
-        titleField.isEditable = false
-        titleField.isSelectable = false
-        titleField.drawsBackground = false
-        titleField.delegate = nil
-        window?.makeFirstResponder(nil)
-
-        // Empty is a cancel, not "clear the name": clearing would hand the row
-        // straight back to the agent's title, which reads as the rename having
-        // been thrown away.
-        guard commit, !typed.isEmpty, typed != displayedName else {
-            titleField.stringValue = displayedName
-            return
-        }
-        onRename?(typed)
-    }
-
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        switch selector {
-        case #selector(NSResponder.insertNewline(_:)):
-            endRenaming(commit: true)
-            return true
-        case #selector(NSResponder.cancelOperation(_:)):
-            endRenaming(commit: false)
-            return true
-        default:
-            return false
-        }
-    }
-
-    func controlTextDidEndEditing(_ obj: Notification) {
-        endRenaming(commit: true)
-    }
-
-    private static func engineIcon(for engine: Engine) -> NSView {
-        if let image = engine.iconImage {
-            let view = NSImageView(image: image)
-            view.translatesAutoresizingMaskIntoConstraints = false
-            view.imageScaling = .scaleProportionallyUpOrDown
-            if image.isTemplate { view.contentTintColor = ShellPalette.inkTertiary }
-            return view
-        }
-        return ShellGlyphView(.terminal, color: ShellPalette.inkTertiary, size: 18, lineWidth: 2.2)
-    }
-
-    /// A browser pane's row wears a globe, not an engine logo — it has no
-    /// engine, whatever placeholder its descriptor carries.
-    private static func browserIcon() -> NSView {
-        guard let image = NSImage(systemSymbolName: "globe", accessibilityDescription: "Browser") else {
-            return ShellGlyphView(.terminal, color: ShellPalette.inkTertiary, size: 18, lineWidth: 2.2)
-        }
-        let view = NSImageView(image: image)
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.imageScaling = .scaleProportionallyUpOrDown
-        view.contentTintColor = ShellPalette.inkTertiary
-        return view
-    }
-}
-
-/// The sessions tree the sidebar's Workspaces section mounts, accent rail
-/// and all.
-final class SessionsTreeView: NSView {
-    var onSelectPane: ((String) -> Void)?
-    var onSelectSession: ((SessionGroupNode) -> Void)?
-    var onNewSession: (() -> Void)?
-    var onRenameSession: ((SessionGroupNode, String) -> Void)?
-    var onRenamePane: ((String, String) -> Void)?
-    /// The pointer resting on a row, or leaving one (`nil`) — what raises the
-    /// hover card.
-    var onHoverTarget: ((SessionHoverCardController.Target?) -> Void)?
-
-    private let countField = ShellFont.label(font: ShellFont.mono(12, .semibold), color: ShellPalette.inkFainter)
-    private let rows = NSStackView()
-    private let rail = NSView()
-    /// What the last `reload` actually drew, so a test can assert scoping
-    /// without walking the stack view.
-    private(set) var renderedSessionIDs: [String] = []
-    /// The terminal rows currently on screen, in order.
-    var renderedPaneIDs: [String] {
-        rows.arrangedSubviews.compactMap { ($0 as? TerminalRowView)?.paneID }
-    }
-    /// Sessions the user has collapsed. Absent means expanded, so a brand new
-    /// session shows its terminals without anyone having to opt in.
-    private var collapsed: Set<String> = []
-
-    /// What `reload` was last handed, so toggling a disclosure can re-render
-    /// without the controller having to push the whole tree again.
-    private struct Render {
-        var sessions: [SessionGroupNode] = []
-        var panes: [String: PaneDescriptor] = [:]
-        var focusedPaneID: String?
-        var statuses: [String: RemoteSessionStatus] = [:]
-    }
-
-    private var lastRender = Render()
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-
-        let header = ShellFont.label(
-            "SESSIONS",
-            font: ShellFont.ui(12, .semibold),
-            color: ShellPalette.inkMuted,
-            tracking: 1.2
-        )
-        let add = ShellRowView()
-        add.wantsLayer = true
-        add.layer?.cornerRadius = 5
-        add.hoverFill = NSColor(white: 1, alpha: 0.1)
-        add.onPress = { [weak self] in self?.onNewSession?() }
-        add.setAccessibilityLabel("New session")
-        let addGlyph = ShellGlyphView(.plus, color: ShellPalette.chevron, size: 19, lineWidth: 1.4)
-        add.addSubview(addGlyph)
-        add.translatesAutoresizingMaskIntoConstraints = false
-
-        rail.wantsLayer = true
-        rail.layer?.backgroundColor = ShellPalette.accentRail.cgColor
-        rail.translatesAutoresizingMaskIntoConstraints = false
-
-        rows.orientation = .vertical
-        rows.alignment = .leading
-        rows.spacing = 1
-        rows.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 6, right: 6)
-        rows.translatesAutoresizingMaskIntoConstraints = false
-
-        for field in [header, countField] {
-            field.setContentCompressionResistancePriority(.required, for: .horizontal)
-            field.setContentHuggingPriority(.required, for: .horizontal)
-        }
-        for view in [rail, header, countField, add, rows] { addSubview(view) }
-        NSLayoutConstraint.activate([
-            // The design draws a 1.5pt accent rail 18pt in, with the tree's
-            // content another 10pt to its right.
-            rail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: ShellMetrics.sessionRail),
-            rail.widthAnchor.constraint(equalToConstant: 1.5),
-            rail.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            rail.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
-
-            header.leadingAnchor.constraint(equalTo: rail.trailingAnchor, constant: 14),
-            header.topAnchor.constraint(equalTo: topAnchor, constant: 9),
-
-            countField.leadingAnchor.constraint(equalTo: header.trailingAnchor, constant: 6),
-            countField.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-
-            add.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            add.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            add.widthAnchor.constraint(equalToConstant: 18),
-            add.heightAnchor.constraint(equalToConstant: 18),
-            addGlyph.centerXAnchor.constraint(equalTo: add.centerXAnchor),
-            addGlyph.centerYAnchor.constraint(equalTo: add.centerYAnchor),
-
-            rows.leadingAnchor.constraint(equalTo: rail.trailingAnchor, constant: ShellMetrics.sessionRailInset),
-            rows.trailingAnchor.constraint(equalTo: trailingAnchor),
-            rows.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
-            rows.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-
-    func reload(
-        sessions: [SessionGroupNode],
-        panes: [String: PaneDescriptor],
-        focusedPaneID: String?,
-        statuses: [String: RemoteSessionStatus]
-    ) {
-        lastRender = Render(
-            sessions: sessions,
-            panes: panes,
-            focusedPaneID: focusedPaneID,
-            statuses: statuses
-        )
-        renderedSessionIDs = sessions.map(\.id)
-        countField.stringValue = "\(sessions.count)"
-
-        for view in rows.arrangedSubviews {
-            rows.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
-
-        for session in sessions {
-            let expanded = !collapsed.contains(session.id)
-            let row = SessionRowView(
-                session: session,
-                expanded: expanded,
-                statuses: session.paneIDs.map { statuses[$0] },
-                // The focused terminal's ask is on screen already — it counts
-                // as seen, the same rule that clears its own row's badge.
-                awaitingCount: session.paneIDs
-                    .filter { statuses[$0] == .awaitingApproval && $0 != focusedPaneID }
-                    .count
-            )
-            row.onPress = { [weak self] in
-                guard let self else { return }
-                // The design's chevron collapses; selecting is what the row as
-                // a whole does. Both on one press would fight each other, so
-                // the current session toggles and any other one is selected.
-                if session.isCurrent {
-                    if self.collapsed.contains(session.id) {
-                        self.collapsed.remove(session.id)
-                    } else {
-                        self.collapsed.insert(session.id)
-                    }
-                    self.rerender()
-                } else {
-                    self.onSelectSession?(session)
-                }
-            }
-            row.onRename = { [weak self] name in self?.onRenameSession?(session, name) }
-            row.onHover = { [weak self] inside in
-                self?.onHoverTarget?(inside ? .session(session.id) : nil)
-            }
-            rows.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
-
-            guard expanded else { continue }
-            for paneID in session.paneIDs {
-                guard let pane = panes[paneID] else { continue }
-                let terminal = TerminalRowView(
-                    pane: pane,
-                    focused: paneID == focusedPaneID,
-                    status: statuses[paneID]
-                )
-                terminal.onPress = { [weak self] in self?.onSelectPane?(paneID) }
-                terminal.onRename = { [weak self] name in self?.onRenamePane?(paneID, name) }
-                terminal.onHover = { [weak self] inside in
-                    self?.onHoverTarget?(inside ? .pane(paneID) : nil)
-                }
-                rows.addArrangedSubview(terminal)
-                terminal.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
-            }
-            // No add-pane rows: the 2026-08-20 redesign removed them from the
-            // sidebar. ⌘T / ⇧⌘T / ⇧⌘E, the hole tile and the palette are the
-            // ways to add a pane.
-        }
-    }
-
-    private func rerender() {
-        reload(
-            sessions: lastRender.sessions,
-            panes: lastRender.panes,
-            focusedPaneID: lastRender.focusedPaneID,
-            statuses: lastRender.statuses
-        )
-    }
-
-    /// The row a hover target names, in whatever the last `reload` built.
-    /// Looked up by id rather than remembered, because every status event
-    /// throws these rows away and makes new ones — a card holding the view it
-    /// opened over would be pointing at a corpse a second later.
-    func rowView(for target: SessionHoverCardController.Target) -> NSView? {
-        rows.arrangedSubviews.first { view in
-            switch target {
-            case .pane(let id): return (view as? TerminalRowView)?.paneID == id
-            case .session(let id): return (view as? SessionRowView)?.session.id == id
-            }
-        }
     }
 }
 
