@@ -311,7 +311,7 @@ final class CommandPaletteTests: XCTestCase {
 
     // MARK: - filtering and selection
 
-    func testFilteringIsACaseInsensitiveSubstringThatPreservesOrder() {
+    func testFilteringIsCaseInsensitiveAndKeepsTheOrderOnAnEqualFit() {
         var model = CommandPaletteModel(commands: sample)
 
         model.update(query: "PANE")
@@ -518,6 +518,55 @@ final class CommandPaletteTests: XCTestCase {
         model.select(section: .files)
 
         XCTAssertEqual(model.matches.map(\.id), ["no-matches"])
+    }
+
+    // MARK: - fuzzy matching
+
+    func testTheQueryFindsAFileByScatteredCharacters() {
+        var model = CommandPaletteModel(
+            commands: [],
+            files: ["macos/OmniAgent/CommandPalette.swift", "macos/OmniAgent/SessionHoverCard.swift"],
+            filesRoot: URL(fileURLWithPath: "/repo")
+        )
+
+        model.update(query: "cmdpal")
+        XCTAssertEqual(model.matches.map(\.title), ["CommandPalette.swift"], "in order, not next to each other")
+
+        model.update(query: "shc")
+        XCTAssertEqual(model.matches.map(\.title), ["SessionHoverCard.swift"], "the camelCase humps are word starts")
+
+        model.update(query: "palcmd")
+        XCTAssertEqual(model.matches.map(\.id), ["no-matches"], "out of order is not a match — fuzzy, not anagram")
+    }
+
+    func testAWholeWordOutranksTheSameLettersScattered() throws {
+        // "Switch to alpha — Session 1 — pane" spells p-a-n-e out of
+        // "al**p**h**a**… Sessio**n**… pan**e**" long before it reaches the
+        // word. Scoring the run has to win, or the ranking is worse than the
+        // substring matching it replaced.
+        XCTAssertEqual(
+            FuzzyMatch.score("pane", in: "Switch to alpha — Session 1 — pane"),
+            FuzzyMatch.score("pane", in: "New terminal pane"),
+            "the word is found in both, and scored the same way"
+        )
+        XCTAssertGreaterThan(
+            try XCTUnwrap(FuzzyMatch.score("pane", in: "a pane")),
+            try XCTUnwrap(FuzzyMatch.score("pane", in: "pxaxnxe")),
+            "a run beats the same letters scattered"
+        )
+
+        var model = CommandPaletteModel(commands: [
+            PaletteCommand(id: "scattered", title: "Pin all notes everywhere", detail: nil, action: .noop),
+            PaletteCommand(id: "whole", title: "New terminal pane", detail: nil, action: .noop),
+        ])
+        model.update(query: "pane")
+
+        XCTAssertEqual(model.matches.map(\.id), ["whole", "scattered"], "the better fit leads, whatever the list order was")
+    }
+
+    func testAScoreIsNilWhenTheCharactersAreNotAllThere() {
+        XCTAssertNil(FuzzyMatch.score("zzz", in: "CommandPalette.swift"))
+        XCTAssertNotNil(FuzzyMatch.score("cp", in: "CommandPalette.swift"))
     }
 
     // MARK: - the repository's files

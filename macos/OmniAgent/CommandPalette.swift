@@ -68,6 +68,88 @@ enum PaletteSection: String, CaseIterable, Equatable {
     }
 }
 
+/// Fuzzy matching: the query's characters have to appear in order, but not
+/// next to each other — `cmdpal` finds `CommandPalette.swift`, the way ⌘P
+/// does in every editor.
+///
+/// Loose matching needs ranking or the good row drowns, so a match is scored
+/// rather than merely accepted: a character that continues a run is worth far
+/// more than a scattered one, and one that starts a word — after a separator
+/// or at a camelCase hump — a little more again. A plain substring hit is a
+/// run from end to end, so it always outscores a scattered one, and equal
+/// scores keep the order the list already had, which is what muscle memory
+/// rests on.
+enum FuzzyMatch {
+    private static let runBonus = 8
+    private static let boundaryBonus = 5
+
+    /// `nil` when `needle`'s characters do not all appear in order. `needle`
+    /// is already lowercased by the caller.
+    ///
+    /// The better of two readings, because the scattered one alone gets the
+    /// obvious case wrong: scanning "Switch to alpha — pane" for `pane`
+    /// greedily takes the `p` in "alpha" and never sees the word. So a whole
+    /// run is looked for first, and only the leftovers are matched loosely.
+    static func score(_ needle: String, in haystack: String) -> Int? {
+        guard !needle.isEmpty else { return 0 }
+        let wanted = Array(needle.lowercased())
+        let characters = Array(haystack)
+        let lowered = Array(haystack.lowercased())
+        return [run(wanted, in: characters, lowered: lowered), scattered(wanted, in: characters, lowered: lowered)]
+            .compactMap { $0 }
+            .max()
+    }
+
+    /// The needle as one unbroken run — a plain substring — scored at every
+    /// place it appears, best first. `nil` when it appears nowhere.
+    private static func run(_ wanted: [Character], in characters: [Character], lowered: [Character]) -> Int? {
+        guard wanted.count <= lowered.count else { return nil }
+        var best: Int?
+        for start in 0...(lowered.count - wanted.count)
+        where Array(lowered[start..<(start + wanted.count)]) == wanted {
+            let score = wanted.count + runBonus * (wanted.count - 1)
+                + (isWordStart(characters, at: start) ? boundaryBonus : 0)
+            best = max(best ?? score, score)
+        }
+        return best
+    }
+
+    /// The characters in order but not together.
+    ///
+    /// ponytail: greedy — it takes the first place each character fits rather
+    /// than the best, so an unusual path can score below its ideal alignment.
+    /// A proper Smith-Waterman pass is the upgrade if that ever shows.
+    private static func scattered(_ wanted: [Character], in characters: [Character], lowered: [Character]) -> Int? {
+        var next = 0
+        var score = 0
+        var previousMatched = false
+        for index in lowered.indices {
+            guard next < wanted.count else { break }
+            guard lowered[index] == wanted[next] else {
+                previousMatched = false
+                continue
+            }
+            score += 1
+            if previousMatched { score += runBonus }
+            if isWordStart(characters, at: index) { score += boundaryBonus }
+            previousMatched = true
+            next += 1
+        }
+        return next == wanted.count ? score : nil
+    }
+
+    /// The start of a word: the first character, one after a separator, or the
+    /// upper half of a camelCase hump.
+    private static func isWordStart(_ characters: [Character], at index: Int) -> Bool {
+        guard index > 0 else { return true }
+        let previous = characters[index - 1]
+        if previous == "/" || previous == "." || previous == "_" || previous == "-" || previous == " " {
+            return true
+        }
+        return previous.isLowercase && characters[index].isUppercase
+    }
+}
+
 /// One row.
 struct PaletteCommand: Equatable {
     let id: String
@@ -112,12 +194,15 @@ struct PaletteCommand: Equatable {
     /// otherwise.
     var icon: String { symbol ?? section.symbol }
 
-    /// Case-insensitive substring over everything the row carries — what it
-    /// shows and what it hides. `needle` is already lowercased by the caller.
-    func matches(_ needle: String) -> Bool {
-        title.lowercased().contains(needle)
-            || subtitle?.lowercased().contains(needle) == true
-            || keywords?.lowercased().contains(needle) == true
+    /// How well the query fits this row, over everything it carries — what it
+    /// shows and what it hides — or `nil` for no fit at all. The best of the
+    /// three, so a row is never punished for having a subtitle the query
+    /// ignores. `needle` is already lowercased by the caller.
+    func score(for needle: String) -> Int? {
+        [title, subtitle, keywords]
+            .compactMap { $0 }
+            .compactMap { FuzzyMatch.score(needle, in: $0) }
+            .max()
     }
 }
 
@@ -149,9 +234,9 @@ struct CommandPaletteModel: Equatable {
         self.filesRoot = filesRoot
     }
 
-    /// How many repository files one query may show. The list is a shortcut to
-    /// a file you can name, not a directory listing — a query loose enough to
-    /// match hundreds is a query to narrow.
+    /// How many repository files one query may show — the twelve that fit it
+    /// best. The list is a shortcut to a file you can name, not a directory
+    /// listing.
     /// ponytail: a flat scan over the path list; an index if a repo outgrows it.
     static let fileMatchLimit = 12
 
@@ -416,9 +501,10 @@ struct CommandPaletteModel: Equatable {
     /// only the bar — the palette used to answer "" with its whole command
     /// list, which is a menu, not a search.
     ///
-    /// Order is preserved and matching is a case-insensitive substring,
-    /// deliberately not a fuzzy score: the list is short and stable ordering
-    /// is what makes muscle memory work. What the query does not match is
+    /// Matching is fuzzy and case-insensitive (see `FuzzyMatch`): the query's
+    /// characters have to appear in order, not next to each other. Rows are
+    /// ranked inside their section by how well they fit, and an equal fit
+    /// keeps the order the list already had. What the query does not match is
     /// simply not there — no synthetic trailing row offering to search
     /// something else.
     var matches: [PaletteCommand] {
@@ -444,41 +530,68 @@ struct CommandPaletteModel: Equatable {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
         let needle = trimmed.lowercased()
-        let rows = commands.filter { $0.matches(needle) } + fileRows(matching: needle)
-        // Grouped rather than sorted: rows have to arrive in section order for
-        // the headings to be a walk instead of a sort, and the repository
-        // files join the files the editors already have open.
-        return PaletteSection.allCases.flatMap { section in rows.filter { $0.section == section } }
+        let rows = commands.enumerated().compactMap { order, command in
+            command.score(for: needle).map { Ranked(command: command, score: $0, order: order) }
+        } + fileRows(matching: needle)
+        // Grouped by section rather than ranked across all of them: rows have
+        // to arrive in section order for the headings to be a walk instead of
+        // a sort, and the repository files join the files the editors already
+        // have open. Ranking happens inside a section, where the comparison
+        // means something.
+        return PaletteSection.allCases.flatMap { section in
+            rows.filter { $0.command.section == section }.sortedByRank()
+        }
+    }
+
+    /// A row and how well the query fit it, with where it started out — the
+    /// tie-break, so an equal score never reshuffles the list.
+    fileprivate struct Ranked {
+        let command: PaletteCommand
+        let score: Int
+        let order: Int
     }
 
     /// Repository files the query names, minus the ones an editor already has
     /// open — those are rows already, and going to the open tab beats opening
     /// the file a second time.
-    private func fileRows(matching needle: String) -> [PaletteCommand] {
+    private func fileRows(matching needle: String) -> [Ranked] {
         guard let root = filesRoot else { return [] }
         let open = Set(commands.compactMap { command -> String? in
             if case let .openFile(path) = command.action { return path }
             return nil
         })
-        var rows: [PaletteCommand] = []
-        for relative in files where relative.lowercased().contains(needle) {
-            let path = root.appendingPathComponent(relative).path
-            guard !open.contains(path) else { continue }
-            let folder = (relative as NSString).deletingLastPathComponent
-            rows.append(
-                PaletteCommand(
-                    id: "file:\(path)",
-                    title: (relative as NSString).lastPathComponent,
-                    detail: nil,
-                    action: .openFile(path: path),
-                    keywords: relative,
-                    section: .files,
-                    subtitle: folder.isEmpty ? root.lastPathComponent : folder
+        // The best matches rather than the first ones: with fuzzy matching a
+        // loose query fits half the repository, and the twelve it fits *best*
+        // are the twelve worth showing.
+        return files.enumerated()
+            .compactMap { order, relative -> (relative: String, score: Int, order: Int)? in
+                guard !open.contains(root.appendingPathComponent(relative).path),
+                      let score = FuzzyMatch.score(needle, in: relative)
+                else { return nil }
+                return (relative, score, order)
+            }
+            .sorted { $0.score != $1.score ? $0.score > $1.score : $0.order < $1.order }
+            .prefix(Self.fileMatchLimit)
+            .enumerated()
+            .map { rank, match in
+                let path = root.appendingPathComponent(match.relative).path
+                let folder = (match.relative as NSString).deletingLastPathComponent
+                return Ranked(
+                    command: PaletteCommand(
+                        id: "file:\(path)",
+                        title: (match.relative as NSString).lastPathComponent,
+                        detail: nil,
+                        action: .openFile(path: path),
+                        keywords: match.relative,
+                        section: .files,
+                        subtitle: folder.isEmpty ? root.lastPathComponent : folder
+                    ),
+                    score: match.score,
+                    // Behind every command row, so a file never jumps the
+                    // workspace's own rows on a tie.
+                    order: commands.count + rank
                 )
-            )
-            if rows.count == Self.fileMatchLimit { break }
-        }
-        return rows
+            }
     }
 
     /// The tags under the field: `nil` — "All" — first, then every section
@@ -545,5 +658,14 @@ struct CommandPaletteModel: Equatable {
     mutating func select(index: Int) {
         guard matches.indices.contains(index) else { return }
         selectedIndex = index
+    }
+}
+
+
+private extension Array where Element == CommandPaletteModel.Ranked {
+    /// Best fit first, and an equal fit keeps the order it came in — Swift's
+    /// sort is not stable, so the tie-break has to be explicit.
+    func sortedByRank() -> [PaletteCommand] {
+        sorted { $0.score != $1.score ? $0.score > $1.score : $0.order < $1.order }.map(\.command)
     }
 }
