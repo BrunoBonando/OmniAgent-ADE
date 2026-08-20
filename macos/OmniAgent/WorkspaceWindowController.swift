@@ -288,6 +288,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// instance for the window; `syncReviewPanelFiles` re-points it at each
     /// session's own workspace and persisted state.
     let reviewPanelFiles = ReviewPanelFilesView()
+    /// The Changes tab's real content — the same single-instance rule;
+    /// `syncReviewPanelChanges` re-points it at each session's workspace and
+    /// reloads its `git status` on every activation.
+    let reviewPanelChanges = ReviewPanelChangesView()
     private(set) var reviewPanelItem: NSSplitViewItem?
     /// The session group whose state the panel is currently showing —
     /// updated on every `activeGroup` change, so a tab edit lands in the
@@ -478,6 +482,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // old sidebar tree fed, so a diff always opens the same way.
         reviewPanelFiles.onOpenDiff = { [weak self] url in self?.openDiffInEditor(url) }
         reviewPanelFiles.onOpenAllChanges = { [weak self] in self?.openChangesOverview() }
+        reviewPanel.setContent(reviewPanelChanges, for: .changes)
+        // The overview's row activations route to the same editor-pane flows
+        // the editor's own changes tab feeds — the panel itself stays
+        // read-only.
+        reviewPanelChanges.onOpenFileRequest = { [weak self] url in
+            self?.openFileInEditor(url, pinned: true)
+        }
+        reviewPanelChanges.onOpenDiffRequest = { [weak self] url in self?.openDiffInEditor(url) }
         workspace.onDeskCanvasChanged = { [weak self] in self?.persistDeskCanvas() }
         workspace.onCameraChanged = { [weak self] in self?.updateDeskZoomReadout() }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
@@ -2958,6 +2970,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         setReviewPanelCollapsed(!visible)
         if visible, let width = state.width { applyReviewPanelWidth(CGFloat(width)) }
         syncReviewPanelFiles()
+        syncReviewPanelChanges()
     }
 
     /// The panel's tab set or selection changed under the user's hands —
@@ -2972,6 +2985,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Selecting the Files tab is what makes its content current — the
         // one moment its tree is worth (re)pointing at the session.
         syncReviewPanelFiles()
+        syncReviewPanelChanges()
     }
 
     /// Puts the showing session's persisted Files state into the tab —
@@ -2990,6 +3004,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             treePosition: state.treePosition,
             showHidden: state.showHidden
         )
+    }
+
+    /// Points the Changes tab at the showing session's workspace and reloads
+    /// its status — on *every* activation, not just the first: the working
+    /// tree moves under the panel, and the spec's promise is that looking at
+    /// the tab shows what git says now.
+    private func syncReviewPanelChanges() {
+        guard
+            reviewPanelItem?.isCollapsed == false,
+            reviewPanel.activeTab == .changes,
+            let group = reviewPanelGroup
+        else { return }
+        reviewPanelChanges.setRoot(reviewPanelRoot(for: group))
+        reviewPanelChanges.refresh()
     }
 
     /// The Files tab's user-made changes (gear preferences, open file) —
