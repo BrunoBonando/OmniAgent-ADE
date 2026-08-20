@@ -153,6 +153,31 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     static let editorTabDragType = NSPasteboard.PasteboardType("digital.bruno.omniagent.editor-tab")
     static let dividerThickness: CGFloat = 6
     static let minimumPaneSize = CGSize(width: 160, height: 96)
+
+    /// The narrowest a pane may get before the grid trades a column for a row:
+    /// `comfortableTerminalColumns` columns of the terminal's own 13pt
+    /// monospace, plus the pane's chrome. `minimumPaneSize` is the floor a
+    /// divider drag may not cross; this is the width below which the *shape*
+    /// itself is wrong (founder brief, 2026-08-20: "I don't want anything to
+    /// feel squeezed").
+    ///
+    /// Measured from the font rather than written down as points, so it stays
+    /// true if the terminal's size ever moves.
+    // ponytail: one width for every pane kind — editors and browsers reflow
+    // rather than wrap, so they are the more forgiving case, not the tighter
+    // one. Measure per kind only if that stops being true.
+    static let comfortablePaneWidth: CGFloat = {
+        let cell = ("M" as NSString)
+            .size(withAttributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            ])
+            .width
+        return (CGFloat(comfortableTerminalColumns) * cell).rounded() + 24
+    }()
+
+    /// Columns of text a terminal needs before it stops reading as squeezed.
+    /// Below 60 an agent's output wraps mid-thought.
+    static let comfortableTerminalColumns = 60
     /// `padding:7px` around the design's pane grid — without it the outermost
     /// panes' rounded corners are cut off by the window edge.
     static let gridInset: CGFloat = 7
@@ -569,9 +594,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// it replaces spent as long arriving as leaving, which reads as a slide.
     static let zoomTimingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
 
-    /// Non-zero only for the one layout pass a zoom change or a pane swap kicks
-    /// off, so the panes' moves are animated there and nowhere else: every other
-    /// pass (window resize, divider drag, session switch) has to land instantly.
+    /// Non-zero only for the one layout pass a zoom change, a pane swap or a
+    /// width reflow kicks off, so the panes' moves are animated there and
+    /// nowhere else: every other pass (window resize, divider drag, session
+    /// switch) has to land instantly.
     private var zoomTransition: TimeInterval = 0
 
     @discardableResult
@@ -2119,6 +2145,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // Canvas mode answers the same question differently: every session's
         // grid at its own card rect, not `activeGroup`'s filling `bounds`.
         if isCanvasMode { return updateCanvasLayout() }
+        // Before the frames are read, so a reshape and the placement it causes
+        // are one pass and no intermediate shape is ever on screen.
+        let reflowed = reflowForWidth()
+        if reflowed { zoomTransition = Self.swapTransitionDuration }
+        // Restored rather than zeroed: a swap sets this around its own call to
+        // this method and reads it again afterwards (`castGlideShadow`), so
+        // clearing it unconditionally would cost the swap its shadow.
+        defer { if reflowed { zoomTransition = 0 } }
         guard let grid else {
             dividerViews.forEach { $0.removeFromSuperview() }
             dividerViews = []
@@ -2142,6 +2176,44 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         applyZoom()
         updateAccessibilityLabels()
         refreshFocusSubtitles()
+    }
+
+    /// Trades a column for a row when the grid's panes would be narrower than
+    /// `comfortablePaneWidth`, and takes the column back when the window grows
+    /// again. The founder's rule (2026-08-20): nothing should feel squeezed, so
+    /// a rung too wide for the window it is in drops columns and grows rows
+    /// rather than shaving every terminal down to forty characters.
+    ///
+    /// Called from `updateLayout`, which is every add, close, resize and
+    /// session switch — one door rather than a `maxColumns` threaded through
+    /// each of `build`'s callers. It rebuilds only when the column count
+    /// actually changes, so an ordinary resize costs nothing and a dragged
+    /// divider survives it; a reshape resets fractions exactly as any other
+    /// change of rung does.
+    ///
+    /// Returns whether the caller should animate the pass.
+    private func reflowForWidth() -> Bool {
+        guard let grid, gridBounds.width > 0, zoomTransition == 0 else { return false }
+        let ids = grid.paneIDs()
+        let fitting = max(1, Int(
+            (gridBounds.width + Self.dividerThickness)
+                / (Self.comfortablePaneWidth + Self.dividerThickness)
+        ))
+        let columns = min(PaneGrid.shape(count: ids.count).cols, fitting)
+        guard columns != grid.cols, let reshaped = PaneGrid.build(ids, maxColumns: columns)
+        else { return false }
+        self.grid = reshaped
+        // The swap's glide, borrowed for the same reason the swap borrows the
+        // zoom's: `place` animates every pane whose frame moved during a
+        // transition window, position *and* scale, so cells of different sizes
+        // morph into each other rather than jumping.
+        //
+        // Not during a live resize, where a pane easing towards a frame the
+        // drag has already moved again reads as lag rather than as motion — and
+        // not with no window or Reduce Motion, which have nothing to animate.
+        return window != nil
+            && !inLiveResize
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
     /// Canvas mode's layout pass: every session's grid at its own card rect in

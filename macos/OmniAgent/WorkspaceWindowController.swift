@@ -693,8 +693,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // background, so the system material was only ever covered up.
         let sidebarItem = NSSplitViewItem(viewController: sidebar)
         // What the sidebar behavior gave for free: the column keeps its width
-        // when the window resizes, the panes absorb it.
-        sidebarItem.holdingPriority = NSLayoutConstraint.Priority(200)
+        // and the panes absorb the change. That means holding ABOVE the pane
+        // grid's 250, not at AppKit's sidebar default of 200 — at 200 the
+        // column is the most willing item to resize, so every layout pass
+        // after a drag handed the width straight back to the grid and the
+        // divider sprang home.
+        sidebarItem.holdingPriority = NSLayoutConstraint.Priority(260)
         // A range, not a cage: a sidebar holding session names and a file tree
         // is exactly the thing a user wants wider or narrower depending on
         // what they are doing. See `ShellMetrics` for what each bound is for —

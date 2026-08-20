@@ -1422,6 +1422,33 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertNotEqual(split.splitViewItems[0].isCollapsed, collapsed)
     }
 
+    /// Dragging the sidebar divider has to hold. It did not: the split view
+    /// carried an `autosaveName` while its `NSSplitViewController` was already
+    /// restoring divider positions itself, and the autosaved subview frames
+    /// were re-applied on the next layout pass, snapping the column back.
+    func testDraggingTheSidebarDividerSticks() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1400, height: 800), display: true)
+        let split = try XCTUnwrap(window.contentViewController as? NSSplitViewController)
+        split.view.layoutSubtreeIfNeeded()
+
+        split.splitView.setPosition(380, ofDividerAt: 0)
+        // The snap-back happened on the *next* pass, not the drag itself, so
+        // one more layout is the whole point of the test.
+        split.view.needsLayout = true
+        split.view.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(
+            split.splitViewItems[0].viewController.view.frame.width,
+            380,
+            accuracy: 1,
+            "the dragged width has to survive the next layout"
+        )
+    }
+
     func testThePaletteIsBuiltFromTheLiveWorkspaceOnEveryOpen() throws {
         let controller = makeEmptyController()
         defer { controller.close() }

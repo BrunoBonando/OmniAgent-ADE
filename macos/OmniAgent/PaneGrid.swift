@@ -162,17 +162,25 @@ struct PaneGrid: Equatable {
     /// The approved shape for `count` panes. Past the cap it keeps the widest
     /// rung and grows rows rather than losing a live session (a restore of an
     /// older, uncapped workspace).
-    static func shape(count: Int) -> PaneGridShape {
-        let cols = (ladder.first { $0.cols * $0.rows >= count } ?? ladder[ladder.count - 1]).cols
+    ///
+    /// `maxColumns` is the window talking back: a rung whose columns would be
+    /// narrower than a terminal can comfortably wrap in is capped here and the
+    /// rows grow to take the panes instead (founder brief, 2026-08-20: "if the
+    /// terminal part feels squeezed, diminish the number of columns and
+    /// increase the number of rows"). Unset it and this is the pure
+    /// count-driven ladder the TypeScript oracle and the fixture pin.
+    static func shape(count: Int, maxColumns: Int = .max) -> PaneGridShape {
+        let rung = (ladder.first { $0.cols * $0.rows >= count } ?? ladder[ladder.count - 1]).cols
+        let cols = max(1, min(rung, maxColumns))
         return PaneGridShape(cols: cols, rows: max(1, Int(ceil(Double(count) / Double(cols)))))
     }
 
     /// Arranges `ids` into their approved grid in `fillOrder`, padding leftover
     /// cells with holes — always the complete rung's rectangle, never a short
     /// row. The ONLY function here that decides a shape.
-    static func build(_ ids: [String]) -> PaneGrid? {
+    static func build(_ ids: [String], maxColumns: Int = .max) -> PaneGrid? {
         guard !ids.isEmpty else { return nil }
-        let shape = shape(count: ids.count)
+        let shape = shape(count: ids.count, maxColumns: maxColumns)
         let order = fillOrder(cols: shape.cols, rows: shape.rows)
         var cells = [PaneCell](repeating: .hole(0), count: shape.cols * shape.rows)
         var holeIndex = 0
