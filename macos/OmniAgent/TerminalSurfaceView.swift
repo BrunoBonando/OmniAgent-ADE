@@ -519,6 +519,36 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         return Array(lines.suffix(limit))
     }
 
+    /// The visible screen with the terminal's wrapping undone: rows the
+    /// terminal broke only because the pane was narrow are joined back into
+    /// the line the program actually printed — what the review panel's
+    /// Browser tab scans for dev-server addresses, where `localhost:5173`
+    /// split across two rows must still read as one address.
+    func unwrappedTailLines(limit: Int = 40) -> [String] {
+        Self.unwrappedTailLines(of: terminalView.terminal, limit: limit)
+    }
+
+    /// Free of the view — `tailLines`'s reasoning, and its NUL substitution.
+    /// A row whose `isWrapped` flag is set is a continuation of the row above
+    /// (SwiftTerm's reflow rule), so it is appended rather than started anew.
+    static func unwrappedTailLines(of terminal: Terminal, limit: Int = 40) -> [String] {
+        var lines: [String] = []
+        for row in 0..<terminal.rows {
+            guard let line = terminal.getLine(row: row) else { continue }
+            let text = line.translateToString(trimRight: true)
+                .replacingOccurrences(of: "\0", with: " ")
+            if line.isWrapped, !lines.isEmpty {
+                lines[lines.count - 1] += text
+            } else {
+                lines.append(text)
+            }
+        }
+        while let last = lines.last, last.isEmpty {
+            lines.removeLast()
+        }
+        return Array(lines.suffix(limit))
+    }
+
     /// Keeps the last line the screen gave rather than letting a blank read
     /// wipe it.
     ///

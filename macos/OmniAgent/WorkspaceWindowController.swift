@@ -292,6 +292,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// `syncReviewPanelChanges` re-points it at each session's workspace and
     /// reloads its `git status` on every activation.
     let reviewPanelChanges = ReviewPanelChangesView()
+    /// The Browser tab's real content — the same single-instance rule;
+    /// `syncReviewPanelBrowser` rescans the showing session's terminals for
+    /// dev-server ports on every activation.
+    let reviewPanelBrowser = ReviewPanelBrowserView()
     private(set) var reviewPanelItem: NSSplitViewItem?
     /// The session group whose state the panel is currently showing —
     /// updated on every `activeGroup` change, so a tab edit lands in the
@@ -490,6 +494,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.openFileInEditor(url, pinned: true)
         }
         reviewPanelChanges.onOpenDiffRequest = { [weak self] url in self?.openDiffInEditor(url) }
+        reviewPanel.setContent(reviewPanelBrowser, for: .browser)
         workspace.onDeskCanvasChanged = { [weak self] in self?.persistDeskCanvas() }
         workspace.onCameraChanged = { [weak self] in self?.updateDeskZoomReadout() }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
@@ -2971,6 +2976,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         if visible, let width = state.width { applyReviewPanelWidth(CGFloat(width)) }
         syncReviewPanelFiles()
         syncReviewPanelChanges()
+        syncReviewPanelBrowser()
     }
 
     /// The panel's tab set or selection changed under the user's hands —
@@ -2986,6 +2992,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // one moment its tree is worth (re)pointing at the session.
         syncReviewPanelFiles()
         syncReviewPanelChanges()
+        syncReviewPanelBrowser()
     }
 
     /// Puts the showing session's persisted Files state into the tab —
@@ -3018,6 +3025,31 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         else { return }
         reviewPanelChanges.setRoot(reviewPanelRoot(for: group))
         reviewPanelChanges.refresh()
+    }
+
+    /// Rescans the showing session's terminals for dev-server ports — on
+    /// every Browser activation, the Changes reload's reasoning: the servers
+    /// move under the panel, and looking at the tab shows what talks now.
+    private func syncReviewPanelBrowser() {
+        guard
+            reviewPanelItem?.isCollapsed == false,
+            reviewPanel.activeTab == .browser,
+            let group = reviewPanelGroup
+        else { return }
+        reviewPanelBrowser.updatePortSuggestions(
+            fromTerminalLines: sessionTerminalTail(for: group)
+        )
+    }
+
+    /// The recent visible output of every terminal pane in one session group
+    /// — what the Browser tab scans. `unwrappedTailLines`, not the approval
+    /// bar's `visibleTailLines`: an address the terminal wrapped across two
+    /// rows of a narrow pane must still read as one address.
+    private func sessionTerminalTail(for group: String) -> [String] {
+        workspace.allPaneIDs
+            .filter { workspace.descriptor(for: $0)?.group == group }
+            .compactMap { workspace.terminalSurface(for: $0) }
+            .flatMap { $0.unwrappedTailLines() }
     }
 
     /// The Files tab's user-made changes (gear preferences, open file) —
