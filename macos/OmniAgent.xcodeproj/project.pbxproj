@@ -22,8 +22,10 @@
 		10000000000000000000092 /* BrowserPanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000092 /* BrowserPanes.swift */; };
 		100000000000000000000B0 /* EditorPaneModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000B0 /* EditorPaneModel.swift */; };
 		53C290D7733E43F89B368514 /* EditorPanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACAA95FB7844450B021094B /* EditorPanes.swift */; };
+		43DFECC6CB8F4285921E6A5A /* DeskCanvasState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 371418F52B4143BE9B762348 /* DeskCanvasState.swift */; };
 		71021CF2EFA24E0285BFFFDA /* EditorFileClass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B9844312A440D4A5A932C5 /* EditorFileClass.swift */; };
 		68F9BD406F6C7DDABE533A9D /* GitFileContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = C43E2B4CEEE6E8798AE14F29 /* GitFileContent.swift */; };
+		C8E5716D35494A029A309845 /* PaneChipView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 405D7DD97ED24F13AEC1C23B /* PaneChipView.swift */; };
 		E4A1C60B27D34F19B0C55A83 /* DoublePressDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F8D45A9B1E64C7290EA3D16 /* DoublePressDetector.swift */; };
 		40187BB1C8BB496BBDF4129A /* EditorWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 804C0D63AE9348399ED44B65 /* EditorWebView.swift */; };
 		8F133DE140464FFEBCA301BD /* EditorPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C05BB92321E4D168F6F8F55 /* EditorPaneView.swift */; };
@@ -38,11 +40,18 @@
 		10000000000000000000093 /* BrowserPanesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000093 /* BrowserPanesTests.swift */; };
 		100000000000000000000B1 /* EditorPaneModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000B1 /* EditorPaneModelTests.swift */; };
 		69D406BCC81448EF8CA13D9D /* EditorPanesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2639724864074430BA56B5D3 /* EditorPanesTests.swift */; };
+		E6B9FB15113B4C25B1F8D0BE /* DeskCanvasStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2FE4A1FC6B7429A8E79A4F9 /* DeskCanvasStateTests.swift */; };
 		34A6BF2B1B324F22ACCD3693 /* EditorFileClassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD2DAF7A30B04EABB3A14693 /* EditorFileClassTests.swift */; };
 		FE04177400364E128B31DF7B /* EditorWebViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E91EFADEB4413DA81A96F8 /* EditorWebViewTests.swift */; };
 		2ADA9E4CC4CE4F37B25A421B /* EditorPaneViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BF1B274379647B88A0DBA04 /* EditorPaneViewTests.swift */; };
 		3C1E9A5F7D0B42E1A8460F31 /* EditorPaneIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A44D2B60E9C41D8B5721CA3 /* EditorPaneIntegrationTests.swift */; };
 		1ECF599C46245E2BA8447FC1 /* GitFileContentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE0A2CB26F101E0CCC68EFBA /* GitFileContentTests.swift */; };
+		886AD5FC7A3C4837958280C6 /* WorkspaceWindowControllerDeskCanvasTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB9D2F62F22A4B56B0D9AAF1 /* WorkspaceWindowControllerDeskCanvasTests.swift */; };
+		6D32C137B60B4C9586F35FBC /* DeskCanvasNodeViewsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1181060562454A6FA6784749 /* DeskCanvasNodeViewsTests.swift */; };
+		6EAB469FE27B4B4D889571B0 /* DeskCanvasInputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5544AA75593B4BA4BC9E6270 /* DeskCanvasInputTests.swift */; };
+		9221AD3E21244586840226C8 /* DeskCameraFlightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 928CD3A8DE8E4A35B612FD89 /* DeskCameraFlightTests.swift */; };
+		7F18710D01214A678267D534 /* DeskCanvasLODTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A5ABE0620BB482B8A6574E9 /* DeskCanvasLODTests.swift */; };
+		FD4C61B478ED4F0BB9AD83A9 /* PaneWorkspaceCanvasModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00EE8F1E07540A09980F775 /* PaneWorkspaceCanvasModeTests.swift */; };
 		5B2F70C41A8E4D6C9E33A017 /* DoublePressDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D48E1B36C2F4A70B15D8E22 /* DoublePressDetectorTests.swift */; };
 		F2729C0CEE50441882BFD7A7 /* MediaTabViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C15DA4028034799A71F586F /* MediaTabViewTests.swift */; };
 		1B7BF5CE3D794B919522855C /* EditorTabStripViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */; };
@@ -50,7 +59,9 @@
 		10000000000000000000000A /* WorkspaceWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* WorkspaceWindowController.swift */; };
 		10000000000000000000000B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* AppDelegate.swift */; };
 		10000000000000000000000C /* PaneGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* PaneGrid.swift */; };
+		B8FC09BF87F34E8E91515F5E /* DeskCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDF8CF2C82745FFABCED8D2 /* DeskCanvas.swift */; };
 		10000000000000000000000D /* PaneGridTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000E /* PaneGridTests.swift */; };
+		BE203811DF334A88BCEB06D8 /* DeskCanvasTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 515737526BA746E7B0775D9D /* DeskCanvasTests.swift */; };
 		10000000000000000000000E /* PaneWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000F /* PaneWorkspaceView.swift */; };
 		10000000000000000000000F /* PaneWorkspaceViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* PaneWorkspaceViewTests.swift */; };
 		100000000000000000000010 /* pane-grid.json in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* pane-grid.json */; };
@@ -105,6 +116,7 @@
 		10000000000000000000046 /* rust-session-models.json in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000047 /* rust-session-models.json */; };
 		10000000000000000000047 /* status-end-events.json in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000048 /* status-end-events.json */; };
 		10000000000000000000050 /* WorkspaceShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000050 /* WorkspaceShell.swift */; };
+		87920CEE136A49449D23172F /* DeskCanvasNodeViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CB37D6AF91C43D1966B98A4 /* DeskCanvasNodeViews.swift */; };
 		10000000000000000000051 /* WorkspaceShellTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000051 /* WorkspaceShellTests.swift */; };
 		10000000000000000000052 /* EngineIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000052 /* EngineIcon.swift */; };
 		10000000000000000000060 /* WorkspaceFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000060 /* WorkspaceFiles.swift */; };
@@ -164,8 +176,10 @@
 		20000000000000000000092 /* BrowserPanes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPanes.swift; sourceTree = "<group>"; };
 		200000000000000000000B0 /* EditorPaneModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneModel.swift; sourceTree = "<group>"; };
 		BACAA95FB7844450B021094B /* EditorPanes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPanes.swift; sourceTree = "<group>"; };
+		371418F52B4143BE9B762348 /* DeskCanvasState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCanvasState.swift; sourceTree = "<group>"; };
 		08B9844312A440D4A5A932C5 /* EditorFileClass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorFileClass.swift; sourceTree = "<group>"; };
 		C43E2B4CEEE6E8798AE14F29 /* GitFileContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitFileContent.swift; sourceTree = "<group>"; };
+		405D7DD97ED24F13AEC1C23B /* PaneChipView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneChipView.swift; sourceTree = "<group>"; };
 		2F8D45A9B1E64C7290EA3D16 /* DoublePressDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoublePressDetector.swift; sourceTree = "<group>"; };
 		804C0D63AE9348399ED44B65 /* EditorWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorWebView.swift; sourceTree = "<group>"; };
 		9C05BB92321E4D168F6F8F55 /* EditorPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneView.swift; sourceTree = "<group>"; };
@@ -175,11 +189,18 @@
 		20000000000000000000093 /* BrowserPanesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPanesTests.swift; sourceTree = "<group>"; };
 		200000000000000000000B1 /* EditorPaneModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneModelTests.swift; sourceTree = "<group>"; };
 		2639724864074430BA56B5D3 /* EditorPanesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPanesTests.swift; sourceTree = "<group>"; };
+		E2FE4A1FC6B7429A8E79A4F9 /* DeskCanvasStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCanvasStateTests.swift; sourceTree = "<group>"; };
 		FD2DAF7A30B04EABB3A14693 /* EditorFileClassTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorFileClassTests.swift; sourceTree = "<group>"; };
 		52E91EFADEB4413DA81A96F8 /* EditorWebViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorWebViewTests.swift; sourceTree = "<group>"; };
 		9BF1B274379647B88A0DBA04 /* EditorPaneViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneViewTests.swift; sourceTree = "<group>"; };
 		7A44D2B60E9C41D8B5721CA3 /* EditorPaneIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPaneIntegrationTests.swift; sourceTree = "<group>"; };
 		BE0A2CB26F101E0CCC68EFBA /* GitFileContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitFileContentTests.swift; sourceTree = "<group>"; };
+		FB9D2F62F22A4B56B0D9AAF1 /* WorkspaceWindowControllerDeskCanvasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowControllerDeskCanvasTests.swift; sourceTree = "<group>"; };
+		1181060562454A6FA6784749 /* DeskCanvasNodeViewsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCanvasNodeViewsTests.swift; sourceTree = "<group>"; };
+		5544AA75593B4BA4BC9E6270 /* DeskCanvasInputTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCanvasInputTests.swift; sourceTree = "<group>"; };
+		928CD3A8DE8E4A35B612FD89 /* DeskCameraFlightTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCameraFlightTests.swift; sourceTree = "<group>"; };
+		1A5ABE0620BB482B8A6574E9 /* DeskCanvasLODTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCanvasLODTests.swift; sourceTree = "<group>"; };
+		D00EE8F1E07540A09980F775 /* PaneWorkspaceCanvasModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneWorkspaceCanvasModeTests.swift; sourceTree = "<group>"; };
 		9D48E1B36C2F4A70B15D8E22 /* DoublePressDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoublePressDetectorTests.swift; sourceTree = "<group>"; };
 		6C15DA4028034799A71F586F /* MediaTabViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaTabViewTests.swift; sourceTree = "<group>"; };
 		F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTabStripViewTests.swift; sourceTree = "<group>"; };
@@ -192,7 +213,9 @@
 		20000000000000000000000B /* WorkspaceWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowController.swift; sourceTree = "<group>"; };
 		20000000000000000000000C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		20000000000000000000000D /* PaneGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneGrid.swift; sourceTree = "<group>"; };
+		2CDF8CF2C82745FFABCED8D2 /* DeskCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCanvas.swift; sourceTree = "<group>"; };
 		20000000000000000000000E /* PaneGridTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneGridTests.swift; sourceTree = "<group>"; };
+		515737526BA746E7B0775D9D /* DeskCanvasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCanvasTests.swift; sourceTree = "<group>"; };
 		20000000000000000000000F /* PaneWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneWorkspaceView.swift; sourceTree = "<group>"; };
 		200000000000000000000010 /* PaneWorkspaceViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneWorkspaceViewTests.swift; sourceTree = "<group>"; };
 		200000000000000000000011 /* pane-grid.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "pane-grid.json"; path = "../fixtures/native-macos-compat/pane-grid.json"; sourceTree = SOURCE_ROOT; };
@@ -247,6 +270,7 @@
 		20000000000000000000049 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A04759722BBF431AA1576C0D /* monaco */ = {isa = PBXFileReference; lastKnownFileType = folder; name = monaco; path = Resources/monaco; sourceTree = "<group>"; };
 		20000000000000000000050 /* WorkspaceShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceShell.swift; sourceTree = "<group>"; };
+		4CB37D6AF91C43D1966B98A4 /* DeskCanvasNodeViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeskCanvasNodeViews.swift; sourceTree = "<group>"; };
 		20000000000000000000051 /* WorkspaceShellTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceShellTests.swift; sourceTree = "<group>"; };
 		20000000000000000000052 /* EngineIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineIcon.swift; sourceTree = "<group>"; };
 		20000000000000000000060 /* WorkspaceFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFiles.swift; sourceTree = "<group>"; };
@@ -293,14 +317,17 @@
 				200000000000000000000007 /* SessionConnection.swift */,
 				200000000000000000000009 /* Instrumentation.swift */,
 				20000000000000000000000D /* PaneGrid.swift */,
+				2CDF8CF2C82745FFABCED8D2 /* DeskCanvas.swift */,
 				20000000000000000000000F /* PaneWorkspaceView.swift */,
 				20000000000000000000080 /* PaneContentView.swift */,
 				20000000000000000000090 /* BrowserPaneView.swift */,
 				20000000000000000000092 /* BrowserPanes.swift */,
 				200000000000000000000B0 /* EditorPaneModel.swift */,
 				BACAA95FB7844450B021094B /* EditorPanes.swift */,
+				371418F52B4143BE9B762348 /* DeskCanvasState.swift */,
 				08B9844312A440D4A5A932C5 /* EditorFileClass.swift */,
 				C43E2B4CEEE6E8798AE14F29 /* GitFileContent.swift */,
+				405D7DD97ED24F13AEC1C23B /* PaneChipView.swift */,
 				2F8D45A9B1E64C7290EA3D16 /* DoublePressDetector.swift */,
 				1422F1A7E3B9416382854F44 /* MediaTabView.swift */,
 				CF6FC80108EE44A497708D9A /* EditorTabStripView.swift */,
@@ -323,6 +350,7 @@
 				20000000000000000000001F /* CommandPaletteController.swift */,
 				200000000000000000000020 /* WorkspaceToolbar.swift */,
 				20000000000000000000050 /* WorkspaceShell.swift */,
+				4CB37D6AF91C43D1966B98A4 /* DeskCanvasNodeViews.swift */,
 				20000000000000000000052 /* EngineIcon.swift */,
 				20000000000000000000022 /* SettingsStore.swift */,
 				20000000000000000000023 /* BrainClients.swift */,
@@ -353,11 +381,14 @@
 				200000000000000000000002 /* FrameCodecTests.swift */,
 				200000000000000000000006 /* SessionConnectionTests.swift */,
 				20000000000000000000000E /* PaneGridTests.swift */,
+				515737526BA746E7B0775D9D /* DeskCanvasTests.swift */,
 				200000000000000000000010 /* PaneWorkspaceViewTests.swift */,
+				D00EE8F1E07540A09980F775 /* PaneWorkspaceCanvasModeTests.swift */,
 				20000000000000000000091 /* BrowserPaneViewTests.swift */,
 				20000000000000000000093 /* BrowserPanesTests.swift */,
 				200000000000000000000B1 /* EditorPaneModelTests.swift */,
 				2639724864074430BA56B5D3 /* EditorPanesTests.swift */,
+				E2FE4A1FC6B7429A8E79A4F9 /* DeskCanvasStateTests.swift */,
 				FD2DAF7A30B04EABB3A14693 /* EditorFileClassTests.swift */,
 				6C15DA4028034799A71F586F /* MediaTabViewTests.swift */,
 				F2210BEDBBCF478A9EA96D02 /* EditorTabStripViewTests.swift */,
@@ -366,6 +397,10 @@
 				9BF1B274379647B88A0DBA04 /* EditorPaneViewTests.swift */,
 				7A44D2B60E9C41D8B5721CA3 /* EditorPaneIntegrationTests.swift */,
 				BE0A2CB26F101E0CCC68EFBA /* GitFileContentTests.swift */,
+				1181060562454A6FA6784749 /* DeskCanvasNodeViewsTests.swift */,
+				5544AA75593B4BA4BC9E6270 /* DeskCanvasInputTests.swift */,
+				928CD3A8DE8E4A35B612FD89 /* DeskCameraFlightTests.swift */,
+				1A5ABE0620BB482B8A6574E9 /* DeskCanvasLODTests.swift */,
 				9D48E1B36C2F4A70B15D8E22 /* DoublePressDetectorTests.swift */,
 				20000000000000000000095 /* PaneApprovalBarTests.swift */,
 				200000000000000000000011 /* pane-grid.json */,
@@ -400,6 +435,7 @@
 				20000000000000000000097 /* SessionHoverCardTests.swift */,
 				20000000000000000000061 /* WorkspaceFilesTests.swift */,
 				20000000000000000000071 /* EngineLauncherTests.swift */,
+				FB9D2F62F22A4B56B0D9AAF1 /* WorkspaceWindowControllerDeskCanvasTests.swift */,
 			);
 			path = OmniAgentTests;
 			sourceTree = "<group>";
@@ -530,14 +566,17 @@
 				100000000000000000000006 /* SessionConnection.swift in Sources */,
 				100000000000000000000008 /* Instrumentation.swift in Sources */,
 				10000000000000000000000C /* PaneGrid.swift in Sources */,
+				B8FC09BF87F34E8E91515F5E /* DeskCanvas.swift in Sources */,
 				10000000000000000000000E /* PaneWorkspaceView.swift in Sources */,
 				10000000000000000000080 /* PaneContentView.swift in Sources */,
 				10000000000000000000090 /* BrowserPaneView.swift in Sources */,
 				10000000000000000000092 /* BrowserPanes.swift in Sources */,
 				100000000000000000000B0 /* EditorPaneModel.swift in Sources */,
 				53C290D7733E43F89B368514 /* EditorPanes.swift in Sources */,
+				43DFECC6CB8F4285921E6A5A /* DeskCanvasState.swift in Sources */,
 				71021CF2EFA24E0285BFFFDA /* EditorFileClass.swift in Sources */,
 				68F9BD406F6C7DDABE533A9D /* GitFileContent.swift in Sources */,
+				C8E5716D35494A029A309845 /* PaneChipView.swift in Sources */,
 				E4A1C60B27D34F19B0C55A83 /* DoublePressDetector.swift in Sources */,
 				6B338221C82340A48C81D8A6 /* MediaTabView.swift in Sources */,
 				12571DF89D0D4288891BDAFE /* EditorTabStripView.swift in Sources */,
@@ -560,6 +599,7 @@
 				10000000000000000000001E /* CommandPaletteController.swift in Sources */,
 				10000000000000000000001F /* WorkspaceToolbar.swift in Sources */,
 				10000000000000000000050 /* WorkspaceShell.swift in Sources */,
+				87920CEE136A49449D23172F /* DeskCanvasNodeViews.swift in Sources */,
 				10000000000000000000052 /* EngineIcon.swift in Sources */,
 				10000000000000000000021 /* SettingsStore.swift in Sources */,
 				10000000000000000000022 /* BrainClients.swift in Sources */,
@@ -588,11 +628,14 @@
 				100000000000000000000002 /* FrameCodecTests.swift in Sources */,
 				100000000000000000000005 /* SessionConnectionTests.swift in Sources */,
 				10000000000000000000000D /* PaneGridTests.swift in Sources */,
+				BE203811DF334A88BCEB06D8 /* DeskCanvasTests.swift in Sources */,
 				10000000000000000000000F /* PaneWorkspaceViewTests.swift in Sources */,
+				FD4C61B478ED4F0BB9AD83A9 /* PaneWorkspaceCanvasModeTests.swift in Sources */,
 				10000000000000000000091 /* BrowserPaneViewTests.swift in Sources */,
 				10000000000000000000093 /* BrowserPanesTests.swift in Sources */,
 				100000000000000000000B1 /* EditorPaneModelTests.swift in Sources */,
 				69D406BCC81448EF8CA13D9D /* EditorPanesTests.swift in Sources */,
+				E6B9FB15113B4C25B1F8D0BE /* DeskCanvasStateTests.swift in Sources */,
 				34A6BF2B1B324F22ACCD3693 /* EditorFileClassTests.swift in Sources */,
 				F2729C0CEE50441882BFD7A7 /* MediaTabViewTests.swift in Sources */,
 				1B7BF5CE3D794B919522855C /* EditorTabStripViewTests.swift in Sources */,
@@ -601,6 +644,10 @@
 				2ADA9E4CC4CE4F37B25A421B /* EditorPaneViewTests.swift in Sources */,
 				3C1E9A5F7D0B42E1A8460F31 /* EditorPaneIntegrationTests.swift in Sources */,
 				1ECF599C46245E2BA8447FC1 /* GitFileContentTests.swift in Sources */,
+				6D32C137B60B4C9586F35FBC /* DeskCanvasNodeViewsTests.swift in Sources */,
+				6EAB469FE27B4B4D889571B0 /* DeskCanvasInputTests.swift in Sources */,
+				9221AD3E21244586840226C8 /* DeskCameraFlightTests.swift in Sources */,
+				7F18710D01214A678267D534 /* DeskCanvasLODTests.swift in Sources */,
 				5B2F70C41A8E4D6C9E33A017 /* DoublePressDetectorTests.swift in Sources */,
 				10000000000000000000095 /* PaneApprovalBarTests.swift in Sources */,
 				100000000000000000000007 /* WorkspaceWindowControllerTests.swift in Sources */,
@@ -631,6 +678,7 @@
 				10000000000000000000097 /* SessionHoverCardTests.swift in Sources */,
 				10000000000000000000061 /* WorkspaceFilesTests.swift in Sources */,
 				10000000000000000000071 /* EngineLauncherTests.swift in Sources */,
+				886AD5FC7A3C4837958280C6 /* WorkspaceWindowControllerDeskCanvasTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

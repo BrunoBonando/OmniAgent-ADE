@@ -132,6 +132,132 @@ enum SessionOutline {
         return defaultSessionName(lowestFreeSessionNumber(Set(sessions.map(\.label))))
     }
 
+    /// The session the user is currently on — the group holding the focused
+    /// pane. `nil` when nothing is focused, and `nil` when the focused id
+    /// names no live pane (a stale focus).
+    ///
+    /// The strict "who has focus" answer. What is on *screen* — and what a
+    /// new pane joins — is `visibleSessionGroupID`, which falls back exactly
+    /// where this returns `nil`. Port of `currentSessionGroupId`.
+    ///
+    /// No `?? ungroupedSessionID` here, deliberately: `PaneDescriptor.group`
+    /// is non-optional and a pre-grouping pane already carries the sentinel,
+    /// resolved once at the restore boundary.
+    static func currentSessionGroupID(_ panes: [PaneDescriptor], focusedPaneID: String?) -> String? {
+        guard let focusedPaneID else { return nil }
+        return panes.first { $0.sessionID == focusedPaneID }?.group
+    }
+
+    /// Which session's panes this project actually puts **on screen** — and
+    /// the session a newly opened single pane JOINS. Port of
+    /// `visibleSessionGroupId`.
+    ///
+    /// The rule, and why it is not just `currentSessionGroupID`:
+    ///
+    /// - **The focused pane's session**, when the focused pane is in this
+    ///   project. This agrees with `group`'s `isCurrent` by construction, so
+    ///   the grid and the sidebar's accent rail can never point at different
+    ///   sessions.
+    /// - **Otherwise the project's first session** (first-seen order = the
+    ///   topmost row in the sidebar). Selecting a workspace deliberately does
+    ///   *not* move focus, so `focusedPaneID` routinely belongs to a
+    ///   different project than the one being rendered;
+    ///   `currentSessionGroupID` answers `nil` there, and showing nothing at
+    ///   all would be a worse answer than showing the session the eye lands
+    ///   on anyway. A stale `focusedPaneID` lands here too, rather than
+    ///   blanking.
+    /// - **`nil`** only when the project genuinely has no panes — the caller
+    ///   then renders its empty state, or mints a group with
+    ///   `existingGroup ?? newSessionGroupID()`.
+    ///
+    /// This absorbed a near-twin, `sessionGroupForNewPane`, identical except
+    /// that its no-focus-in-this-project fallback picked the project's
+    /// *most-recently-created* session instead of the first-seen one — which
+    /// is how "the 'New terminal' row could be drawn under Session 1 and
+    /// spawn into Session 2". One question, one answer: a new pane joins the
+    /// session you are looking at.
+    static func visibleSessionGroupID(
+        _ panes: [PaneDescriptor],
+        project: String,
+        focusedPaneID: String?
+    ) -> String? {
+        let focused = focusedPaneID.flatMap { id in panes.first { $0.sessionID == id } }
+        if let focused, focused.project == project { return focused.group }
+        return panes.first { $0.project == project }?.group
+    }
+
+    /// The first pane of the adjacent session in `project`, or `nil` at a
+    /// project boundary. Port of `adjacentSessionTab` — what session
+    /// stepping (`⌃1…⌃9`-style, and the canvas's "fly sideways") walks.
+    ///
+    /// Two behaviours ride on the oracle's single line
+    /// (`sessions[(currentIndex === -1 ? 0 : currentIndex) + offset]?.tabs[0] ?? null`):
+    ///
+    /// - **No current session in this project** — focus is elsewhere, or
+    ///   nowhere — starts the walk from index 0. So `offset: 1` lands on the
+    ///   project's *second* session and `offset: -1` computes index -1.
+    /// - **Index -1 and index >= count are both `nil`, with no wrapping.**
+    ///   JS reads those as `undefined` and short-circuits; Swift traps, so
+    ///   the `indices.contains` guard below *is* the end behaviour rather
+    ///   than a defensive extra.
+    ///
+    /// Returns the target session's **first** pane, not its focused one.
+    static func adjacentSessionTab(
+        _ panes: [PaneDescriptor],
+        project: String,
+        focusedPaneID: String?,
+        offset: Int
+    ) -> PaneDescriptor? {
+        let sessions = group(panes, focusedPaneID: focusedPaneID)
+            .first { $0.project == project }?
+            .sessions ?? []
+        let currentIndex = sessions.firstIndex { $0.isCurrent } ?? -1
+        let target = (currentIndex == -1 ? 0 : currentIndex) + offset
+        guard sessions.indices.contains(target),
+              let firstPaneID = sessions[target].paneIDs.first
+        else { return nil }
+        return panes.first { $0.sessionID == firstPaneID }
+    }
+
+    /// Which engines are running in one session and how many terminals of
+    /// each, in first-seen order — what the canvas's session chips and the
+    /// hover card draw an engine-coloured dot per entry from. Port of
+    /// `sessionEngineBreakdown`.
+    ///
+    /// Two deliberate divergences from the oracle:
+    ///
+    /// - **It takes the descriptors and a group id, not a session node.**
+    ///   The oracle reads `session.tabs`, whole `TabInfo`s;
+    ///   `SessionGroupNode` carries only `paneIDs`, so it physically cannot
+    ///   answer this. Callers already keep the descriptors beside the tree.
+    /// - **Only `.terminal` panes count.** A browser or editor pane carries
+    ///   `.shell` as a placeholder, not as an identity — the same reason
+    ///   `nextPaneNumber` gives them their own ladder — and counting one
+    ///   would make the card claim a shell that is not running. The web
+    ///   build has no pane kinds, so its oracle cannot express this.
+    ///
+    /// Scoped by group alone, matching how `PaneWorkspaceView.grids` is
+    /// keyed. Real group ids are unique across projects
+    /// (`sess-grp-<ms>-<counter>`); `WorkspaceRestoration.ungroupedSessionID`
+    /// is shared by construction, so for that one id this merges the
+    /// pre-grouping panes of every project. Pass project-scoped panes if
+    /// that matters at the call site.
+    ///
+    /// Built from live panes, never from what a create dialog chose: a
+    /// terminal closed afterwards must not leave the card claiming it is
+    /// there.
+    static func sessionEngineBreakdown(_ panes: [PaneDescriptor], group: String) -> [(engine: Engine, count: Int)] {
+        var counts: [(engine: Engine, count: Int)] = []
+        for pane in panes where pane.group == group && pane.kind == .terminal {
+            if let index = counts.firstIndex(where: { $0.engine == pane.engine }) {
+                counts[index].count += 1
+            } else {
+                counts.append((engine: pane.engine, count: 1))
+            }
+        }
+        return counts
+    }
+
     static func defaultPaneName(_ engine: Engine, _ n: Int) -> String {
         "\(engine.displayName) \(n)"
     }

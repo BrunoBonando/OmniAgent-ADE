@@ -10,6 +10,12 @@ enum PaletteAction: Equatable {
     case newBrowserPane
     case newEditorPane
     case newSession
+    /// Fly the Desk's camera onto one session's card. The palette twin of
+    /// ⌃1…⌃9 and of the sidebar's session row — all three land in
+    /// `WorkspaceWindowController.enterDeskSession`.
+    case enterSession(group: String)
+    /// ⌘0 — the whole organigram, centred.
+    case zoomDeskToFit
     /// The focused editor's active file, diffed against HEAD — the palette's
     /// twin of the tab strip's ± toggle.
     case openDiffForCurrentFile(path: String)
@@ -338,6 +344,27 @@ struct CommandPaletteModel: Equatable {
                 }
             }
         }
+        // One row per session, before the pane rows and in the same section:
+        // a section is a run of consecutive rows, so these cannot be appended
+        // after the browser and editor rows without splitting Terminals in two.
+        for project in tree {
+            for (index, session) in project.sessions.enumerated() {
+                commands.append(
+                    PaletteCommand(
+                        id: "enter:\(session.id)",
+                        title: "Enter \(session.label) — \(SessionOutline.projectLabel(project.project, labels: projectLabels))",
+                        // Hand-typed, like every other key hint in this file:
+                        // nothing links a row to the NSMenuItem that defines
+                        // its chord. ⌃1…⌃9 is per project, and there is no
+                        // single keystroke past nine.
+                        detail: index < 9 ? "⌃\(index + 1)" : nil,
+                        action: .enterSession(group: session.id),
+                        keywords: session.cwd,
+                        section: .terminals
+                    )
+                )
+            }
+        }
         commands += paneRows[.terminal] ?? []
         commands += paneRows[.browser] ?? []
         commands += paneRows[.editor] ?? []
@@ -449,6 +476,9 @@ struct CommandPaletteModel: Equatable {
                 }
             }
         }
+        commands.append(
+            PaletteCommand(id: "zoom-to-fit", title: "Zoom to fit", detail: "⌘0", action: .zoomDeskToFit)
+        )
         commands.append(
             PaletteCommand(id: "toggle-sidebar", title: "Toggle sidebar", detail: "⌃⌘S", action: .toggleSidebar)
         )

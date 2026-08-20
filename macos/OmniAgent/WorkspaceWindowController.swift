@@ -109,6 +109,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// views and their PTY attachment along with it.
     private let contentContainer = NSView()
     private let placeholder = WorkspacePlaceholderView()
+
+    /// The canvas's zoom readout. A sibling of `workspace`, never a subview of
+    /// it — see `DeskZoomReadoutView`.
+    let deskZoomReadout = DeskZoomReadoutView()
+
+    /// The canvas's ground. A sibling *behind* `workspace` — see `DeskGridView`
+    /// for why it is not inside it.
+    let deskGrid = DeskGridView()
     /// Which destination is on screen. `applyDestination` is the only writer;
     /// ⌘↩ reads it because focus mode is about a terminal, and off Terminals the
     /// pane workspace is hidden entirely.
@@ -185,6 +193,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// `layout` row and drops fields it does not know about.
     private var editorPanesReadDispatched = false
     private var editorPanesReadCompleted = false
+    /// The `desk_canvas_native` row's two flags — the browser and editor pairs
+    /// above, for the third native-only row. Separate again for the same
+    /// reason: the web build rewrites the shared `layout` row and drops fields
+    /// it does not know about, and it knows nothing about a canvas.
+    private var deskCanvasReadDispatched = false
+    private var deskCanvasReadCompleted = false
+    /// Coalesces a burst of canvas changes into one write — see
+    /// `persistDeskCanvas`.
+    private var deskCanvasWriteToken = 0
     /// The pane that had focus when the app was last used, so a restart
     /// comes back to that session rather than to whichever pane happened to
     /// restore last. Native-local UI state the web build knows nothing about,
@@ -382,12 +399,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.reloadOutline()
             self?.adjustWindowForRowCount()
         }
+        workspace.onDeskCanvasChanged = { [weak self] in self?.persistDeskCanvas() }
+        workspace.onCameraChanged = { [weak self] in self?.updateDeskZoomReadout() }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
         usageRecorder.onStoreChanged = { [weak self] store in self?.persistUsageAnalytics(store) }
         shellSidebar.onSelectPane = { [weak self] id in self?.workspace.focusPane(id) }
         shellSidebar.onSelectSession = { [weak self] session in
-            guard let first = session.paneIDs.first else { return }
-            self?.workspace.focusPane(first)
+            // The one entry path. This used to call `workspace.focusPane(first)`
+            // directly, which in canvas mode would swap the grid out from under
+            // a camera pointed somewhere else.
+            self?.enterDeskSession(session.id)
         }
         shellSidebar.onRenameSession = { [weak self] session, name in
             self?.renameSession(session, to: name)
@@ -403,34 +424,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         hoverCard.rowFrame = { [weak self] target in self?.shellSidebar.rowFrameOnScreen(for: target) }
         shellSidebar.onNewSession = { [weak self] in self?.newSession(nil) }
         shellSidebar.onNewTerminal = { [weak self] in
-            guard let self else { return }
-            let panes = self.workspace.allPaneIDs.compactMap { self.workspace.descriptor(for: $0) }
-            let current = SessionOutline.group(panes, focusedPaneID: self.workspace.focusedPaneID)
-                .flatMap(\.sessions)
-                .first(where: \.isCurrent)
-            guard let current else { return }
-            self.newPane(in: current)
+            guard let self, let session = self.visibleSession() else { return }
+            self.newPane(in: session)
         }
         shellSidebar.onNewBrowser = { [weak self] in
-            guard let self else { return }
-            // The same current-session lookup `onNewTerminal` uses: the row
-            // lives under the session it adds to.
-            let panes = self.workspace.allPaneIDs.compactMap { self.workspace.descriptor(for: $0) }
-            let current = SessionOutline.group(panes, focusedPaneID: self.workspace.focusedPaneID)
-                .flatMap(\.sessions)
-                .first(where: \.isCurrent)
-            guard let current else { return }
-            self.newBrowser(in: current)
+            // The same visible-session lookup: the row lives under the session
+            // it adds to, and that is the session on screen.
+            guard let self, let session = self.visibleSession() else { return }
+            self.newBrowser(in: session)
         }
         shellSidebar.onNewEditor = { [weak self] in
-            guard let self else { return }
-            // The same current-session lookup the two rows above use.
-            let panes = self.workspace.allPaneIDs.compactMap { self.workspace.descriptor(for: $0) }
-            let current = SessionOutline.group(panes, focusedPaneID: self.workspace.focusedPaneID)
-                .flatMap(\.sessions)
-                .first(where: \.isCurrent)
-            guard let current else { return }
-            self.newEditor(in: current)
+            // The same visible-session lookup the two rows above use.
+            guard let self, let session = self.visibleSession() else { return }
+            self.newEditor(in: session)
         }
         shellSidebar.onOpenFile = { [weak self] url, pinned in
             self?.openFileInEditor(url, pinned: pinned)
@@ -551,8 +557,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func installSplitView(on window: NSWindow) {
         workspace.translatesAutoresizingMaskIntoConstraints = false
         placeholder.translatesAutoresizingMaskIntoConstraints = false
+        // Behind the canvas, and added first so it is: the canvas's own backing
+        // layer goes clear in canvas mode precisely so this shows through.
+        deskGrid.translatesAutoresizingMaskIntoConstraints = false
+        deskGrid.isHidden = true
+        contentContainer.addSubview(deskGrid)
         contentContainer.addSubview(workspace)
         contentContainer.addSubview(placeholder)
+        NSLayoutConstraint.activate([
+            deskGrid.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+            deskGrid.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+            deskGrid.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+            deskGrid.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
+        ])
+        installDeskZoomReadout()
         for view in [workspace, placeholder] as [NSView] {
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
@@ -603,13 +621,134 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Swaps the destination. `isHidden`, never add/remove: see
     /// `contentContainer`'s own doc for why the pane workspace must stay
     /// mounted.
+    ///
+    /// DESK *is* the canvas. There is no second content root and no
+    /// `DeskCanvasView`: the one `PaneWorkspaceView` already owns every
+    /// session's grid, so selecting DESK only asks it for its second layout
+    /// mode — every group laid out at its node rect, under one camera — and
+    /// leaving asks for the first one back, so a hidden workspace is not
+    /// laying out ninety-six panes for nobody.
     func applyDestination(_ destination: WorkspaceDestination) {
+        let wasTerminals = self.destination == .terminals
         self.destination = destination
         shellSidebar.applyDestination(destination)
         let isTerminals = destination == .terminals
         workspace.isHidden = !isTerminals
+        // Canvas mode is on for the whole Desk destination — but *not* while
+        // the user is inside a session: `landSession` turns the mode off as it
+        // lands, precisely so that "the camera is at identity" and "this card
+        // fills the viewport" are the same picture and every coordinate
+        // conversion in that file stays correct. Which is why the second flag
+        // exists rather than being derived from the first: `deskCanvasLoaded`
+        // says the Desk is what is on screen, whether or not a session is
+        // filling it, and the gesture that brings you back *out* of a session
+        // is guarded on it. This is its only writer.
+        //
+        // The mode itself is not simply `isTerminals` any more: coming back to
+        // the Desk restores whichever of its two states was left behind, which
+        // is what `rememberDeskState`/`restoreDeskState` are for. Re-selecting
+        // DESK while already on it is unchanged — with nothing recorded it
+        // loads the organigram, as it always did.
+        if isTerminals {
+            restoreDeskState()
+        } else if wasTerminals {
+            rememberDeskState()
+            workspace.canvasMode = false
+        }
+        workspace.deskCanvasLoaded = isTerminals
         placeholder.isHidden = isTerminals
         if !isTerminals { placeholder.show(destination) }
+        // A destination change moves the readout in or out of existence without
+        // necessarily moving the camera, so it cannot ride on `onCameraChanged`.
+        updateDeskZoomReadout()
+    }
+
+    /// Bottom-right, over the canvas, clear of the panes.
+    private func installDeskZoomReadout() {
+        deskZoomReadout.translatesAutoresizingMaskIntoConstraints = false
+        deskZoomReadout.isHidden = true
+        contentContainer.addSubview(deskZoomReadout)
+        NSLayoutConstraint.activate([
+            deskZoomReadout.trailingAnchor.constraint(
+                equalTo: contentContainer.trailingAnchor, constant: -16
+            ),
+            deskZoomReadout.bottomAnchor.constraint(
+                equalTo: contentContainer.bottomAnchor, constant: -16
+            ),
+        ])
+    }
+
+    /// Shown exactly while the canvas is what the user is flying over.
+    ///
+    /// Not inside a session: there the camera is the identity by construction,
+    /// so the readout would be a permanent "100%" — a number that never changes
+    /// and answers nothing, sitting on top of a terminal's last line.
+    func updateDeskZoomReadout() {
+        let onCanvas = workspace.canvasMode && destination == .terminals
+        deskZoomReadout.scale = workspace.camera.scale
+        deskZoomReadout.isHidden = !onCanvas
+        // The ground goes with it: inside a session the card fills the viewport
+        // and there is no ground to see, and off the Desk there is no canvas.
+        deskGrid.camera = workspace.camera
+        deskGrid.isHidden = !onCanvas
+    }
+
+    /// What the Desk was showing when it was last left, so coming back to it is
+    /// a *return* and not a reset.
+    ///
+    /// Neither half of the Desk's state survives the trip on its own.
+    /// `canvasMode`'s setter destroys the camera on the way out ("Normal mode
+    /// must carry no transform at all"), so a canvas left at some camera comes
+    /// back parked in its own corner at scale 1; and inside a session canvas
+    /// mode is already *off*, so switching it back on would show the organigram
+    /// the user did not leave from. Recording which of the two it was is the
+    /// only way to tell them apart on the way back — the flags alone cannot.
+    private enum DeskReturn {
+        /// On the organigram, looking through this camera.
+        case canvas(DeskCamera)
+        /// Inside a session, filling the viewport. Canvas mode stays off.
+        case session
+    }
+
+    private var deskReturn: DeskReturn?
+
+    /// Called on the way *off* the Desk, and only from a destination that was
+    /// the Desk — two Dashboard selections in a row must not overwrite what the
+    /// first one recorded with the mode the first one turned off.
+    private func rememberDeskState() {
+        // A flight still in the air is neither state: `canvasMode` is on but
+        // `camera` is already parked over the destination card, and its landing
+        // (`DispatchQueue.main.asyncAfter`, token-guarded) arrives whether or
+        // not the Desk is still on screen — so by the time the user comes back
+        // they are inside that session. Storing the camera instead would come
+        // back to a session drawn at full size with `canvasOwnsInput` true,
+        // i.e. every keystroke swallowed by the canvas.
+        if workspace.canvasMode, !workspace.isEnteringSession {
+            deskReturn = .canvas(workspace.camera)
+        } else {
+            deskReturn = .session
+        }
+    }
+
+    /// Called on the way *on* to the Desk. With nothing recorded — the first
+    /// selection of the run — this is the plain "load the organigram" it has
+    /// always been.
+    private func restoreDeskState() {
+        switch deskReturn {
+        case .canvas(let seat):
+            workspace.canvasMode = true
+            // After the mode, not before: the setter resets the camera on every
+            // transition it makes, so a camera seated first would be thrown
+            // away by the mode change that follows it.
+            workspace.camera = seat
+        case .session:
+            // Already in normal mode with that session's grid filling `bounds`;
+            // unhiding the workspace is the whole of the work.
+            workspace.canvasMode = false
+        case nil:
+            workspace.canvasMode = true
+        }
+        deskReturn = nil
     }
 
     /// Opens a workspace in Level 2 and scopes the outline to it.
@@ -898,6 +1037,49 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @objc func newTerminalPane(_ sender: Any?) {
         newPane(in: nil)
     }
+
+    /// The session a new pane should join: the one the project on screen is
+    /// showing, not the one holding focus. What the sidebar's three "new pane"
+    /// rows resolve their target with.
+    ///
+    /// Those are different answers more often than they look. Selecting a
+    /// workspace in the sidebar deliberately does not move focus, so
+    /// `focusedPaneID` routinely names a pane in another project;
+    /// `SessionOutline.visibleSessionGroupID` falls back to the project's
+    /// first-seen session there, where the strict "current" answer is `nil` and
+    /// the row does nothing at all.
+    ///
+    /// `nil` only when the project genuinely has no panes — which is what makes
+    /// the callers' `?? SessionOutline.newSessionGroupID()` correct rather than
+    /// a swallowed failure.
+    private func visibleSession() -> SessionGroupNode? {
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        // A window that has not picked a workspace yet — Level 1, or the
+        // bootstrap pane, whose project is `""` and so never selects one —
+        // still has a project on screen: the focused pane's own. Without this
+        // fallback the three rows do nothing at all before a workspace has
+        // been selected, which is the same silence this change exists to
+        // remove rather than move.
+        let onScreen = selectedProjectID
+            ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0)?.project }
+        guard
+            let project = onScreen,
+            let group = SessionOutline.visibleSessionGroupID(
+                panes,
+                project: project,
+                focusedPaneID: workspace.focusedPaneID
+            )
+        else { return nil }
+        return SessionOutline.group(panes, focusedPaneID: workspace.focusedPaneID)
+            .first { $0.project == project }?
+            .sessions
+            .first { $0.id == group }
+    }
+
+    /// The three sidebar rows set their closures up in `init`, so a test cannot
+    /// invoke them; this is the same call they make.
+    @discardableResult
+    func newPaneInVisibleSessionForTesting() -> Bool { newPane(in: visibleSession()) }
 
     /// Adds one pane seeded from an explicit session, or — with `nil` — from
     /// whatever currently has focus.
@@ -1691,6 +1873,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return destination == .terminals
                 && workspace.focusedPaneID != nil
                 && workspace.paneIDs.count >= 2
+        case #selector(zoomDeskToFit(_:)):
+            // The canvas only exists on the Desk.
+            return destination == .terminals
+        case #selector(enterFocusedSession(_:)):
+            return destination == .terminals && currentDeskSessionGroup() != nil
+        case #selector(nextSession(_:)):
+            return destination == .terminals && stepTarget(by: 1) != nil
+        case #selector(previousSession(_:)):
+            return destination == .terminals && stepTarget(by: -1) != nil
+        case #selector(selectSession(_:)):
+            // Nine menu items, rarely nine sessions: the ones past the end are
+            // greyed out rather than silently doing nothing.
+            return destination == .terminals && deskSession(at: menuItem.tag) != nil
         default:
             return true
         }
@@ -1772,6 +1967,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // left empty.
         restoreBrowserPanesIfNeeded()
         restoreEditorPanesIfNeeded()
+        // A sibling of those two rather than chained behind them, deliberately:
+        // each of the three is independently gated and independently re-armed,
+        // so a browser read that fails must not take the canvas down with it.
+        restoreDeskCanvasIfNeeded()
     }
 
     /// Kills daemon sessions this window no longer references.
@@ -1883,6 +2082,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             openChangesOverview()
         case .newSession:
             newSession(nil)
+        case let .enterSession(group):
+            enterDeskSession(group)
+        case .zoomDeskToFit:
+            zoomDeskToFit(nil)
         // Interrupt and reattach are the focused terminal's own responder
         // actions (`TerminalSurfaceView`), reached here directly rather than
         // re-implemented, so the palette runs the identical code the ⌘. and
@@ -1913,6 +2116,115 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         case .noop:
             break
         }
+    }
+
+    // MARK: - Desk canvas commands
+
+    /// The one way into a session, whichever surface asked.
+    ///
+    /// Below identity scale the canvas is what you are looking at, so entering
+    /// is a camera flight and `PaneWorkspaceView.enterSession` owns the
+    /// landing — including `carryCardToFocusedPane()`, without which the
+    /// blinking cursor is left behind on a pane nobody can see. Off the Desk
+    /// (or with the canvas not loaded) the old instant swap is still exactly
+    /// right, so `activateGroup` stays the other arm rather than being replaced
+    /// by it. Every surface — the toolbar button, the palette row, and the menu
+    /// items and sidebar row Task 10b routes here — lands in this one method, so
+    /// they cannot drift apart the way `run(_:)`'s doc warns about.
+    func enterDeskSession(_ group: String) {
+        if workspace.canvasMode {
+            workspace.enterSession(group)
+        } else {
+            workspace.activateGroup(group)
+        }
+        // The sidebar's current-session highlight is derived from the focused
+        // pane, which the line above has just moved.
+        reloadOutline()
+    }
+
+    /// Which session the Desk is about right now.
+    ///
+    /// Deliberately the *visible* session of the selected project first, and
+    /// only then the one holding focus: selecting a workspace does not move
+    /// focus, so focus routinely belongs to another project entirely, and
+    /// "which session should this project show" is a different question from
+    /// "which session has the cursor in it".
+    func currentDeskSessionGroup() -> String? {
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        if let project = selectedProjectID,
+           let visible = SessionOutline.visibleSessionGroupID(
+               panes,
+               project: project,
+               focusedPaneID: workspace.focusedPaneID
+           ) {
+            return visible
+        }
+        return SessionOutline.currentSessionGroupID(panes, focusedPaneID: workspace.focusedPaneID)
+    }
+
+    /// ⌘0 — the whole tree plus its margin, centred. The same operation
+    /// exiting a session performs, aimed at `fitAll` rather than at a card.
+    @objc func zoomDeskToFit(_ sender: Any?) {
+        guard destination == .terminals else { return }
+        workspace.exitToCanvas()
+    }
+
+    /// Enter whichever session the Desk is currently about. Named
+    /// `enterFocusedSession:` rather than `enterSession:` on purpose: the
+    /// latter selector would be ambiguous with
+    /// `PaneWorkspaceView.enterSession(_:)` if that ever became `@objc`, and a
+    /// responder chain that handed an `NSMenuItem` to a method expecting a
+    /// group id crashes rather than misbehaving.
+    @objc func enterFocusedSession(_ sender: Any?) {
+        guard let group = currentDeskSessionGroup() else { return }
+        enterDeskSession(group)
+    }
+
+    /// ⌃1…⌃9. The `selectPane:` precedent exactly — the digit rides on the
+    /// menu item's tag — but scoped to the sessions of the *selected project*,
+    /// because that is what the sidebar is showing rows for.
+    @objc func selectSession(_ sender: Any?) {
+        guard let index = (sender as? NSMenuItem)?.tag, index >= 1,
+              let node = deskSession(at: index) else { return }
+        enterDeskSession(node.id)
+    }
+
+    @objc func nextSession(_ sender: Any?) { stepSession(by: 1) }
+
+    @objc func previousSession(_ sender: Any?) { stepSession(by: -1) }
+
+    /// What `stepSession` would land on — split out so `validateMenuItem` greys
+    /// the item out on exactly the condition the command refuses on.
+    ///
+    /// `adjacentSessionTab` answers with a *pane*, the web build's own shape,
+    /// and both ends stop rather than wrap: index -1 and index >= count are
+    /// both "nothing there", which is why nothing here is a modulo.
+    private func stepTarget(by offset: Int) -> PaneDescriptor? {
+        guard let project = selectedProjectID else { return nil }
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        return SessionOutline.adjacentSessionTab(
+            panes,
+            project: project,
+            focusedPaneID: workspace.focusedPaneID,
+            offset: offset
+        )
+    }
+
+    /// ⇧⌘] / ⇧⌘[.
+    private func stepSession(by offset: Int) {
+        guard let target = stepTarget(by: offset) else { return }
+        enterDeskSession(target.group)
+    }
+
+    /// The 1-based Nth session of the selected project, or nil past the end.
+    private func deskSession(at index: Int) -> SessionGroupNode? {
+        guard let project = selectedProjectID else { return nil }
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        let sessions = SessionOutline.group(panes, focusedPaneID: workspace.focusedPaneID)
+            .first { $0.project == project }?
+            .sessions ?? []
+        guard sessions.indices.contains(index - 1) else { return nil }
+        return sessions[index - 1]
     }
 
     /// The palette's "results mode": the same panel, its rows swapped for
@@ -2400,6 +2712,99 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 )
             }
         write(EditorPanesCodec.serialize(panes), to: SettingsKey.editorPanes)
+    }
+
+    // MARK: - Desk canvas persistence
+
+    /// Reads the native-only `desk_canvas_native` row once, alongside the
+    /// browser and editor rows — `restoreBrowserPanesIfNeeded`'s shape and its
+    /// reasons: a row that could not be read is not an empty one, so the write
+    /// gate stays shut and the read re-arms for the next reconnect.
+    private func restoreDeskCanvasIfNeeded() {
+        guard !deskCanvasReadDispatched else { return }
+        deskCanvasReadDispatched = true
+        connection.getSetting(key: SettingsKey.deskCanvas) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                applyRestoredDeskCanvas(DeskCanvasCodec.deserialize(raw))
+            case .failure:
+                deskCanvasReadDispatched = false
+            }
+        }
+    }
+
+    /// Hands the canvas its pinned nodes and the camera it was left at. Split
+    /// out from the read so a state can be applied in a test without a socket,
+    /// exactly as `applyRestoredBrowserPanes` is.
+    ///
+    /// A first launch has no stored camera, and that is what makes DESK open on
+    /// the whole organigram: `exitToCanvas` is `fitAll`.
+    func applyRestoredDeskCanvas(_ state: DeskCanvasState) {
+        // Pins first: `exitToCanvas` fits the tree the last layout pass
+        // produced, and a pinned node is what moves it.
+        workspace.canvasPins = state.pinned
+        // Seating a camera is only the canvas's business, and only while the
+        // canvas is what is on screen. This read lands last in the restore
+        // chain — after `applyRestoredBrowserPanes` has put focus back where
+        // the user left it, which on the canvas is a *flight* into that
+        // session. Overwriting the camera mid-flight would show the wrong
+        // place for 0.38s, and `exitToCanvas` would cancel the arrival
+        // outright: the restore's whole point, undone by its own last step.
+        // The canvas always opens on the whole organigram, whatever camera a
+        // previous run left behind. A launch that restores a camera zoomed into
+        // one card opens on a screen that looks like a single session with no
+        // sign that anything else exists — the one view where the spatial model
+        // is invisible. `state.camera` is therefore read and ignored; see
+        // `persistDeskCanvas`, which stops writing it.
+        if workspace.canvasMode, !workspace.isEnteringSession {
+            workspace.exitToCanvas()
+        }
+        // Last, deliberately, where its browser and editor siblings open the
+        // gate first: both assignments above raise `onDeskCanvasChanged`, and
+        // the row we just read is not a change worth writing back.
+        deskCanvasReadCompleted = true
+    }
+
+    /// A burst of canvas changes is one write.
+    ///
+    /// `write(_:to:)` suppresses an unchanged value, which is what protects the
+    /// `layout` row from a shell repainting its OSC title — but a camera being
+    /// dragged around produces a *different* value every frame, so suppression
+    /// cannot help here and only a settle can. Scheduled with `asyncAfter`
+    /// behind a token, the same shape `finishZoomTransition` uses and for the
+    /// same reason: a stale timer is harmless because it refuses any token but
+    /// the current one.
+    private static let deskCanvasWriteDelay: TimeInterval = 0.25
+
+    private func persistDeskCanvas() {
+        // The *completed* flag, never the dispatched one: the read is
+        // asynchronous, and a node dragged while it is in flight would
+        // otherwise persist an empty pinned map over a row nothing has read
+        // yet.
+        //
+        // And only from the canvas. Normal mode is entered by resetting the
+        // camera to the identity, so a write from inside a session would store
+        // "parked in the canvas's own corner" over the camera the user
+        // actually left — recoverable with ⌘0, but it is not what they left.
+        guard deskCanvasReadCompleted, workspace.canvasMode else { return }
+        deskCanvasWriteToken += 1
+        let token = deskCanvasWriteToken
+        // Captured now rather than read back when the timer fires: the state
+        // is known to be a canvas state at this instant, and the user may well
+        // have flown into a session before the quarter-second is up. Each
+        // change re-schedules, so the value that survives is still the last
+        // one.
+        // `camera: nil` on purpose. The canvas opens on `fitAll` every time —
+        // see `applyRestoredDeskCanvas` — so a stored camera is a field nothing
+        // reads. `DeskCanvasState.camera` and the codec's handling of it are
+        // left in place: they are covered by their own tests, and an old row
+        // that still carries a camera has to keep parsing.
+        let state = DeskCanvasState(pinned: workspace.canvasPins, camera: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.deskCanvasWriteDelay) { [weak self] in
+            guard let self, token == deskCanvasWriteToken else { return }
+            write(DeskCanvasCodec.serialize(state), to: SettingsKey.deskCanvas)
+        }
     }
 
     /// Writes a settings row only when its value actually changed.

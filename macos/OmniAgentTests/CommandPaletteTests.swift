@@ -31,9 +31,9 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(
             unfocused.map(\.id),
             [
-                "session:alpha/g1", "focus:a",
+                "session:alpha/g1", "enter:g1", "focus:a",
                 "destination:dashboard", "destination:board", "destination:terminals",
-                "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
+                "new-pane", "new-browser", "new-editor", "new-session", "zoom-to-fit", "toggle-sidebar",
             ]
         )
 
@@ -46,10 +46,10 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(
             focused.map(\.id),
             [
-                "session:alpha/g1", "focus:a",
+                "session:alpha/g1", "enter:g1", "focus:a",
                 "destination:dashboard", "destination:board", "destination:terminals",
                 "new-pane", "new-browser", "new-editor", "new-session",
-                "close-pane", "interrupt", "reattach", "toggle-sidebar",
+                "close-pane", "interrupt", "reattach", "zoom-to-fit", "toggle-sidebar",
             ]
         )
         XCTAssertEqual(focused.first { $0.id == "close-pane" }?.action, .closePane(sessionID: "a"))
@@ -120,7 +120,7 @@ final class CommandPaletteTests: XCTestCase {
                 .map(\.id),
             [
                 "destination:dashboard", "destination:board", "destination:terminals",
-                "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
+                "new-pane", "new-browser", "new-editor", "new-session", "zoom-to-fit", "toggle-sidebar",
             ]
         )
     }
@@ -274,6 +274,39 @@ final class CommandPaletteTests: XCTestCase {
             ["focus:a", "new-pane", "close-pane"],
             "what the query matched and nothing else — no 'Search brain for …' row"
         )
+    }
+
+    /// The canvas's two rows. "Enter" is per session and lives in the
+    /// Terminals section beside the panes it contains — emitted before the
+    /// pane rows so the section stays one consecutive run, which is the only
+    /// thing the table's heading logic relies on.
+    func testTheCanvasOffersOneEnterRowPerSessionAndOneZoomToFit() throws {
+        let commands = CommandPaletteModel.build(
+            panes: [
+                pane("a", project: "alpha", group: "g1", groupLabel: "Build"),
+                pane("b", project: "alpha", group: "g2"),
+                pane("c", project: "beta", group: "g3"),
+            ],
+            paneOrder: ["a", "b", "c"],
+            focusedPaneID: nil,
+            unreadNotifications: 0
+        )
+
+        let enters = commands.filter { if case .enterSession = $0.action { return true } else { return false } }
+        XCTAssertEqual(enters.map(\.id), ["enter:g1", "enter:g2", "enter:g3"])
+        XCTAssertEqual(enters.map(\.title), [
+            "Enter Build — alpha",
+            "Enter Session 1 — alpha",
+            "Enter Session 1 — beta",
+        ])
+        XCTAssertEqual(enters.map(\.detail), ["⌃1", "⌃2", "⌃1"], "the digit is per project, like ⌃1…⌃9 is")
+        XCTAssertEqual(enters.map(\.section), [.terminals, .terminals, .terminals])
+        XCTAssertEqual(enters.first?.action, .enterSession(group: "g1"))
+
+        let fit = try XCTUnwrap(commands.first { $0.id == "zoom-to-fit" })
+        XCTAssertEqual(fit.detail, "⌘0")
+        XCTAssertEqual(fit.action, .zoomDeskToFit)
+        XCTAssertEqual(fit.section, .actions)
     }
 
     // MARK: - filtering and selection
@@ -693,7 +726,7 @@ final class CommandPaletteTests: XCTestCase {
         // Panes keep the outline's own order inside their section.
         XCTAssertEqual(
             commands.filter { $0.section == .terminals }.map(\.id),
-            ["focus:t1", "focus:t2"]
+            ["enter:g1", "enter:g2", "focus:t1", "focus:t2"]
         )
         // The editor pane sits with the files it holds.
         XCTAssertEqual(
