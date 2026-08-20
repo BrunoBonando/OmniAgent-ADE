@@ -1956,6 +1956,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // Nine menu items, rarely nine sessions: the ones past the end are
             // greyed out rather than silently doing nothing.
             return destination == .terminals && deskSession(at: menuItem.tag) != nil
+        case #selector(toggleReviewPanel(_:)):
+            // The review panel does not exist yet — a later task builds it
+            // and flips this to its real condition.
+            return false
         default:
             return true
         }

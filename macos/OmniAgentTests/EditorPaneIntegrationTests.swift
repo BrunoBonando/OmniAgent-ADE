@@ -243,8 +243,10 @@ final class EditorPaneIntegrationTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         let toolbar = try XCTUnwrap(controller.window?.toolbar)
+        // Demoted from the default row when the toolbar slimmed down, but the
+        // button itself lives on in the customization palette.
         XCTAssertTrue(
-            controller.toolbarDefaultItemIdentifiers(toolbar)
+            controller.toolbarAllowedItemIdentifiers(toolbar)
                 .contains(WorkspaceWindowController.ToolbarItem.newEditor)
         )
         let button = try XCTUnwrap(

@@ -1312,17 +1312,25 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             [
                 WorkspaceWindowController.ToolbarItem.sidebar,
                 .sidebarTrackingSeparator,
-                WorkspaceWindowController.ToolbarItem.newPane,
-                WorkspaceWindowController.ToolbarItem.newBrowser,
-                WorkspaceWindowController.ToolbarItem.newEditor,
-                WorkspaceWindowController.ToolbarItem.closePane,
                 .flexibleSpace,
-                WorkspaceWindowController.ToolbarItem.zoomToFit,
-                WorkspaceWindowController.ToolbarItem.enterSession,
-                WorkspaceWindowController.ToolbarItem.palette,
+                WorkspaceWindowController.ToolbarItem.reviewPanel,
             ]
         )
-        for identifier in identifiers where !identifier.rawValue.hasPrefix("NS") {
+        // The demoted items stay reachable from the customization palette —
+        // slimming the default row must not delete the buttons themselves.
+        let allowed = controller.toolbarAllowedItemIdentifiers(toolbar)
+        for demoted in [
+            WorkspaceWindowController.ToolbarItem.newPane,
+            WorkspaceWindowController.ToolbarItem.newBrowser,
+            WorkspaceWindowController.ToolbarItem.newEditor,
+            WorkspaceWindowController.ToolbarItem.closePane,
+            WorkspaceWindowController.ToolbarItem.zoomToFit,
+            WorkspaceWindowController.ToolbarItem.enterSession,
+            WorkspaceWindowController.ToolbarItem.palette,
+        ] {
+            XCTAssertTrue(allowed.contains(demoted), "\(demoted.rawValue) survives in the palette")
+        }
+        for identifier in allowed where !identifier.rawValue.hasPrefix("NS") {
             let item = try XCTUnwrap(
                 controller.toolbar(toolbar, itemForItemIdentifier: identifier, willBeInsertedIntoToolbar: true)
             )
@@ -1330,6 +1338,41 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             XCTAssertNotNil(item.action)
             XCTAssertNotNil(item.image, "\(identifier.rawValue) has a symbol")
         }
+    }
+
+    func testTheViewMenuCarriesToggleReviewPanelOnCmdOptB() throws {
+        ApplicationMenus.install()
+        let view = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "View")?.submenu)
+        let item = try XCTUnwrap(view.item(withTitle: "Toggle Review Panel"))
+        XCTAssertNil(item.target, "it travels the responder chain, like every other item")
+        XCTAssertEqual(item.action, #selector(WorkspaceWindowController.toggleReviewPanel(_:)))
+        XCTAssertEqual(item.keyEquivalent, "b")
+        XCTAssertEqual(item.keyEquivalentModifierMask, [.command, .option], "⌥⌘B")
+    }
+
+    /// The chord and the button are reserved now; the panel arrives in a later
+    /// task, which flips this validation. Until then both surfaces grey out
+    /// through the one shared enablement rule.
+    func testToggleReviewPanelStaysDisabledUntilThePanelExists() throws {
+        let controller = makeController()
+        defer { controller.close() }
+
+        let probe = NSMenuItem(
+            title: "Toggle Review Panel",
+            action: #selector(WorkspaceWindowController.toggleReviewPanel(_:)),
+            keyEquivalent: ""
+        )
+        XCTAssertFalse(controller.validateMenuItem(probe))
+
+        let toolbar = try XCTUnwrap(controller.window?.toolbar)
+        let button = try XCTUnwrap(
+            controller.toolbar(
+                toolbar,
+                itemForItemIdentifier: WorkspaceWindowController.ToolbarItem.reviewPanel,
+                willBeInsertedIntoToolbar: true
+            )
+        )
+        XCTAssertFalse(controller.validateToolbarItem(button))
     }
 
     func testTheToolbarSharesTheMenusEnablementRuleRatherThanAddingASecondOne() throws {

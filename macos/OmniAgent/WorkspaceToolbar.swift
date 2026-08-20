@@ -1,9 +1,10 @@
 import AppKit
 
-/// The window's toolbar. Eight items, each one a command that already exists
-/// somewhere else (a menu item, a palette row) — a toolbar button that is the
-/// only way to reach something would be a fifth place for the same behaviour
-/// to drift.
+/// The window's toolbar. A slim default row — sidebar toggle and the review
+/// panel toggle — with the rest of the commands demoted to the customization
+/// palette. Each item is a command that already exists somewhere else (a menu
+/// item, a palette row) — a toolbar button that is the only way to reach
+/// something would be a fifth place for the same behaviour to drift.
 ///
 /// Every item targets `nil` so it travels the responder chain exactly like
 /// the menu items do, which is also what makes `validateMenuItem`/
@@ -18,17 +19,20 @@ extension WorkspaceWindowController: NSToolbarDelegate, NSToolbarItemValidation 
         static let zoomToFit = NSToolbarItem.Identifier("digital.bruno.omniagent.toolbar.zoom-to-fit")
         static let enterSession = NSToolbarItem.Identifier("digital.bruno.omniagent.toolbar.enter-session")
         static let palette = NSToolbarItem.Identifier("digital.bruno.omniagent.toolbar.palette")
+        static let reviewPanel = NSToolbarItem.Identifier("digital.bruno.omniagent.toolbar.review-panel")
     }
 
     func installToolbar(on window: NSWindow) {
-        // `.canvas` rather than the bare identifier this used to carry:
+        // `.slim` rather than the `.canvas` this used to carry:
         // `autosavesConfiguration` means AppKit remembers the item set under
-        // this name, and an already-saved configuration silently swallows any
-        // *newly added* default item. Adding Zoom to Fit and Enter Session
-        // under the old name would have shipped two buttons nobody could see.
-        // Bumping resets the saved layout to the defaults, which is what is
-        // wanted; it costs anyone who had dragged their own arrangement.
-        let toolbar = NSToolbar(identifier: "digital.bruno.omniagent.workspace.canvas")
+        // this name, and an already-saved configuration silently keeps
+        // whatever it holds — the old eight-item row would have survived the
+        // slimming, and a *newly added* default item is swallowed the same
+        // way (Zoom to Fit and Enter Session hit that under the name before
+        // this one). Bumping resets the saved layout to the defaults, which
+        // is what is wanted; it costs anyone who had dragged their own
+        // arrangement.
+        let toolbar = NSToolbar(identifier: "digital.bruno.omniagent.workspace.slim")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = true
@@ -41,19 +45,25 @@ extension WorkspaceWindowController: NSToolbarDelegate, NSToolbarItemValidation 
         [
             ToolbarItem.sidebar,
             .sidebarTrackingSeparator,
-            ToolbarItem.newPane,
-            ToolbarItem.newBrowser,
-            ToolbarItem.newEditor,
-            ToolbarItem.closePane,
             .flexibleSpace,
-            ToolbarItem.zoomToFit,
-            ToolbarItem.enterSession,
-            ToolbarItem.palette,
+            ToolbarItem.reviewPanel,
         ]
     }
 
     public func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar) + [.space, .flexibleSpace]
+        // The demoted default items stay here: anyone who wants the old row
+        // back drags it together from the customization palette.
+        toolbarDefaultItemIdentifiers(toolbar) + [
+            ToolbarItem.newPane,
+            ToolbarItem.newBrowser,
+            ToolbarItem.newEditor,
+            ToolbarItem.closePane,
+            ToolbarItem.zoomToFit,
+            ToolbarItem.enterSession,
+            ToolbarItem.palette,
+            .space,
+            .flexibleSpace,
+        ]
     }
 
     public func toolbar(
@@ -78,10 +88,17 @@ extension WorkspaceWindowController: NSToolbarDelegate, NSToolbarItemValidation 
             return item(identifier, "Enter Session", "arrow.up.left.and.arrow.down.right", #selector(enterFocusedSession(_:)))
         case ToolbarItem.palette:
             return item(identifier, "Commands", "command", #selector(showCommandPalette(_:)))
+        case ToolbarItem.reviewPanel:
+            return item(identifier, "Toggle Review Panel", "sidebar.trailing", #selector(toggleReviewPanel(_:)))
         default:
             return nil
         }
     }
+
+    /// Stub: the review panel arrives in a later task. The chord (⌥⌘B), the
+    /// menu item and the toolbar button are reserved now, all greyed out via
+    /// `validateMenuItem`, so shipping them costs nothing but a disabled row.
+    @objc func toggleReviewPanel(_ sender: Any?) {}
 
     private func item(
         _ identifier: NSToolbarItem.Identifier,

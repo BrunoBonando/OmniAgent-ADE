@@ -199,6 +199,15 @@ enum ApplicationMenus {
         edit.addItem(item("Paste", Selector(("paste:")), "v"))
         edit.addItem(item("Select All", Selector(("selectAll:")), "a"))
 
+        let view = NSMenu(title: "View")
+        main.addItem(withSubmenu: view)
+        // Greyed out until the review panel ships — `validateMenuItem`
+        // refuses the action for now, so ⌥⌘B is reserved without doing
+        // anything yet.
+        view.addItem(
+            item("Toggle Review Panel", Selector(("toggleReviewPanel:")), "b", [.command, .option])
+        )
+
         let session = NSMenu(title: "Session")
         main.addItem(withSubmenu: session)
         session.addItem(item("Interrupt", Selector(("interruptSession:")), "."))
