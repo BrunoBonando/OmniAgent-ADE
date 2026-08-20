@@ -275,6 +275,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Its read/write gates, the pairs above's shape and reasoning.
     private var sessionMetaReadDispatched = false
     private var sessionMetaReadCompleted = false
+    /// The `review_panel_native` row, keyed by session group id — the review
+    /// panel's per-session state (open, tabs, active tab, width).
+    private(set) var reviewPanelStates: [String: ReviewPanelSessionState] = [:]
+    /// Its read/write gates, the pairs above's shape and reasoning.
+    private var reviewPanelReadDispatched = false
+    private var reviewPanelReadCompleted = false
+    /// The panel view and its split item — the third `NSSplitViewItem`, on
+    /// the right of the session content.
+    let reviewPanel = ReviewPanelView()
+    private(set) var reviewPanelItem: NSSplitViewItem?
+    /// The session group whose state the panel is currently showing —
+    /// updated on every `activeGroup` change, so a tab edit lands in the
+    /// right session's entry even while the panel is closed.
+    private var reviewPanelGroup: String?
+    /// The width to give back when expand-to-full-width toggles off.
+    /// Transient by design: the persisted `width` is the user's real one,
+    /// and an expanded panel that survived a relaunch full-width would have
+    /// swallowed the pane grid with no memory of why.
+    private var reviewPanelWidthBeforeExpand: CGFloat?
     /// The Customize… card while one is up — window-scoped, so owned here.
     private(set) var customizeCard: WorkspaceCustomizeCard?
     let authGateCoordinator: AuthGateCoordinator
@@ -443,6 +462,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.reloadOutline()
             self?.adjustWindowForRowCount()
         }
+        workspace.onActiveGroupChanged = { [weak self] group in
+            self?.reviewPanelSessionDidChange(to: group)
+        }
+        reviewPanel.onTabsChanged = { [weak self] in self?.reviewPanelUIChanged() }
+        reviewPanel.onToggleExpand = { [weak self] in self?.toggleReviewPanelExpansion() }
         workspace.onDeskCanvasChanged = { [weak self] in self?.persistDeskCanvas() }
         workspace.onCameraChanged = { [weak self] in self?.updateDeskZoomReadout() }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
@@ -642,6 +666,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         split.splitView.autosaveName = "OmniAgentWorkspaceSidebar"
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
+
+        // The third item: the review panel, collapsed until a session's
+        // state (or ⌥⌘B) opens it. Its divider rides the same autosave name.
+        let review = NSViewController()
+        review.view = reviewPanel
+        let reviewItem = NSSplitViewItem(viewController: review)
+        reviewItem.minimumThickness = ReviewPanelView.minimumWidth
+        reviewItem.canCollapse = true
+        reviewItem.isCollapsed = true
+        // Above the default 250 the other two sit at, so opening the panel
+        // squeezes the pane grid — the spec's word — rather than the sidebar.
+        reviewItem.holdingPriority = NSLayoutConstraint.Priority(251)
+        split.addSplitViewItem(reviewItem)
+        reviewPanelItem = reviewItem
         window.contentViewController = split
     }
 
@@ -685,6 +723,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.deskCanvasLoaded = isTerminals
         placeholder.isHidden = isTerminals
         if !isTerminals { placeholder.show(destination) }
+        // The review panel reviews the session on screen, and Home/To Do
+        // List show no session — collapsed there, and back to the session's
+        // own recorded state on the way back in.
+        if !isTerminals {
+            reviewPanelItem?.isCollapsed = true
+        } else if reviewPanelReadCompleted, let group = workspace.activeGroup {
+            reviewPanelItem?.isCollapsed = !reviewPanelState(for: group).open
+        }
         // A destination change moves the readout in or out of existence without
         // necessarily moving the camera, so it cannot ride on `onCameraChanged`.
         updateDeskZoomReadout()
@@ -1957,9 +2003,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // greyed out rather than silently doing nothing.
             return destination == .terminals && deskSession(at: menuItem.tag) != nil
         case #selector(toggleReviewPanel(_:)):
-            // The review panel does not exist yet — a later task builds it
-            // and flips this to its real condition.
-            return false
+            // Session-scoped: the panel reviews the session on screen, so
+            // there has to be one for ⌥⌘B to mean anything.
+            return destination == .terminals && workspace.activeGroup != nil
         default:
             return true
         }
@@ -2049,6 +2095,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // prunes against the restored groups — read before the panes exist,
         // every entry would look vanished.
         restoreSessionMetaIfNeeded()
+        // Same reasoning: the review panel row prunes against the restored
+        // groups, and its apply re-opens the panel for the session on screen.
+        restoreReviewPanelIfNeeded()
     }
 
     /// Kills daemon sessions this window no longer references.
@@ -2822,6 +2871,184 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func persistSessionMeta() {
         guard sessionMetaReadCompleted else { return }
         write(SessionMetaCodec.serialize(sessionMeta), to: SettingsKey.sessionMeta)
+    }
+
+    // MARK: - Review panel
+
+    /// ⌥⌘B / the toolbar button. Open is a per-session fact: toggling
+    /// records it for the session on screen, and switching sessions restores
+    /// each one's own answer.
+    @objc func toggleReviewPanel(_ sender: Any?) {
+        guard destination == .terminals, let group = workspace.activeGroup else { return }
+        let opening = reviewPanelItem?.isCollapsed ?? false
+        reviewPanelGroup = group
+        var state = reviewPanelState(for: group)
+        state.open = opening
+        if opening {
+            reviewPanelStates[group] = state
+            applyReviewPanelState(state)
+        } else {
+            // Closing keeps the dragged width, so reopening comes back at it
+            // — the pre-expansion width when the panel is expanded, since
+            // full-width is transient and must not become the stored one.
+            if let width = reviewPanelWidthBeforeExpand ?? currentReviewPanelWidth() {
+                state.width = Double(width)
+            }
+            reviewPanelStates[group] = state
+            endReviewPanelExpansion()
+            setReviewPanelCollapsed(true)
+        }
+        persistReviewPanel()
+    }
+
+    /// The stored state for one session group, or the default — closed, the
+    /// spec's Changes + Files tab set.
+    func reviewPanelState(for group: String) -> ReviewPanelSessionState {
+        reviewPanelStates[group] ?? ReviewPanelSessionState()
+    }
+
+    /// `PaneWorkspaceView.onActiveGroupChanged` — the activateGroup path.
+    /// Leaves the departing session's width behind in its entry, then shows
+    /// the arriving session's own panel.
+    private func reviewPanelSessionDidChange(to group: String?) {
+        guard reviewPanelReadCompleted else {
+            // Before the row has been read there is nothing to save or to
+            // apply — but the pointer still moves, so the first edit after
+            // the restore lands in the right session's entry.
+            reviewPanelGroup = group
+            return
+        }
+        if let previous = reviewPanelGroup, previous != group,
+           reviewPanelItem?.isCollapsed == false,
+           let width = reviewPanelWidthBeforeExpand ?? currentReviewPanelWidth() {
+            var state = reviewPanelState(for: previous)
+            state.width = Double(width)
+            reviewPanelStates[previous] = state
+        }
+        reviewPanelGroup = group
+        endReviewPanelExpansion()
+        guard let group else {
+            setReviewPanelCollapsed(true)
+            persistReviewPanel()
+            return
+        }
+        applyReviewPanelState(reviewPanelState(for: group))
+        persistReviewPanel()
+    }
+
+    /// Puts one session's recorded state on screen: tabs, selection,
+    /// open/closed, width.
+    private func applyReviewPanelState(_ state: ReviewPanelSessionState) {
+        reviewPanel.load(
+            tabs: state.tabs.compactMap(ReviewPanelTab.init(rawValue:)),
+            active: ReviewPanelTab(rawValue: state.activeTab)
+        )
+        let visible = destination == .terminals && state.open
+        setReviewPanelCollapsed(!visible)
+        if visible, let width = state.width { applyReviewPanelWidth(CGFloat(width)) }
+    }
+
+    /// The panel's tab set or selection changed under the user's hands —
+    /// recorded against the session the panel is showing.
+    private func reviewPanelUIChanged() {
+        guard let group = reviewPanelGroup else { return }
+        var state = reviewPanelState(for: group)
+        state.tabs = reviewPanel.openTabs.map(\.rawValue)
+        state.activeTab = reviewPanel.activeTab?.rawValue ?? ""
+        reviewPanelStates[group] = state
+        persistReviewPanel()
+    }
+
+    /// The tab bar's expand-to-full-width toggle. Transient — see
+    /// `reviewPanelWidthBeforeExpand`.
+    private func toggleReviewPanelExpansion() {
+        guard let item = reviewPanelItem, !item.isCollapsed else { return }
+        if let restore = reviewPanelWidthBeforeExpand {
+            reviewPanelWidthBeforeExpand = nil
+            reviewPanel.setExpanded(false)
+            applyReviewPanelWidth(restore)
+        } else {
+            reviewPanelWidthBeforeExpand = max(
+                currentReviewPanelWidth() ?? ReviewPanelView.minimumWidth,
+                ReviewPanelView.minimumWidth
+            )
+            reviewPanel.setExpanded(true)
+            // Everything right of the sidebar; AppKit clamps at whatever the
+            // other items refuse to give up.
+            applyReviewPanelWidth(.greatestFiniteMagnitude)
+        }
+    }
+
+    /// Un-expands without moving the divider — for the paths where the
+    /// divider is about to be repositioned or hidden anyway.
+    private func endReviewPanelExpansion() {
+        reviewPanelWidthBeforeExpand = nil
+        reviewPanel.setExpanded(false)
+    }
+
+    private func setReviewPanelCollapsed(_ collapsed: Bool) {
+        guard let item = reviewPanelItem, item.isCollapsed != collapsed else { return }
+        // Not animated under XCTest — `restoreWindowFrame`'s reasoning: a
+        // test reading the item right after needs the final state there.
+        let animate = window?.isVisible == true && NSClassFromString("XCTestCase") == nil
+        (animate ? item.animator() : item).isCollapsed = collapsed
+    }
+
+    private func currentReviewPanelWidth() -> CGFloat? {
+        guard reviewPanelItem?.isCollapsed == false else { return nil }
+        let width = reviewPanel.frame.width
+        return width > 0 ? width : nil
+    }
+
+    /// Moves the second divider so the panel measures `width` — the split
+    /// view's own coordinate arithmetic, clamped by AppKit against the other
+    /// items' minimums.
+    private func applyReviewPanelWidth(_ width: CGFloat) {
+        guard
+            let split = (window?.contentViewController as? NSSplitViewController)?.splitView,
+            split.frame.width > 0
+        else { return }
+        let position = split.frame.width - min(width, split.frame.width) - split.dividerThickness
+        split.setPosition(max(0, position), ofDividerAt: 1)
+    }
+
+    private func restoreReviewPanelIfNeeded() {
+        guard !reviewPanelReadDispatched else { return }
+        reviewPanelReadDispatched = true
+        connection.getSetting(key: SettingsKey.reviewPanel) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                applyRestoredReviewPanel(raw)
+            case .failure:
+                // Re-armed for the next reconnect; the write gate stays
+                // shut — `layoutReadFailed`'s reasoning.
+                reviewPanelReadDispatched = false
+            }
+        }
+    }
+
+    /// Applies the `review_panel_native` row and opens its write gate —
+    /// split out of the read so a test can restore without a socket,
+    /// `applyRestoredPanes`'s pattern. Entries for groups no restored pane
+    /// carries are pruned, and a prune that changed anything is written
+    /// straight back so the next launch reads the row clean.
+    func applyRestoredReviewPanel(_ raw: String?) {
+        reviewPanelReadDispatched = true
+        reviewPanelReadCompleted = true
+        let stored = ReviewPanelStateCodec.deserialize(raw)
+        let live = liveSessionGroups()
+        reviewPanelStates = stored.filter { live.contains($0.key) }
+        if reviewPanelStates != stored { persistReviewPanel() }
+        reviewPanelGroup = workspace.activeGroup
+        if let group = reviewPanelGroup {
+            applyReviewPanelState(reviewPanelState(for: group))
+        }
+    }
+
+    private func persistReviewPanel() {
+        guard reviewPanelReadCompleted else { return }
+        write(ReviewPanelStateCodec.serialize(reviewPanelStates), to: SettingsKey.reviewPanel)
     }
 
     // MARK: - Notifications

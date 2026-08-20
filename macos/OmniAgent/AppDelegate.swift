@@ -201,9 +201,8 @@ enum ApplicationMenus {
 
         let view = NSMenu(title: "View")
         main.addItem(withSubmenu: view)
-        // Greyed out until the review panel ships — `validateMenuItem`
-        // refuses the action for now, so ⌥⌘B is reserved without doing
-        // anything yet.
+        // Session-scoped — `validateMenuItem` enables it whenever a session
+        // is on screen, since the panel reviews that session.
         view.addItem(
             item("Toggle Review Panel", Selector(("toggleReviewPanel:")), "b", [.command, .option])
         )

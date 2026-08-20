@@ -95,11 +95,6 @@ extension WorkspaceWindowController: NSToolbarDelegate, NSToolbarItemValidation 
         }
     }
 
-    /// Stub: the review panel arrives in a later task. The chord (⌥⌘B), the
-    /// menu item and the toolbar button are reserved now, all greyed out via
-    /// `validateMenuItem`, so shipping them costs nothing but a disabled row.
-    @objc func toggleReviewPanel(_ sender: Any?) {}
-
     private func item(
         _ identifier: NSToolbarItem.Identifier,
         _ label: String,

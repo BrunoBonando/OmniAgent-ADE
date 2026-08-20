@@ -116,6 +116,14 @@ enum SettingsKey {
     /// `SessionMetaCodec`. No TypeScript twin, by design.
     static let sessionMeta = "session_meta_native"
 
+    /// Native-only — the review panel's per-session state (the 2026-08-20
+    /// redesign's §5): open/closed, the open tabs and the active one, the
+    /// panel width, and the Files tab's preferences, keyed by session group
+    /// id. Its own row for `browserPanes`'s reason. One JSON object,
+    /// `{"sessions":{"<group id>":{open,tabs,activeTab,width?,openFile?,treePosition?,showHidden?}}}`
+    /// — see `ReviewPanelStateCodec`. No TypeScript twin, by design.
+    static let reviewPanel = "review_panel_native"
+
     /// Native-only — `browserPanes`'s reasoning a third time: the web build
     /// rewrites the shared `layout` row and strips the fields it does not
     /// know, and it knows nothing about a canvas. The Desk canvas's pinned

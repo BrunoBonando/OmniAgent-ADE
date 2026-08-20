@@ -179,7 +179,19 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// from it, the sidebar tree and the persisted layout included — has a
     /// stable order rather than a dictionary's.
     private var groupOrder: [String] = []
-    private(set) var activeGroup: String?
+    private(set) var activeGroup: String? {
+        didSet {
+            guard oldValue != activeGroup else { return }
+            onActiveGroupChanged?(activeGroup)
+        }
+    }
+
+    /// The session on screen changed. A `didSet` observer rather than a call
+    /// at each writer because `activeGroup` is written from four places — a
+    /// plain activation, a canvas landing, the first pane's arrival, the
+    /// last pane of a session closing — and the review panel's per-session
+    /// state has to follow the switch whichever door it came through.
+    var onActiveGroupChanged: ((String?) -> Void)?
 
     /// The active session's grid; assigning replaces that session's.
     var grid: PaneGrid? {

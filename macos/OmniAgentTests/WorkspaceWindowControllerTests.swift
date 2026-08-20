@@ -1350,19 +1350,23 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(item.keyEquivalentModifierMask, [.command, .option], "⌥⌘B")
     }
 
-    /// The chord and the button are reserved now; the panel arrives in a later
-    /// task, which flips this validation. Until then both surfaces grey out
-    /// through the one shared enablement rule.
-    func testToggleReviewPanelStaysDisabledUntilThePanelExists() throws {
-        let controller = makeController()
-        defer { controller.close() }
-
+    /// The panel exists now, so the chord and the button are live — but only
+    /// with a session on screen, since the panel reviews that session. Both
+    /// surfaces answer through the one shared enablement rule.
+    func testToggleReviewPanelEnablesExactlyWhenASessionIsOnScreen() throws {
         let probe = NSMenuItem(
             title: "Toggle Review Panel",
             action: #selector(WorkspaceWindowController.toggleReviewPanel(_:)),
             keyEquivalent: ""
         )
-        XCTAssertFalse(controller.validateMenuItem(probe))
+
+        let empty = makeEmptyController()
+        defer { empty.close() }
+        XCTAssertFalse(empty.validateMenuItem(probe), "no session, nothing to review")
+
+        let controller = makeController()
+        defer { controller.close() }
+        XCTAssertTrue(controller.validateMenuItem(probe))
 
         let toolbar = try XCTUnwrap(controller.window?.toolbar)
         let button = try XCTUnwrap(
@@ -1372,7 +1376,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 willBeInsertedIntoToolbar: true
             )
         )
-        XCTAssertFalse(controller.validateToolbarItem(button))
+        XCTAssertTrue(controller.validateToolbarItem(button))
     }
 
     func testTheToolbarSharesTheMenusEnablementRuleRatherThanAddingASecondOne() throws {
