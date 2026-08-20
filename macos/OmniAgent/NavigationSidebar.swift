@@ -408,7 +408,8 @@ final class NavigationSidebarView: NSView {
 
         for view in [navStack, workspacesHeader, scroll, accountRow] { addSubview(view) }
         NSLayoutConstraint.activate([
-            navStack.topAnchor.constraint(equalTo: topAnchor),
+            // The column runs under the window chrome (titleBar) and this clears it.
+            navStack.topAnchor.constraint(equalTo: topAnchor, constant: WorkspaceTitleBarView.height),
             navStack.leadingAnchor.constraint(equalTo: leadingAnchor),
             navStack.trailingAnchor.constraint(equalTo: trailingAnchor),
 

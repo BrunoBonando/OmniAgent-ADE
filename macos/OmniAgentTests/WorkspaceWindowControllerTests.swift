@@ -1337,55 +1337,61 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         defer { controller.close() }
         controller.showWindow(nil)
 
-        let session = controller.titleBar.title
+        let session = controller.sessionTitleField.stringValue
         XCTAssertFalse(session.isEmpty, "a session is on screen, so the bar names it")
         XCTAssertNotEqual(session, "OmniAgent", "the app's name is not a session name")
-        XCTAssertEqual(
-            session,
-            controller.titleBar.titleFieldForTesting.stringValue,
-            "what it holds is what it draws"
-        )
         XCTAssertTrue(controller.titleBar.isReviewToggleVisible)
 
         controller.applyDestination(.home)
 
-        XCTAssertEqual(controller.titleBar.title, "", "Home names no session")
-        XCTAssertEqual(controller.titleBar.titleFieldForTesting.stringValue, "")
+        XCTAssertEqual(controller.sessionTitleField.stringValue, "", "Home names no session")
         XCTAssertFalse(controller.titleBar.isReviewToggleVisible, "and offers nothing to review")
 
         controller.applyDestination(.terminals)
-        XCTAssertEqual(controller.titleBar.title, session, "and it comes back on the way in")
+        XCTAssertEqual(controller.sessionTitleField.stringValue, session, "and it comes back on the way in")
         XCTAssertTrue(controller.titleBar.isReviewToggleVisible)
     }
 
-    /// The bar used to sample the column's width, which cannot be smooth:
-    /// `isCollapsed` flips at the *start* of the collapse, so the bar read the
-    /// destination and jumped there while the column was still travelling.
-    /// The width is pushed now, and the collapse runs it through `animator()`
-    /// in the same group — so mid-animation the bar is still short of its
-    /// destination rather than already sitting on it.
-    func testTheBarDoesNotRunAheadOfTheCollapsingSidebar() throws {
+    /// The session title label is a subview of the content column, so it is
+    /// carried by the column's own collapse animation and cannot drift from it.
+    func testTheSessionNameRidesTheContentColumnSoItCannotDriftFromIt() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
+
+        let sessionLabel = controller.sessionTitleField
+        let contentContainer = try XCTUnwrap(controller.workspaceView.superview)
+        XCTAssertTrue(
+            sessionLabel.isDescendant(of: contentContainer),
+            "the session label is part of the content column, so it is carried by its animation"
+        )
+
+        // Riding the column has one sharp edge: collapse the sidebar and the
+        // column reaches the window's left edge, which would draw the name
+        // straight through the window buttons. It did, once.
         let window = try XCTUnwrap(controller.window)
-        window.setFrame(NSRect(x: 0, y: 0, width: 1400, height: 800), display: true)
-        let item = try XCTUnwrap(controller.splitController?.splitViewItems.first)
-        controller.splitController?.view.layoutSubtreeIfNeeded()
+        window.setFrame(NSRect(x: 0, y: 0, width: 1200, height: 600), display: true)
+        let split = try XCTUnwrap(controller.splitController)
+        split.view.layoutSubtreeIfNeeded()
+        let openX = sessionLabel.convert(sessionLabel.bounds, to: nil).minX
 
-        controller.titleBar.setSidebarWidth(260, animated: false)
-        XCTAssertEqual(controller.titleBar.sidebarSegmentWidthForTesting, 260)
-        XCTAssertFalse(item.isCollapsed)
+        try XCTUnwrap(split.splitViewItems.first).isCollapsed = true
+        split.view.layoutSubtreeIfNeeded()
+        let collapsedX = sessionLabel.convert(sessionLabel.bounds, to: nil).minX
 
-        controller.toggleWorkspaceSidebar(nil)
-        // `isCollapsed` is already true here — the state the old sampling read
-        // — but the bar must not have teleported with it.
-        XCTAssertTrue(item.isCollapsed, "the collapse is under way")
-        XCTAssertEqual(
-            controller.titleBar.sidebarSegmentWidthForTesting,
-            260,
-            accuracy: 0.5,
-            "the bar animates from where it was; it must not snap to 0 at the start"
+        XCTAssertLessThan(collapsedX, openX, "it does follow the column in")
+        // The left-hand cluster only: `controlsForTesting` is in layout order,
+        // so that is the three lights and the sidebar toggle. The review
+        // toggle is the fifth and sits at the far right, where it is no
+        // obstacle to a name growing rightwards.
+        let buttonsEnd = controller.titleBar.controlsForTesting
+            .prefix(4)
+            .map { $0.convert($0.bounds, to: nil).maxX }
+            .max() ?? 0
+        XCTAssertGreaterThanOrEqual(
+            collapsedX,
+            buttonsEnd,
+            "and still clears the window buttons rather than printing over them"
         )
     }
 

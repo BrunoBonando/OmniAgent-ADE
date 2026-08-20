@@ -110,8 +110,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private let contentContainer = NSView()
     private let placeholder = WorkspacePlaceholderView()
     /// The window's drawn title bar — window buttons, the sidebar toggle, the
-    /// running session's name, the review toggle. Replaced the `NSToolbar`.
+    /// review toggle. Replaced the `NSToolbar`, and paints nothing: it is a
+    /// transparent overlay across the top of the split, so each column's own
+    /// background reaches the window's top edge underneath it.
     let titleBar = WorkspaceTitleBarView()
+    /// The running session's name. A subview of `contentContainer` rather than
+    /// of the title bar, which is the whole trick: a sidebar collapse moves the
+    /// content column, and a subview is carried by its superview's animation
+    /// exactly, with nothing to keep in step.
+    let sessionTitleField = ShellFont.label(
+        "",
+        font: ShellFont.ui(13, .medium),
+        color: ShellPalette.inkSecondary
+    )
     /// The split itself. `window.contentViewController` is a container that
     /// holds the title bar above it, so the old
     /// `contentViewController as? NSSplitViewController` no longer resolves —
@@ -120,14 +131,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The sidebar's split item, kept so its ceiling can follow the window —
     /// see `clampSidebarWidth`.
     private var sidebarWidthItem: NSSplitViewItem?
-    /// Block-based observers are not released with their observer, so this is
-    /// held to be torn down in `deinit`.
-    private var splitResizeObserver: NSObjectProtocol?
-    /// True for the length of a sidebar collapse/expand, so the divider
-    /// notification leaves the animation alone.
-    private var isSidebarToggling = false
-    /// The width to expand back to, taken before the collapse starts.
-    private var lastExpandedSidebarWidth = ShellMetrics.sidebarMinimumWidth
 
     /// The canvas's zoom readout. A sibling of `workspace`, never a subview of
     /// it — see `DeskZoomReadoutView`.
@@ -713,7 +716,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         NSLayoutConstraint.activate([
             deskGrid.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
             deskGrid.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-            deskGrid.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+            deskGrid.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: WorkspaceTitleBarView.height),
             deskGrid.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
         ])
         installDeskZoomReadout()
@@ -721,7 +724,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-                view.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+                view.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: WorkspaceTitleBarView.height),
                 view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
             ])
         }
@@ -775,8 +778,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
         // The third item: the review panel, collapsed until a session's
         // state (or ⌥⌘B) opens it. Its divider rides the same autosave name.
+        // The panel is wrapped in a container so it clears the window chrome.
+        let reviewContainer = NSView()
+        reviewContainer.addSubview(reviewPanel)
+        reviewPanel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            reviewPanel.leadingAnchor.constraint(equalTo: reviewContainer.leadingAnchor),
+            reviewPanel.trailingAnchor.constraint(equalTo: reviewContainer.trailingAnchor),
+            reviewPanel.bottomAnchor.constraint(equalTo: reviewContainer.bottomAnchor),
+            reviewPanel.topAnchor.constraint(equalTo: reviewContainer.topAnchor, constant: WorkspaceTitleBarView.height),
+        ])
         let review = NSViewController()
-        review.view = reviewPanel
+        review.view = reviewContainer
         let reviewItem = NSSplitViewItem(viewController: review)
         reviewItem.minimumThickness = ReviewPanelView.minimumWidth
         reviewItem.canCollapse = true
@@ -788,42 +801,59 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         reviewPanelItem = reviewItem
         splitController = split
 
-        // The bar carries the sidebar's own ground across the column's width,
-        // so the column reads as reaching the window's top edge. A dragged
-        // divider moves the column with no animation to join, so the bar
-        // follows it un-animated, one notification at a time; the collapse has
-        // its own animation and is handled in `toggleWorkspaceSidebar`, which
-        // is why this stands down while that runs.
-        splitResizeObserver = NotificationCenter.default.addObserver(
-            forName: NSSplitView.didResizeSubviewsNotification,
-            object: split.splitView,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self, !isSidebarToggling else { return }
-            syncTitleBarToSidebar(animated: false)
-        }
+        // The session's name, in the strip the title bar leaves clear at the top
+        // of the content column. It sits in the column so the column's own
+        // collapse animation carries it.
+        contentContainer.addSubview(sessionTitleField)
+        // Where it wants to be: just inside the column. Not required, because
+        // with the sidebar collapsed the column reaches the window's left edge
+        // and this alone would draw the name straight through the window
+        // buttons. The clearance below outranks it, so the pair reads as "just
+        // inside the column, but never under the buttons".
+        let nameFollowsColumn = sessionTitleField.leadingAnchor.constraint(
+            equalTo: contentContainer.leadingAnchor,
+            constant: 12
+        )
+        nameFollowsColumn.priority = .init(999)
+        NSLayoutConstraint.activate([
+            nameFollowsColumn,
+            sessionTitleField.centerYAnchor.constraint(
+                equalTo: contentContainer.topAnchor,
+                constant: WorkspaceTitleBarView.height / 2
+            ),
+        ])
 
-        // The window's own bar, above the split rather than over it: the
-        // columns start below the chrome, so nothing has to be inset around
-        // it. `contentViewController` is a plain container now — read the
-        // split through `splitController`, never by casting it back.
+        // The window's own bar, above the split as an overlay: pinned to top,
+        // leading, trailing but added AFTER split.view so it is above it.
+        // `contentViewController` is a plain container now — read the split
+        // through `splitController`, never by casting it back.
         let container = NSViewController()
         container.view = NSView()
         container.addChild(split)
         split.view.translatesAutoresizingMaskIntoConstraints = false
-        container.view.addSubview(titleBar)
         container.view.addSubview(split.view)
+        container.view.addSubview(titleBar)
         NSLayoutConstraint.activate([
-            titleBar.topAnchor.constraint(equalTo: container.view.topAnchor),
-            titleBar.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
-            titleBar.trailingAnchor.constraint(equalTo: container.view.trailingAnchor),
-
-            split.view.topAnchor.constraint(equalTo: titleBar.bottomAnchor),
+            split.view.topAnchor.constraint(equalTo: container.view.topAnchor),
             split.view.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
             split.view.trailingAnchor.constraint(equalTo: container.view.trailingAnchor),
             split.view.bottomAnchor.constraint(equalTo: container.view.bottomAnchor),
+
+            titleBar.topAnchor.constraint(equalTo: container.view.topAnchor),
+            titleBar.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
+            titleBar.trailingAnchor.constraint(equalTo: container.view.trailingAnchor),
         ])
         window.contentViewController = container
+
+        // Only now: the name is in the content column and the bar is the
+        // overlay, so this is the first moment the two share an ancestor —
+        // activating it any earlier throws for having none.
+        NSLayoutConstraint.activate([
+            sessionTitleField.leadingAnchor.constraint(
+                greaterThanOrEqualTo: titleBar.titleClearanceAnchor,
+                constant: 12
+            ),
+        ])
     }
 
     /// Swaps the destination. `isHidden`, never add/remove: see
@@ -1055,12 +1085,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is unavailable")
-    }
-
-    deinit {
-        if let splitResizeObserver {
-            NotificationCenter.default.removeObserver(splitResizeObserver)
-        }
     }
 
     override func showWindow(_ sender: Any?) {
@@ -2587,34 +2611,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// no `.sidebar`-behavior item to act on: the toolbar button greyed out
     /// and ⌃⌘S did nothing. Nothing answers this name but us.
     @objc func toggleWorkspaceSidebar(_ sender: Any?) {
-        guard let item = splitController?.splitViewItems.first else { return }
-        let collapsing = !item.isCollapsed
-        // The width to travel to. Read *before* the toggle, because
-        // `isCollapsed` flips at the start of the animation and takes the
-        // column's width with it — the whole reason the bar cannot sample.
-        if collapsing {
-            lastExpandedSidebarWidth = max(1, item.viewController.view.frame.width)
-        }
-        // One group, so the column and the bar share a duration and a curve.
-        // `isSidebarToggling` keeps the divider notification from writing an
-        // un-animated width over the animation while it is running.
-        isSidebarToggling = true
-        NSAnimationContext.runAnimationGroup { _ in
-            item.animator().isCollapsed = collapsing
-            titleBar.setSidebarWidth(collapsing ? 0 : lastExpandedSidebarWidth, animated: true)
-        } completionHandler: { [weak self] in
-            self?.isSidebarToggling = false
-            self?.syncTitleBarToSidebar(animated: false)
-        }
-    }
-
-    /// The bar's left segment and title, put where the column actually is.
-    /// Called for divider drags and window resizes — everything that moves the
-    /// column *without* an animation of its own.
-    private func syncTitleBarToSidebar(animated: Bool) {
-        guard let item = splitController?.splitViewItems.first else { return }
-        let width = item.isCollapsed ? 0 : item.viewController.view.frame.width
-        titleBar.setSidebarWidth(width, animated: animated)
+        splitController?.splitViewItems.first?.animator().isCollapsed.toggle()
     }
 
     // MARK: - Session outline
@@ -4702,7 +4699,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// and "OmniAgent — Reconnecting" identifies a window in those lists where
     /// a bare "Session 1" would not.
     func refreshTitle() {
-        titleBar.title = currentSessionName()
+        sessionTitleField.stringValue = currentSessionName()
         titleBar.isReviewToggleVisible = destination == .terminals && workspace.activeGroup != nil
 
         if let connectionStatus {
