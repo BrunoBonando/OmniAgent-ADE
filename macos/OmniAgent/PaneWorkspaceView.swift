@@ -2707,6 +2707,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 
     override func mouseDown(with event: NSEvent) {
         guard canvasOwnsInput else { return super.mouseDown(with: event) }
+        // An entry flight owns the next 0.38s and cannot be argued with: its
+        // landing is already scheduled (`DispatchQueue.main.asyncAfter`,
+        // token-guarded) and arrives whatever happens here. So a click in that
+        // window would select or drag a node on a canvas the user is a third of
+        // a second from leaving — and a drag pins that node, which
+        // `onDeskCanvasChanged` then persists. Swallowed rather than allowed to
+        // fight a landing it cannot stop.
+        if isEnteringSession { return }
         // Where the canvas owns input it holds the keyboard too: arrows move
         // the node selection, ↩ enters, and nothing typed can reach a terminal
         // nobody can read.

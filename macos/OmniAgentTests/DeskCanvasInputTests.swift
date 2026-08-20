@@ -317,6 +317,38 @@ final class DeskCanvasInputTests: XCTestCase {
         XCTAssertTrue(workspace.canvasPins.isEmpty, "entering is not a drag")
     }
 
+    /// A click while an entry flight is still in the air used to reach the
+    /// canvas and act on it — select a node, or drag one and *pin* it, which is
+    /// then persisted — while the flight landed the session underneath it
+    /// regardless. The landing cannot be cancelled from here, so the click is
+    /// the thing that gives way.
+    func testAClickIsSwallowedWhileAnEntryFlightIsStillInTheAir() throws {
+        let (workspace, window) = makeAttachedCanvasWorkspace(sessions: 3)
+        defer { window.close() }
+        let layout = try XCTUnwrap(workspace.canvasLayout)
+        let target = workspace.groupIDs[2]
+        let other = try XCTUnwrap(nodeID(forGroup: workspace.groupIDs[0], in: workspace))
+        let rect = try XCTUnwrap(layout.frames[other])
+        workspace.camera = DeskCamera.fitAll(content: layout.contentRect, in: workspace.bounds)
+        let start = viewToWindow(canvas: CGPoint(x: rect.midX, y: rect.midY), workspace)
+
+        workspace.enterSession(target)
+        XCTAssertTrue(workspace.isEnteringSession, "the flight is in the air")
+
+        let far = CGPoint(x: start.x + 300, y: start.y)
+        workspace.mouseDown(with: mouseEvent(.leftMouseDown, at: start, in: window))
+        workspace.mouseDragged(with: mouseEvent(.leftMouseDragged, at: far, in: window))
+        workspace.mouseUp(with: mouseEvent(.leftMouseUp, at: far, in: window))
+
+        XCTAssertNil(workspace.selectedNodeID, "the click selected nothing")
+        XCTAssertTrue(workspace.canvasPins.isEmpty, "and pinned nothing")
+
+        RunLoop.current.run(
+            until: Date().addingTimeInterval(PaneWorkspaceView.zoomTransitionDuration + 0.2)
+        )
+        XCTAssertEqual(workspace.activeGroup, target, "and the landing still arrived")
+    }
+
     // MARK: - Cost
 
     /// A node drag translates a whole session card sixty times a second and

@@ -608,6 +608,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// leaving asks for the first one back, so a hidden workspace is not
     /// laying out ninety-six panes for nobody.
     func applyDestination(_ destination: WorkspaceDestination) {
+        let wasTerminals = self.destination == .terminals
         self.destination = destination
         shellSidebar.applyDestination(destination)
         let isTerminals = destination == .terminals
@@ -621,10 +622,79 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // says the Desk is what is on screen, whether or not a session is
         // filling it, and the gesture that brings you back *out* of a session
         // is guarded on it. This is its only writer.
-        workspace.canvasMode = isTerminals
+        //
+        // The mode itself is not simply `isTerminals` any more: coming back to
+        // the Desk restores whichever of its two states was left behind, which
+        // is what `rememberDeskState`/`restoreDeskState` are for. Re-selecting
+        // DESK while already on it is unchanged — with nothing recorded it
+        // loads the organigram, as it always did.
+        if isTerminals {
+            restoreDeskState()
+        } else if wasTerminals {
+            rememberDeskState()
+            workspace.canvasMode = false
+        }
         workspace.deskCanvasLoaded = isTerminals
         placeholder.isHidden = isTerminals
         if !isTerminals { placeholder.show(destination) }
+    }
+
+    /// What the Desk was showing when it was last left, so coming back to it is
+    /// a *return* and not a reset.
+    ///
+    /// Neither half of the Desk's state survives the trip on its own.
+    /// `canvasMode`'s setter destroys the camera on the way out ("Normal mode
+    /// must carry no transform at all"), so a canvas left at some camera comes
+    /// back parked in its own corner at scale 1; and inside a session canvas
+    /// mode is already *off*, so switching it back on would show the organigram
+    /// the user did not leave from. Recording which of the two it was is the
+    /// only way to tell them apart on the way back — the flags alone cannot.
+    private enum DeskReturn {
+        /// On the organigram, looking through this camera.
+        case canvas(DeskCamera)
+        /// Inside a session, filling the viewport. Canvas mode stays off.
+        case session
+    }
+
+    private var deskReturn: DeskReturn?
+
+    /// Called on the way *off* the Desk, and only from a destination that was
+    /// the Desk — two Dashboard selections in a row must not overwrite what the
+    /// first one recorded with the mode the first one turned off.
+    private func rememberDeskState() {
+        // A flight still in the air is neither state: `canvasMode` is on but
+        // `camera` is already parked over the destination card, and its landing
+        // (`DispatchQueue.main.asyncAfter`, token-guarded) arrives whether or
+        // not the Desk is still on screen — so by the time the user comes back
+        // they are inside that session. Storing the camera instead would come
+        // back to a session drawn at full size with `canvasOwnsInput` true,
+        // i.e. every keystroke swallowed by the canvas.
+        if workspace.canvasMode, !workspace.isEnteringSession {
+            deskReturn = .canvas(workspace.camera)
+        } else {
+            deskReturn = .session
+        }
+    }
+
+    /// Called on the way *on* to the Desk. With nothing recorded — the first
+    /// selection of the run — this is the plain "load the organigram" it has
+    /// always been.
+    private func restoreDeskState() {
+        switch deskReturn {
+        case .canvas(let seat):
+            workspace.canvasMode = true
+            // After the mode, not before: the setter resets the camera on every
+            // transition it makes, so a camera seated first would be thrown
+            // away by the mode change that follows it.
+            workspace.camera = seat
+        case .session:
+            // Already in normal mode with that session's grid filling `bounds`;
+            // unhiding the workspace is the whole of the work.
+            workspace.canvasMode = false
+        case nil:
+            workspace.canvasMode = true
+        }
+        deskReturn = nil
     }
 
     /// Opens a workspace in Level 2 and scopes the outline to it.

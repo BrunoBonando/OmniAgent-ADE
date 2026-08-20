@@ -60,6 +60,77 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         XCTAssertTrue(controller.workspaceView.superview === host, "hidden, never unmounted")
     }
 
+    /// Desk → Dashboard → Desk used to come back at scale 1 / origin 0 — the
+    /// *corner* of the canvas — whatever the user had been looking at, because
+    /// `canvasMode`'s setter resets the camera on the way out ("Normal mode
+    /// must carry no transform at all") and nothing wrote it down first.
+    func testLeavingTheDeskAndComingBackReturnsToTheCameraItWasLeftAt() {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        let seat = DeskCamera(scale: 0.4, origin: CGPoint(x: -120, y: -80))
+        controller.workspaceView.camera = seat
+
+        controller.applyDestination(.dashboard)
+        XCTAssertFalse(controller.workspaceView.canvasMode, "off the Desk there is no canvas to lay out")
+
+        controller.applyDestination(.terminals)
+        XCTAssertTrue(controller.workspaceView.canvasMode)
+        XCTAssertEqual(controller.workspaceView.camera, seat, "the canvas comes back where it was left")
+    }
+
+    /// The other half of the same round trip, and the one a camera cannot
+    /// express: inside a session canvas mode is already *off*, so switching it
+    /// back on when the user returns would show them the organigram they did
+    /// not leave from. Which of the two states it was is recorded, because
+    /// neither flag can be derived from the other after the fact.
+    func testLeavingTheDeskFromInsideASessionComesBackInsideThatSession() {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.applyRestoredPanes(twoSessionPlan())
+        controller.showWindow(nil)
+        controller.selectWorkspace(id: "alpha", animated: false)
+        // The restore leaves the *last* group active, so asking for a pane in
+        // the first one is a session the camera is not on: a flight, and the
+        // landing is what turns canvas mode off.
+        controller.workspaceView.focusPane("sess-a")
+        settleCameraFlight()
+        XCTAssertFalse(controller.workspaceView.canvasMode, "landing a session turns canvas mode off")
+        XCTAssertEqual(controller.currentDeskSessionGroup(), "grp-1")
+
+        controller.applyDestination(.dashboard)
+        controller.applyDestination(.terminals)
+
+        XCTAssertFalse(controller.workspaceView.canvasMode, "left inside a session, back inside it")
+        XCTAssertEqual(controller.currentDeskSessionGroup(), "grp-1")
+    }
+
+    /// Leaving mid-flight is neither state: `canvasMode` is still on but the
+    /// camera is already parked over the destination card, and the landing
+    /// arrives on its own `asyncAfter` whether or not the Desk is still on
+    /// screen — so the user comes back to a session. Storing that camera would
+    /// restore a session drawn at full size with `canvasOwnsInput` true, which
+    /// swallows every keystroke into the canvas.
+    func testLeavingTheDeskMidFlightComesBackInsideTheSessionItWasFlyingTo() {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.applyRestoredPanes(twoSessionPlan())
+        controller.showWindow(nil)
+        controller.selectWorkspace(id: "alpha", animated: false)
+
+        controller.workspaceView.focusPane("sess-a")
+        XCTAssertTrue(controller.workspaceView.isEnteringSession, "the entry is still in the air")
+        controller.applyDestination(.dashboard)
+        settleCameraFlight()
+        controller.applyDestination(.terminals)
+
+        XCTAssertFalse(controller.workspaceView.canvasMode)
+        XCTAssertEqual(controller.currentDeskSessionGroup(), "grp-1")
+    }
+
     // MARK: - The Desk menu
 
     /// The canvas's shortcuts, and the two things that make them safe: ⌘0 and
