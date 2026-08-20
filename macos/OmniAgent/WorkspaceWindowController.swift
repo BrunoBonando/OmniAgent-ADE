@@ -229,6 +229,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// silently spawn a login shell) or `connection.kill` — without a socket.
     var sessionEnsurer: ((String) -> Void)?
     var sessionKiller: ((String) -> Void)?
+    /// The context menu's Show in Finder. `nil` means the real
+    /// `NSWorkspace` reveal; a test substitutes a recorder — the
+    /// `externalLinkOpener` pattern for a filesystem path.
+    var fileRevealer: ((String) -> Void)?
+    /// The Remove-workspace confirmation, handed the workspace's display
+    /// label and its session count. `nil` means "ask with an `NSAlert`"; a
+    /// test substitutes an answer — `newSessionForLinkConfirmer`'s pattern.
+    var workspaceRemovalConfirmer: ((String, Int, @escaping (Bool) -> Void) -> Void)?
 
     // MARK: - Task 6b-2: settings/onboarding/usage/inspector
 
@@ -238,6 +246,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// what fixes 6b-1 concern #3 ("project rows show ids, not labels") for
     /// the outline, the palette and the inspector alike, from one read.
     private(set) var projectLabels: [String: String] = [:]
+    /// The `workspace_customizations_native` row, keyed by workspace path —
+    /// the Customize… dialog's display names and folder colours.
+    private(set) var workspaceCustomizations: [String: WorkspaceCustomization] = [:]
+    /// The shared `closed_workspaces` row: the workspaces the user removed.
+    /// Removal is the web build's close — sessions end, the row leaves the
+    /// sidebar, the folder and the brain's graph stay untouched.
+    private(set) var closedWorkspaceIDs: Set<String> = []
+    /// Read/write gates for the two rows above — `layoutReadDispatched`'s
+    /// shape and reasoning: a save before the read lands must not overwrite
+    /// a row nothing has seen.
+    private var customizationsReadDispatched = false
+    private var customizationsReadCompleted = false
+    private var closedWorkspacesReadDispatched = false
+    private var closedWorkspacesReadCompleted = false
+    /// The Customize… card while one is up — window-scoped, so owned here.
+    private(set) var customizeCard: WorkspaceCustomizeCard?
     let authGateCoordinator: AuthGateCoordinator
     private let authGateWindow: AuthGateWindowController
     private let firstRunWindow: FirstRunWindowController
@@ -449,6 +473,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             )
         }
         shellSidebar.onAddLocalFolder = { [weak self] in self?.openWorkspaceFolder(nil) }
+        // A workspace row's right-click: the controller builds the menu
+        // because only it can resolve the row to a directory, a GitHub
+        // remote and a stored customization.
+        shellSidebar.workspaceMenuProvider = { [weak self] id in self?.workspaceContextMenu(for: id) }
         // Asking the login shell for its PATH spawns a shell; do it now, off
         // the main thread, so the first terminal does not wait for it.
         EngineLauncher.prewarm()
@@ -831,6 +859,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 applyConnectionStatus(nil)
                 restoreWorkspaceIfNeeded()
                 restoreUsageAnalyticsIfNeeded()
+                restoreWorkspaceCustomizationsIfNeeded()
+                restoreClosedWorkspacesIfNeeded()
                 refreshProjectLabels()
                 presentOnboardingIfNeeded()
             case .connecting:
@@ -1298,6 +1328,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @discardableResult
     func startSession(inDirectory cwd: String, project: String) -> String? {
         guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return nil }
+        // Starting a session in a closed workspace reopens it — the web
+        // build's `reopenWorkspace` rule, so the row is back the moment the
+        // workspace is in use again.
+        if !project.isEmpty, closedWorkspaceIDs.contains(project) {
+            closedWorkspaceIDs.remove(project)
+            persistClosedWorkspaces()
+        }
         let group = SessionOutline.newSessionGroupID()
         let name = SessionOutline.nextSessionName(
             workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
@@ -2277,13 +2314,62 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func reloadOutline() {
         let all = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
         shellSidebar.reloadWorkspaces(
-            workspaces: workspaces,
+            workspaces: Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs),
             panes: all,
             focusedPaneID: workspace.focusedPaneID,
             statuses: lastStatus,
             projectLabels: projectLabels,
-            eventTimes: lastStatusEventAt
+            eventTimes: lastStatusEventAt,
+            customizations: sidebarCustomizations()
         )
+    }
+
+    /// The web build's `openWorkspaces` (`ui/src/state/closedWorkspaces.ts`),
+    /// shape-for-shape: the brain's project list minus the ids the user
+    /// closed, order untouched. A closed workspace that still has live panes
+    /// deliberately re-enters through the pane-derived path — a session on
+    /// screen must stay reachable.
+    static func openWorkspaces(
+        _ workspaces: [BrainProjectSummary],
+        closed: Set<String>
+    ) -> [BrainProjectSummary] {
+        guard !closed.isEmpty else { return workspaces }
+        return workspaces.filter { !closed.contains($0.id) }
+    }
+
+    /// The stored customizations re-keyed by workspace *id* for the sidebar,
+    /// which never sees paths. The row itself is keyed by path (stable
+    /// across brain rebuilds, which can re-mint ids) — `customizationKey`.
+    private func sidebarCustomizations() -> [String: WorkspaceCustomization] {
+        guard !workspaceCustomizations.isEmpty else { return [:] }
+        var ids = Set(workspaces.map(\.id))
+        for paneID in workspace.allPaneIDs {
+            if let project = workspace.descriptor(for: paneID)?.project, !project.isEmpty {
+                ids.insert(project)
+            }
+        }
+        var byID: [String: WorkspaceCustomization] = [:]
+        for id in ids {
+            if let custom = workspaceCustomizations[customizationKey(for: id)] {
+                byID[id] = custom
+            }
+        }
+        return byID
+    }
+
+    /// Where a workspace's customization is stored: its path (the brain's
+    /// recorded folder, else a live pane's cwd), falling back to the id for
+    /// a workspace with no known directory at all.
+    func customizationKey(for id: String) -> String {
+        workspaceDirectory(for: id) ?? id
+    }
+
+    /// What the sidebar prints for this workspace — the customization's
+    /// display name when one is stored, the same override the tree applies.
+    private func sidebarDisplayLabel(for id: String) -> String {
+        workspaceCustomizations[customizationKey(for: id)]?.displayName
+            ?? workspaces.first { $0.id == id }?.label
+            ?? SessionOutline.projectLabel(id, labels: projectLabels)
     }
 
     /// The project directory every project-label-aware surface
@@ -2322,6 +2408,225 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         for paneID in session.paneIDs {
             workspace.updateDescriptor(for: paneID) { $0.groupLabel = trimmed }
         }
+    }
+
+    // MARK: - Workspace context menu (2026-08-20 redesign §3)
+
+    /// The workspace row's right-click menu, built fresh per click so the
+    /// GitHub item reflects the remote as it is *now*.
+    func workspaceContextMenu(for id: String) -> NSMenu {
+        let directory = workspaceDirectory(for: id)
+        return WorkspaceContextMenu.build(
+            gitHubURL: directory.flatMap(WorkspaceContextMenu.gitHubRepositoryURL(inDirectory:)),
+            newSession: { [weak self] in
+                guard let self else { return }
+                startSession(inDirectory: workspaceDirectory(for: id) ?? "", project: id)
+            },
+            showInFinder: { [weak self] in
+                guard let self, let directory = workspaceDirectory(for: id) else { return }
+                revealInFinder(directory)
+            },
+            openOnGitHub: { [weak self] url in self?.openExternally(url) },
+            customize: { [weak self] in self?.presentCustomizeWorkspace(id) },
+            remove: { [weak self] in self?.removeWorkspace(id) }
+        )
+    }
+
+    private func revealInFinder(_ path: String) {
+        if let fileRevealer {
+            fileRevealer(path)
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    /// Customize…: the card over the whole window (the subject is a sidebar
+    /// row, not a pane, so this is not a pane ask), seeded with what is
+    /// stored for the workspace.
+    func presentCustomizeWorkspace(_ id: String) {
+        guard customizeCard == nil, let content = window?.contentView else { return }
+        let card = WorkspaceCustomizeCard(
+            folderName: customizationFolderName(for: id),
+            current: workspaceCustomizations[customizationKey(for: id)]
+        )
+        card.onCancel = { [weak self] in self?.dismissCustomizeCard() }
+        card.onSave = { [weak self] customization in
+            guard let self else { return }
+            saveWorkspaceCustomization(customization, forWorkspace: id)
+            dismissCustomizeCard()
+        }
+        card.frame = content.bounds
+        card.autoresizingMask = [.width, .height]
+        content.addSubview(card)
+        customizeCard = card
+        window?.makeFirstResponder(card.firstResponderView)
+        card.selectInput()
+    }
+
+    private func dismissCustomizeCard() {
+        customizeCard?.removeFromSuperview()
+        customizeCard = nil
+    }
+
+    /// The field's placeholder and the caption's fallback: the folder's own
+    /// name — what the row shows when nothing is customized.
+    private func customizationFolderName(for id: String) -> String {
+        if let directory = workspaceDirectory(for: id), !directory.isEmpty {
+            return (directory as NSString).lastPathComponent
+        }
+        return workspaces.first { $0.id == id }?.label
+            ?? SessionOutline.projectLabel(id, labels: projectLabels)
+    }
+
+    /// Stores (or, for an empty customization, clears) one workspace's
+    /// customization and re-renders everywhere the label shows.
+    func saveWorkspaceCustomization(
+        _ customization: WorkspaceCustomization,
+        forWorkspace id: String
+    ) {
+        let key = customizationKey(for: id)
+        if customization.isEmpty {
+            workspaceCustomizations.removeValue(forKey: key)
+        } else {
+            workspaceCustomizations[key] = customization
+        }
+        persistWorkspaceCustomizations()
+        reloadOutline()
+    }
+
+    /// Remove workspace: confirm — naming the workspace and how many
+    /// sessions end with it — then close every one of its sessions and
+    /// record the workspace closed.
+    ///
+    /// There is deliberately no daemon RPC behind this: the daemon's roots
+    /// protocol has no removal (and the brain's graph should survive — an
+    /// hour of ingestion must not be one click from destruction). This is
+    /// the web build's close-workspace path, row for row: kill the daemon
+    /// sessions, write the id into `closed_workspaces`, leave the folder and
+    /// the graph alone. Re-adding the folder or starting a session in the
+    /// workspace brings the row straight back.
+    func removeWorkspace(_ id: String) {
+        let panes = workspace.allPaneIDs
+            .compactMap { workspace.descriptor(for: $0) }
+            .filter { $0.project == id }
+        confirmWorkspaceRemoval(
+            label: sidebarDisplayLabel(for: id),
+            sessionCount: Set(panes.map(\.group)).count
+        ) { [weak self] confirmed in
+            guard confirmed else { return }
+            self?.performRemoveWorkspace(id)
+        }
+    }
+
+    private func confirmWorkspaceRemoval(
+        label: String,
+        sessionCount: Int,
+        completion: @escaping (Bool) -> Void
+    ) {
+        if let workspaceRemovalConfirmer {
+            workspaceRemovalConfirmer(label, sessionCount, completion)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Remove \(label) from OmniAgent?"
+        let sessions: String
+        switch sessionCount {
+        case 0: sessions = ""
+        case 1: sessions = "Its session ends with it. "
+        default: sessions = "Its \(sessionCount) sessions end with it. "
+        }
+        alert.informativeText = sessions
+            + "The folder on disk is untouched, and adding it again brings the workspace back."
+        alert.addButton(withTitle: "Remove Workspace")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard let window else {
+            completion(alert.runModal() == .alertFirstButtonReturn)
+            return
+        }
+        alert.beginSheetModal(for: window) { response in
+            completion(response == .alertFirstButtonReturn)
+        }
+    }
+
+    private func performRemoveWorkspace(_ id: String) {
+        // Sessions first: `destroyPane` kills each terminal's daemon
+        // session and does the per-pane bookkeeping, exactly as ⌘W does —
+        // one close path, not two that drift.
+        let paneIDs = workspace.allPaneIDs.filter { workspace.descriptor(for: $0)?.project == id }
+        for paneID in paneIDs {
+            destroyPane(paneID)
+        }
+        closedWorkspaceIDs.insert(id)
+        persistClosedWorkspaces()
+        if selectedProjectID == id {
+            selectedProjectID = nil
+            selectInitialWorkspaceIfNeeded(animated: false)
+        }
+        reloadOutline()
+    }
+
+    private func restoreWorkspaceCustomizationsIfNeeded() {
+        guard !customizationsReadDispatched else { return }
+        customizationsReadDispatched = true
+        connection.getSetting(key: SettingsKey.workspaceCustomizations) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                applyRestoredWorkspaceCustomizations(raw)
+            case .failure:
+                // Re-armed for the next reconnect; the write gate stays
+                // shut so a save cannot overwrite a row nothing has read —
+                // `layoutReadFailed`'s reasoning.
+                customizationsReadDispatched = false
+            }
+        }
+    }
+
+    private func restoreClosedWorkspacesIfNeeded() {
+        guard !closedWorkspacesReadDispatched else { return }
+        closedWorkspacesReadDispatched = true
+        connection.getSetting(key: SettingsKey.closedWorkspaces) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                applyRestoredClosedWorkspaces(raw)
+            case .failure:
+                closedWorkspacesReadDispatched = false
+            }
+        }
+    }
+
+    /// Applies the `workspace_customizations_native` row and opens its write
+    /// gate — split out of the read so a test can restore without a socket,
+    /// `applyRestoredPanes`'s pattern.
+    func applyRestoredWorkspaceCustomizations(_ raw: String?) {
+        customizationsReadDispatched = true
+        customizationsReadCompleted = true
+        workspaceCustomizations = WorkspaceCustomizationsCodec.deserialize(raw)
+        reloadOutline()
+    }
+
+    /// `applyRestoredWorkspaceCustomizations`'s twin for the shared
+    /// `closed_workspaces` row.
+    func applyRestoredClosedWorkspaces(_ raw: String?) {
+        closedWorkspacesReadDispatched = true
+        closedWorkspacesReadCompleted = true
+        closedWorkspaceIDs = ClosedWorkspacesCodec.deserialize(raw)
+        reloadOutline()
+    }
+
+    private func persistWorkspaceCustomizations() {
+        guard customizationsReadCompleted else { return }
+        write(
+            WorkspaceCustomizationsCodec.serialize(workspaceCustomizations),
+            to: SettingsKey.workspaceCustomizations
+        )
+    }
+
+    private func persistClosedWorkspaces() {
+        guard closedWorkspacesReadCompleted else { return }
+        write(ClosedWorkspacesCodec.serialize(closedWorkspaceIDs), to: SettingsKey.closedWorkspaces)
     }
 
     // MARK: - Notifications

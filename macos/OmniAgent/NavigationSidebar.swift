@@ -308,6 +308,10 @@ final class NavigationSidebarView: NSView {
     /// The plus menu's "Local folder or repository…" — the existing
     /// add-workspace folder chooser.
     var onAddLocalFolder: (() -> Void)?
+    /// A workspace row's right-click, forwarded to the controller — which
+    /// resolves the workspace's directory, GitHub remote and stored
+    /// customization, none of which the sidebar holds.
+    var workspaceMenuProvider: ((String) -> NSMenu?)?
 
     private(set) var navRows: [SidebarNavRowView] = []
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
@@ -363,6 +367,7 @@ final class NavigationSidebarView: NSView {
             self?.onRenameSession?(session, name)
         }
         workspacesTree.onHoverTarget = { [weak self] target in self?.onHoverTarget?(target) }
+        workspacesTree.workspaceMenuProvider = { [weak self] id in self?.workspaceMenuProvider?(id) }
 
         for view in [navStack, workspacesHeader, scroll, accountRow] { addSubview(view) }
         NSLayoutConstraint.activate([
@@ -409,27 +414,33 @@ final class NavigationSidebarView: NSView {
         focusedPaneID: String?,
         statuses: [String: RemoteSessionStatus],
         projectLabels: [String: String],
-        eventTimes: [String: Double] = [:]
+        eventTimes: [String: Double] = [:],
+        customizations: [String: WorkspaceCustomization] = [:]
     ) {
         let grouped = SessionOutline.group(panes, focusedPaneID: focusedPaneID)
         var entries: [WorkspaceTreeEntry] = []
         var listed = Set<String>()
         for workspace in workspaces {
             listed.insert(workspace.id)
+            let custom = customizations[workspace.id]
             entries.append(
                 WorkspaceTreeEntry(
                     id: workspace.id,
-                    label: workspace.label,
-                    sessions: grouped.first { $0.project == workspace.id }?.sessions ?? []
+                    label: custom?.displayName ?? workspace.label,
+                    sessions: grouped.first { $0.project == workspace.id }?.sessions ?? [],
+                    tint: custom?.color?.tint
                 )
             )
         }
         for node in grouped where !listed.contains(node.project) {
+            let custom = customizations[node.project]
             entries.append(
                 WorkspaceTreeEntry(
                     id: node.project,
-                    label: SessionOutline.projectLabel(node.project, labels: projectLabels),
-                    sessions: node.sessions
+                    label: custom?.displayName
+                        ?? SessionOutline.projectLabel(node.project, labels: projectLabels),
+                    sessions: node.sessions,
+                    tint: custom?.color?.tint
                 )
             )
         }

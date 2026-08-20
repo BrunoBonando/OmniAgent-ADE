@@ -17,6 +17,16 @@ struct WorkspaceTreeEntry: Equatable {
     let id: String
     let label: String
     let sessions: [SessionGroupNode]
+    /// The customization's folder colour, already resolved to a tint —
+    /// `nil` keeps `ShellPalette.folderGlyph`.
+    let tint: NSColor?
+
+    init(id: String, label: String, sessions: [SessionGroupNode], tint: NSColor? = nil) {
+        self.id = id
+        self.label = label
+        self.sessions = sessions
+        self.tint = tint
+    }
 }
 
 /// A workspace row: disclosure chevron, folder icon (the open variant while
@@ -28,18 +38,27 @@ final class WorkspaceRowView: ShellRowView {
     /// Held so the fold state is a fact a test can read off the icon.
     private(set) var folderGlyph: ShellGlyphView
     private let chevron: ShellGlyphView
+    private let titleField: NSTextField
+    /// The row's context menu, built fresh per right-click by whoever can
+    /// resolve the workspace — the menu reads live state (the GitHub
+    /// remote, the stored customization) this row never holds.
+    var onContextMenu: (() -> NSMenu?)?
 
-    init(id: String, label: String, expanded: Bool) {
+    /// What the row prints — the customization's display name when one is
+    /// stored.
+    var titleText: String { titleField.stringValue }
+
+    init(id: String, label: String, expanded: Bool, tint: NSColor? = nil) {
         workspaceID = id
         isExpanded = expanded
         chevron = ShellGlyphView(.chevronRight, color: ShellPalette.chevron, size: 15, lineWidth: 1.8)
         folderGlyph = ShellGlyphView(
             expanded ? .folderOpen : .folder,
-            color: ShellPalette.folderGlyph,
+            color: tint ?? ShellPalette.folderGlyph,
             size: 17,
             lineWidth: 1.1
         )
-        let titleField = ShellFont.label(
+        titleField = ShellFont.label(
             label,
             font: ShellFont.ui(13.5, .semibold),
             color: ShellPalette.inkFolder
@@ -71,6 +90,10 @@ final class WorkspaceRowView: ShellRowView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        onContextMenu?() ?? super.menu(for: event)
+    }
 }
 
 /// The dim placeholder under an expanded workspace that has nothing running.
@@ -147,6 +170,9 @@ final class WorkspacesTreeView: NSView {
     /// The pointer resting on a session row, or leaving one (`nil`) — what
     /// raises the hover card.
     var onHoverTarget: ((SessionHoverCardController.Target?) -> Void)?
+    /// A workspace row's right-click: whoever mounts the tree answers with
+    /// the row's context menu, built fresh so it reads live state.
+    var workspaceMenuProvider: ((String) -> NSMenu?)?
 
     /// Collapsed workspace ids, persisted so the fold survives a relaunch.
     /// Stored inverted — absent means expanded — so a brand new workspace
@@ -251,8 +277,14 @@ final class WorkspacesTreeView: NSView {
         renderedWorkspaceIDs = entries.map(\.id)
         for entry in entries {
             let expanded = !collapsed.contains(entry.id)
-            let workspaceRow = WorkspaceRowView(id: entry.id, label: entry.label, expanded: expanded)
+            let workspaceRow = WorkspaceRowView(
+                id: entry.id,
+                label: entry.label,
+                expanded: expanded,
+                tint: entry.tint
+            )
             workspaceRow.onPress = { [weak self] in self?.toggle(entry.id) }
+            workspaceRow.onContextMenu = { [weak self] in self?.workspaceMenuProvider?(entry.id) }
             add(workspaceRow)
 
             guard expanded else { continue }

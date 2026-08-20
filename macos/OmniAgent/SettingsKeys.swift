@@ -58,12 +58,13 @@ enum SettingsKey {
     static let authAccountName = "auth_account_name"
 
     /// `ui/src/state/closedWorkspaces.ts`'s `CLOSED_WORKSPACES_SETTING_KEY`.
-    /// Declared for schema completeness (it is one shared `brain.db` row,
-    /// same as every other key here) but not read or written by this build:
-    /// "closed workspaces" names the web app's closeable per-project tab
-    /// strip, a concept this build's session-outline/pane model does not
-    /// have. A future native project picker is the natural place to wire it,
-    /// not this task's settings/onboarding/usage/inspector surface.
+    /// One JSON array of workspace ids — see `ClosedWorkspacesCodec`, which
+    /// matches the web codec's shape exactly because the row is shared.
+    /// Wired here by the sidebar's Remove-workspace path (the 2026-08-20
+    /// redesign's workspace context menu): removing a workspace closes its
+    /// sessions and records the id here, exactly what the web app's
+    /// close-workspace control writes — a window-close, never a delete; the
+    /// folder and everything ingested from it stay untouched.
     static let closedWorkspaces = "closed_workspaces"
 
     /// `ui/src/lib/tauri.ts`'s `FILE_TREE_VISIBLE_SETTING_KEY`. Declared for
@@ -98,6 +99,13 @@ enum SettingsKey {
     /// JSON object, `{"panes":[{tabs:[{path,kind,pinned}],active,group?,groupLabel?}]}`
     /// — see `EditorPanesCodec`. No TypeScript twin, by design.
     static let editorPanes = "editor_panes_native"
+
+    /// Native-only — the sidebar's per-workspace customizations (the
+    /// 2026-08-20 redesign's Customize… dialog): display name and folder
+    /// colour, keyed by workspace path. One JSON object,
+    /// `{"workspaces":{"<path>":{"name"?,"color"?}}}` — see
+    /// `WorkspaceCustomizationsCodec`. No TypeScript twin, by design.
+    static let workspaceCustomizations = "workspace_customizations_native"
 
     /// Native-only — `browserPanes`'s reasoning a third time: the web build
     /// rewrites the shared `layout` row and strips the fields it does not

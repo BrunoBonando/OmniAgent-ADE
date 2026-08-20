@@ -39,6 +39,10 @@
 		4C7A2E5FB9D14038A2202609 /* WorkspacesTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A2202608 /* WorkspacesTree.swift */; };
 		4C7A2E5FB9D14038A220260B /* WorkspacesHeaderMenus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A220260A /* WorkspacesHeaderMenus.swift */; };
 		4C7A2E5FB9D14038A220260D /* WorkspacesHeaderMenusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A220260C /* WorkspacesHeaderMenusTests.swift */; };
+		4C7A2E5FB9D14038A220260F /* WorkspaceCustomizations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A220260E /* WorkspaceCustomizations.swift */; };
+		4C7A2E5FB9D14038A2202611 /* WorkspaceContextMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A2202610 /* WorkspaceContextMenu.swift */; };
+		4C7A2E5FB9D14038A2202613 /* WorkspaceCustomizationsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A2202612 /* WorkspaceCustomizationsTests.swift */; };
+		4C7A2E5FB9D14038A2202615 /* WorkspaceContextMenuTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A2202614 /* WorkspaceContextMenuTests.swift */; };
 		3A7E4B21D95C4F6E8A102028 /* NavigationSidebarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */; };
 		10000000000000000000098 /* PaneAsk.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000098 /* PaneAsk.swift */; };
 		10000000000000000000095 /* PaneApprovalBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000095 /* PaneApprovalBarTests.swift */; };
@@ -217,6 +221,10 @@
 		4C7A2E5FB9D14038A2202608 /* WorkspacesTree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacesTree.swift; sourceTree = "<group>"; };
 		4C7A2E5FB9D14038A220260A /* WorkspacesHeaderMenus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacesHeaderMenus.swift; sourceTree = "<group>"; };
 		4C7A2E5FB9D14038A220260C /* WorkspacesHeaderMenusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacesHeaderMenusTests.swift; sourceTree = "<group>"; };
+		4C7A2E5FB9D14038A220260E /* WorkspaceCustomizations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCustomizations.swift; sourceTree = "<group>"; };
+		4C7A2E5FB9D14038A2202610 /* WorkspaceContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceContextMenu.swift; sourceTree = "<group>"; };
+		4C7A2E5FB9D14038A2202612 /* WorkspaceCustomizationsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCustomizationsTests.swift; sourceTree = "<group>"; };
+		4C7A2E5FB9D14038A2202614 /* WorkspaceContextMenuTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceContextMenuTests.swift; sourceTree = "<group>"; };
 		3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationSidebarTests.swift; sourceTree = "<group>"; };
 		20000000000000000000098 /* PaneAsk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAsk.swift; sourceTree = "<group>"; };
 		20000000000000000000095 /* PaneApprovalBarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneApprovalBarTests.swift; sourceTree = "<group>"; };
@@ -349,6 +357,8 @@
 				3A7E4B21D95C4F6E8A102027 /* NavigationSidebar.swift */,
 				4C7A2E5FB9D14038A2202608 /* WorkspacesTree.swift */,
 				4C7A2E5FB9D14038A220260A /* WorkspacesHeaderMenus.swift */,
+				4C7A2E5FB9D14038A220260E /* WorkspaceCustomizations.swift */,
+				4C7A2E5FB9D14038A2202610 /* WorkspaceContextMenu.swift */,
 				20000000000000000000098 /* PaneAsk.swift */,
 				20000000000000000000000A /* TerminalSurfaceView.swift */,
 				20000000000000000000000B /* WorkspaceWindowController.swift */,
@@ -430,6 +440,8 @@
 				200000000000000000000021 /* CommandPaletteTests.swift */,
 				3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */,
 				4C7A2E5FB9D14038A220260C /* WorkspacesHeaderMenusTests.swift */,
+				4C7A2E5FB9D14038A2202612 /* WorkspaceCustomizationsTests.swift */,
+				4C7A2E5FB9D14038A2202614 /* WorkspaceContextMenuTests.swift */,
 				2000000000000000000002D /* SettingsStoreTests.swift */,
 				200000000000000000000A1 /* AuthClientTests.swift */,
 				2000000000000000000002E /* AuthGateStateTests.swift */,
@@ -603,6 +615,8 @@
 				3A7E4B21D95C4F6E8A102026 /* NavigationSidebar.swift in Sources */,
 				4C7A2E5FB9D14038A2202609 /* WorkspacesTree.swift in Sources */,
 				4C7A2E5FB9D14038A220260B /* WorkspacesHeaderMenus.swift in Sources */,
+				4C7A2E5FB9D14038A220260F /* WorkspaceCustomizations.swift in Sources */,
+				4C7A2E5FB9D14038A2202611 /* WorkspaceContextMenu.swift in Sources */,
 				10000000000000000000098 /* PaneAsk.swift in Sources */,
 				100000000000000000000009 /* TerminalSurfaceView.swift in Sources */,
 				10000000000000000000000A /* WorkspaceWindowController.swift in Sources */,
@@ -678,6 +692,8 @@
 				100000000000000000000020 /* CommandPaletteTests.swift in Sources */,
 				3A7E4B21D95C4F6E8A102028 /* NavigationSidebarTests.swift in Sources */,
 				4C7A2E5FB9D14038A220260D /* WorkspacesHeaderMenusTests.swift in Sources */,
+				4C7A2E5FB9D14038A2202613 /* WorkspaceCustomizationsTests.swift in Sources */,
+				4C7A2E5FB9D14038A2202615 /* WorkspaceContextMenuTests.swift in Sources */,
 				1000000000000000000002C /* SettingsStoreTests.swift in Sources */,
 				100000000000000000000A1 /* AuthClientTests.swift in Sources */,
 				1000000000000000000002D /* AuthGateStateTests.swift in Sources */,
