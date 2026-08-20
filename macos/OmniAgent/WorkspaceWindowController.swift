@@ -185,6 +185,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// `layout` row and drops fields it does not know about.
     private var editorPanesReadDispatched = false
     private var editorPanesReadCompleted = false
+    /// The `desk_canvas_native` row's two flags — the browser and editor pairs
+    /// above, for the third native-only row. Separate again for the same
+    /// reason: the web build rewrites the shared `layout` row and drops fields
+    /// it does not know about, and it knows nothing about a canvas.
+    private var deskCanvasReadDispatched = false
+    private var deskCanvasReadCompleted = false
+    /// Coalesces a burst of canvas changes into one write — see
+    /// `persistDeskCanvas`.
+    private var deskCanvasWriteToken = 0
     /// The pane that had focus when the app was last used, so a restart
     /// comes back to that session rather than to whichever pane happened to
     /// restore last. Native-local UI state the web build knows nothing about,
@@ -382,6 +391,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.reloadOutline()
             self?.adjustWindowForRowCount()
         }
+        workspace.onDeskCanvasChanged = { [weak self] in self?.persistDeskCanvas() }
         notifier.onEntriesChanged = { [weak self] entries in self?.persistNotifications(entries) }
         usageRecorder.onStoreChanged = { [weak self] store in self?.persistUsageAnalytics(store) }
         shellSidebar.onSelectPane = { [weak self] id in self?.workspace.focusPane(id) }
@@ -1833,6 +1843,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // left empty.
         restoreBrowserPanesIfNeeded()
         restoreEditorPanesIfNeeded()
+        // A sibling of those two rather than chained behind them, deliberately:
+        // each of the three is independently gated and independently re-armed,
+        // so a browser read that fails must not take the canvas down with it.
+        restoreDeskCanvasIfNeeded()
     }
 
     /// Kills daemon sessions this window no longer references.
@@ -2574,6 +2588,92 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 )
             }
         write(EditorPanesCodec.serialize(panes), to: SettingsKey.editorPanes)
+    }
+
+    // MARK: - Desk canvas persistence
+
+    /// Reads the native-only `desk_canvas_native` row once, alongside the
+    /// browser and editor rows — `restoreBrowserPanesIfNeeded`'s shape and its
+    /// reasons: a row that could not be read is not an empty one, so the write
+    /// gate stays shut and the read re-arms for the next reconnect.
+    private func restoreDeskCanvasIfNeeded() {
+        guard !deskCanvasReadDispatched else { return }
+        deskCanvasReadDispatched = true
+        connection.getSetting(key: SettingsKey.deskCanvas) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                applyRestoredDeskCanvas(DeskCanvasCodec.deserialize(raw))
+            case .failure:
+                deskCanvasReadDispatched = false
+            }
+        }
+    }
+
+    /// Hands the canvas its pinned nodes and the camera it was left at. Split
+    /// out from the read so a state can be applied in a test without a socket,
+    /// exactly as `applyRestoredBrowserPanes` is.
+    ///
+    /// A first launch has no stored camera, and that is what makes DESK open on
+    /// the whole organigram: `exitToCanvas` is `fitAll`.
+    func applyRestoredDeskCanvas(_ state: DeskCanvasState) {
+        // Pins first: `exitToCanvas` fits the tree the last layout pass
+        // produced, and a pinned node is what moves it.
+        workspace.canvasPins = state.pinned
+        // Seating a camera is only the canvas's business, and only while the
+        // canvas is what is on screen. This read lands last in the restore
+        // chain — after `applyRestoredBrowserPanes` has put focus back where
+        // the user left it, which on the canvas is a *flight* into that
+        // session. Overwriting the camera mid-flight would show the wrong
+        // place for 0.38s, and `exitToCanvas` would cancel the arrival
+        // outright: the restore's whole point, undone by its own last step.
+        if workspace.canvasMode, !workspace.isEnteringSession {
+            if let camera = state.camera {
+                workspace.camera = camera
+            } else {
+                workspace.exitToCanvas()
+            }
+        }
+        // Last, deliberately, where its browser and editor siblings open the
+        // gate first: both assignments above raise `onDeskCanvasChanged`, and
+        // the row we just read is not a change worth writing back.
+        deskCanvasReadCompleted = true
+    }
+
+    /// A burst of canvas changes is one write.
+    ///
+    /// `write(_:to:)` suppresses an unchanged value, which is what protects the
+    /// `layout` row from a shell repainting its OSC title — but a camera being
+    /// dragged around produces a *different* value every frame, so suppression
+    /// cannot help here and only a settle can. Scheduled with `asyncAfter`
+    /// behind a token, the same shape `finishZoomTransition` uses and for the
+    /// same reason: a stale timer is harmless because it refuses any token but
+    /// the current one.
+    private static let deskCanvasWriteDelay: TimeInterval = 0.25
+
+    private func persistDeskCanvas() {
+        // The *completed* flag, never the dispatched one: the read is
+        // asynchronous, and a node dragged while it is in flight would
+        // otherwise persist an empty pinned map over a row nothing has read
+        // yet.
+        //
+        // And only from the canvas. Normal mode is entered by resetting the
+        // camera to the identity, so a write from inside a session would store
+        // "parked in the canvas's own corner" over the camera the user
+        // actually left — recoverable with ⌘0, but it is not what they left.
+        guard deskCanvasReadCompleted, workspace.canvasMode else { return }
+        deskCanvasWriteToken += 1
+        let token = deskCanvasWriteToken
+        // Captured now rather than read back when the timer fires: the state
+        // is known to be a canvas state at this instant, and the user may well
+        // have flown into a session before the quarter-second is up. Each
+        // change re-schedules, so the value that survives is still the last
+        // one.
+        let state = DeskCanvasState(pinned: workspace.canvasPins, camera: workspace.camera)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.deskCanvasWriteDelay) { [weak self] in
+            guard let self, token == deskCanvasWriteToken else { return }
+            write(DeskCanvasCodec.serialize(state), to: SettingsKey.deskCanvas)
+        }
     }
 
     /// Writes a settings row only when its value actually changed.

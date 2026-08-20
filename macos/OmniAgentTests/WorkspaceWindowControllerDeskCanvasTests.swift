@@ -179,7 +179,162 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         XCTAssertTrue(controller.validateMenuItem(first))
     }
 
+    // MARK: - desk_canvas_native
+
+    /// The write gate is the *completed* flag, not the dispatched one. The read
+    /// is asynchronous, and a node dragged while it is in flight would
+    /// otherwise persist an empty pinned map over a row nothing has read yet —
+    /// the exact reasoning `layoutReadCompleted`'s doc records for the shared
+    /// layout row.
+    func testTheCanvasRowIsNotWrittenBeforeItHasBeenRead() {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+
+        controller.workspaceView.canvasPins["grp-1"] = CGPoint(x: 40, y: 60)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        XCTAssertTrue(
+            writes.filter { $0.0 == SettingsKey.deskCanvas }.isEmpty,
+            "the row has not been read, so nothing may be written over it"
+        )
+    }
+
+    /// Restore hands the view its pinned nodes and its camera, and from then on
+    /// a change writes the row back. Debounced: a camera being dragged around
+    /// changes every frame, so `write`'s unchanged-value suppression cannot
+    /// help and only a settle can.
+    func testPinningANodeWritesTheCanvasRowOnceTheRowHasBeenRead() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+
+        controller.applyRestoredDeskCanvas(
+            DeskCanvasState(
+                pinned: ["grp-1": CGPoint(x: 10, y: 20)],
+                camera: DeskCamera(scale: 0.5, origin: CGPoint(x: 5, y: 7))
+            )
+        )
+        XCTAssertEqual(controller.workspaceView.canvasPins["grp-1"], CGPoint(x: 10, y: 20))
+        XCTAssertEqual(controller.workspaceView.camera.scale, 0.5, accuracy: 0.0001)
+
+        controller.workspaceView.canvasPins["grp-2"] = CGPoint(x: 80, y: 90)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        let row = try XCTUnwrap(writes.last { $0.0 == SettingsKey.deskCanvas })
+        let stored = DeskCanvasCodec.deserialize(row.1)
+        XCTAssertEqual(stored.pinned["grp-1"], CGPoint(x: 10, y: 20))
+        XCTAssertEqual(stored.pinned["grp-2"], CGPoint(x: 80, y: 90))
+    }
+
+    /// Five changes in a row are one write, not five. A drag and a camera
+    /// flight both produce a stream of them against a database the web app is
+    /// also reading.
+    func testAStreamOfCanvasChangesCoalescesIntoOneWrite() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+        controller.applyRestoredDeskCanvas(DeskCanvasState(pinned: [:], camera: nil))
+
+        for step in 1...5 {
+            controller.workspaceView.canvasPins["grp-1"] = CGPoint(x: CGFloat(step) * 10, y: 0)
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        let rows = writes.filter { $0.0 == SettingsKey.deskCanvas }
+        XCTAssertEqual(rows.count, 1)
+        let stored = DeskCanvasCodec.deserialize(try XCTUnwrap(rows.last).1)
+        XCTAssertEqual(stored.pinned["grp-1"], CGPoint(x: 50, y: 0), "the last position, once")
+    }
+
+    /// A row that could not be *read* is not an empty row. The read re-arms for
+    /// the next reconnect and the write gate stays shut, so a transient daemon
+    /// error at launch cannot erase where the user put their nodes.
+    func testAFailedCanvasReadReArmsWithoutOpeningTheWriteGate() {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+
+        controller.workspaceView.canvasPins["grp-1"] = CGPoint(x: 1, y: 2)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        XCTAssertTrue(writes.filter { $0.0 == SettingsKey.deskCanvas }.isEmpty)
+    }
+
+    /// Entering a session must not rewrite the row. `landSession` turns canvas
+    /// mode off and snaps the camera to the identity, so a persistence path
+    /// that took any camera value it was handed would store "parked in the
+    /// canvas's own corner" over the camera the user actually left — and the
+    /// next Desk would open there instead of on the organigram.
+    func testEnteringASessionLeavesTheStoredCameraWhereTheCanvasWas() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+        controller.applyRestoredPanes(twoSessionPlan())
+        controller.showWindow(nil)
+        // Whatever the restore left focused, the canvas is where this starts.
+        controller.workspaceView.exitToCanvas()
+        settleCameraFlight()
+        controller.applyRestoredDeskCanvas(DeskCanvasState(pinned: [:], camera: nil))
+
+        controller.workspaceView.panCanvas(by: CGSize(width: 5, height: 6))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        let onTheCanvas = try XCTUnwrap(writes.last { $0.0 == SettingsKey.deskCanvas })
+
+        controller.workspaceView.enterSession("grp-2")
+        settleCameraFlight()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        XCTAssertFalse(controller.workspaceView.canvasMode, "the entry landed")
+        let last = try XCTUnwrap(writes.last { $0.0 == SettingsKey.deskCanvas })
+        XCTAssertEqual(last.1, onTheCanvas.1, "a session has no camera of its own to store")
+    }
+
+    /// The canvas read lands *after* the restore chain has already flown the
+    /// camera into the session the user was last in. Seating a stored camera on
+    /// top of that flight would show the wrong place for its whole 0.38s, and
+    /// the no-camera branch is worse still: `exitToCanvas` cancels the arrival,
+    /// so the restore's last step would undo what the restore is for.
+    func testARestoredCanvasDoesNotCancelTheEntryTheRestoreIsAlreadyFlying() {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.applyRestoredPanes(twoSessionPlan())
+        controller.showWindow(nil)
+        controller.workspaceView.exitToCanvas()
+        settleCameraFlight()
+
+        // The last pane added owns the active session, so a focus request for
+        // the other one is a flight rather than an instant switch.
+        XCTAssertEqual(controller.workspaceView.activeGroup, "grp-2")
+        controller.workspaceView.focusPane("sess-a")
+        XCTAssertTrue(controller.workspaceView.isEnteringSession, "a flight is in the air")
+
+        controller.applyRestoredDeskCanvas(DeskCanvasState(pinned: [:], camera: nil))
+        settleCameraFlight()
+
+        XCTAssertEqual(controller.workspaceView.activeGroup, "grp-1", "the entry still landed")
+        XCTAssertFalse(controller.workspaceView.canvasMode)
+    }
+
     // MARK: - Helpers
+
+    /// Two sessions, one pane each, in one project — the smallest canvas with
+    /// somewhere to fly to.
+    private func twoSessionPlan() -> [RestoredPane] {
+        WorkspaceRestoration.plan(
+            fromLayout: PersistedLayoutCodec.serialize([
+                PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "grp-1"),
+                PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-b", group: "grp-2"),
+            ])
+        )
+    }
 
     /// Runs the run loop until a camera flight's scheduled landing has fired.
     /// `flyCamera` schedules it with `DispatchQueue.main.asyncAfter` — never an

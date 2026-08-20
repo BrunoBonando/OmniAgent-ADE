@@ -1289,9 +1289,17 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // origins, and if it ever does not, a flight that refused to land would
         // strand the camera mid-air with nothing accepting input. The snap in
         // `landSession` fixes the fraction either way.
-        guard let group = pendingSessionEntry else { return }
-        pendingSessionEntry = nil
-        landSession(group)
+        if let group = pendingSessionEntry {
+            pendingSessionEntry = nil
+            landSession(group)
+        }
+        // After the landing, never before it: an entry arrives at scale 1 over a
+        // card at canvas x=1600, and a camera stored from *that* instant would
+        // reopen the Desk with one card filling the viewport and the canvas
+        // holding the keyboard. `landSession` has turned the mode off by now, so
+        // the controller's canvas-mode gate refuses the write and the row keeps
+        // the camera the canvas itself was last left at.
+        onDeskCanvasChanged?()
     }
 
     /// The end of an entry: the camera has arrived over one card at scale 1, and
@@ -1882,10 +1890,42 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// Handed straight to `DeskCanvas.layout`, which excludes them from packing.
     var canvasPins: [String: CGPoint] = [:] {
         didSet {
-            guard isCanvasMode, canvasPins != oldValue else { return }
-            updateLayout()
+            guard canvasPins != oldValue else { return }
+            // The relayout is the canvas's business; the *announcement* is not.
+            // A restore hands these over before the canvas is on screen, and the
+            // controller still has to know it now holds the row's contents.
+            if isCanvasMode { updateLayout() }
+            onDeskCanvasChanged?()
         }
     }
+
+    /// Raised when the canvas's persistable state changes — a node dragged, the
+    /// camera panned or zoomed, a flight landed.
+    ///
+    /// Deliberately *not* raised by the camera's own `didSet`: normal mode is
+    /// entered by resetting the camera to the identity (`canvasMode`'s setter,
+    /// `landSession`), and a persistence path hung off that would write "the
+    /// canvas is parked in its own corner" over the camera the user actually
+    /// left, every single time they enter a session or leave the Desk. The
+    /// paths that raise it are the ones where a camera value means something:
+    /// the two gestures, and a flight's arrival.
+    ///
+    /// A drag and a pinch both raise it many times a second. That is the
+    /// controller's problem to damp — `write(_:to:)`'s unchanged-value
+    /// suppression cannot help with a value that genuinely differs every frame,
+    /// so `persistDeskCanvas` debounces instead.
+    var onDeskCanvasChanged: (() -> Void)?
+
+    /// True while a camera flight into a session is still in the air.
+    ///
+    /// The one thing an outside observer cannot otherwise tell: `canvasMode` is
+    /// still on for the whole 0.38s of an entry, and `camera` is already at the
+    /// destination. The restore path asks because it lands *after* the restore
+    /// chain's `focusPane(lastFocusedPaneOnLaunch)`, which on the canvas is a
+    /// flight into that session — seating a stored camera on top of it, or
+    /// worse flying back out to `fitAll`, would undo the one thing the focus
+    /// restore exists for.
+    var isEnteringSession: Bool { pendingSessionEntry != nil }
 
     /// The node rects the last canvas pass produced — what `DeskCamera.fitAll`
     /// fits (`contentRect`) and what hit testing resolves a click against.
@@ -2559,6 +2599,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             scale: camera.scale,
             origin: CGPoint(x: camera.origin.x + delta.width, y: camera.origin.y + delta.height)
         )
+        // Where the user left the canvas is worth remembering, and a pan is one
+        // of the two ways they say so. Raised per event rather than at the end
+        // of a scroll — AppKit's momentum phase makes "the end" a guess — and
+        // damped by `persistDeskCanvas`'s debounce instead.
+        onDeskCanvasChanged?()
     }
 
     /// Rescales about a fixed point in this view's coordinates — the pointer for
@@ -2581,6 +2626,8 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
                 y: viewPoint.y - anchor.y * scale
             )
         )
+        // The other half of "where the user left the canvas" — see `panCanvas`.
+        onDeskCanvasChanged?()
     }
 
     /// `zoomCanvas`, plus the resolution the spec's "one operation" demands: a
