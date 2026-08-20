@@ -52,10 +52,16 @@ final class WorkspaceTitleBarView: NSView {
     /// change to the palette carries here without anything to remember.
     private static let sidebarTop = ShellPalette.sidebarGlass.interpolatedColor(atLocation: 0)
 
-    /// The sidebar column's width right now — 0 when it is collapsed. Read at
-    /// draw time rather than stored, so a divider drag needs nothing but a
-    /// redraw.
-    var sidebarWidthProvider: (() -> CGFloat)?
+    /// Where the title sits when the column is too narrow to place it — clear
+    /// of the window buttons and the toggle, never under them.
+    private static let afterButtons = lightsWidth + columnInset + buttonSize + columnInset
+
+    /// The bar's share of the sidebar column: a real view with an animatable
+    /// width, not a rectangle painted in `draw`. A painted one can only be
+    /// redrawn at whatever moment something samples the column's width, and
+    /// the collapse is an *animation* — there is no single moment to sample.
+    private let sidebarSegment = NSView()
+    private var segmentWidth: NSLayoutConstraint!
 
     private let closeButton = PaneHeaderButton(glyph: .close)
     private let minimizeButton = PaneHeaderButton(glyph: .restore)
@@ -104,7 +110,13 @@ final class WorkspaceTitleBarView: NSView {
     init() {
         super.init(frame: .zero)
         wantsLayer = true
+        layer?.backgroundColor = Self.ground.cgColor
         translatesAutoresizingMaskIntoConstraints = false
+
+        sidebarSegment.wantsLayer = true
+        sidebarSegment.layer?.backgroundColor = Self.sidebarTop.cgColor
+        sidebarSegment.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(sidebarSegment)
 
         closeButton.trafficLight = .red
         minimizeButton.trafficLight = .yellow
@@ -138,10 +150,19 @@ final class WorkspaceTitleBarView: NSView {
         addSubview(titleField)
         for view in controls { view.translatesAutoresizingMaskIntoConstraints = false }
 
-        titleLeading = titleField.leadingAnchor.constraint(equalTo: leadingAnchor)
+        titleLeading = titleField.leadingAnchor.constraint(
+            equalTo: leadingAnchor,
+            constant: Self.afterButtons
+        )
+        segmentWidth = sidebarSegment.widthAnchor.constraint(equalToConstant: 0)
 
         var constraints: [NSLayoutConstraint] = [
             heightAnchor.constraint(equalToConstant: Self.height),
+
+            sidebarSegment.leadingAnchor.constraint(equalTo: leadingAnchor),
+            sidebarSegment.topAnchor.constraint(equalTo: topAnchor),
+            sidebarSegment.bottomAnchor.constraint(equalTo: bottomAnchor),
+            segmentWidth,
 
             closeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.leadingInset),
             minimizeButton.leadingAnchor.constraint(
@@ -192,28 +213,26 @@ final class WorkspaceTitleBarView: NSView {
         [closeButton, minimizeButton, zoomButton, sidebarButton, reviewButton]
     }
 
-    /// The session's name starts where the sidebar column ends — and, with the
-    /// column collapsed or narrower than the buttons, after the toggle
-    /// instead, so it never lands underneath them.
-    override func layout() {
-        let column = max(0, sidebarWidthProvider?() ?? 0)
-        let afterButtons = Self.lightsWidth + Self.columnInset + Self.buttonSize + Self.columnInset
-        titleLeading.constant = max(afterButtons, column + Self.columnInset)
-        super.layout()
-    }
-
-    /// The bar's ground is the window's, except across the sidebar's own
-    /// width, where it is the column's — which is what makes the column read
-    /// as running to the top edge of the window rather than starting under a
-    /// strip of chrome.
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        Self.ground.setFill()
-        dirtyRect.fill()
-        let column = max(0, sidebarWidthProvider?() ?? 0)
-        guard column > 0 else { return }
-        Self.sidebarTop.setFill()
-        NSRect(x: 0, y: 0, width: column, height: bounds.height).intersection(dirtyRect).fill()
+    /// Puts the bar's left segment and the session's name at the column's
+    /// current width. `animated` routes both through `animator()`, so when the
+    /// caller runs this inside the same `NSAnimationContext` group as the
+    /// collapse itself, all three move on one duration and one curve.
+    ///
+    /// This used to be sampled — a width read whenever something asked. That
+    /// cannot be smooth: `isCollapsed` flips at the *start* of the collapse,
+    /// so every sample after the first already reported the destination and
+    /// the bar arrived while the column was still travelling.
+    func setSidebarWidth(_ width: CGFloat, animated: Bool) {
+        let column = max(0, width)
+        let title = max(Self.afterButtons, column + Self.columnInset)
+        guard segmentWidth.constant != column || titleLeading.constant != title else { return }
+        if animated {
+            segmentWidth.animator().constant = column
+            titleLeading.animator().constant = title
+        } else {
+            segmentWidth.constant = column
+            titleLeading.constant = title
+        }
     }
 
     /// The buttons keep their clicks; everything else — the title, the empty
@@ -236,6 +255,9 @@ final class WorkspaceTitleBarView: NSView {
     /// assert what the bar carries without reaching into private storage.
     var controlsForTesting: [NSView] { controls }
     var titleFieldForTesting: NSTextField { titleField }
+    /// The model width — what the animation is travelling *from* while it
+    /// runs, which is exactly what the smoothness test needs to see.
+    var sidebarSegmentWidthForTesting: CGFloat { segmentWidth.constant }
 }
 
 /// One icon control in the title bar. `ShellRowView` already owns hover, the

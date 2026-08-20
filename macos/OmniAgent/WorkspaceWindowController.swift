@@ -123,6 +123,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Block-based observers are not released with their observer, so this is
     /// held to be torn down in `deinit`.
     private var splitResizeObserver: NSObjectProtocol?
+    /// True for the length of a sidebar collapse/expand, so the divider
+    /// notification leaves the animation alone.
+    private var isSidebarToggling = false
+    /// The width to expand back to, taken before the collapse starts.
+    private var lastExpandedSidebarWidth = ShellMetrics.sidebarMinimumWidth
 
     /// The canvas's zoom readout. A sibling of `workspace`, never a subview of
     /// it — see `DeskZoomReadoutView`.
@@ -784,21 +789,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         splitController = split
 
         // The bar carries the sidebar's own ground across the column's width,
-        // so the column reads as reaching the window's top edge — and the
-        // sidebar toggle and the session name are placed off the same number.
-        // Read live rather than stored: a dragged divider then needs nothing
-        // but the redraw below.
-        titleBar.sidebarWidthProvider = { [weak sidebarItem] in
-            guard let sidebarItem, !sidebarItem.isCollapsed else { return 0 }
-            return sidebarItem.viewController.view.frame.width
-        }
+        // so the column reads as reaching the window's top edge. A dragged
+        // divider moves the column with no animation to join, so the bar
+        // follows it un-animated, one notification at a time; the collapse has
+        // its own animation and is handled in `toggleWorkspaceSidebar`, which
+        // is why this stands down while that runs.
         splitResizeObserver = NotificationCenter.default.addObserver(
             forName: NSSplitView.didResizeSubviewsNotification,
             object: split.splitView,
             queue: .main
         ) { [weak self] _ in
-            self?.titleBar.needsLayout = true
-            self?.titleBar.needsDisplay = true
+            guard let self, !isSidebarToggling else { return }
+            syncTitleBarToSidebar(animated: false)
         }
 
         // The window's own bar, above the split rather than over it: the
@@ -2585,8 +2587,34 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// no `.sidebar`-behavior item to act on: the toolbar button greyed out
     /// and ⌃⌘S did nothing. Nothing answers this name but us.
     @objc func toggleWorkspaceSidebar(_ sender: Any?) {
-        splitController?.splitViewItems.first?
-            .animator().isCollapsed.toggle()
+        guard let item = splitController?.splitViewItems.first else { return }
+        let collapsing = !item.isCollapsed
+        // The width to travel to. Read *before* the toggle, because
+        // `isCollapsed` flips at the start of the animation and takes the
+        // column's width with it — the whole reason the bar cannot sample.
+        if collapsing {
+            lastExpandedSidebarWidth = max(1, item.viewController.view.frame.width)
+        }
+        // One group, so the column and the bar share a duration and a curve.
+        // `isSidebarToggling` keeps the divider notification from writing an
+        // un-animated width over the animation while it is running.
+        isSidebarToggling = true
+        NSAnimationContext.runAnimationGroup { _ in
+            item.animator().isCollapsed = collapsing
+            titleBar.setSidebarWidth(collapsing ? 0 : lastExpandedSidebarWidth, animated: true)
+        } completionHandler: { [weak self] in
+            self?.isSidebarToggling = false
+            self?.syncTitleBarToSidebar(animated: false)
+        }
+    }
+
+    /// The bar's left segment and title, put where the column actually is.
+    /// Called for divider drags and window resizes — everything that moves the
+    /// column *without* an animation of its own.
+    private func syncTitleBarToSidebar(animated: Bool) {
+        guard let item = splitController?.splitViewItems.first else { return }
+        let width = item.isCollapsed ? 0 : item.viewController.view.frame.width
+        titleBar.setSidebarWidth(width, animated: animated)
     }
 
     // MARK: - Session outline

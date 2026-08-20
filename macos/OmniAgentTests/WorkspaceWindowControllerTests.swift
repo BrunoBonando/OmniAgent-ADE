@@ -1358,6 +1358,37 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.titleBar.isReviewToggleVisible)
     }
 
+    /// The bar used to sample the column's width, which cannot be smooth:
+    /// `isCollapsed` flips at the *start* of the collapse, so the bar read the
+    /// destination and jumped there while the column was still travelling.
+    /// The width is pushed now, and the collapse runs it through `animator()`
+    /// in the same group — so mid-animation the bar is still short of its
+    /// destination rather than already sitting on it.
+    func testTheBarDoesNotRunAheadOfTheCollapsingSidebar() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1400, height: 800), display: true)
+        let item = try XCTUnwrap(controller.splitController?.splitViewItems.first)
+        controller.splitController?.view.layoutSubtreeIfNeeded()
+
+        controller.titleBar.setSidebarWidth(260, animated: false)
+        XCTAssertEqual(controller.titleBar.sidebarSegmentWidthForTesting, 260)
+        XCTAssertFalse(item.isCollapsed)
+
+        controller.toggleWorkspaceSidebar(nil)
+        // `isCollapsed` is already true here — the state the old sampling read
+        // — but the bar must not have teleported with it.
+        XCTAssertTrue(item.isCollapsed, "the collapse is under way")
+        XCTAssertEqual(
+            controller.titleBar.sidebarSegmentWidthForTesting,
+            260,
+            accuracy: 0.5,
+            "the bar animates from where it was; it must not snap to 0 at the start"
+        )
+    }
+
     /// Hiding the real green button took full screen with it: the bar's own
     /// was wired to `zoom`, and these menus are hand-built, so AppKit never
     /// filled in an Enter Full Screen item to fall back on. Both routes are
