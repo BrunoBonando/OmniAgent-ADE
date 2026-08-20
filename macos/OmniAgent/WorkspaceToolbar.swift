@@ -26,6 +26,11 @@ final class WorkspaceTitleBarView: NSView {
     /// window's left edge.
     private static let lightSpacing: CGFloat = 20
     private static let leadingInset: CGFloat = 13
+    /// Where the three lights stop.
+    private static let lightsWidth = leadingInset + lightSpacing * 2 + PaneHeaderButton.iconSize
+    private static let buttonSize: CGFloat = 24
+    /// How far the two toggles sit from the edge of the column each belongs to.
+    private static let columnInset: CGFloat = 12
 
     /// The window's own ground, so the bar is not a band across the top but
     /// the same surface the panes sit on — no fill of its own to see, and no
@@ -34,6 +39,23 @@ final class WorkspaceTitleBarView: NSView {
     /// white when it is rendered offscreen, which is not a risk worth
     /// carrying for one line.
     private static let ground = NSColor(srgbRed: 8 / 255, green: 10 / 255, blue: 14 / 255, alpha: 1)
+
+    /// The sidebar column's ground at its very top, carried across the bar's
+    /// left segment so the column reads as running to the window's top edge
+    /// rather than starting under a strip.
+    ///
+    /// A flat fill rather than a 38pt slice of the gradient itself: over the
+    /// bar's height `sidebarGlass` moves by well under one part in 255 — on
+    /// the shortest window this app opens, under two — so the slice and its
+    /// first colour are the same picture, and this one cannot drift out of
+    /// alignment with the column below. Taken *from* the gradient, so a
+    /// change to the palette carries here without anything to remember.
+    private static let sidebarTop = ShellPalette.sidebarGlass.interpolatedColor(atLocation: 0)
+
+    /// The sidebar column's width right now — 0 when it is collapsed. Read at
+    /// draw time rather than stored, so a divider drag needs nothing but a
+    /// redraw.
+    var sidebarWidthProvider: (() -> CGFloat)?
 
     private let closeButton = PaneHeaderButton(glyph: .close)
     private let minimizeButton = PaneHeaderButton(glyph: .restore)
@@ -69,10 +91,16 @@ final class WorkspaceTitleBarView: NSView {
         didSet { reviewButton.isHidden = !isReviewToggleVisible }
     }
 
+    /// Both are driven by the live sidebar width in `layout`: the toggle sits
+    /// at the column's right edge, inside it, and the name starts after the
+    /// column ends. Held as constraints rather than frames so everything else
+    /// in the bar stays declarative.
+    private var sidebarButtonLeading: NSLayoutConstraint!
+    private var titleLeading: NSLayoutConstraint!
+
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = Self.ground.cgColor
         translatesAutoresizingMaskIntoConstraints = false
 
         closeButton.trafficLight = .red
@@ -95,6 +123,12 @@ final class WorkspaceTitleBarView: NSView {
         addSubview(titleField)
         for view in controls { view.translatesAutoresizingMaskIntoConstraints = false }
 
+        sidebarButtonLeading = sidebarButton.leadingAnchor.constraint(
+            equalTo: leadingAnchor,
+            constant: Self.lightsWidth + 16
+        )
+        titleLeading = titleField.leadingAnchor.constraint(equalTo: leadingAnchor)
+
         var constraints: [NSLayoutConstraint] = [
             heightAnchor.constraint(equalToConstant: Self.height),
 
@@ -108,20 +142,20 @@ final class WorkspaceTitleBarView: NSView {
                 constant: Self.lightSpacing
             ),
 
-            sidebarButton.leadingAnchor.constraint(equalTo: zoomButton.trailingAnchor, constant: 16),
-            sidebarButton.widthAnchor.constraint(equalToConstant: 24),
-            sidebarButton.heightAnchor.constraint(equalToConstant: 24),
+            sidebarButtonLeading,
+            sidebarButton.widthAnchor.constraint(equalToConstant: Self.buttonSize),
+            sidebarButton.heightAnchor.constraint(equalToConstant: Self.buttonSize),
 
-            titleField.leadingAnchor.constraint(equalTo: sidebarButton.trailingAnchor, constant: 12),
+            titleLeading,
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             reviewButton.leadingAnchor.constraint(
                 greaterThanOrEqualTo: titleField.trailingAnchor,
                 constant: 12
             ),
-            reviewButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            reviewButton.widthAnchor.constraint(equalToConstant: 24),
-            reviewButton.heightAnchor.constraint(equalToConstant: 24),
+            reviewButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.columnInset),
+            reviewButton.widthAnchor.constraint(equalToConstant: Self.buttonSize),
+            reviewButton.heightAnchor.constraint(equalToConstant: Self.buttonSize),
         ]
         for view in controls {
             constraints.append(view.centerYAnchor.constraint(equalTo: centerYAnchor))
@@ -142,6 +176,35 @@ final class WorkspaceTitleBarView: NSView {
     /// control missing from it would silently become draggable background.
     private var controls: [NSView] {
         [closeButton, minimizeButton, zoomButton, sidebarButton, reviewButton]
+    }
+
+    /// The sidebar toggle rides the column's right edge, from the inside, and
+    /// the session's name starts where the column ends. With the column
+    /// collapsed both fall back to sitting after the lights, so neither ends
+    /// up off the left of the bar.
+    override func layout() {
+        let column = max(0, sidebarWidthProvider?() ?? 0)
+        let afterLights = Self.lightsWidth + 16
+        sidebarButtonLeading.constant = max(afterLights, column - Self.columnInset - Self.buttonSize)
+        titleLeading.constant = max(
+            sidebarButtonLeading.constant + Self.buttonSize + Self.columnInset,
+            column + Self.columnInset
+        )
+        super.layout()
+    }
+
+    /// The bar's ground is the window's, except across the sidebar's own
+    /// width, where it is the column's — which is what makes the column read
+    /// as running to the top edge of the window rather than starting under a
+    /// strip of chrome.
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        Self.ground.setFill()
+        dirtyRect.fill()
+        let column = max(0, sidebarWidthProvider?() ?? 0)
+        guard column > 0 else { return }
+        Self.sidebarTop.setFill()
+        NSRect(x: 0, y: 0, width: column, height: bounds.height).intersection(dirtyRect).fill()
     }
 
     /// The buttons keep their clicks; everything else — the title, the empty

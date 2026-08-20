@@ -117,6 +117,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// `contentViewController as? NSSplitViewController` no longer resolves —
     /// this is the way to it.
     private(set) var splitController: NSSplitViewController?
+    /// The sidebar's split item, kept so its ceiling can follow the window —
+    /// see `clampSidebarWidth`.
+    private var sidebarWidthItem: NSSplitViewItem?
+    /// Block-based observers are not released with their observer, so this is
+    /// held to be torn down in `deinit`.
+    private var splitResizeObserver: NSObjectProtocol?
 
     /// The canvas's zoom readout. A sibling of `workspace`, never a subview of
     /// it — see `DeskZoomReadoutView`.
@@ -419,7 +425,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             blue: 14 / 255,
             alpha: 1
         )
-        window.minSize = NSSize(width: 520, height: 320)
+        // Not a taste: below this the pane area cannot hold one terminal worth
+        // reading, and every sizing rule in `PaneWorkspaceView` assumes it can.
+        // The sidebar is counted at its own floor rather than at zero, so the
+        // promise holds with the column open, which is how the app opens.
+        window.contentMinSize = NSSize(
+            width: ShellMetrics.sidebarMinimumWidth + PaneWorkspaceView.minimumContentSize.width,
+            height: WorkspaceTitleBarView.height + PaneWorkspaceView.minimumContentSize.height
+        )
+        window.minSize = window.contentMinSize
 
         super.init(window: window)
         installSplitView(on: window)
@@ -733,6 +747,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // divider position is clamped to it.
         sidebarItem.minimumThickness = ShellMetrics.sidebarMinimumWidth
         sidebarItem.maximumThickness = ShellMetrics.sidebarMaximumWidth
+        sidebarWidthItem = sidebarItem
+        clampSidebarWidth()
         sidebarItem.canCollapse = true
         // AppKit remembers the dragged position under this name, so the width
         // survives a relaunch without anything here persisting it.
@@ -761,6 +777,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         split.addSplitViewItem(reviewItem)
         reviewPanelItem = reviewItem
         splitController = split
+
+        // The bar carries the sidebar's own ground across the column's width,
+        // so the column reads as reaching the window's top edge — and the
+        // sidebar toggle and the session name are placed off the same number.
+        // Read live rather than stored: a dragged divider then needs nothing
+        // but the redraw below.
+        titleBar.sidebarWidthProvider = { [weak sidebarItem] in
+            guard let sidebarItem, !sidebarItem.isCollapsed else { return 0 }
+            return sidebarItem.viewController.view.frame.width
+        }
+        splitResizeObserver = NotificationCenter.default.addObserver(
+            forName: NSSplitView.didResizeSubviewsNotification,
+            object: split.splitView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.titleBar.needsLayout = true
+            self?.titleBar.needsDisplay = true
+        }
 
         // The window's own bar, above the split rather than over it: the
         // columns start below the chrome, so nothing has to be inset around
@@ -1016,6 +1050,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         fatalError("init(coder:) is unavailable")
     }
 
+    deinit {
+        if let splitResizeObserver {
+            NotificationCenter.default.removeObserver(splitResizeObserver)
+        }
+    }
+
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
         window?.center()
@@ -1234,6 +1274,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             sender.close()
         }
         return false
+    }
+
+    /// The sidebar's ceiling is a range on a wide window and a smaller number on
+    /// a narrow one: `ShellMetrics.sidebarMaximumWidth` unless dragging that far
+    /// would leave the pane area below `minimumContentSize`, in which case the
+    /// pane area wins. The window minimum guarantees room for one comfortable
+    /// pane; a draggable divider is the one thing that could take it away again.
+    private func clampSidebarWidth() {
+        guard let item = sidebarWidthItem, let width = window?.contentLayoutRect.width else {
+            return
+        }
+        item.maximumThickness = max(
+            ShellMetrics.sidebarMinimumWidth,
+            min(ShellMetrics.sidebarMaximumWidth, width - PaneWorkspaceView.minimumContentSize.width)
+        )
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        clampSidebarWidth()
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
