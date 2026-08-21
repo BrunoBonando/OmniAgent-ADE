@@ -33,6 +33,11 @@ struct PaneDescriptor: Equatable {
     /// and reflected back here so the header's color badge stays in sync.
     var claudeColor: String = "default"
     var copilotTheme: String = "default"
+    /// The model that served this Claude terminal's last reply. Read out of
+    /// Claude Code's own transcript (`ClaudeModel.current`), never persisted:
+    /// the file already knows, so a copy in `PersistedLayout` could only be
+    /// stale. `nil` until the terminal has answered something.
+    var claudeModel: String?
     /// Which "Claude 2" this terminal is, within its session. Derived on the
     /// way in and never persisted — the number is a placeholder, and storing
     /// it would make it outlive the moment it is useful for.
@@ -349,6 +354,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// The header's color badge clicked on a Claude pane — open the color menu.
     var onRequestColorMenu: ((String, NSView) -> Void)?
     var onRequestThemeMenu: ((String, NSView) -> Void)?
+    var onRequestModelMenu: ((String, NSView) -> Void)?
     /// The header's engine badge, clicked — same shape as the old ⋯ menu, and for
     /// the same reason: which engines exist and what swapping one costs is
     /// the window controller's business, not this view's.
@@ -1672,6 +1678,22 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // layout pass nobody triggered — this is the feed, so this is where it
         // reaches the card.
         filmstripItems[sessionID]?.status = status
+        // Only the transcript knows which model answered, and a status change
+        // is exactly when a new answer has landed — so this is the tick, and
+        // the feature needs no timer of its own.
+        refreshClaudeModel(for: sessionID)
+    }
+
+    /// Re-reads the model behind a Claude pane and publishes it if it moved.
+    /// Cheap enough to sit on the status feed: `ClaudeModel.current` reads a
+    /// bounded tail, not the whole conversation.
+    private func refreshClaudeModel(for sessionID: String) {
+        guard let descriptor = descriptors[sessionID],
+              descriptor.kind == .terminal, descriptor.engine == .claude,
+              let model = ClaudeModel.current(sessionID: sessionID, cwd: descriptor.cwd),
+              model != descriptor.claudeModel
+        else { return }
+        updateDescriptor(for: sessionID) { $0.claudeModel = model }
     }
 
     func updateDescriptor(for sessionID: String, _ mutate: (inout PaneDescriptor) -> Void) {
@@ -3844,6 +3866,11 @@ final class PaneContainerView: NSView, NSDraggingSource {
             self.workspace?.focusPane(self.paneID)
             self.workspace?.onRequestThemeMenu?(self.paneID, anchor)
         }
+        header.onModelMenuRequested = { [weak self] anchor in
+            guard let self else { return }
+            self.workspace?.focusPane(self.paneID)
+            self.workspace?.onRequestModelMenu?(self.paneID, anchor)
+        }
         header.onEngineMenuRequested = { [weak self] anchor in
             guard let self else { return }
             self.workspace?.focusPane(self.paneID)
@@ -4132,6 +4159,10 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // Color badge: only Claude terminals support `/color`.
         header.claudeColor = descriptor.kind == .terminal && descriptor.engine == .claude
             ? descriptor.claudeColor : nil
+        // Model badge: only Claude terminals have a model to report, and only
+        // once one has actually answered — see `PaneDescriptor.claudeModel`.
+        header.claudeModel = descriptor.kind == .terminal && descriptor.engine == .claude
+            ? descriptor.claudeModel : nil
         // Copilot theme badge: only Copilot terminals support `/theme`.
         header.copilotTheme = descriptor.kind == .terminal && descriptor.engine == .copilot
             ? descriptor.copilotTheme : nil
@@ -4478,6 +4509,27 @@ final class PaneHeaderView: NSView {
         }
     }
 
+    /// The model behind this Claude terminal, or `nil` when the pane does not
+    /// run Claude — or runs it and has answered nothing yet, the one state
+    /// where the transcript cannot say.
+    var claudeModel: String? {
+        didSet {
+            guard claudeModel != oldValue else { return }
+            modelBadge.isHidden = claudeModel == nil
+            if let claudeModel {
+                modelBadge.configure(
+                    icon: nil,
+                    text: ClaudeModel.label(for: claudeModel),
+                    foreground: NSColor(white: 1, alpha: 0.55),
+                    fill: NSColor(white: 1, alpha: 0.07),
+                    stroke: .clear,
+                    font: ShellFont.ui(12, .medium)
+                )
+            }
+            needsLayout = true
+        }
+    }
+
     /// The active Copilot theme for this terminal, or `nil` when the pane does
     /// not run Copilot. Setting it shows/hides and updates the theme badge.
     var copilotTheme: String? {
@@ -4502,6 +4554,8 @@ final class PaneHeaderView: NSView {
     var onColorMenuRequested: ((NSView) -> Void)?
     /// The theme badge, clicked — opens the Copilot theme picker menu.
     var onThemeMenuRequested: ((NSView) -> Void)?
+    /// The model badge, clicked — opens the `/model` picker menu.
+    var onModelMenuRequested: ((NSView) -> Void)?
 
     /// A 10×10 filled circle in the colour `/color` uses for this name.
     static func colorDotImage(for color: String) -> NSImage {
@@ -4607,6 +4661,8 @@ final class PaneHeaderView: NSView {
     private let colorBadge = PaneBadgeView()
     /// Theme badge shown on Copilot panes — opens the `/theme` menu.
     private let themeBadge = PaneBadgeView()
+    /// Model badge shown on Claude panes — opens the `/model` menu.
+    private let modelBadge = PaneBadgeView()
     /// Thin vertical rule between the badge group and the traffic-light cluster.
     private let clusterSeparator = PaneHeaderSeparatorView()
     /// ✏️ button shown immediately after the title — tap to rename the conversation.
@@ -4644,6 +4700,7 @@ final class PaneHeaderView: NSView {
         engineBadge.isHidden = true
         colorBadge.isHidden = true
         themeBadge.isHidden = true
+        modelBadge.isHidden = true
         renamePencilButton.isHidden = true
         renamePencilButton.onClick = { [weak self] in self?.onRenameRequested?() }
         colorBadge.onClick = { [weak self] in
@@ -4653,6 +4710,10 @@ final class PaneHeaderView: NSView {
         themeBadge.onClick = { [weak self] in
             guard let self else { return }
             self.onThemeMenuRequested?(self.themeBadge)
+        }
+        modelBadge.onClick = { [weak self] in
+            guard let self else { return }
+            self.onModelMenuRequested?(self.modelBadge)
         }
         zoomButton.onClick = { [weak self] in self?.onZoomRequested?() }
         // The same toggle, reached from the other side: yellow is live only
@@ -4665,7 +4726,8 @@ final class PaneHeaderView: NSView {
         // Added left to right, the order they are laid out in, so the subview
         // order a reader — or a test — walks is the order on screen.
         let views: [NSView] = [
-            mark, titleLabel, renamePencilButton, subtitleLabel, themeBadge, colorBadge, engineBadge,
+            mark, titleLabel, renamePencilButton, subtitleLabel, themeBadge, colorBadge, modelBadge,
+            engineBadge,
             clusterSeparator, restoreButton, zoomButton, closeButton,
         ]
         for view in views { addSubview(view) }
@@ -4804,7 +4866,7 @@ final class PaneHeaderView: NSView {
         let minimumTitleWidth: CGFloat = 40
         // Color badge (Claude only) sits left of the engine badge, same as the
         // old branch badge — it drops before the engine if there is no room.
-        for badge in [themeBadge, colorBadge, engineBadge] where !badge.isHidden {
+        for badge in [themeBadge, colorBadge, modelBadge, engineBadge] where !badge.isHidden {
             let size = badge.intrinsicContentSize
             let candidate = right - gap - size.width
             guard candidate - titleLeft >= minimumTitleWidth else {

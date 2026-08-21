@@ -524,6 +524,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 in: anchor
             )
         }
+        workspace.onRequestModelMenu = { [weak self] paneID, anchor in
+            guard let self else { return }
+            self.claudeModelMenu(for: paneID).popUp(
+                positioning: nil,
+                at: NSPoint(x: 0, y: anchor.bounds.maxY + 4),
+                in: anchor
+            )
+        }
         workspace.onRequestEngineMenu = { [weak self] paneID, anchor in
             guard let self else { return }
             engineMenu(for: paneID).popUp(
@@ -2100,6 +2108,43 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.terminalSurface(for: paneID)?.sendCommandClearingInput("/color \(color)")
         // Reflect the choice back to the descriptor so the header badge updates.
         workspace.updateDescriptor(for: paneID) { $0.claudeColor = color }
+    }
+
+    /// The aliases `/model` accepts, with the one the transcript reports
+    /// ticked. The tick is a substring match because the two are not the same
+    /// vocabulary — the menu offers `opus`, the transcript answers
+    /// `claude-opus-5` — so this marks where they agree rather than claiming
+    /// they are the same thing. `default` never ticks: it names a preference,
+    /// not a model, and the transcript only ever records the model it resolved
+    /// to.
+    func claudeModelMenu(for paneID: String?) -> NSMenu {
+        let current = paneID.flatMap { workspace.descriptor(for: $0)?.claudeModel }
+        let menu = NSMenu()
+        for alias in ClaudeModel.aliases {
+            let item = NSMenuItem(
+                title: alias.capitalized,
+                action: #selector(changeClaudeModel(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = alias
+            item.state = current?.contains(alias) == true ? .on : .off
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    /// One alias off that menu, typed at the terminal.
+    ///
+    /// Unlike `/color`, nothing is written back to the descriptor: the
+    /// transcript answers this question and will say so as soon as the next
+    /// reply lands. A guess written here would be wrong exactly when the alias
+    /// was refused — the one case where the badge has to be believed.
+    @objc func changeClaudeModel(_ sender: Any?) {
+        guard let alias = (sender as? NSMenuItem)?.representedObject as? String,
+              let paneID = workspace.focusedPaneID,
+              workspace.descriptor(for: paneID)?.engine == .claude
+        else { return }
+        workspace.terminalSurface(for: paneID)?.sendCommandClearingInput("/model \(alias)")
     }
 
     /// The `/settings theme` modes Copilot CLI accepts.

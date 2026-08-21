@@ -329,6 +329,81 @@ final class EngineSwitchTests: XCTestCase {
         XCTAssertEqual(workspace.descriptor(for: after[1])?.engine, .shell)
     }
 
+    // MARK: - ClaudeModel
+
+    /// Every character outside `[A-Za-z0-9-]` collapses to a dash — `/`, `.`
+    /// and `_` alike. Asserted against the exact encoding this machine's real
+    /// `~/.claude/projects` uses, because a slug that is one character off
+    /// finds no transcript and the badge silently never appears.
+    func testProjectSlugCollapsesEverythingButLettersDigitsAndDashes() {
+        XCTAssertEqual(
+            ClaudeModel.projectSlug(for: "/Users/b/Documents/Bruno.Digital/OmniAgent-ADE"),
+            "-Users-b-Documents-Bruno-Digital-OmniAgent-ADE"
+        )
+        XCTAssertEqual(
+            ClaudeModel.projectSlug(for: "/Users/b/Documents/HomeBridge_UniFi"),
+            "-Users-b-Documents-HomeBridge-UniFi"
+        )
+    }
+
+    /// The badge's whole text. A release-date suffix is a snapshot, not a
+    /// model; `[1m]` is a fact worth keeping.
+    func testModelLabelReadsAsAName() {
+        XCTAssertEqual(ClaudeModel.label(for: "claude-opus-5"), "Opus 5")
+        XCTAssertEqual(ClaudeModel.label(for: "claude-haiku-4-5-20251001"), "Haiku 4.5")
+        XCTAssertEqual(ClaudeModel.label(for: "claude-opus-4-8[1m]"), "Opus 4.8 · 1M")
+        XCTAssertEqual(ClaudeModel.label(for: "claude-fable-5"), "Fable 5")
+        // Bedrock/Vertex ids carry a vendor prefix.
+        XCTAssertEqual(ClaudeModel.label(for: "us.anthropic.claude-sonnet-5"), "Sonnet 5")
+        // Something this has never seen still reads as its own name.
+        XCTAssertEqual(ClaudeModel.label(for: "claude-newthing-9-1"), "Newthing 9.1")
+    }
+
+    /// The last model *Claude* answered with — not the last `"model":"…"` in
+    /// the file, which a user can put there by pasting JSON at the prompt.
+    func testLastModelSkipsPastedTextAndTakesTheLatestReply() {
+        let tail = """
+        {"type":"assistant","message":{"model":"claude-sonnet-5"}}
+        {"type":"assistant","message":{"model":"claude-opus-5"}}
+        {"type":"user","message":{"content":"see this config: {\\"model\\":\\"gpt-4\\"}"}}
+        """
+        XCTAssertEqual(ClaudeModel.lastModel(inTail: tail), "claude-opus-5")
+        XCTAssertNil(ClaudeModel.lastModel(inTail: "no model here"))
+    }
+
+    /// End to end against a real file at the real path, with a fake home: the
+    /// path is derived from the pane's session id the same way the launcher
+    /// derives `--session-id`, so a change to either has to keep them agreeing.
+    func testCurrentModelReadsTheTailOfTheRealTranscriptPath() throws {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("omniagent-model-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let cwd = "/Users/b/Bruno.Digital/proj"
+        let url = ClaudeModel.transcriptURL(sessionID: "pane-1", cwd: cwd, home: home)
+        XCTAssertEqual(
+            url.lastPathComponent,
+            ClaudeConversation.uuid(forSessionID: "pane-1") + ".jsonl"
+        )
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+
+        // Nothing written yet: a fresh terminal has no model, and no badge is
+        // better than a guess at the one it will pick.
+        XCTAssertNil(ClaudeModel.current(sessionID: "pane-1", cwd: cwd, home: home))
+
+        // Padded past the tail window, so this also proves the read is bounded
+        // to the end of the file rather than scanning all of it.
+        let filler = String(repeating: "{\"type\":\"user\",\"x\":\"y\"}\n", count: 8000)
+        try (filler + "{\"message\":{\"model\":\"claude-opus-4-8[1m]\"}}\n")
+            .write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(
+            ClaudeModel.current(sessionID: "pane-1", cwd: cwd, home: home),
+            "claude-opus-4-8[1m]"
+        )
+        XCTAssertNil(ClaudeModel.current(sessionID: "pane-2", cwd: cwd, home: home))
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(

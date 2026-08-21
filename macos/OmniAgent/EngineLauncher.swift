@@ -55,6 +55,121 @@ enum ClaudeConversation {
     }
 }
 
+/// Which model a Claude terminal is running, and the aliases `/model` takes.
+///
+/// **Read, never tracked.** Claude Code writes every reply to
+/// `~/.claude/projects/<slug(cwd)>/<conversation>.jsonl` with the model that
+/// served it on the line, and the conversation is the one this pane already
+/// hands `claude --session-id` — so the transcript *is* the answer and there
+/// is nothing to keep in sync. A `/model` the user typed by hand shows up
+/// here on its own, as does one typed before this app was ever launched.
+///
+/// The alternative — running `/model` in the PTY and scraping the reply — is
+/// not available: with no argument it opens an interactive arrow-key picker,
+/// which is not something a machine can read.
+enum ClaudeModel {
+    /// The aliases `/model` accepts, and the menu offers. A fixed list for the
+    /// same reason `WorkspaceWindowController.claudeColors` is one: there is
+    /// no machine-readable list to enumerate, and this changes about twice a
+    /// year. Nothing *displayed* comes from here — the badge reads the
+    /// transcript — so a stale entry costs a menu row, never a wrong label.
+    static let aliases = ["default", "opus", "sonnet", "haiku", "fable"]
+
+    /// Claude Code's own directory encoding: every character outside
+    /// `[A-Za-z0-9-]` becomes `-`. Confirmed against this machine's real
+    /// `~/.claude/projects` — `/`, `.` and `_` all collapse to a dash, and all
+    /// 36 directories there contain nothing else. The same encoding
+    /// `crates/brain-ingest/src/import_detect.rs` decodes in the other
+    /// direction; this only ever encodes, so its lossiness does not apply.
+    static func projectSlug(for cwd: String) -> String {
+        String(cwd.map { char in
+            char.isASCII && (char.isLetter || char.isNumber || char == "-") ? char : "-"
+        })
+    }
+
+    /// Where Claude Code keeps this pane's conversation.
+    static func transcriptURL(sessionID: String, cwd: String, home: URL = homeDirectory) -> URL {
+        home
+            .appendingPathComponent(".claude")
+            .appendingPathComponent("projects")
+            .appendingPathComponent(projectSlug(for: cwd))
+            .appendingPathComponent(ClaudeConversation.uuid(forSessionID: sessionID) + ".jsonl")
+    }
+
+    static var homeDirectory: URL { URL(fileURLWithPath: NSHomeDirectory()) }
+
+    /// The model that served the most recent reply, or `nil` while the pane
+    /// has answered nothing yet — a fresh terminal has no transcript, and no
+    /// badge is better than a guess at what it will pick.
+    static func current(sessionID: String, cwd: String, home: URL = homeDirectory) -> String? {
+        lastModel(inTailOf: transcriptURL(sessionID: sessionID, cwd: cwd, home: home))
+    }
+
+    /// Reads the **tail** rather than the file: a long conversation's
+    /// transcript runs to tens of megabytes and the answer is always in the
+    /// last few lines, so this must not be an amount of work that grows with
+    /// how long the terminal has been open.
+    static func lastModel(inTailOf url: URL, bytes: UInt64 = 64 * 1024) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let end = try? handle.seekToEnd() else { return nil }
+        guard (try? handle.seek(toOffset: end > bytes ? end - bytes : 0)) != nil,
+              let data = try? handle.readToEnd()
+        else { return nil }
+        // A byte offset lands mid-character as often as not, which makes
+        // strict UTF-8 decoding fail on the whole tail. Latin-1 cannot fail
+        // and model ids are ASCII either way.
+        let tail = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+        return lastModel(inTail: tail)
+    }
+
+    /// The last `"model":"…"` in a chunk of transcript, scanned as text rather
+    /// than parsed: the tail starts mid-line, so most of it is not valid JSON.
+    ///
+    /// A transcript records what the *user* typed as well as what the model
+    /// answered, so `"model":"…"` can also be something somebody pasted —
+    /// hence the walk backwards until a value that names Claude, rather than
+    /// trusting the first match.
+    static func lastModel(inTail tail: String) -> String? {
+        var searchEnd = tail.endIndex
+        while let key = tail.range(
+            of: "\"model\":\"", options: .backwards, range: tail.startIndex..<searchEnd
+        ) {
+            searchEnd = key.lowerBound
+            let rest = tail[key.upperBound...]
+            guard let close = rest.firstIndex(of: "\"") else { continue }
+            let value = String(rest[..<close])
+            if value.contains("claude") { return value }
+        }
+        return nil
+    }
+
+    /// What the badge prints: `claude-opus-4-8[1m]` → `Opus 4.8 · 1M`,
+    /// `claude-haiku-4-5-20251001` → `Haiku 4.5`. Derived rather than looked
+    /// up in a table, so a model released after this ships still reads as its
+    /// own name instead of falling through to a blank.
+    static func label(for model: String) -> String {
+        var id = model
+        var suffix = ""
+        if id.hasSuffix("[1m]") {
+            id = String(id.dropLast(4))
+            suffix = " · 1M"
+        }
+        // Bedrock and Vertex prefix their ids (`us.anthropic.claude-…`).
+        if let claude = id.range(of: "claude-") { id = String(id[claude.upperBound...]) }
+        var parts = id.split(separator: "-").map(String.init)
+        // A trailing release date says which snapshot, not which model.
+        if let last = parts.last, last.count == 8, last.allSatisfy(\.isNumber) {
+            parts.removeLast()
+        }
+        guard let family = parts.first, !family.isEmpty else { return model }
+        let name = family.prefix(1).uppercased() + family.dropFirst()
+        let version = parts.dropFirst().joined(separator: ".")
+        return (version.isEmpty ? name : "\(name) \(version)") + suffix
+    }
+}
+
+
 /// Turns an `Engine` into something the PTY daemon can exec.
 ///
 /// The daemon has always accepted an arbitrary argv, cwd and environment
