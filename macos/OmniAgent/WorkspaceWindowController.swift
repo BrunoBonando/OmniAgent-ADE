@@ -843,6 +843,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             titleBar.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
             titleBar.trailingAnchor.constraint(equalTo: container.view.trailingAnchor),
         ])
+        // AppKit pins its own split view inside `split.view` at priority 749,
+        // which loses to the sizing chain a collapsed item leaves behind: the
+        // split stops filling and hugs the trailing edge, and the strip it
+        // gives up is bare window background. Required pins, so filling the
+        // container is not negotiable.
+        split.splitView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            split.splitView.leadingAnchor.constraint(equalTo: split.view.leadingAnchor),
+            split.splitView.trailingAnchor.constraint(equalTo: split.view.trailingAnchor),
+            split.splitView.topAnchor.constraint(equalTo: split.view.topAnchor),
+            split.splitView.bottomAnchor.constraint(equalTo: split.view.bottomAnchor),
+        ])
         window.contentViewController = container
 
         // Only now: the name is in the content column and the bar is the

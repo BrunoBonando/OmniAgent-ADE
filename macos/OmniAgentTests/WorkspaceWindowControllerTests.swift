@@ -1926,6 +1926,36 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertNil(controller.lastSyncedName["sess-cl"])
     }
 
+    /// Collapsing the sidebar used to leave a strip of bare window background
+    /// where the column had been — a black band, the same at every window
+    /// width. AppKit pins its own split view inside the split view
+    /// controller's view at priority 749, and the sizing chain a collapsed
+    /// item leaves behind outranks it: the split gave up 109pt and hugged the
+    /// trailing edge. Nothing paints there, so the window's own ground showed.
+    func testCollapsingTheSidebarLeavesNoBandOfBareWindowBehindIt() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1400, height: 900), display: true)
+        let content = try XCTUnwrap(window.contentView)
+        let split = try XCTUnwrap(controller.splitController)
+        content.layoutSubtreeIfNeeded()
+
+        try XCTUnwrap(split.splitViewItems.first).isCollapsed = true
+        content.layoutSubtreeIfNeeded()
+
+        let filled = split.splitView.convert(split.splitView.bounds, to: content)
+        XCTAssertEqual(filled, content.bounds, "the split fills the window with the column gone")
+        let column = try XCTUnwrap(controller.workspaceView.superview)
+        XCTAssertEqual(
+            column.convert(column.bounds, to: content).minX,
+            0,
+            accuracy: 0.5,
+            "and the content reaches the window's left edge, with nothing bare beside it"
+        )
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(
