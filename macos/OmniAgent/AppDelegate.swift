@@ -39,10 +39,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             workspace?.revealPane(sessionID)
         }
         self.workspace = workspace
-        workspace.showWindow(nil)
+        // `start()` before anything is shown: the socket comes up behind the
+        // login window, so signing in costs no wait for the daemon.
         workspace.start()
         workspace.notifier.requestAuthorization()
         NSApp.activate(ignoringOtherApps: true)
+        // The gate is what puts the first window on screen. Deliberately not
+        // `showWindow` first and a sheet after: a workspace flashing up behind
+        // a login is the app admitting the login is decoration.
+        workspace.presentLaunchGate {
+            workspace.showWindow(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         os_signpost(
             .end,
             log: Instrumentation.log,

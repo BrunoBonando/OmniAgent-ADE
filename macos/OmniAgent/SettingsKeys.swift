@@ -30,8 +30,10 @@ enum SettingsKey {
     static let reviewMemory = "review_memory"
 
     /// `ui/src/onboarding/authGateState.ts`'s `AUTH_GATE_RESOLVED_SETTING_KEY`.
-    /// `"true"` once the gate has been shown and resolved either path — see
-    /// `AuthGate.alreadyResolved(_:)`.
+    /// `"true"` once the gate has been shown and resolved either path. Still
+    /// written for the web build and for Settings, but no longer what the
+    /// native launch gate latches on — that is `authSignedIn`, mirrored into
+    /// `UserDefaults`; see `AuthGate.needsSignIn(_:)`.
     static let authGateResolved = "auth_gate_resolved"
 
     /// `ui/src/onboarding/authGateState.ts`'s `AUTH_SIGNED_IN_SETTING_KEY`.

@@ -66,13 +66,6 @@ final class AuthGateStateTests: XCTestCase {
 
     // MARK: - Persistence conventions
 
-    func testOnlyTheExactStringTrueCountsAsAlreadyResolved() {
-        XCTAssertTrue(AuthGate.alreadyResolved("true"))
-        XCTAssertFalse(AuthGate.alreadyResolved(nil))
-        XCTAssertFalse(AuthGate.alreadyResolved("false"))
-        XCTAssertFalse(AuthGate.alreadyResolved("garbage"))
-    }
-
     func testUnsetOrAnythingButFalseReadsAsSignedIn() {
         XCTAssertTrue(AuthGate.resolveSignedIn(nil))
         XCTAssertTrue(AuthGate.resolveSignedIn("true"))

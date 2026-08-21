@@ -1395,6 +1395,42 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    /// The login is the app's front door: the workspace window does not open
+    /// until the gate is answered, and the decision is made from `UserDefaults`
+    /// rather than over the socket, so a slow daemon cannot delay it.
+    func testTheWorkspaceWindowWaitsBehindTheLaunchGate() throws {
+        let strangers = Set(NSApp.windows.map(ObjectIdentifier.init))
+        addTeardownBlock {
+            for window in NSApp.windows where !strangers.contains(ObjectIdentifier(window)) {
+                window.close()
+            }
+        }
+
+        let waiting = makeController()
+        defer { waiting.close() }
+        var revealed = false
+        waiting.presentLaunchGate(defaults: try throwawayDefaults()) { revealed = true }
+        XCTAssertFalse(revealed, "nothing signed in, so the workspace waits on the gate")
+        XCTAssertFalse(try XCTUnwrap(waiting.window).isVisible, "and stays off screen while it does")
+
+        let signedIn = try throwawayDefaults()
+        signedIn.set(true, forKey: AuthGate.signedInDefaultsKey)
+        let straightIn = makeController()
+        defer { straightIn.close() }
+        var openedImmediately = false
+        straightIn.presentLaunchGate(defaults: signedIn) { openedImmediately = true }
+        XCTAssertTrue(openedImmediately, "signed in already: nothing to ask, so the workspace opens")
+    }
+
+    /// A suite of its own, torn down after — never the real app's defaults,
+    /// which is where the real launch decision lives.
+    private func throwawayDefaults() throws -> UserDefaults {
+        let name = "digital.bruno.omniagent.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
+        return defaults
+    }
+
     /// The bar is a transparent overlay across the top of the split now, and
     /// the *topmost* subview of the window's container — so AppKit asks it
     /// first for every point in the window, not just for points in its own

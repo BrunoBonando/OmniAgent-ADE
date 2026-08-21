@@ -11,16 +11,14 @@ import SwiftUI
 /// screen.
 final class AuthGateCoordinator {
     let settings: SettingsStore
+    /// Where the signed-in flag is mirrored, so the launch decision can be
+    /// made with no socket at all — see `AuthGate.needsSignIn(_:)`. Injectable
+    /// so a test never writes the real app's defaults.
+    let defaults: UserDefaults
 
-    init(settings: SettingsStore) {
+    init(settings: SettingsStore, defaults: UserDefaults = .standard) {
         self.settings = settings
-    }
-
-    /// `true` unless `SettingsKey.authGateResolved` is exactly `"true"`.
-    func needsPresenting(completion: @escaping (Bool) -> Void) {
-        settings.get(SettingsKey.authGateResolved) { result in
-            completion(!AuthGate.alreadyResolved(try? result.get()))
-        }
+        self.defaults = defaults
     }
 
     /// Persists all five keys the gate cares about and completes once every
@@ -40,8 +38,8 @@ final class AuthGateCoordinator {
 
     /// "Log out" / "Sign in" from the Settings screen's Account section —
     /// clears the persisted outcome (account identity included) so the gate
-    /// shows again next time `needsPresenting` is asked, without needing an
-    /// app relaunch.
+    /// shows again at the next launch, and offers the same view as a sheet
+    /// right now without needing one.
     func reset(completion: @escaping () -> Void) {
         persist(resolved: "false", signedIn: "false", persona: "", accountEmail: "", accountName: "", completion: completion)
     }
@@ -88,6 +86,11 @@ final class AuthGateCoordinator {
         accountName: String,
         completion: @escaping () -> Void
     ) {
+        // Written first and synchronously: this is the only copy the launch
+        // decision can read, and it must be true before the workspace window
+        // it gates is allowed on screen. The rows below stay the source of
+        // truth for everything the Settings screen shows.
+        defaults.set(signedIn == "true", forKey: AuthGate.signedInDefaultsKey)
         settings.set(SettingsKey.authGateResolved, resolved) { [settings] _ in
             settings.set(SettingsKey.authSignedIn, signedIn) { _ in
                 settings.set(SettingsKey.authPersona, persona) { _ in
@@ -922,9 +925,10 @@ private extension Color {
     }
 }
 
-/// Hosts `AuthGateContentView` in a sheet on the workspace window — the
-/// native shape of the web's `overlay-backdrop`, which the AppKit side has
-/// no equivalent of.
+/// Hosts `AuthGateContentView`. Two shapes, one flow: `over: nil` is the
+/// login window at launch, standing on its own with nothing behind it; a
+/// window makes it a sheet on that window — the native shape of the web's
+/// `overlay-backdrop`, which the Settings screen's "Sign in" row uses.
 final class AuthGateWindowController {
     private let coordinator: AuthGateCoordinator
     private var sheetWindow: NSWindow?
@@ -933,20 +937,8 @@ final class AuthGateWindowController {
         self.coordinator = coordinator
     }
 
-    /// Presents only if `SettingsKey.authGateResolved` is not `"true"` yet.
-    /// `completion` always runs — immediately if nothing needed showing.
-    func presentIfNeeded(over window: NSWindow?, completion: @escaping () -> Void) {
-        coordinator.needsPresenting { [weak self] needed in
-            guard needed else {
-                completion()
-                return
-            }
-            self?.present(over: window, completion: completion)
-        }
-    }
-
-    /// Unconditionally shows the gate — the Settings screen's Account
-    /// section "Sign in" row re-runs the same flow rather than a second one.
+    /// Shows the gate — the Settings screen's Account section "Sign in" row
+    /// re-runs the same flow rather than a second one.
     func present(over window: NSWindow?, completion: (() -> Void)? = nil) {
         let model = AuthGateViewModel()
         model.onResolved = { [weak self] outcome in

@@ -4,22 +4,54 @@ import XCTest
 @testable import OmniAgent
 
 final class AuthGateCoordinatorTests: XCTestCase {
-    func testNeedsPresentingIsTrueWhenUnresolvedAndFalseWhenResolved() {
-        let unresolved = AuthGateCoordinator(settings: SettingsStore(client: FakeSettingsClient()))
-        let unresolvedExpectation = expectation(description: "unresolved")
-        unresolved.needsPresenting { needed in
-            XCTAssertTrue(needed)
-            unresolvedExpectation.fulfill()
-        }
-        wait(for: [unresolvedExpectation], timeout: 1)
+    /// The launch gate cannot ask the daemon whether to show itself — a
+    /// settings read is a socket round trip, and this window has to be on
+    /// screen before the socket is. So the signed-in flag is mirrored into
+    /// `UserDefaults`, and that mirror is what the launch reads.
+    func testTheSignedInFlagIsMirroredIntoDefaultsForTheLaunchDecision() throws {
+        let defaults = try throwawayDefaults()
+        let coordinator = AuthGateCoordinator(
+            settings: SettingsStore(client: FakeSettingsClient()),
+            defaults: defaults
+        )
+        XCTAssertTrue(AuthGate.needsSignIn(defaults), "nothing signed in yet, so the gate shows")
 
-        let resolved = AuthGateCoordinator(settings: SettingsStore(client: FakeSettingsClient(rows: ["auth_gate_resolved": "true"])))
-        let resolvedExpectation = expectation(description: "resolved")
-        resolved.needsPresenting { needed in
-            XCTAssertFalse(needed)
-            resolvedExpectation.fulfill()
-        }
-        wait(for: [resolvedExpectation], timeout: 1)
+        resolve(coordinator, AuthGateOutcome(
+            signedIn: true,
+            persona: "research",
+            accountEmail: "bruno@bonando.com",
+            accountName: "Bruno Bonando"
+        ))
+        XCTAssertFalse(AuthGate.needsSignIn(defaults), "a real sign-in is what puts the gate away")
+
+        // "Continue without signing in" is an answer for this launch only —
+        // the whole difference between a login screen and a first-run screen.
+        resolve(coordinator, AuthGateOutcome(signedIn: false, persona: nil, accountEmail: nil, accountName: nil))
+        XCTAssertTrue(AuthGate.needsSignIn(defaults))
+
+        resolve(coordinator, AuthGateOutcome(signedIn: true, persona: nil, accountEmail: "x@y.z", accountName: nil))
+        XCTAssertFalse(AuthGate.needsSignIn(defaults))
+
+        // Settings → Account → "Log out".
+        let reset = expectation(description: "reset")
+        coordinator.reset { reset.fulfill() }
+        wait(for: [reset], timeout: 1)
+        XCTAssertTrue(AuthGate.needsSignIn(defaults), "logging out brings the gate back next launch")
+    }
+
+    private func resolve(_ coordinator: AuthGateCoordinator, _ outcome: AuthGateOutcome) {
+        let done = expectation(description: "resolve")
+        coordinator.resolve(outcome) { done.fulfill() }
+        wait(for: [done], timeout: 1)
+    }
+
+    /// A suite of its own, torn down after: these tests must never write the
+    /// real app's defaults, which is where the real launch decision lives.
+    private func throwawayDefaults() throws -> UserDefaults {
+        let name = "digital.bruno.omniagent.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
+        return defaults
     }
 
     func testResolvingASignedInOutcomeWritesAllFiveKeys() {

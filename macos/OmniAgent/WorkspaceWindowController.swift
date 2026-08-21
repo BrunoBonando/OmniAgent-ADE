@@ -350,6 +350,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// launch, the same one-shot-then-re-arm-on-failure shape
     /// `layoutReadDispatched` uses.
     private var onboardingDispatched = false
+    /// The two halves FirstRun waits on — see `presentOnboardingIfNeeded`.
+    private var authGateResolved = false
+    private var didConnect = false
     private var usageReadDispatched = false
     private var usageReadCompleted = false
     /// Task 6c: the `SMAppService`/degraded-mode mechanism and its status
@@ -1117,6 +1120,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 restoreWorkspaceCustomizationsIfNeeded()
                 restoreClosedWorkspacesIfNeeded()
                 refreshProjectLabels()
+                didConnect = true
                 presentOnboardingIfNeeded()
             case .connecting:
                 applyConnectionStatus("Connecting")
@@ -3580,17 +3584,43 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     // MARK: - Onboarding (Task 6b-2)
 
-    /// The launch-time sequence: the auth gate first (if unresolved), then
-    /// FirstRun (if no project root has ever been picked) — the same order
-    /// `App.tsx`'s boot effect enforces (`needsAuthGate` resolves before
-    /// `needsOnboarding` is ever allowed to render anything). Dispatched
-    /// once per launch; a reconnect does not re-ask.
-    private func presentOnboardingIfNeeded() {
-        guard !onboardingDispatched else { return }
-        onboardingDispatched = true
-        authGateWindow.presentIfNeeded(over: window) { [weak self] in
-            self?.presentFirstRunIfNeeded()
+    /// The login window, and the first thing the app puts on screen. Answered
+    /// from `UserDefaults` rather than over the socket, so it is on screen
+    /// before the daemon has been heard from at all — see
+    /// `AuthGate.needsSignIn(_:)`.
+    ///
+    /// `completion` is what reveals the workspace window, so it must run on
+    /// every path, including the one where nothing is shown.
+    func presentLaunchGate(defaults: UserDefaults = .standard, completion: @escaping () -> Void) {
+        guard AuthGate.needsSignIn(defaults) else {
+            authGateDidResolve()
+            completion()
+            return
         }
+        // `over: nil` — a window of its own, centred, with nothing behind it.
+        // A sheet needs a parent window on screen, and the whole point here is
+        // that there isn't one yet.
+        authGateWindow.present(over: nil) { [weak self] in
+            self?.authGateDidResolve()
+            completion()
+        }
+    }
+
+    /// The gate is answered — signed in, or "continue without signing in".
+    private func authGateDidResolve() {
+        authGateResolved = true
+        presentOnboardingIfNeeded()
+    }
+
+    /// FirstRun (if no project root has ever been picked), once *both* the
+    /// gate has been answered and the socket is up: it is a sheet on the
+    /// workspace window, which the gate holds off screen, and asking the
+    /// daemon what roots exist needs the socket. Whichever lands last runs
+    /// it. Dispatched once per launch; a reconnect does not re-ask.
+    private func presentOnboardingIfNeeded() {
+        guard authGateResolved, didConnect, !onboardingDispatched else { return }
+        onboardingDispatched = true
+        presentFirstRunIfNeeded()
     }
 
     private func presentFirstRunIfNeeded() {

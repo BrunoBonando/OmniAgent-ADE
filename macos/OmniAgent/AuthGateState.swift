@@ -125,20 +125,31 @@ enum AuthGate {
     /// New sign-ins always carry a real email and never show this.
     static let fakeAccountName = "Bruno Bonando"
 
-    /// The "already resolved, don't show the gate again" check —
-    /// `App.tsx`'s boot effect applies this to the raw `authGateResolved`
-    /// read. Only the exact string `"true"` counts; unset/`"false"`/garbage
-    /// all mean "show the gate".
-    static func alreadyResolved(_ settingValue: String?) -> Bool {
-        settingValue == "true"
+    /// Where `AuthGateCoordinator` mirrors the signed-in flag.
+    static let signedInDefaultsKey = "auth.signedIn"
+
+    /// The launch question, and the one rule in this file that deliberately
+    /// does **not** go through `SettingsStore`: a settings read is a round
+    /// trip over the daemon socket, so it cannot answer before the socket is
+    /// up — which is far too late for a window that has to be the first thing
+    /// on screen. The mirror is a `UserDefaults` bool, read synchronously, so
+    /// a slow or dead daemon delays nothing.
+    ///
+    /// The gate latches on *signed in*, not on "resolved once": clicking
+    /// "Continue without signing in" is an answer for that launch, not
+    /// forever. That is the whole difference between a login screen and a
+    /// first-run screen, and it is why an install that has already resolved
+    /// the old gate starts asking again.
+    static func needsSignIn(_ defaults: UserDefaults = .standard) -> Bool {
+        !defaults.bool(forKey: signedInDefaultsKey)
     }
 
     /// **Unset defaults to signed in** — so an install predating the gate
     /// shows the signed-in experience without clicking through a login.
     /// Only the explicit string `"false"` — exactly what "Log out"/
     /// "Continue without signing in" write — means signed out. Deliberately
-    /// the mirror image of `alreadyResolved`'s "only an explicit 'true'
-    /// counts" convention, for the opposite default.
+    /// the mirror image of the `"true"`-only convention `authGateResolved`
+    /// is written with, for the opposite default.
     static func resolveSignedIn(_ settingValue: String?) -> Bool {
         settingValue != "false"
     }
