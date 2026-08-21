@@ -766,49 +766,6 @@ final class HoverWorkingMarkView: NSImageView {
     }
 }
 
-/// The blinking caret in front of a working pane's last line — a terminal's
-/// own cursor, borrowed. With the ellipsis at the end of that line it is the
-/// card saying "this sentence is not finished", which is exactly what a pane
-/// that is still working is doing.
-final class HoverCaretView: NSView {
-    static let width: CGFloat = 2
-    static let height: CGFloat = 13
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = true
-        layer?.cornerRadius = Self.width / 2
-        setContentHuggingPriority(.required, for: .horizontal)
-        setContentCompressionResistancePriority(.required, for: .horizontal)
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: Self.width),
-            heightAnchor.constraint(equalToConstant: Self.height),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-
-    func apply(color: NSColor, blinks: Bool) {
-        layer?.backgroundColor = color.cgColor
-        layer?.removeAnimation(forKey: "om-blink")
-        guard blinks, !ShellMotion.reduced else {
-            layer?.opacity = 1
-            return
-        }
-        // Discrete, not eased: a caret is on or off. A fading one reads as a
-        // pulse, which is what the mark at the head of the row already does.
-        let blink = CAKeyframeAnimation(keyPath: "opacity")
-        blink.values = [1, 0]
-        blink.keyTimes = [0, 0.5, 1]
-        blink.calculationMode = .discrete
-        blink.duration = 1.06
-        blink.repeatCount = .infinity
-        layer?.add(blink, forKey: "om-blink")
-    }
-}
-
 /// The branch, top right: its name and then the git-branch glyph, in green.
 /// A fact about the whole card, so it sits on the title's line rather than
 /// inside the tile that happens to count its diff.
@@ -1078,49 +1035,59 @@ final class HoverKPITileView: NSView {
     }
 }
 
-/// One line of the "Working now" table: the OmniAgent mark in the pane's own
-/// status colour, the pane's name and what is driving it, and under it the last
-/// line that pane printed.
+/// One line of the "Working now" table.
+///
+/// Two rows of two columns. On the left a lane of marks: the engine's logo
+/// beside the pane's name, and under it the OmniAgent mark in the pane's own
+/// status colour, pulsing — which is where a blinking caret used to be, and
+/// says the same thing without a second blinking object in every row. On the
+/// right the name and what is driving it, and under it the last line the pane
+/// printed. Both text rows start at the same x: the lane is a fixed width, so
+/// the two read as one left-aligned column rather than two indents.
 final class HoverWorkRowView: NSView {
-    static let markGap: CGFloat = 8
+    /// The marks' lane. Wide enough for the larger of the two glyphs, and the
+    /// same for every row whatever engine it is running.
+    static let lane: CGFloat = 15
+    static let laneGap: CGFloat = 9
+    static let engineSize: CGFloat = 13
 
+    private let engineIcon = NSImageView()
     private let mark = HoverWorkingMarkView()
     private let headerField = ShellFont.label(font: ShellFont.ui(12.5, .semibold), color: ShellPalette.ink)
     private let lineField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.blue)
-    private let caret = HoverCaretView()
-    private let lineRow = NSStackView()
     private var row: HoverWorkRow?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
+        engineIcon.translatesAutoresizingMaskIntoConstraints = false
+        engineIcon.imageScaling = .scaleProportionallyUpOrDown
 
         // Name and engine are one attributed field rather than two labels in a
         // stack: two labels need baseline alignment and a spacer to keep from
         // being centred against each other, and one string gets both for free.
-        lineRow.orientation = .horizontal
-        lineRow.alignment = .centerY
-        lineRow.spacing = 6
-        lineRow.addArrangedSubview(caret)
-        lineRow.addArrangedSubview(lineField)
-
-        let text = NSStackView(views: [headerField, lineRow])
+        let text = NSStackView(views: [headerField, lineField])
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 2
         text.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(engineIcon)
         addSubview(mark)
         addSubview(text)
 
         NSLayoutConstraint.activate([
-            mark.leadingAnchor.constraint(equalTo: leadingAnchor),
-            mark.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            text.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: Self.markGap),
+            engineIcon.centerXAnchor.constraint(equalTo: leadingAnchor, constant: Self.lane / 2),
+            engineIcon.centerYAnchor.constraint(equalTo: headerField.centerYAnchor),
+            engineIcon.widthAnchor.constraint(equalToConstant: Self.engineSize),
+            engineIcon.heightAnchor.constraint(equalToConstant: Self.engineSize),
+            mark.centerXAnchor.constraint(equalTo: leadingAnchor, constant: Self.lane / 2),
+            mark.centerYAnchor.constraint(equalTo: lineField.centerYAnchor),
+            text.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.lane + Self.laneGap),
             text.trailingAnchor.constraint(equalTo: trailingAnchor),
             text.topAnchor.constraint(equalTo: topAnchor),
             text.bottomAnchor.constraint(equalTo: bottomAnchor),
             headerField.widthAnchor.constraint(equalTo: text.widthAnchor),
-            lineRow.widthAnchor.constraint(equalTo: text.widthAnchor),
+            lineField.widthAnchor.constraint(equalTo: text.widthAnchor),
         ])
     }
 
@@ -1136,9 +1103,18 @@ final class HoverWorkRowView: NSView {
         // name, and full-strength blue on glass at 11.5pt glares rather than
         // reads. Not softened further — it still has to be legible.
         lineField.textColor = row.accent.withAlphaComponent(0.88)
-        lineRow.isHidden = row.line.isEmpty
-        caret.apply(color: row.accent, blinks: true)
+        lineField.isHidden = row.line.isEmpty
+        mark.isHidden = row.line.isEmpty
         mark.apply(color: row.accent, pulses: row.pulses)
+        if let engine = row.engine, let image = engine.iconImage {
+            engineIcon.image = image
+            // Shell and Copilot ship as near-black art and are templates; the
+            // rest are brand marks and keep their own palettes.
+            if image.isTemplate { engineIcon.contentTintColor = ShellPalette.inkTertiary }
+            engineIcon.isHidden = false
+        } else {
+            engineIcon.isHidden = true
+        }
         setAccessibilityLabel("\(row.title). \(row.detail). \(row.line)")
     }
 
