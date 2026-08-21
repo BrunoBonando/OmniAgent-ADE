@@ -342,7 +342,9 @@ struct AuthGateContentView: View {
     }
 
     /// The whole two-panel screen; the story panel gets whatever is left.
-    private static let sheetSize = CGSize(width: 1040, height: 640)
+    /// Internal because `AuthGateWindowController` sizes the gate's window
+    /// from it — the window is this screen and nothing else.
+    static let sheetSize = CGSize(width: 1040, height: 640)
     private static let cardWidth: CGFloat = 452
 
     var body: some View {
@@ -931,7 +933,9 @@ private extension Color {
 /// `overlay-backdrop`, which the Settings screen's "Sign in" row uses.
 final class AuthGateWindowController {
     private let coordinator: AuthGateCoordinator
-    private var sheetWindow: NSWindow?
+    /// The gate's window. Readable so a test can measure the real thing —
+    /// where it opens and how big it is *is* the launch shape.
+    private(set) var sheetWindow: NSWindow?
 
     init(coordinator: AuthGateCoordinator) {
         self.coordinator = coordinator
@@ -948,21 +952,54 @@ final class AuthGateWindowController {
                 completion?()
             }
         }
-        let hosting = NSHostingController(rootView: AuthGateContentView(model: model))
+        // One size for every phase. `NSHostingController` sizes the window
+        // from whatever the view currently prefers, so left alone the window
+        // would shrink to the personalize card's 420pt mid-flow — and, since
+        // a resize holds the top-left corner, walk out of the centre it
+        // opened in. The phases lay themselves out inside a fixed screen.
+        let hosting = NSHostingController(
+            rootView: AuthGateContentView(model: model)
+                .frame(width: AuthGateContentView.sheetSize.width, height: AuthGateContentView.sheetSize.height)
+        )
+        // Edge to edge. `fullSizeContentView` runs the content view under the
+        // title bar, but SwiftUI still insets its layout by that safe area,
+        // which left the window's own grey painting a band across the top of
+        // the screen. Nothing on this screen wants a safe area.
+        hosting.safeAreaRegions = []
         let sheet = NSWindow(contentViewController: hosting)
         sheet.styleMask = [.titled, .fullSizeContentView]
         sheet.titlebarAppearsTransparent = true
         sheet.titleVisibility = .hidden
         sheet.isReleasedWhenClosed = false
+        // What shows behind the window's own rounded corners, and for the
+        // instant before SwiftUI's first paint: the screen's colour rather
+        // than the system window grey.
+        sheet.backgroundColor = NSColor(SignInPalette.screenBackground)
         // Sign in with Apple's system dialog anchors to the sheet itself.
         model.presentationWindow = { [weak sheet] in sheet }
         sheetWindow = sheet
         if let window {
             window.beginSheet(sheet)
         } else {
-            sheet.center()
+            centerOnScreen(sheet)
             sheet.makeKeyAndOrderFront(nil)
         }
+    }
+
+    /// Puts the launch window at the middle of the screen — and does it
+    /// without `NSWindow.center()`, which is wrong here twice over: it biases
+    /// the window above centre by design, and it places whatever size the
+    /// window has *at that moment*, which is before SwiftUI has reported
+    /// one. That is what parked the login screen in the top-right quadrant.
+    private func centerOnScreen(_ window: NSWindow) {
+        window.setContentSize(AuthGateContentView.sheetSize)
+        guard let screen = window.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let size = window.frame.size
+        window.setFrameOrigin(NSPoint(
+            x: visible.midX - size.width / 2,
+            y: visible.midY - size.height / 2
+        ))
     }
 
     private func dismiss() {

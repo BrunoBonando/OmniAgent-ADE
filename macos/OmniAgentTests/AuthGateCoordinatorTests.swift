@@ -375,3 +375,77 @@ final class AuthGateRenderTests: XCTestCase {
         try png.write(to: URL(fileURLWithPath: path))
     }
 }
+
+// MARK: - Launch window shape
+
+/// The gate is the app's front door now: `present(over: nil)` is a window of
+/// its own, opened before the workspace window exists. Two things that shape
+/// has to get right which a sheet never had to — where it opens, and that
+/// the screen it hosts runs to the window's own edges.
+final class AuthGateWindowTests: XCTestCase {
+    @MainActor
+    func testTheLaunchWindowOpensAtTheCentreOfTheScreen() throws {
+        let window = try presentLaunchWindow()
+        let screen = try XCTUnwrap(window.screen ?? NSScreen.main)
+
+        // The size has to be the screen's own before the position can mean
+        // anything: `NSWindow.center()` used to run while the window was
+        // still its default size, so the login screen grew out of a corner
+        // of the centre point instead of standing on it.
+        XCTAssertEqual(window.frame.width, AuthGateContentView.sheetSize.width, accuracy: 0.5)
+        XCTAssertEqual(window.frame.height, AuthGateContentView.sheetSize.height, accuracy: 0.5)
+        XCTAssertEqual(window.frame.midX, screen.visibleFrame.midX, accuracy: 1)
+        XCTAssertEqual(window.frame.midY, screen.visibleFrame.midY, accuracy: 1)
+    }
+
+    /// The window is `fullSizeContentView`, but SwiftUI still insets its
+    /// layout by the title bar's safe area unless told not to — which showed
+    /// up as a black band across the top of the sign-in screen, exactly as
+    /// wide as a title bar. Two ways to see it: the content view grew by the
+    /// inset, and the story panel's glow stopped short of the top edge.
+    @MainActor
+    func testTheScreenPaintsToTheWindowsTopEdgeWithNoTitleBarBand() throws {
+        let window = try presentLaunchWindow()
+        let content = try XCTUnwrap(window.contentView)
+        XCTAssertEqual(
+            content.bounds.height,
+            AuthGateContentView.sheetSize.height,
+            accuracy: 0.5,
+            "a safe-area inset would make the content taller than the screen it holds"
+        )
+
+        let frameView = content.superview ?? content
+        let rep = try XCTUnwrap(frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds))
+        frameView.cacheDisplay(in: frameView.bounds, to: rep)
+        let scale = max(1, rep.pixelsWide / Int(frameView.bounds.width))
+        let top = try XCTUnwrap(rep.colorAt(x: 60 * scale, y: scale)?.usingColorSpace(.sRGB))
+        XCTAssertGreaterThan(
+            top.blueComponent - top.redComponent,
+            0.05,
+            "the story panel's indigo glow must reach the window's top edge, not a band of window background"
+        )
+
+        if let png = rep.representation(using: .png, properties: [:]) {
+            let path = ProcessInfo.processInfo.environment["AUTH_GATE_WINDOW_RENDER_PATH"]
+                ?? (NSTemporaryDirectory() as NSString).appendingPathComponent("auth-gate-window.png")
+            try png.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
+    /// The real controller, presented the way the launch presents it. The
+    /// window is ordered in (SwiftUI lays out and fires `onAppear` only for
+    /// a window that is on screen) and ordered out again on teardown.
+    @MainActor
+    private func presentLaunchWindow() throws -> NSWindow {
+        let controller = AuthGateWindowController(
+            coordinator: AuthGateCoordinator(settings: SettingsStore(client: FakeSettingsClient()))
+        )
+        controller.present(over: nil)
+        let window = try XCTUnwrap(controller.sheetWindow)
+        addTeardownBlock { @MainActor in window.orderOut(nil) }
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        return window
+    }
+}
