@@ -473,6 +473,14 @@ enum GitBranch {
     }
 }
 
+/// One commit, as the hover card's git tab lists it.
+struct GitCommit: Equatable {
+    var hash: String
+    var subject: String
+    /// Unix seconds, so the card can age it against its own clock.
+    var at: Double
+}
+
 /// `14 files · +1284 −312` for one repository — the uncommitted work, as the
 /// hover card's second KPI.
 ///
@@ -493,6 +501,18 @@ struct GitDiffStat: Equatable {
     /// caller because this type has already resolved the repository root, off
     /// the main thread — and the caller asks ten times a second.
     var branch: String?
+    /// Files in the index. `changed` above is the working tree against `HEAD`,
+    /// so a staged file is in both — which is what "staged, of the changed" is
+    /// meant to say.
+    var staged: Int = 0
+    /// Commits on `HEAD` since midnight, whoever wrote them. A day's output,
+    /// not the user's: a card cannot ask who is at the keyboard.
+    var committedToday: Int = 0
+    /// Against the tracking branch, and both zero when there is none.
+    var ahead: Int = 0
+    var behind: Int = 0
+    /// The last three, newest first — the card shows exactly three.
+    var recent: [GitCommit] = []
 
     var isEmpty: Bool { files == 0 && added == 0 && removed == 0 }
 
@@ -530,14 +550,58 @@ struct GitDiffStat: Equatable {
         return cache[path]
     }
 
-    /// **Never call this on the main thread** — it is a subprocess.
+    /// **Never call this on the main thread** — it is a subprocess. Five of
+    /// them now: the card's git tab reports the whole repository, and each
+    /// question is one short read-only `git`. All of them behind the same
+    /// three-second cache as the first.
     static func load(repoRoot: URL) -> GitDiffStat? {
         guard let output = GitStatus.runGit(["diff", "--shortstat", "HEAD"], in: repoRoot) else {
             return nil
         }
         var stat = parse(shortstat: output)
         stat.branch = GitBranch.current(repoRoot: repoRoot)
+        stat.staged = parse(
+            shortstat: GitStatus.runGit(["diff", "--cached", "--shortstat"], in: repoRoot) ?? ""
+        ).files
+        stat.committedToday = Int(
+            (GitStatus.runGit(["rev-list", "--count", "--since=midnight", "HEAD"], in: repoRoot) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        ) ?? 0
+        stat.recent = parse(
+            log: GitStatus.runGit(
+                ["log", "-3", "--format=%h%x1f%s%x1f%ct"],
+                in: repoRoot
+            ) ?? ""
+        )
+        // No upstream is exit 128, and an ordinary state — a local branch
+        // nobody has pushed yet reports 0 ahead, 0 behind, which is true.
+        let tracking = GitStatus.runGit(
+            ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+            in: repoRoot,
+            acceptExitCodes: [0, 128]
+        )
+        (stat.behind, stat.ahead) = parse(tracking: tracking ?? "")
         return stat
+    }
+
+    /// `behind\tahead`, git's own order for `--left-right` with the upstream on
+    /// the left. Empty — no upstream — is `(0, 0)`.
+    static func parse(tracking: String) -> (behind: Int, ahead: Int) {
+        let counts = tracking.split(whereSeparator: { $0 == "\t" || $0 == " " || $0 == "\n" })
+            .compactMap { Int($0) }
+        guard counts.count == 2 else { return (0, 0) }
+        return (counts[0], counts[1])
+    }
+
+    /// `hash US subject US unix-seconds`, one commit a line. The unit
+    /// separator rather than a space: a subject may contain anything, and
+    /// splitting on whitespace would cut it in half.
+    static func parse(log: String) -> [GitCommit] {
+        log.split(separator: "\n").compactMap { line in
+            let fields = line.split(separator: "\u{1f}", omittingEmptySubsequences: false)
+            guard fields.count == 3, let at = Double(fields[2]) else { return nil }
+            return GitCommit(hash: String(fields[0]), subject: String(fields[1]), at: at)
+        }
     }
 
     /// ` 14 files changed, 1284 insertions(+), 312 deletions(-)`, and any

@@ -602,6 +602,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         hoverCard.provider = { [weak self] target in self?.hoverCardModel(for: target) }
         hoverCard.rowFrame = { [weak self] target in self?.shellSidebar.rowFrameOnScreen(for: target) }
+        // The card's git tab offers one action, and this is all it is: the
+        // session it is about, with its review panel open on the changes the
+        // card was just counting.
+        hoverCard.onReview = { [weak self] target in
+            guard let self, case .session(let group) = target else { return }
+            if destination != .terminals { applyDestination(.terminals) }
+            enterDeskSession(group)
+            if reviewPanelItem?.isCollapsed ?? true { toggleReviewPanel(nil) }
+        }
         // Search fires the spotlight and is deliberately not a selection —
         // the same panel ⌃Space and ⌘K raise.
         shellSidebar.onSearch = { [weak self] in self?.showCommandPalette(nil) }

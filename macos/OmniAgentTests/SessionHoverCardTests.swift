@@ -394,6 +394,97 @@ final class SessionHoverCardTests: XCTestCase {
         XCTAssertTrue(GitDiffStat.parse(shortstat: "").isEmpty)
     }
 
+    /// The commit list is unit-separated because a subject may contain
+    /// anything — spaces, tabs, its own colons.
+    func testTheLogParsesIntoCommits() {
+        let log = "a41f7c2\u{1f}fix: coalesce token rotation\u{1f}1760000000\n"
+            + "7de0b19\u{1f}db: add users.last_seen_at + index\u{1f}1759998800\n"
+        XCTAssertEqual(
+            GitDiffStat.parse(log: log),
+            [
+                GitCommit(hash: "a41f7c2", subject: "fix: coalesce token rotation", at: 1_760_000_000),
+                GitCommit(hash: "7de0b19", subject: "db: add users.last_seen_at + index", at: 1_759_998_800),
+            ]
+        )
+        XCTAssertTrue(GitDiffStat.parse(log: "").isEmpty)
+        XCTAssertTrue(GitDiffStat.parse(log: "malformed line\n").isEmpty)
+    }
+
+    /// `--left-right` prints the upstream's side first. No upstream is empty
+    /// output, and an honest zero-zero rather than a guess.
+    func testTheTrackingCountsReadBehindThenAhead() {
+        XCTAssertEqual(GitDiffStat.parse(tracking: "0\t2\n").behind, 0)
+        XCTAssertEqual(GitDiffStat.parse(tracking: "0\t2\n").ahead, 2)
+        XCTAssertEqual(GitDiffStat.parse(tracking: "3\t1\n").behind, 3)
+        XCTAssertEqual(GitDiffStat.parse(tracking: "").ahead, 0)
+    }
+
+    /// The commits reach the view already aged, so the model changes when the
+    /// card's text does rather than ten times a second.
+    func testTheCommitsArriveAgedAndTrimmed() {
+        let long = String(repeating: "x", count: HoverCommitRow.subjectLimit + 20)
+        var git = GitDiffStat(files: 2, added: 3, removed: 1, branch: "main")
+        git.recent = [
+            GitCommit(hash: "a41f7c2", subject: "fix: coalesce token rotation", at: t0 / 1000 - 360),
+            GitCommit(hash: "7de0b19", subject: long, at: t0 / 1000 - 7_200),
+        ]
+        let model = HoverCardModel.session(
+            sessionNode(paneIDs: ["a"]),
+            panes: ["a": PaneDescriptor(sessionID: "a", group: "s", engine: .claude)],
+            statuses: ["a": .ready],
+            ledger: PaneActivityLedger(),
+            git: git,
+            now: t0
+        )
+        let commits = model.dashboard?.commits
+        XCTAssertEqual(commits?.count, 2)
+        XCTAssertEqual(commits?.first?.hash, "a41f7c2")
+        XCTAssertEqual(commits?.first?.age, "6m")
+        XCTAssertEqual(commits?.last?.age, "2h")
+        XCTAssertEqual(commits?.last?.subject.count, HoverCommitRow.subjectLimit + 1, "trimmed, plus its ellipsis")
+    }
+
+    /// The two tiles are tabs: terminals to begin with, git while the pointer
+    /// is on the git tile, and back to terminals the moment the tree is clean
+    /// and that tile is gone.
+    func testTheTilesAreTabs() {
+        let view = HoverDashboardView()
+        var dirty = SessionDashboard(
+            pills: [ShellPalette.blue],
+            capacity: 12,
+            working: 1,
+            mix: "",
+            age: "2h",
+            branch: "main",
+            git: GitDiffStat(files: 14, added: 1284, removed: 312, branch: "main"),
+            rows: [
+                HoverWorkRow(
+                    paneID: "a",
+                    title: "token rotation",
+                    detail: "Claude",
+                    line: "working…",
+                    accent: ShellPalette.blue,
+                    pulses: true,
+                    engine: .claude
+                )
+            ],
+            commits: [HoverCommitRow(hash: "a41f7c2", subject: "fix: it", age: "6m")]
+        )
+        view.apply(dirty, animated: false)
+        XCTAssertEqual(view.tab, .terminals)
+        XCTAssertNil(view.visibleGitPanel, "the table is what a session row is about")
+        XCTAssertEqual(view.visibleRowCount, 1)
+
+        view.select(.git)
+        XCTAssertEqual(view.tab, .git)
+        XCTAssertEqual(view.visibleGitPanel?.visibleCommitCount, 1)
+
+        dirty.git = nil
+        view.apply(dirty, animated: false)
+        XCTAssertEqual(view.tab, .terminals, "no tile, no tab")
+        XCTAssertNil(view.visibleGitPanel)
+    }
+
     /// The bar gives up empty slots before it lets a filled pill become a
     /// hairline — and never drops a pane that exists.
     func testThePillBarKeepsEveryPaneAndDropsSpareSlots() {
@@ -493,6 +584,15 @@ final class SessionHoverCardTests: XCTestCase {
             "c": "Migration 0043_curly_stingray.sql ready to apply",
             "d": "Re-walking 1,842 files · 68% parsed, 41,208 nodes linked",
         ]
+        var git = GitDiffStat(files: 14, added: 1284, removed: 312, branch: "main")
+        git.staged = 3
+        git.committedToday = 27
+        git.ahead = 2
+        git.recent = [
+            GitCommit(hash: "a41f7c2", subject: "fix: coalesce token rotation", at: now / 1000 - 360),
+            GitCommit(hash: "7de0b19", subject: "db: add users.last_seen_at + index", at: now / 1000 - 1_320),
+            GitCommit(hash: "1c98ee4", subject: "test: stripe webhook idempotency", at: now / 1000 - 3_600),
+        ]
         let model = HoverCardModel.session(
             SessionGroupNode(
                 id: "s",
@@ -511,7 +611,7 @@ final class SessionHoverCardTests: XCTestCase {
             ledger: ledger,
             eventTimes: ["a": now - 4_000, "c": now - 9_000, "d": now - 1_000],
             tails: { tails[$0] },
-            git: GitDiffStat(files: 14, added: 1284, removed: 312, branch: "main"),
+            git: git,
             branch: "main",
             now: now
         )
@@ -519,6 +619,15 @@ final class SessionHoverCardTests: XCTestCase {
         let body = HoverCardBodyView()
         body.tailField.animates = false
         body.apply(model)
+
+        // Both tabs, since either is one hover away from the other.
+        try shoot(body, into: dir, named: "session-card.png")
+        body.dashboardView.onReview = {}
+        body.dashboardView.select(.git)
+        try shoot(body, into: dir, named: "session-card-git.png")
+    }
+
+    private func shoot(_ body: HoverCardBodyView, into dir: String, named name: String) throws {
         let size = body.cardSize
         let backdrop = NSView(frame: NSRect(origin: .zero, size: size))
         backdrop.wantsLayer = true
@@ -535,7 +644,7 @@ final class SessionHoverCardTests: XCTestCase {
         let rep = try XCTUnwrap(backdrop.bitmapImageRepForCachingDisplay(in: backdrop.bounds))
         backdrop.cacheDisplay(in: backdrop.bounds, to: rep)
         let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
-        try png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("session-card.png"))
+        try png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
     }
 
     private func sessionNode(paneIDs: [String]) -> SessionGroupNode {
@@ -671,13 +780,15 @@ final class SessionHoverCardTests: XCTestCase {
         XCTAssertEqual(shell.dropCenterY, 40)
     }
 
-    /// Glance-only: the card can never swallow a click meant for the pane
-    /// underneath it, and never takes key away from the terminal.
-    func testTheCardNeverTakesTheMouse() throws {
+    /// The card takes the mouse — its tiles are tabs and the pointer has to be
+    /// able to reach them — but never key: a non-activating panel, so the
+    /// terminal underneath keeps the keyboard.
+    func testTheCardTakesTheMouseButNeverKey() throws {
         let controller = SessionHoverCardController()
         let panel = try XCTUnwrap(Mirror(reflecting: controller).children
             .first { $0.label == "panel" }?.value as? NSPanel)
-        XCTAssertTrue(panel.ignoresMouseEvents)
+        XCTAssertFalse(panel.ignoresMouseEvents)
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
         XCTAssertFalse(controller.isOpen)
         XCTAssertNil(controller.target)
     }

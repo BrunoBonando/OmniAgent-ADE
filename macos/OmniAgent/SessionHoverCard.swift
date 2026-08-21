@@ -114,6 +114,18 @@ struct HoverWorkRow: Equatable {
     static let lineLimit = 90
 }
 
+/// One line of the git tab's commit list: the short hash, the subject, and
+/// how long ago it landed.
+struct HoverCommitRow: Equatable {
+    var hash: String
+    var subject: String
+    var age: String
+
+    /// Longer than a work row's: a commit subject is written to be read, and
+    /// the git tab has no second column competing for the width.
+    static let subjectLimit = 46
+}
+
 /// The session card's KPI strip and its table — everything a pane card does
 /// not have. A session is a fleet; the card is its dashboard.
 struct SessionDashboard: Equatable {
@@ -135,6 +147,10 @@ struct SessionDashboard: Equatable {
     var git: GitDiffStat?
     /// The four most urgent, most recent panes that are doing something.
     var rows: [HoverWorkRow]
+    /// The git tab's commit list, already aged against the card's own clock —
+    /// a string the view prints, like everything else here, so that the model
+    /// only changes when the card's *text* does and not ten times a second.
+    var commits: [HoverCommitRow] = []
 
     /// How many rows the table ever shows. Four is what fits beside a sidebar
     /// row without the card running off the screen.
@@ -341,7 +357,14 @@ extension HoverCardModel {
                 age: age,
                 branch: branch,
                 git: (git?.isEmpty ?? true) ? nil : git,
-                rows: Array(rows)
+                rows: Array(rows),
+                commits: (git?.recent ?? []).map {
+                    HoverCommitRow(
+                        hash: $0.hash,
+                        subject: snippet($0.subject, limit: HoverCommitRow.subjectLimit) ?? "",
+                        age: Self.age(now - $0.at * 1000)
+                    )
+                }
             )
         )
     }
@@ -1033,6 +1056,43 @@ final class HoverKPITileView: NSView {
         hintField.stringValue = hint ?? ""
         hintField.isHidden = (hint == nil)
     }
+
+    // MARK: The tile as a tab
+
+    /// Hovering a tile is what selects it. A hover card asking for a click to
+    /// show more of what the pointer is already resting on is a click that
+    /// buys nothing.
+    var onHover: (() -> Void)?
+
+    private(set) var isSelected = false
+    private var tracking: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        // `.activeAlways`: the card is a non-activating panel and is never the
+        // key window, so `.activeInKeyWindow` would never fire in it.
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { onHover?() }
+
+    func setSelected(_ selected: Bool) {
+        guard isSelected != selected else { return }
+        isSelected = selected
+        layer?.backgroundColor = (selected
+            ? ShellPalette.cardFillHover
+            : NSColor(white: 1, alpha: 0.045)).cgColor
+        layer?.borderColor = (selected
+            ? NSColor(white: 1, alpha: 0.16)
+            : ShellPalette.hairline).cgColor
+    }
 }
 
 /// One line of the "Working now" table.
@@ -1144,6 +1204,219 @@ final class HoverWorkRowView: NSView {
 /// The table's rows are a fixed pool of four, shown and hidden rather than
 /// built and destroyed — which is what lets the card *grow* when a fifth
 /// terminal starts working instead of snapping to a new size.
+/// One of the git tab's three headline numbers: the figure in the colour of
+/// what it means — amber for work not committed, green for work staged, the
+/// accent for work already landed — and under it the noun it counts.
+final class HoverGitStatView: NSView {
+    private let valueField: NSTextField
+    private let captionField: NSTextField
+
+    init(caption: String, color: NSColor) {
+        valueField = ShellFont.label(font: ShellFont.ui(21, .semibold), color: color)
+        captionField = ShellFont.label(caption, font: ShellFont.ui(11), color: ShellPalette.inkTertiary)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        valueField.alignment = .center
+        captionField.alignment = .center
+
+        let stack = NSStackView(views: [valueField, captionField])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 1
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stack.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(_ value: Int) { valueField.stringValue = "\(value)" }
+}
+
+/// One line of the git tab's commit list: hash, subject, age.
+final class HoverCommitRowView: NSView {
+    private let hashField = ShellFont.label(font: ShellFont.mono(11), color: ShellPalette.blue)
+    private let subjectField = ShellFont.label(font: ShellFont.ui(12), color: ShellPalette.inkSecondary)
+    private let ageField = ShellFont.label(font: ShellFont.ui(10), color: ShellPalette.inkTertiary)
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        // The hash and the age are fixed facts; the subject is the one thing
+        // long enough to need truncating, so it is the one that gives way.
+        for field in [hashField, ageField] {
+            field.setContentHuggingPriority(.required, for: .horizontal)
+            field.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
+        subjectField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        ageField.alignment = .right
+
+        let stack = NSStackView(views: [hashField, subjectField, NSView(), ageField])
+        stack.orientation = .horizontal
+        stack.alignment = .firstBaseline
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(_ row: HoverCommitRow) {
+        hashField.stringValue = row.hash
+        subjectField.stringValue = row.subject
+        ageField.stringValue = row.age
+        setAccessibilityLabel("\(row.hash) \(row.subject), \(row.age) ago")
+    }
+}
+
+/// The card's other tab: the repository the second KPI tile counts, in full.
+///
+/// Three numbers, the last three commits, and the one action a card of this
+/// kind can honestly offer — open the review panel on what is not committed
+/// yet.
+final class HoverGitPanelView: NSView {
+    static let maxCommits = 3
+
+    private let changedStat = HoverGitStatView(caption: "changed", color: ShellPalette.amber)
+    private let stagedStat = HoverGitStatView(caption: "staged", color: ShellPalette.green)
+    private let committedStat = HoverGitStatView(caption: "committed today", color: ShellPalette.accent)
+    private let caption = ShellFont.label(
+        "RECENT COMMITS",
+        font: ShellFont.ui(10, .semibold),
+        color: ShellPalette.inkTertiary,
+        tracking: 0.9
+    )
+    /// `↑2 ↓0` against the tracking branch, where the table's own count sits on
+    /// the other tab — the same corner answering the same kind of question.
+    private let trackingField = ShellFont.label(font: ShellFont.ui(10), color: ShellPalette.inkTertiary)
+    private let commitViews = (0..<maxCommits).map { _ in HoverCommitRowView() }
+    private let commits = NSStackView()
+    private let rule = NSView()
+    private let pendingField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.amber)
+    private let reviewButton = PaneApprovalButton(
+        title: "Review",
+        isPrimary: true,
+        tint: ShellPalette.accent
+    )
+
+    /// What the button does. Unset — nothing can handle it — and there is no
+    /// button: a card does not offer an action that goes nowhere.
+    var onReview: (() -> Void)? {
+        didSet {
+            reviewButton.onClick = onReview
+            reviewButton.isHidden = onReview == nil
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        reviewButton.isHidden = true
+
+        let stats = NSStackView(views: [
+            changedStat, divider(), stagedStat, divider(), committedStat,
+        ])
+        stats.orientation = .horizontal
+        stats.alignment = .centerY
+        stats.distribution = .fill
+        stats.spacing = 10
+        stagedStat.widthAnchor.constraint(equalTo: changedStat.widthAnchor).isActive = true
+        committedStat.widthAnchor.constraint(equalTo: changedStat.widthAnchor).isActive = true
+
+        trackingField.alignment = .right
+        let header = NSStackView(views: [caption, NSView(), trackingField])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 6
+
+        commits.orientation = .vertical
+        commits.alignment = .leading
+        commits.spacing = 7
+        for view in commitViews { commits.addArrangedSubview(view) }
+
+        rule.wantsLayer = true
+        rule.layer?.backgroundColor = ShellPalette.hairlineStrong.cgColor
+        rule.translatesAutoresizingMaskIntoConstraints = false
+
+        let footer = NSStackView(views: [pendingField, NSView(), reviewButton])
+        footer.orientation = .horizontal
+        footer.alignment = .centerY
+        footer.spacing = 8
+
+        let stack = NSStackView(views: [stats, header, commits, rule, footer])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 7
+        stack.setCustomSpacing(12, after: stats)
+        stack.setCustomSpacing(9, after: commits)
+        stack.setCustomSpacing(9, after: rule)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            rule.heightAnchor.constraint(equalToConstant: 1),
+        ] + [stats, header, commits, rule, footer].map {
+            $0.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        } + commitViews.map { $0.widthAnchor.constraint(equalTo: commits.widthAnchor) })
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// For tests: how many commits the list is actually showing.
+    var visibleCommitCount: Int { commitViews.filter { !$0.isHidden }.count }
+
+    func apply(_ dashboard: SessionDashboard) {
+        let git = dashboard.git ?? GitDiffStat()
+        changedStat.apply(git.files)
+        stagedStat.apply(git.staged)
+        committedStat.apply(git.committedToday)
+        trackingField.stringValue = "↑\(git.ahead)  ↓\(git.behind)"
+
+        for (index, view) in commitViews.enumerated() {
+            let row = index < dashboard.commits.count ? dashboard.commits[index] : nil
+            if let row { view.apply(row) }
+            view.isHidden = row == nil
+        }
+        let empty = dashboard.commits.isEmpty
+        caption.isHidden = empty
+        commits.isHidden = empty
+
+        pendingField.stringValue = git.files == 1
+            ? "1 file awaiting commit"
+            : "\(git.files) files awaiting commit"
+    }
+
+    private func divider() -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = ShellPalette.hairlineStrong.cgColor
+        view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalToConstant: 1),
+            view.heightAnchor.constraint(equalToConstant: 30),
+        ])
+        return view
+    }
+}
+
 final class HoverDashboardView: NSView {
     private let panesBar = HoverPillBarView()
     private let diffBar = HoverDiffBarView()
@@ -1162,6 +1435,19 @@ final class HoverDashboardView: NSView {
     private let rowViews = (0..<SessionDashboard.maxRows).map { _ in HoverWorkRowView() }
     private let rows = NSStackView()
     private let tiles = NSStackView()
+    private let gitPanel = HoverGitPanelView()
+
+    /// The two tiles are the card's tabs, and what is under them is whichever
+    /// one the pointer is on. Terminals to begin with — the card is opened from
+    /// a session row, and the fleet is what that row is about.
+    enum Tab { case terminals, git }
+    private(set) var tab: Tab = .terminals
+
+    /// Wired by the controller, and only when the window can act on it.
+    var onReview: (() -> Void)? {
+        get { gitPanel.onReview }
+        set { gitPanel.onReview = newValue }
+    }
 
     override init(frame frameRect: NSRect) {
         let diffNumbers = NSStackView(views: [addedField, removedField, diffBar])
@@ -1204,13 +1490,20 @@ final class HoverDashboardView: NSView {
         rows.spacing = 9
         for view in rowViews { rows.addArrangedSubview(view) }
 
-        let stack = NSStackView(views: [tiles, tableHeader, rows])
+        let stack = NSStackView(views: [tiles, tableHeader, rows, gitPanel])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
         stack.setCustomSpacing(11, after: tiles)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+
+        // Which tile the pointer is on is which tab is showing. Selecting on
+        // the way in only: there is no "off the tiles" state, because leaving
+        // them for the table below must not throw the tab away.
+        panesTile.onHover = { [weak self] in self?.select(.terminals) }
+        gitTile.onHover = { [weak self] in self?.select(.git) }
+        panesTile.setSelected(true)
 
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -1220,7 +1513,18 @@ final class HoverDashboardView: NSView {
             tiles.widthAnchor.constraint(equalTo: stack.widthAnchor),
             tableHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),
             rows.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            gitPanel.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ] + rowViews.map { $0.widthAnchor.constraint(equalTo: rows.widthAnchor) })
+    }
+
+    /// Switches tab. The panel resizes itself on its next tick — a tenth of a
+    /// second — so nothing here has to reach up and ask for it.
+    func select(_ next: Tab) {
+        guard tab != next, !(next == .git && gitTile.isHidden) else { return }
+        tab = next
+        panesTile.setSelected(next == .terminals)
+        gitTile.setSelected(next == .git)
+        if let dashboard { apply(dashboard, animated: true) }
     }
 
     @available(*, unavailable)
@@ -1228,8 +1532,15 @@ final class HoverDashboardView: NSView {
 
     /// For tests: which rows the table is actually showing.
     var visibleRowCount: Int { rowViews.filter { !$0.isHidden }.count }
+    /// For tests: the git tab, when it is the one showing.
+    var visibleGitPanel: HoverGitPanelView? { gitPanel.isHidden ? nil : gitPanel }
+
+    /// The last dashboard drawn, so a tab switch can redraw without waiting
+    /// for the next tick to hand one over.
+    private var dashboard: SessionDashboard?
 
     func apply(_ dashboard: SessionDashboard, animated: Bool) {
+        self.dashboard = dashboard
         panesTile.apply(
             value: "\(dashboard.working)",
             label: dashboard.mix.isEmpty ? "working" : "working · \(dashboard.mix)",
@@ -1251,6 +1562,8 @@ final class HoverDashboardView: NSView {
             diffBar.apply(added: git.added, removed: git.removed)
         } else {
             gitTile.isHidden = true
+            // A clean tree has no tile, and a tab with no handle is a trap.
+            if tab == .git { select(.terminals) }
         }
 
         let count = dashboard.rows.count
@@ -1261,9 +1574,12 @@ final class HoverDashboardView: NSView {
             guard view.isHidden != hidden else { continue }
             setHidden(view, hidden, animated: animated)
         }
-        let empty = count == 0
+        let empty = count == 0 || tab != .terminals
         setHidden(tableHeader, empty, animated: animated)
         setHidden(rows, empty, animated: animated)
+
+        gitPanel.apply(dashboard)
+        setHidden(gitPanel, tab != .git, animated: animated)
     }
 
     /// Shown or hidden *now*, and faded in on the way. Not through
@@ -1676,9 +1992,12 @@ final class HoverCardShellView: NSView {
 /// it has to be its own window (the same reason the spotlight is one — see
 /// `CommandPaletteController`).
 ///
-/// It never takes the mouse. `ignoresMouseEvents` is the whole interaction
-/// model: rest on a row and it appears, move on and it goes, and it can never
-/// swallow a click meant for the pane underneath it.
+/// It takes the mouse, because the card is a dashboard now and its two KPI
+/// tiles are tabs: the pointer has to be able to reach them. So leaving the
+/// row no longer closes it — the pointer is given `closeGrace` to arrive on
+/// the card, and only when it is on neither does the card fade. Hovering
+/// another row, or a click anywhere else, still closes it at once: the grace
+/// is for a pointer on its way to the card, not for one that has moved on.
 final class SessionHoverCardController {
     /// Which row the pointer is on.
     enum Target: Equatable {
@@ -1693,12 +2012,19 @@ final class SessionHoverCardController {
     /// which takes the card with it. Re-read every tick for the same reason:
     /// a row rebuilt under a stationary pointer must not drop the card.
     var rowFrame: ((Target) -> NSRect?)?
+    /// What the git tab's Review button does. Unset — the window has nothing
+    /// to show — and the card does not draw the button at all.
+    var onReview: ((Target) -> Void)?
 
     /// Barely a delay at all — enough to keep a pointer crossing the list from
     /// firing a card per row, and no more. Anything longer reads as the card
     /// deciding whether to come.
     static let openDelay: TimeInterval = 0.12
     static let tickInterval: TimeInterval = 0.1
+    /// How long the pointer may be on neither the row nor the card before the
+    /// card goes. Long enough to cross the gap between them without hurrying,
+    /// and to read the card from just outside it.
+    static let closeGrace: TimeInterval = 3
     /// Between the row's right edge and the card — the arrowhead's lane, plus
     /// enough that its tip lands just off the row rather than on top of it.
     static var gap: CGFloat { HoverCardShellView.lane + 4 }
@@ -1712,6 +2038,10 @@ final class SessionHoverCardController {
     private let panel: NSPanel
     private var openTimer: Timer?
     private var tickTimer: Timer?
+    /// When the pointer left both the row and the card, and `nil` while it is
+    /// on one of them. The grace runs from here.
+    private var leftAt: TimeInterval?
+    private var clickMonitor: Any?
     private weak var parent: NSWindow?
 
     var isOpen: Bool { panel.isVisible }
@@ -1733,7 +2063,7 @@ final class SessionHoverCardController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
         panel.animationBehavior = .none
@@ -1744,6 +2074,7 @@ final class SessionHoverCardController {
     deinit {
         openTimer?.invalidate()
         tickTimer?.invalidate()
+        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
     }
 
     /// The pointer entered a row, or left one (`nil`).
@@ -1752,10 +2083,17 @@ final class SessionHoverCardController {
         guard let next else {
             openTimer?.invalidate()
             openTimer = nil
-            dismiss()
+            // An open card is not dismissed here any more: the pointer may be
+            // on its way *onto* it, and the row it came from reports that as
+            // having left. The tick, which can see where the pointer actually
+            // is, decides — see `closeGrace`.
+            if !isOpen { dismiss() }
             return
         }
         guard next != target || !isOpen else { return }
+        // A different row: that is the pointer having moved on, not a pointer
+        // in transit, and the old card goes now rather than in three seconds.
+        leftAt = nil
         target = next
         // Already showing something: slide to the new row now. The delay is
         // there to stop a card appearing at all while the pointer travels, not
@@ -1771,16 +2109,22 @@ final class SessionHoverCardController {
         }
     }
 
-    func dismiss() {
+    /// `fade` is longer on the way out of the grace than on the way off a row:
+    /// a card that timed out should look like it faded, and one the pointer
+    /// walked away from should already be gone.
+    func dismiss(fade: TimeInterval = 0.09) {
         openTimer?.invalidate()
         openTimer = nil
         tickTimer?.invalidate()
         tickTimer = nil
+        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+        clickMonitor = nil
+        leftAt = nil
         target = nil
         guard panel.isVisible else { return }
         let panel = panel
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = ShellMotion.reduced ? 0 : 0.09
+            context.duration = ShellMotion.reduced ? 0 : fade
             panel.animator().alphaValue = 0
         }, completionHandler: {
             // A second hover may have re-opened it in the meantime.
@@ -1834,6 +2178,16 @@ final class SessionHoverCardController {
         let wasOpen = panel.isVisible
         body.apply(model)
         body.tailField.animates = !ShellMotion.reduced
+        if let onReview, case .session = target {
+            // Clicking it is a decision: the card has done its job and gets
+            // out of the way of whatever it just opened.
+            body.dashboardView.onReview = { [weak self] in
+                self?.dismiss()
+                onReview(target)
+            }
+        } else {
+            body.dashboardView.onReview = nil
+        }
         let size = Self.panelSize(card: body.cardSize)
         let frame = Self.frame(size: size, row: row, container: parent.frame)
 
@@ -1859,6 +2213,19 @@ final class SessionHoverCardController {
     }
 
     private func startTicking() {
+        // A click anywhere but on the card ends it now — the pointer is doing
+        // something else, and no grace applies to that. Local only: a click in
+        // another app takes the whole window's attention, and the card goes
+        // with the window.
+        if clickMonitor == nil {
+            clickMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+            ) { [weak self] event in
+                guard let self, self.isOpen, event.window !== self.panel else { return event }
+                self.dismiss()
+                return event
+            }
+        }
         guard tickTimer == nil else { return }
         let timer = Timer(timeInterval: Self.tickInterval, repeats: true) { [weak self] _ in
             self?.tick()
@@ -1879,10 +2246,19 @@ final class SessionHoverCardController {
             return
         }
         // The pointer, not `mouseExited`: a row destroyed by a reload never
-        // sends one, and the card would be stranded on screen.
-        guard row.contains(NSEvent.mouseLocation) else {
-            dismiss()
-            return
+        // sends one, and the card would be stranded on screen. The card counts
+        // as well as the row now — resting on it is what the tabs are for.
+        let pointer = NSEvent.mouseLocation
+        if row.contains(pointer) || panel.frame.contains(pointer) {
+            leftAt = nil
+        } else {
+            let now = Date().timeIntervalSince1970
+            let since = leftAt ?? now
+            leftAt = since
+            if now - since >= Self.closeGrace {
+                dismiss(fade: 0.35)
+                return
+            }
         }
         body.apply(model)
         let frame = Self.frame(size: Self.panelSize(card: body.cardSize), row: row, container: parent.frame)
