@@ -18,7 +18,7 @@ import AppKit
 /// `SpotlightScrimWindow` behind the panel is invisible and only catches the
 /// click that means "close".
 final class CommandPaletteController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate,
-    NSTextFieldDelegate {
+    NSTextFieldDelegate, NSWindowDelegate {
     /// Raised with the chosen row's action. The palette closes first, so the
     /// action lands with focus already back in the workspace.
     var onRun: ((PaletteAction) -> Void)?
@@ -54,6 +54,9 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
     static let headerHeight: CGFloat = 26
     static let maxResultsHeight: CGFloat = 396
     static let cornerRadius: CGFloat = 24
+    static let openDuration: TimeInterval = 0.16
+    static let closeDuration: TimeInterval = 0.11
+    private static let scaleKey = "spotlight.scale"
 
     init() {
         let panel = CommandPalettePanel(
@@ -70,7 +73,12 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         panel.hasShadow = true
         panel.isMovableByWindowBackground = true
         panel.appearance = NSAppearance(named: .darkAqua)
-        panel.hidesOnDeactivate = true
+        // Not `hidesOnDeactivate`: that hides the panel behind the app's back,
+        // with no animation and with the panel still open underneath, so it
+        // came straight back on the next activation. Losing the keyboard is a
+        // dismissal like any other and goes through `dismiss()` — see
+        // `windowDidResignKey`.
+        panel.hidesOnDeactivate = false
         panel.level = .floating
         super.init(window: panel)
 
@@ -145,6 +153,9 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         content.addSubview(scrollView)
 
         panel.contentView = Self.glassHost(content, size: panel.frame.size)
+        // The layer the open/close scale rides on.
+        panel.contentView?.wantsLayer = true
+        panel.delegate = self
         panel.initialFirstResponder = field
         panel.onCancel = { [weak self] in self?.dismiss() }
         scrim.onClick = { [weak self] in self?.dismiss() }
@@ -225,20 +236,89 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
                 )
             )
         }
+        isClosing = false
+        window?.contentView?.layer?.removeAnimation(forKey: Self.scaleKey)
+        window?.alphaValue = 0
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(field)
+        animateOpen()
     }
 
-    func dismiss() {
-        if let window {
-            window.parent?.removeChildWindow(window)
-            window.orderOut(nil)
+    /// Fades and swells into place, the way Spotlight arrives. The scale is on
+    /// the content's layer rather than the window's frame: the panel's height
+    /// is hand-laid per keystroke, and animating the frame would drag the
+    /// field and the rows through sizes they were never laid out for.
+    private func animateOpen() {
+        guard let window else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = ShellMotion.reduced ? 0 : Self.openDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().alphaValue = 1
         }
-        // Ordered out rather than faded: dismissal should feel like the
-        // workspace snapping back, not like waiting for it.
+        scale(from: 0.96, to: 1, duration: Self.openDuration, timing: .easeOut)
+    }
+
+    private func scale(
+        from: CGFloat,
+        to: CGFloat,
+        duration: TimeInterval,
+        timing: CAMediaTimingFunctionName
+    ) {
+        guard !ShellMotion.reduced, let layer = window?.contentView?.layer else { return }
+        let animation = CABasicAnimation(keyPath: "transform.scale")
+        animation.fromValue = from
+        animation.toValue = to
+        animation.duration = duration
+        animation.timingFunction = CAMediaTimingFunction(name: timing)
+        // Held at the end value: the closing one has to stay shrunk until the
+        // window is actually ordered out, and the opening one is cleared by
+        // the next `present`.
+        animation.fillMode = .forwards
+        animation.isRemovedOnCompletion = false
+        layer.add(animation, forKey: Self.scaleKey)
+    }
+
+    /// Fades and shrinks away, and hands the keyboard back before it does —
+    /// so a row's action, or whatever the click that closed the spotlight was
+    /// aimed at, lands in the workspace while the panel is still on its way
+    /// out rather than after it.
+    func dismiss() {
+        guard let window, window.isVisible, !isClosing else { return }
+        isClosing = true
+        let workspace = scrim.parent
+        window.parent?.removeChildWindow(window)
+        // The scrim draws nothing, so it has nothing to fade: it goes at once,
+        // and having gone stops swallowing clicks meant for the workspace. It
+        // must also leave before the panel, being the panel's parent window —
+        // ordering it out with a child attached would take the panel with it,
+        // fade and all.
         scrim.parent?.removeChildWindow(scrim)
         scrim.orderOut(nil)
+        workspace?.makeKey()
+
+        scale(from: 1, to: 0.97, duration: Self.closeDuration, timing: .easeIn)
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = ShellMotion.reduced ? 0 : Self.closeDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            window.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            // A ⌘K in the meantime has already reopened it.
+            guard let self, isClosing else { return }
+            isClosing = false
+            window.orderOut(nil)
+        })
+    }
+
+    /// Closing, but still on screen finishing its fade. Not open, for every
+    /// purpose except the pixels.
+    private(set) var isClosing = false
+
+    /// Losing the keyboard — a click in another app, ⌘Tab, anything — closes
+    /// the spotlight. It has the keyboard and nothing else; without it, it is
+    /// a glass slab sitting over a workspace it can no longer act on.
+    func windowDidResignKey(_ notification: Notification) {
+        dismiss()
     }
 
     /// Types into the field — exactly the path a keystroke takes, exposed so
@@ -672,8 +752,9 @@ final class SpotlightScrimWindow: NSWindow {
         hasShadow = false
         backgroundColor = .clear
         level = .floating
-        // Hides and returns with the panel, which does the same.
-        hidesOnDeactivate = true
+        // The panel's dismissal takes the scrim with it, deactivation
+        // included, so nothing is left catching clicks over the workspace.
+        hidesOnDeactivate = false
         let click = ScrimClickView { [weak self] in self?.onClick?() }
         click.autoresizingMask = [.width, .height]
         contentView = click

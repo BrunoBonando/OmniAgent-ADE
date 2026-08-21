@@ -743,7 +743,7 @@ final class CommandPaletteTests: XCTestCase {
         var openWhenRun: [Bool] = []
         controller.onRun = { action in
             ran.append(action)
-            openWhenRun.append(controller.window?.isVisible == true)
+            openWhenRun.append(!controller.isClosing)
         }
         controller.present(commands: sample, over: nil)
         controller.setQuery("switch")
@@ -751,7 +751,22 @@ final class CommandPaletteTests: XCTestCase {
         controller.runSelected()
 
         XCTAssertEqual(ran, [.focusPane(sessionID: "a")])
-        XCTAssertEqual(openWhenRun, [false], "the action lands with focus already back in the workspace")
+        XCTAssertEqual(
+            openWhenRun,
+            [false],
+            "the action lands with the panel already dismissed — still on screen only for its fade"
+        )
+    }
+
+    func testLosingTheKeyboardClosesTheSpotlight() {
+        let controller = CommandPaletteController()
+        controller.present(commands: sample, over: nil)
+        XCTAssertFalse(controller.isClosing)
+
+        controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification))
+
+        XCTAssertTrue(controller.isClosing, "out of focus is out")
+        XCTAssertNil(controller.window?.parent, "and it takes itself out of the workspace's window chain at once")
     }
 
     func testThePanelIsRebuiltFromScratchOnEveryOpen() {
