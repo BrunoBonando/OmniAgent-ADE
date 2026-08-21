@@ -18,6 +18,13 @@ import AppKit
 struct PaneActivity: Equatable {
     /// Epoch ms the current run of work began, `nil` when the pane is not busy.
     var busySince: Double?
+    /// Epoch ms this pane was first heard from — the card's "age".
+    ///
+    /// The app's own first sight of it, not a durable creation stamp: nothing
+    /// persists one, and the daemon's sessions carry an `Instant`, which does
+    /// not survive a daemon restart either. A restored pane therefore reads as
+    /// young, which is the honest answer to "how long has this been running".
+    var firstSeen: Double?
     /// Busy time from runs that have already ended.
     var settledActiveMs: Double = 0
     /// How many times this pane has gone off to run a tool.
@@ -58,6 +65,7 @@ struct PaneActivityLedger: Equatable {
         last[paneID] = status
 
         var activity = panes[paneID] ?? PaneActivity()
+        if activity.firstSeen == nil { activity.firstSeen = now }
         let wasBusy = Self.isBusy(previous)
         let isBusy = Self.isBusy(status)
         // thinking -> tool -> thinking is *one* run, not three: "since" is
@@ -82,6 +90,54 @@ struct PaneActivityLedger: Equatable {
 
 // MARK: - What the card says
 
+/// One line of the session card's "Working now" table: a pane that is *not*
+/// ready, and the last thing it said.
+struct HoverWorkRow: Equatable {
+    var paneID: String
+    var title: String
+    /// `Claude · Running a tool` — what is driving the pane, and what it is
+    /// doing. Not a model name: nothing in the app knows which model an engine
+    /// picked, and a made-up one is worse than none.
+    var detail: String
+    /// The pane's own last output line, ellipsised. Empty for a pane that has
+    /// printed nothing yet — the row is still worth showing, it is working.
+    var line: String
+    var accent: NSColor
+    var pulses: Bool
+    var engine: Engine?
+
+    /// Shorter than a pane card's `tail`: this is one line of a table, and the
+    /// table matters more than any single row in it.
+    static let lineLimit = 90
+}
+
+/// The session card's KPI strip and its table — everything a pane card does
+/// not have. A session is a fleet; the card is its dashboard.
+struct SessionDashboard: Equatable {
+    /// One colour per terminal, worst state first. The bar's filled pills:
+    /// count them and you have the session's size, read them and you have its
+    /// state. `capacity` is the rest of the bar, drawn empty — which is the
+    /// one thing a donut cannot say at all.
+    var pills: [NSColor]
+    var capacity: Int
+    /// The headline number: how many are working right now.
+    var working: Int
+    /// `2 waiting · 1 ready` — the rest of the mix, beside the headline.
+    var mix: String
+    /// `2h`, `3d`, `5mo` — the oldest pane in the session.
+    var age: String?
+    var branch: String?
+    /// `nil` until the first `git diff` lands, and hidden when the tree is
+    /// clean.
+    var git: GitDiffStat?
+    /// The four most urgent, most recent panes that are doing something.
+    var rows: [HoverWorkRow]
+
+    /// How many rows the table ever shows. Four is what fits beside a sidebar
+    /// row without the card running off the screen.
+    static let maxRows = 4
+}
+
 /// The card's content, derived and then rendered. Everything here is a string
 /// the view prints as-is, so the shape of the card is decided in one testable
 /// place instead of inside a stack of labels.
@@ -105,6 +161,9 @@ struct HoverCardModel: Equatable {
     /// working, it is the mark and the line; ready, it is the mark alone, green,
     /// which is the card saying "nothing running" without spending a word on it.
     var mark: Bool = false
+    /// The session card's dashboard. `nil` for a pane card, which is one pane
+    /// and has nothing to summarise.
+    var dashboard: SessionDashboard?
 
     /// How much of the output line the card shows. The ask was the beginning
     /// of the line and an ellipsis, not the line.
@@ -171,18 +230,29 @@ extension HoverCardModel {
         }
     }
 
-    /// A session row's card: its panes, summarised.
+    /// A session row's card: the fleet, as a dashboard.
+    ///
+    /// Everything here is derived from what the window already holds — no new
+    /// bookkeeping, except `git`, which is a subprocess the caller caches
+    /// (`GitDiffStat.cached`). Nothing on this path may block: it runs ten
+    /// times a second while the card is open.
     static func session(
         _ session: SessionGroupNode,
         panes: [String: PaneDescriptor],
         statuses: [String: RemoteSessionStatus],
         ledger: PaneActivityLedger,
+        eventTimes: [String: Double] = [:],
+        tails: (String) -> String? = { _ in nil },
+        git: GitDiffStat? = nil,
+        branch: String? = nil,
+        capacity: Int = PaneGrid.maxPanes,
         now: Double
     ) -> HoverCardModel {
         let live = session.paneIDs.filter { panes[$0]?.kind == .terminal }
         let waiting = live.filter { statuses[$0] == .awaitingApproval }.count
         let working = live.filter { PaneActivityLedger.isBusy(statuses[$0]) }.count
         let ready = live.filter { statuses[$0] == .ready }.count
+        let errored = live.filter { statuses[$0] == .error }.count
 
         // The worst state wins, the same order the row's own dots read in:
         // something asking beats something working beats something done.
@@ -202,16 +272,51 @@ extension HoverCardModel {
             word = "Idle"
         }
 
-        // The longest-running of them: the session's "how long has this been
-        // going", which is the oldest start, not the newest.
-        let longest = live
-            .compactMap { ledger.activity(for: $0)?.runMs(now: now) }
-            .max()
+        // Worst first, so a bar read left to right is a bar read in order of
+        // how much it wants from you.
+        let pills = live
+            .sorted { severity(statuses[$0]) < severity(statuses[$1]) }
+            .map { ShellDotsView.color(for: statuses[$0]) }
 
-        var counts: [String] = [count(session.paneIDs.count, "pane")]
-        if working > 0 { counts.append("\(working) working") }
-        if waiting > 0 { counts.append("\(waiting) waiting") }
-        if ready > 0 { counts.append("\(ready) ready") }
+        var mix: [String] = []
+        if errored > 0 { mix.append("\(errored) error") }
+        if waiting > 0 { mix.append("\(waiting) waiting") }
+        if ready > 0 { mix.append("\(ready) ready") }
+        let idle = live.count - working - waiting - ready - errored
+        if idle > 0 { mix.append("\(idle) idle") }
+
+        // A ready pane is not news — the ask was the panes that are *doing*
+        // something. Urgent first, then whichever spoke most recently.
+        let rows = live
+            .filter { severity(statuses[$0]) < severity(.ready) }
+            .sorted {
+                let left = severity(statuses[$0]), right = severity(statuses[$1])
+                if left != right { return left < right }
+                return (eventTimes[$0] ?? 0) > (eventTimes[$1] ?? 0)
+            }
+            .prefix(SessionDashboard.maxRows)
+            .compactMap { id -> HoverWorkRow? in
+                guard let pane = panes[id] else { return nil }
+                let status = statuses[id]
+                return HoverWorkRow(
+                    paneID: id,
+                    title: SessionOutline.paneLabel(pane),
+                    detail: "\(pane.engine.displayName) · \(Self.word(for: status))",
+                    line: tails(id).flatMap { snippet($0, limit: HoverWorkRow.lineLimit) } ?? "",
+                    accent: ShellDotsView.color(for: status),
+                    pulses: ShellDotsView.pulses(status),
+                    engine: pane.engine
+                )
+            }
+
+        let born = live.compactMap { ledger.activity(for: $0)?.firstSeen }.min()
+        let age = born.map { Self.age(now - $0) }
+        // The age rides on the path line rather than taking a row of its own:
+        // it is one word, and a row for one word is how a card becomes a form.
+        let meta = [
+            session.cwd.isEmpty ? nil : ShellPath.abbreviate(session.cwd),
+            age.map { "\($0) old" },
+        ].compactMap { $0 }.joined(separator: "  ·  ")
 
         return HoverCardModel(
             title: session.label,
@@ -219,11 +324,34 @@ extension HoverCardModel {
             accent: accent,
             pulses: working > 0,
             engine: nil,
-            meta: session.cwd.isEmpty ? nil : ShellPath.abbreviate(session.cwd),
-            timing: longest.map { "working \(duration($0))" },
-            totals: counts.joined(separator: " · "),
-            tail: nil
+            meta: meta.isEmpty ? nil : meta,
+            timing: nil,
+            totals: nil,
+            tail: nil,
+            dashboard: SessionDashboard(
+                pills: pills,
+                capacity: max(capacity, live.count),
+                working: working,
+                mix: mix.joined(separator: " · "),
+                age: age,
+                branch: branch,
+                git: (git?.isEmpty ?? true) ? nil : git,
+                rows: Array(rows)
+            )
         )
+    }
+
+    /// Worst first: an error, then something waiting on you, then something
+    /// working, then a settled pane, then one that has never said anything.
+    /// The one ordering the pill bar and the table both sort by.
+    static func severity(_ status: RemoteSessionStatus?) -> Int {
+        switch status {
+        case .error: return 0
+        case .awaitingApproval: return 1
+        case .thinking, .toolExecution: return 2
+        case .ready: return 3
+        case nil: return 4
+        }
     }
 
     // MARK: Pieces
@@ -304,6 +432,24 @@ extension HoverCardModel {
         if hours > 0 { return String(format: "%dh %02dm", hours, minutes) }
         if minutes > 0 { return "\(minutes)m \(seconds)s" }
         return "\(seconds)s"
+    }
+
+    /// `12s`, `4m`, `3h`, `2d`, `3w`, `5mo`, `2y` — one unit, the biggest
+    /// that fits. Deliberately coarser than `duration`: that one is a running
+    /// clock and has to tick, this one answers "how old is this" and a second
+    /// hand on it would be noise.
+    static func age(_ ms: Double) -> String {
+        let seconds = max(0, ms) / 1000
+        let minutes = seconds / 60, hours = minutes / 60, days = hours / 24
+        if seconds < 60 { return "\(Int(seconds))s" }
+        if minutes < 60 { return "\(Int(minutes))m" }
+        if hours < 24 { return "\(Int(hours))h" }
+        if days < 7 { return "\(Int(days))d" }
+        if days < 30 { return "\(Int(days / 7))w" }
+        // Calendar months and years, averaged. The card says "5mo", not a date
+        // — nobody reading a hover card is counting the days in February.
+        if days < 365 { return "\(Int(days / 30))mo" }
+        return "\(Int(days / 365))y"
     }
 
     /// Fixed 24-hour clock rather than the user's locale: the card sits beside
@@ -615,11 +761,447 @@ final class HoverWorkingMarkView: NSImageView {
     }
 }
 
+/// The pane bar: one filled pill per terminal in the session, and an empty one
+/// for every slot it has not used.
+///
+/// The alternative was a half-donut with the count in the hole. A donut of four
+/// slices at this size is a pie chart nobody can read: arc angles do not
+/// answer "how many", and the number in the middle only repeats what the ring
+/// failed to say. One pill per pane answers it by counting, colours it by
+/// status, and shows the empty slots as well — which no donut can.
+final class HoverPillBarView: NSView {
+    static let height: CGFloat = 6
+    static let gap: CGFloat = 3
+    /// Below this a pill is a dash, so the bar stops adding slots and simply
+    /// shows what it can. A twelve-pane session is already off the design's map.
+    static let minPill: CGFloat = 4
+
+    private(set) var pills: [NSColor] = []
+    private(set) var capacity = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: Self.height).isActive = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(pills: [NSColor], capacity: Int) {
+        guard pills != self.pills || capacity != self.capacity else { return }
+        self.pills = pills
+        self.capacity = capacity
+        needsDisplay = true
+    }
+
+    /// How many slots actually fit. The filled ones always do — an empty slot
+    /// is the first thing to give up when the bar runs out of room.
+    func slotCount(width: CGFloat) -> Int {
+        let wanted = max(capacity, pills.count)
+        guard wanted > 0, width > 0 else { return 0 }
+        let fits = Int((width + Self.gap) / (Self.minPill + Self.gap))
+        return max(pills.count, min(wanted, fits))
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let slots = slotCount(width: bounds.width)
+        guard slots > 0 else { return }
+        let pill = (bounds.width - Self.gap * CGFloat(slots - 1)) / CGFloat(slots)
+        guard pill > 0 else { return }
+        for index in 0..<slots {
+            let color = index < pills.count ? pills[index] : Self.emptySlot
+            color.setFill()
+            let rect = NSRect(
+                x: (pill + Self.gap) * CGFloat(index),
+                y: 0,
+                width: pill,
+                height: bounds.height
+            )
+            NSBezierPath(
+                roundedRect: rect,
+                xRadius: min(bounds.height / 2, pill / 2),
+                yRadius: bounds.height / 2
+            ).fill()
+        }
+    }
+
+    private static let emptySlot = NSColor(white: 1, alpha: 0.09)
+}
+
+/// The diff bar: how much of the uncommitted work is added versus removed.
+/// The numbers beside it carry the magnitude; this carries the ratio.
+final class HoverDiffBarView: NSView {
+    static let height: CGFloat = 6
+    static let gap: CGFloat = 2
+    /// A one-line deletion in a thousand-line diff still gets a visible sliver
+    /// — a bar that rounds a real number to nothing is lying.
+    static let minSlice: CGFloat = 5
+
+    private var added = 0
+    private var removed = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: Self.height).isActive = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(added: Int, removed: Int) {
+        guard added != self.added || removed != self.removed else { return }
+        self.added = added
+        self.removed = removed
+        needsDisplay = true
+    }
+
+    /// The green slice's width, clamped so neither side vanishes while it still
+    /// has lines in it.
+    func greenWidth(total width: CGFloat) -> CGFloat {
+        let sum = added + removed
+        guard sum > 0, width > 0 else { return 0 }
+        if removed == 0 { return width }
+        if added == 0 { return 0 }
+        let usable = width - Self.gap
+        let raw = usable * CGFloat(added) / CGFloat(sum)
+        return min(max(raw, Self.minSlice), max(usable - Self.minSlice, 0))
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let radius = bounds.height / 2
+        guard added + removed > 0 else {
+            NSColor(white: 1, alpha: 0.09).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+            return
+        }
+        let green = greenWidth(total: bounds.width)
+        if green > 0 {
+            ShellPalette.green.setFill()
+            NSBezierPath(
+                roundedRect: NSRect(x: 0, y: 0, width: green, height: bounds.height),
+                xRadius: radius,
+                yRadius: radius
+            ).fill()
+        }
+        let redX = green > 0 ? green + Self.gap : 0
+        let redWidth = bounds.width - redX
+        if redWidth > 0 {
+            ShellPalette.red.setFill()
+            NSBezierPath(
+                roundedRect: NSRect(x: redX, y: 0, width: redWidth, height: bounds.height),
+                xRadius: radius,
+                yRadius: radius
+            ).fill()
+        }
+    }
+}
+
+/// One KPI tile: a caption, a hint on the right, a big number with a label
+/// beside it, and a bar underneath. Both tiles on the card are this — the
+/// terminals one and the uncommitted one differ only by what they hand it.
+final class HoverKPITileView: NSView {
+    static let corner: CGFloat = 10
+    static let padding: CGFloat = 10
+
+    private let captionField = ShellFont.label(
+        font: ShellFont.ui(9.5, .semibold),
+        color: ShellPalette.inkFaint,
+        tracking: 0.8
+    )
+    private let hintField = ShellFont.label(font: ShellFont.ui(9.5), color: ShellPalette.inkFainter)
+    private let valueField = ShellFont.label(
+        font: ShellFont.ui(23, .semibold),
+        color: ShellPalette.inkSecondary
+    )
+    private let labelField = ShellFont.label(font: ShellFont.ui(11), color: ShellPalette.inkTertiary)
+
+    init(caption: String, accessory: NSView) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(white: 1, alpha: 0.045).cgColor
+        layer?.cornerRadius = Self.corner
+        layer?.borderWidth = 1
+        layer?.borderColor = ShellPalette.hairline.cgColor
+
+        captionField.stringValue = caption.uppercased()
+        // The caption must never be the thing that gets squeezed: it is two
+        // words, and the hint beside it is the one that can go.
+        captionField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        hintField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        hintField.alignment = .right
+
+        let header = NSStackView(views: [captionField, NSView(), hintField])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 6
+
+        // First baseline, so `14` and `files` sit on one line the way a
+        // sentence does rather than being centred against each other.
+        let value = NSStackView(views: [valueField, labelField, NSView()])
+        value.orientation = .horizontal
+        value.alignment = .firstBaseline
+        value.spacing = 5
+
+        let stack = NSStackView(views: [header, value, accessory])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.distribution = .fill
+        stack.spacing = 4
+        stack.setCustomSpacing(6, after: value)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.padding),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padding),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding - 1),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -(Self.padding)),
+            header.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            value.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            accessory.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(value: String, label: String, hint: String?) {
+        valueField.stringValue = value
+        labelField.stringValue = label
+        hintField.stringValue = hint ?? ""
+        hintField.isHidden = (hint == nil)
+    }
+}
+
+/// One line of the "Working now" table: the OmniAgent mark in the pane's own
+/// status colour, the pane's name and what is driving it, and under it the last
+/// line that pane printed.
+final class HoverWorkRowView: NSView {
+    static let markGap: CGFloat = 8
+
+    private let mark = HoverWorkingMarkView()
+    private let headerField = ShellFont.label(font: ShellFont.ui(12.5, .semibold), color: ShellPalette.ink)
+    private let lineField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.blue)
+    private var row: HoverWorkRow?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        // Name and engine are one attributed field rather than two labels in a
+        // stack: two labels need baseline alignment and a spacer to keep from
+        // being centred against each other, and one string gets both for free.
+        let text = NSStackView(views: [headerField, lineField])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 1
+        text.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(mark)
+        addSubview(text)
+
+        NSLayoutConstraint.activate([
+            mark.leadingAnchor.constraint(equalTo: leadingAnchor),
+            mark.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            text.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: Self.markGap),
+            text.trailingAnchor.constraint(equalTo: trailingAnchor),
+            text.topAnchor.constraint(equalTo: topAnchor),
+            text.bottomAnchor.constraint(equalTo: bottomAnchor),
+            headerField.widthAnchor.constraint(equalTo: text.widthAnchor),
+            lineField.widthAnchor.constraint(equalTo: text.widthAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(_ row: HoverWorkRow) {
+        guard row != self.row else { return }
+        self.row = row
+        headerField.attributedStringValue = Self.header(title: row.title, detail: row.detail)
+        lineField.stringValue = row.line
+        // The status colour, softened: it is a subtitle under a white name, and
+        // full-strength blue on glass at 11pt glares rather than reads.
+        lineField.textColor = row.accent.withAlphaComponent(0.82)
+        lineField.isHidden = row.line.isEmpty
+        mark.apply(color: row.accent, pulses: row.pulses)
+        setAccessibilityLabel("\(row.title). \(row.detail). \(row.line)")
+    }
+
+    /// The name in white, what is driving it in grey, on one line.
+    static func header(title: String, detail: String) -> NSAttributedString {
+        let string = NSMutableAttributedString(
+            string: title,
+            attributes: [
+                .font: ShellFont.ui(12.5, .semibold),
+                .foregroundColor: ShellPalette.ink,
+            ]
+        )
+        string.append(NSAttributedString(
+            string: "  \(detail)",
+            attributes: [
+                .font: ShellFont.ui(11),
+                .foregroundColor: ShellPalette.inkMuted,
+            ]
+        ))
+        return string
+    }
+}
+
+/// The session card's dashboard: two KPI tiles, and the table of everything
+/// that is doing something right now.
+///
+/// The table's rows are a fixed pool of four, shown and hidden rather than
+/// built and destroyed — which is what lets the card *grow* when a fifth
+/// terminal starts working instead of snapping to a new size.
+final class HoverDashboardView: NSView {
+    private let panesBar = HoverPillBarView()
+    private let diffBar = HoverDiffBarView()
+    private let panesTile: HoverKPITileView
+    private let gitTile: HoverKPITileView
+    private let addedField = ShellFont.label(font: ShellFont.ui(11, .medium), color: ShellPalette.green)
+    private let removedField = ShellFont.label(font: ShellFont.ui(11, .medium), color: ShellPalette.red)
+    private let tableCaption = ShellFont.label(
+        "WORKING NOW",
+        font: ShellFont.ui(9.5, .semibold),
+        color: ShellPalette.inkFaint,
+        tracking: 0.8
+    )
+    private let tableCount = ShellFont.label(font: ShellFont.ui(9.5), color: ShellPalette.inkFainter)
+    private let tableHeader = NSStackView()
+    private let rowViews = (0..<SessionDashboard.maxRows).map { _ in HoverWorkRowView() }
+    private let rows = NSStackView()
+    private let tiles = NSStackView()
+
+    override init(frame frameRect: NSRect) {
+        let diffNumbers = NSStackView(views: [addedField, removedField, diffBar])
+        diffNumbers.orientation = .horizontal
+        diffNumbers.alignment = .centerY
+        diffNumbers.spacing = 6
+        // The bar takes whatever the two numbers leave; the numbers are the
+        // fact and must never be the thing that truncates.
+        addedField.setContentHuggingPriority(.required, for: .horizontal)
+        removedField.setContentHuggingPriority(.required, for: .horizontal)
+        addedField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        removedField.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        panesTile = HoverKPITileView(caption: "Terminals", accessory: panesBar)
+        gitTile = HoverKPITileView(caption: "Uncommitted", accessory: diffNumbers)
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        tiles.orientation = .horizontal
+        tiles.distribution = .fillEqually
+        tiles.alignment = .top
+        tiles.spacing = 8
+        tiles.addArrangedSubview(panesTile)
+        tiles.addArrangedSubview(gitTile)
+
+        tableCount.alignment = .right
+        tableHeader.orientation = .horizontal
+        tableHeader.alignment = .centerY
+        tableHeader.spacing = 6
+        for view in [tableCaption, NSView(), tableCount] { tableHeader.addArrangedSubview(view) }
+
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 9
+        for view in rowViews { rows.addArrangedSubview(view) }
+
+        let stack = NSStackView(views: [tiles, tableHeader, rows])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.setCustomSpacing(11, after: tiles)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            tiles.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            tableHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            rows.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ] + rowViews.map { $0.widthAnchor.constraint(equalTo: rows.widthAnchor) })
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// For tests: which rows the table is actually showing.
+    var visibleRowCount: Int { rowViews.filter { !$0.isHidden }.count }
+
+    func apply(_ dashboard: SessionDashboard, animated: Bool) {
+        panesTile.apply(
+            value: "\(dashboard.working)",
+            label: dashboard.mix.isEmpty ? "working" : "working · \(dashboard.mix)",
+            hint: "of \(dashboard.capacity) max"
+        )
+        panesBar.apply(pills: dashboard.pills, capacity: dashboard.capacity)
+
+        if let git = dashboard.git {
+            gitTile.isHidden = false
+            gitTile.apply(
+                value: "\(git.files)",
+                label: git.files == 1 ? "file" : "files",
+                hint: dashboard.branch
+            )
+            addedField.stringValue = "+\(git.added)"
+            // A real minus sign, not a hyphen: it sits beside a `+` at the same
+            // optical weight, which a hyphen does not.
+            removedField.stringValue = "\u{2212}\(git.removed)"
+            diffBar.apply(added: git.added, removed: git.removed)
+        } else {
+            gitTile.isHidden = true
+        }
+
+        let count = dashboard.rows.count
+        tableCount.stringValue = count == 1 ? "1 agent" : "\(count) agents"
+        for (index, view) in rowViews.enumerated() {
+            if index < count { view.apply(dashboard.rows[index]) }
+            let hidden = index >= count
+            guard view.isHidden != hidden else { continue }
+            setHidden(view, hidden, animated: animated)
+        }
+        let empty = count == 0
+        setHidden(tableHeader, empty, animated: animated)
+        setHidden(rows, empty, animated: animated)
+    }
+
+    /// Shown or hidden *now*, and faded in on the way. Not through
+    /// `animator().isHidden`: that collapses the row over its own duration, and
+    /// the card is measured the instant this returns — so the panel would size
+    /// itself to the shape the table had a moment ago and catch up in jerks.
+    /// The smooth growth is the panel's frame animation; this is only the row
+    /// arriving softly inside it.
+    private func setHidden(_ view: NSView, _ hidden: Bool, animated: Bool) {
+        guard view.isHidden != hidden else { return }
+        view.isHidden = hidden
+        guard animated, !hidden else {
+            view.alphaValue = 1
+            return
+        }
+        view.alphaValue = 0
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            view.animator().alphaValue = 1
+        }
+    }
+}
+
 /// Everything inside the glass. Rows the model has nothing for are hidden,
 /// which in a stack view is the same as not being there — so a ready terminal's
 /// card is genuinely three lines tall, not three lines and four gaps.
 final class HoverCardBodyView: NSView {
+    /// A pane's card: a name and three lines.
     static let width: CGFloat = 280
+    /// A session's card: two KPI tiles side by side, and a table under them.
+    /// The one card in the app that is a dashboard rather than a label.
+    static let sessionWidth: CGFloat = 404
     static let inset: CGFloat = 14
     /// Between the mark and the line it marks.
     static let markGap: CGFloat = 6
@@ -639,6 +1221,9 @@ final class HoverCardBodyView: NSView {
     /// visibly saying one thing.
     let workingMark = HoverWorkingMarkView()
     let engineIcon = NSImageView()
+    /// The session card's KPI tiles and "Working now" table. Hidden — and so,
+    /// in a stack view, absent — on a pane's card.
+    let dashboardView = HoverDashboardView()
     private let rule = NSView()
     private let tailRow = NSView()
     private let stack = NSStackView()
@@ -673,7 +1258,7 @@ final class HoverCardBodyView: NSView {
         stack.alignment = .leading
         stack.spacing = 3
         stack.translatesAutoresizingMaskIntoConstraints = false
-        for view in [header, metaField, timingField, totalsField, rule, tailRow] {
+        for view in [header, metaField, timingField, totalsField, dashboardView, rule, tailRow] {
             stack.addArrangedSubview(view)
         }
         stack.setCustomSpacing(5, after: header)
@@ -681,26 +1266,20 @@ final class HoverCardBodyView: NSView {
         stack.setCustomSpacing(8, after: rule)
         addSubview(stack)
 
-        let content = Self.width - Self.inset * 2
-        // Fixed, and set before anything measures with it: the field has to
-        // break lines at the width the layout gives it, and an unset one
-        // measures as a single endless line.
-        tailField.preferredMaxLayoutWidth = content - HoverWorkingMarkView.size - Self.markGap
+        // Set before anything measures with it: the field has to break lines at
+        // the width the layout gives it, and an unset one measures as a single
+        // endless line.
+        stackWidth = stack.widthAnchor.constraint(equalToConstant: contentWidth)
+        tailField.preferredMaxLayoutWidth = contentWidth - HoverWorkingMarkView.size - Self.markGap
 
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: Self.inset - 1),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -(Self.inset - 1)),
-            stack.widthAnchor.constraint(equalToConstant: content),
-            header.widthAnchor.constraint(equalToConstant: content),
+            stackWidth,
             engineIcon.widthAnchor.constraint(equalToConstant: 15),
             engineIcon.heightAnchor.constraint(equalToConstant: 15),
-            rule.widthAnchor.constraint(equalToConstant: content),
             rule.heightAnchor.constraint(equalToConstant: 1),
-            metaField.widthAnchor.constraint(equalToConstant: content),
-            timingField.widthAnchor.constraint(equalToConstant: content),
-            totalsField.widthAnchor.constraint(equalToConstant: content),
-            tailRow.widthAnchor.constraint(equalToConstant: content),
             workingMark.leadingAnchor.constraint(equalTo: tailRow.leadingAnchor),
             workingMark.topAnchor.constraint(
                 equalTo: tailRow.topAnchor,
@@ -713,7 +1292,9 @@ final class HoverCardBodyView: NSView {
             tailField.trailingAnchor.constraint(equalTo: tailRow.trailingAnchor),
             tailField.topAnchor.constraint(equalTo: tailRow.topAnchor),
             tailField.bottomAnchor.constraint(equalTo: tailRow.bottomAnchor),
-        ])
+        ] + [header, metaField, timingField, totalsField, dashboardView, rule, tailRow].map {
+            $0.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        })
     }
 
     @available(*, unavailable)
@@ -722,6 +1303,12 @@ final class HoverCardBodyView: NSView {
     /// What the last `apply` drew, so the panel knows when the card changed
     /// shape and has to be resized.
     private(set) var model: HoverCardModel?
+
+    /// The width the card is currently drawn at — one of the two constants,
+    /// picked by whether the model carries a dashboard.
+    private(set) var currentWidth = HoverCardBodyView.width
+    private var contentWidth: CGFloat { currentWidth - Self.inset * 2 }
+    private var stackWidth: NSLayoutConstraint!
 
     func apply(_ model: HoverCardModel) {
         let sameRow = self.model?.title == model.title
@@ -742,6 +1329,24 @@ final class HoverCardBodyView: NSView {
             engineIcon.isHidden = false
         } else {
             engineIcon.isHidden = true
+        }
+
+        if currentWidth != (model.dashboard == nil ? Self.width : Self.sessionWidth) {
+            currentWidth = model.dashboard == nil ? Self.width : Self.sessionWidth
+            stackWidth.constant = contentWidth
+            tailField.preferredMaxLayoutWidth =
+                contentWidth - HoverWorkingMarkView.size - Self.markGap
+            tailField.invalidateIntrinsicContentSize()
+        }
+
+        if let dashboard = model.dashboard {
+            dashboardView.isHidden = false
+            // Only while the card stays put: a card that has just slid to
+            // another row is already moving, and rows fading in behind that
+            // read as lag rather than as the table growing.
+            dashboardView.apply(dashboard, animated: sameRow && !ShellMotion.reduced)
+        } else {
+            dashboardView.isHidden = true
         }
 
         rule.isHidden = !model.mark
@@ -769,7 +1374,7 @@ final class HoverCardBodyView: NSView {
     /// The height this card wants at its fixed width.
     var cardSize: NSSize {
         layoutSubtreeIfNeeded()
-        return NSSize(width: Self.width, height: max(fittingSize.height, 44))
+        return NSSize(width: currentWidth, height: max(fittingSize.height, 44))
     }
 }
 
@@ -1165,7 +1770,21 @@ final class SessionHoverCardController {
         }
         body.apply(model)
         let frame = Self.frame(size: Self.panelSize(card: body.cardSize), row: row, container: parent.frame)
-        if !frame.equalTo(panel.frame) { panel.setFrame(frame, display: true) }
+        if !frame.equalTo(panel.frame) {
+            // A pane started or stopped working and the table gained or lost a
+            // row: animate the height so the card grows to cover it rather than
+            // snapping to a new size under a stationary pointer. A move with no
+            // resize is just the row scrolling, and animating that lags.
+            if ShellMotion.reduced || frame.size.equalTo(panel.frame.size) {
+                panel.setFrame(frame, display: true)
+            } else {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.2
+                    context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 0.85, 0.25, 1)
+                    panel.animator().setFrame(frame, display: true)
+                }
+            }
+        }
         // The row moves under the card as the sidebar reloads; the drop keeps
         // pointing at it.
         let centerY = row.midY - frame.minY

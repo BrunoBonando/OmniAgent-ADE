@@ -247,15 +247,7 @@ final class SessionHoverCardTests: XCTestCase {
         let panes = ["a", "b", "c"].reduce(into: [String: PaneDescriptor]()) { out, id in
             out[id] = PaneDescriptor(sessionID: id, group: "s", engine: .claude, cwd: "/Users/x/Code")
         }
-        let node = SessionGroupNode(
-            id: "s",
-            project: "p",
-            name: "Refactor",
-            label: "Refactor",
-            cwd: "/Users/x/Code",
-            paneIDs: ["a", "b", "c"],
-            isCurrent: true
-        )
+        let node = sessionNode(paneIDs: ["a", "b", "c"])
 
         let working = HoverCardModel.session(
             node,
@@ -266,9 +258,18 @@ final class SessionHoverCardTests: XCTestCase {
         )
         XCTAssertEqual(working.status, "2 terminals are working")
         XCTAssertEqual(working.accent, ShellPalette.blue)
-        XCTAssertEqual(working.totals, "3 panes · 2 working · 1 ready")
-        // The *longest* run, not the newest: 2m, not 1m.
-        XCTAssertEqual(working.timing, "working 2m 0s")
+        let dashboard = try? XCTUnwrap(working.dashboard)
+        XCTAssertEqual(dashboard?.working, 2)
+        XCTAssertEqual(dashboard?.mix, "1 ready")
+        // Worst first: the two blues, then the green. Read left to right, the
+        // bar is in order of how much it wants from you.
+        XCTAssertEqual(
+            dashboard?.pills,
+            [ShellPalette.blue, ShellPalette.blue, ShellPalette.green]
+        )
+        XCTAssertEqual(dashboard?.capacity, PaneGrid.maxPanes)
+        // The *oldest* pane, not the newest: 2m, not 1m.
+        XCTAssertEqual(dashboard?.age, "2m")
 
         let waiting = HoverCardModel.session(
             node,
@@ -279,6 +280,271 @@ final class SessionHoverCardTests: XCTestCase {
         )
         XCTAssertEqual(waiting.status, "1 terminal is waiting")
         XCTAssertEqual(waiting.accent, ShellPalette.amber, "something asking outranks something working")
+        XCTAssertEqual(waiting.dashboard?.pills.first, ShellPalette.amber)
+    }
+
+    /// The table is the point of the card: what is doing something, worst
+    /// first, most recent first, and never anything that is just sitting there.
+    func testTheWorkingTableSkipsReadyPanesAndPutsTheUrgentOneFirst() throws {
+        var panes: [String: PaneDescriptor] = [:]
+        for (id, engine) in [("a", Engine.claude), ("b", .codex), ("c", .shell), ("d", .claude)] {
+            panes[id] = PaneDescriptor(
+                sessionID: id,
+                group: "s",
+                title: "pane \(id)",
+                engine: engine,
+                cwd: "/Users/x/Code",
+                label: "pane \(id)"
+            )
+        }
+        let model = HoverCardModel.session(
+            sessionNode(paneIDs: ["a", "b", "c", "d"]),
+            panes: panes,
+            statuses: ["a": .thinking, "b": .awaitingApproval, "c": .ready, "d": .thinking],
+            ledger: PaneActivityLedger(),
+            eventTimes: ["a": t0, "d": t0 + 5_000],
+            tails: { $0 == "b" ? "Blocked — wants to write 3 files outside src/" : "line \($0)" },
+            now: t0 + 10_000
+        )
+        let rows = try XCTUnwrap(model.dashboard?.rows)
+        XCTAssertEqual(rows.map(\.paneID), ["b", "d", "a"], "waiting first, then the newest worker")
+        XCTAssertEqual(rows[0].accent, ShellPalette.amber)
+        XCTAssertEqual(rows[0].detail, "Codex · Waiting for you")
+        XCTAssertEqual(rows[0].line, "Blocked — wants to write 3 files outside src/")
+        XCTAssertFalse(rows.contains { $0.paneID == "c" }, "a ready pane is not news")
+    }
+
+    /// Four rows, and the fifth is simply not shown — the card sits beside a
+    /// sidebar row and cannot grow forever.
+    func testTheTableStopsAtFourRows() throws {
+        let ids = (0..<7).map { "p\($0)" }
+        var panes: [String: PaneDescriptor] = [:]
+        var statuses: [String: RemoteSessionStatus] = [:]
+        for id in ids {
+            panes[id] = PaneDescriptor(sessionID: id, group: "s", engine: .claude)
+            statuses[id] = .thinking
+        }
+        let model = HoverCardModel.session(
+            sessionNode(paneIDs: ids),
+            panes: panes,
+            statuses: statuses,
+            ledger: PaneActivityLedger(),
+            now: t0
+        )
+        XCTAssertEqual(model.dashboard?.rows.count, SessionDashboard.maxRows)
+        XCTAssertEqual(model.dashboard?.pills.count, 7, "the bar still counts them all")
+    }
+
+    /// A clean tree has no git tile at all, rather than a tile full of zeroes.
+    func testACleanTreeHasNoGitTile() {
+        let panes = ["a": PaneDescriptor(sessionID: "a", group: "s", engine: .claude)]
+        let clean = HoverCardModel.session(
+            sessionNode(paneIDs: ["a"]),
+            panes: panes,
+            statuses: ["a": .ready],
+            ledger: PaneActivityLedger(),
+            git: GitDiffStat(),
+            now: t0
+        )
+        XCTAssertNil(clean.dashboard?.git)
+
+        let dirty = HoverCardModel.session(
+            sessionNode(paneIDs: ["a"]),
+            panes: panes,
+            statuses: ["a": .ready],
+            ledger: PaneActivityLedger(),
+            git: GitDiffStat(files: 14, added: 1284, removed: 312, branch: "main"),
+            branch: "main",
+            now: t0
+        )
+        XCTAssertEqual(dirty.dashboard?.git?.files, 14)
+        XCTAssertEqual(dirty.dashboard?.branch, "main")
+    }
+
+    /// One unit, the biggest that fits — the card answers "how old", not "to
+    /// the second".
+    func testAgeReadsAsOneUnit() {
+        XCTAssertEqual(HoverCardModel.age(12_000), "12s")
+        XCTAssertEqual(HoverCardModel.age(4 * 60_000 + 12_000), "4m")
+        XCTAssertEqual(HoverCardModel.age(3 * 3_600_000), "3h")
+        XCTAssertEqual(HoverCardModel.age(2 * 86_400_000), "2d")
+        XCTAssertEqual(HoverCardModel.age(16 * 86_400_000), "2w")
+        XCTAssertEqual(HoverCardModel.age(150 * 86_400_000), "5mo")
+        XCTAssertEqual(HoverCardModel.age(800 * 86_400_000), "2y")
+    }
+
+    /// `git diff --shortstat` prints only the clauses that are non-zero, and
+    /// nothing at all for a clean tree.
+    func testTheShortstatParsesEveryShapeGitPrints() {
+        let full = GitDiffStat.parse(
+            shortstat: " 14 files changed, 1284 insertions(+), 312 deletions(-)\n"
+        )
+        XCTAssertEqual(full, GitDiffStat(files: 14, added: 1284, removed: 312))
+        XCTAssertEqual(
+            GitDiffStat.parse(shortstat: " 1 file changed, 2 insertions(+)\n"),
+            GitDiffStat(files: 1, added: 2, removed: 0)
+        )
+        XCTAssertEqual(
+            GitDiffStat.parse(shortstat: " 3 files changed, 9 deletions(-)\n"),
+            GitDiffStat(files: 3, added: 0, removed: 9)
+        )
+        XCTAssertTrue(GitDiffStat.parse(shortstat: "").isEmpty)
+    }
+
+    /// The bar gives up empty slots before it lets a filled pill become a
+    /// hairline — and never drops a pane that exists.
+    func testThePillBarKeepsEveryPaneAndDropsSpareSlots() {
+        let bar = HoverPillBarView()
+        bar.apply(pills: Array(repeating: ShellPalette.blue, count: 3), capacity: 12)
+        XCTAssertEqual(bar.slotCount(width: 160), 12, "twelve fit in the tile")
+        XCTAssertEqual(bar.slotCount(width: 30), 4, "no room: empty slots go first")
+        XCTAssertEqual(bar.slotCount(width: 4), 3, "the panes themselves never go")
+    }
+
+    /// Neither side of the diff bar vanishes while it still has lines in it.
+    func testTheDiffBarNeverRoundsARealNumberToNothing() {
+        let bar = HoverDiffBarView()
+        bar.apply(added: 1284, removed: 1)
+        let green = bar.greenWidth(total: 120)
+        XCTAssertLessThanOrEqual(green, 120 - HoverDiffBarView.minSlice)
+        XCTAssertGreaterThan(green, 100, "1284 against 1 is still mostly green")
+
+        bar.apply(added: 0, removed: 40)
+        XCTAssertEqual(bar.greenWidth(total: 120), 0, "nothing added, no green at all")
+        bar.apply(added: 40, removed: 0)
+        XCTAssertEqual(bar.greenWidth(total: 120), 120)
+    }
+
+    /// The card that is a dashboard is wider than the card that is a label,
+    /// and it grows and shrinks with the table.
+    func testTheSessionCardIsWiderAndGrowsWithItsTable() throws {
+        let body = HoverCardBodyView()
+        body.tailField.animates = false
+        var panes: [String: PaneDescriptor] = [:]
+        for id in ["a", "b", "c"] {
+            panes[id] = PaneDescriptor(sessionID: id, group: "s", engine: .claude, label: "pane \(id)")
+        }
+        func apply(_ statuses: [String: RemoteSessionStatus]) -> NSSize {
+            body.apply(HoverCardModel.session(
+                sessionNode(paneIDs: ["a", "b", "c"]),
+                panes: panes,
+                statuses: statuses,
+                ledger: PaneActivityLedger(),
+                tails: { "working on \($0)" },
+                git: GitDiffStat(files: 14, added: 1284, removed: 312, branch: "main"),
+                branch: "main",
+                now: t0
+            ))
+            let size = body.cardSize
+            body.frame = NSRect(origin: .zero, size: size)
+            body.layoutSubtreeIfNeeded()
+            return size
+        }
+
+        let three = apply(["a": .thinking, "b": .thinking, "c": .awaitingApproval])
+        XCTAssertEqual(three.width, HoverCardBodyView.sessionWidth)
+        XCTAssertEqual(body.dashboardView.visibleRowCount, 3)
+
+        let one = apply(["a": .thinking, "b": .ready, "c": .ready])
+        XCTAssertEqual(body.dashboardView.visibleRowCount, 1)
+        XCTAssertLessThan(one.height, three.height, "two rows fewer is a shorter card")
+
+        // Renders, and back to the narrow card when the model is a pane again.
+        let rep = try XCTUnwrap(body.bitmapImageRepForCachingDisplay(in: body.bounds))
+        body.cacheDisplay(in: body.bounds, to: rep)
+        XCTAssertGreaterThan(rep.pixelsHigh, 0)
+
+        body.apply(HoverCardModel.pane(terminal(), status: .ready, activity: nil, now: t0))
+        XCTAssertEqual(body.cardSize.width, HoverCardBodyView.width)
+    }
+
+    /// Scratch: renders the session card to a PNG so its layout can be looked
+    /// at. Runs only when `TEST_RUNNER_HOVER_SNAPSHOT_DIR` is set.
+    func testRenderSessionCardSnapshot() throws {
+        guard let dir = ProcessInfo.processInfo.environment["HOVER_SNAPSHOT_DIR"] else {
+            throw XCTSkip("no snapshot dir")
+        }
+        let now: Double = 1_760_000_000_000
+        var panes: [String: PaneDescriptor] = [:]
+        let spec: [(String, Engine, String)] = [
+            ("a", .claude, "token rotation"),
+            ("b", .codex, "webhook retries"),
+            ("c", .antigravity, "users.last_seen_at"),
+            ("d", .claude, "brain ingest audit"),
+            ("e", .shell, "build"),
+        ]
+        for (id, engine, label) in spec {
+            panes[id] = PaneDescriptor(
+                sessionID: id,
+                group: "s",
+                engine: engine,
+                cwd: "/Users/x/Code/OmniAgent-ADE",
+                label: label
+            )
+        }
+        var ledger = PaneActivityLedger()
+        ledger.record(paneID: "a", status: .thinking, at: now - 7_400_000)
+        let tails = [
+            "a": "Coalescing refresh-token rotation behind one in-flight promise",
+            "b": "Blocked — wants to write 3 files outside src/stripe/",
+            "c": "Migration 0043_curly_stingray.sql ready to apply",
+            "d": "Re-walking 1,842 files · 68% parsed, 41,208 nodes linked",
+        ]
+        let model = HoverCardModel.session(
+            SessionGroupNode(
+                id: "s",
+                project: "p",
+                name: "session restore",
+                label: "session restore",
+                cwd: "/Users/x/Code/OmniAgent-ADE",
+                paneIDs: ["a", "b", "c", "d", "e"],
+                isCurrent: true
+            ),
+            panes: panes,
+            statuses: [
+                "a": .thinking, "b": .awaitingApproval, "c": .toolExecution,
+                "d": .thinking, "e": .ready,
+            ],
+            ledger: ledger,
+            eventTimes: ["a": now - 4_000, "c": now - 9_000, "d": now - 1_000],
+            tails: { tails[$0] },
+            git: GitDiffStat(files: 14, added: 1284, removed: 312, branch: "main"),
+            branch: "main",
+            now: now
+        )
+
+        let body = HoverCardBodyView()
+        body.tailField.animates = false
+        body.apply(model)
+        let size = body.cardSize
+        let backdrop = NSView(frame: NSRect(origin: .zero, size: size))
+        backdrop.wantsLayer = true
+        backdrop.layer?.backgroundColor = NSColor(
+            srgbRed: 0.07,
+            green: 0.075,
+            blue: 0.11,
+            alpha: 1
+        ).cgColor
+        body.frame = backdrop.bounds
+        backdrop.addSubview(body)
+        backdrop.layoutSubtreeIfNeeded()
+
+        let rep = try XCTUnwrap(backdrop.bitmapImageRepForCachingDisplay(in: backdrop.bounds))
+        backdrop.cacheDisplay(in: backdrop.bounds, to: rep)
+        let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        try png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("session-card.png"))
+    }
+
+    private func sessionNode(paneIDs: [String]) -> SessionGroupNode {
+        SessionGroupNode(
+            id: "s",
+            project: "p",
+            name: "Refactor",
+            label: "Refactor",
+            cwd: "/Users/x/Code",
+            paneIDs: paneIDs,
+            isCurrent: true
+        )
     }
 
     // MARK: - The typing

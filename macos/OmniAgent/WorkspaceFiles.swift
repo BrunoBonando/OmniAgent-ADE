@@ -472,3 +472,93 @@ enum GitBranch {
         return current(repoRoot: root)
     }
 }
+
+/// `14 files · +1284 −312` for one repository — the uncommitted work, as the
+/// hover card's second KPI.
+///
+/// `git diff --shortstat HEAD`, which is **tracked** changes only: an untracked
+/// file has no "before" to diff against, and counting its whole length as
+/// insertions would make a freshly cloned `vendor/` read as a day's work.
+// ponytail: untracked files are not counted; run a second `git status` pass if
+// that ever reads as wrong.
+///
+/// Cached, because the caller is a hover card that asks ten times a second and
+/// this is a subprocess. Main thread only, deliberately: every read and every
+/// write happens on it, so the maps need no lock.
+struct GitDiffStat: Equatable {
+    var files: Int = 0
+    var added: Int = 0
+    var removed: Int = 0
+    /// The branch the stat was taken on. Carried here rather than read by the
+    /// caller because this type has already resolved the repository root, off
+    /// the main thread — and the caller asks ten times a second.
+    var branch: String?
+
+    var isEmpty: Bool { files == 0 && added == 0 && removed == 0 }
+
+    /// How long an answer is good for. A repository does not change much in
+    /// three seconds, and a card left open for a minute still refreshes twenty
+    /// times.
+    static let staleAfter: TimeInterval = 3
+
+    private static var cache: [String: GitDiffStat] = [:]
+    private static var loadedAt: [String: TimeInterval] = [:]
+    private static var inFlight: Set<String> = []
+
+    /// The last known stat for whatever repository `path` sits in, kicking off
+    /// a refresh when there is none or it has gone stale. `nil` only until the
+    /// first load lands — the card simply has no git tile until then.
+    static func cached(forDirectory path: String) -> GitDiffStat? {
+        guard !path.isEmpty else { return nil }
+        let now = Date().timeIntervalSince1970
+        let fresh = loadedAt[path].map { now - $0 < staleAfter } ?? false
+        if !fresh, !inFlight.contains(path) {
+            inFlight.insert(path)
+            loadQueue.async {
+                let stat = GitStatus.repoRoot(for: URL(fileURLWithPath: path, isDirectory: true))
+                    .flatMap { load(repoRoot: $0) }
+                DispatchQueue.main.async {
+                    inFlight.remove(path)
+                    loadedAt[path] = Date().timeIntervalSince1970
+                    // An empty stat for "not a repository" too: the tile hides
+                    // on `isEmpty`, and caching the miss stops the card asking
+                    // a non-repository the same question forever.
+                    cache[path] = stat ?? GitDiffStat()
+                }
+            }
+        }
+        return cache[path]
+    }
+
+    /// **Never call this on the main thread** — it is a subprocess.
+    static func load(repoRoot: URL) -> GitDiffStat? {
+        guard let output = GitStatus.runGit(["diff", "--shortstat", "HEAD"], in: repoRoot) else {
+            return nil
+        }
+        var stat = parse(shortstat: output)
+        stat.branch = GitBranch.current(repoRoot: repoRoot)
+        return stat
+    }
+
+    /// ` 14 files changed, 1284 insertions(+), 312 deletions(-)`, and any
+    /// subset of it: git omits the clauses that are zero, and prints nothing at
+    /// all for a clean tree.
+    static func parse(shortstat: String) -> GitDiffStat {
+        var stat = GitDiffStat()
+        for clause in shortstat.split(separator: ",") {
+            let words = clause.split(separator: " ")
+            guard let value = words.first.flatMap({ Int($0) }),
+                  let noun = words.dropFirst().first
+            else { continue }
+            if noun.hasPrefix("file") { stat.files = value }
+            if noun.hasPrefix("insertion") { stat.added = value }
+            if noun.hasPrefix("deletion") { stat.removed = value }
+        }
+        return stat
+    }
+
+    private static let loadQueue = DispatchQueue(
+        label: "ai.omni-agent.ade.workspace-files.git-diff-stat",
+        qos: .utility
+    )
+}
