@@ -309,8 +309,11 @@ final class SessionHoverCardTests: XCTestCase {
         let rows = try XCTUnwrap(model.dashboard?.rows)
         XCTAssertEqual(rows.map(\.paneID), ["b", "d", "a"], "waiting first, then the newest worker")
         XCTAssertEqual(rows[0].accent, ShellPalette.amber)
-        XCTAssertEqual(rows[0].detail, "Codex · Waiting for you")
-        XCTAssertEqual(rows[0].line, "Blocked — wants to write 3 files outside src/")
+        // The engine, and only the engine: the colour and the caret say the
+        // rest, and "Codex · Working" beside a blinking blue line said it twice.
+        XCTAssertEqual(rows[0].detail, "Codex")
+        // Always ellipsised — the pane is mid-sentence.
+        XCTAssertEqual(rows[0].line, "Blocked — wants to write 3 files outside src/…")
         XCTAssertFalse(rows.contains { $0.paneID == "c" }, "a ready pane is not news")
     }
 

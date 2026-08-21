@@ -95,12 +95,15 @@ struct PaneActivityLedger: Equatable {
 struct HoverWorkRow: Equatable {
     var paneID: String
     var title: String
-    /// `Claude · Running a tool` — what is driving the pane, and what it is
-    /// doing. Not a model name: nothing in the app knows which model an engine
-    /// picked, and a made-up one is worse than none.
+    /// What is driving the pane, and only that. Not a model name: nothing in
+    /// the app knows which model an engine picked, and a made-up one is worse
+    /// than none. And not the status either — the caret, the colour and the
+    /// table's own title all say it already, three times over.
     var detail: String
-    /// The pane's own last output line, ellipsised. Empty for a pane that has
-    /// printed nothing yet — the row is still worth showing, it is working.
+    /// The pane's own last output line, always ending in an ellipsis: the pane
+    /// is mid-sentence, and the line should read like one. Empty for a pane
+    /// that has printed nothing yet — the row is still worth showing, it is
+    /// working.
     var line: String
     var accent: NSColor
     var pulses: Bool
@@ -301,8 +304,10 @@ extension HoverCardModel {
                 return HoverWorkRow(
                     paneID: id,
                     title: SessionOutline.paneLabel(pane),
-                    detail: "\(pane.engine.displayName) · \(Self.word(for: status))",
-                    line: tails(id).flatMap { snippet($0, limit: HoverWorkRow.lineLimit) } ?? "",
+                    detail: pane.engine.displayName,
+                    line: tails(id)
+                        .flatMap { snippet($0, limit: HoverWorkRow.lineLimit) }
+                        .map { $0.hasSuffix("…") ? $0 : $0 + "…" } ?? "",
                     accent: ShellDotsView.color(for: status),
                     pulses: ShellDotsView.pulses(status),
                     engine: pane.engine
@@ -761,6 +766,91 @@ final class HoverWorkingMarkView: NSImageView {
     }
 }
 
+/// The blinking caret in front of a working pane's last line — a terminal's
+/// own cursor, borrowed. With the ellipsis at the end of that line it is the
+/// card saying "this sentence is not finished", which is exactly what a pane
+/// that is still working is doing.
+final class HoverCaretView: NSView {
+    static let width: CGFloat = 2
+    static let height: CGFloat = 13
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = Self.width / 2
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: Self.width),
+            heightAnchor.constraint(equalToConstant: Self.height),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(color: NSColor, blinks: Bool) {
+        layer?.backgroundColor = color.cgColor
+        layer?.removeAnimation(forKey: "om-blink")
+        guard blinks, !ShellMotion.reduced else {
+            layer?.opacity = 1
+            return
+        }
+        // Discrete, not eased: a caret is on or off. A fading one reads as a
+        // pulse, which is what the mark at the head of the row already does.
+        let blink = CAKeyframeAnimation(keyPath: "opacity")
+        blink.values = [1, 0]
+        blink.keyTimes = [0, 0.5, 1]
+        blink.calculationMode = .discrete
+        blink.duration = 1.06
+        blink.repeatCount = .infinity
+        layer?.add(blink, forKey: "om-blink")
+    }
+}
+
+/// The branch, top right: its name and then the git-branch glyph, in green.
+/// A fact about the whole card, so it sits on the title's line rather than
+/// inside the tile that happens to count its diff.
+final class HoverBranchView: NSView {
+    private let field = ShellFont.label(font: ShellFont.ui(11.5, .medium), color: ShellPalette.green)
+    private let icon = NSImageView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.image = NSImage(
+            systemSymbolName: "arrow.triangle.branch",
+            accessibilityDescription: "branch"
+        )
+        icon.image?.isTemplate = true
+        icon.contentTintColor = ShellPalette.green
+        addSubview(field)
+        addSubview(icon)
+        NSLayoutConstraint.activate([
+            field.leadingAnchor.constraint(equalTo: leadingAnchor),
+            field.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.leadingAnchor.constraint(equalTo: field.trailingAnchor, constant: 5),
+            icon.trailingAnchor.constraint(equalTo: trailingAnchor),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 12),
+            icon.heightAnchor.constraint(equalToConstant: 12),
+            heightAnchor.constraint(equalToConstant: 15),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(_ branch: String?) {
+        field.stringValue = branch ?? ""
+        isHidden = (branch == nil)
+        setAccessibilityLabel(branch.map { "on branch \($0)" })
+    }
+}
+
 /// The pane bar: one filled pill per terminal in the session, and an empty one
 /// for every slot it has not used.
 ///
@@ -906,16 +996,16 @@ final class HoverKPITileView: NSView {
     static let padding: CGFloat = 10
 
     private let captionField = ShellFont.label(
-        font: ShellFont.ui(9.5, .semibold),
-        color: ShellPalette.inkFaint,
-        tracking: 0.8
+        font: ShellFont.ui(10, .semibold),
+        color: ShellPalette.inkTertiary,
+        tracking: 0.9
     )
-    private let hintField = ShellFont.label(font: ShellFont.ui(9.5), color: ShellPalette.inkFainter)
+    private let hintField = ShellFont.label(font: ShellFont.ui(10), color: ShellPalette.inkTertiary)
     private let valueField = ShellFont.label(
         font: ShellFont.ui(23, .semibold),
         color: ShellPalette.inkSecondary
     )
-    private let labelField = ShellFont.label(font: ShellFont.ui(11), color: ShellPalette.inkTertiary)
+    private let labelField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkSecondary)
 
     init(caption: String, accessory: NSView) {
         super.init(frame: .zero)
@@ -945,23 +1035,35 @@ final class HoverKPITileView: NSView {
         value.alignment = .firstBaseline
         value.spacing = 5
 
-        let stack = NSStackView(views: [header, value, accessory])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.distribution = .fill
-        stack.spacing = 4
-        stack.setCustomSpacing(6, after: value)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        // The caption and the number sit at the top, the bar at the *bottom*.
+        // The two tiles are held to one height, and a bar pinned under its own
+        // number would then float at two different levels — which is the one
+        // thing that makes a pair of tiles look thrown together.
+        let top = NSStackView(views: [header, value])
+        top.orientation = .vertical
+        top.alignment = .leading
+        top.spacing = 3
+        top.translatesAutoresizingMaskIntoConstraints = false
+        accessory.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(top)
+        addSubview(accessory)
+
+        // The gap is a floor plus a preference: the natural height is the
+        // preference, and the taller of the two tiles pushes past it.
+        let hug = accessory.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 9)
+        hug.priority = .defaultLow
 
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.padding),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padding),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding - 1),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -(Self.padding)),
-            header.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            value.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            accessory.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            top.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.padding),
+            top.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padding),
+            top.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding - 1),
+            accessory.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.padding),
+            accessory.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padding),
+            accessory.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.padding),
+            accessory.topAnchor.constraint(greaterThanOrEqualTo: top.bottomAnchor, constant: 9),
+            hug,
+            header.widthAnchor.constraint(equalTo: top.widthAnchor),
+            value.widthAnchor.constraint(equalTo: top.widthAnchor),
         ])
     }
 
@@ -985,6 +1087,8 @@ final class HoverWorkRowView: NSView {
     private let mark = HoverWorkingMarkView()
     private let headerField = ShellFont.label(font: ShellFont.ui(12.5, .semibold), color: ShellPalette.ink)
     private let lineField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.blue)
+    private let caret = HoverCaretView()
+    private let lineRow = NSStackView()
     private var row: HoverWorkRow?
 
     override init(frame frameRect: NSRect) {
@@ -994,10 +1098,16 @@ final class HoverWorkRowView: NSView {
         // Name and engine are one attributed field rather than two labels in a
         // stack: two labels need baseline alignment and a spacer to keep from
         // being centred against each other, and one string gets both for free.
-        let text = NSStackView(views: [headerField, lineField])
+        lineRow.orientation = .horizontal
+        lineRow.alignment = .centerY
+        lineRow.spacing = 6
+        lineRow.addArrangedSubview(caret)
+        lineRow.addArrangedSubview(lineField)
+
+        let text = NSStackView(views: [headerField, lineRow])
         text.orientation = .vertical
         text.alignment = .leading
-        text.spacing = 1
+        text.spacing = 2
         text.translatesAutoresizingMaskIntoConstraints = false
         addSubview(mark)
         addSubview(text)
@@ -1010,7 +1120,7 @@ final class HoverWorkRowView: NSView {
             text.topAnchor.constraint(equalTo: topAnchor),
             text.bottomAnchor.constraint(equalTo: bottomAnchor),
             headerField.widthAnchor.constraint(equalTo: text.widthAnchor),
-            lineField.widthAnchor.constraint(equalTo: text.widthAnchor),
+            lineRow.widthAnchor.constraint(equalTo: text.widthAnchor),
         ])
     }
 
@@ -1022,10 +1132,12 @@ final class HoverWorkRowView: NSView {
         self.row = row
         headerField.attributedStringValue = Self.header(title: row.title, detail: row.detail)
         lineField.stringValue = row.line
-        // The status colour, softened: it is a subtitle under a white name, and
-        // full-strength blue on glass at 11pt glares rather than reads.
-        lineField.textColor = row.accent.withAlphaComponent(0.82)
-        lineField.isHidden = row.line.isEmpty
+        // The status colour, softened a touch: it is a subtitle under a white
+        // name, and full-strength blue on glass at 11.5pt glares rather than
+        // reads. Not softened further — it still has to be legible.
+        lineField.textColor = row.accent.withAlphaComponent(0.88)
+        lineRow.isHidden = row.line.isEmpty
+        caret.apply(color: row.accent, blinks: true)
         mark.apply(color: row.accent, pulses: row.pulses)
         setAccessibilityLabel("\(row.title). \(row.detail). \(row.line)")
     }
@@ -1042,8 +1154,8 @@ final class HoverWorkRowView: NSView {
         string.append(NSAttributedString(
             string: "  \(detail)",
             attributes: [
-                .font: ShellFont.ui(11),
-                .foregroundColor: ShellPalette.inkMuted,
+                .font: ShellFont.ui(11.5),
+                .foregroundColor: ShellPalette.inkTertiary,
             ]
         ))
         return string
@@ -1065,11 +1177,11 @@ final class HoverDashboardView: NSView {
     private let removedField = ShellFont.label(font: ShellFont.ui(11, .medium), color: ShellPalette.red)
     private let tableCaption = ShellFont.label(
         "WORKING NOW",
-        font: ShellFont.ui(9.5, .semibold),
-        color: ShellPalette.inkFaint,
-        tracking: 0.8
+        font: ShellFont.ui(10, .semibold),
+        color: ShellPalette.inkTertiary,
+        tracking: 0.9
     )
-    private let tableCount = ShellFont.label(font: ShellFont.ui(9.5), color: ShellPalette.inkFainter)
+    private let tableCount = ShellFont.label(font: ShellFont.ui(10), color: ShellPalette.inkTertiary)
     private let tableHeader = NSStackView()
     private let rowViews = (0..<SessionDashboard.maxRows).map { _ in HoverWorkRowView() }
     private let rows = NSStackView()
@@ -1098,6 +1210,12 @@ final class HoverDashboardView: NSView {
         tiles.spacing = 8
         tiles.addArrangedSubview(panesTile)
         tiles.addArrangedSubview(gitTile)
+        // One height for both, whichever's contents are taller. Below
+        // `.required` so that a hidden tile — which the stack collapses on a
+        // clean tree — can never make the layout unsatisfiable.
+        let equalHeights = gitTile.heightAnchor.constraint(equalTo: panesTile.heightAnchor)
+        equalHeights.priority = .defaultHigh
+        equalHeights.isActive = true
 
         tableCount.alignment = .right
         tableHeader.orientation = .horizontal
@@ -1148,7 +1266,7 @@ final class HoverDashboardView: NSView {
             gitTile.apply(
                 value: "\(git.files)",
                 label: git.files == 1 ? "file" : "files",
-                hint: dashboard.branch
+                hint: nil
             )
             addedField.stringValue = "+\(git.added)"
             // A real minus sign, not a hyphen: it sits beside a `+` at the same
@@ -1207,7 +1325,7 @@ final class HoverCardBodyView: NSView {
     static let markGap: CGFloat = 6
 
     let titleField = ShellFont.label(font: ShellFont.ui(15, .semibold), color: ShellPalette.ink)
-    let metaField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkMuted)
+    let metaField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkTertiary)
     let timingField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkTertiary)
     let totalsField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkFaint)
     /// The state line. Working, it is the agent's own current line, in blue —
@@ -1221,16 +1339,36 @@ final class HoverCardBodyView: NSView {
     /// visibly saying one thing.
     let workingMark = HoverWorkingMarkView()
     let engineIcon = NSImageView()
+    /// The branch, top right. A session card's; a pane card wears its engine
+    /// mark in the same corner and never both.
+    let branchView = HoverBranchView()
     /// The session card's KPI tiles and "Working now" table. Hidden — and so,
     /// in a stack view, absent — on a pane's card.
     let dashboardView = HoverDashboardView()
     private let rule = NSView()
     private let tailRow = NSView()
     private let stack = NSStackView()
+    /// The navy wash over the system material: a flat fill reads as paint, a
+    /// gradient as glass.
+    ///
+    /// Top to bottom, and framed in `layout()`. It used to run corner to corner
+    /// and rely on layer autoresizing from a frame nobody ever set — which was
+    /// invisible on a card of one size and became a dark blotch across the
+    /// bottom-left corner the moment the card could be 404 points wide and
+    /// change height a row at a time.
+    private let tint = CAGradientLayer()
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: 120))
         wantsLayer = true
+        tint.colors = [
+            NSColor(srgbRed: 0.085, green: 0.095, blue: 0.15, alpha: 0.52).cgColor,
+            NSColor(srgbRed: 0.05, green: 0.055, blue: 0.09, alpha: 0.52).cgColor,
+        ]
+        tint.startPoint = CGPoint(x: 0.5, y: 1)
+        tint.endPoint = CGPoint(x: 0.5, y: 0)
+        tint.cornerRadius = SessionHoverCardController.cornerRadius
+        layer?.insertSublayer(tint, at: 0)
 
         engineIcon.translatesAutoresizingMaskIntoConstraints = false
         engineIcon.imageScaling = .scaleProportionallyUpOrDown
@@ -1238,7 +1376,7 @@ final class HoverCardBodyView: NSView {
         // The engine's mark rides on the title now that the status pill is
         // gone: what the pane is is a property of its name, not a row of its
         // own.
-        let header = NSStackView(views: [titleField, NSView(), engineIcon])
+        let header = NSStackView(views: [titleField, NSView(), branchView, engineIcon])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 8
@@ -1323,6 +1461,8 @@ final class HoverCardBodyView: NSView {
         set(timingField, model.timing)
         set(totalsField, model.totals)
 
+        branchView.apply(model.dashboard?.branch)
+
         if let engine = model.engine, let image = engine.iconImage {
             engineIcon.image = image
             if image.isTemplate { engineIcon.contentTintColor = ShellPalette.inkTertiary }
@@ -1364,6 +1504,17 @@ final class HoverCardBodyView: NSView {
             tailField.reset()
         }
         needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        // Explicitly, every pass: the card has two widths and a height that
+        // moves with the table, and a gradient sized to any of the others is a
+        // stain rather than a wash.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        tint.frame = bounds
+        CATransaction.commit()
     }
 
     private func set(_ field: NSTextField, _ text: String?) {
@@ -1426,7 +1577,6 @@ final class HoverCardShellView: NSView {
     private let drop: NSView
     private let host: NSView
     private let wrapper = NSView()
-    private let tint = CAGradientLayer()
 
     /// Where the drop points, in this view's coordinates. The card is
     /// top-aligned with its row but gets pushed around by the screen edges, so
@@ -1434,18 +1584,8 @@ final class HoverCardShellView: NSView {
     private(set) var dropCenterY: CGFloat = 0
 
     override init(frame frameRect: NSRect) {
-        // The palette's treatment: the system material, with a slight navy
-        // gradient over it — a flat wash reads as paint, a gradient as glass.
-        body.wantsLayer = true
-        tint.colors = [
-            NSColor(srgbRed: 0.09, green: 0.10, blue: 0.16, alpha: 0.55).cgColor,
-            NSColor(srgbRed: 0.05, green: 0.05, blue: 0.09, alpha: 0.42).cgColor,
-        ]
-        tint.startPoint = CGPoint(x: 0.1, y: 1)
-        tint.endPoint = CGPoint(x: 0.9, y: 0)
-        tint.cornerRadius = SessionHoverCardController.cornerRadius
-        tint.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        body.layer?.insertSublayer(tint, at: 0)
+        // The navy wash over the material lives on the body itself, which is
+        // the view that resizes — see `HoverCardBodyView.tint`.
         body.autoresizingMask = [.width, .height]
 
         if #available(macOS 26.0, *) {
