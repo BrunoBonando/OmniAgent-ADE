@@ -99,8 +99,10 @@ final class NavigationSidebarTests: XCTestCase {
             sidebar.accountRow.frame.width, sidebar.bounds.width - 16, accuracy: 0.5,
             "inset from both side edges"
         )
-        // Everything else sits above it.
-        for sibling in sidebar.subviews where sibling !== sidebar.accountRow {
+        // Every row above it — but not the glass ground, which is the column's
+        // full-bleed backdrop and runs the whole height *under* the chip.
+        let rows = sidebar.subviews.filter { $0 !== sidebar.accountRow && $0 !== sidebar.glassHost }
+        for sibling in rows {
             XCTAssertGreaterThanOrEqual(
                 sibling.frame.minY,
                 sidebar.accountRow.frame.maxY - 0.5,
@@ -174,6 +176,69 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(controller.destination, .terminals, "and Search selected nothing")
         XCTAssertFalse(controller.workspaceView.isHidden)
         controller.palette.dismiss()
+    }
+
+    // MARK: - The column's ground
+
+    /// The column is Liquid Glass where there is glass to ask for: one
+    /// full-bleed sheet at the very back of the view, with the design's blue
+    /// washed over it rather than under it. Below macOS 26 there is no sheet
+    /// and `draw` paints the opaque gradient exactly as it always did.
+    func testTheColumnIsAGlassGroundCarryingTheBlueWash() throws {
+        let sidebar = makeSidebar()
+
+        guard #available(macOS 26.0, *) else {
+            XCTAssertNil(
+                sidebar.glassHost,
+                "below 26 there is no glass to ask for and `draw` is the ground"
+            )
+            return
+        }
+
+        let glass = try XCTUnwrap(sidebar.glassHost, "macOS 26 has glass to ask for")
+        XCTAssertIdentical(
+            sidebar.subviews.first, glass, "the sheet is the ground, behind every row"
+        )
+        XCTAssertEqual(glass.frame, sidebar.bounds, "full-bleed: no inset, no floating slab")
+
+        let wash = try XCTUnwrap(sidebar.glassTint)
+        XCTAssertEqual(wash.frame.size, glass.frame.size, "the wash covers the whole sheet")
+        let stops = try XCTUnwrap(wash.layer as? CAGradientLayer)
+        let colors = try XCTUnwrap(stops.colors as? [CGColor])
+            .compactMap { NSColor(cgColor: $0)?.usingColorSpace(.sRGB) }
+        XCTAssertEqual(colors.count, 2)
+        let top = try XCTUnwrap(colors.first)
+        let bottom = try XCTUnwrap(colors.last)
+        // Translucent, or the wash is paint over the glass and hides the
+        // material it is supposed to tint.
+        XCTAssertLessThan(top.alphaComponent, 1)
+        XCTAssertGreaterThan(top.alphaComponent, 0)
+        XCTAssertLessThan(bottom.alphaComponent, top.alphaComponent, "top-lit, as it always was")
+        // Still the column's blue, both ends.
+        XCTAssertGreaterThan(top.blueComponent, top.redComponent)
+        XCTAssertGreaterThan(bottom.blueComponent, bottom.redComponent)
+        // Top to bottom: (0.5, 1) is the top in the layer's y-up unit space,
+        // the direction `NSGradient`'s -90° angle gave the opaque gradient.
+        XCTAssertEqual(stops.startPoint.y, 1)
+        XCTAssertEqual(stops.endPoint.y, 0)
+    }
+
+    /// The sheet went behind the rows, not over them: a press still lands on
+    /// the row under the cursor. A full-bleed view added on top would eat
+    /// every click in the column.
+    func testTheGlassGroundDoesNotSwallowTheRowsUnderIt() throws {
+        let sidebar = makeSidebar()
+        let row = try XCTUnwrap(sidebar.navRows.first)
+        let centre = row.convert(NSPoint(x: row.bounds.midX, y: row.bounds.midY), to: sidebar)
+
+        // `hitTest` reads its point in the superview's space; this sidebar has
+        // no superview and sits at the origin, so the column's own coordinates
+        // are that space.
+        let hit = try XCTUnwrap(sidebar.hitTest(centre))
+        XCTAssertTrue(
+            hit === row || hit.isDescendant(of: row),
+            "the Home row should take its own click, not \(type(of: hit))"
+        )
     }
 
     // MARK: - Offscreen render

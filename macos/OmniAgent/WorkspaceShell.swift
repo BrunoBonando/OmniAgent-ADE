@@ -67,14 +67,40 @@ enum WorkspaceDestination: String, CaseIterable {
 enum ShellPalette {
     static let content = srgb(10, 10, 12)
 
-    /// The sidebar's ground: a top-lit blue-black sheet, so the column reads as
-    /// glass over the flat `content` black rather than a second slab of it.
-    /// A gradient, not `NSGlassEffectView` — that is macOS 26 only (this app
-    /// deploys to 14), and its blur samples what is behind the view, which
-    /// here is the window's own opaque near-black.
+    /// The sidebar's ground *below macOS 26*: a top-lit blue-black sheet, so
+    /// the column reads as glass over the flat `content` black rather than a
+    /// second slab of it. There is no Liquid Glass to ask for that far back,
+    /// and every stand-in dims rather than refracts, so this paints the look
+    /// by hand.
+    ///
+    /// On 26 and later the column is a real `NSGlassEffectView` wearing
+    /// `sidebarGlassTint` instead — see `NavigationSidebarView.glassHost`.
     static let sidebarGlass = NSGradient(
         colors: [srgb(28, 32, 52), srgb(13, 14, 22)]
     )!
+
+    /// The same blue, washed *over* the glass column rather than painted as
+    /// its ground. Translucent where `sidebarGlass` is opaque: a solid
+    /// gradient over Liquid Glass is paint, and hides the material it is there
+    /// to tint.
+    ///
+    /// Solved against the material, not against the window. The obvious
+    /// arithmetic — take `sidebarGlass`'s stops and divide them back out of
+    /// their own alpha over the window's `8, 10, 14` ground — is wrong here,
+    /// because the wash does not sit on that ground: `.regular` glass in the
+    /// dark appearance carries its own frosting, measured at roughly
+    /// `66, 72, 78` under the column's head and `54, 57, 65` at its foot. A
+    /// wash solved against near-black lands about twice as light as intended
+    /// and reads slate rather than blue.
+    ///
+    /// So these are solved against those two readings. Measured off the built
+    /// app, the column now runs `44, 52, 87` down to `29, 32, 52` — the
+    /// design's hue and its top-lighting, and a foot that lands on
+    /// `sidebarGlass`'s own head,
+    /// sitting lighter than the flat token because it is glass and meant to
+    /// look like it. Deep navy over a bright material, and the alpha falls with
+    /// the light — the sheet shows through most where the column is dimmest.
+    static let sidebarGlassTint = [srgb(30, 38, 84, 0.70), srgb(6, 9, 30, 0.52)]
 
     static let ink = srgb(240, 240, 244)
     static let inkNav = srgb(176, 176, 186)

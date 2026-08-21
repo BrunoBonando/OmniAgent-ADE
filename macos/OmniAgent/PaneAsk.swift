@@ -406,7 +406,9 @@ final class PaneAskOverlayView: NSView {
     }
 }
 
-/// The one sheet of glass this app lays over the workspace.
+/// Every sheet of glass this app puts inside the workspace window — the zoom
+/// backdrop over the pane grid, the account row on the sidebar's floor, and
+/// the sidebar column's own ground.
 ///
 /// The same material as the approval card's pane panel above — `.regular`,
 /// untinted, at full strength — because that is the one that reads as glass on
@@ -418,17 +420,22 @@ final class PaneAskOverlayView: NSView {
 /// through.
 ///
 /// Still no `tintColor`: a tint is a wash of colour over everything behind the
-/// sheet, and this exists to push the workspace back, not to darken it.
+/// sheet, and this exists to push the workspace back, not to darken it. A
+/// caller that wants colour passes `content` instead — a view laid over the
+/// glass, which is where the sidebar's blue gradient goes. The two are not the
+/// same thing: `tintColor` colours what shows *through*, `content` colours what
+/// sits *on top*, and only the second can be a gradient.
 ///
 /// `nil` before macOS 26 — there is no glass to ask for and every stand-in dims
 /// rather than refracts, so the callers leave it out entirely.
 enum WorkspaceGlass {
-    static func sheet(cornerRadius: CGFloat = 0) -> NSView? {
+    static func sheet(cornerRadius: CGFloat = 0, content: NSView? = nil) -> NSView? {
         guard #available(macOS 26.0, *) else { return nil }
         let glass = NSGlassEffectView()
         glass.style = .regular
         glass.tintColor = nil
         glass.cornerRadius = cornerRadius
+        glass.contentView = content
         return glass
     }
 }
