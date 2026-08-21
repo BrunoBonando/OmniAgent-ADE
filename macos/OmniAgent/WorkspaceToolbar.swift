@@ -142,9 +142,17 @@ final class WorkspaceTitleBarView: NSView {
     /// span between and around them — belongs to the window drag. Done here rather
     /// than by `isMovableByWindowBackground`, which would also let a drag
     /// inside a terminal move the window.
+    ///
+    /// "Everything else" means everything else *in the bar*, and the guard is
+    /// what says so. A parent asks each of its subviews to hit-test every
+    /// point, outside their frames included, and answers with the first one
+    /// that does not return nil — so an unconditional `return self` here
+    /// claimed the whole window. Harmless while the bar was laid out above the
+    /// split (the split was asked first), fatal the moment it became the
+    /// overlay on top of it: every click anywhere went to `performDrag`.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        let hit = super.hitTest(point)
-        if let hit, controls.contains(where: { !$0.isHidden && hit.isDescendant(of: $0) }) {
+        guard let hit = super.hitTest(point) else { return nil }
+        if controls.contains(where: { !$0.isHidden && hit.isDescendant(of: $0) }) {
             return hit
         }
         return self

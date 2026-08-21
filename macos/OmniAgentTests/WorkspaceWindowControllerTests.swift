@@ -1395,6 +1395,44 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    /// The bar is a transparent overlay across the top of the split now, and
+    /// the *topmost* subview of the window's container — so AppKit asks it
+    /// first for every point in the window, not just for points in its own
+    /// 38pt strip. Its `hitTest` answered `self` unconditionally, which was
+    /// invisible while the bar was laid out above the split (the split was
+    /// asked first) and fatal the moment it became the overlay: every click
+    /// in the sidebar and the panes went to the bar and straight into
+    /// `performDrag(with:)`. The whole window was a drag handle and nothing
+    /// else answered a mouse at all.
+    func testAClickBelowTheBarReachesTheSplitRatherThanTheOverlay() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1200, height: 800), display: true)
+        let content = try XCTUnwrap(window.contentView)
+        content.layoutSubtreeIfNeeded()
+
+        let bar = controller.titleBar
+        let inTheContent = NSPoint(x: content.bounds.midX, y: content.bounds.midY)
+        let hit = try XCTUnwrap(content.hitTest(inTheContent), "something must answer a click")
+        XCTAssertFalse(
+            hit.isDescendant(of: bar),
+            "a click in the middle of the window belongs to what is drawn there, not to the bar"
+        )
+
+        // The other half of the contract, which is why the bar answers at all:
+        // its own transparent background is the window drag.
+        let inTheBar = NSPoint(
+            x: content.bounds.midX,
+            y: content.bounds.maxY - WorkspaceTitleBarView.height / 2
+        )
+        XCTAssertTrue(
+            try XCTUnwrap(content.hitTest(inTheBar)).isDescendant(of: bar),
+            "and the strip it does cover still drags the window"
+        )
+    }
+
     /// Hiding the real green button took full screen with it: the bar's own
     /// was wired to `zoom`, and these menus are hand-built, so AppKit never
     /// filled in an Enter Full Screen item to fall back on. Both routes are
