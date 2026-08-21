@@ -28,6 +28,8 @@ struct RestoredPane: Equatable {
     let groupLabel: String?
     let claudeColor: String
     let copilotTheme: String
+    /// The model picked from this pane's model menu, `nil` when none was.
+    let pickedModel: String?
     /// What the pane holds. The shared `layout` row only ever describes
     /// terminals; a `.browser` or `.editor` pane restores from its own
     /// native-only row.
@@ -53,6 +55,7 @@ struct RestoredPane: Equatable {
         groupLabel: String?,
         claudeColor: String = "default",
         copilotTheme: String = "default",
+        pickedModel: String? = nil,
         kind: PaneKind = .terminal,
         browserURL: String = "",
         editorTabs: [PersistedEditorTab] = [],
@@ -69,6 +72,7 @@ struct RestoredPane: Equatable {
         self.groupLabel = groupLabel
         self.claudeColor = claudeColor
         self.copilotTheme = copilotTheme
+        self.pickedModel = pickedModel
         self.kind = kind
         self.browserURL = browserURL
         self.editorTabs = editorTabs
@@ -139,7 +143,8 @@ enum WorkspaceRestoration {
                 group: tab.group ?? ungroupedSessionID,
                 groupLabel: tab.groupLabel,
                 claudeColor: tab.claudeColor ?? "default",
-                copilotTheme: tab.copilotTheme ?? "default"
+                copilotTheme: tab.copilotTheme ?? "default",
+                pickedModel: tab.model
             )
         }
     }
@@ -194,7 +199,8 @@ enum WorkspaceRestoration {
                 group: pane.group == ungroupedSessionID ? nil : pane.group,
                 groupLabel: pane.groupLabel,
                 claudeColor: pane.claudeColor == "default" ? nil : pane.claudeColor,
-                copilotTheme: pane.copilotTheme == "default" ? nil : pane.copilotTheme
+                copilotTheme: pane.copilotTheme == "default" ? nil : pane.copilotTheme,
+                model: pane.pickedModel
             )
         }
     }

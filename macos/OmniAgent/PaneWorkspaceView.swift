@@ -33,6 +33,13 @@ struct PaneDescriptor: Equatable {
     /// and reflected back here so the header's color badge stays in sync.
     var claudeColor: String = "default"
     var copilotTheme: String = "default"
+    /// What this terminal is running, as the badge prints it. Derived by
+    /// `EngineModel.current` and never persisted — recomputed from disk and
+    /// from `pickedModel`, both of which outlive a restart on their own.
+    var model: String?
+    /// The model picked from *this pane's* model menu. Persisted, because for
+    /// every engine but Claude it is the only per-pane answer there is.
+    var pickedModel: String?
     /// Which "Claude 2" this terminal is, within its session. Derived on the
     /// way in and never persisted — the number is a placeholder, and storing
     /// it would make it outlive the moment it is useful for.
@@ -60,6 +67,7 @@ struct PaneDescriptor: Equatable {
         themeId: TerminalThemeId? = nil,
         claudeColor: String = "default",
         copilotTheme: String = "default",
+        pickedModel: String? = nil,
         kind: PaneKind = .terminal,
         browserURL: String = "",
         editorTabs: [PersistedEditorTab] = [],
@@ -76,6 +84,7 @@ struct PaneDescriptor: Equatable {
         self.themeId = themeId
         self.claudeColor = claudeColor
         self.copilotTheme = copilotTheme
+        self.pickedModel = pickedModel
         self.kind = kind
         self.browserURL = browserURL
         self.editorTabs = editorTabs
@@ -97,6 +106,7 @@ struct PaneDescriptor: Equatable {
             themeId: pane.themeId,
             claudeColor: pane.claudeColor,
             copilotTheme: pane.copilotTheme,
+            pickedModel: pane.pickedModel,
             kind: pane.kind,
             browserURL: pane.browserURL,
             editorTabs: pane.editorTabs,
@@ -349,6 +359,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// The header's color badge clicked on a Claude pane — open the color menu.
     var onRequestColorMenu: ((String, NSView) -> Void)?
     var onRequestThemeMenu: ((String, NSView) -> Void)?
+    var onRequestModelMenu: ((String, NSView) -> Void)?
     /// The header's engine badge, clicked — same shape as the old ⋯ menu, and for
     /// the same reason: which engines exist and what swapping one costs is
     /// the window controller's business, not this view's.
@@ -1672,6 +1683,35 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // layout pass nobody triggered — this is the feed, so this is where it
         // reaches the card.
         filmstripItems[sessionID]?.status = status
+        // A status change is exactly when a new answer has landed, so it is
+        // also when the model behind a pane can have changed — this is the
+        // tick, and the feature needs no timer of its own.
+        refreshModel(for: sessionID)
+    }
+
+    /// Re-reads the model behind a terminal and publishes it if it moved.
+    ///
+    /// **Off the main thread.** `EngineModel.current` reads Claude's
+    /// transcript and Codex's config from disk, and this sits on the status
+    /// feed — which fires while the user is typing. A bounded read is still a
+    /// read, and none of it belongs on the way to a draw.
+    private func refreshModel(for sessionID: String) {
+        guard let descriptor = descriptors[sessionID],
+              descriptor.kind == .terminal, descriptor.engine != .shell
+        else { return }
+        let engine = descriptor.engine
+        let cwd = descriptor.cwd
+        let picked = descriptor.pickedModel
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let model = EngineModel.current(
+                engine: engine, sessionID: sessionID, cwd: cwd, picked: picked
+            )
+            guard let model else { return }
+            DispatchQueue.main.async {
+                guard let self, self.descriptors[sessionID]?.model != model else { return }
+                self.updateDescriptor(for: sessionID) { $0.model = model }
+            }
+        }
     }
 
     func updateDescriptor(for sessionID: String, _ mutate: (inout PaneDescriptor) -> Void) {
@@ -3844,6 +3884,11 @@ final class PaneContainerView: NSView, NSDraggingSource {
             self.workspace?.focusPane(self.paneID)
             self.workspace?.onRequestThemeMenu?(self.paneID, anchor)
         }
+        header.onModelMenuRequested = { [weak self] anchor in
+            guard let self else { return }
+            self.workspace?.focusPane(self.paneID)
+            self.workspace?.onRequestModelMenu?(self.paneID, anchor)
+        }
         header.onEngineMenuRequested = { [weak self] anchor in
             guard let self else { return }
             self.workspace?.focusPane(self.paneID)
@@ -4132,6 +4177,10 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // Color badge: only Claude terminals support `/color`.
         header.claudeColor = descriptor.kind == .terminal && descriptor.engine == .claude
             ? descriptor.claudeColor : nil
+        // Model badge: a terminal running an agent, once anything can say
+        // which model — see `PaneDescriptor.model`. A shell has none.
+        header.model = descriptor.kind == .terminal && descriptor.engine != .shell
+            ? descriptor.model : nil
         // Copilot theme badge: only Copilot terminals support `/theme`.
         header.copilotTheme = descriptor.kind == .terminal && descriptor.engine == .copilot
             ? descriptor.copilotTheme : nil
@@ -4408,6 +4457,7 @@ final class PaneHeaderView: NSView {
                     font: ShellFont.ui(12, .semibold)
                 )
             }
+            applyModelBadge()
             needsLayout = true
         }
     }
@@ -4478,6 +4528,33 @@ final class PaneHeaderView: NSView {
         }
     }
 
+    /// The model behind this terminal, or `nil` when nothing can say which —
+    /// a shell, or an agent that has not been asked and has answered nothing.
+    var model: String? {
+        didSet {
+            guard model != oldValue else { return }
+            applyModelBadge()
+        }
+    }
+
+    /// The badge reads `EngineModel.label`, which needs the engine as well as
+    /// the model — and the two arrive in separate `didSet`s, in an order this
+    /// view does not control. So both call this rather than either assuming it
+    /// went second.
+    private func applyModelBadge() {
+        modelBadge.isHidden = model == nil
+        guard let model, let engine else { return }
+        modelBadge.configure(
+            icon: nil,
+            text: EngineModel.label(for: model, engine: engine),
+            foreground: NSColor(white: 1, alpha: 0.55),
+            fill: NSColor(white: 1, alpha: 0.07),
+            stroke: .clear,
+            font: ShellFont.ui(12, .medium)
+        )
+        needsLayout = true
+    }
+
     /// The active Copilot theme for this terminal, or `nil` when the pane does
     /// not run Copilot. Setting it shows/hides and updates the theme badge.
     var copilotTheme: String? {
@@ -4502,6 +4579,8 @@ final class PaneHeaderView: NSView {
     var onColorMenuRequested: ((NSView) -> Void)?
     /// The theme badge, clicked — opens the Copilot theme picker menu.
     var onThemeMenuRequested: ((NSView) -> Void)?
+    /// The model badge, clicked — opens the `/model` picker menu.
+    var onModelMenuRequested: ((NSView) -> Void)?
 
     /// A 10×10 filled circle in the colour `/color` uses for this name.
     static func colorDotImage(for color: String) -> NSImage {
@@ -4607,6 +4686,8 @@ final class PaneHeaderView: NSView {
     private let colorBadge = PaneBadgeView()
     /// Theme badge shown on Copilot panes — opens the `/theme` menu.
     private let themeBadge = PaneBadgeView()
+    /// Model badge shown on agent panes — opens the `/model` menu.
+    private let modelBadge = PaneBadgeView()
     /// Thin vertical rule between the badge group and the traffic-light cluster.
     private let clusterSeparator = PaneHeaderSeparatorView()
     /// ✏️ button shown immediately after the title — tap to rename the conversation.
@@ -4644,6 +4725,7 @@ final class PaneHeaderView: NSView {
         engineBadge.isHidden = true
         colorBadge.isHidden = true
         themeBadge.isHidden = true
+        modelBadge.isHidden = true
         renamePencilButton.isHidden = true
         renamePencilButton.onClick = { [weak self] in self?.onRenameRequested?() }
         colorBadge.onClick = { [weak self] in
@@ -4653,6 +4735,10 @@ final class PaneHeaderView: NSView {
         themeBadge.onClick = { [weak self] in
             guard let self else { return }
             self.onThemeMenuRequested?(self.themeBadge)
+        }
+        modelBadge.onClick = { [weak self] in
+            guard let self else { return }
+            self.onModelMenuRequested?(self.modelBadge)
         }
         zoomButton.onClick = { [weak self] in self?.onZoomRequested?() }
         // The same toggle, reached from the other side: yellow is live only
@@ -4665,7 +4751,8 @@ final class PaneHeaderView: NSView {
         // Added left to right, the order they are laid out in, so the subview
         // order a reader — or a test — walks is the order on screen.
         let views: [NSView] = [
-            mark, titleLabel, renamePencilButton, subtitleLabel, themeBadge, colorBadge, engineBadge,
+            mark, titleLabel, renamePencilButton, subtitleLabel, themeBadge, colorBadge, modelBadge,
+            engineBadge,
             clusterSeparator, restoreButton, zoomButton, closeButton,
         ]
         for view in views { addSubview(view) }
@@ -4804,7 +4891,7 @@ final class PaneHeaderView: NSView {
         let minimumTitleWidth: CGFloat = 40
         // Color badge (Claude only) sits left of the engine badge, same as the
         // old branch badge — it drops before the engine if there is no room.
-        for badge in [themeBadge, colorBadge, engineBadge] where !badge.isHidden {
+        for badge in [themeBadge, colorBadge, modelBadge, engineBadge] where !badge.isHidden {
             let size = badge.intrinsicContentSize
             let candidate = right - gap - size.width
             guard candidate - titleLeft >= minimumTitleWidth else {

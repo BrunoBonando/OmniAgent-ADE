@@ -59,6 +59,11 @@ struct PersistedTab: Equatable {
     var groupLabel: String?
     var claudeColor: String?
     var copilotTheme: String?
+    /// The model picked from this pane's own model menu. Persisted because for
+    /// three of the four engines it is the only per-pane answer there is — the
+    /// badge otherwise falls back to a machine-wide config, or to nothing.
+    /// Claude's transcript outranks it and does not need it.
+    var model: String?
 
     init(
         project: String,
@@ -70,7 +75,8 @@ struct PersistedTab: Equatable {
         group: String? = nil,
         groupLabel: String? = nil,
         claudeColor: String? = nil,
-        copilotTheme: String? = nil
+        copilotTheme: String? = nil,
+        model: String? = nil
     ) {
         self.project = project
         self.engine = engine
@@ -82,6 +88,7 @@ struct PersistedTab: Equatable {
         self.groupLabel = groupLabel
         self.claudeColor = claudeColor
         self.copilotTheme = copilotTheme
+        self.model = model
     }
 }
 
@@ -151,6 +158,7 @@ enum PersistedLayoutCodec {
         }
         if let v = tab.claudeColor { dict["claudeColor"] = v }
         if let v = tab.copilotTheme { dict["copilotTheme"] = v }
+        if let v = tab.model { dict["model"] = v }
         return dict
     }
 
@@ -235,7 +243,8 @@ enum PersistedLayoutCodec {
             group: group,
             groupLabel: groupLabel,
             claudeColor: dict["claudeColor"] as? String,
-            copilotTheme: dict["copilotTheme"] as? String
+            copilotTheme: dict["copilotTheme"] as? String,
+            model: dict["model"] as? String
         )
     }
 }

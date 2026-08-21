@@ -524,6 +524,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 in: anchor
             )
         }
+        workspace.onRequestModelMenu = { [weak self] paneID, anchor in
+            guard let self else { return }
+            self.modelMenu(for: paneID).popUp(
+                positioning: nil,
+                at: NSPoint(x: 0, y: anchor.bounds.maxY + 4),
+                in: anchor
+            )
+        }
         workspace.onRequestEngineMenu = { [weak self] paneID, anchor in
             guard let self else { return }
             engineMenu(for: paneID).popUp(
@@ -2100,6 +2108,89 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.terminalSurface(for: paneID)?.sendCommandClearingInput("/color \(color)")
         // Reflect the choice back to the descriptor so the header badge updates.
         workspace.updateDescriptor(for: paneID) { $0.claudeColor = color }
+    }
+
+    /// This pane's model menu.
+    ///
+    /// Two of the four engines have to be *asked* what they accept, and one of
+    /// those asks over the network — so the menu is allowed to open before it
+    /// knows. It shows "Loading models…", goes and asks off the main thread,
+    /// and rewrites itself in place when the answer lands; `NSMenu` tracks
+    /// item changes while it is open, so nothing has to be reopened. The
+    /// answer is then cached, and the next open is instant.
+    func modelMenu(for paneID: String?) -> NSMenu {
+        let menu = NSMenu()
+        guard let paneID, let descriptor = workspace.descriptor(for: paneID),
+              descriptor.engine != .shell
+        else { return menu }
+        let engine = descriptor.engine
+        let current = descriptor.model
+        if let choices = EngineModelList.cached(for: engine) {
+            fill(menu, with: choices, current: current, engine: engine)
+            return menu
+        }
+        let loading = NSMenuItem(title: "Loading models…", action: nil, keyEquivalent: "")
+        loading.isEnabled = false
+        menu.addItem(loading)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let choices = EngineModelList.fetch(for: engine)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                menu.removeAllItems()
+                guard !choices.isEmpty else {
+                    // Said out loud rather than left as an empty menu: a menu
+                    // with nothing in it reads as a bug, and this is a network
+                    // call that can simply have failed.
+                    let failed = NSMenuItem(
+                        title: "Could not reach \(engine.displayName)",
+                        action: nil,
+                        keyEquivalent: ""
+                    )
+                    failed.isEnabled = false
+                    menu.addItem(failed)
+                    return
+                }
+                self.fill(menu, with: choices, current: current, engine: engine)
+            }
+        }
+        return menu
+    }
+
+    private func fill(
+        _ menu: NSMenu, with choices: [ModelChoice], current: String?, engine: Engine
+    ) {
+        for choice in choices {
+            let item = NSMenuItem(
+                title: choice.label,
+                action: #selector(changeModel(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = choice.id
+            item.state = EngineModelList.choice(choice, isCurrent: current, engine: engine)
+                ? .on : .off
+            menu.addItem(item)
+        }
+    }
+
+    /// One model off that menu, typed at the terminal and remembered.
+    ///
+    /// Remembered because for every engine but Claude it is the only per-pane
+    /// answer there is: Codex's config is machine-wide, Copilot's list lives in
+    /// a database this app does not open, and AntiGravity writes nothing at
+    /// all. Claude's transcript outranks the memory and corrects it on the next
+    /// reply — including when the model was refused.
+    @objc func changeModel(_ sender: Any?) {
+        guard let model = (sender as? NSMenuItem)?.representedObject as? String,
+              let paneID = workspace.focusedPaneID,
+              let engine = workspace.descriptor(for: paneID)?.engine,
+              let command = EngineModel.switchCommand(engine: engine, model: model)
+        else { return }
+        workspace.terminalSurface(for: paneID)?.sendCommandClearingInput(command)
+        workspace.updateDescriptor(for: paneID) {
+            $0.pickedModel = model
+            $0.model = model
+        }
     }
 
     /// The `/settings theme` modes Copilot CLI accepts.
