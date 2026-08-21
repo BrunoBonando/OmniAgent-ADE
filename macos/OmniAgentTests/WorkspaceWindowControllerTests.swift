@@ -1178,57 +1178,34 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertLessThanOrEqual(small.height, 600)
     }
 
-    /// The ladder's row counts map to window sizes through `rowWindowScale`,
-    /// and two and three rows deliberately share one. `makeController` already opens
-    /// one pane, so the window has already been through its *first*
-    /// row-count transition — and already scaled from whatever raw frame it
-    /// started at — by the time this reads `window.frame`; there is no
-    /// observing the pre-scale frame from outside. What the reference-frame
-    /// design promises, and what is actually checkable, is that returning to
-    /// a row count always lands on the exact size that row count landed on
-    /// before — never a little larger each time.
-    func testWindowScalesOnARowCountTransitionAndReturnsToTheSameSizeRatherThanCompounding() throws {
+    /// Crossing a row count leaves the window exactly where the user put it
+    /// (Bruno, 2026-08-21). The window used to scale and re-centre on every
+    /// row-count change, which moved it out from under the cursor mid-drop.
+    func testCrossingARowCountNeverResizesOrMovesTheWindow() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
         let window = try XCTUnwrap(controller.window)
-        let visible = try XCTUnwrap(window.screen?.visibleFrame)
+        window.setFrame(NSRect(x: 40, y: 60, width: 1400, height: 900), display: true)
+        let before = window.frame
         let group = try XCTUnwrap(controller.workspaceView.descriptor(for: "native-terminal")?.group)
-        let oneRow = window.frame.size
 
-        // Two browser panes — no daemon session behind them, so no PTY
-        // needed — bring the grid from one pane to three, which is row two
-        // on this ladder.
-        controller.workspaceView.addPane(
-            PaneDescriptor(sessionID: "extra-1", group: group, kind: .browser, browserURL: "https://example.com")
-        )
-        controller.workspaceView.addPane(
-            PaneDescriptor(sessionID: "extra-2", group: group, kind: .browser, browserURL: "https://example.com")
-        )
+        // Browser panes — no daemon session behind them, so no PTY needed —
+        // bring the grid from one pane to three, which is row two on this ladder.
+        for id in ["extra-1", "extra-2"] {
+            controller.workspaceView.addPane(
+                PaneDescriptor(sessionID: id, group: group, kind: .browser, browserURL: "https://example.com")
+            )
+        }
         XCTAssertEqual(controller.workspaceView.grid?.rows, 2)
-        let twoRow = window.frame.size
-        XCTAssertNotEqual(twoRow, oneRow, "the transition to two rows actually resized the window")
-        XCTAssertEqual(window.frame.midX, visible.midX, accuracy: 1, "centred on screen")
-        XCTAssertEqual(window.frame.midY, visible.midY, accuracy: 1)
+        XCTAssertEqual(window.frame, before, "growing into a second row left the window alone")
 
-        controller.workspaceView.focusPane("extra-1")
-        controller.closePane(nil)
-        controller.workspaceView.focusPane("extra-2")
-        controller.closePane(nil)
+        for id in ["extra-1", "extra-2"] {
+            controller.workspaceView.focusPane(id)
+            controller.closePane(nil)
+        }
         XCTAssertEqual(controller.workspaceView.grid?.rows, 1)
-        XCTAssertEqual(window.frame.size, oneRow, "back to one row lands on the exact size the first transition did")
-
-        // A second round trip must land on the same two sizes again, not
-        // scale either one further from wherever the window sits now — the
-        // property scaling from a fixed reference, rather than the window's
-        // current frame, exists to guarantee.
-        controller.workspaceView.addPane(
-            PaneDescriptor(sessionID: "extra-3", group: group, kind: .browser, browserURL: "https://example.com")
-        )
-        controller.workspaceView.addPane(
-            PaneDescriptor(sessionID: "extra-4", group: group, kind: .browser, browserURL: "https://example.com")
-        )
-        XCTAssertEqual(window.frame.size, twoRow, "a second trip to two rows lands on the same size as the first")
+        XCTAssertEqual(window.frame, before, "and so did coming back to one")
     }
 
     // MARK: - Orphaned sessions
@@ -1990,6 +1967,48 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             accuracy: 0.5,
             "and the content reaches the window's left edge, with nothing bare beside it"
         )
+    }
+
+    /// The window is the user's: adding panes must not resize it, and the
+    /// review panel must not squeeze the pane column below one comfortable
+    /// terminal (Bruno, 2026-08-21 — terminals wrapping at six characters
+    /// beside an expanded panel).
+    func testTheWindowKeepsItsSizeAndThePaneColumnKeepsItsMinimumWidth() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1400, height: 900), display: true)
+        window.layoutIfNeeded()
+        let before = window.frame
+
+        // Two panes, then three — the row count crosses 1 -> 2 here.
+        controller.newTerminalPane(nil)
+        controller.newTerminalPane(nil)
+        window.layoutIfNeeded()
+        XCTAssertEqual(controller.workspaceView.paneIDs.count, 3)
+        XCTAssertEqual(window.frame, before, "adding a pane never resizes the window")
+
+        controller.toggleReviewPanel(nil)
+        controller.reviewPanel.onToggleExpand?()
+        window.layoutIfNeeded()
+        XCTAssertEqual(window.frame, before, "opening and expanding the panel never resizes the window")
+        XCTAssertGreaterThanOrEqual(
+            controller.workspaceView.frame.width,
+            PaneWorkspaceView.minimumPaneAreaWidth,
+            "the panel may not squeeze the pane column below one comfortable terminal"
+        )
+
+        // And at the narrowest the window is allowed to be, where the three
+        // columns' floors cannot all be paid: still no window resize — the
+        // pane column simply keeps what it is owed.
+        window.setFrame(NSRect(origin: before.origin, size: window.minSize), display: true)
+        window.layoutIfNeeded()
+        let narrow = window.frame
+        controller.reviewPanel.onToggleExpand?()
+        controller.reviewPanel.onToggleExpand?()
+        window.layoutIfNeeded()
+        XCTAssertEqual(window.frame, narrow, "a squeezed window is never grown to fit the panel")
     }
 
     private func makeController() -> WorkspaceWindowController {

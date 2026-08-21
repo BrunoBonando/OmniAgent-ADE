@@ -162,7 +162,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// no-drop cursor for a tab and the drop highlight for a pane.
     static let editorTabDragType = NSPasteboard.PasteboardType("digital.bruno.omniagent.editor-tab")
     static let dividerThickness: CGFloat = 6
-    static let minimumPaneSize = CGSize(width: 160, height: 96)
+    /// The floor a divider drag may not cross. The same comfortable pane the
+    /// ladder tiles at, not a smaller number of its own: a minimum you can
+    /// drag straight through is not a minimum (Bruno, 2026-08-21). `slide`
+    /// refuses the drag outright where two of these will not fit, so a seam
+    /// with no room simply does not move.
+    static var minimumPaneSize: CGSize {
+        CGSize(width: comfortablePaneWidth, height: comfortablePaneHeight)
+    }
 
     /// The narrowest a pane may get before the grid trades a column for a row:
     /// `comfortableTerminalColumns` columns of the terminal's own 13pt
@@ -176,14 +183,18 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     // ponytail: one width for every pane kind — editors and browsers reflow
     // rather than wrap, so they are the more forgiving case, not the tighter
     // one. Measure per kind only if that stops being true.
-    static let comfortablePaneWidth: CGFloat = {
+    static let comfortablePaneWidth = paneWidth(forColumns: comfortableTerminalColumns)
+
+    /// A pane wide enough to hold `columns` of the terminal's own 13pt
+    /// monospace, plus the pane's chrome.
+    static func paneWidth(forColumns columns: Int) -> CGFloat {
         let cell = ("M" as NSString)
             .size(withAttributes: [
                 .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
             ])
             .width
-        return (CGFloat(comfortableTerminalColumns) * cell).rounded() + 24
-    }()
+        return (CGFloat(columns) * cell).rounded() + 24
+    }
 
     /// The shortest a pane may get before the workspace stops tiling
     /// altogether and `PaneFilmstrip` takes over: `comfortableTerminalRows`
@@ -216,6 +227,23 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         width: filmstripRailWidth + dividerThickness + comfortablePaneWidth + gridInset * 2,
         height: comfortablePaneHeight + gridInset * 2
     )
+
+    /// Columns the pane column is never squeezed below, whatever else wants
+    /// the width — the classic 80, where a shell's own output and an agent's
+    /// tables stop wrapping mid-thought.
+    ///
+    /// Deliberately wider than `comfortableTerminalColumns`: that one is the
+    /// point the *ladder* trades a column for a row, and raising it would stop
+    /// four panes tiling as a 2x2 on a laptop. This is the hard floor of the
+    /// column as a whole, which nothing tiles against.
+    static let minimumTerminalColumns = 80
+
+    /// The narrowest the pane column itself may be squeezed to — one readable
+    /// terminal, no rail. `minimumContentSize` is what the *window* promises;
+    /// this is what the review panel's divider may not take, so opening or
+    /// expanding that panel can never leave a terminal wrapping mid-thought
+    /// (see `installSplitView`).
+    static let minimumPaneAreaWidth = paneWidth(forColumns: minimumTerminalColumns) + gridInset * 2
 
     /// Columns of text a terminal needs before it stops reading as squeezed.
     ///
@@ -388,8 +416,12 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     init(makeSurface: @escaping (PaneDescriptor) -> any PaneContentView) {
         self.makeSurface = makeSurface
         super.init(frame: .zero)
+        // No ground of its own, in either mode: the sheet the panes sit on is
+        // `PaneGroundView`, the content column behind this view, so it runs
+        // unbroken from the window's top edge through the title-bar strip and
+        // out around the panes. Anything opaque here would cut that off at the
+        // grid's edge — and on the canvas it would hide the ground entirely.
         wantsLayer = true
-        layer?.backgroundColor = Self.normalBackgroundColor.cgColor
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         // Kind-neutral: the grid holds browsers as well as terminals now.
@@ -1206,28 +1238,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         canvasLayout?.frames[group]
     }
 
-    /// Inside a session the ground is never seen, so it stays the near-black a
-    /// terminal wants behind it.
-    static let normalBackgroundColor = NSColor(srgbRed: 4 / 255, green: 6 / 255, blue: 9 / 255, alpha: 1)
-
-    /// The canvas's ground is painted by `DeskGridView`, a **sibling** behind
-    /// this view rather than anything inside it.
-    ///
-    /// It lived here first, in `draw(_:)`, and was wrong: AppKit calls `draw`
-    /// with whatever rect happens to be dirty, and after the first full pass
-    /// the only things invalidating this view are its own subviews. The grid
-    /// was painted in the chips' frames and nowhere else — a field of ground
-    /// exactly where the content is, and black everywhere the eye actually
-    /// needed a reference. A sibling has no subviews of its own, so its only
-    /// invalidation is the whole-view one the camera raises.
-    ///
-    /// Which is also why this view's own background goes clear on the canvas:
-    /// it is in front of the grid, and an opaque backing layer would hide it.
-    private func updateCanvasBackground() {
-        layer?.backgroundColor = isCanvasMode
-            ? NSColor.clear.cgColor
-            : Self.normalBackgroundColor.cgColor
-    }
 
     /// Whether the camera is far enough out that pane surfaces carry no
     /// information: at `DeskCanvas.lodThreshold` 12pt type is 2.4pt. Below it
@@ -1690,12 +1700,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     }
 
     /// Re-reads the model behind a terminal and publishes it if it moved.
+    /// Also the way a pick is *checked* rather than assumed — see
+    /// `WorkspaceWindowController.changeModel`.
     ///
     /// **Off the main thread.** `EngineModel.current` reads Claude's
     /// transcript and Codex's config from disk, and this sits on the status
     /// feed — which fires while the user is typing. A bounded read is still a
     /// read, and none of it belongs on the way to a draw.
-    private func refreshModel(for sessionID: String) {
+    func refreshModel(for sessionID: String) {
         guard let descriptor = descriptors[sessionID],
               descriptor.kind == .terminal, descriptor.engine != .shell
         else { return }
@@ -2101,7 +2113,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
                 canvasEdges.removeFromSuperlayer()
             }
             isCanvasMode = newValue
-            updateCanvasBackground()
             // Unconditionally, and before the layout pass rather than after it:
             // `updateVisibility` is what runs `validateZoom`, and `updateLayout`
             // ends in `applyZoom`, which would otherwise act on a zoom this mode
@@ -3539,9 +3550,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// yet — with a live status the ring wears that status's own colour
     /// instead (see `borderColor`).
     static let focusedBorderColor = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.85)
-    /// The accent wash the selected pane's header carries, so the highlight is
-    /// legible even where a neighbouring pane's ring sits right beside it.
-    static let focusedHeaderTint = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.11)
     /// How solid the status-coloured ring is: bright on the focused pane, and
     /// still clearly visible on an unfocused one that has stopped to ask
     /// something or errored — urgency outranks focus, because that pane is
@@ -4438,7 +4446,7 @@ final class PaneHeaderView: NSView {
         didSet {
             guard status != oldValue else { return }
             mark.status = status
-            // The focused bar's bottom hairline wears the status colour too.
+            // The bar's own wash is the status colour, dark — see `tint`.
             needsDisplay = true
         }
     }
@@ -4686,7 +4694,7 @@ final class PaneHeaderView: NSView {
     private let colorBadge = PaneBadgeView()
     /// Theme badge shown on Copilot panes — opens the `/theme` menu.
     private let themeBadge = PaneBadgeView()
-    /// Model badge shown on agent panes — opens the `/model` menu.
+    /// Model badge shown on Claude panes — opens the `/model` menu.
     private let modelBadge = PaneBadgeView()
     /// Thin vertical rule between the badge group and the traffic-light cluster.
     private let clusterSeparator = PaneHeaderSeparatorView()
@@ -4829,22 +4837,37 @@ final class PaneHeaderView: NSView {
             NSRect(x: 0, y: bounds.maxY - 0.5, width: bounds.width, height: 0.5).fill()
             return
         }
-        if isFocused {
-            PaneContainerView.focusedHeaderTint.setFill()
-        } else {
-            NSColor(white: 1, alpha: 0.03).setFill()
-        }
-        bounds.fill()
-        if isFocused {
-            // The ring's own colour, dimmed — status first, accent while
-            // nothing has been reported yet, same rule as the border.
-            let ring = status.map(PaneStatusMarkView.color(for:))
-                ?? PaneContainerView.focusedBorderColor
-            ring.withAlphaComponent(0.4).setFill()
-        } else {
-            NSColor(white: 1, alpha: 0.07).setFill()
-        }
+        let (top, bottom) = Self.tint(status: status, isFocused: isFocused)
+        // A gradient rather than a flat wash: the same reason the ground and
+        // the sidebar are gradients — a tint that falls away down the bar reads
+        // as lit glass, a flat one reads as paint. Angle 90° is *down the
+        // screen* here, because this view is flipped and `NSGradient` measures
+        // counter-clockwise from the current coordinate system's x-axis.
+        NSGradient(starting: top, ending: bottom)?.draw(in: bounds, angle: 90)
+        NSColor(white: 1, alpha: isFocused ? 0.1 : 0.07).setFill()
         NSRect(x: 0, y: bounds.maxY - 0.5, width: bounds.width, height: 0.5).fill()
+    }
+
+    /// The bar's two gradient stops, over the pane's own near-black.
+    ///
+    /// An unfocused pane wears its status colour, deliberately *dark*: the
+    /// status is already stated at full strength by the tinted OmniAgent mark
+    /// and its glow at the head of this same bar, and a wash anywhere near that
+    /// brightness would swallow it. This is a hint behind the mark, not a
+    /// second copy of it.
+    ///
+    /// The selected pane wears no colour at all — plain dark glass. Its ring,
+    /// its border and the mark say which pane it is and what the agent is
+    /// doing; a third voice on the same 30pt bar is noise.
+    static func tint(status: RemoteSessionStatus?, isFocused: Bool) -> (NSColor, NSColor) {
+        if isFocused {
+            return (NSColor(white: 1, alpha: 0.06), NSColor(white: 1, alpha: 0.02))
+        }
+        guard let status else {
+            return (NSColor(white: 1, alpha: 0.045), NSColor(white: 1, alpha: 0.015))
+        }
+        let color = PaneStatusMarkView.color(for: status)
+        return (color.withAlphaComponent(0.2), color.withAlphaComponent(0.05))
     }
 
     override func layout() {
@@ -5628,6 +5651,48 @@ final class PaneHeaderButton: NSView {
 
 /// One draggable seam. Frames follow the pointer on every mouse event; the PTY
 /// resize behind them is coalesced by `PaneResizeCoalescer`.
+/// The ground everything in the content column sits on: a top-lit dark grey
+/// sheet behind the title-bar strip, the pane grid and the gaps between panes
+/// alike, so it reads as one continuous surface from the window's top edge
+/// down rather than as a slab that starts where the panes do.
+///
+/// It is the content column's container view (`contentContainer` in
+/// `WorkspaceWindowController`) rather than anything inside the grid, which is
+/// the whole point — `PaneWorkspaceView` starts below the title bar, so a
+/// ground painted there could never reach the top edge the sidebar's glass
+/// reaches.
+///
+/// Panes stay opaque on top of it (`PaneContainerView.paneBackgroundColor`) —
+/// a terminal theme with any transparency washes its own text out — so this is
+/// what is seen in the grid inset and the divider gaps, which is where the eye
+/// reads depth from.
+final class PaneGroundView: NSView {
+    static let colors = [
+        NSColor(srgbRed: 36 / 255, green: 38 / 255, blue: 45 / 255, alpha: 1),
+        NSColor(srgbRed: 15 / 255, green: 16 / 255, blue: 20 / 255, alpha: 1),
+    ]
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        guard let gradient = layer as? CAGradientLayer else { return }
+        gradient.colors = Self.colors.map(\.cgColor)
+        // Unit coordinates, y up, and this view is *not* flipped (unlike
+        // `PaneWorkspaceView`, whose flip turns its backing layer's gradient
+        // over with it): `1` is the top edge. Pinned by
+        // `testTheGroundUnderThePanesIsLitFromTheTop`.
+        gradient.startPoint = CGPoint(x: 0.5, y: 1)
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    override func makeBackingLayer() -> CALayer { CAGradientLayer() }
+}
+
 final class PaneDividerView: NSView {
     var divider: PaneDivider?
 
@@ -5637,13 +5702,10 @@ final class PaneDividerView: NSView {
     init(workspace: PaneWorkspaceView) {
         self.workspace = workspace
         super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor(
-            srgbRed: 4 / 255,
-            green: 6 / 255,
-            blue: 9 / 255,
-            alpha: 1
-        ).cgColor
+        // Paints nothing. It used to fill itself near-black, which put an
+        // opaque strip in every gap between panes — a black border where the
+        // ground should show through. It is a drag target and a cursor rect,
+        // nothing more.
         setAccessibilityElement(false)
     }
 

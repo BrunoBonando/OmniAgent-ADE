@@ -107,7 +107,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// both live here permanently, and the destination only toggles which is
     /// hidden. Unmounting `PaneWorkspaceView` would tear down live SwiftTerm
     /// views and their PTY attachment along with it.
-    private let contentContainer = NSView()
+    /// The column's ground as well as its container: a `PaneGroundView` paints
+    /// the grey sheet behind the title-bar strip *and* the pane grid, so the
+    /// two are one continuous surface (the title bar itself paints nothing).
+    private let contentContainer = PaneGroundView()
     private let placeholder = WorkspacePlaceholderView()
     /// The window's drawn title bar — window buttons, the sidebar toggle, the
     /// review toggle. Replaced the `NSToolbar`, and paints nothing: it is a
@@ -136,9 +139,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// it — see `DeskZoomReadoutView`.
     let deskZoomReadout = DeskZoomReadoutView()
 
-    /// The canvas's ground. A sibling *behind* `workspace` — see `DeskGridView`
-    /// for why it is not inside it.
-    let deskGrid = DeskGridView()
     /// Which destination is on screen. `applyDestination` is the only writer;
     /// ⌘↩ reads it because focus mode is about a terminal, and off Terminals the
     /// pane workspace is hidden entirely.
@@ -165,18 +165,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// nothing has read yet.
     private var layoutReadCompleted = false
     private var observedFirstOutput = false
-    /// The window's frame the first time `adjustWindowForRowCount` ran —
-    /// every row-count size is a scale of *this*, never of whatever the
-    /// window currently measures, so toggling between one row and two
-    /// across any number of pane changes lands on the same two sizes rather
-    /// than compounding a little larger each round trip.
-    ///
-    /// ponytail: resets each launch, so a session quit mid-scale-up starts
-    /// the next launch from an already-scaled frame — bounded by the
-    /// `visibleFrame` clamp below, not unbounded, but worth a real
-    /// persisted baseline if the drift ever gets noticed.
-    private var rowScaleReferenceFrame: NSRect?
-    private var lastGridRowCount: Int?
     /// Status text per session — an exited, erroring or thinking pane keeps its
     /// own line instead of one window-wide string every pane overwrites. The
     /// title shows the *focused* pane's entry, so switching panes tells the
@@ -545,7 +533,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.persistBrowserPanes()
             self?.persistEditorPanes()
             self?.reloadOutline()
-            self?.adjustWindowForRowCount()
         }
         workspace.onActiveGroupChanged = { [weak self] group in
             self?.reviewPanelSessionDidChange(to: group)
@@ -671,42 +658,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         return NSRect(x: 0, y: 0, width: width.rounded(), height: height.rounded())
     }
 
-    /// One entry per row count `PaneGridShape.ladder` can produce (it tops out
-    /// at 4×3): a single row — one pane, or two side by side — reads short and
-    /// wide for what's actually on screen, and two or three rows benefit from a
-    /// little more room per terminal. All of them scale the reference frame
-    /// uniformly, so the window keeps its own proportions rather than being
-    /// reshaped.
-    ///
-    /// Two and three rows share a factor deliberately. Growing the window again
-    /// on the eighth-to-ninth pane would shove it around the screen at the exact
-    /// moment the user is placing a pane, and a uniform scale buys height only
-    /// by also buying width the third row does not need. Crossing into the
-    /// third row therefore leaves the window where it is.
-    private static let rowWindowScale: [Int: CGFloat] = [1: 1.18, 2: 1.08, 3: 1.08]
-
-    /// Called whenever the on-screen pane set changes. Only acts on an
-    /// actual row-count change — not every rename or reorder `onPanesChanged`
-    /// also fires for — so a manual resize the user makes while the row
-    /// count is unchanged is never fought mid-session.
-    private func adjustWindowForRowCount() {
-        guard let window, let rows = workspace.grid?.rows, rows != lastGridRowCount else { return }
-        lastGridRowCount = rows
-        let reference = rowScaleReferenceFrame ?? window.frame
-        rowScaleReferenceFrame = reference
-        guard let scale = Self.rowWindowScale[rows] else { return }
-        let visible = (window.screen ?? NSScreen.main)?.visibleFrame ?? reference
-        let size = NSSize(
-            width: min(reference.width * scale, visible.width).rounded(),
-            height: min(reference.height * scale, visible.height).rounded()
-        )
-        let origin = NSPoint(x: (visible.midX - size.width / 2).rounded(), y: (visible.midY - size.height / 2).rounded())
-        // Not animated under XCTest, the same reason `restoreWindowFrame` isn't:
-        // a test reading `window.frame` right after this call needs the final
-        // rect there, not whatever an in-flight animation last painted.
-        let animate = window.isVisible && NSClassFromString("XCTestCase") == nil
-        window.setFrame(NSRect(origin: origin, size: size), display: true, animate: animate)
-    }
+    // ponytail: the window's size is the user's, full stop. Adding a pane
+    // used to scale and re-centre it on every row-count change; it moved the
+    // window out from under the cursor mid-placement, and the reference frame
+    // it scaled from threw away any manual resize made since. The content
+    // adapts to the window now (`PaneWorkspaceView.reflowForSize`), never the
+    // other way round.
 
     /// Restores where the user last put the window, and centres the default on
     /// first launch. Skipped under XCTest, where an autosaved frame would make
@@ -726,19 +683,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func installSplitView(on window: NSWindow) {
         workspace.translatesAutoresizingMaskIntoConstraints = false
         placeholder.translatesAutoresizingMaskIntoConstraints = false
-        // Behind the canvas, and added first so it is: the canvas's own backing
-        // layer goes clear in canvas mode precisely so this shows through.
-        deskGrid.translatesAutoresizingMaskIntoConstraints = false
-        deskGrid.isHidden = true
-        contentContainer.addSubview(deskGrid)
+        // No ground of the canvas's own: `contentContainer` is the ground, in
+        // both modes, so the sheet runs unbroken from the window's top edge
+        // rather than restarting where the canvas begins.
         contentContainer.addSubview(workspace)
         contentContainer.addSubview(placeholder)
-        NSLayoutConstraint.activate([
-            deskGrid.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
-            deskGrid.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-            deskGrid.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: WorkspaceTitleBarView.height),
-            deskGrid.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
-        ])
         installDeskZoomReadout()
         for view in [workspace, placeholder] as [NSView] {
             NSLayoutConstraint.activate([
@@ -794,7 +743,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             split.splitView.autosaveName = "OmniAgentWorkspaceSidebar"
         }
         split.addSplitViewItem(sidebarItem)
-        split.addSplitViewItem(NSSplitViewItem(viewController: content))
+        // A floor of its own, and the reason the review panel's expansion can
+        // ask for "everything" safely: the pane column is the lowest-holding
+        // item here, so without this it is squeezed to a sliver and every
+        // terminal in it wraps at six characters. One comfortable pane is what
+        // the grid's own rules assume exists.
+        let contentItem = NSSplitViewItem(viewController: content)
+        contentItem.minimumThickness = PaneWorkspaceView.minimumPaneAreaWidth
+        split.addSplitViewItem(contentItem)
 
         // The third item: the review panel, collapsed until a session's
         // state (or ⌥⌘B) opens it. Its divider rides the same autosave name.
@@ -968,10 +924,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let onCanvas = workspace.canvasMode && destination == .terminals
         deskZoomReadout.scale = workspace.camera.scale
         deskZoomReadout.isHidden = !onCanvas
-        // The ground goes with it: inside a session the card fills the viewport
-        // and there is no ground to see, and off the Desk there is no canvas.
-        deskGrid.camera = workspace.camera
-        deskGrid.isHidden = !onCanvas
     }
 
     /// What the Desk was showing when it was last left, so coming back to it is
@@ -2148,12 +2100,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 menu.removeAllItems()
                 guard !choices.isEmpty else {
                     // Said out loud rather than left as an empty menu: a menu
-                    // with nothing in it reads as a bug, and this is a network
-                    // call that can simply have failed.
+                    // with nothing in it reads as a bug, and this is a
+                    // network call that can simply have failed.
                     let failed = NSMenuItem(
-                        title: "Could not reach \(engine.displayName)",
-                        action: nil,
-                        keyEquivalent: ""
+                        title: "Could not reach \(engine.displayName)", action: nil, keyEquivalent: ""
                     )
                     failed.isEnabled = false
                     menu.addItem(failed)
@@ -2184,11 +2134,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     /// One model off that menu, typed at the terminal and remembered.
     ///
-    /// Remembered because for every engine but Claude it is the only per-pane
-    /// answer there is: Codex's config is machine-wide, Copilot's list lives in
-    /// a database this app does not open, and AntiGravity writes nothing at
-    /// all. Claude's transcript outranks the memory and corrects it on the next
-    /// reply — including when the model was refused.
+    /// Remembered because for every engine but Claude the pick is the only
+    /// per-pane answer there is: Codex's config is machine-wide, Copilot's
+    /// list is in a database this app does not open, and AntiGravity writes
+    /// nothing at all.
+    ///
+    /// The badge is a different question, and only moves here for the engines
+    /// where the pick settles it. `/model` is a *request* to Claude — it can
+    /// ask the user to confirm, and declining leaves the terminal on the model
+    /// it was already running — so moving the badge on the pick would have it
+    /// claim a switch that never happened, with nothing to correct it until
+    /// the next reply landed. Instead the pane re-reads its transcript
+    /// straight away and the badge lands on what is actually true: for a
+    /// declined switch, the model it was already showing. See
+    /// `EngineModel.pickIsAuthoritative`.
     @objc func changeModel(_ sender: Any?) {
         guard let model = (sender as? NSMenuItem)?.representedObject as? String,
               let paneID = workspace.focusedPaneID,
@@ -2198,8 +2157,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.terminalSurface(for: paneID)?.sendCommandClearingInput(command)
         workspace.updateDescriptor(for: paneID) {
             $0.pickedModel = model
-            $0.model = model
+            if EngineModel.pickIsAuthoritative(for: engine) { $0.model = model }
         }
+        // The badge, the menu's tick and the descriptor all read one value, so
+        // this is the whole of keeping them in sync: put the true answer in it.
+        workspace.refreshModel(for: paneID)
     }
 
     /// The `/settings theme` modes Copilot CLI accepts.
@@ -3583,11 +3545,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             else { return nil }
             var byID: [String: PaneDescriptor] = [:]
             for pane in all { byID[pane.sessionID] = pane }
+            let git = GitDiffStat.cached(forDirectory: node.cwd)
             return .session(
                 node,
                 panes: byID,
                 statuses: lastStatus,
                 ledger: activity,
+                eventTimes: lastStatusEventAt,
+                // Read lazily, per row the table actually draws: this runs ten
+                // times a second, and scraping every pane's screen for a table
+                // that shows four of them is work nobody sees.
+                tails: { [weak self] paneID in
+                    self?.workspace.terminalSurface(for: paneID)?.lastOutputLine()
+                },
+                git: git,
+                branch: git?.branch,
                 now: now
             )
         }

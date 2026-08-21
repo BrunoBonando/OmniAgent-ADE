@@ -426,6 +426,12 @@ final class EngineSwitchTests: XCTestCase {
         XCTAssertEqual(
             ClaudeModel.current(sessionID: "p1", cwd: cwd, home: home), "claude-opus-5"
         )
+        // The pick is a request Claude can refuse; only its transcript settles
+        // it. Everything else has nothing that could disagree.
+        XCTAssertFalse(EngineModel.pickIsAuthoritative(for: .claude))
+        for engine in [Engine.codex, .copilot, .antigravity] {
+            XCTAssertTrue(EngineModel.pickIsAuthoritative(for: engine), "\(engine)")
+        }
         // A shell has no model to report, whatever was picked.
         XCTAssertNil(
             EngineModel.current(engine: .shell, sessionID: "p1", cwd: cwd, picked: "opus")
@@ -437,6 +443,13 @@ final class EngineSwitchTests: XCTestCase {
         )
         XCTAssertNil(
             EngineModel.current(engine: .antigravity, sessionID: "p1", cwd: cwd, picked: nil)
+        )
+        // A Claude pane that has answered nothing reports nothing — not the
+        // model the user just asked for and may have then declined. This is
+        // the bug the badge had: a rejected switch left it claiming a model
+        // the terminal was not running.
+        XCTAssertNil(
+            EngineModel.current(engine: .claude, sessionID: "unanswered", cwd: cwd, picked: "haiku")
         )
         // Copilot's documented default, until this app sets otherwise.
         XCTAssertEqual(

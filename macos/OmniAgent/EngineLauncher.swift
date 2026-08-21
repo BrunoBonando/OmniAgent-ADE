@@ -204,8 +204,11 @@ enum EngineModel {
     ) -> String? {
         switch engine {
         // The transcript is per-pane and follows a `/model` typed by hand,
-        // which a remembered pick cannot — so here the disk outranks it.
-        case .claude: return ClaudeModel.current(sessionID: sessionID, cwd: cwd) ?? picked
+        // which a remembered pick cannot — so here the disk is the whole
+        // answer. Deliberately no `?? picked` fallback: a pick Claude has not
+        // acted on is exactly the one that can turn out to be false, and a
+        // pane that has answered nothing has no model to report.
+        case .claude: return ClaudeModel.current(sessionID: sessionID, cwd: cwd)
         case .codex: return picked ?? codexConfiguredModel()
         // Copilot's default is `auto` and its real answer lives in a live
         // WAL-mode SQLite database this app is not going to open for a badge.
@@ -214,6 +217,21 @@ enum EngineModel {
         case .shell: return nil
         }
     }
+
+    /// Whether a model picked in the menu is *the answer* for this engine, or
+    /// only a request it may refuse.
+    ///
+    /// Claude names the model that actually served each reply in its
+    /// transcript, and `/model` can be turned down — the switch asks the user
+    /// to confirm, and Escape leaves the terminal on the model it was already
+    /// running. A badge that moved on the pick would then be claiming
+    /// something the terminal is not doing, and nothing would correct it until
+    /// the next reply landed. So for Claude the pick is a request and the
+    /// transcript is the answer.
+    ///
+    /// No other engine has a source that can disagree, so there the pick is
+    /// the only answer there is.
+    static func pickIsAuthoritative(for engine: Engine) -> Bool { engine != .claude }
 
     /// What to type at the terminal to switch, or `nil` for an engine with no
     /// in-session switch.

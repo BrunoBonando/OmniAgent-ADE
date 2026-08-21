@@ -845,6 +845,76 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertGreaterThan(near, far + 0.05, "and it fades on the way down")
     }
 
+    /// The ground under the panes is a lit grey sheet, not a flat slab, and
+    /// which end the light is at is the whole point — a gradient's unit space
+    /// is y-up, and whether that survives depends on the view's flippedness —
+    /// so it is rendered rather than reasoned about, anchored by a marker at
+    /// the top of the screen the way the wash test is.
+    func testTheGroundUnderThePanesIsLitFromTheTop() throws {
+        let ground = PaneGroundView()
+        // In a window: a detached view never runs the display pass that hangs
+        // its subviews' layers off its own, so the marker would not render.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 40, height: 400),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = ground
+        defer { window.close() }
+        // Unflipped, so the top of the screen is the *high* y.
+        let marker = NSView(frame: NSRect(x: 0, y: ground.bounds.height - 6, width: 40, height: 6))
+        marker.wantsLayer = true
+        marker.layer?.backgroundColor = NSColor.green.cgColor
+        ground.addSubview(marker)
+        window.displayIfNeeded()
+        ground.layoutSubtreeIfNeeded()
+
+        let image = try XCTUnwrap(render(ground))
+        func pixel(_ row: Int) -> NSColor {
+            image.colorAt(x: 20, y: row)?.usingColorSpace(.sRGB) ?? .black
+        }
+        let anchor = try XCTUnwrap(
+            (0..<image.pixelsHigh).first { pixel($0).greenComponent > 0.8 },
+            "the marker has to show up, or the render proves nothing"
+        )
+        let rows = anchor < image.pixelsHigh / 2
+            ? Array(0..<image.pixelsHigh)
+            : Array((0..<image.pixelsHigh).reversed())
+        let top = pixel(rows[rows.count / 10])
+        let bottom = pixel(rows[rows.count - rows.count / 20])
+        XCTAssertGreaterThan(top.brightnessComponent, bottom.brightnessComponent + 0.02, "lit from the top")
+        XCTAssertGreaterThan(top.brightnessComponent, 0.1, "and grey, not the near-black it used to be")
+    }
+
+    /// The bar wears the agent's status as a *dark* wash, and only while the
+    /// pane is not the selected one — the tinted OmniAgent mark on the same bar
+    /// states the status at full strength, and the wash is a hint behind it.
+    func testTheHeaderWashIsTheStatusColourDarkenedAndOnlyWhenUnselected() throws {
+        let (top, bottom) = PaneHeaderView.tint(status: .error, isFocused: false)
+        let red = try XCTUnwrap(PaneStatusMarkView.color(for: .error).usingColorSpace(.sRGB))
+        XCTAssertEqual(try XCTUnwrap(top.usingColorSpace(.sRGB)).redComponent, red.redComponent)
+        XCTAssertLessThan(top.alphaComponent, 0.25, "a hint, not a second status light")
+        XCTAssertLessThan(bottom.alphaComponent, top.alphaComponent, "and it falls away down the bar")
+
+        let (selectedTop, _) = PaneHeaderView.tint(status: .error, isFocused: true)
+        let neutral = try XCTUnwrap(selectedTop.usingColorSpace(.sRGB))
+        XCTAssertEqual(neutral.redComponent, neutral.blueComponent, "selected is plain dark glass")
+        XCTAssertEqual(neutral.redComponent, neutral.greenComponent, "with no status colour in it")
+    }
+
+    /// A divider is a drag target, not a surface: filling it would put a black
+    /// strip in every gap where the ground should show through.
+    func testTheDividersBetweenPanesPaintNothing() throws {
+        let workspace = makeWorkspace(panes: 2)
+        let divider = try XCTUnwrap(
+            workspace.subviews.compactMap { $0 as? PaneDividerView }.first,
+            "two panes side by side have a divider between them"
+        )
+        XCTAssertNil(divider.layer?.backgroundColor)
+    }
+
     /// Renders a view's whole layer tree, gradients included — `cacheDisplay`
     /// draws `draw(_:)` output only, which is nothing here.
     private func render(_ view: NSView) -> NSBitmapImageRep? {
