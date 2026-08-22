@@ -757,6 +757,7 @@ final class SessionHoverCardTests: XCTestCase {
     func testTheDropPointsAtTheRowAndKeepsOffTheCorners() {
         let shell = HoverCardShellView(frame: NSRect(x: 0, y: 0, width: 300, height: 140))
         shell.layoutSubtreeIfNeeded()
+        assertNoNaNGeometry(shell)
 
         let middle = shell.dropFrame(centerY: 70)
         XCTAssertEqual(middle.midY, 70)
@@ -1210,5 +1211,131 @@ final class SessionHoverCardTests: XCTestCase {
             engine: .claude,
             cwd: NSHomeDirectory() + "/Code/thing"
         )
+    }
+
+    // MARK: - NaN geometry regression (crash: "Invalid view geometry: y is NaN")
+
+    /// Walks the real, laid-out tree the way the crash reporter's own
+    /// `_NSViewValidateGeometry` does, and fails loudly the instant a frame
+    /// component is NaN — instead of trapping the whole process the way the
+    /// real thing does.
+    func assertNoNaNGeometry(_ view: NSView, _ path: String = "", file: StaticString = #filePath, line: UInt = #line) {
+        let f = view.frame
+        if f.origin.x.isNaN || f.origin.y.isNaN || f.size.width.isNaN || f.size.height.isNaN {
+            XCTFail("\(path)/\(type(of: view)) has NaN geometry: \(f)", file: file, line: line)
+        }
+        for (i, sub) in view.subviews.enumerated() {
+            assertNoNaNGeometry(sub, "\(path)/\(i):\(type(of: sub))", file: file, line: line)
+        }
+    }
+
+    /// A grab-bag of dashboard states that used to leave `HoverCardBodyView`
+    /// pinned to a `.required` height it had already outgrown — a stale
+    /// `translatesAutoresizingMaskIntoConstraints` mirror fighting the real
+    /// content the moment it needed more room. AppKit resolved that by
+    /// breaking a stack spacing constraint, or, at the wrong moment, by
+    /// producing NaN geometry and crashing (`HoverCardBodyView.cardSize`).
+    func testNoStateProducesNaNGeometry() throws {
+        let body = HoverCardBodyView()
+        body.tailField.animates = false
+        let backdrop = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 500))
+        backdrop.addSubview(body)
+
+        func lay(_ model: HoverCardModel) {
+            body.apply(model)
+            let size = body.cardSize
+            body.frame = NSRect(origin: .zero, size: size)
+            backdrop.layoutSubtreeIfNeeded()
+            assertNoNaNGeometry(body)
+        }
+
+        // A session with panes, dirty tree, commits — the ordinary path.
+        var panes: [String: PaneDescriptor] = [:]
+        for id in ["a", "b", "c"] {
+            panes[id] = PaneDescriptor(sessionID: id, group: "s", engine: .claude, label: "pane \(id)")
+        }
+        var git = GitDiffStat(files: 14, added: 1284, removed: 312, branch: "main")
+        git.recent = [GitCommit(hash: "a41f7c2", subject: "fix: it", at: t0 / 1000 - 60)]
+        lay(HoverCardModel.session(
+            sessionNode(paneIDs: ["a", "b", "c"]),
+            panes: panes,
+            statuses: ["a": .thinking, "b": .thinking, "c": .awaitingApproval],
+            ledger: PaneActivityLedger(),
+            tails: { "working on \($0)" },
+            git: git,
+            branch: "main",
+            now: t0
+        ))
+        body.dashboardView.onReview = {}
+        body.dashboardView.select(.git)
+        backdrop.layoutSubtreeIfNeeded()
+        assertNoNaNGeometry(body)
+
+        // Dirty tree, zero commits ever (a brand new repo) — the git tab's
+        // commit list collapses to nothing while its stats row stays up.
+        var noCommits = GitDiffStat(files: 2, added: 5, removed: 0, branch: "main")
+        noCommits.recent = []
+        lay(HoverCardModel.session(
+            sessionNode(paneIDs: ["a", "b", "c"]),
+            panes: panes,
+            statuses: ["a": .ready, "b": .ready, "c": .ready],
+            ledger: PaneActivityLedger(),
+            git: noCommits,
+            branch: "main",
+            now: t0
+        ))
+        body.dashboardView.select(.git)
+        backdrop.layoutSubtreeIfNeeded()
+        assertNoNaNGeometry(body)
+
+        // An empty session: no panes at all, no git. The narrowest, emptiest
+        // dashboard the card can carry.
+        lay(HoverCardModel.session(
+            sessionNode(paneIDs: []),
+            panes: [:],
+            statuses: [:],
+            ledger: PaneActivityLedger(),
+            now: t0
+        ))
+
+        // Clean tree after a dirty one, while sitting on the git tab — the
+        // tab has to fall back before the tile it belongs to disappears.
+        lay(HoverCardModel.session(
+            sessionNode(paneIDs: ["a", "b", "c"]),
+            panes: panes,
+            statuses: ["a": .thinking, "b": .thinking, "c": .thinking],
+            ledger: PaneActivityLedger(),
+            git: git,
+            branch: "main",
+            now: t0
+        ))
+        body.dashboardView.select(.git)
+        backdrop.layoutSubtreeIfNeeded()
+        var clean = git
+        clean.files = 0
+        clean.added = 0
+        clean.removed = 0
+        lay(HoverCardModel.session(
+            sessionNode(paneIDs: ["a", "b", "c"]),
+            panes: panes,
+            statuses: ["a": .thinking, "b": .thinking, "c": .thinking],
+            ledger: PaneActivityLedger(),
+            git: clean,
+            branch: "main",
+            now: t0
+        ))
+
+        // Back down to a plain pane card, narrow again, from a wide one.
+        lay(HoverCardModel.pane(terminal(), status: .ready, activity: nil, now: t0))
+
+        // A pane card that has never been sized at all before its first
+        // layout, from zero.
+        let fresh = HoverCardBodyView()
+        fresh.tailField.animates = false
+        let freshBackdrop = NSView(frame: .zero)
+        freshBackdrop.addSubview(fresh)
+        fresh.apply(HoverCardModel.pane(terminal(), status: .thinking, activity: nil, tail: "hello", now: t0))
+        freshBackdrop.layoutSubtreeIfNeeded()
+        assertNoNaNGeometry(fresh)
     }
 }

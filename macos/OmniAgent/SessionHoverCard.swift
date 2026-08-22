@@ -1815,9 +1815,25 @@ final class HoverCardBodyView: NSView {
     }
 
     /// The height this card wants at its fixed width.
+    ///
+    /// `translatesAutoresizingMaskIntoConstraints` is on so `HoverCardShellView`
+    /// can fill its host the old-fashioned way — which means AppKit is also
+    /// holding a `.required` constraint pinning this view's height to
+    /// whatever it was last measured at. Asking `fittingSize` "how tall do
+    /// you want to be" while still pinned to yesterday's answer is a
+    /// contradiction the moment the dashboard grows: the engine cannot
+    /// satisfy both, breaks a stack spacing constraint to cope, and on a bad
+    /// day produces NaN geometry instead (crash: "Invalid view geometry: y
+    /// is NaN"). Lifting the pin for the one measurement that exists to
+    /// answer it, then restoring it, removes the contradiction rather than
+    /// surviving it.
     var cardSize: NSSize {
+        translatesAutoresizingMaskIntoConstraints = false
         layoutSubtreeIfNeeded()
-        return NSSize(width: currentWidth, height: max(fittingSize.height, 44))
+        let height = max(fittingSize.height, 44)
+        frame.size = NSSize(width: currentWidth, height: height)
+        translatesAutoresizingMaskIntoConstraints = true
+        return frame.size
     }
 }
 
@@ -1881,7 +1897,22 @@ final class HoverCardShellView: NSView {
         body.autoresizingMask = [.width, .height]
 
         if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
+            // Framed, not the parameterless initializer: `NSGlassEffectView`
+            // defaults to `.zero` like any other view, and — since nothing
+            // here ever turns off `translatesAutoresizingMaskIntoConstraints`
+            // — a `.zero` frame is a `.required` `height == 0` constraint
+            // AppKit holds until the first real `card.frame = …` in
+            // `layout()`. `contentView = body` pins `body`'s edges to this
+            // view's with constraints of its own regardless, so that
+            // `.required` zero was reaching every stack and text field
+            // inside `body` before this view was ever placed — "Unable to
+            // simultaneously satisfy constraints", and on a bad day NaN
+            // geometry instead (crash: "Invalid view geometry: y is NaN").
+            // Seeding the same starting size the pre-26 fallback already
+            // uses below removes the contradiction instead of surviving it.
+            let glass = NSGlassEffectView(
+                frame: NSRect(origin: .zero, size: NSSize(width: HoverCardBodyView.width, height: 120))
+            )
             glass.cornerRadius = SessionHoverCardController.cornerRadius
             glass.contentView = body
             card = glass
@@ -1946,6 +1977,25 @@ final class HoverCardShellView: NSView {
         wrapper.frame = bounds
         card.frame = NSRect(x: Self.lane, y: 0, width: max(0, bounds.width - Self.lane), height: bounds.height)
         dropBox.frame = dropFrame(centerY: dropCenterY)
+    }
+
+    /// `body`'s natural size, asked before this view's own frame has any
+    /// reason to already be the right shape — the controller calls this to
+    /// *decide* that shape.
+    ///
+    /// On macOS 26, `NSGlassEffectView.contentView` pins `body`'s edges to
+    /// `card`'s with its own `.required` constraints, permanently — so
+    /// measuring while `card` is still sized for the *previous* card fights
+    /// the new content the same way `body`'s own stale mask constraint used
+    /// to (`HoverCardBodyView.cardSize`'s fix does not reach this one: the
+    /// pin belongs to `card`, not to `body`). Widening `card` first, the way
+    /// that fix widens `body`, gives the measurement room instead of a fight.
+    var cardSize: NSSize {
+        let previous = card.frame
+        card.frame.size.height = 10_000
+        let size = body.cardSize
+        card.frame = previous
+        return size
     }
 
     /// Points the drop at `centerY`. Animated when the card slides from one row
@@ -2188,7 +2238,7 @@ final class SessionHoverCardController {
         } else {
             body.dashboardView.onReview = nil
         }
-        let size = Self.panelSize(card: body.cardSize)
+        let size = Self.panelSize(card: shell.cardSize)
         let frame = Self.frame(size: size, row: row, container: parent.frame)
 
         if !wasOpen {
@@ -2261,7 +2311,7 @@ final class SessionHoverCardController {
             }
         }
         body.apply(model)
-        let frame = Self.frame(size: Self.panelSize(card: body.cardSize), row: row, container: parent.frame)
+        let frame = Self.frame(size: Self.panelSize(card: shell.cardSize), row: row, container: parent.frame)
         if !frame.equalTo(panel.frame) {
             // A pane started or stopped working and the table gained or lost a
             // row: animate the height so the card grows to cover it rather than
