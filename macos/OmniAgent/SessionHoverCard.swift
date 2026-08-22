@@ -1205,8 +1205,8 @@ final class HoverWorkRowView: NSView {
 /// built and destroyed — which is what lets the card *grow* when a fifth
 /// terminal starts working instead of snapping to a new size.
 /// One of the git tab's three headline numbers: the figure in the colour of
-/// what it means — amber for the files touched, green for what was added, red
-/// for what was taken away — and under it what it counts.
+/// what it means — amber for work not committed, green for work staged, the
+/// accent for work already landed — and under it the noun it counts.
 final class HoverGitStatView: NSView {
     private let valueField: NSTextField
     private let captionField: NSTextField
@@ -1236,7 +1236,7 @@ final class HoverGitStatView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
-    func apply(_ value: String) { valueField.stringValue = value }
+    func apply(_ value: Int) { valueField.stringValue = "\(value)" }
 }
 
 /// One line of the git tab's commit list: hash, subject, age.
@@ -1290,10 +1290,9 @@ final class HoverCommitRowView: NSView {
 final class HoverGitPanelView: NSView {
     static let maxCommits = 3
 
-    private let diffBar = HoverDiffBarView()
-    private let filesStat = HoverGitStatView(caption: "files changed", color: ShellPalette.amber)
-    private let addedStat = HoverGitStatView(caption: "lines added", color: ShellPalette.green)
-    private let removedStat = HoverGitStatView(caption: "lines removed", color: ShellPalette.red)
+    private let changedStat = HoverGitStatView(caption: "changed", color: ShellPalette.amber)
+    private let stagedStat = HoverGitStatView(caption: "staged", color: ShellPalette.green)
+    private let committedStat = HoverGitStatView(caption: "committed today", color: ShellPalette.accent)
     private let caption = ShellFont.label(
         "RECENT COMMITS",
         font: ShellFont.ui(10, .semibold),
@@ -1328,52 +1327,14 @@ final class HoverGitPanelView: NSView {
         reviewButton.isHidden = true
 
         let stats = NSStackView(views: [
-            filesStat, divider(), addedStat, divider(), removedStat,
+            changedStat, divider(), stagedStat, divider(), committedStat,
         ])
         stats.orientation = .horizontal
         stats.alignment = .centerY
         stats.distribution = .fill
         stats.spacing = 10
-        addedStat.widthAnchor.constraint(equalTo: filesStat.widthAnchor).isActive = true
-        removedStat.widthAnchor.constraint(equalTo: filesStat.widthAnchor).isActive = true
-
-        // The three numbers and the bar that draws them live in one bubble,
-        // the same one the KPI tiles above are made of: the bar is the chart
-        // *of* those numbers, and a bar floating loose under them would read
-        // as a fourth, unrelated thing.
-        let bubble = NSView()
-        bubble.wantsLayer = true
-        bubble.layer?.backgroundColor = NSColor(white: 1, alpha: 0.045).cgColor
-        bubble.layer?.cornerRadius = HoverKPITileView.corner
-        bubble.layer?.borderWidth = 1
-        bubble.layer?.borderColor = ShellPalette.hairline.cgColor
-        bubble.translatesAutoresizingMaskIntoConstraints = false
-        let bubbleStack = NSStackView(views: [stats, diffBar])
-        bubbleStack.orientation = .vertical
-        bubbleStack.alignment = .leading
-        bubbleStack.spacing = 10
-        bubbleStack.translatesAutoresizingMaskIntoConstraints = false
-        bubble.addSubview(bubbleStack)
-        NSLayoutConstraint.activate([
-            bubbleStack.leadingAnchor.constraint(
-                equalTo: bubble.leadingAnchor,
-                constant: HoverKPITileView.padding
-            ),
-            bubbleStack.trailingAnchor.constraint(
-                equalTo: bubble.trailingAnchor,
-                constant: -HoverKPITileView.padding
-            ),
-            bubbleStack.topAnchor.constraint(
-                equalTo: bubble.topAnchor,
-                constant: HoverKPITileView.padding
-            ),
-            bubbleStack.bottomAnchor.constraint(
-                equalTo: bubble.bottomAnchor,
-                constant: -HoverKPITileView.padding
-            ),
-            stats.widthAnchor.constraint(equalTo: bubbleStack.widthAnchor),
-            diffBar.widthAnchor.constraint(equalTo: bubbleStack.widthAnchor),
-        ])
+        stagedStat.widthAnchor.constraint(equalTo: changedStat.widthAnchor).isActive = true
+        committedStat.widthAnchor.constraint(equalTo: changedStat.widthAnchor).isActive = true
 
         trackingField.alignment = .right
         let header = NSStackView(views: [caption, NSView(), trackingField])
@@ -1395,11 +1356,11 @@ final class HoverGitPanelView: NSView {
         footer.alignment = .centerY
         footer.spacing = 8
 
-        let stack = NSStackView(views: [bubble, header, commits, rule, footer])
+        let stack = NSStackView(views: [stats, header, commits, rule, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 7
-        stack.setCustomSpacing(12, after: bubble)
+        stack.setCustomSpacing(12, after: stats)
         stack.setCustomSpacing(9, after: commits)
         stack.setCustomSpacing(9, after: rule)
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -1411,7 +1372,7 @@ final class HoverGitPanelView: NSView {
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 11),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             rule.heightAnchor.constraint(equalToConstant: 1),
-        ] + [bubble, header, commits, rule, footer].map {
+        ] + [stats, header, commits, rule, footer].map {
             $0.widthAnchor.constraint(equalTo: stack.widthAnchor)
         } + commitViews.map { $0.widthAnchor.constraint(equalTo: commits.widthAnchor) })
     }
@@ -1424,12 +1385,9 @@ final class HoverGitPanelView: NSView {
 
     func apply(_ dashboard: SessionDashboard) {
         let git = dashboard.git ?? GitDiffStat()
-        diffBar.apply(added: git.added, removed: git.removed)
-        filesStat.apply("\(git.files)")
-        addedStat.apply("+\(git.added)")
-        // A real minus sign, matching the tile's own: it sits beside a `+` at
-        // the same optical weight, which a hyphen does not.
-        removedStat.apply("\u{2212}\(git.removed)")
+        changedStat.apply(git.files)
+        stagedStat.apply(git.staged)
+        committedStat.apply(git.committedToday)
         trackingField.stringValue = "↑\(git.ahead)  ↓\(git.behind)"
 
         for (index, view) in commitViews.enumerated() {

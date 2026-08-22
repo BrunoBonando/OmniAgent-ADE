@@ -501,6 +501,13 @@ struct GitDiffStat: Equatable {
     /// caller because this type has already resolved the repository root, off
     /// the main thread — and the caller asks ten times a second.
     var branch: String?
+    /// Files in the index. `changed` above is the working tree against `HEAD`,
+    /// so a staged file is in both — which is what "staged, of the changed" is
+    /// meant to say.
+    var staged: Int = 0
+    /// Commits on `HEAD` since midnight, whoever wrote them. A day's output,
+    /// not the user's: a card cannot ask who is at the keyboard.
+    var committedToday: Int = 0
     /// Against the tracking branch, and both zero when there is none.
     var ahead: Int = 0
     var behind: Int = 0
@@ -543,16 +550,23 @@ struct GitDiffStat: Equatable {
         return cache[path]
     }
 
-    /// **Never call this on the main thread** — it is a subprocess. Three of
-    /// them now: the card's git tab lists the last commits and says where the
-    /// branch stands, and each question is one short read-only `git`. All
-    /// behind the same three-second cache as the first.
+    /// **Never call this on the main thread** — it is a subprocess. Five of
+    /// them now: the card's git tab reports the whole repository, and each
+    /// question is one short read-only `git`. All of them behind the same
+    /// three-second cache as the first.
     static func load(repoRoot: URL) -> GitDiffStat? {
         guard let output = GitStatus.runGit(["diff", "--shortstat", "HEAD"], in: repoRoot) else {
             return nil
         }
         var stat = parse(shortstat: output)
         stat.branch = GitBranch.current(repoRoot: repoRoot)
+        stat.staged = parse(
+            shortstat: GitStatus.runGit(["diff", "--cached", "--shortstat"], in: repoRoot) ?? ""
+        ).files
+        stat.committedToday = Int(
+            (GitStatus.runGit(["rev-list", "--count", "--since=midnight", "HEAD"], in: repoRoot) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        ) ?? 0
         stat.recent = parse(
             log: GitStatus.runGit(
                 ["log", "-3", "--format=%h%x1f%s%x1f%ct"],
