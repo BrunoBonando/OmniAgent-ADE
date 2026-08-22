@@ -128,6 +128,56 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(opened, 1)
     }
 
+    // MARK: - System stats
+
+    /// The machine card sits directly above the account chip, on the same
+    /// side insets.
+    func testTheStatsCardSitsAboveTheAccountRow() {
+        let sidebar = makeSidebar()
+        XCTAssertTrue(sidebar.statsRow.superview === sidebar)
+        XCTAssertEqual(
+            sidebar.statsRow.frame.minY,
+            sidebar.accountRow.frame.maxY + 8,
+            accuracy: 0.5
+        )
+        XCTAssertEqual(sidebar.statsRow.frame.width, sidebar.bounds.width - 16, accuracy: 0.5)
+    }
+
+    /// Fractions render as whole percentages and clamp to 0...1; a metric
+    /// with no reading says so instead of inventing a number.
+    func testTheGaugesRenderPercentagesAndClamp() {
+        let stats = SidebarSystemStatsView()
+        stats.apply(cpu: 0.37, memory: 1.7, gpu: nil)
+        XCTAssertEqual(stats.cpuGauge.readout, "37%")
+        XCTAssertEqual(stats.memoryGauge.readout, "100%")
+        XCTAssertEqual(stats.gpuGauge.readout, "—")
+    }
+
+    /// The number's colour is the pressure analysis: green while comfortable,
+    /// amber past 70%, red past 90% — and no verdict at all without a reading.
+    func testTheGaugesWearThePressureColour() {
+        let stats = SidebarSystemStatsView()
+        stats.apply(cpu: 0.3, memory: 0.75, gpu: 0.95)
+        XCTAssertEqual(stats.cpuGauge.readoutColor, ShellPalette.green)
+        XCTAssertEqual(stats.memoryGauge.readoutColor, ShellPalette.amber)
+        XCTAssertEqual(stats.gpuGauge.readoutColor, ShellPalette.red)
+
+        stats.apply(cpu: 0.3, memory: 0.75, gpu: nil)
+        XCTAssertEqual(stats.gpuGauge.readoutColor, ShellPalette.inkTertiary)
+    }
+
+    /// The kernel answers on this machine: memory is always readable and in
+    /// range. CPU legitimately needs two samples for a delta and the tick
+    /// counters may not advance between them, so it only must not crash.
+    func testMachineStatsAnswerFromTheKernel() {
+        _ = MachineStats.cpuFraction()
+        _ = MachineStats.cpuFraction()
+        let memory = MachineStats.memoryFraction()
+        XCTAssertNotNil(memory)
+        XCTAssertGreaterThan(memory ?? 0, 0)
+        XCTAssertLessThanOrEqual(memory ?? 0, 1)
+    }
+
     // MARK: - Content routing (controller)
 
     /// Home and To Do List land on the "Under development" placeholder; the

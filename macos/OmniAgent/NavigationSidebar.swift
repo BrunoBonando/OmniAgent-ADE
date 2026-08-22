@@ -1,4 +1,5 @@
 import AppKit
+import IOKit
 
 // The flat Copilot-style sidebar — the 2026-08-20 navigation redesign
 // (docs/superpowers/specs/2026-08-20-copilot-nav-redesign-design.md). One
@@ -318,6 +319,260 @@ final class SidebarAccountRowView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 }
 
+// MARK: - System stats
+
+/// What the machine is doing right now, read straight from the kernel — no
+/// spawned processes, no dependencies. CPU and memory come from Mach host
+/// statistics; GPU utilization from the accelerator's IOKit performance
+/// dictionary, `nil` where the driver does not publish one.
+enum MachineStats {
+    /// Busy/total CPU ticks from the previous sample, so the next one can
+    /// report the load *since then* rather than since boot.
+    /// ponytail: static state — one sidebar samples this; make it per-view if a second ever does.
+    private static var lastTicks: (busy: UInt64, total: UInt64)?
+
+    /// Aggregate CPU load across all cores since the previous call, 0...1.
+    /// `nil` on the first call (no baseline yet) and on kernel refusal.
+    static func cpuFraction() -> Double? {
+        var info = host_cpu_load_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<host_cpu_load_info_data_t>.size / MemoryLayout<integer_t>.size
+        )
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        let busy = UInt64(info.cpu_ticks.0) + UInt64(info.cpu_ticks.1) + UInt64(info.cpu_ticks.3)
+        let total = busy + UInt64(info.cpu_ticks.2)
+        defer { lastTicks = (busy, total) }
+        guard let last = lastTicks, total > last.total else { return nil }
+        return Double(busy - last.busy) / Double(total - last.total)
+    }
+
+    /// Memory pressure the way Activity Monitor counts it: active + wired +
+    /// compressed pages over physical RAM, 0...1.
+    static func memoryFraction() -> Double? {
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size
+        )
+        let result = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        let used = (UInt64(stats.active_count) + UInt64(stats.wire_count)
+            + UInt64(stats.compressor_page_count)) * UInt64(vm_kernel_page_size)
+        let total = ProcessInfo.processInfo.physicalMemory
+        guard total > 0 else { return nil }
+        return Double(used) / Double(total)
+    }
+
+    /// The busiest accelerator's "Device Utilization %", 0...1, or `nil` when
+    /// no driver publishes one.
+    static func gpuFraction() -> Double? {
+        var iterator = io_iterator_t()
+        guard IOServiceGetMatchingServices(
+            kIOMainPortDefault, IOServiceMatching("IOAccelerator"), &iterator
+        ) == KERN_SUCCESS else { return nil }
+        defer { IOObjectRelease(iterator) }
+        var best: Double?
+        var entry = IOIteratorNext(iterator)
+        while entry != 0 {
+            if let stats = IORegistryEntryCreateCFProperty(
+                entry, "PerformanceStatistics" as CFString, kCFAllocatorDefault, 0
+            )?.takeRetainedValue() as? [String: Any],
+                let value = (stats["Device Utilization %"] as? NSNumber)?.doubleValue {
+                best = max(best ?? 0, value / 100)
+            }
+            IOObjectRelease(entry)
+            entry = IOIteratorNext(iterator)
+        }
+        return best
+    }
+}
+
+/// One machine stat in the hover card's git-tab language (`HoverGitStatView`):
+/// the big number over a small caption. Except there the colour names the
+/// column and here it *is* the reading — green while comfortable, amber past
+/// 70%, red past 90%.
+final class SidebarStatGaugeView: NSView {
+    private let valueField: NSTextField
+    private let captionField: NSTextField
+    private(set) var fraction: Double?
+
+    /// What the gauge currently reads — a fact a test can assert without
+    /// rendering. "—" until a sample lands, or when the metric never will.
+    var readout: String { valueField.stringValue }
+    /// The pressure verdict the number wears.
+    var readoutColor: NSColor? { valueField.textColor }
+
+    init(name: String) {
+        valueField = ShellFont.label(
+            "—",
+            font: ShellFont.ui(18, .semibold),
+            color: ShellPalette.inkTertiary
+        )
+        captionField = ShellFont.label(
+            name,
+            font: ShellFont.ui(10, .semibold),
+            color: ShellPalette.inkTertiary,
+            tracking: 0.5
+        )
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        valueField.alignment = .center
+        captionField.alignment = .center
+
+        let stack = NSStackView(views: [valueField, captionField])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 1
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stack.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor),
+        ])
+        setAccessibilityElement(true)
+        setAccessibilityRole(.progressIndicator)
+        setAccessibilityLabel(name)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(_ value: Double?) {
+        fraction = value.map { min(max($0, 0), 1) }
+        if let fraction {
+            valueField.stringValue = "\(Int((fraction * 100).rounded()))%"
+            valueField.textColor = fraction >= 0.9
+                ? ShellPalette.red
+                : fraction >= 0.7 ? ShellPalette.amber : ShellPalette.green
+        } else {
+            valueField.stringValue = "—"
+            valueField.textColor = ShellPalette.inkTertiary
+        }
+        setAccessibilityValue(valueField.stringValue)
+    }
+}
+
+/// The machine gauges pinned just above the account row: CPU, memory and GPU
+/// side by side in the hover card's three-numbers arrangement — equal-width
+/// columns split by hairlines — resampled every two seconds while the sidebar
+/// is on screen.
+final class SidebarSystemStatsView: NSView {
+    static let height: CGFloat = 62
+
+    let cpuGauge = SidebarStatGaugeView(name: "CPU")
+    let memoryGauge = SidebarStatGaugeView(name: "MEM")
+    let gpuGauge = SidebarStatGaugeView(name: "GPU")
+
+    private var timer: Timer?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+
+        // The account row's exact glass treatment, one radius shy of its
+        // capsule — this card is taller than a chip.
+        let glass = WorkspaceGlass.sheet(cornerRadius: 14)
+        if glass == nil {
+            layer?.cornerRadius = 14
+            layer?.cornerCurve = .continuous
+            layer?.backgroundColor = NSColor(white: 1, alpha: 0.05).cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = ShellPalette.hairlineStrong.cgColor
+        }
+
+        let stack = NSStackView(views: [
+            cpuGauge, Self.divider(), memoryGauge, Self.divider(), gpuGauge,
+        ])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.distribution = .fill
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        memoryGauge.widthAnchor.constraint(equalTo: cpuGauge.widthAnchor).isActive = true
+        gpuGauge.widthAnchor.constraint(equalTo: cpuGauge.widthAnchor).isActive = true
+
+        for view in [glass, stack].compactMap({ $0 }) { addSubview(view) }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: Self.height),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        if let glass {
+            glass.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                glass.leadingAnchor.constraint(equalTo: leadingAnchor),
+                glass.trailingAnchor.constraint(equalTo: trailingAnchor),
+                glass.topAnchor.constraint(equalTo: topAnchor),
+                glass.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ])
+        }
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("System stats")
+
+        // A throwaway CPU read, so the first ticking sample has a baseline
+        // and the gauge shows a number two seconds in, not four.
+        _ = MachineStats.cpuFraction()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// Samples only while there is a window to show them in.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        timer?.invalidate()
+        timer = nil
+        guard window != nil else { return }
+        sample()
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.sample() }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func sample() {
+        apply(
+            cpu: MachineStats.cpuFraction(),
+            memory: MachineStats.memoryFraction(),
+            gpu: MachineStats.gpuFraction()
+        )
+    }
+
+    /// Split from `sample` so a test can feed fractions without a kernel.
+    func apply(cpu: Double?, memory: Double?, gpu: Double?) {
+        cpuGauge.apply(cpu)
+        memoryGauge.apply(memory)
+        gpuGauge.apply(gpu)
+    }
+
+    /// The hairline between two stats — the git tab's divider, a touch
+    /// shorter for this card's height.
+    private static func divider() -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = ShellPalette.hairlineStrong.cgColor
+        view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalToConstant: 1),
+            view.heightAnchor.constraint(equalToConstant: 26),
+        ])
+        return view
+    }
+}
+
 // MARK: - The sidebar
 
 /// The blue the glass column wears. Its backing layer *is* the gradient, so
@@ -374,6 +629,7 @@ final class NavigationSidebarView: NSView {
     private(set) var navRows: [SidebarNavRowView] = []
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
     let workspacesTree = WorkspacesTreeView()
+    let statsRow = SidebarSystemStatsView()
     let accountRow = SidebarAccountRowView()
     private(set) var destination: WorkspaceDestination = .terminals
 
@@ -457,7 +713,7 @@ final class NavigationSidebarView: NSView {
             addSubview(glass)
         }
 
-        for view in [navStack, workspacesHeader, scroll, accountRow] { addSubview(view) }
+        for view in [navStack, workspacesHeader, scroll, statsRow, accountRow] { addSubview(view) }
 
         // Last, and so on top of everything: the rows are all inset from this
         // edge, so it never covers one, and being topmost means it cannot be
@@ -487,7 +743,11 @@ final class NavigationSidebarView: NSView {
             scroll.topAnchor.constraint(equalTo: workspacesHeader.bottomAnchor, constant: 2),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: accountRow.topAnchor, constant: -8),
+            scroll.bottomAnchor.constraint(equalTo: statsRow.topAnchor, constant: -8),
+
+            statsRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            statsRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            statsRow.bottomAnchor.constraint(equalTo: accountRow.topAnchor, constant: -8),
 
             accountRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             accountRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
