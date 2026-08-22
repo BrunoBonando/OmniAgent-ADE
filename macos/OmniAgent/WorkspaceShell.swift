@@ -102,6 +102,17 @@ enum ShellPalette {
     /// the light — the sheet shows through most where the column is dimmest.
     static let sidebarGlassTint = [srgb(30, 38, 84, 0.70), srgb(6, 9, 30, 0.52)]
 
+    /// The line down the column's trailing edge — where the sidebar stops and
+    /// the pane black starts.
+    ///
+    /// Grey rather than a lighter step of the column's blue, which would read
+    /// as the column's own edge rather than as a border between two things.
+    /// It is not the glass sheet's rim either: that rim exists, and measured
+    /// `64, 65, 71` at its brightest against the pane black, which is present
+    /// without being a separation. This is drawn on every OS — below macOS 26
+    /// there is no sheet and so no rim at all.
+    static let sidebarEdge = srgb(107, 107, 107)
+
     static let ink = srgb(240, 240, 244)
     static let inkNav = srgb(176, 176, 186)
     static let inkSecondary = srgb(194, 194, 203)
@@ -1048,9 +1059,10 @@ final class WorkspacePlaceholderView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = ShellPalette.content.cgColor
-
+        // Paints nothing. Home and To Do List are the *same* surface the Desk
+        // is — `PaneGroundView` behind this view, running from the window's top
+        // edge — and an opaque fill here made switching destination look like
+        // switching apps.
         let stack = NSStackView(views: [titleField, subtitleField])
         stack.orientation = .vertical
         stack.alignment = .centerX

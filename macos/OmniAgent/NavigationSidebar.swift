@@ -390,6 +390,9 @@ final class NavigationSidebarView: NSView {
     /// The blue over the sheet — the glass view's `contentView`, so it is
     /// composited on top of the material rather than behind it.
     private(set) var glassTint: NSView?
+    /// The grey line where the column stops. Topmost, so nothing the column
+    /// grows later can cover the one thing that separates it from the panes.
+    let trailingEdge = NSView()
     /// What the plus menu lists: every workspace the tree currently renders,
     /// in render order.
     private(set) var workspaceMenuEntries: [(id: String, label: String)] = []
@@ -455,6 +458,22 @@ final class NavigationSidebarView: NSView {
         }
 
         for view in [navStack, workspacesHeader, scroll, accountRow] { addSubview(view) }
+
+        // Last, and so on top of everything: the rows are all inset from this
+        // edge, so it never covers one, and being topmost means it cannot be
+        // covered either.
+        trailingEdge.wantsLayer = true
+        trailingEdge.layer?.backgroundColor = ShellPalette.sidebarEdge.cgColor
+        trailingEdge.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(trailingEdge)
+
+        NSLayoutConstraint.activate([
+            trailingEdge.trailingAnchor.constraint(equalTo: trailingAnchor),
+            trailingEdge.topAnchor.constraint(equalTo: topAnchor),
+            trailingEdge.bottomAnchor.constraint(equalTo: bottomAnchor),
+            trailingEdge.widthAnchor.constraint(equalToConstant: 1),
+        ])
+
         NSLayoutConstraint.activate([
             // The column runs under the window chrome (titleBar) and this clears it.
             navStack.topAnchor.constraint(equalTo: topAnchor, constant: WorkspaceTitleBarView.height),

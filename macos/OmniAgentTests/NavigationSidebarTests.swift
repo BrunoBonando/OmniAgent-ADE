@@ -99,9 +99,12 @@ final class NavigationSidebarTests: XCTestCase {
             sidebar.accountRow.frame.width, sidebar.bounds.width - 16, accuracy: 0.5,
             "inset from both side edges"
         )
-        // Every row above it — but not the glass ground, which is the column's
-        // full-bleed backdrop and runs the whole height *under* the chip.
-        let rows = sidebar.subviews.filter { $0 !== sidebar.accountRow && $0 !== sidebar.glassHost }
+        // Every row above it — but not the two full-height pieces that are not
+        // rows at all: the glass ground runs the whole column *under* the chip,
+        // and the trailing edge runs it *beside* the chip.
+        let rows = sidebar.subviews.filter {
+            $0 !== sidebar.accountRow && $0 !== sidebar.glassHost && $0 !== sidebar.trailingEdge
+        }
         for sibling in rows {
             XCTAssertGreaterThanOrEqual(
                 sibling.frame.minY,
@@ -221,6 +224,42 @@ final class NavigationSidebarTests: XCTestCase {
         // the direction `NSGradient`'s -90° angle gave the opaque gradient.
         XCTAssertEqual(stops.startPoint.y, 1)
         XCTAssertEqual(stops.endPoint.y, 0)
+    }
+
+    /// The column's trailing edge carries its own grey hairline. The sheet
+    /// draws a rim there, but it measured `64, 65, 71` at its brightest
+    /// against the pane black beside it — present, and not enough to say where
+    /// the column stops. This line is, and it is grey on purpose: the column's
+    /// own blue would read as part of the column rather than as its border.
+    ///
+    /// Drawn whatever the OS: below macOS 26 there is no sheet and so no rim
+    /// at all, which is the case that needs it most.
+    func testTheColumnsTrailingEdgeCarriesAGreySeparator() throws {
+        let sidebar = makeSidebar()
+        let edge = sidebar.trailingEdge
+
+        XCTAssertEqual(edge.frame.width, 1, accuracy: 0.01, "a hairline, not a bar")
+        XCTAssertEqual(
+            edge.frame.maxX, sidebar.bounds.maxX, accuracy: 0.5, "pinned to the trailing edge"
+        )
+        XCTAssertEqual(
+            edge.frame.height, sidebar.bounds.height, accuracy: 0.5,
+            "the whole height, chrome included — the column runs under it"
+        )
+        XCTAssertIdentical(
+            sidebar.subviews.last, edge, "over the glass and every row, never under them"
+        )
+
+        let cg = try XCTUnwrap(edge.layer?.backgroundColor)
+        let color = try XCTUnwrap(NSColor(cgColor: cg)?.usingColorSpace(.sRGB))
+        XCTAssertEqual(
+            color.redComponent, color.blueComponent, accuracy: 0.02,
+            "grey — the column's blue would read as column, not as border"
+        )
+        XCTAssertEqual(color.redComponent, color.greenComponent, accuracy: 0.02)
+        XCTAssertGreaterThan(
+            color.redComponent, 0.25, "and light enough to read against both sides"
+        )
     }
 
     /// The sheet went behind the rows, not over them: a press still lands on
