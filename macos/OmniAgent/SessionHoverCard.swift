@@ -1971,17 +1971,41 @@ final class HoverCardShellView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+    /// The floor `layout()` holds `card`'s size to. Set by `cardSize`, which
+    /// the controller always calls right before starting an animated
+    /// resize — but the animation itself then drives `card`'s size (and,
+    /// through `NSGlassEffectView.contentView`'s own `.required` pin,
+    /// `body`'s) through every intermediate value between the old frame and
+    /// the new one, once per tick, not just the two endpoints. Any tick that
+    /// lands smaller than `body`'s real content needs is the same
+    /// contradiction `HoverCardBodyView.cardSize`'s fix removes for a single
+    /// synchronous measurement — except this one recurs live, inside
+    /// `+[NSAnimationManager performAnimations:]`, at 60–120 times a second,
+    /// which is where a broken stack constraint stops being the recovery
+    /// and NaN geometry starts being the crash (EXC_BREAKPOINT, "Invalid
+    /// view geometry: y is NaN" — the bug this fixes). `layout()` never
+    /// lets `card` answer a tick with less than this, whatever `bounds`
+    /// says: a card bigger than `bounds` for a few frames of a 120–200ms
+    /// transition reads as nothing; one that traps does not.
+    private var minimumCardSize = NSSize(width: HoverCardBodyView.width, height: 120)
+
     override func layout() {
         super.layout()
         host.frame = bounds
         wrapper.frame = bounds
-        card.frame = NSRect(x: Self.lane, y: 0, width: max(0, bounds.width - Self.lane), height: bounds.height)
+        card.frame = NSRect(
+            x: Self.lane,
+            y: 0,
+            width: max(max(0, bounds.width - Self.lane), minimumCardSize.width),
+            height: max(bounds.height, minimumCardSize.height)
+        )
         dropBox.frame = dropFrame(centerY: dropCenterY)
     }
 
     /// `body`'s natural size, asked before this view's own frame has any
     /// reason to already be the right shape — the controller calls this to
-    /// *decide* that shape.
+    /// *decide* that shape, and every call also refreshes the floor
+    /// `layout()` holds `card` to for whatever animation follows.
     ///
     /// On macOS 26, `NSGlassEffectView.contentView` pins `body`'s edges to
     /// `card`'s with its own `.required` constraints, permanently — so
@@ -1995,6 +2019,7 @@ final class HoverCardShellView: NSView {
         card.frame.size.height = 10_000
         let size = body.cardSize
         card.frame = previous
+        minimumCardSize = size
         return size
     }
 

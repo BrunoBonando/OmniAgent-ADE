@@ -1338,4 +1338,72 @@ final class SessionHoverCardTests: XCTestCase {
         freshBackdrop.layoutSubtreeIfNeeded()
         assertNoNaNGeometry(fresh)
     }
+
+    /// The field crash this whole file's NaN fixes chase: not `cardSize`
+    /// itself (a single synchronous measurement, already covered above) but
+    /// the animated resize that follows it — `panel.animator().setFrame`
+    /// drives `HoverCardShellView` through every intermediate size between
+    /// the old card and the new one, not just the two endpoints, and a tick
+    /// smaller than the new dashboard's real content used to be the same
+    /// contradiction `cardSize` fixes for one synchronous call. Simulates
+    /// the animation by hand — `NSAnimationContext` runs off a display link,
+    /// which a synchronous test cannot step through — narrowing and
+    /// shortening the shell one tick at a time and asserting every tick is
+    /// clean, not just the first and last.
+    func testNoStateProducesNaNGeometryDuringAnAnimatedResize() {
+        let shell = HoverCardShellView(frame: NSRect(x: 0, y: 0, width: 280, height: 90))
+        shell.body.tailField.animates = false
+        shell.layoutSubtreeIfNeeded()
+        assertNoNaNGeometry(shell)
+
+        var panes: [String: PaneDescriptor] = [:]
+        for id in ["a", "b", "c"] {
+            panes[id] = PaneDescriptor(sessionID: id, group: "s", engine: .claude, label: "pane \(id)")
+        }
+        var git = GitDiffStat(files: 14, added: 1284, removed: 312, branch: "main")
+        git.recent = [GitCommit(hash: "a41f7c2", subject: "fix: it", at: t0 / 1000 - 60)]
+        shell.body.apply(HoverCardModel.session(
+            sessionNode(paneIDs: ["a", "b", "c"]),
+            panes: panes,
+            statuses: ["a": .thinking, "b": .thinking, "c": .awaitingApproval],
+            ledger: PaneActivityLedger(),
+            tails: { "working on \($0)" },
+            git: git,
+            branch: "main",
+            now: t0
+        ))
+        let target = shell.cardSize
+        XCTAssertGreaterThan(target.height, 90, "the dashboard needs more than the pane card's shape")
+
+        // The window frame does not jump from the old size to the new one;
+        // it eases through every value in between, once per animation tick.
+        let start = NSSize(width: 280, height: 90)
+        for step in 0...20 {
+            let t = CGFloat(step) / 20
+            shell.frame = NSRect(
+                origin: .zero,
+                size: NSSize(
+                    width: start.width + (target.width - start.width) * t,
+                    height: start.height + (target.height - start.height) * t
+                )
+            )
+            shell.layoutSubtreeIfNeeded()
+            assertNoNaNGeometry(shell, "tick \(step)")
+        }
+
+        // And the reverse — shrinking back down, which passes through the
+        // same intermediate sizes from the other direction.
+        for step in 0...20 {
+            let t = CGFloat(step) / 20
+            shell.frame = NSRect(
+                origin: .zero,
+                size: NSSize(
+                    width: target.width + (start.width - target.width) * t,
+                    height: target.height + (start.height - target.height) * t
+                )
+            )
+            shell.layoutSubtreeIfNeeded()
+            assertNoNaNGeometry(shell, "shrink tick \(step)")
+        }
+    }
 }
