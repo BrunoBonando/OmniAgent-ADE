@@ -443,6 +443,34 @@ final class SessionContextMenuTests: XCTestCase {
         XCTAssertNil(workspace.editorPane(for: editorID))
     }
 
+    /// With no `sessionDeletionConfirmer` installed, delete asks through the
+    /// real window-scoped card — critical severity, over the whole content
+    /// view, not one pane — and choosing "Delete Session" still destroys it.
+    func testDeleteSessionWithNoConfirmerAsksThroughTheWindowCard() throws {
+        let controller = makeController(panes: [
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-1", group: "g-1"),
+        ])
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.appLocator = { _ in nil }
+        var killed: [String] = []
+        controller.sessionKiller = { killed.append($0) }
+        controller.applyRestoredSessionMeta(nil)
+        let tree = controller.shellSidebar.workspacesTree
+        let session = try XCTUnwrap(sessionRow(in: tree, group: "g-1")).session
+
+        controller.deleteSession(session)
+        let card = try XCTUnwrap(controller.windowAskOverlay, "the real card, not an NSAlert")
+        XCTAssertEqual(card.frame, controller.window?.contentView?.bounds, "over the whole window")
+        let buttons = card.subviews.compactMap { $0 as? PaneApprovalButton }
+        XCTAssertEqual(buttons.map(\.title), ["Cancel", "Delete Session"])
+
+        buttons[1].onClick?()
+        XCTAssertEqual(killed, ["s-1"])
+        XCTAssertNil(controller.workspaceView.descriptor(for: "s-1"))
+        XCTAssertNil(controller.windowAskOverlay, "answering takes the card down")
+    }
+
     // MARK: - Helpers
 
     private func makeTempFile(_ name: String, _ contents: String) throws -> URL {

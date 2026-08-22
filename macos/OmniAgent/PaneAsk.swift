@@ -49,14 +49,20 @@ struct PaneAskOption {
 /// exactly once. Pass `input:` to get a text field, and the answer arrives as
 /// the chosen option's argument.
 /// Window-scoped questions (quitting, "which pane should this link open in?")
-/// are not pane asks and stay alerts — they are not about one pane.
+/// are not pane asks, but a window-scoped *destructive* one — deleting a
+/// session, say — still wants this card, just bigger and over the whole
+/// window instead of one pane: `WorkspaceWindowController.presentWindowAsk`
+/// mounts the same view over `window.contentView`, with `severity: .critical`
+/// and a taller `cardWidth`. Anything else window-scoped stays an alert.
 ///
 /// Two deliberate departures from the amber card this replaced. The glass is
 /// navy, the same wash Spotlight (`CommandPaletteController`) wears, because
 /// amber in this app means "an agent is blocked and waiting" and a question
-/// about the user's own next move is not that. And the icon is the *subject*
-/// of the question — the engine being switched to, the file about to be lost —
-/// not a warning triangle, which said "danger" where the answer is a choice.
+/// about the user's own next move is not that — `severity: .critical` is the
+/// one exception, swapping that navy for a reddish wash for "this destroys
+/// something." And the icon is the *subject* of the question — the engine
+/// being switched to, the file about to be lost — not a warning triangle,
+/// which said "danger" where the answer is a choice.
 final class PaneAskOverlayView: NSView {
     /// Esc, or a click on the glass outside the card — the way clicking
     /// outside a popover dismisses it.
@@ -68,7 +74,7 @@ final class PaneAskOverlayView: NSView {
     /// The pane accent, not the approval bar's amber. See the note above.
     static let accent = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 1)
 
-    private static let cardWidth: CGFloat = 330
+    private static let defaultCardWidth: CGFloat = 330
     private static let padding: CGFloat = 22
     private static let iconSize: CGFloat = 30
     private static let buttonHeight: CGFloat = 26
@@ -97,6 +103,25 @@ final class PaneAskOverlayView: NSView {
         NSColor(srgbRed: 0.11, green: 0.16, blue: 0.38, alpha: 0.40).cgColor,
         NSColor(srgbRed: 0.05, green: 0.08, blue: 0.22, alpha: 0.14).cgColor,
     ]
+    /// The one alternative to navy — `severity: .critical`'s wash, the same
+    /// top-down shape and alpha so severity changes colour and nothing else.
+    private static let criticalTint = [
+        NSColor(srgbRed: 0.46, green: 0.10, blue: 0.12, alpha: 0.40).cgColor,
+        NSColor(srgbRed: 0.24, green: 0.04, blue: 0.06, alpha: 0.14).cgColor,
+    ]
+
+    /// A question the user chooses an answer to, or one where an answer
+    /// destroys something — the only two the card's glass tints differently
+    /// for. See the class doc above.
+    enum Severity {
+        case question
+        case critical
+    }
+
+    private let severity: Severity
+    /// 330 for a pane ask; `presentWindowAsk` passes a taller one — the
+    /// window has the room a single pane does not.
+    private let cardWidth: CGFloat
     /// The subject of the question, for the test that the right one is shown.
     var icon: NSImage? { iconView.image }
 
@@ -130,8 +155,18 @@ final class PaneAskOverlayView: NSView {
     /// a caller's completion may only be called once.
     private var isAnswered = false
 
-    init(title: String, message: String, icon: NSImage?, input: String?, options: [PaneAskOption]) {
+    init(
+        title: String,
+        message: String,
+        icon: NSImage?,
+        input: String?,
+        options: [PaneAskOption],
+        severity: Severity = .question,
+        cardWidth: CGFloat = defaultCardWidth
+    ) {
         self.options = options
+        self.severity = severity
+        self.cardWidth = cardWidth
         // The pill is its own view and the field sits centred inside it, rather
         // than the field drawing its own background: `NSTextFieldCell` puts
         // text at the top of whatever height it is given, so a field stretched
@@ -160,8 +195,9 @@ final class PaneAskOverlayView: NSView {
         messageLabel = Self.label(message, font: ShellFont.ui(13), color: NSColor(
             srgbRed: 176 / 255, green: 180 / 255, blue: 198 / 255, alpha: 1
         ))
+        let buttonTint = severity == .critical ? ShellPalette.red : Self.accent
         buttons = options.map {
-            PaneApprovalButton(title: $0.title, isPrimary: $0.isPrimary, tint: Self.accent)
+            PaneApprovalButton(title: $0.title, isPrimary: $0.isPrimary, tint: buttonTint)
         }
         if #available(macOS 26.0, *) {
             let pane = NSGlassEffectView()
@@ -196,7 +232,7 @@ final class PaneAskOverlayView: NSView {
         iconView.contentTintColor = NSColor(white: 1, alpha: 0.92)
         iconView.imageScaling = .scaleProportionallyUpOrDown
         cardTint.wantsLayer = true
-        cardTintLayer.colors = Self.navyTint
+        cardTintLayer.colors = severity == .critical ? Self.criticalTint : Self.navyTint
         cardTintLayer.startPoint = CGPoint(x: 0.5, y: 1)
         cardTintLayer.endPoint = CGPoint(x: 0.5, y: 0)
         cardTint.layer?.addSublayer(cardTintLayer)
@@ -285,7 +321,7 @@ final class PaneAskOverlayView: NSView {
         super.layout()
         scrim?.frame = bounds
         let padding = Self.padding
-        let width = min(Self.cardWidth, max(160, bounds.width - 32))
+        let width = min(cardWidth, max(160, bounds.width - 32))
         let content = width - padding * 2
         let titleHeight = Self.height(of: titleLabel, width: content)
         // A card with nothing to add under its title leaves no gap for one:
@@ -393,7 +429,10 @@ final class PaneAskOverlayView: NSView {
             xRadius: Self.cardRadius,
             yRadius: Self.cardRadius
         )
-        NSColor(srgbRed: 0.09, green: 0.12, blue: 0.26, alpha: 1).setFill()
+        (severity == .critical
+            ? NSColor(srgbRed: 0.30, green: 0.07, blue: 0.09, alpha: 1)
+            : NSColor(srgbRed: 0.09, green: 0.12, blue: 0.26, alpha: 1)
+        ).setFill()
         card.fill()
         NSColor(white: 1, alpha: 0.16).setStroke()
         let ring = NSBezierPath(

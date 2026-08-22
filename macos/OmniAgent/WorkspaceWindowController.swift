@@ -329,6 +329,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private var reviewPanelWidthBeforeExpand: CGFloat?
     /// The Customize… card while one is up — window-scoped, so owned here.
     private(set) var customizeCard: WorkspaceCustomizeCard?
+    /// A window-scoped `PaneAskOverlayView` while one is up — see
+    /// `presentWindowAsk`.
+    private(set) var windowAskOverlay: PaneAskOverlayView?
     let authGateCoordinator: AuthGateCoordinator
     private let authGateWindow: AuthGateWindowController
     private let firstRunWindow: FirstRunWindowController
@@ -2860,6 +2863,59 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         customizeCard = nil
     }
 
+    /// A `PaneAskOverlayView` over the whole window instead of one pane —
+    /// for a blocking question that is not about any single pane but still
+    /// wants the same glass-and-card treatment as one, `presentAsk`'s pattern
+    /// (`PaneAskOverlayView`) with `presentCustomizeWorkspace`'s mount point.
+    /// Pass `severity: .critical` for a destructive question — deleting a
+    /// session, say — and the card tints red instead of navy.
+    func presentWindowAsk(
+        title: String,
+        message: String = "",
+        icon: NSImage? = nil,
+        severity: PaneAskOverlayView.Severity = .question,
+        options: [PaneAskOption],
+        onCancel: @escaping () -> Void = {}
+    ) {
+        guard windowAskOverlay == nil, let content = window?.contentView else { return }
+        // The window and app come forward exactly as the `NSAlert` this
+        // replaces would have — `PaneContainerView.presentAsk`'s reasoning:
+        // a custom overlay does not get that for free.
+        if let window {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+        }
+        NSApp.activate()
+        let overlay = PaneAskOverlayView(
+            title: title,
+            message: message,
+            icon: icon,
+            input: nil,
+            options: options.map { option in
+                PaneAskOption(option.title, isPrimary: option.isPrimary) { [weak self] text in
+                    self?.dismissWindowAsk()
+                    option.action(text)
+                }
+            },
+            severity: severity,
+            cardWidth: 380
+        )
+        overlay.onCancel = { [weak self] in
+            self?.dismissWindowAsk()
+            onCancel()
+        }
+        overlay.frame = content.bounds
+        overlay.autoresizingMask = [.width, .height]
+        content.addSubview(overlay, positioned: .above, relativeTo: nil)
+        windowAskOverlay = overlay
+        window?.makeFirstResponder(overlay.firstResponderView)
+    }
+
+    private func dismissWindowAsk() {
+        windowAskOverlay?.removeFromSuperview()
+        windowAskOverlay = nil
+    }
+
     /// The field's placeholder and the caption's fallback: the folder's own
     /// name — what the row shows when nothing is customized.
     private func customizationFolderName(for id: String) -> String {
@@ -3114,22 +3170,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             sessionDeletionConfirmer(label, paneCount, completion)
             return
         }
-        let alert = NSAlert()
-        alert.messageText = "Delete \(label)?"
         let panes = paneCount == 1
             ? "Its pane closes with it"
             : "Its \(paneCount) panes close with it"
-        alert.informativeText = panes + ", and every conversation running in them ends."
-        alert.addButton(withTitle: "Delete Session")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        guard let window else {
-            completion(alert.runModal() == .alertFirstButtonReturn)
-            return
-        }
-        alert.beginSheetModal(for: window) { response in
-            completion(response == .alertFirstButtonReturn)
-        }
+        presentWindowAsk(
+            title: "Delete \(label)?",
+            message: panes + ", and every conversation running in them ends.",
+            icon: NSImage(systemSymbolName: "trash", accessibilityDescription: nil),
+            severity: .critical,
+            options: [
+                PaneAskOption("Cancel") { _ in completion(false) },
+                PaneAskOption("Delete Session", isPrimary: true) { _ in completion(true) },
+            ],
+            onCancel: { completion(false) }
+        )
     }
 
     private func performDeleteSession(_ session: SessionGroupNode) {
