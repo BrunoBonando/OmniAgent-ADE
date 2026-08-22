@@ -114,6 +114,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         super.init()
         if let button = statusItem.button {
             let image = NSImage(named: "OmniAgentMark")
+            // The asset is 256pt; a status button draws it at natural size,
+            // which at menu bar height is an invisible smear. 18pt is the
+            // standard status-icon size, and template rendering is what makes
+            // it white on a dark menu bar.
+            image?.size = NSSize(width: 18, height: 18)
             image?.isTemplate = true
             button.image = image
         }
