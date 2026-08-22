@@ -112,6 +112,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// two are one continuous surface (the title bar itself paints nothing).
     private let contentContainer = PaneGroundView()
     private let placeholder = WorkspacePlaceholderView()
+    /// Home's real screen — the placeholder now only covers To Do List.
+    /// Internal, not private: the tests assert its routing.
+    let homeView = HomeSurfaceView()
     /// The window's drawn title bar — window buttons, the sidebar toggle, the
     /// review toggle. Replaced the `NSToolbar`, and paints nothing: it is a
     /// transparent overlay across the top of the split, so each column's own
@@ -691,8 +694,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // rather than restarting where the canvas begins.
         contentContainer.addSubview(workspace)
         contentContainer.addSubview(placeholder)
+        contentContainer.addSubview(homeView)
         installDeskZoomReadout()
-        for view in [workspace, placeholder] as [NSView] {
+        for view in [workspace, placeholder, homeView] as [NSView] {
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
@@ -885,8 +889,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             workspace.canvasMode = false
         }
         workspace.deskCanvasLoaded = isTerminals
-        placeholder.isHidden = isTerminals
-        if !isTerminals { placeholder.show(destination) }
+        // Home has a real screen now; the placeholder covers To Do List only.
+        homeView.isHidden = destination != .home
+        if destination == .home {
+            homeView.refresh(
+                workspaceID: selectedProjectID,
+                workspaceName: workspaces.first { $0.id == selectedProjectID }?.label
+            )
+        }
+        placeholder.isHidden = destination != .todo
+        if destination == .todo { placeholder.show(destination) }
         // Home and To Do List name no session, so the bar goes blank and its
         // review toggle goes away entirely.
         refreshTitle()

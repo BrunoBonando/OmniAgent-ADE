@@ -180,24 +180,30 @@ final class NavigationSidebarTests: XCTestCase {
 
     // MARK: - Content routing (controller)
 
-    /// Home and To Do List land on the "Under development" placeholder; the
-    /// pane workspace hides and comes back with the Desk.
-    func testHomeAndToDoShowTheUnderDevelopmentPlaceholder() throws {
+    /// Home shows its real screen, To Do List still lands on the "Under
+    /// development" placeholder, and the pane workspace hides and comes back
+    /// with the Desk.
+    func testHomeShowsItsScreenAndToDoThePlaceholder() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
 
-        for destination in [WorkspaceDestination.home, .todo] {
-            controller.applyDestination(destination)
-            XCTAssertTrue(controller.workspaceView.isHidden)
-            let placeholder = try XCTUnwrap(placeholderView(in: controller))
-            XCTAssertFalse(placeholder.isHiddenOrHasHiddenAncestor)
-            XCTAssertEqual(placeholder.titleText, destination.title)
-            XCTAssertEqual(placeholder.subtitleText, "Under development")
-        }
+        controller.applyDestination(.home)
+        XCTAssertTrue(controller.workspaceView.isHidden)
+        XCTAssertFalse(controller.homeView.isHiddenOrHasHiddenAncestor)
+        XCTAssertTrue(try XCTUnwrap(placeholderView(in: controller)).isHidden)
+
+        controller.applyDestination(.todo)
+        XCTAssertTrue(controller.workspaceView.isHidden)
+        XCTAssertTrue(controller.homeView.isHidden)
+        let placeholder = try XCTUnwrap(placeholderView(in: controller))
+        XCTAssertFalse(placeholder.isHiddenOrHasHiddenAncestor)
+        XCTAssertEqual(placeholder.titleText, WorkspaceDestination.todo.title)
+        XCTAssertEqual(placeholder.subtitleText, "Under development")
 
         controller.applyDestination(.terminals)
         XCTAssertFalse(controller.workspaceView.isHidden)
+        XCTAssertTrue(controller.homeView.isHidden)
         XCTAssertTrue(try XCTUnwrap(placeholderView(in: controller)).isHidden)
     }
 
