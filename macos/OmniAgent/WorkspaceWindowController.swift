@@ -1110,6 +1110,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 os_signpost(.event, log: Instrumentation.log, name: "First Terminal Output")
             }
             surface.feed(bytes, isSnapshot: isSnapshot, sequence: sequence)
+            // A hand-typed `/model` changes the model without an API call or a
+            // status event; its printed confirmation is the only signal. The
+            // pane re-reads its transcript when the output settles.
+            workspace.noteOutput(for: id)
         }
         connection.onStatus = { [weak self] event in
             // Every pane records its own status, focused or not, so switching to

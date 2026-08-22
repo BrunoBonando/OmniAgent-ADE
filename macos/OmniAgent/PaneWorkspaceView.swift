@@ -1699,6 +1699,26 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         refreshModel(for: sessionID)
     }
 
+    /// Terminal output is the one signal that always accompanies a model
+    /// change — a hand-typed `/model` makes no API call, so it moves no
+    /// status; the confirmation it prints is the only evidence there is. One
+    /// second after the output goes quiet, the pane re-reads its transcript.
+    /// Debounced per pane so a streaming reply costs one read, not hundreds.
+    func noteOutput(for sessionID: String) {
+        guard let descriptor = descriptors[sessionID],
+              descriptor.kind == .terminal, descriptor.engine == .claude
+        else { return }
+        modelRefreshDebounce[sessionID]?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.modelRefreshDebounce.removeValue(forKey: sessionID)
+            self?.refreshModel(for: sessionID)
+        }
+        modelRefreshDebounce[sessionID] = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: item)
+    }
+
+    private var modelRefreshDebounce: [String: DispatchWorkItem] = [:]
+
     /// Re-reads the model behind a terminal and publishes it if it moved.
     /// Also the way a pick is *checked* rather than assumed — see
     /// `WorkspaceWindowController.changeModel`.
@@ -4549,13 +4569,21 @@ final class PaneHeaderView: NSView {
     /// the model — and the two arrive in separate `didSet`s, in an order this
     /// view does not control. So both call this rather than either assuming it
     /// went second.
+    ///
+    /// A Claude pane wears the badge from the moment it exists: its model is
+    /// always discoverable — the transcript names it, and `refreshModel` keeps
+    /// looking while output arrives — so an unknown is a *not yet*, printed as
+    /// `Loading…`. The other engines keep hiding an unknown: AntiGravity has
+    /// nothing to discover until a model is picked, and a permanent `Loading…`
+    /// would be a promise nothing intends to keep.
     private func applyModelBadge() {
-        modelBadge.isHidden = model == nil
-        guard let model, let engine else { return }
+        let placeholder = model == nil && engine == .claude
+        modelBadge.isHidden = model == nil && !placeholder
+        guard let engine, !modelBadge.isHidden else { return }
         modelBadge.configure(
             icon: nil,
-            text: EngineModel.label(for: model, engine: engine),
-            foreground: NSColor(white: 1, alpha: 0.55),
+            text: model.map { EngineModel.label(for: $0, engine: engine) } ?? "Loading…",
+            foreground: NSColor(white: 1, alpha: placeholder ? 0.35 : 0.55),
             fill: NSColor(white: 1, alpha: 0.07),
             stroke: .clear,
             font: ShellFont.ui(12, .medium)

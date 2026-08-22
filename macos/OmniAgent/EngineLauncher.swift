@@ -91,11 +91,30 @@ enum ClaudeModel {
 
     static var homeDirectory: URL { URL(fileURLWithPath: NSHomeDirectory()) }
 
-    /// The model that served the most recent reply, or `nil` while the pane
-    /// has answered nothing yet — a fresh terminal has no transcript, and no
-    /// badge is better than a guess at what it will pick.
+    /// The model this pane is running, or `nil` while nothing on disk can say
+    /// yet — a fresh terminal has no transcript.
+    ///
+    /// The derived path is only where the transcript *usually* is: Claude
+    /// slugs the directory it was **launched** in, and a `cd elsewhere &&
+    /// claude` — or a cwd recorded differently than the shell resolved it —
+    /// files the conversation under another slug. The conversation id is ours
+    /// either way, so when the expected file says nothing, every project
+    /// directory is checked for it by name. ~40 stats on a background queue,
+    /// and only while the badge still says `Loading…`.
     static func current(sessionID: String, cwd: String, home: URL = homeDirectory) -> String? {
-        lastModel(inTailOf: transcriptURL(sessionID: sessionID, cwd: cwd, home: home))
+        let expected = transcriptURL(sessionID: sessionID, cwd: cwd, home: home)
+        if let model = lastModel(inTailOf: expected) { return model }
+        let name = expected.lastPathComponent
+        let projects = home.appendingPathComponent(".claude").appendingPathComponent("projects")
+        let dirs = (try? FileManager.default.contentsOfDirectory(
+            at: projects, includingPropertiesForKeys: nil
+        )) ?? []
+        for dir in dirs {
+            let candidate = dir.appendingPathComponent(name)
+            guard candidate != expected, let model = lastModel(inTailOf: candidate) else { continue }
+            return model
+        }
+        return nil
     }
 
     /// Reads the **tail** rather than the file: a long conversation's
@@ -116,14 +135,35 @@ enum ClaudeModel {
         return lastModel(inTail: tail)
     }
 
-    /// The last `"model":"…"` in a chunk of transcript, scanned as text rather
-    /// than parsed: the tail starts mid-line, so most of it is not valid JSON.
+    /// The most recent statement of the model in a chunk of transcript,
+    /// scanned as text rather than parsed: the tail starts mid-line, so most
+    /// of it is not valid JSON.
     ///
-    /// A transcript records what the *user* typed as well as what the model
-    /// answered, so `"model":"…"` can also be something somebody pasted —
-    /// hence the walk backwards until a value that names Claude, rather than
-    /// trusting the first match.
+    /// Two records can say it, and **recency decides between them**:
+    ///
+    /// - `"model":"claude-…"` — the model that actually served a reply.
+    /// - `<local-command-stdout>Set model to …` — the confirmation a
+    ///   hand-typed `/model` prints. This is the only record that exists
+    ///   *between* the switch and the next reply — a local command makes no
+    ///   API call — and it is exactly the record a declined picker never
+    ///   writes, which is what keeps a refused switch off the badge.
+    ///
+    /// A transcript records what the user typed as well, so `"model":"…"` can
+    /// be something somebody pasted — hence the walk backwards until a value
+    /// that names Claude.
     static func lastModel(inTail tail: String) -> String? {
+        let reply = lastReply(inTail: tail)
+        let switched = lastSwitchConfirmation(inTail: tail)
+        switch (reply, switched) {
+        case let (reply?, switched?):
+            return switched.at > reply.at ? switched.value : reply.value
+        case let (reply?, nil): return reply.value
+        case let (nil, switched?): return switched.value
+        case (nil, nil): return nil
+        }
+    }
+
+    private static func lastReply(inTail tail: String) -> (at: String.Index, value: String)? {
         var searchEnd = tail.endIndex
         while let key = tail.range(
             of: "\"model\":\"", options: .backwards, range: tail.startIndex..<searchEnd
@@ -132,9 +172,36 @@ enum ClaudeModel {
             let rest = tail[key.upperBound...]
             guard let close = rest.firstIndex(of: "\"") else { continue }
             let value = String(rest[..<close])
-            if value.contains("claude") { return value }
+            if value.contains("claude") { return (key.lowerBound, value) }
         }
         return nil
+    }
+
+    /// `<local-command-stdout>Set model to \u001b[1mFable 5\u001b[22m and
+    /// saved as…` — anchored on the stdout marker so prose merely *mentioning*
+    /// "Set model to" cannot move the badge. The name it carries is a display
+    /// name ("Fable 5"), not an id; `label(for:)` passes those through.
+    private static func lastSwitchConfirmation(
+        inTail tail: String
+    ) -> (at: String.Index, value: String)? {
+        let marker = "<local-command-stdout>Set model to "
+        guard let key = tail.range(of: marker, options: .backwards) else { return nil }
+        let rest = tail[key.upperBound...]
+        guard let close = rest.firstIndex(of: "\"") else { return nil }
+        var value = String(rest[..<close])
+        if let tag = value.range(of: "</local-command-stdout>") {
+            value = String(value[..<tag.lowerBound])
+        }
+        // ANSI colour, in the JSON-escaped form it has on disk (`\u001b[1m`)
+        // and raw, should the encoding ever change.
+        value = value.replacingOccurrences(
+            of: "(\\\\u001b|\u{1b})\\[[0-9;]*m", with: "", options: .regularExpression
+        )
+        // "…and saved as your default for new sessions", or any variant —
+        // the name never contains " and ".
+        if let cut = value.range(of: " and ") { value = String(value[..<cut.lowerBound]) }
+        value = value.trimmingCharacters(in: .whitespaces)
+        return value.isEmpty ? nil : (key.lowerBound, value)
     }
 
     /// What the badge prints: `claude-opus-4-8[1m]` → `Opus 4.8 · 1M`,
@@ -142,6 +209,9 @@ enum ClaudeModel {
     /// up in a table, so a model released after this ships still reads as its
     /// own name instead of falling through to a blank.
     static func label(for model: String) -> String {
+        // A switch confirmation's value is already a display name ("Fable 5",
+        // "Opus 4.5"); only ids need unpacking.
+        guard !model.contains(" ") else { return model }
         var id = model
         var suffix = ""
         if id.hasSuffix("[1m]") {
@@ -420,8 +490,11 @@ enum EngineModelList {
         guard let current else { return false }
         guard engine == .claude else { return choice.id == current }
         // `default` names a preference, not a model; the transcript only ever
-        // records what it resolved to, so that row never ticks.
-        return choice.id != "default" && current.contains(choice.id)
+        // records what it resolved to, so that row never ticks. Lowercased
+        // because the transcript answers two vocabularies — `claude-fable-5`
+        // after a reply, `Fable 5` straight after a hand-typed switch — and
+        // the alias must tick against both.
+        return choice.id != "default" && current.lowercased().contains(choice.id)
     }
 
     // MARK: - Caches

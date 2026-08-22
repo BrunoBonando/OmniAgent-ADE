@@ -404,6 +404,60 @@ final class EngineSwitchTests: XCTestCase {
         XCTAssertNil(ClaudeModel.current(sessionID: "pane-2", cwd: cwd, home: home))
     }
 
+    /// A hand-typed `/model` prints a confirmation and makes no API call, so
+    /// between the switch and the next reply that line is the only record —
+    /// and recency decides between it and the last reply. Prose merely
+    /// mentioning "Set model to" is not a confirmation.
+    func testAHandTypedSwitchMovesTheModelBeforeAnyReplyLands() {
+        let switched = """
+        {"message":{"model":"claude-opus-5"}}
+        {"type":"user","message":{"content":"<local-command-stdout>Set model to \\u001b[1mFable 5\\u001b[22m and saved as your default for new sessions</local-command-stdout>"}}
+        """
+        XCTAssertEqual(ClaudeModel.lastModel(inTail: switched), "Fable 5")
+
+        // The next reply is newer than the confirmation, and wins.
+        let replied = switched + "\n{\"message\":{\"model\":\"claude-fable-5\"}}"
+        XCTAssertEqual(ClaudeModel.lastModel(inTail: replied), "claude-fable-5")
+
+        // Talk about the confirmation is not the confirmation.
+        let prose = """
+        {"message":{"model":"claude-opus-5"}}
+        {"message":{"content":"the terminal prints Set model to X when you switch"}}
+        """
+        XCTAssertEqual(ClaudeModel.lastModel(inTail: prose), "claude-opus-5")
+
+        // A display name passes through the label untouched, and ticks the
+        // alias it names.
+        XCTAssertEqual(ClaudeModel.label(for: "Fable 5"), "Fable 5")
+        XCTAssertTrue(
+            EngineModelList.choice(ModelChoice(id: "fable"), isCurrent: "Fable 5", engine: .claude)
+        )
+    }
+
+    /// The transcript is filed under the directory Claude was *launched* in,
+    /// which is not always the pane's cwd — `cd elsewhere && claude` files it
+    /// under another slug. The conversation id is ours either way, so the
+    /// search falls back to every project directory by name.
+    func testDiscoveryFindsATranscriptFiledUnderAnotherProjectSlug() throws {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("omniagent-drift-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let paneCwd = "/Users/b/pane-cwd"
+        // Filed where claude was launched, not where the pane lives.
+        let actual = ClaudeModel.transcriptURL(sessionID: "p1", cwd: "/Users/b/elsewhere", home: home)
+        try FileManager.default.createDirectory(
+            at: actual.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try "{\"message\":{\"model\":\"claude-opus-5\"}}\n".write(
+            to: actual, atomically: true, encoding: .utf8
+        )
+        XCTAssertEqual(
+            ClaudeModel.current(sessionID: "p1", cwd: paneCwd, home: home), "claude-opus-5"
+        )
+        // A different conversation's file is never this pane's answer.
+        XCTAssertNil(ClaudeModel.current(sessionID: "p2", cwd: paneCwd, home: home))
+    }
+
     // MARK: - Every engine
 
     /// Claude's transcript outranks a remembered pick, because it is the only
