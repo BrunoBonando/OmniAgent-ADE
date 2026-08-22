@@ -226,14 +226,14 @@ final class NavigationSidebarTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
-        XCTAssertEqual(controller.destination, .terminals)
+        XCTAssertEqual(controller.destination, .home)
         XCTAssertTrue(controller.palette.model.commands.isEmpty, "nothing presented yet")
 
         try XCTUnwrap(controller.shellSidebar.navRows.first { $0.item == .search }?.onPress)()
 
         XCTAssertFalse(controller.palette.model.commands.isEmpty, "the spotlight was presented")
-        XCTAssertEqual(controller.destination, .terminals, "and Search selected nothing")
-        XCTAssertFalse(controller.workspaceView.isHidden)
+        XCTAssertEqual(controller.destination, .home, "and Search selected nothing")
+        XCTAssertTrue(controller.workspaceView.isHidden)
         controller.palette.dismiss()
     }
 
@@ -434,7 +434,12 @@ final class NavigationSidebarTests: XCTestCase {
         }
 
         for row in sidebar.navRows {
-            XCTAssertGreaterThan(spread(row), 0.1, "the \(row.item.title) row rendered nothing")
+            // The selected row (Home, by default now that the app lands
+            // there) wears `accentSoft` under `ink` text — a softer,
+            // lower-contrast combination than an unselected row's flat
+            // background under `inkNav`, so it clears a lower bar.
+            let threshold: CGFloat = row.isSelected ? 0.05 : 0.1
+            XCTAssertGreaterThan(spread(row), threshold, "the \(row.item.title) row rendered nothing")
         }
         XCTAssertGreaterThan(
             spread(sidebar.workspacesHeader), 0.1, "the Workspaces header rendered nothing"

@@ -144,8 +144,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     /// Which destination is on screen. `applyDestination` is the only writer;
     /// ⌘↩ reads it because focus mode is about a terminal, and off Terminals the
-    /// pane workspace is hidden entirely.
-    private(set) var destination: WorkspaceDestination = .terminals
+    /// pane workspace is hidden entirely. Home, not Terminals: the first view
+    /// after login must be Home.
+    private(set) var destination: WorkspaceDestination = .home
     /// Everything `listProjects` last returned, and where a selected id is
     /// resolved back to a label and path.
     private(set) var workspaces: [BrainProjectSummary] = []
@@ -708,7 +709,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.onSelectDestination = { [weak self] destination in
             self?.applyDestination(destination)
         }
-        applyDestination(.terminals)
+        applyDestination(.home)
 
         let sidebar = NSViewController()
         sidebar.view = shellSidebar
@@ -913,6 +914,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // A destination change moves the readout in or out of existence without
         // necessarily moving the camera, so it cannot ride on `onCameraChanged`.
         updateDeskZoomReadout()
+        // Leaving/entering the Desk moves which session row (if any) may show
+        // as current — `reloadOutline`'s job, and its only other callers are
+        // pane/status events, none of which fire on a plain destination
+        // switch. Without this a session stays lit under Home/To Do until
+        // something unrelated happens to refresh the tree.
+        reloadOutline()
     }
 
     /// Bottom-right, over the canvas, clear of the panes.
@@ -2722,7 +2729,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.reloadWorkspaces(
             workspaces: Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs),
             panes: all,
-            focusedPaneID: workspace.focusedPaneID,
+            // Only on the Desk is a session actually "on the screen" — off it,
+            // no session row may claim to be current, the same rule that
+            // already leaves every nav row unlit while a session is (see
+            // `applyDestination`/`NavigationSidebarView.applyDestination`).
+            // Otherwise a session stays lit under Home/To Do forever, since
+            // nothing else ever un-focuses a pane.
+            focusedPaneID: destination == .terminals ? workspace.focusedPaneID : nil,
             statuses: lastStatus,
             projectLabels: projectLabels,
             eventTimes: lastStatusEventAt,

@@ -687,6 +687,7 @@ final class EditorPaneIntegrationTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
+        controller.applyDestination(.terminals)
         let a = try makeTempFile("a.swift", "x")
         let b = try makeTempFile("b.swift", "y")
         controller.openFileInEditor(a, pinned: true)

@@ -91,6 +91,7 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         controller.sessionEnsurer = { _ in }
         controller.applyRestoredPanes(twoSessionPlan())
         controller.showWindow(nil)
+        controller.applyDestination(.terminals)
         controller.selectWorkspace(id: "alpha", animated: false)
         // The restore leaves the *last* group active, so asking for a pane in
         // the first one is a session the camera is not on: a flight, and the
@@ -119,6 +120,7 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
         controller.sessionEnsurer = { _ in }
         controller.applyRestoredPanes(twoSessionPlan())
         controller.showWindow(nil)
+        controller.applyDestination(.terminals)
         controller.selectWorkspace(id: "alpha", animated: false)
 
         controller.workspaceView.focusPane("sess-a")
@@ -234,6 +236,7 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
             )
         )
         controller.showWindow(nil)
+        controller.applyDestination(.terminals)
         controller.selectWorkspace(id: "alpha", animated: false)
         controller.workspaceView.focusPane("sess-a")
         settleCameraFlight()
@@ -279,6 +282,10 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
     func testPinningANodeWritesTheCanvasRowOnceTheRowHasBeenRead() throws {
         let controller = makeEmptyController()
         defer { controller.close() }
+        // The canvas row is only persisted while `canvasMode` is on — i.e. on
+        // the Desk — which now takes an explicit switch since `.home` is the
+        // controller's starting destination.
+        controller.applyDestination(.terminals)
         var writes: [(String, String)] = []
         controller.settingsWriter = { writes.append(($0, $1)) }
 
@@ -310,6 +317,10 @@ final class WorkspaceWindowControllerDeskCanvasTests: XCTestCase {
     func testAStreamOfCanvasChangesCoalescesIntoOneWrite() throws {
         let controller = makeEmptyController()
         defer { controller.close() }
+        // The canvas row is only persisted while `canvasMode` is on — i.e. on
+        // the Desk — which now takes an explicit switch since `.home` is the
+        // controller's starting destination.
+        controller.applyDestination(.terminals)
         var writes: [(String, String)] = []
         controller.settingsWriter = { writes.append(($0, $1)) }
         controller.applyRestoredDeskCanvas(DeskCanvasState(pinned: [:], camera: nil))

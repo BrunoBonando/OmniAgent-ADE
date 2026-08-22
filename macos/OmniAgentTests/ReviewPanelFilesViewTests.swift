@@ -463,6 +463,10 @@ final class ReviewPanelFilesViewTests: XCTestCase {
         controller.applyRestoredPanes(
             WorkspaceRestoration.plan(fromLayout: PersistedLayoutCodec.serialize(panes))
         )
+        // The review panel only syncs while the Desk is on screen; these tests
+        // are about the panel, not the destination default, so restore that
+        // precondition explicitly now that `.home` is the initial destination.
+        controller.applyDestination(.terminals)
         return controller
     }
 

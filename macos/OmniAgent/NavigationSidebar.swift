@@ -631,7 +631,7 @@ final class NavigationSidebarView: NSView {
     let workspacesTree = WorkspacesTreeView()
     let statsRow = SidebarSystemStatsView()
     let accountRow = SidebarAccountRowView()
-    private(set) var destination: WorkspaceDestination = .terminals
+    private(set) var destination: WorkspaceDestination = .home
 
     /// The column's ground on macOS 26: one full-bleed sheet of Liquid Glass
     /// behind every row, with `glassTint` washing the design's blue over it.
@@ -754,7 +754,7 @@ final class NavigationSidebarView: NSView {
             accountRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
         ])
 
-        applyDestination(.terminals)
+        applyDestination(.home)
     }
 
     @available(*, unavailable)

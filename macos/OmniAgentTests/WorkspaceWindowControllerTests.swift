@@ -501,6 +501,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
+        controller.applyDestination(.terminals)
         let workspace = controller.workspaceView
         controller.newTerminalPane(nil)
         let focused = try XCTUnwrap(workspace.focusedPaneID)
@@ -521,6 +522,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
+        controller.applyDestination(.terminals)
         let workspace = controller.workspaceView
         controller.newTerminalPane(nil)
         let panes = workspace.paneIDs
@@ -546,6 +548,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
+        controller.applyDestination(.terminals)
         let workspace = controller.workspaceView
         controller.newTerminalPane(nil)
         let panes = workspace.paneIDs
@@ -587,6 +590,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.showWindow(nil)
         let workspace = controller.workspaceView
         controller.newTerminalPane(nil)
+        controller.applyDestination(.terminals)
         let item = NSMenuItem(
             title: "",
             action: #selector(WorkspaceWindowController.toggleFocusMode(_:)),
@@ -621,6 +625,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
+        controller.applyDestination(.terminals)
         let workspace = controller.workspaceView
         let menuItem = NSMenuItem(
             title: "Focus This Terminal",
@@ -1313,6 +1318,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
+        controller.applyDestination(.terminals)
 
         let session = controller.sessionTitleField.stringValue
         XCTAssertFalse(session.isEmpty, "a session is on screen, so the bar names it")
@@ -1520,6 +1526,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
         let controller = makeController()
         defer { controller.close() }
+        controller.applyDestination(.terminals)
         XCTAssertTrue(controller.validateMenuItem(probe))
 
         // The bar's own affordance answers to the same rule — and it answers

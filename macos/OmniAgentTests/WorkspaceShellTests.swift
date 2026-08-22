@@ -41,8 +41,8 @@ final class WorkspaceShellTests: XCTestCase {
 
     // MARK: - Destinations
 
-    func testTerminalsIsTheDefaultDestination() {
-        XCTAssertEqual(makeSidebar().destination, .terminals)
+    func testHomeIsTheDefaultDestination() {
+        XCTAssertEqual(makeSidebar().destination, .home)
     }
 
     /// The workspaces tree stays on screen for every destination — the sidebar
