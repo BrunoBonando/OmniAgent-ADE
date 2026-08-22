@@ -4,6 +4,7 @@ import os.signpost
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let launchSignpost = OSSignpostID(log: Instrumentation.log)
     private var workspace: WorkspaceWindowController?
+    private var menuBar: MenuBarController?
 
     override init() {
         super.init()
@@ -39,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             workspace?.revealPane(sessionID)
         }
         self.workspace = workspace
+        menuBar = MenuBarController(workspace: workspace)
         // `start()` before anything is shown: the socket comes up behind the
         // login window, so signing in costs no wait for the daemon.
         workspace.start()
@@ -67,8 +69,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workspace?.stop()
     }
 
+    /// `false`: the menu bar icon is the point of staying alive with the
+    /// window closed — closing it (`WorkspaceWindowController.windowShouldClose`)
+    /// just hides it now, it does not quit the app.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    /// The Dock icon's standard reopen gesture, now that the window can be
+    /// hidden without the app quitting — the same "bring it to the front"
+    /// the menu bar icon's own items do.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        workspace?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        return true
     }
 
     /// How the deferred answer gets back to AppKit. A seam because

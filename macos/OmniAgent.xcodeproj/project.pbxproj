@@ -49,6 +49,8 @@
 		4C7A2E5FB9D14038A2202619 /* SessionContextMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A2202618 /* SessionContextMenu.swift */; };
 		4C7A2E5FB9D14038A220261B /* SessionMetaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A220261A /* SessionMetaTests.swift */; };
 		4C7A2E5FB9D14038A220261D /* SessionContextMenuTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A220261C /* SessionContextMenuTests.swift */; };
+		78E47BC111FE60AB7613FA3D /* MenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E010092C3F547CDAA535B766 /* MenuBarController.swift */; };
+		21B815180974289417756888 /* MenuBarControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB10AC26ADD4F846DEA536FE /* MenuBarControllerTests.swift */; };
 		4C7A2E5FB9D14038A2202621 /* ReviewPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A2202620 /* ReviewPanel.swift */; };
 		4C7A2E5FB9D14038A2202623 /* ReviewPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A2202622 /* ReviewPanelView.swift */; };
 		4C7A2E5FB9D14038A2202627 /* ReviewPanelFilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A2E5FB9D14038A2202626 /* ReviewPanelFilesView.swift */; };
@@ -249,6 +251,8 @@
 		4C7A2E5FB9D14038A2202618 /* SessionContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionContextMenu.swift; sourceTree = "<group>"; };
 		4C7A2E5FB9D14038A220261A /* SessionMetaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMetaTests.swift; sourceTree = "<group>"; };
 		4C7A2E5FB9D14038A220261C /* SessionContextMenuTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionContextMenuTests.swift; sourceTree = "<group>"; };
+		E010092C3F547CDAA535B766 /* MenuBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarController.swift; sourceTree = "<group>"; };
+		CB10AC26ADD4F846DEA536FE /* MenuBarControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarControllerTests.swift; sourceTree = "<group>"; };
 		4C7A2E5FB9D14038A2202620 /* ReviewPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPanel.swift; sourceTree = "<group>"; };
 		4C7A2E5FB9D14038A2202622 /* ReviewPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPanelView.swift; sourceTree = "<group>"; };
 		4C7A2E5FB9D14038A2202626 /* ReviewPanelFilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPanelFilesView.swift; sourceTree = "<group>"; };
@@ -399,6 +403,7 @@
 				4C7A2E5FB9D14038A2202610 /* WorkspaceContextMenu.swift */,
 				4C7A2E5FB9D14038A2202616 /* SessionMeta.swift */,
 				4C7A2E5FB9D14038A2202618 /* SessionContextMenu.swift */,
+				E010092C3F547CDAA535B766 /* MenuBarController.swift */,
 				4C7A2E5FB9D14038A2202620 /* ReviewPanel.swift */,
 				4C7A2E5FB9D14038A2202622 /* ReviewPanelView.swift */,
 				4C7A2E5FB9D14038A2202626 /* ReviewPanelFilesView.swift */,
@@ -491,6 +496,7 @@
 				4C7A2E5FB9D14038A2202614 /* WorkspaceContextMenuTests.swift */,
 				4C7A2E5FB9D14038A220261A /* SessionMetaTests.swift */,
 				4C7A2E5FB9D14038A220261C /* SessionContextMenuTests.swift */,
+				CB10AC26ADD4F846DEA536FE /* MenuBarControllerTests.swift */,
 				4C7A2E5FB9D14038A2202624 /* ReviewPanelTests.swift */,
 				4C7A2E5FB9D14038A2202628 /* ReviewPanelFilesViewTests.swift */,
 				4C7A2E5FB9D14038A220262C /* ReviewPanelChangesViewTests.swift */,
@@ -675,6 +681,7 @@
 				4C7A2E5FB9D14038A2202611 /* WorkspaceContextMenu.swift in Sources */,
 				4C7A2E5FB9D14038A2202617 /* SessionMeta.swift in Sources */,
 				4C7A2E5FB9D14038A2202619 /* SessionContextMenu.swift in Sources */,
+				78E47BC111FE60AB7613FA3D /* MenuBarController.swift in Sources */,
 				4C7A2E5FB9D14038A2202621 /* ReviewPanel.swift in Sources */,
 				4C7A2E5FB9D14038A2202623 /* ReviewPanelView.swift in Sources */,
 				4C7A2E5FB9D14038A2202627 /* ReviewPanelFilesView.swift in Sources */,
@@ -761,6 +768,7 @@
 				4C7A2E5FB9D14038A2202615 /* WorkspaceContextMenuTests.swift in Sources */,
 				4C7A2E5FB9D14038A220261B /* SessionMetaTests.swift in Sources */,
 				4C7A2E5FB9D14038A220261D /* SessionContextMenuTests.swift in Sources */,
+				21B815180974289417756888 /* MenuBarControllerTests.swift in Sources */,
 				4C7A2E5FB9D14038A2202625 /* ReviewPanelTests.swift in Sources */,
 				4C7A2E5FB9D14038A2202629 /* ReviewPanelFilesViewTests.swift in Sources */,
 				4C7A2E5FB9D14038A220262D /* ReviewPanelChangesViewTests.swift in Sources */,

@@ -194,6 +194,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// same `onStatus` fan-out (`recordNotification`), forgotten wherever
     /// the ledger forgets.
     private(set) var statusSeries = PaneStatusSeriesRecorder()
+    /// Session groups, most-recently-focused first — the menu bar icon's
+    /// "last active sessions" list. Fed from `onFocusedPaneChanged`, so it
+    /// covers every way focus moves (click, sidebar, palette, notification),
+    /// not just the ones this controller names. In-memory only: a natural
+    /// order re-establishes itself within the first few clicks of a launch,
+    /// and persisting it would be bookkeeping nobody asked for.
+    private var recentSessionGroupIDs: [String] = []
     /// The card itself. Owned here rather than by the sidebar because it is a
     /// window, and a view cannot own one of those.
     let hoverCard = SessionHoverCardController()
@@ -465,6 +472,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             if let paneID, workspace.descriptor(for: paneID)?.kind == .editor {
                 lastFocusedEditorPaneID = paneID
             }
+            if let paneID { noteSessionFocused(paneID) }
             refreshTitle()
             reloadOutline()
             refreshInspectorIfVisible(for: paneID)
@@ -1286,16 +1294,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         step(editors)
     }
 
-    /// ⇧⌘W. Answers `false` and closes the window itself once the prompts
-    /// resolve, rather than blocking AppKit's close on an asynchronous
-    /// answer. `NSWindow.close()` does not consult this delegate method, so
-    /// there is no second pass to guard against.
+    /// The red button and ⇧⌘W both just hide the window now: the app is
+    /// menu-bar-resident (`applicationShouldTerminateAfterLastWindowClosed`
+    /// is `false`), so nothing behind this window is going away — every pane
+    /// and every unsaved editor buffer lives on exactly as it was, and the
+    /// menu bar icon's session list keeps working. There is nothing left to
+    /// prompt about here; the save prompt still runs, unconditionally, on a
+    /// real quit (`AppDelegate.applicationShouldTerminate`).
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard mayHaveUnsavedEditorWork else { return true }
-        promptDirtyEditorTabs { proceed in
-            guard proceed else { return }
-            sender.close()
-        }
+        sender.orderOut(nil)
         return false
     }
 
@@ -3576,6 +3583,54 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // which `setZoomed` calls itself: that would recurse.
         if workspace.zoomedPaneID != nil { workspace.setZoomed(sessionID) }
         return true
+    }
+
+    /// Records a focus move in `recentSessionGroupIDs`, most-recent first.
+    private func noteSessionFocused(_ paneID: String) {
+        guard let group = workspace.descriptor(for: paneID)?.group else { return }
+        recentSessionGroupIDs.removeAll { $0 == group }
+        recentSessionGroupIDs.insert(group, at: 0)
+        // Five is all the menu bar ever shows; keeping a little more than
+        // that absorbs a session or two closing between focus and open.
+        if recentSessionGroupIDs.count > 8 { recentSessionGroupIDs.removeLast() }
+    }
+
+    /// What the menu bar icon's dropdown shows, assembled fresh every time it
+    /// opens — `hoverCardModel`'s pattern, no second copy to keep in sync.
+    func menuBarSummary() -> MenuBarSummary {
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        let sessions = SessionOutline.group(panes, focusedPaneID: workspace.focusedPaneID).flatMap(\.sessions)
+        let terminals = panes.filter { $0.kind == .terminal }
+        let working = terminals.filter { PaneActivityLedger.isBusy(lastStatus[$0.sessionID]) }.count
+
+        var byGroup: [String: SessionGroupNode] = [:]
+        for session in sessions { byGroup[session.id] = session }
+        let recent = recentSessionGroupIDs.compactMap { byGroup[$0] }
+
+        var seenProjects = Set<String>()
+        let recentWorkspaces = recent.compactMap { session -> MenuBarSummary.RecentWorkspace? in
+            guard seenProjects.insert(session.project).inserted else { return nil }
+            return MenuBarSummary.RecentWorkspace(
+                project: session.project,
+                label: SessionOutline.projectLabel(session.project, labels: projectLabels)
+            )
+        }
+
+        return MenuBarSummary(
+            sessionCount: sessions.count,
+            terminalCount: terminals.count,
+            workingCount: working,
+            recentSessions: recent.prefix(5).map {
+                MenuBarSummary.RecentSession(
+                    id: $0.id,
+                    label: $0.label,
+                    project: $0.project,
+                    projectLabel: SessionOutline.projectLabel($0.project, labels: projectLabels),
+                    firstPaneID: $0.paneIDs.first ?? $0.id
+                )
+            },
+            recentWorkspaces: Array(recentWorkspaces.prefix(5))
+        )
     }
 
     /// What the sidebar's hover card shows for one row, assembled fresh every

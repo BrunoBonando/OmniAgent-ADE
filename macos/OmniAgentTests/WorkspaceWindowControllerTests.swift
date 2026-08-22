@@ -2011,6 +2011,65 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(window.frame, narrow, "a squeezed window is never grown to fit the panel")
     }
 
+    /// The menu bar icon's three counts: sessions, terminals, and terminals
+    /// currently busy.
+    func testMenuBarSummaryCountsSessionsTerminalsAndWorking() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.startSession(inDirectory: "/tmp", project: "second")
+
+        var summary = controller.menuBarSummary()
+        XCTAssertEqual(summary.sessionCount, 2)
+        XCTAssertEqual(summary.terminalCount, 2)
+        XCTAssertEqual(summary.workingCount, 0)
+
+        let paneID = try XCTUnwrap(controller.workspaceView.allPaneIDs.first)
+        controller.recordNotification(
+            for: SessionStatusEvent(id: paneID, status: .thinking, notify: false, engine: "shell")
+        )
+
+        summary = controller.menuBarSummary()
+        XCTAssertEqual(summary.workingCount, 1)
+    }
+
+    /// The menu bar's "last active sessions" list — most recently focused
+    /// first, reordering live as focus moves, the same chokepoint every
+    /// click/sidebar-row/palette-jump/notification-reveal already goes
+    /// through.
+    func testMenuBarSummaryRecentSessionsAreMostRecentlyFocusedFirst() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1200, height: 800), display: true)
+        window.layoutIfNeeded()
+        let firstPaneID = try XCTUnwrap(controller.workspaceView.allPaneIDs.first)
+        guard let secondGroup = controller.startSession(inDirectory: "/tmp", project: "second") else {
+            return XCTFail("expected a new session")
+        }
+        let secondPaneID = try XCTUnwrap(
+            controller.workspaceView.allPaneIDs.first { controller.workspaceView.descriptor(for: $0)?.group == secondGroup }
+        )
+
+        focusAndWaitToLand(controller, secondPaneID)
+        XCTAssertEqual(controller.menuBarSummary().recentSessions.map(\.firstPaneID), [secondPaneID, firstPaneID])
+
+        focusAndWaitToLand(controller, firstPaneID)
+        XCTAssertEqual(controller.menuBarSummary().recentSessions.map(\.firstPaneID), [firstPaneID, secondPaneID])
+    }
+
+    /// `focusPane` across sessions on the Desk flies the camera there rather
+    /// than landing synchronously (`testRestoreReturnsToTheLastUsedSession`'s
+    /// same canvas-mode behavior) — pumped until it lands rather than a fixed
+    /// wait, for the same reason that test gives.
+    private func focusAndWaitToLand(_ controller: WorkspaceWindowController, _ paneID: String) {
+        controller.workspaceView.focusPane(paneID)
+        let deadline = Date().addingTimeInterval(5)
+        while controller.workspaceView.focusedPaneID != paneID, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(
