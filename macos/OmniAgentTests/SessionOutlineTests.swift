@@ -21,6 +21,41 @@ final class SessionOutlineTests: XCTestCase {
         XCTAssertEqual(tree[1].sessions.map(\.paneIDs), [["b"]])
     }
 
+    /// Real group ids carry their creation instant, so sessions list in the
+    /// order they were created no matter how the pane array came back from a
+    /// restore or a drag.
+    func testSessionsListInCreationOrderRegardlessOfPaneOrder() {
+        let tree = SessionOutline.group(
+            [
+                pane("late", project: "alpha", group: "sess-grp-2000-7"),
+                pane("early", project: "alpha", group: "sess-grp-1000-2"),
+                pane("middle", project: "alpha", group: "sess-grp-1000-5"),
+            ],
+            focusedPaneID: nil
+        )
+        XCTAssertEqual(
+            tree[0].sessions.map(\.id),
+            ["sess-grp-1000-2", "sess-grp-1000-5", "sess-grp-2000-7"]
+        )
+    }
+
+    /// The ungrouped sentinel predates every minted group, so it stays on
+    /// top — and the visible-session fallback answers that same topmost row.
+    func testTheSentinelSortsFirstAndTheVisibleFallbackAgrees() {
+        let panes = [
+            pane("b", project: "alpha", group: "sess-grp-2000-1"),
+            pane("a", project: "alpha", group: WorkspaceRestoration.ungroupedSessionID),
+        ]
+        XCTAssertEqual(
+            SessionOutline.group(panes, focusedPaneID: nil)[0].sessions.map(\.id),
+            [WorkspaceRestoration.ungroupedSessionID, "sess-grp-2000-1"]
+        )
+        XCTAssertEqual(
+            SessionOutline.visibleSessionGroupID(panes, project: "alpha", focusedPaneID: nil),
+            WorkspaceRestoration.ungroupedSessionID
+        )
+    }
+
     func testExactlyOneSessionIsCurrentAndItIsTheOneHoldingTheFocusedPane() {
         let tree = SessionOutline.group(
             [

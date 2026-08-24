@@ -1648,9 +1648,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
             project: project
         )
-        addPane(
+        let paneID = UUID().uuidString
+        let added = addPane(
             RestoredPane(
-                sessionID: UUID().uuidString,
+                sessionID: paneID,
                 reattaches: false,
                 project: project,
                 engine: EngineLauncher.defaultEngine(),
@@ -1662,6 +1663,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             ),
             startSession: true
         )
+        // A session you just created is the one you meant to be in. The pane
+        // is already focused (`insertPane` does that), but focus alone leaves
+        // the screen wherever it was — on Home or the To Do List the new
+        // session would start behind the destination. `revealPane` is the
+        // whole move: destination to the Desk, window front, focus, unzoom.
+        if added { revealPane(paneID) }
         return group
     }
 

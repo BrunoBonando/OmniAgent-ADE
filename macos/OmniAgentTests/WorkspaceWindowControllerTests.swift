@@ -1035,6 +1035,32 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.pane(inGroup: second)?.groupLabel, "Session 3")
     }
 
+    /// Creating a session goes to it: even from Home, the Desk comes back on
+    /// screen and the new session's pane holds focus.
+    func testStartingASessionRoutesToIt() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1", groupLabel: "Session 1"),
+                ])
+            )
+        )
+        controller.applyDestination(.home)
+
+        let group = try XCTUnwrap(controller.startSession(inDirectory: "/a", project: "alpha"))
+
+        XCTAssertEqual(controller.destination, .terminals, "the Desk is back on screen")
+        let added = try XCTUnwrap(controller.pane(inGroup: group))
+        XCTAssertEqual(
+            controller.workspaceView.focusedPaneID,
+            added.sessionID,
+            "and the new session's pane holds focus"
+        )
+    }
+
     /// A new session starts in the workspace's own folder and asks nothing.
     /// The chooser is reserved for opening a *different* folder as a new
     /// workspace — asking on every new session meant answering a question whose

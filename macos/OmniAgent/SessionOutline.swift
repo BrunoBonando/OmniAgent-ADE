@@ -35,8 +35,13 @@ struct ProjectSessionsNode: Equatable {
 /// There is no second collection to keep in sync — restore the panes and the
 /// grouping comes back with them, which is what keeps restoration honest.
 enum SessionOutline {
-    /// Panes grouped project -> session -> panes. Both levels keep first-seen
-    /// order, so a new pane in a known session never re-sorts anything.
+    /// Panes grouped project -> session -> panes. Projects keep first-seen
+    /// order and a new pane in a known session never re-sorts anything —
+    /// but the sessions inside a project list in **creation order**: their
+    /// ids carry the instant they were minted (`sess-grp-<ms>-<counter>`),
+    /// so the order survives restores and pane drags that reorder the pane
+    /// array itself. Ids without that key (the ungrouped sentinel) predate
+    /// grouping and sort first, keeping first-seen order among themselves.
     static func group(_ panes: [PaneDescriptor], focusedPaneID: String?) -> [ProjectSessionsNode] {
         var projectOrder: [String] = []
         var groupOrder: [String: [String]] = [:]
@@ -56,7 +61,15 @@ enum SessionOutline {
         }
 
         return projectOrder.map { project in
-            let order = groupOrder[project] ?? []
+            // Swift's sort is stable, so two keyless ids keep their
+            // first-seen order rather than jumping around per render.
+            let order = (groupOrder[project] ?? []).sorted { lhs, rhs in
+                switch (creationKey(lhs), creationKey(rhs)) {
+                case let (l?, r?): return l < r
+                case (nil, .some): return true
+                case (.some, nil), (nil, nil): return false
+                }
+            }
             // Two passes: a derived default must never collide with a name
             // actually stored somewhere in this project, so collect the real
             // names first and hand the leftovers the lowest free number.
@@ -112,6 +125,18 @@ enum SessionOutline {
     /// Main-thread only, like every other caller in this file.
     private static var groupCounter = 0
 
+    /// The creation instant a real group id carries
+    /// (`sess-grp-<ms>-<counter>`), as a sortable pair — what `group` orders
+    /// sessions by. `nil` for the ungrouped sentinel and any foreign id.
+    static func creationKey(_ group: String) -> (ms: Int, counter: Int)? {
+        guard group.hasPrefix("sess-grp-") else { return nil }
+        let parts = group.dropFirst("sess-grp-".count).split(separator: "-")
+        guard parts.count == 2, let ms = Int(parts[0]), let counter = Int(parts[1]) else {
+            return nil
+        }
+        return (ms, counter)
+    }
+
     /// **The numbering rule:** the lowest positive integer whose default name
     /// is not already taken by a live session in that project. So sessions
     /// created and closed out of order never collide and never climb forever
@@ -158,7 +183,7 @@ enum SessionOutline {
     ///   project. This agrees with `group`'s `isCurrent` by construction, so
     ///   the grid and the sidebar's accent rail can never point at different
     ///   sessions.
-    /// - **Otherwise the project's first session** (first-seen order = the
+    /// - **Otherwise the project's first session** (creation order = the
     ///   topmost row in the sidebar). Selecting a workspace deliberately does
     ///   *not* move focus, so `focusedPaneID` routinely belongs to a
     ///   different project than the one being rendered;
@@ -183,7 +208,11 @@ enum SessionOutline {
     ) -> String? {
         let focused = focusedPaneID.flatMap { id in panes.first { $0.sessionID == id } }
         if let focused, focused.project == project { return focused.group }
-        return panes.first { $0.project == project }?.group
+        // Through `group` rather than `panes.first`, so "the topmost row"
+        // stays literally true now that sessions list in creation order.
+        return group(panes, focusedPaneID: nil)
+            .first { $0.project == project }?
+            .sessions.first?.id
     }
 
     /// The first pane of the adjacent session in `project`, or `nil` at a
