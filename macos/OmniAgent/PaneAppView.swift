@@ -707,6 +707,18 @@ final class PaneAppView: NSView {
         field.translatesAutoresizingMaskIntoConstraints = false
         return field
     }
+
+    /// The header a collapsed run of tool calls reads as.
+    ///
+    /// A homogeneous run can name its tool honestly; a mixed one cannot, and
+    /// listing every name would rebuild the wall of text this collapse
+    /// exists to remove — so it counts steps instead.
+    static func workSummary(for names: [String]) -> String {
+        guard let first = names.first else { return "" }
+        if names.count == 1 { return first }
+        if names.allSatisfy({ $0 == first }) { return "\(names.count) \(first) calls" }
+        return "\(names.count) steps"
+    }
 }
 
 /// One `TranscriptTurn`, laid out once at append time and never rebuilt.
@@ -728,16 +740,25 @@ final class PaneAppMessageRowView: NSView {
         )
         body.addArrangedSubview(roleLabel)
 
+        // Consecutive tool calls are one run and collapse together; anything
+        // else flushes the run in progress first, so work keeps its place
+        // between the prose either side of it.
+        var run: [(name: String, detail: String)] = []
+        func flushRun() {
+            guard !run.isEmpty else { return }
+            add(PaneAppWorkGroupView(calls: run), to: body)
+            run = []
+        }
         for block in turn.blocks {
-            for view in Self.blockViews(for: block) {
-                body.addArrangedSubview(view)
-                // `.leading` alignment only pins each arranged view's leading
-                // edge; without this, a wrapping prose label or a truncating
-                // tool line would report its own tiny intrinsic width instead
-                // of filling the row.
-                view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+            switch block {
+            case .tool(let name, let detail):
+                run.append((name, detail))
+            case .text(let text):
+                flushRun()
+                for view in Self.blockViews(for: .text(text)) { add(view, to: body) }
             }
         }
+        flushRun()
 
         addSubview(body)
         NSLayoutConstraint.activate([
@@ -750,6 +771,15 @@ final class PaneAppMessageRowView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// `.leading` alignment only pins each arranged view's leading edge;
+    /// without the width constraint, a wrapping prose label or a truncating
+    /// tool line reports its own tiny intrinsic width instead of filling the
+    /// row.
+    private func add(_ view: NSView, to body: NSStackView) {
+        body.addArrangedSubview(view)
+        view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+    }
 
     private static func blockViews(for block: TranscriptBlock) -> [NSView] {
         switch block {
@@ -773,5 +803,79 @@ final class PaneAppMessageRowView: NSView {
         case .tool(let name, let detail):
             return [PaneAppView.toolLabel(name: name, detail: detail)]
         }
+    }
+}
+
+/// A run of consecutive tool calls in one turn, collapsed to a summary line
+/// that expands on click.
+///
+/// The detail is built up front and merely hidden, never built on expand:
+/// `PaneAppMessageRowView` lays a row out once and never rebuilds it, and
+/// growing the view tree mid-scroll is exactly the kind of relayout that
+/// contract exists to avoid.
+final class PaneAppWorkGroupView: NSView {
+    private(set) var isExpanded = false
+    private let chevron: NSTextField
+    private let detail = NSStackView()
+
+    init(calls: [(name: String, detail: String)]) {
+        chevron = ShellFont.label("⌄", font: ShellFont.ui(11), color: ShellPalette.inkFaint)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let summary = ShellFont.label(
+            PaneAppView.workSummary(for: calls.map(\.name)),
+            font: ShellFont.ui(12),
+            color: ShellPalette.inkMuted
+        )
+
+        let header = NSStackView(views: [chevron, summary])
+        header.orientation = .horizontal
+        header.alignment = .firstBaseline
+        header.spacing = 6
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        detail.orientation = .vertical
+        detail.alignment = .leading
+        detail.spacing = 2
+        detail.isHidden = true
+        detail.translatesAutoresizingMaskIntoConstraints = false
+        for call in calls {
+            let label = PaneAppView.toolLabel(name: call.name, detail: call.detail)
+            detail.addArrangedSubview(label)
+            label.widthAnchor.constraint(equalTo: detail.widthAnchor).isActive = true
+        }
+
+        let body = NSStackView(views: [header, detail])
+        body.orientation = .vertical
+        body.alignment = .leading
+        body.spacing = 4
+        body.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(body)
+        NSLayoutConstraint.activate([
+            body.topAnchor.constraint(equalTo: topAnchor),
+            body.leadingAnchor.constraint(equalTo: leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: trailingAnchor),
+            body.bottomAnchor.constraint(equalTo: bottomAnchor),
+            header.widthAnchor.constraint(equalTo: body.widthAnchor),
+            detail.widthAnchor.constraint(equalTo: body.widthAnchor),
+        ])
+
+        let click = NSClickGestureRecognizer(target: self, action: #selector(handleClick))
+        header.addGestureRecognizer(click)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    @objc private func handleClick() { toggle() }
+
+    /// Internal rather than private so the tests can drive expansion without
+    /// synthesising a click.
+    func toggle() {
+        isExpanded.toggle()
+        detail.isHidden = !isExpanded
+        chevron.stringValue = isExpanded ? "⌃" : "⌄"
     }
 }

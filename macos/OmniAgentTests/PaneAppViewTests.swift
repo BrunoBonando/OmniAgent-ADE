@@ -62,7 +62,12 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(secondLabels.first?.stringValue, "Claude")
         XCTAssertEqual(secondLabels.first?.textColor, ShellPalette.accent)
 
-        let toolLine = try XCTUnwrap(secondLabels.first { $0.stringValue.contains("Read") })
+        // Not `.contains("Read")`: a single-call run's work-group *header*
+        // reads as the bare tool name too (`workSummary`), so that alone
+        // matches both it and the detail line. The `▸` prefix is unique to
+        // `toolLabel`'s own rendering.
+        let toolLine = try XCTUnwrap(secondLabels.first { $0.stringValue.hasPrefix("▸") })
+        XCTAssertTrue(toolLine.stringValue.contains("Read"))
         XCTAssertTrue(toolLine.stringValue.contains("/x.swift"))
     }
 
@@ -289,6 +294,65 @@ final class PaneAppViewTests: XCTestCase {
 
         XCTAssertEqual(labels[0].stringValue, "1.")
         XCTAssertEqual(labels[2].stringValue, "2.")
+    }
+
+    // MARK: - Work groups
+
+    func testWorkSummaryNamesASingleCall() {
+        XCTAssertEqual(PaneAppView.workSummary(for: ["Bash"]), "Bash")
+    }
+
+    func testWorkSummaryCountsAHomogeneousRun() {
+        XCTAssertEqual(PaneAppView.workSummary(for: ["Bash", "Bash", "Bash"]), "3 Bash calls")
+    }
+
+    /// Mixed runs get a neutral count — "3 Bash calls" would be a lie and
+    /// listing every name is the wall of text this exists to remove.
+    func testWorkSummaryFallsBackToStepsForAMixedRun() {
+        XCTAssertEqual(PaneAppView.workSummary(for: ["Bash", "Read", "Edit"]), "3 steps")
+    }
+
+    /// Consecutive tool calls become one group, collapsed, with the detail
+    /// built but hidden — expansion must not have to re-derive anything.
+    func testConsecutiveToolCallsCollapseIntoOneGroup() {
+        let row = PaneAppMessageRowView(turn: TranscriptTurn(id: "1", isUser: false, blocks: [
+            .text("on it"),
+            .tool(name: "Bash", detail: "ls"),
+            .tool(name: "Bash", detail: "pwd"),
+            .text("done"),
+        ]))
+
+        let groups = row.descendants(PaneAppWorkGroupView.self)
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertFalse(groups[0].isExpanded)
+
+        let summaries = row.descendants(NSTextField.self).filter { $0.stringValue == "2 Bash calls" }
+        XCTAssertEqual(summaries.count, 1)
+    }
+
+    /// Prose on both sides of a run keeps its place — work reads where it
+    /// happened, rather than being hoisted to the top of the turn.
+    func testProseKeepsItsPlaceAroundAWorkGroup() {
+        let row = PaneAppMessageRowView(turn: TranscriptTurn(id: "1", isUser: false, blocks: [
+            .text("on it"),
+            .tool(name: "Bash", detail: "ls"),
+            .text("done"),
+        ]))
+        let body = row.descendants(NSStackView.self).first!
+        let kinds = body.arrangedSubviews.map { $0 is PaneAppWorkGroupView }
+
+        XCTAssertEqual(kinds, [false, false, true, false], "role label, prose, group, prose")
+    }
+
+    func testExpandingAWorkGroupRevealsItsCalls() {
+        let group = PaneAppWorkGroupView(calls: [("Bash", "ls"), ("Bash", "pwd")])
+        let detail = group.descendants(NSTextField.self).filter { $0.stringValue.hasPrefix("▸") }
+        XCTAssertEqual(detail.count, 2, "detail is built up front, not on expand")
+
+        group.toggle()
+
+        XCTAssertTrue(group.isExpanded)
+        XCTAssertFalse(detail[0].isHiddenOrHasHiddenAncestor)
     }
 
     // MARK: - Markdown
