@@ -152,8 +152,13 @@
 		10000000000000000000052 /* EngineIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000052 /* EngineIcon.swift */; };
 		10000000000000000000060 /* WorkspaceFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000060 /* WorkspaceFiles.swift */; };
 		10000000000000000000070 /* EngineLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000070 /* EngineLauncher.swift */; };
+		10000000000000000000099 /* ClaudeTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000099 /* ClaudeTranscript.swift */; };
+		10000000000000000000100 /* PaneAppView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000100 /* PaneAppView.swift */; };
 		10000000000000000000061 /* WorkspaceFilesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000061 /* WorkspaceFilesTests.swift */; };
 		10000000000000000000071 /* EngineLauncherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000071 /* EngineLauncherTests.swift */; };
+		FC3606719F77D1F856C827D9 /* ClaudeTranscriptTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 712943C7B868840E1BB009CB /* ClaudeTranscriptTests.swift */; };
+		A00517B4FA93E5FDEADE27DF /* PaneAppViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8623C15B469687448C65CB4C /* PaneAppViewTests.swift */; };
+		2554343CE87E2D615945A793 /* PaneViewModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4ED45FD94552610C3C4DE5D2 /* PaneViewModeTests.swift */; };
 		100000000000000000000A0 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000A0 /* AuthClient.swift */; };
 		100000000000000000000A1 /* AuthClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000A1 /* AuthClientTests.swift */; };
 /* End PBXBuildFile section */
@@ -337,8 +342,13 @@
 		20000000000000000000052 /* EngineIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineIcon.swift; sourceTree = "<group>"; };
 		20000000000000000000060 /* WorkspaceFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFiles.swift; sourceTree = "<group>"; };
 		20000000000000000000070 /* EngineLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineLauncher.swift; sourceTree = "<group>"; };
+		20000000000000000000099 /* ClaudeTranscript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeTranscript.swift; sourceTree = "<group>"; };
+		20000000000000000000100 /* PaneAppView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAppView.swift; sourceTree = "<group>"; };
 		20000000000000000000061 /* WorkspaceFilesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFilesTests.swift; sourceTree = "<group>"; };
 		20000000000000000000071 /* EngineLauncherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineLauncherTests.swift; sourceTree = "<group>"; };
+		712943C7B868840E1BB009CB /* ClaudeTranscriptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeTranscriptTests.swift; sourceTree = "<group>"; };
+		8623C15B469687448C65CB4C /* PaneAppViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAppViewTests.swift; sourceTree = "<group>"; };
+		4ED45FD94552610C3C4DE5D2 /* PaneViewModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneViewModeTests.swift; sourceTree = "<group>"; };
 		200000000000000000000A0 /* AuthClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthClient.swift; sourceTree = "<group>"; };
 		200000000000000000000A1 /* AuthClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthClientTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -448,6 +458,8 @@
 				2000000000000000000003D /* DaemonPersistenceController.swift */,
 				20000000000000000000060 /* WorkspaceFiles.swift */,
 				20000000000000000000070 /* EngineLauncher.swift */,
+				20000000000000000000099 /* ClaudeTranscript.swift */,
+				20000000000000000000100 /* PaneAppView.swift */,
 				20000000000000000000049 /* Assets.xcassets */,
 				A04759722BBF431AA1576C0D /* monaco */,
 			);
@@ -528,6 +540,9 @@
 				20000000000000000000097 /* SessionHoverCardTests.swift */,
 				20000000000000000000061 /* WorkspaceFilesTests.swift */,
 				20000000000000000000071 /* EngineLauncherTests.swift */,
+				712943C7B868840E1BB009CB /* ClaudeTranscriptTests.swift */,
+				8623C15B469687448C65CB4C /* PaneAppViewTests.swift */,
+				4ED45FD94552610C3C4DE5D2 /* PaneViewModeTests.swift */,
 				FB9D2F62F22A4B56B0D9AAF1 /* WorkspaceWindowControllerDeskCanvasTests.swift */,
 			);
 			path = OmniAgentTests;
@@ -728,6 +743,8 @@
 				1000000000000000000003C /* DaemonPersistenceController.swift in Sources */,
 				10000000000000000000060 /* WorkspaceFiles.swift in Sources */,
 				10000000000000000000070 /* EngineLauncher.swift in Sources */,
+				10000000000000000000099 /* ClaudeTranscript.swift in Sources */,
+				10000000000000000000100 /* PaneAppView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -802,6 +819,9 @@
 				10000000000000000000097 /* SessionHoverCardTests.swift in Sources */,
 				10000000000000000000061 /* WorkspaceFilesTests.swift in Sources */,
 				10000000000000000000071 /* EngineLauncherTests.swift in Sources */,
+				FC3606719F77D1F856C827D9 /* ClaudeTranscriptTests.swift in Sources */,
+				A00517B4FA93E5FDEADE27DF /* PaneAppViewTests.swift in Sources */,
+				2554343CE87E2D615945A793 /* PaneViewModeTests.swift in Sources */,
 				886AD5FC7A3C4837958280C6 /* WorkspaceWindowControllerDeskCanvasTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

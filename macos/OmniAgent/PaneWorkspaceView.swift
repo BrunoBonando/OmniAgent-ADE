@@ -1080,10 +1080,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // WKWebView's actual responder is an internal content view, so identity
         // could never hold for it — and the terminal's `terminalView` is a
         // descendant of its surface, so the same rule covers both kinds.
-        if let view = window.firstResponder as? NSView, view.isDescendant(of: container.surface) {
+        // Against whichever content the pane is showing, not always its
+        // surface: an App-mode pane keeps the keyboard in its composer rather
+        // than handing it to the terminal hidden behind it.
+        let content = container.activeContentView
+        if let view = window.firstResponder as? NSView, view.isDescendant(of: content) {
             return
         }
-        container.surface.focus()
+        container.focusActiveContent()
     }
 
     /// The cell a pane occupies in the grid as it stands — where a card being
@@ -1314,6 +1318,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         for (id, container) in containers {
             let onScreen = visible.contains(id)
             container.isHidden = !onScreen
+            // A pane's App view polls a transcript file on a timer, so it has
+            // to hear that the pane went off screen. Deliberately *not*
+            // `suspendsDrawing`'s business — that gates the renderer kick and
+            // nothing else, and this is the pane's own content answering the
+            // same question `isHidden` just did, which is why it is here rather
+            // than after the chip: `isChipped`'s didSet starts a crossfade, and
+            // a content view hidden on the next statement never fades at all.
+            container.applyContentVisibility()
             container.surface.suspendsDrawing = suspendsDrawing || !onScreen
             container.isChipped = onScreen && chips
         }
@@ -1803,11 +1815,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         focusedPaneID = sessionID
         // In the filmstrip the focused pane *is* the one at full size, so a
         // focus change is a layout change — and it has to land before
-        // `surface.focus()`, which cannot make a chipped pane's terminal the
-        // first responder.
+        // `focusActiveContent()`, which cannot make a chipped pane's terminal
+        // the first responder.
         if changed, isFilmstrip { relayoutFilmstrip() }
         updateFocusRings()
-        containers[sessionID]?.surface.focus()
+        // Whichever view the pane is showing — for a terminal-mode pane this is
+        // exactly `surface.focus()`, and for an App-mode one it is the composer
+        // rather than the hidden PTY behind it.
+        containers[sessionID]?.focusActiveContent()
         if changed { onFocusedPaneChanged?(sessionID) }
     }
 
@@ -1827,7 +1842,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             ask.selectInput()
             return
         }
-        container.surface.focus()
+        container.focusActiveContent()
     }
 
     /// Adopts the pane that actually holds the first responder — click-to-focus,
@@ -3651,6 +3666,136 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// `header`/`surface`/`approvalBar`, because `surface` is `let`.
     let chip = PaneChipView()
 
+    /// The pane's chat rendering of its own Claude transcript, once anyone has
+    /// asked for it — see `PaneAppView`. Built on the first switch into `.app`
+    /// and kept for the pane's life, because most panes are shells, browsers
+    /// and editors that will never ask: creating one for every pane would open
+    /// a poll timer and a file reader for a view nobody looks at.
+    private(set) var appView: PaneAppView?
+
+    /// Which of its two views this terminal is showing. The PTY runs either
+    /// way — the terminal is hidden, never torn down, which is why the
+    /// approval bar goes on reading the live screen from behind the chat.
+    ///
+    /// Lives here rather than on `PaneDescriptor`: nothing outside the pane
+    /// needs to know, and v1 deliberately does not persist it.
+    var viewMode: PaneViewMode = .terminal {
+        didSet {
+            guard viewMode != oldValue else { return }
+            if viewMode == .app { makeAppViewIfNeeded() }
+            header.viewMode = viewMode
+            applyContentVisibility()
+            // Directly rather than through `needsLayout`, for the reason
+            // `isChipped` gives: the incoming view has to be framed in the same
+            // turn it is shown, and the windowless test host never turns a run
+            // loop to deliver a later pass at all.
+            applyLayout()
+            // Only the terminal has a stale drawable to come back to. It spent
+            // App mode hidden, so its own `setNeedsDisplay` scheduled nothing,
+            // and `MacTerminalView.draw(_:)` returns immediately once Metal is
+            // on — an idle terminal unhidden without this shows the frame it
+            // went down with until its next byte arrives.
+            if viewMode == .terminal { (surface as? TerminalSurfaceView)?.requestRendererDraw() }
+            // The keyboard follows the swap, but only when it was in this pane
+            // to begin with — toggling a pane you are not typing in must not
+            // steal focus from the one you are. Without it the first responder
+            // stays on the *hidden* terminal (AppKit does not resign one for
+            // being hidden), so every keystroke meant for the composer would go
+            // silently into the agent's PTY.
+            if let responder = window?.firstResponder as? NSView, responder.isDescendant(of: self) {
+                focusActiveContent()
+            }
+        }
+    }
+
+    /// The content view the pane is actually showing — what the chip fades
+    /// against and what the focus machinery aims at. Falls back to the surface
+    /// whenever App mode has no view yet, so there is never a moment with no
+    /// answer.
+    var activeContentView: NSView { viewMode == .app ? (appView ?? surface) : surface }
+
+    /// The one writer of which content a pane is showing, the way
+    /// `EditorPaneView.setContentVisibility` is for the editor's three: the
+    /// chip replaces both content views, and the view mode picks between them
+    /// once the chip is down. Two independent writers of one `isHidden` is a
+    /// bug waiting for the order of two callers to change.
+    ///
+    /// `fileprivate` rather than `private` only because
+    /// `PaneWorkspaceView.updateVisibility` — the sole owner of whether a pane
+    /// is on screen at all — calls it to keep the app view's polling in step
+    /// with that answer.
+    fileprivate func applyContentVisibility() {
+        // A missing app view counts as Terminal, the way `activeContentView`
+        // falls back: a switch that could not build one must leave the pane
+        // showing its terminal rather than showing nothing at all.
+        let showsApp = viewMode == .app && appView != nil
+        // Nothing polls a transcript nobody can see: a pane in another session,
+        // one drawn as a chip, or one showing its terminal all cost nothing.
+        // Always answered, fade or no fade — it is a timer, not a pixel.
+        appView?.isLive = !isHidden && !isChipped && showsApp
+        // A crossfade owns both content views for the length of it: both are
+        // up, one is travelling to opacity 0, and hiding the loser now would
+        // cut that fade to a pop — precisely the glitch `crossfadeChip` exists
+        // to prevent. `settleChipFade` clears the flag and calls this again on
+        // the other side, so the state below is applied either way, one settle
+        // later. This is load-bearing beyond the pass that starts the fade:
+        // `camera`'s didSet runs `updateVisibility` on *every* pinch event, so
+        // without it the second event of a zoom-out would cut the first's fade.
+        guard !isCrossfadingChip else { return }
+        surface.isHidden = isChipped || showsApp
+        appView?.isHidden = isChipped || !showsApp
+    }
+
+    /// Puts the keyboard in whichever content the pane is showing — the
+    /// terminal, or the App view's composer. Every focus path goes through
+    /// here rather than `surface.focus()`, so an App-mode pane never hands the
+    /// keyboard to the terminal hidden behind it.
+    func focusActiveContent() {
+        if viewMode == .app, let appView {
+            window?.makeFirstResponder(appView.primaryResponderView)
+        } else {
+            surface.focus()
+        }
+    }
+
+    /// The App view, built on demand from the pane's own descriptor — the
+    /// transcript is found from the session id and the cwd, which is all
+    /// `PaneAppView` needs and all this pane knows about the conversation.
+    private func makeAppViewIfNeeded() {
+        guard appView == nil, let descriptor = workspace?.descriptor(for: paneID) else { return }
+        let view = PaneAppView(sessionID: descriptor.sessionID, cwd: descriptor.cwd)
+        // `applyLayout` frames every child by hand; `PaneAppView` builds itself
+        // with Auto Layout inside and switches this off in its own init. The
+        // header's title label is the same story, and does the same thing.
+        view.translatesAutoresizingMaskIntoConstraints = true
+        view.onSubmit = { [weak self] text in
+            // Not `sendInput(text + "\r")`: a half-typed line sitting in the
+            // TUI would be sent with it. This clears the input, sends the
+            // command and puts the draft back — see `sendCommandClearingInput`.
+            (self?.surface as? TerminalSurfaceView)?.sendCommandClearingInput(text)
+        }
+        // Directly above the surface it replaces, and so below the approval
+        // bar, the chip and the drop highlight: an amber question and a
+        // level-of-detail placeholder both outrank the pane's content.
+        addSubview(view, positioned: .above, relativeTo: surface)
+        appView = view
+        // The last chrome pass ran before this view existed, so it would sit
+        // here with square corners inside the container's rounded mask until
+        // something else happened to trigger one — the exact pinch
+        // `roundChildren` exists to prevent. Its own comment records why no
+        // offscreen render would show it.
+        updateChrome()
+    }
+
+    /// How long a pane takes to become its placeholder, and back.
+    static let chipFadeDuration: TimeInterval = 0.18
+    private static let chipFadeKey = "chipFade"
+    private var chipFadeToken = 0
+    /// Whether a crossfade is in flight — both content members up, one of them
+    /// on its way to opacity 0. `applyContentVisibility` stands off while this
+    /// is true; see the reason there.
+    private var isCrossfadingChip = false
+
     /// Whether this pane is drawn as a chip instead of as itself.
     ///
     /// The surface is **hidden**, not merely suspended: `suspendsDrawing`
@@ -3668,11 +3813,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// sole owner of per-pane visibility. Anything that assigns this from
     /// elsewhere is overwritten by that method's next call — the same trap
     /// `setSuspendsDrawing`'s comment already records for `suspendsDrawing`.
-    /// How long a pane takes to become its placeholder, and back.
-    static let chipFadeDuration: TimeInterval = 0.18
-    private static let chipFadeKey = "chipFade"
-    private var chipFadeToken = 0
-
     var isChipped = false {
         didSet {
             guard isChipped != oldValue else { return }
@@ -3688,8 +3828,12 @@ final class PaneContainerView: NSView, NSDraggingSource {
             // idle terminal would come back showing a stale drawable until its
             // next byte arrives. `requestRendererDraw()` is the primitive that
             // actually paints; it is not on `PaneContentView`, hence the cast —
-            // the same one `approvalBar.onChoose` makes.
-            if !isChipped { (surface as? TerminalSurfaceView)?.requestRendererDraw() }
+            // the same one `approvalBar.onChoose` makes. Only when the terminal
+            // is the one coming back: an App-mode pane's terminal stays hidden,
+            // and has no stale drawable anyone can see.
+            if !isChipped, viewMode == .terminal {
+                (surface as? TerminalSurfaceView)?.requestRendererDraw()
+            }
         }
     }
 
@@ -3717,8 +3861,16 @@ final class PaneContainerView: NSView, NSDraggingSource {
             settleChipFade(token)
             return
         }
+        isCrossfadingChip = true
         chip.isHidden = false
-        surface.isHidden = false
+        // The content view the pane is actually showing, not always the
+        // surface: in App mode the terminal is the one that stays down, and
+        // un-hiding it here would put it under the fade instead of the chat.
+        // Deliberately not `applyContentVisibility()` — this is the state
+        // *during* the fade, with both members up; the settle applies the one
+        // it was heading for.
+        let content = activeContentView
+        content.isHidden = false
         header.isHidden = false
         // The chip is sized and seated by the same pass that sizes the surface,
         // and it has to be in place *before* it is faded in rather than one
@@ -3726,7 +3878,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // blank rectangle for the length of it.
         applyLayout()
         fadeChipMember(chip, to: isChipped ? 1 : 0)
-        fadeChipMember(surface, to: isChipped ? 0 : 1)
+        fadeChipMember(content, to: isChipped ? 0 : 1)
         fadeChipMember(header, to: isChipped ? 0 : 1)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.chipFadeDuration) { [weak self] in
             self?.settleChipFade(token)
@@ -3753,17 +3905,32 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// two paths gets there first.
     private func settleChipFade(_ token: Int) {
         guard token == chipFadeToken else { return }
+        // Cleared before anything below reads it: `applyContentVisibility` is
+        // what applies the state this fade was heading for, and it stands off
+        // while this is true.
+        isCrossfadingChip = false
         chip.layer?.removeAnimation(forKey: Self.chipFadeKey)
         surface.layer?.removeAnimation(forKey: Self.chipFadeKey)
         header.layer?.removeAnimation(forKey: Self.chipFadeKey)
+        // The app view whether or not it was the one faded: a mode switched
+        // mid-fade would otherwise leave the view it faded out parked at
+        // opacity 0, invisible the next time it is shown.
+        appView?.layer?.removeAnimation(forKey: Self.chipFadeKey)
         chip.layer?.opacity = 1
         surface.layer?.opacity = 1
         header.layer?.opacity = 1
+        appView?.layer?.opacity = 1
         chip.isHidden = !isChipped
-        surface.isHidden = isChipped
         header.isHidden = isChipped
+        // Which of the two content views comes back is the view mode's
+        // question, not this one's — see `applyContentVisibility`.
+        applyContentVisibility()
         applyLayout()
-        if !isChipped { (surface as? TerminalSurfaceView)?.requestRendererDraw() }
+        // Only when the terminal is the one coming back; an App-mode pane has
+        // no stale drawable to repaint. See `isChipped`'s didSet.
+        if !isChipped, viewMode == .terminal {
+            (surface as? TerminalSurfaceView)?.requestRendererDraw()
+        }
     }
 
     /// The design's amber strip along the bottom while the agent is blocked on
@@ -3922,6 +4089,17 @@ final class PaneContainerView: NSView, NSDraggingSource {
             self.workspace?.focusPane(self.paneID)
             self.workspace?.onRequestEngineMenu?(self.paneID, anchor)
         }
+        // Terminal ⇄ App stays inside the pane: nothing outside it needs to
+        // know which view a pane is showing in v1, so unlike the menus above
+        // there is no `onRequest…` hook for the window controller to answer.
+        // Focus first for the reason the zoom button gives — the header's
+        // controls swallow their own clicks, so this is the one path that would
+        // otherwise leave the pane unfocused.
+        header.onViewModeChanged = { [weak self] mode in
+            guard let self else { return }
+            self.workspace?.focusPane(self.paneID)
+            self.viewMode = mode
+        }
         // The design's `session restore · terminal 1 of 4`. A closure rather
         // than a stored string because the ordinal is a fact about the
         // workspace, not about this pane: a sibling closing while this one is
@@ -4007,6 +4185,10 @@ final class PaneContainerView: NSView, NSDraggingSource {
             width: width,
             height: max(0, bounds.height - headerHeight - barHeight - inset * 2)
         )
+        // The App view takes the surface's box exactly, because it stands in
+        // for it. Framed on every pass, hidden or not — and the terminal keeps
+        // its own frame while hidden, so the PTY never reflows over a toggle.
+        appView?.frame = surface.frame
         approvalBar.frame = CGRect(
             x: inset,
             y: inset + headerHeight + surface.frame.height,
@@ -4039,8 +4221,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
         updateWorkingRing()
     }
 
-    /// The two children get the corner the container's mask would otherwise cut
-    /// out of the ring. Both are square and inset by exactly `borderWidth`, so
+    /// The children get the corner the container's mask would otherwise cut
+    /// out of the ring. Each is square and inset by exactly `borderWidth`, so
     /// along a straight edge the container's background shows through as a 1pt
     /// border — but at a corner the child's square corner runs straight into the
     /// mask's arc and the ring pinches out to nothing there. Rounding each child
@@ -4074,7 +4256,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
                 ? [.layerMinXMinYCorner, .layerMaxXMinYCorner]
                 : [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
         }
-        for (child, corners) in [
+        var children: [(NSView, CACornerMask)] = [
             (header as NSView, screenTop(of: header)),
             (surface as NSView, approvalBar.isHidden ? screenBottom(of: surface) : []),
             (approvalBar as NSView, screenBottom(of: approvalBar)),
@@ -4083,7 +4265,17 @@ final class PaneContainerView: NSView, NSDraggingSource {
             // it is written as the union of the two helpers rather than as a
             // four-corner literal the next author would have to re-derive.
             (chip as NSView, screenTop(of: chip).union(screenBottom(of: chip))),
-        ] {
+        ]
+        // The App view stands in the surface's box exactly (`applyLayout`
+        // frames it from `surface.frame`), so it takes the surface's corners
+        // exactly. Built lazily, long after the chrome pass that would
+        // otherwise have caught it, which is why `makeAppViewIfNeeded` runs
+        // one of its own.
+        if let appView {
+            appView.wantsLayer = true
+            children.append((appView, approvalBar.isHidden ? screenBottom(of: appView) : []))
+        }
+        for (child, corners) in children {
             child.layer?.cornerRadius = inner
             child.layer?.cornerCurve = .continuous
             child.layer?.maskedCorners = corners
@@ -4212,6 +4404,14 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // Copilot theme badge: only Copilot terminals support `/theme`.
         header.copilotTheme = descriptor.kind == .terminal && descriptor.engine == .copilot
             ? descriptor.copilotTheme : nil
+        // Terminal ⇄ App switch: only Claude writes the transcript the App view
+        // renders, so it is the only engine with a second view to offer.
+        let hasAppView = descriptor.kind == .terminal && descriptor.engine == .claude
+        header.isViewToggleAvailable = hasAppView
+        // An engine changed out from under an App-mode pane leaves a
+        // conversation nothing will ever append to — and the control that gets
+        // the user back to the terminal has just gone with it.
+        if !hasAppView { viewMode = .terminal }
         // Its session's name is half the focus subtitle, so a rename has to
         // reach the bar. A no-op unless this pane is the zoomed one.
         header.refreshSubtitle()
@@ -4519,6 +4719,30 @@ final class PaneHeaderView: NSView {
     /// The engine badge, clicked — the badge says which agent drives this
     /// PTY, so it is also where you change it.
     var onEngineMenuRequested: ((NSView) -> Void)?
+    /// A segment of the Terminal ⇄ App switch, clicked. The bar changes
+    /// nothing itself: the pane owns the mode, and writes `viewMode` back.
+    var onViewModeChanged: ((PaneViewMode) -> Void)?
+
+    /// Which view the pane is showing, as the switch draws it. Written by the
+    /// pane — a click reports through `onViewModeChanged` and waits to be told,
+    /// so the control can never light a segment the pane is not actually in.
+    var viewMode: PaneViewMode = .terminal {
+        didSet {
+            guard viewMode != oldValue else { return }
+            viewToggle.mode = viewMode
+        }
+    }
+
+    /// Whether this pane has a second view to switch to at all. Only a Claude
+    /// terminal does — see `descriptorChanged` — and the switch is hidden
+    /// outright for the rest rather than offered as a no-op.
+    var isViewToggleAvailable = false {
+        didSet {
+            guard isViewToggleAvailable != oldValue else { return }
+            viewToggle.isHidden = !isViewToggleAvailable
+            needsLayout = true
+        }
+    }
 
     var isZoomAvailable = false {
         didSet {
@@ -4724,6 +4948,8 @@ final class PaneHeaderView: NSView {
     private let themeBadge = PaneBadgeView()
     /// Model badge shown on Claude panes — opens the `/model` menu.
     private let modelBadge = PaneBadgeView()
+    /// The Terminal ⇄ App switch, on a Claude pane — see `PaneViewToggleView`.
+    private let viewToggle = PaneViewToggleView()
     /// Thin vertical rule between the badge group and the traffic-light cluster.
     private let clusterSeparator = PaneHeaderSeparatorView()
     /// ✏️ button shown immediately after the title — tap to rename the conversation.
@@ -4762,6 +4988,8 @@ final class PaneHeaderView: NSView {
         colorBadge.isHidden = true
         themeBadge.isHidden = true
         modelBadge.isHidden = true
+        viewToggle.isHidden = true
+        viewToggle.onSelect = { [weak self] mode in self?.onViewModeChanged?(mode) }
         renamePencilButton.isHidden = true
         renamePencilButton.onClick = { [weak self] in self?.onRenameRequested?() }
         colorBadge.onClick = { [weak self] in
@@ -4788,7 +5016,7 @@ final class PaneHeaderView: NSView {
         // order a reader — or a test — walks is the order on screen.
         let views: [NSView] = [
             mark, titleLabel, renamePencilButton, subtitleLabel, themeBadge, colorBadge, modelBadge,
-            engineBadge,
+            engineBadge, viewToggle,
             clusterSeparator, restoreButton, zoomButton, closeButton,
         ]
         for view in views { addSubview(view) }
@@ -4938,6 +5166,23 @@ final class PaneHeaderView: NSView {
         )
         right -= 7  // 1pt separator + 6pt gap to badges
 
+        // The Terminal ⇄ App switch, between the cluster and the badges —
+        // and deliberately *not* in the badge loop below. Badges drop out of a
+        // narrow pane by design, because a fact you cannot read is worth less
+        // than the pane's own name; the one control that gets the user back to
+        // their terminal cannot go the same way.
+        if !viewToggle.isHidden {
+            let size = viewToggle.intrinsicContentSize
+            right -= size.width
+            viewToggle.frame = CGRect(
+                x: right,
+                y: (bounds.height - size.height) / 2,
+                width: size.width,
+                height: size.height
+            )
+            right -= gap
+        }
+
         let titleLeft = mark.frame.maxX + gap
         let minimumTitleWidth: CGFloat = 40
         // Color badge (Claude only) sits left of the engine badge, same as the
@@ -5050,7 +5295,10 @@ final class PaneHeaderView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         mouseDownEvent = nil
-        (superview as? PaneContainerView).map { $0.surface.focus() }
+        // Whatever the pane is showing, not always its terminal: clicking the
+        // bar of an App-mode pane puts the caret in the composer, not into the
+        // PTY hidden behind it.
+        (superview as? PaneContainerView)?.focusActiveContent()
     }
 }
 
@@ -5280,6 +5528,201 @@ final class PaneBadgeView: NSView {
         chevron.lineJoinStyle = .round
         foreground.withAlphaComponent(0.75).setStroke()
         chevron.stroke()
+    }
+}
+
+/// The Terminal ⇄ App switch in a Claude pane's header: two segments, the lit
+/// one saying which view the pane is showing.
+///
+/// `PaneBadgeView`'s pill, at the same 19pt height and with the same
+/// hover-brightens treatment, but a switch rather than a button — both choices
+/// stay on screen, so the state is readable without being clicked and the way
+/// back is always in the same place. Each segment is its own view rather than
+/// a region of one drawing pass, so VoiceOver gets two named buttons instead
+/// of one control whose halves it cannot tell apart.
+final class PaneViewToggleView: NSView {
+    /// `PaneBadgeView`'s own pill height, so the switch sits on the same line
+    /// as the badges beside it rather than near it.
+    private static let height: CGFloat = 19
+    /// Wide enough for an 11pt glyph with `PaneBadgeView`'s own 7pt of air on
+    /// each side of it.
+    private static let segmentWidth: CGFloat = 25
+    private static let symbolSize: CGFloat = 11
+
+    /// Which segment is lit. Written by the header only: a click reports
+    /// through `onSelect` and the control waits to be told, so it can never
+    /// show a mode the pane is not in.
+    var mode: PaneViewMode = .terminal {
+        didSet {
+            guard mode != oldValue else { return }
+            terminalSegment.isSelected = mode == .terminal
+            appSegment.isSelected = mode == .app
+        }
+    }
+
+    /// A segment was pressed. Carries which one, not a toggle: pressing the
+    /// segment already lit is a no-op the pane resolves, not a swap.
+    var onSelect: ((PaneViewMode) -> Void)?
+
+    private let terminalSegment = Segment(symbol: "terminal", label: "Terminal view")
+    private let appSegment = Segment(symbol: "text.bubble", label: "App view")
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        // The corner is cut on the control, so each segment can fill its own
+        // bounds flat and still be rounded where it meets the pill's ends.
+        layer?.cornerRadius = 6
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        terminalSegment.isSelected = true
+        terminalSegment.onClick = { [weak self] in self?.onSelect?(.terminal) }
+        appSegment.onClick = { [weak self] in self?.onSelect?(.app) }
+        for segment in [terminalSegment, appSegment] { addSubview(segment) }
+        // The segments are the elements; the pill around them is not a third
+        // thing to land on.
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    override var isFlipped: Bool { true }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: Self.segmentWidth * 2, height: Self.height)
+    }
+
+    override func layout() {
+        super.layout()
+        // Split on a whole point, with the remainder going to the second half,
+        // so the two never overlap or leave a seam between them.
+        let split = (bounds.width / 2).rounded()
+        terminalSegment.frame = CGRect(x: 0, y: 0, width: split, height: bounds.height)
+        appSegment.frame = CGRect(
+            x: split,
+            y: 0,
+            width: max(0, bounds.width - split),
+            height: bounds.height
+        )
+    }
+
+    /// One half of the switch: an SF Symbol on a fill that says whether this is
+    /// the view you are looking at.
+    fileprivate final class Segment: NSView {
+        var onClick: (() -> Void)?
+
+        var isSelected = false {
+            didSet {
+                guard isSelected != oldValue else { return }
+                applyTint()
+                needsDisplay = true
+            }
+        }
+
+        private let icon = NSImageView()
+        private var isHovered = false {
+            didSet {
+                guard isHovered != oldValue else { return }
+                needsDisplay = true
+            }
+        }
+        private var tracking: NSTrackingArea?
+
+        init(symbol: String, label: String) {
+            super.init(frame: .zero)
+            wantsLayer = true
+            icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+                .withSymbolConfiguration(.init(pointSize: PaneViewToggleView.symbolSize, weight: .medium))
+            icon.imageScaling = .scaleNone
+            applyTint()
+            addSubview(icon)
+            setAccessibilityElement(true)
+            setAccessibilityRole(.button)
+            // A bare glyph draws no words, so the name is all VoiceOver and
+            // Voice Control have to go on — and this is the control that says
+            // which of two views a pane is showing.
+            setAccessibilityLabel(label)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) is unavailable")
+        }
+
+        override var isFlipped: Bool { true }
+
+        override func layout() {
+            super.layout()
+            let size = icon.image?.size ?? .zero
+            icon.frame = CGRect(
+                x: ((bounds.width - size.width) / 2).rounded(),
+                y: ((bounds.height - size.height) / 2).rounded(),
+                width: size.width,
+                height: size.height
+            )
+        }
+
+        /// The lit segment reads at full strength; the other stays a control
+        /// you can see rather than one competing with it — the sidebar's own
+        /// nav ink.
+        private func applyTint() {
+            icon.contentTintColor = isSelected ? ShellPalette.ink : ShellPalette.inkNav
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let tracking { removeTrackingArea(tracking) }
+            let area = NSTrackingArea(
+                rect: bounds,
+                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                owner: self
+            )
+            addTrackingArea(area)
+            tracking = area
+        }
+
+        override func mouseEntered(with event: NSEvent) { isHovered = true }
+        override func mouseExited(with event: NSEvent) { isHovered = false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .pointingHand)
+        }
+
+        /// Swallowed, so a press on the switch never reaches the header's
+        /// drag-the-pane-out handler behind it — the same thing
+        /// `PaneHeaderButton` does.
+        override func mouseDown(with event: NSEvent) {}
+
+        /// On the way up, and only inside: a switch you can slide off to
+        /// cancel, exactly like the traffic-light cluster beside it.
+        override func mouseUp(with event: NSEvent) {
+            isHovered = false
+            guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+            onClick?()
+        }
+
+        override func accessibilityPerformPress() -> Bool {
+            onClick?()
+            return onClick != nil
+        }
+
+        override func draw(_ dirtyRect: NSRect) {
+            super.draw(dirtyRect)
+            // The sidebar's selected-row fill for the live segment, and its
+            // hover for the other one under the pointer: the same two washes
+            // every other list of choices in the app is read by.
+            if isSelected {
+                ShellPalette.rowSelected.setFill()
+                bounds.fill()
+            } else if isHovered {
+                ShellPalette.hoverSoft.setFill()
+                bounds.fill()
+            }
+        }
     }
 }
 

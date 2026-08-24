@@ -91,28 +91,53 @@ enum ClaudeModel {
 
     static var homeDirectory: URL { URL(fileURLWithPath: NSHomeDirectory()) }
 
-    /// The model this pane is running, or `nil` while nothing on disk can say
-    /// yet — a fresh terminal has no transcript.
+    /// Every place this pane's transcript could be: the derived path first,
+    /// then the same conversation filename under every other project
+    /// directory.
     ///
     /// The derived path is only where the transcript *usually* is: Claude
     /// slugs the directory it was **launched** in, and a `cd elsewhere &&
     /// claude` — or a cwd recorded differently than the shell resolved it —
     /// files the conversation under another slug. The conversation id is ours
-    /// either way, so when the expected file says nothing, every project
-    /// directory is checked for it by name. ~40 stats on a background queue,
-    /// and only while the badge still says `Loading…`.
-    static func current(sessionID: String, cwd: String, home: URL = homeDirectory) -> String? {
+    /// either way, so every project directory is offered by the same name.
+    static func transcriptCandidates(
+        sessionID: String, cwd: String, home: URL = homeDirectory
+    ) -> [URL] {
         let expected = transcriptURL(sessionID: sessionID, cwd: cwd, home: home)
-        if let model = lastModel(inTailOf: expected) { return model }
         let name = expected.lastPathComponent
         let projects = home.appendingPathComponent(".claude").appendingPathComponent("projects")
         let dirs = (try? FileManager.default.contentsOfDirectory(
             at: projects, includingPropertiesForKeys: nil
         )) ?? []
-        for dir in dirs {
-            let candidate = dir.appendingPathComponent(name)
-            guard candidate != expected, let model = lastModel(inTailOf: candidate) else { continue }
-            return model
+        // `.standardizedFileURL`: directory enumeration can hand back a
+        // `/private/var/…` a caller-built URL never carries (macOS resolves
+        // `/var`, `/tmp` and `/etc` through their real path here but not in
+        // `URL.appendingPathComponent`), which would otherwise make an
+        // identical path fail `==` against `expected` or a caller's own copy.
+        let others = dirs
+            .map { $0.appendingPathComponent(name).standardizedFileURL }
+            .filter { $0 != expected }
+        return [expected] + others
+    }
+
+    /// The first candidate that exists on disk, or `nil` while nothing has
+    /// been written yet.
+    static func resolvedTranscriptURL(
+        sessionID: String, cwd: String, home: URL = homeDirectory
+    ) -> URL? {
+        transcriptCandidates(sessionID: sessionID, cwd: cwd, home: home)
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// The model this pane is running, or `nil` while nothing on disk can say
+    /// yet — a fresh terminal has no transcript. Walks every candidate rather
+    /// than stopping at the first one that merely *exists*: a stale file with
+    /// no reply on it yet says nothing either, and the next candidate might.
+    /// ~40 stats on a background queue, and only while the badge still says
+    /// `Loading…`.
+    static func current(sessionID: String, cwd: String, home: URL = homeDirectory) -> String? {
+        for candidate in transcriptCandidates(sessionID: sessionID, cwd: cwd, home: home) {
+            if let model = lastModel(inTailOf: candidate) { return model }
         }
         return nil
     }
