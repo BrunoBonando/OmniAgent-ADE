@@ -139,29 +139,54 @@ final class PaneAppViewTests: XCTestCase {
 
     /// A user who has scrolled up to read earlier messages must not be
     /// yanked back down by a reply arriving behind their back —
-    /// `isScrolledToBottom()` is measured before a single row is appended,
-    /// so a position set between two `appendMessages` calls must survive the
-    /// second one untouched. This is also a regression guard for a real bug
-    /// self-review found in this exact path: `appendMessages` originally
-    /// only forced layout inside its `wasAtBottom` branch, leaving
-    /// `messageStack`'s height stale for the *next* call's measurement
-    /// whenever the user had scrolled away from the bottom.
-    func testAppendingWhileScrolledUpLeavesThePositionUnchanged() throws {
+    /// `isScrolledToBottom()` is measured before a single row is appended, so
+    /// a scroll position set between appends must survive later ones
+    /// untouched.
+    ///
+    /// This is a *third*-call test, not a second-call one, on purpose: it is
+    /// the regression guard for a real bug self-review found and fixed in
+    /// this exact path (`appendMessages` originally forced layout only
+    /// inside its `wasAtBottom` branch, leaving `messageStack`'s height stale
+    /// for the *next* call's measurement). A second call cannot catch that
+    /// bug — its own `isScrolledToBottom()` reads against whatever the
+    /// *first* call already laid out, and the first call is always trivially
+    /// "at bottom" against an empty list, so layout runs regardless of the
+    /// bug. The staleness only becomes observable at a third call, measuring
+    /// against a height the second call left stale under the bug. Verified
+    /// by temporarily reverting the fix: this test failed against the
+    /// reverted code and passes against the fix (see the task report).
+    func testAppendingWhileScrolledUpLeavesThePositionUnchangedAcrossAThirdAppend() throws {
         let view = makeView()
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 120)
+
+        // Nothing on screen yet, so this first append is trivially "at
+        // bottom" — accurate under the historical bug too, which only ever
+        // skipped the *non*-"at bottom" branch.
         view.appendMessages(manyMessages(count: 10, startingAt: 0))
-
         let clip = try scrollClipView(in: view)
-        // The append above found nothing on screen yet, so
-        // `isScrolledToBottom()` was trivially true and scrolled to the
-        // bottom; scroll back to the top to simulate a user reading earlier
-        // messages.
-        clip.scroll(to: .zero)
-        let scrolledPosition = clip.bounds.origin
-        XCTAssertEqual(scrolledPosition, .zero, "the view must actually have overflowed for this test to mean anything")
+        let heightAfterFirstBatch = try messageStackHeight(in: view)
 
+        // Scroll well clear of the bottom before the second append, so its
+        // own `isScrolledToBottom()` reads false and — under the reverted
+        // bug — skips the layout pass that would otherwise refresh
+        // `messageStack.frame.height`.
+        clip.scroll(to: .zero)
         view.appendMessages(manyMessages(count: 10, startingAt: 10))
-        XCTAssertEqual(clip.bounds.origin, scrolledPosition, "a user scrolled up must not be moved by a later append")
+        XCTAssertEqual(clip.bounds.origin, .zero, "still scrolled up after the second append")
+
+        // Reposition to exactly where the first append's bottom was. Read
+        // against a *stale* height (unchanged since the first append) this
+        // looks like "at bottom"; read against the *true* height (grown by
+        // the second append's rows) it does not — exactly the discrepancy
+        // the historical bug produced.
+        clip.scroll(to: NSPoint(x: 0, y: max(0, heightAfterFirstBatch - clip.bounds.height)))
+        let positionBeforeThirdAppend = clip.bounds.origin
+
+        view.appendMessages(manyMessages(count: 10, startingAt: 20))
+        XCTAssertEqual(
+            clip.bounds.origin, positionBeforeThirdAppend,
+            "a user who was not at the true bottom must not be yanked down by a third append"
+        )
     }
 
     /// The complementary case: a user already at the bottom follows new
