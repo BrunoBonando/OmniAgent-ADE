@@ -544,16 +544,23 @@ final class PaneAppView: NSView {
         super.viewDidMoveToWindow()
         for observer in keyWindowObservers { NotificationCenter.default.removeObserver(observer) }
         keyWindowObservers = []
-        guard let window else { return }
-        let center = NotificationCenter.default
-        keyWindowObservers = [
-            center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) {
-                [weak self] _ in self?.updateComposerGlow()
-            },
-            center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) {
-                [weak self] _ in self?.updateComposerGlow()
-            },
-        ]
+        if let window {
+            let center = NotificationCenter.default
+            keyWindowObservers = [
+                center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) {
+                    [weak self] _ in self?.updateComposerGlow()
+                },
+                center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) {
+                    [weak self] _ in self?.updateComposerGlow()
+                },
+            ]
+        }
+        // Rewiring the observers above only catches the *next* key-status
+        // change. Moving to a nil window, or to a second window that is not
+        // itself key, has to stop the glow right now — `isComposerWindowKey`
+        // reads whatever window this view has this instant, and a nil
+        // window in particular posts no notification at all to ever catch.
+        updateComposerGlow()
     }
 
     /// Reconciles the transcript's bottom clearance against the glass
@@ -628,9 +635,7 @@ final class PaneAppView: NSView {
     private static let composerGlassCornerRadius: CGFloat = 14
 
     /// How far the glow bleeds past the glass's own edge on every side, and
-    /// how strongly it is blurred — the two numbers that turn a hard-edged
-    /// gradient into a soft halo escaping the glass rather than a ring
-    /// painted on it.
+    /// how strongly it is blurred — chosen together, not independently.
     ///
     /// Bleed is kept `<=` `composerGlassMargin` (18 against 20) rather than
     /// past it: `PaneWorkspaceView.roundChildren` masks every pane, this
@@ -638,9 +643,24 @@ final class PaneAppView: NSView {
     /// = true`), so bleed past the glass's own margin off the pane's bottom
     /// edge is not a fade at all there — it is a straight cut across the
     /// halo at the pane's edge. Verified by inspection of that call, not
-    /// assumed safe by construction.
+    /// assumed safe by construction. It is a hard ceiling: the softness
+    /// below has to fit inside it, not ask for more room.
+    ///
+    /// The blur radius is roughly half the bleed, deliberately, and both
+    /// `layOutComposerGlow`'s mask and `updateComposerGlow`'s gradient share
+    /// this one number rather than each picking its own: a `CIGaussianBlur`'s
+    /// visible spread runs a few multiples of its radius, and a mask blurred
+    /// wider than the band it lives in has nothing further to spread into —
+    /// its own layer bounds (`outerRect.size`, the same size as the band)
+    /// already cut it off there, which is exactly the hard edge this radius
+    /// exists to avoid reintroducing. Half the band's width is comfortably
+    /// inside that limit while still tapering across a real fraction of it.
+    /// (28 was tuned for the 36pt bleed this replaced; halving the bleed to
+    /// 18 without also lowering this left a 28pt blur mostly clipped by an
+    /// 18pt band — a smear, not a glow, which is what sent both numbers
+    /// back for reconsideration together here.)
     private static let composerGlowBleed: CGFloat = 18
-    private static let composerGlowBlurRadius: CGFloat = 28
+    private static let composerGlowBlurRadius: CGFloat = 9
 
     /// The design's signature glow, reused for the composer: "make it shiny
     /// with a nice circling effect with blue and purple out of focus." Same
@@ -652,10 +672,10 @@ final class PaneAppView: NSView {
     ///
     /// Structured as two layers rather than one, which the working ring
     /// does not need: a non-rotating `container` sized to the glass's own
-    /// bled (non-square) rect, masked by a `CAShapeLayer` even-odd path —
-    /// the bled rounded rect minus the glass's own rounded rect — and,
-    /// inside it, the spinning gradient itself, square and sized to the
-    /// container's diagonal so no rotation angle can uncover a corner.
+    /// bled (non-square) rect, masked by a blurred `CAShapeLayer` even-odd
+    /// path — the bled rounded rect minus the glass's own rounded rect —
+    /// and, inside it, the spinning gradient itself, square and sized to
+    /// the container's diagonal so no rotation angle can uncover a corner.
     ///
     /// Both halves answer the same mistake a single rotated, bled-rect-
     /// shaped `CAGradientLayer` makes: a layer's *shape* rotates with its
@@ -676,6 +696,16 @@ final class PaneAppView: NSView {
     /// inside spins, and being square, its conic hue sweep reads as an
     /// actual circle rather than the ellipse a non-square layer would bake
     /// into it.
+    ///
+    /// The mask's own path is blurred (`layOutComposerGlow`), not left as a
+    /// solid even-odd fill: a plain fill clips at a hard boundary — the
+    /// design asked for the halo to read "out of focus", and a ring with a
+    /// crisp edge on both sides is the opposite of that. Blurring the
+    /// mask's own rendered alpha softens both boundaries of the band at
+    /// once, and — being a blur of the exact rounded-rect band shape rather
+    /// than a generic radial falloff — follows that shape's silhouette
+    /// exactly rather than an ellipse shaped by the container's own
+    /// (markedly non-square) aspect ratio.
     ///
     /// Gated on focus, `isLive`, Reduce Motion and the window's own key
     /// status together: an always-spinning blurred gradient on every open
@@ -709,11 +739,16 @@ final class PaneAppView: NSView {
         // A `CIFilter` on a layer costs an offscreen pass — the one other
         // filter/shadow in this file (`PaneContainerView.updateChrome`'s own
         // comment) avoids exactly that cost by never adding a second one.
-        // This is the first `layer.filters` use in `macos/`, taken
-        // deliberately rather than by accident: the animated property is
-        // `transform.rotation.z` on `gradient`, not the filter's own input,
-        // so Core Animation rasterises the blurred content once and spins
-        // that cached result rather than re-running the filter every frame.
+        // This glow spends it twice over, deliberately rather than by
+        // accident: once here (softens the conic gradient's own colour
+        // steps) and again on the mask built in `layOutComposerGlow`
+        // (softens the band's edges) — both small (`composerGlowBlurRadius`,
+        // 9), both alive only while a composer is focused on a live, key,
+        // motion-enabled pane, and both animated only via
+        // `transform.rotation.z` on `gradient`, not via anything the
+        // filters themselves read, so Core Animation rasterises each once
+        // and spins the cached result rather than re-running either filter
+        // every frame.
         if let blur = CIFilter(name: "CIGaussianBlur") {
             blur.setValue(Self.composerGlowBlurRadius, forKey: kCIInputRadiusKey)
             gradient.filters = [blur]
@@ -750,32 +785,60 @@ final class PaneAppView: NSView {
     /// on every later pass) — one seam rather than the same maths kept in
     /// sync by hand in two places.
     private func layOutComposerGlow(_ container: CALayer) {
+        // These are plain data layers this method drives by hand every
+        // layout pass, not view-backed layers reacting to a user gesture —
+        // without this, Core Animation's default 0.25s implicit action
+        // would fire on every frame/mask assignment below, and the halo
+        // would visibly lag the glass while a pane resizes.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
         let bleed = Self.composerGlowBleed
         let glassBounds = composerGlass.bounds
         let outerRect = glassBounds.insetBy(dx: -bleed, dy: -bleed)
         container.frame = outerRect
 
-        let mask = CAShapeLayer()
-        let path = CGMutablePath()
-        let outerCornerRadius = Self.composerGlassCornerRadius + bleed
-        path.addRoundedRect(
-            in: CGRect(origin: .zero, size: outerRect.size),
-            cornerWidth: outerCornerRadius, cornerHeight: outerCornerRadius
-        )
-        path.addRoundedRect(
-            in: CGRect(x: bleed, y: bleed, width: glassBounds.width, height: glassBounds.height),
-            cornerWidth: Self.composerGlassCornerRadius, cornerHeight: Self.composerGlassCornerRadius
-        )
-        // Even-odd, not the default nonzero rule: two closed subpaths added
-        // independently (an outer rounded rect, an inner one) both wind the
-        // same direction, and nonzero would fill *both* solid rather than
-        // punching the inner one out of the outer — even-odd only cares
-        // about crossing parity, not winding direction, so it does not
-        // matter that neither path was built to wind the other way.
-        mask.path = path
-        mask.fillRule = .evenOdd
-        mask.frame = CGRect(origin: .zero, size: outerRect.size)
-        container.mask = mask
+        // Rebuilt only when the size actually changed, not on every pass —
+        // a live pane resize calls this every frame, and neither the path
+        // nor the blur filter depend on anything but `outerRect.size`
+        // (`glassBounds.size` moves in lockstep with it, offset by the
+        // constant `bleed`, so comparing this one size covers both).
+        let existingMask = container.mask as? CAShapeLayer
+        if existingMask == nil || existingMask?.frame.size != outerRect.size {
+            let mask = CAShapeLayer()
+            let path = CGMutablePath()
+            let outerCornerRadius = Self.composerGlassCornerRadius + bleed
+            path.addRoundedRect(
+                in: CGRect(origin: .zero, size: outerRect.size),
+                cornerWidth: outerCornerRadius, cornerHeight: outerCornerRadius
+            )
+            path.addRoundedRect(
+                in: CGRect(x: bleed, y: bleed, width: glassBounds.width, height: glassBounds.height),
+                cornerWidth: Self.composerGlassCornerRadius, cornerHeight: Self.composerGlassCornerRadius
+            )
+            // Even-odd, not the default nonzero rule: two closed subpaths
+            // added independently (an outer rounded rect, an inner one)
+            // both wind the same direction, and nonzero would fill *both*
+            // solid rather than punching the inner one out of the outer —
+            // even-odd only cares about crossing parity, not winding
+            // direction, so it does not matter that neither path was built
+            // to wind the other way.
+            mask.path = path
+            mask.fillRule = .evenOdd
+            mask.frame = CGRect(origin: .zero, size: outerRect.size)
+            // Blurred — see `updateComposerGlow`'s own doc comment for why:
+            // an even-odd fill alone is a hard edge on both the outer
+            // silhouette and the inner hole it punches, and blurring the
+            // mask's own rendered alpha softens both in the one pass,
+            // following the band's actual rounded-rect shape rather than
+            // an ellipse a `CAGradientLayer` mask would impose instead.
+            if let blur = CIFilter(name: "CIGaussianBlur") {
+                blur.setValue(Self.composerGlowBlurRadius, forKey: kCIInputRadiusKey)
+                mask.filters = [blur]
+            }
+            container.mask = mask
+        }
 
         guard let gradient = container.sublayers?.first as? CAGradientLayer else { return }
         // Square, and sized to the container's own diagonal — the longest

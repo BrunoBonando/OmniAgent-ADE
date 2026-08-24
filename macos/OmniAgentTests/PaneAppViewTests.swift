@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import XCTest
 
 @testable import OmniAgent
@@ -872,6 +873,97 @@ final class PaneAppViewTests: XCTestCase {
 
         view.isKeyWindowForTesting = true
         XCTAssertNotNil(glowContainer(on: glass), "and resumes when it becomes key again")
+
+        view.isLive = false
+    }
+
+    /// Structural, not visual: confirms the mask's and the gradient's
+    /// blurs are the one deliberate number `composerGlowBlurRadius`
+    /// documents, chosen small enough to fit inside the band it lives in
+    /// (`composerGlowBleed`) rather than being clipped by it — not that the
+    /// result actually *reads* as a soft out-of-focus halo, which nothing
+    /// short of a human looking at it can judge.
+    func testTheGlowsBlurRadiusFitsWithinTheBandItSoftens() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        view.isLive = true
+        view.reducedMotionForTesting = false
+        view.isKeyWindowForTesting = true
+        let window = show(view)
+        defer { window.close() }
+        let glass = try XCTUnwrap(view.composerField.superview)
+        XCTAssertTrue(window.makeFirstResponder(view.composerField))
+
+        let container = try XCTUnwrap(glowContainer(on: glass))
+        let mask = try XCTUnwrap(container.mask as? CAShapeLayer)
+        let gradient = try XCTUnwrap(glowGradient(on: glass))
+        let maskBlur = try XCTUnwrap(mask.filters?.first as? CIFilter)
+        let gradientBlur = try XCTUnwrap(gradient.filters?.first as? CIFilter)
+        let maskRadius = try XCTUnwrap(maskBlur.value(forKey: kCIInputRadiusKey) as? CGFloat)
+        let gradientRadius = try XCTUnwrap(gradientBlur.value(forKey: kCIInputRadiusKey) as? CGFloat)
+        let bleed = glass.bounds.minY - container.frame.minY
+
+        XCTAssertEqual(maskRadius, gradientRadius, "one deliberate number, not two independent guesses")
+        XCTAssertGreaterThan(maskRadius, 0, "actually blurred, not a hard edge")
+        XCTAssertLessThanOrEqual(maskRadius, bleed, "the blur's own spread has to fit the band it lives in")
+
+        view.isLive = false
+    }
+
+    /// A live pane resize calls `layout()`, and so `layOutComposerGlow`,
+    /// every frame — rebuilding the mask's path and `CIFilter` on every one
+    /// of them would be wasteful when the band's size has not actually
+    /// changed, so the mask must be reused (same object) across an
+    /// unrelated layout pass and only replaced when the size genuinely
+    /// moves.
+    func testTheGlowsMaskIsRebuiltOnlyWhenTheBandsSizeChanges() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        view.isLive = true
+        view.reducedMotionForTesting = false
+        view.isKeyWindowForTesting = true
+        let window = show(view)
+        defer { window.close() }
+        let glass = try XCTUnwrap(view.composerField.superview)
+        XCTAssertTrue(window.makeFirstResponder(view.composerField))
+        let container = try XCTUnwrap(glowContainer(on: glass))
+        let firstMask = try XCTUnwrap(container.mask)
+
+        view.layoutSubtreeIfNeeded()
+        XCTAssertTrue(container.mask === firstMask, "an unrelated layout pass must not rebuild an unchanged band")
+
+        view.frame = NSRect(x: 0, y: 0, width: 500, height: 400)
+        view.layoutSubtreeIfNeeded()
+        XCTAssertFalse(container.mask === firstMask, "the band actually shrank, so the mask must be rebuilt")
+
+        view.isLive = false
+    }
+
+    /// These are plain data layers this view drives by hand every layout
+    /// pass, not view-backed layers reacting to a user gesture — without
+    /// `CATransaction.setDisableActions(true)` in `layOutComposerGlow`,
+    /// Core Animation's own default 0.25s implicit action would fire on
+    /// `container`'s frame every time a pane resize moves it, and the halo
+    /// would visibly lag the glass rather than tracking it. Verifiable
+    /// structurally (no implicit animation got attached); whether the
+    /// result actually tracks smoothly on screen is not.
+    func testTheGlowsFrameDoesNotPickUpAnImplicitAnimationAcrossAResize() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        view.isLive = true
+        view.reducedMotionForTesting = false
+        view.isKeyWindowForTesting = true
+        let window = show(view)
+        defer { window.close() }
+        let glass = try XCTUnwrap(view.composerField.superview)
+        XCTAssertTrue(window.makeFirstResponder(view.composerField))
+        let container = try XCTUnwrap(glowContainer(on: glass))
+
+        view.frame = NSRect(x: 0, y: 0, width: 500, height: 400)
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertNil(container.animation(forKey: "position"), "setDisableActions must suppress the implicit frame action")
+        XCTAssertNil(container.animation(forKey: "bounds"))
 
         view.isLive = false
     }
