@@ -3779,7 +3779,22 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // level-of-detail placeholder both outrank the pane's content.
         addSubview(view, positioned: .above, relativeTo: surface)
         appView = view
+        // The last chrome pass ran before this view existed, so it would sit
+        // here with square corners inside the container's rounded mask until
+        // something else happened to trigger one — the exact pinch
+        // `roundChildren` exists to prevent. Its own comment records why no
+        // offscreen render would show it.
+        updateChrome()
     }
+
+    /// How long a pane takes to become its placeholder, and back.
+    static let chipFadeDuration: TimeInterval = 0.18
+    private static let chipFadeKey = "chipFade"
+    private var chipFadeToken = 0
+    /// Whether a crossfade is in flight — both content members up, one of them
+    /// on its way to opacity 0. `applyContentVisibility` stands off while this
+    /// is true; see the reason there.
+    private var isCrossfadingChip = false
 
     /// Whether this pane is drawn as a chip instead of as itself.
     ///
@@ -3798,15 +3813,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// sole owner of per-pane visibility. Anything that assigns this from
     /// elsewhere is overwritten by that method's next call — the same trap
     /// `setSuspendsDrawing`'s comment already records for `suspendsDrawing`.
-    /// How long a pane takes to become its placeholder, and back.
-    static let chipFadeDuration: TimeInterval = 0.18
-    private static let chipFadeKey = "chipFade"
-    private var chipFadeToken = 0
-    /// Whether a crossfade is in flight — both content members up, one of them
-    /// on its way to opacity 0. `applyContentVisibility` stands off while this
-    /// is true; see the reason there.
-    private var isCrossfadingChip = false
-
     var isChipped = false {
         didSet {
             guard isChipped != oldValue else { return }
@@ -4215,8 +4221,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
         updateWorkingRing()
     }
 
-    /// The two children get the corner the container's mask would otherwise cut
-    /// out of the ring. Both are square and inset by exactly `borderWidth`, so
+    /// The children get the corner the container's mask would otherwise cut
+    /// out of the ring. Each is square and inset by exactly `borderWidth`, so
     /// along a straight edge the container's background shows through as a 1pt
     /// border — but at a corner the child's square corner runs straight into the
     /// mask's arc and the ring pinches out to nothing there. Rounding each child
@@ -4250,7 +4256,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
                 ? [.layerMinXMinYCorner, .layerMaxXMinYCorner]
                 : [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
         }
-        for (child, corners) in [
+        var children: [(NSView, CACornerMask)] = [
             (header as NSView, screenTop(of: header)),
             (surface as NSView, approvalBar.isHidden ? screenBottom(of: surface) : []),
             (approvalBar as NSView, screenBottom(of: approvalBar)),
@@ -4259,7 +4265,17 @@ final class PaneContainerView: NSView, NSDraggingSource {
             // it is written as the union of the two helpers rather than as a
             // four-corner literal the next author would have to re-derive.
             (chip as NSView, screenTop(of: chip).union(screenBottom(of: chip))),
-        ] {
+        ]
+        // The App view stands in the surface's box exactly (`applyLayout`
+        // frames it from `surface.frame`), so it takes the surface's corners
+        // exactly. Built lazily, long after the chrome pass that would
+        // otherwise have caught it, which is why `makeAppViewIfNeeded` runs
+        // one of its own.
+        if let appView {
+            appView.wantsLayer = true
+            children.append((appView, approvalBar.isHidden ? screenBottom(of: appView) : []))
+        }
+        for (child, corners) in children {
             child.layer?.cornerRadius = inner
             child.layer?.cornerCurve = .continuous
             child.layer?.maskedCorners = corners

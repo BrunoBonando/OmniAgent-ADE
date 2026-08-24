@@ -60,6 +60,32 @@ final class PaneViewModeTests: XCTestCase {
         XCTAssertNotNil(workspace.terminalSurface(for: "pane-1"))
     }
 
+    /// The App view stands in the surface's box, so it needs the surface's
+    /// rounding: a square-cornered child inside the container's rounded mask
+    /// pinches the pane's 1pt ring out to nothing at both bottom corners —
+    /// the exact failure `roundChildren` exists to prevent. It is built
+    /// lazily, after the chrome pass that would otherwise have caught it,
+    /// which is the half of this that is easy to miss.
+    ///
+    /// `roundChildren`'s own comment records why no offscreen render can show
+    /// this (`CALayer.render(in:)` skips the compositor's geometry flips), so
+    /// the layer state is asserted directly.
+    func testTheAppViewIsRoundedIntoTheRingLikeTheSurfaceItStandsInFor() throws {
+        let workspace = makeWorkspace()
+        let container = try XCTUnwrap(workspace.container(for: "pane-1"))
+        container.viewMode = .app
+        let appView = try XCTUnwrap(container.appView)
+
+        let radius = try XCTUnwrap(container.surface.layer?.cornerRadius)
+        XCTAssertGreaterThan(radius, 0, "the fixture's premise: the surface is rounded at all")
+        XCTAssertEqual(appView.layer?.cornerRadius, radius)
+        XCTAssertEqual(appView.layer?.masksToBounds, true)
+        XCTAssertEqual(
+            appView.layer?.maskedCorners, container.surface.layer?.maskedCorners,
+            "the same box, so the same corners — resolved in each child's own space"
+        )
+    }
+
     // MARK: - The chip
 
     /// The chip replaces the pane whole, so it outranks the view mode: both
