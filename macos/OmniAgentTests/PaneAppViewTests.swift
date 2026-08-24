@@ -445,23 +445,55 @@ final class PaneAppViewTests: XCTestCase {
     /// The transcript runs the full height of the view and scrolls *behind*
     /// the composer, with enough bottom inset that the last message can clear
     /// the glass instead of parking under it.
-    func testTranscriptScrollsBehindTheComposer() {
+    func testTranscriptScrollsBehindTheComposer() throws {
         let view = makeView()
         view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
         view.layoutSubtreeIfNeeded()
 
         XCTAssertEqual(view.scrollView.frame.height, view.frame.height, accuracy: 0.5)
         XCTAssertGreaterThan(view.scrollView.contentInsets.bottom, 40)
+
+        // Derived from the real, laid-out glass, not an authored constant:
+        // the inset has to track the container's own height (plus its
+        // margin off the view's edge) exactly, so a font or controls-row
+        // change can never silently desync it.
+        let glassContainer = try XCTUnwrap(view.composerField.superview)
+        XCTAssertEqual(
+            view.scrollView.contentInsets.bottom, glassContainer.frame.height + 12, accuracy: 0.5
+        )
     }
 
-    /// The glass is a real material, not a flat fill — it has to agree with
-    /// the approval card that can sit right above it.
-    func testTheComposerSitsOnGlass() {
+    /// The composer's glass is the approval card's own material
+    /// (`WorkspaceGlass.sheet`, `NSGlassEffectView` with `.style = .regular`)
+    /// — not a hand-picked stand-in — so the two agree when both are on
+    /// screen. Pins the actual type/material rather than a looser structural
+    /// fact, precisely because a looser check (blend mode alone, on any
+    /// visual-effect view) is what let a wrong material through review once
+    /// already.
+    func testTheComposerSitsOnGlass() throws {
         let view = makeView()
-        let effects = view.descendants(NSVisualEffectView.self)
+        // `composerField`'s superview is the glass container — the tests have
+        // no direct access to `composerGlass`, which stays `private`.
+        let container = try XCTUnwrap(view.composerField.superview)
 
-        XCTAssertEqual(effects.count, 1)
-        XCTAssertEqual(effects[0].blendingMode, .withinWindow)
+        // Never an `NSVisualEffectView` stand-in, on any OS: that was the
+        // wrong material (dark HUD chrome, meant for a floating window panel)
+        // applied unconditionally, and is exactly the regression this test
+        // exists to catch.
+        XCTAssertTrue(view.descendants(NSVisualEffectView.self).isEmpty)
+
+        guard #available(macOS 26.0, *) else {
+            // No glass to ask for pre-26 — same rule `WorkspaceGlass.sheet`
+            // documents for every other caller — so the fallback is the
+            // plain flat card `SidebarAccountRowView` also falls back to,
+            // painted directly on the container's own layer.
+            XCTAssertTrue(container.subviews.isEmpty, "no panel layered on top pre-26")
+            XCTAssertNotNil(container.layer?.backgroundColor, "the flat-card fallback paints its own layer")
+            return
+        }
+        let glass = try XCTUnwrap(container.subviews.first as? NSGlassEffectView)
+        XCTAssertEqual(glass.style, .regular, "the approval card's own material")
+        XCTAssertNil(glass.tintColor, "no wash of colour over it")
     }
 
     /// Attach puts the path into the draft, which is what the transport can

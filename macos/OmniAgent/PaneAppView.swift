@@ -191,33 +191,44 @@ final class PaneAppView: NSView {
         font: ShellFont.ui(13),
         color: ShellPalette.inkFaint
     )
-    /// `.withinWindow`, not `.behindWindow`: this overlay floats over the
-    /// transcript inside the pane, so what it should sample is the content
-    /// scrolling under it. `.behindWindow` — what `CommandPaletteController`
-    /// uses, correctly, for its own window — would sample the desktop
-    /// instead and show nothing of the conversation.
+    /// `WorkspaceGlass.sheet`, not a hand-rolled `NSVisualEffectView`: the
+    /// approval card's own pane panel is built from that same helper
+    /// (`PaneAsk.swift`, `NSGlassEffectView` with `.style = .regular`), and
+    /// its doc comment ties `.regular` explicitly to "the same material as
+    /// the approval card's pane panel" — the two have to agree when both are
+    /// on screen, and calling the shared helper is what guarantees that
+    /// rather than a second hand-picked material drifting from it.
     ///
-    /// `.hudWindow`, not `.regular` (the brief's guess): `NSVisualEffectView`
-    /// has no `.regular` material — that case belongs to `NSGlassEffectView`
-    /// `.style`, the real macOS 26 glass this codebase already reserves for
-    /// `WorkspaceGlass`/`CommandPaletteController`. `.hudWindow` is this
-    /// class's own dark floating-chrome material and is the one
-    /// `CommandPaletteController` already uses for its pre-26 fallback panel,
-    /// so it keeps this overlay visually consistent with the app's other
-    /// glass rather than introducing a second look.
-    private let composerGlass: NSVisualEffectView = {
-        let effect = NSVisualEffectView()
-        effect.material = .hudWindow
-        effect.blendingMode = .withinWindow
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = 14
-        effect.layer?.cornerCurve = .continuous
-        effect.layer?.borderWidth = 1
-        effect.layer?.borderColor = ShellPalette.cardStroke.cgColor
-        effect.layer?.masksToBounds = true
-        effect.translatesAutoresizingMaskIntoConstraints = false
-        return effect
+    /// `nil` before macOS 26 — there is no glass to ask for and every
+    /// stand-in dims rather than refracts, so, like every other caller of
+    /// this helper (`SidebarAccountRowView` is the closest analogue: a
+    /// small, always-visible card, not an optional backdrop that can just be
+    /// left out), the fallback is a plain flat card: `ShellPalette.fieldFill`
+    /// over a `hairlineStrong` stroke. Deliberately not `.hudWindow` — that
+    /// is dark HUD chrome for a floating *window* panel
+    /// (`CommandPaletteController`'s own pre-26 fallback), and reads wrong
+    /// pasted onto in-pane content.
+    private let composerGlass: NSView = {
+        let container = NSView()
+        container.wantsLayer = true
+        container.translatesAutoresizingMaskIntoConstraints = false
+        if let glass = WorkspaceGlass.sheet(cornerRadius: 14) {
+            glass.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(glass)
+            NSLayoutConstraint.activate([
+                glass.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                glass.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                glass.topAnchor.constraint(equalTo: container.topAnchor),
+                glass.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            ])
+        } else {
+            container.layer?.cornerRadius = 14
+            container.layer?.cornerCurve = .continuous
+            container.layer?.backgroundColor = ShellPalette.fieldFill.cgColor
+            container.layer?.borderWidth = 1
+            container.layer?.borderColor = ShellPalette.hairlineStrong.cgColor
+        }
+        return container
     }()
     /// Internal rather than `private` so the composer tests can read and set
     /// the draft directly.
@@ -344,9 +355,9 @@ final class PaneAppView: NSView {
             emptyStateLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyStateLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
 
-            composerGlass.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            composerGlass.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            composerGlass.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            composerGlass.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.composerGlassMargin),
+            composerGlass.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.composerGlassMargin),
+            composerGlass.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.composerGlassMargin),
 
             composerField.topAnchor.constraint(equalTo: composerGlass.topAnchor, constant: 12),
             composerField.leadingAnchor.constraint(equalTo: composerGlass.leadingAnchor, constant: 14),
@@ -362,23 +373,6 @@ final class PaneAppView: NSView {
         // AppKit would otherwise fold its own automatic insets into these and
         // the inset would not match the glass.
         scrollView.automaticallyAdjustsContentInsets = false
-        scrollView.contentInsets = NSEdgeInsets(
-            top: 0,
-            left: 0,
-            // Glass height (12 + field + 10 + 26 + 10) plus its 12pt margin,
-            // so the last message scrolls clear rather than parking under it.
-            bottom: Self.composerClearance,
-            right: 0
-        )
-        // Negative, verified rather than assumed: `contentInsets.bottom`
-        // alone already shrinks the vertical scroller's frame by that same
-        // amount (confirmed with a throwaway offscreen probe — a 300pt-tall
-        // scroll view's scroller measured 213pt with `scrollerInsets` left at
-        // zero). This negative inset exactly cancels that automatic shrink,
-        // restoring the scroller to the view's full height so its track still
-        // represents the whole scrollable range — including the padded tail
-        // under the glass — rather than being pushed up and truncated.
-        scrollView.scrollerInsets = NSEdgeInsets(top: 0, left: 0, bottom: -Self.composerClearance, right: 0)
     }
 
     @available(*, unavailable)
@@ -388,19 +382,34 @@ final class PaneAppView: NSView {
         pollTimer?.invalidate()
     }
 
+    /// Reconciles the transcript's bottom clearance against the glass
+    /// composer's *real*, laid-out height every pass, rather than an authored
+    /// constant that could silently drift from it (a font-size change, a
+    /// controls-row tweak, an OS metrics update). `super.layout()` first: it
+    /// is what resolves `composerGlass`'s own Auto Layout constraints, so its
+    /// `frame` is only trustworthy after that call returns.
+    override func layout() {
+        super.layout()
+        let clearance = composerGlass.frame.height + Self.composerGlassMargin
+        guard scrollView.contentInsets.bottom != clearance else { return }
+        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: clearance, right: 0)
+        // Negative, verified rather than assumed: `contentInsets.bottom`
+        // alone already shrinks the vertical scroller's frame by that same
+        // amount (confirmed with a throwaway offscreen probe — a 300pt-tall
+        // scroll view's scroller measured 213pt with `scrollerInsets` left at
+        // zero). This negative inset exactly cancels that automatic shrink,
+        // restoring the scroller to the view's full height so its track still
+        // represents the whole scrollable range — including the padded tail
+        // under the glass — rather than being pushed up and truncated.
+        scrollView.scrollerInsets = NSEdgeInsets(top: 0, left: 0, bottom: -clearance, right: 0)
+    }
+
     // MARK: - Composer
 
-    /// How much room the glass composer takes out of the transcript's scroll
-    /// area — the overlay's own height plus its bottom margin.
-    ///
-    /// Measured, not guessed: 75 (12 top inset + 17 for a single-line
-    /// `ShellFont.ui(14)` field + 10 gap + 26 controls row + 10 bottom inset)
-    /// plus the glass's own 12pt margin off the view's bottom = 87. A
-    /// throwaway offscreen-window test read `composerField.superview!.frame`
-    /// after a real layout pass to get the 17 — the brief's 90 assumed a
-    /// taller field (as if it were the 32pt-tall `fieldContainer` this
-    /// replaces) and would have left 3pt of dead gap under the glass.
-    private static let composerClearance: CGFloat = 87
+    /// The glass's own margin off the view's bottom (and leading/trailing)
+    /// edge — the single authored number the clearance in `layout()` is
+    /// built from, rather than a second constant that could disagree with it.
+    private static let composerGlassMargin: CGFloat = 12
 
     private static func composerButton(symbol: String, accessibility: String) -> NSButton {
         let button = NSButton()
