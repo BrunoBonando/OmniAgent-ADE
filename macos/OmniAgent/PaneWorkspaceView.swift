@@ -1318,14 +1318,16 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         for (id, container) in containers {
             let onScreen = visible.contains(id)
             container.isHidden = !onScreen
-            container.surface.suspendsDrawing = suspendsDrawing || !onScreen
-            container.isChipped = onScreen && chips
             // A pane's App view polls a transcript file on a timer, so it has
             // to hear that the pane went off screen. Deliberately *not*
             // `suspendsDrawing`'s business — that gates the renderer kick and
             // nothing else, and this is the pane's own content answering the
-            // same question `isHidden` just did.
+            // same question `isHidden` just did, which is why it is here rather
+            // than after the chip: `isChipped`'s didSet starts a crossfade, and
+            // a content view hidden on the next statement never fades at all.
             container.applyContentVisibility()
+            container.surface.suspendsDrawing = suspendsDrawing || !onScreen
+            container.isChipped = onScreen && chips
         }
         // The camera decides who may blink as much as it decides who is on
         // screen, and a camera move runs this pass and no other.
@@ -3727,11 +3729,21 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // falls back: a switch that could not build one must leave the pane
         // showing its terminal rather than showing nothing at all.
         let showsApp = viewMode == .app && appView != nil
-        surface.isHidden = isChipped || showsApp
-        appView?.isHidden = isChipped || !showsApp
         // Nothing polls a transcript nobody can see: a pane in another session,
         // one drawn as a chip, or one showing its terminal all cost nothing.
+        // Always answered, fade or no fade — it is a timer, not a pixel.
         appView?.isLive = !isHidden && !isChipped && showsApp
+        // A crossfade owns both content views for the length of it: both are
+        // up, one is travelling to opacity 0, and hiding the loser now would
+        // cut that fade to a pop — precisely the glitch `crossfadeChip` exists
+        // to prevent. `settleChipFade` clears the flag and calls this again on
+        // the other side, so the state below is applied either way, one settle
+        // later. This is load-bearing beyond the pass that starts the fade:
+        // `camera`'s didSet runs `updateVisibility` on *every* pinch event, so
+        // without it the second event of a zoom-out would cut the first's fade.
+        guard !isCrossfadingChip else { return }
+        surface.isHidden = isChipped || showsApp
+        appView?.isHidden = isChipped || !showsApp
     }
 
     /// Puts the keyboard in whichever content the pane is showing — the
@@ -3790,6 +3802,10 @@ final class PaneContainerView: NSView, NSDraggingSource {
     static let chipFadeDuration: TimeInterval = 0.18
     private static let chipFadeKey = "chipFade"
     private var chipFadeToken = 0
+    /// Whether a crossfade is in flight — both content members up, one of them
+    /// on its way to opacity 0. `applyContentVisibility` stands off while this
+    /// is true; see the reason there.
+    private var isCrossfadingChip = false
 
     var isChipped = false {
         didSet {
@@ -3839,6 +3855,7 @@ final class PaneContainerView: NSView, NSDraggingSource {
             settleChipFade(token)
             return
         }
+        isCrossfadingChip = true
         chip.isHidden = false
         // The content view the pane is actually showing, not always the
         // surface: in App mode the terminal is the one that stays down, and
@@ -3882,6 +3899,10 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// two paths gets there first.
     private func settleChipFade(_ token: Int) {
         guard token == chipFadeToken else { return }
+        // Cleared before anything below reads it: `applyContentVisibility` is
+        // what applies the state this fade was heading for, and it stands off
+        // while this is true.
+        isCrossfadingChip = false
         chip.layer?.removeAnimation(forKey: Self.chipFadeKey)
         surface.layer?.removeAnimation(forKey: Self.chipFadeKey)
         header.layer?.removeAnimation(forKey: Self.chipFadeKey)
