@@ -128,6 +128,12 @@ enum ShellPalette {
     static let accentSelection = srgb(139, 149, 255, 0.14)
     static let accentIconTile = srgb(139, 149, 255, 0.28)
     static let accentRail = srgb(139, 149, 255, 0.35)
+    /// The purple half of the App-view composer's focus glow
+    /// (`PaneAppView.updateComposerGlow`) — `accent`'s blue ramps into this
+    /// rather than the ring's single accent hue, per the design's "blue and
+    /// purple out of focus". No other caller needs a violet, so this is the
+    /// one token rather than a family like `accent`'s.
+    static let accentPurple = srgb(186, 120, 255)
 
     static let green = srgb(78, 201, 122)
     static let amber = srgb(240, 180, 70)

@@ -1,4 +1,6 @@
 import AppKit
+import CoreImage
+import QuartzCore
 
 /// One block of a `.text` block's raw string — see `MarkdownBlock.parse`.
 /// Internal rather than `private` so `PaneAppViewTests` can assert on a parse
@@ -240,6 +242,13 @@ final class PaneAppView: NSView {
     /// all over real glass, the flat card's hairline before macOS 26) so
     /// `setComposerFocused` can put it back exactly rather than guessing.
     private var composerRestingBorder: (width: CGFloat, color: CGColor?) = (0, nil)
+    /// The focus glow: a blurred, spinning blue→purple halo bled outside the
+    /// glass, in the idiom `PaneWorkspaceView.updateWorkingRing` already
+    /// establishes for a travelling conic-gradient ring — created only while
+    /// wanted and removed from its superlayer entirely otherwise, never left
+    /// paused. `nil` whenever it is not on screen, which is most of the
+    /// time: see `updateComposerGlow`.
+    private var composerGlow: CAGradientLayer?
     /// Internal rather than `private` so the composer tests can read and set
     /// the draft directly.
     let composerField: HomeComposerField = {
@@ -301,8 +310,27 @@ final class PaneAppView: NSView {
         didSet {
             guard isLive != oldValue else { return }
             isLive ? startPolling() : stopPolling()
+            // A pane can go non-live (Task 3 flips this on the Terminal ⇄ App
+            // toggle) while the composer still holds focus — the glow must
+            // not keep spinning on a view nobody is looking at.
+            updateComposerGlow()
         }
     }
+
+    /// Whether `composerField` currently holds first responder — the glow's
+    /// other gate, alongside `isLive` and Reduce Motion. Set from
+    /// `setComposerFocused`, the one place focus changes land.
+    private var isComposerFocused = false
+
+    /// Test seam: `ShellMotion.reduced` reads a live, global accessibility
+    /// setting nothing in a unit test can flip (see the existing
+    /// `XCTSkipIf(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+    /// …)` pattern elsewhere in this codebase, e.g.
+    /// `PaneViewModeTests.swift`), which would leave the Reduce-Motion path
+    /// of the composer glow untested on any runner that happens to have it
+    /// off. `nil` — every real pane — defers to the real setting.
+    var reducedMotionForTesting: Bool?
+    private var reducedMotion: Bool { reducedMotionForTesting ?? ShellMotion.reduced }
 
     /// Where keyboard focus should land when this view is the pane's active
     /// content — the composer, so typing starts a message rather than
@@ -313,9 +341,34 @@ final class PaneAppView: NSView {
         self.sessionID = sessionID
         self.cwd = cwd
         self.home = home
-        scrollView = ShellScrollView(documentView: messageStack)
+        // The scroll view's real document view — pinned to the clip's full
+        // width by `ShellScrollView` itself, exactly like `HomeView`'s own
+        // `content` — with `messageStack` centred inside it as the 880pt
+        // column. Local rather than stored: nothing outside `init` touches
+        // it, since rows are added to `messageStack` directly.
+        let transcriptContent = NSView()
+        transcriptContent.translatesAutoresizingMaskIntoConstraints = false
+        transcriptContent.addSubview(messageStack)
+        scrollView = ShellScrollView(documentView: transcriptContent)
         super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
+        // `translatesAutoresizingMaskIntoConstraints` deliberately left at
+        // its default `true` — NOT set `false` the way most Auto-Layout-
+        // internal views in this file are. `PaneContainerView.applyLayout`
+        // positions this view by assigning `.frame` directly
+        // (`appView?.frame = surface.frame`), never through an
+        // `NSLayoutConstraint` from its superview; with TAMIC `false` this
+        // view's own width has *nothing at all* pinning it externally, so
+        // `messageStack`/`composerGlass`'s new `.defaultHigh` 880pt
+        // preference (below) is free to satisfy itself by growing this
+        // view's own frame outward — confirmed with a throwaway offscreen
+        // probe: a `PaneAppView` framed 500×600 and added as an ordinary
+        // frame-positioned subview of a real host in a real window (the
+        // shape `PaneContainerView` actually uses) grew itself to 960×117 the
+        // moment `appendMessages`' own `layoutSubtreeIfNeeded()` ran, wildly
+        // overflowing its host. TAMIC `true` is what pins a directly-`.frame`-
+        // assigned view's own size against exactly that — the same probe,
+        // otherwise identical, stayed at 500×600 with the column correctly
+        // capped to 420pt.
         wantsLayer = true
         // Opaque, and the same background every real pane-content view uses
         // (`PaneContainerView.paneBackgroundColor` — see `BrowserPaneView`,
@@ -337,6 +390,12 @@ final class PaneAppView: NSView {
         composerField.onFocusChange = { [weak self] focused in
             self?.setComposerFocused(focused)
         }
+        // Left `false` (the layer default) deliberately, not just left
+        // alone: the focus glow (`updateComposerGlow`) is inset *outside*
+        // this layer's own bounds on purpose, and `true` here would clip it
+        // back down to a hard-edged ring at the glass's corner radius —
+        // exactly the "not a soft halo" failure mode.
+        composerGlass.layer?.masksToBounds = false
 
         let attachButton = Self.composerButton(symbol: "paperclip", accessibility: "Attach a file")
         attachButton.target = self
@@ -377,23 +436,53 @@ final class PaneAppView: NSView {
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
+            // `HomeView.swift:275-292`'s own centred column, reused exactly:
+            // a `.defaultHigh` fixed width (below) so the required
+            // `leadingAnchor` floor here is what gives on a narrow window
+            // instead of the column clipping.
+            messageStack.topAnchor.constraint(equalTo: transcriptContent.topAnchor),
+            messageStack.bottomAnchor.constraint(equalTo: transcriptContent.bottomAnchor),
+            messageStack.centerXAnchor.constraint(equalTo: transcriptContent.centerXAnchor),
+            messageStack.leadingAnchor.constraint(
+                greaterThanOrEqualTo: transcriptContent.leadingAnchor, constant: 40
+            ),
+
             emptyStateLabel.centerXAnchor.constraint(equalTo: readableArea.centerXAnchor),
             emptyStateLabel.centerYAnchor.constraint(equalTo: readableArea.centerYAnchor),
 
-            composerGlass.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.composerGlassMargin),
-            composerGlass.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.composerGlassMargin),
+            // The same column, centred the same way, so the composer's edges
+            // line up with the transcript's rather than spanning the pane.
+            composerGlass.centerXAnchor.constraint(equalTo: centerXAnchor),
+            composerGlass.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 40),
             composerGlass.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.composerGlassMargin),
 
-            composerField.topAnchor.constraint(equalTo: composerGlass.topAnchor, constant: 12),
+            // Vertical rhythm scaled up from `HomeView`'s own composer card
+            // (`buildComposer()`: prompt inset 20 from the top, controls 18
+            // below it) rather than copied verbatim — that card has a third
+            // meta row this composer doesn't, so its proportions, not its
+            // numbers, are what carry over. Measured on a real layout pass:
+            // 22 + a single-line field's own ~17pt intrinsic height + 18 +
+            // the 26pt controls row + 24 lands at 107pt, inside the target
+            // ~100-115pt band with room either side of an intrinsic-height
+            // guess.
+            composerField.topAnchor.constraint(equalTo: composerGlass.topAnchor, constant: 22),
             composerField.leadingAnchor.constraint(equalTo: composerGlass.leadingAnchor, constant: 14),
             composerField.trailingAnchor.constraint(equalTo: composerGlass.trailingAnchor, constant: -14),
 
-            controls.topAnchor.constraint(equalTo: composerField.bottomAnchor, constant: 10),
+            controls.topAnchor.constraint(equalTo: composerField.bottomAnchor, constant: 18),
             controls.leadingAnchor.constraint(equalTo: composerGlass.leadingAnchor, constant: 10),
             controls.trailingAnchor.constraint(equalTo: composerGlass.trailingAnchor, constant: -10),
-            controls.bottomAnchor.constraint(equalTo: composerGlass.bottomAnchor, constant: -10),
+            controls.bottomAnchor.constraint(equalTo: composerGlass.bottomAnchor, constant: -24),
             controls.heightAnchor.constraint(equalToConstant: 26),
         ])
+        // `.defaultHigh`, not required: on a window narrow enough that the
+        // 40pt leading floor above would otherwise conflict with it, this is
+        // the constraint that has to lose.
+        for column in [messageStack, composerGlass] {
+            let width = column.widthAnchor.constraint(equalToConstant: Self.transcriptColumnWidth)
+            width.priority = .defaultHigh
+            width.isActive = true
+        }
 
         // AppKit would otherwise fold its own automatic insets into these and
         // the inset would not match the glass.
@@ -416,6 +505,16 @@ final class PaneAppView: NSView {
     override func layout() {
         super.layout()
         let clearance = composerGlass.frame.height + Self.composerGlassMargin
+        // `composerGlow`'s frame is inset-negative relative to the glass
+        // (see `updateComposerGlow`), so it has to be resynced against the
+        // glass's real, laid-out bounds on every pass too — the same reason
+        // `clearance` above is read from `frame.height` rather than kept as
+        // an authored constant. Unconditional, unlike the block below: a
+        // resize can move the glass without changing its height, and the
+        // guard beneath would then skip a glow that needs to move with it.
+        composerGlow?.frame = composerGlass.bounds.insetBy(
+            dx: -Self.composerGlowBleed, dy: -Self.composerGlowBleed
+        )
         guard scrollView.contentInsets.bottom != clearance else { return }
         scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: clearance, right: 0)
         // Negative, verified rather than assumed: `contentInsets.bottom`
@@ -431,10 +530,18 @@ final class PaneAppView: NSView {
 
     // MARK: - Composer
 
-    /// The glass's own margin off the view's bottom (and leading/trailing)
-    /// edge — the single authored number the clearance in `layout()` is
-    /// built from, rather than a second constant that could disagree with it.
-    private static let composerGlassMargin: CGFloat = 12
+    /// `HomeView.swift:275-292`'s own 880pt column width, reused for both
+    /// the transcript (`messageStack`) and the composer (`composerGlass`) so
+    /// the two line up.
+    private static let transcriptColumnWidth: CGFloat = 880
+
+    /// The glass's own margin off the view's *bottom* edge — the single
+    /// authored number the clearance in `layout()` is built from, rather
+    /// than a second constant that could disagree with it. (Leading and
+    /// trailing no longer share this: the glass is centred in its own
+    /// 880pt column now, with its own 40pt escape-hatch floor, rather than a
+    /// fixed margin off the pane's edges.)
+    private static let composerGlassMargin: CGFloat = 20
 
     /// The only thing on screen that says where keystrokes are going. The
     /// field's own bordered container is gone — it folded into the glass —
@@ -450,6 +557,83 @@ final class PaneAppView: NSView {
         composerGlass.layer?.borderColor = focused
             ? ShellPalette.accent.withAlphaComponent(0.5).cgColor
             : composerRestingBorder.color
+        // The stroke above is the Reduce-Motion / no-window fallback and
+        // stays regardless — `updateComposerGlow` decides for itself whether
+        // the glow on top of it is also wanted.
+        isComposerFocused = focused
+        updateComposerGlow()
+    }
+
+    /// How far `composerGlow` bleeds past the glass's own edge on every
+    /// side, and how strongly it is blurred — the two numbers that turn a
+    /// hard-edged gradient into a soft halo escaping the glass rather than a
+    /// ring painted on it.
+    private static let composerGlowBleed: CGFloat = 36
+    private static let composerGlowBlurRadius: CGFloat = 28
+
+    /// The design's signature glow, reused for the composer: "make it shiny
+    /// with a nice circling effect with blue and purple out of focus." Same
+    /// idiom as `PaneWorkspaceView.updateWorkingRing` — a `CAGradientLayer`
+    /// of type `.conic` spun by an `om-spin` `CABasicAnimation`, created
+    /// only while wanted and removed from its superlayer (not merely
+    /// hidden, and never left paused) otherwise, so an unfocused composer
+    /// costs nothing.
+    ///
+    /// Differs from the working ring in two ways rather than one: the ramp
+    /// runs `accent` → `accentPurple` instead of a single hue, and the layer
+    /// is deliberately inset *outside* the glass's own bounds
+    /// (`composerGlowBleed`) and Core-Image-blurred (`composerGlowBlurRadius`)
+    /// so it reads as a bled, out-of-focus halo rather than a hard ring —
+    /// the working ring is a travelling arc precisely because everything but
+    /// its 1pt border is covered by opaque pane chrome; this glass has no
+    /// such occluder around it, so the softness has to come from the layer
+    /// itself.
+    ///
+    /// Gated on focus, `isLive` and Reduce Motion together: an always-
+    /// spinning blurred gradient on every open App-mode pane is exactly the
+    /// cost `updateWorkingRing`'s own comment warns a permanent animation
+    /// would be.
+    private func updateComposerGlow() {
+        let wanted = isComposerFocused && isLive && !reducedMotion
+        guard wanted else {
+            composerGlow?.removeFromSuperlayer()
+            composerGlow = nil
+            return
+        }
+        guard composerGlow == nil else { return }
+        let glow = CAGradientLayer()
+        glow.type = .conic
+        glow.frame = composerGlass.bounds.insetBy(
+            dx: -Self.composerGlowBleed, dy: -Self.composerGlowBleed
+        )
+        glow.startPoint = CGPoint(x: 0.5, y: 0.5)
+        glow.endPoint = CGPoint(x: 0.5, y: 0)
+        glow.colors = [
+            ShellPalette.accent.withAlphaComponent(0).cgColor,
+            ShellPalette.accent.withAlphaComponent(0.55).cgColor,
+            ShellPalette.accentPurple.withAlphaComponent(0.9).cgColor,
+            ShellPalette.accent.withAlphaComponent(0.55).cgColor,
+            ShellPalette.accent.withAlphaComponent(0).cgColor,
+        ]
+        glow.locations = [0, 0.25, 0.5, 0.75, 1]
+        if let blur = CIFilter(name: "CIGaussianBlur") {
+            blur.setValue(Self.composerGlowBlurRadius, forKey: kCIInputRadiusKey)
+            glow.filters = [blur]
+        }
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = 2 * Double.pi
+        spin.duration = 3
+        spin.repeatCount = .infinity
+        spin.isRemovedOnCompletion = false
+        glow.add(spin, forKey: "om-spin")
+        // Behind the glass panel filling the container (that panel occupies
+        // exactly the container's bounds; the glow's bled overflow around it
+        // is the only part of this layer ever actually seen), and never
+        // clipped — `composerGlass.layer?.masksToBounds` is left `false` in
+        // `init` for exactly this.
+        composerGlass.layer?.insertSublayer(glow, at: 0)
+        composerGlow = glow
     }
 
     private static func composerButton(symbol: String, accessibility: String) -> NSButton {

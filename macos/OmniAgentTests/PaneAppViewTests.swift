@@ -576,11 +576,72 @@ final class PaneAppViewTests: XCTestCase {
         // Derived from the real, laid-out glass, not an authored constant:
         // the inset has to track the container's own height (plus its
         // margin off the view's edge) exactly, so a font or controls-row
-        // change can never silently desync it.
+        // change can never silently desync it. `+ 20`, not the pre-redesign
+        // `+ 12`: the composer sits slightly further off the bottom edge now.
         let glassContainer = try XCTUnwrap(view.composerField.superview)
         XCTAssertEqual(
-            view.scrollView.contentInsets.bottom, glassContainer.frame.height + 12, accuracy: 0.5
+            view.scrollView.contentInsets.bottom, glassContainer.frame.height + 20, accuracy: 0.5
         )
+    }
+
+    /// The transcript is centred in the same 880pt column `HomeView`'s own
+    /// content uses (`HomeView.swift:275-292`), not spread across the full
+    /// pane, on a window wide enough that the escape hatch never engages.
+    ///
+    /// Through `show(_:)`, not a bare `layoutSubtreeIfNeeded()`: a column
+    /// width fight (the `.defaultHigh` 880pt preference against the required
+    /// 40pt leading floor) only resolves the way production actually lays it
+    /// out — `messageStack`/`composerGlass` capped, `self` untouched — inside
+    /// a real window; unwindowed, Auto Layout has nothing pinning `self`'s
+    /// own frame as fixed and the two ends of that fight land inconsistently
+    /// with each other (confirmed with a throwaway offscreen probe).
+    func testTheMessageColumnIsCappedAt880ptAndCentred() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+
+        let content = try XCTUnwrap(view.scrollView.documentView)
+        let column = try XCTUnwrap(content.subviews.first, "messageStack, the transcript column")
+
+        XCTAssertEqual(column.frame.width, 880, accuracy: 0.5)
+        XCTAssertEqual(column.frame.midX, content.frame.midX, accuracy: 0.5, "centred, not just capped")
+    }
+
+    /// The same escape hatch `HomeView`'s column uses: on a window too
+    /// narrow for 880pt, the column gives way at a 40pt leading floor rather
+    /// than clipping against the pane's edge. See `testTheMessageColumnIsCappedAt880ptAndCentred`
+    /// for why this goes through `show(_:)`.
+    func testTheMessageColumnGivesWayOnANarrowWindow() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 500, height: 600)
+        let window = show(view)
+        defer { window.close() }
+
+        let content = try XCTUnwrap(view.scrollView.documentView)
+        let column = try XCTUnwrap(content.subviews.first)
+
+        XCTAssertLessThan(column.frame.width, 880)
+        XCTAssertEqual(column.frame.minX, 40, accuracy: 0.5)
+    }
+
+    /// The composer sits in the transcript's own centred column, at the
+    /// design's taller vertical rhythm — roughly `HomeView`'s composer card
+    /// proportions (`HomeView.swift`, `buildComposer()`), not the
+    /// pre-redesign ~75pt. See `testTheMessageColumnIsCappedAt880ptAndCentred`
+    /// for why this goes through `show(_:)`.
+    func testTheComposerIsTallerAndCentredInTheSameColumn() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+
+        let glass = try XCTUnwrap(view.composerField.superview)
+
+        XCTAssertGreaterThanOrEqual(glass.frame.height, 100)
+        XCTAssertLessThanOrEqual(glass.frame.height, 115)
+        XCTAssertEqual(glass.frame.width, 880, accuracy: 0.5, "the same column width as the transcript")
+        XCTAssertEqual(glass.frame.midX, view.frame.midX, accuracy: 0.5, "centred in the pane")
     }
 
     /// The composer's glass is the approval card's own material
@@ -640,6 +701,74 @@ final class PaneAppViewTests: XCTestCase {
         // And it goes away again: a permanent stroke says "focused" forever.
         XCTAssertTrue(window.makeFirstResponder(nil))
         XCTAssertEqual(container.layer?.borderWidth, restingWidth)
+    }
+
+    /// The focus glow: `PaneWorkspaceView.updateWorkingRing`'s own idiom —
+    /// a spinning `CAGradientLayer`, created only while wanted and removed
+    /// from its superlayer entirely (not merely hidden) once it is not.
+    /// Focusing a live composer must create exactly one, spinning; blurring
+    /// it must remove it rather than leaving a paused animation behind.
+    func testFocusingALiveComposerCreatesTheGlowAndBlurRemovesIt() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        view.isLive = true
+        let window = show(view)
+        defer { window.close() }
+        let glass = try XCTUnwrap(view.composerField.superview)
+
+        XCTAssertNil(glowLayer(on: glass), "no glow before focus")
+
+        XCTAssertTrue(window.makeFirstResponder(view.composerField))
+        let glow = try XCTUnwrap(glowLayer(on: glass), "focus creates the glow")
+        XCTAssertNotNil(glow.animation(forKey: "om-spin"), "and it spins")
+
+        XCTAssertTrue(window.makeFirstResponder(nil))
+        XCTAssertNil(glowLayer(on: glass), "blur removes it entirely, not just hides it")
+
+        view.isLive = false
+    }
+
+    /// A pane in Terminal mode (`isLive == false`) never spends the glow's
+    /// animated blur on a composer nobody is looking at, even if it somehow
+    /// takes focus.
+    func testTheGlowIsNotCreatedWhenThePaneIsNotLive() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        let window = show(view)
+        defer { window.close() }
+        let glass = try XCTUnwrap(view.composerField.superview)
+
+        XCTAssertTrue(window.makeFirstResponder(view.composerField))
+        XCTAssertNil(glowLayer(on: glass))
+    }
+
+    /// Reduce Motion's fallback is the border stroke alone
+    /// (`testFocusingTheComposerStrokesTheGlass`); the glow itself must not
+    /// be created at all. `ShellMotion.reduced` reads a live, global
+    /// accessibility setting nothing here can flip, so `reducedMotionForTesting`
+    /// is the seam that forces this path regardless of the test runner's own
+    /// setting — see its doc comment in `PaneAppView.swift`.
+    func testTheGlowIsNotCreatedUnderReduceMotion() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        view.isLive = true
+        view.reducedMotionForTesting = true
+        let window = show(view)
+        defer { window.close() }
+        let glass = try XCTUnwrap(view.composerField.superview)
+
+        XCTAssertTrue(window.makeFirstResponder(view.composerField))
+        XCTAssertNil(glowLayer(on: glass), "no glow under Reduce Motion")
+        XCTAssertEqual(glass.layer?.borderWidth, 1, "the stroke fallback still works")
+
+        view.isLive = false
+    }
+
+    /// Every match in `glass`'s own sublayers — the glow rides directly on
+    /// `composerGlass.layer`, not on a subview, per the same idiom
+    /// `PaneWorkspaceViewTests` uses to find `updateWorkingRing`'s layer.
+    private func glowLayer(on glass: NSView) -> CAGradientLayer? {
+        glass.layer?.sublayers?.compactMap { $0 as? CAGradientLayer }.first
     }
 
     /// Attach puts the path into the draft, which is what the transport can
@@ -1013,15 +1142,29 @@ final class PaneAppViewTests: XCTestCase {
     /// A window, because a layer-backed view with no window never runs
     /// `draw(_:)` and the render comes back empty — the test would then pass
     /// for the wrong reason.
+    ///
+    /// `view` is added to a plain, unconstrained *host* rather than made the
+    /// window's own `contentView` directly — the same shape
+    /// `PaneContainerView.applyLayout` actually embeds `PaneAppView` in
+    /// (`appView?.frame = surface.frame`, an ordinary `addSubview`, never an
+    /// `NSLayoutConstraint` from the superview). Confirmed the hard way: with
+    /// `view` *as* `contentView`, `messageStack`/`composerGlass`'s new
+    /// `.defaultHigh` 880pt column preference gives `NSWindow` something to
+    /// resize the whole window to fit, and both the window and `view` balloon
+    /// out past whatever frame the test set — a resize that never happens
+    /// through a host with no Auto Layout constraints of its own reaching
+    /// into `view`, exactly like the real container.
     private func show(_ view: NSView) -> NSWindow {
+        let host = NSView(frame: view.frame)
+        host.addSubview(view)
         let window = NSWindow(
-            contentRect: view.frame,
+            contentRect: host.frame,
             styleMask: [.titled],
             backing: .buffered,
             defer: false
         )
         window.isReleasedWhenClosed = false
-        window.contentView = view
+        window.contentView = host
         window.displayIfNeeded()
         view.layoutSubtreeIfNeeded()
         return window
