@@ -1,11 +1,164 @@
 import AppKit
 
-/// One split of a `.text` block's raw string — see `PaneAppView.splitFences`.
-/// Internal rather than `private` so `PaneAppViewTests` can assert on a split
+/// One block of a `.text` block's raw string — see `MarkdownBlock.parse`.
+/// Internal rather than `private` so `PaneAppViewTests` can assert on a parse
 /// directly, without going through a live row.
-enum PaneAppTextSegment: Equatable {
-    case prose(String)
+enum MarkdownBlock: Equatable {
+    case paragraph(String)
+    case heading(level: Int, text: String)
+    case list(items: [String], ordered: Bool)
     case code(String)
+    case table(header: [String], rows: [[String]])
+
+    /// Splits raw assistant text into blocks by scanning it a line at a time.
+    ///
+    /// A line scanner, not a markdown parser: a line's prefix decides its
+    /// block and consecutive lines of a kind accumulate. Deliberately
+    /// forgiving, because this runs against a reply another process is still
+    /// writing — an unterminated fence runs to the end, and anything that
+    /// fails to be a table falls back to the prose it came from rather than
+    /// being dropped.
+    ///
+    /// Inline emphasis inside a block is left to
+    /// `PaneAppView.attributedMarkdown`; block structure is this function's
+    /// job alone.
+    static func parse(_ text: String) -> [MarkdownBlock] {
+        var blocks: [MarkdownBlock] = []
+        var paragraph: [String] = []
+        var code: [String] = []
+        var items: [String] = []
+        var ordered = false
+        var pipes: [String] = []
+        var inFence = false
+
+        func flushParagraph() {
+            let joined = paragraph.joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            paragraph = []
+            guard !joined.isEmpty else { return }
+            blocks.append(.paragraph(joined))
+        }
+        func flushList() {
+            guard !items.isEmpty else { return }
+            blocks.append(.list(items: items, ordered: ordered))
+            items = []
+        }
+        func flushPipes() {
+            guard !pipes.isEmpty else { return }
+            blocks.append(table(from: pipes) ?? .paragraph(pipes.joined(separator: "\n")))
+            pipes = []
+        }
+        // Only ever called from a branch that is not itself accumulating, so
+        // the fixed order here can never reorder two live accumulators.
+        func flushAll() {
+            flushParagraph()
+            flushList()
+            flushPipes()
+        }
+
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("```") {
+                if inFence {
+                    blocks.append(.code(code.joined(separator: "\n")))
+                    code = []
+                } else {
+                    flushAll()
+                }
+                inFence.toggle()
+                continue
+            }
+            if inFence {
+                code.append(line)
+                continue
+            }
+            if trimmed.isEmpty {
+                flushAll()
+                continue
+            }
+            if let heading = heading(from: trimmed) {
+                flushAll()
+                blocks.append(heading)
+                continue
+            }
+            if let item = listItem(from: trimmed) {
+                flushParagraph()
+                flushPipes()
+                // A bullet list running straight into a numbered one is two
+                // lists, not one with a confused marker.
+                if !items.isEmpty, ordered != item.ordered { flushList() }
+                ordered = item.ordered
+                items.append(item.text)
+                continue
+            }
+            if trimmed.hasPrefix("|") {
+                flushParagraph()
+                flushList()
+                pipes.append(trimmed)
+                continue
+            }
+            flushList()
+            flushPipes()
+            paragraph.append(line)
+        }
+
+        if inFence {
+            blocks.append(.code(code.joined(separator: "\n")))
+        }
+        flushAll()
+        return blocks
+    }
+
+    /// The cells of one `|`-delimited row, outer pipes dropped and each cell
+    /// trimmed. Internal so the table tests can build expectations with it.
+    static func cells(_ line: String) -> [String] {
+        var text = line.trimmingCharacters(in: .whitespaces)
+        if text.hasPrefix("|") { text.removeFirst() }
+        if text.hasSuffix("|") { text.removeLast() }
+        return text.components(separatedBy: "|")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// A run of pipe lines as a table, or nil when it is not one.
+    ///
+    /// The delimiter row is what decides it: markdown requires `|---|---|`
+    /// under the header, and prose can easily contain pipe characters. Ragged
+    /// body rows are *not* disqualifying — they are ordinary markdown, and
+    /// `PaneAppView.renderTable` pads them.
+    private static func table(from lines: [String]) -> MarkdownBlock? {
+        guard lines.count >= 2 else { return nil }
+        let delimiter = cells(lines[1])
+        guard !delimiter.isEmpty,
+              delimiter.allSatisfy({ cell in
+                  !cell.isEmpty && cell.allSatisfy { $0 == "-" || $0 == ":" }
+              })
+        else { return nil }
+        return .table(
+            header: cells(lines[0]),
+            rows: lines.dropFirst(2).map { cells($0) }
+        )
+    }
+
+    private static func heading(from trimmed: String) -> MarkdownBlock? {
+        let hashes = trimmed.prefix { $0 == "#" }
+        guard (1...6).contains(hashes.count),
+              trimmed.dropFirst(hashes.count).hasPrefix(" ")
+        else { return nil }
+        return .heading(
+            level: hashes.count,
+            text: String(trimmed.dropFirst(hashes.count)).trimmingCharacters(in: .whitespaces)
+        )
+    }
+
+    private static func listItem(from trimmed: String) -> (text: String, ordered: Bool)? {
+        for marker in ["- ", "* "] where trimmed.hasPrefix(marker) {
+            return (String(trimmed.dropFirst(marker.count)), false)
+        }
+        let digits = trimmed.prefix { $0.isNumber }
+        guard !digits.isEmpty, trimmed.dropFirst(digits.count).hasPrefix(". ") else { return nil }
+        return (String(trimmed.dropFirst(digits.count + 2)), true)
+    }
 }
 
 /// The App view: a native chat rendering of a Claude pane's own transcript,
@@ -328,48 +481,6 @@ final class PaneAppView: NSView {
         }
     }
 
-    // MARK: - Fenced code
-
-    /// Splits a `.text` block's raw string on fenced code blocks: a line
-    /// whose trimmed content starts with ``` opens a fence and the next such
-    /// line closes it. The fence marker lines are dropped outright — they are
-    /// syntax, not content — and an unterminated fence simply runs to the end
-    /// of the text rather than being treated as an error.
-    ///
-    /// Internal rather than `private` so `PaneAppViewTests` can assert on the
-    /// split directly.
-    static func splitFences(_ text: String) -> [PaneAppTextSegment] {
-        var segments: [PaneAppTextSegment] = []
-        var proseLines: [String] = []
-        var codeLines: [String] = []
-        var inFence = false
-
-        func flushProse() {
-            guard !proseLines.isEmpty else { return }
-            segments.append(.prose(proseLines.joined(separator: "\n")))
-            proseLines = []
-        }
-        func flushCode() {
-            segments.append(.code(codeLines.joined(separator: "\n")))
-            codeLines = []
-        }
-
-        for line in text.components(separatedBy: "\n") {
-            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                inFence ? flushCode() : flushProse()
-                inFence.toggle()
-                continue
-            }
-            if inFence {
-                codeLines.append(line)
-            } else {
-                proseLines.append(line)
-            }
-        }
-        inFence ? flushCode() : flushProse()
-        return segments
-    }
-
     // MARK: - Markdown
 
     /// Runs `raw` through `NSAttributedString(markdown:)` for inline
@@ -543,13 +654,20 @@ final class PaneAppMessageRowView: NSView {
     private static func blockViews(for block: TranscriptBlock) -> [NSView] {
         switch block {
         case .text(let text):
-            return PaneAppView.splitFences(text).compactMap { segment in
-                switch segment {
-                case .prose(let prose):
-                    let trimmed = prose.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return trimmed.isEmpty ? nil : PaneAppView.proseLabel(prose)
+            return MarkdownBlock.parse(text).map { markdown -> NSView in
+                switch markdown {
+                case .paragraph(let prose):
+                    return PaneAppView.proseLabel(prose)
+                case .heading(_, let text):
+                    return PaneAppView.proseLabel(text)
+                case .list(let items, _):
+                    return PaneAppView.proseLabel(items.joined(separator: "\n"))
                 case .code(let code):
                     return PaneAppView.codeBlockView(code)
+                case .table(let header, let rows):
+                    return PaneAppView.codeBlockView(
+                        ([header] + rows).map { $0.joined(separator: "  ") }.joined(separator: "\n")
+                    )
                 }
             }
         case .tool(let name, let detail):

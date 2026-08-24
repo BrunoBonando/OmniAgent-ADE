@@ -3,10 +3,10 @@ import XCTest
 
 @testable import OmniAgent
 
-/// `PaneAppView`: rows for a fed transcript, the fence splitter, markdown
-/// typography, the empty state, composer submission, the poll timer's
-/// `isLive` gate — and the reader → view seam, where a real view is pointed at
-/// a real JSONL file and driven through its actual polling path.
+/// `PaneAppView`: rows for a fed transcript, the markdown block scanner,
+/// inline markdown typography, the empty state, composer submission, the poll
+/// timer's `isLive` gate — and the reader → view seam, where a real view is
+/// pointed at a real JSONL file and driven through its actual polling path.
 final class PaneAppViewTests: XCTestCase {
     private var tempDirectory: URL!
 
@@ -148,27 +148,73 @@ final class PaneAppViewTests: XCTestCase {
         )
     }
 
-    // MARK: - Fence splitting
+    // MARK: - Markdown blocks
 
-    func testSplitFencesProducesTheProseAndCodeSequence() {
-        let text = "before\n```swift\nlet x = 1\nlet y = 2\n```\nafter"
-        XCTAssertEqual(
-            PaneAppView.splitFences(text),
-            [.prose("before"), .code("let x = 1\nlet y = 2"), .prose("after")]
-        )
+    func testParseSplitsFencedCodeFromProse() {
+        let blocks = MarkdownBlock.parse("before\n```\nlet x = 1\n```\nafter")
+        XCTAssertEqual(blocks, [
+            .paragraph("before"),
+            .code("let x = 1"),
+            .paragraph("after"),
+        ])
     }
 
-    func testSplitFencesRunsAnUnterminatedFenceToTheEnd() {
-        let text = "before\n```\ncode one\ncode two"
-        XCTAssertEqual(
-            PaneAppView.splitFences(text),
-            [.prose("before"), .code("code one\ncode two")]
-        )
+    /// A reply still being written ends mid-fence every time it is polled. An
+    /// unterminated fence runs to the end rather than being treated as an error.
+    func testParseLetsAnUnterminatedFenceRunToTheEnd() {
+        let blocks = MarkdownBlock.parse("intro\n```\nstill typing")
+        XCTAssertEqual(blocks, [.paragraph("intro"), .code("still typing")])
     }
 
-    func testSplitFencesReturnsExactlyOneSegmentForProseOnlyText() {
-        let text = "just some prose\nacross two lines"
-        XCTAssertEqual(PaneAppView.splitFences(text), [.prose(text)])
+    func testParseReadsHeadingsAndTheirLevel() {
+        let blocks = MarkdownBlock.parse("## Results\ntext")
+        XCTAssertEqual(blocks, [.heading(level: 2, text: "Results"), .paragraph("text")])
+    }
+
+    func testParseGroupsListItems() {
+        let blocks = MarkdownBlock.parse("- one\n- two\n\nafter")
+        XCTAssertEqual(blocks, [
+            .list(items: ["one", "two"], ordered: false),
+            .paragraph("after"),
+        ])
+    }
+
+    func testParseReadsAnOrderedList() {
+        let blocks = MarkdownBlock.parse("1. first\n2. second")
+        XCTAssertEqual(blocks, [.list(items: ["first", "second"], ordered: true)])
+    }
+
+    /// The shape that reads as raw pipes today — note the empty leading header
+    /// cell, which is exactly what a `wc -l` table produces.
+    func testParseReadsATable() {
+        let blocks = MarkdownBlock.parse("| | lines |\n|---|---|\n| Swift | 69158 |")
+        XCTAssertEqual(blocks, [
+            .table(header: ["", "lines"], rows: [["Swift", "69158"]]),
+        ])
+    }
+
+    /// Ragged rows are ordinary markdown and stay a table — Task 4's renderer
+    /// pads them. Only a missing delimiter row disqualifies one.
+    func testParseKeepsARaggedTable() {
+        let blocks = MarkdownBlock.parse("| a | b |\n|---|---|\n| 1 |")
+        XCTAssertEqual(blocks, [.table(header: ["a", "b"], rows: [["1"]])])
+    }
+
+    /// Pipe lines with no delimiter row are not a table. They fall back to the
+    /// paragraph they came from — losing formatting beats losing content.
+    func testParsePipeLinesWithoutADelimiterStayProse() {
+        let blocks = MarkdownBlock.parse("| a | b |\n| 1 | 2 |")
+        XCTAssertEqual(blocks, [.paragraph("| a | b |\n| 1 | 2 |")])
+    }
+
+    func testParseKeepsBlocksInOrder() {
+        let blocks = MarkdownBlock.parse("# Title\npara\n- item\n```\ncode\n```")
+        XCTAssertEqual(blocks, [
+            .heading(level: 1, text: "Title"),
+            .paragraph("para"),
+            .list(items: ["item"], ordered: false),
+            .code("code"),
+        ])
     }
 
     // MARK: - Markdown
