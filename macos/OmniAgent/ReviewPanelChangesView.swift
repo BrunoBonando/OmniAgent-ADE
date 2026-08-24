@@ -74,8 +74,8 @@ final class ReviewPanelChangesView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = ShellPalette.content.cgColor
+        // No ground of its own: the panel behind it is the glass sheet, and an
+        // opaque fill here would be a slab sitting on top of it.
 
         let barHairline = NSView()
         barHairline.wantsLayer = true

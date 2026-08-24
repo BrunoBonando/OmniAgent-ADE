@@ -246,6 +246,30 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertNil(quiet.awaitingBadge)
     }
 
+    /// The badge's width is a literal computed from its digit count, not
+    /// Auto Layout measuring `label.widthAnchor` — see `ShellAwaitingBadgeView`
+    /// (2026-08-24). This locks in the two sizes the design covers and
+    /// guards against the width absorbing slack from elsewhere in the row.
+    func testTheAwaitingBadgeStaysTightRegardlessOfRowWidth() {
+        let row = SessionRowView(
+            session: sessionNode(label: "Main One"),
+            statuses: [.ready, .ready, .awaitingApproval],
+            awaitingCount: 1
+        )
+        row.frame = NSRect(x: 0, y: 0, width: 600, height: 32)
+        row.layoutSubtreeIfNeeded()
+        XCTAssertEqual(row.awaitingBadge?.frame.width, 17)
+
+        let doubleDigit = SessionRowView(
+            session: sessionNode(label: "Main Two"),
+            statuses: [.ready],
+            awaitingCount: 12
+        )
+        doubleDigit.frame = NSRect(x: 0, y: 0, width: 600, height: 32)
+        doubleDigit.layoutSubtreeIfNeeded()
+        XCTAssertEqual(doubleDigit.awaitingBadge?.frame.width, 24)
+    }
+
     func testStatusDotColoursFollowTheDesign() {
         XCTAssertEqual(ShellDotsView.color(for: .thinking), ShellPalette.blue)
         // Running a tool is the agent *working*, not the agent needing you:

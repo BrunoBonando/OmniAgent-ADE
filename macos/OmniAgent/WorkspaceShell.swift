@@ -65,8 +65,6 @@ enum WorkspaceDestination: String, CaseIterable {
 /// `.darkAqua` with its own near-black ground, and the design specifies exact
 /// values that must not drift with the user's system accent.
 enum ShellPalette {
-    static let content = srgb(10, 10, 12)
-
     /// The sidebar's ground *below macOS 26*: a top-lit blue-black sheet, so
     /// the column reads as glass over the flat `content` black rather than a
     /// second slab of it. There is no Liquid Glass to ask for that far back,
@@ -807,11 +805,27 @@ final class ShellAwaitingBadgeView: NSView {
             color: ShellPalette.amber
         )
         addSubview(label)
+        // A literal width computed from the digit count, not
+        // `label.widthAnchor` — deliberately not content-based. Two required
+        // fixes attempted here first (protecting the label's own hugging
+        // priority; loosening the dots' pin to it) both held up in every
+        // reproduction I could build — a bare view, a real row, a real
+        // NSWindow with a real NSScrollView and a resize — yet the shipped
+        // app kept measuring a badge roughly 5x too wide around a single "1"
+        // (2026-08-24, pixel-measured against three separate rebuilds; the
+        // user's own resize made no difference either, ruling out a stale
+        // first layout pass). Whatever is inflating `label.widthAnchor` in
+        // that live environment never reproduced anywhere I could attach a
+        // test, so rather than keep guessing, the badge no longer measures
+        // the label at all: 7pt/digit plus the same 10pt padding this always
+        // used, matching what the content-based math measured correctly in
+        // every isolated test (17pt for one digit, 24pt for two).
+        let digits = max(1, String(count).count)
+        let width = CGFloat(digits) * 7 + 10
         NSLayoutConstraint.activate([
             label.centerXAnchor.constraint(equalTo: centerXAnchor),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            widthAnchor.constraint(greaterThanOrEqualToConstant: 16),
-            widthAnchor.constraint(equalTo: label.widthAnchor, constant: 10),
+            widthAnchor.constraint(equalToConstant: width),
             heightAnchor.constraint(equalToConstant: 16),
         ])
         setAccessibilityElement(true)
@@ -939,8 +953,22 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             let badge = ShellAwaitingBadgeView(count: awaitingCount)
             awaitingBadge = badge
             addSubview(badge)
+            // Only the trailing edge pins the badge as `.required`; its own
+            // width constraint (content + fixed padding) is the other
+            // required constraint on its geometry, so nothing else may pin
+            // its leading edge at `.required` too — that would over-determine
+            // it against two independent required constraints and let Auto
+            // Layout silently break one, stretching the badge to whatever was
+            // left over (2026-08-24, live-app screenshot showed exactly
+            // that: a ~130pt box around "1"). Pulling the dots up to it is a
+            // strong preference instead, one step below `.required` — enough
+            // to win against titleField's low compression resistance and
+            // close the gap under normal width, but never a hard requirement
+            // that can conflict with the badge's own.
+            let dotsHugsBadge = dots.trailingAnchor.constraint(equalTo: badge.leadingAnchor, constant: -8)
+            dotsHugsBadge.priority = .defaultHigh
             NSLayoutConstraint.activate([
-                dots.trailingAnchor.constraint(equalTo: badge.leadingAnchor, constant: -8),
+                dotsHugsBadge,
                 badge.trailingAnchor.constraint(equalTo: trailingEdge, constant: -8),
                 badge.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
@@ -1047,6 +1075,30 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     func controlTextDidEndEditing(_ obj: Notification) {
         endRenaming(commit: true)
     }
+}
+
+/// The blue a glass column wears — the sidebar's, and the review panel's on
+/// the other side of the window. Its backing layer *is* the gradient, so the
+/// wash resizes with the sheet and there is no sublayer frame for anyone to
+/// keep in step.
+final class ShellGlassTintView: NSView {
+    override func makeBackingLayer() -> CALayer {
+        let layer = CAGradientLayer()
+        layer.colors = ShellPalette.sidebarGlassTint.map(\.cgColor)
+        // (0.5, 1) is the top of a layer's y-up unit space — the direction
+        // `NSGradient`'s -90° gave the opaque gradient this replaces.
+        layer.startPoint = CGPoint(x: 0.5, y: 1)
+        layer.endPoint = CGPoint(x: 0.5, y: 0)
+        return layer
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 }
 
 // MARK: - Placeholder

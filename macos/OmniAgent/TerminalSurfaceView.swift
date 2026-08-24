@@ -693,7 +693,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
             // Rule 3, plus the hint lines an agent parks under its tool calls
             // (`(ctrl+b to run in background)`), plus anything with no words in
             // it at all — a box's own bottom edge is not output.
-            if isSpinner(row.body) || isHint(row.body) { continue }
+            if isSpinner(row.body) || isHint(row.body) || isFrame(row.body) { continue }
             guard row.body.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains)
             else { continue }
             best = display(row.body)
@@ -742,11 +742,24 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         return spinner.contains(first)
     }
 
+    /// Pure box-drawing chrome (corners, edges, whitespace) is layout, not
+    /// output. Keep this separate from `borderAndSpace` so command content that
+    /// begins with "-" is never trimmed as if it were frame glyphs.
+    private static func isFrame(_ body: String) -> Bool {
+        let visible = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !visible.isEmpty else { return false }
+        return visible.unicodeScalars.allSatisfy(frameChrome.contains)
+    }
+
     /// The box-drawing verticals a TUI wraps its lines in, plus whitespace.
     /// Trimmed off both ends so the card shows the sentence rather than the
     /// frame it happens to be sitting inside.
     private static let borderAndSpace = CharacterSet(charactersIn: "│┃║|╎┆┊╵ \t")
         .union(.whitespacesAndNewlines)
+
+    /// Box-drawing glyphs that are pure frame chrome when a row contains only
+    /// these symbols and no text content.
+    private static let frameChrome = CharacterSet(charactersIn: "│┃║|╎┆┊╵╷╴╶┌┐└┘├┤┬┴┼╭╮╰╯─━═╞╡╪╫╬")
 
     /// The bullets an agent prefixes its own lines with. Taken off the front of
     /// what the card shows — the glyph is a margin mark, not a word.

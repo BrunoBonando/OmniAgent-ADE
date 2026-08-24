@@ -204,6 +204,13 @@ final class ReviewPanelView: NSView {
     private let tabStack = NSStackView()
     private let hairline = NSView()
     private let contentContainer = NSView()
+    /// The panel's ground, the sidebar's treatment mirrored to this edge of the
+    /// window: one full-bleed sheet of Liquid Glass with the design's blue
+    /// washed over it. `nil` below macOS 26, where `draw` paints the opaque
+    /// gradient instead — see `NavigationSidebarView.glassHost`, which this
+    /// follows exactly.
+    private(set) var glassHost: NSView?
+    private(set) var glassTint: NSView?
     private(set) var tabItems: [ReviewPanelTabItemView] = []
     private(set) var placeholders: [ReviewPanelTab: ReviewPanelPlaceholderView] = [:]
     /// Real tab contents, registered by the controller. A tab with a view
@@ -213,7 +220,17 @@ final class ReviewPanelView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = ShellPalette.content.cgColor
+
+        // The ground first, so the tabs and their content sit on it. Sized in
+        // `layout` rather than by an autoresizing mask, for the reason the
+        // sidebar states: the mask scales from this view's frame, which at init
+        // is zero, and zero scales to zero.
+        let tint = ShellGlassTintView()
+        if let glass = WorkspaceGlass.sheet(content: tint) {
+            glassHost = glass
+            glassTint = tint
+            addSubview(glass)
+        }
 
         tabStack.orientation = .horizontal
         tabStack.alignment = .centerY
@@ -259,6 +276,17 @@ final class ReviewPanelView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func layout() {
+        super.layout()
+        glassHost?.frame = bounds
+        glassTint?.frame = NSRect(origin: .zero, size: bounds.size)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard glassHost == nil else { return }
+        ShellPalette.sidebarGlass.draw(in: bounds, angle: -90)
+    }
 
     // MARK: - State
 

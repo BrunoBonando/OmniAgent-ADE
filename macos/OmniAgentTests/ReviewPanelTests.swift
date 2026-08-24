@@ -10,6 +10,25 @@ import XCTest
 final class ReviewPanelTests: XCTestCase {
     // MARK: - Codec
 
+    /// The panel is the sidebar's column mirrored to the other edge: the same
+    /// glass sheet with the same blue washed over it, and no opaque ground of
+    /// its own anywhere in the stack — a fill on the panel or on a tab's view
+    /// would be a slab sitting on the sheet.
+    func testThePanelWearsTheSidebarsGlassAndNothingPaintsOverIt() {
+        let panel = ReviewPanelView()
+        panel.frame = NSRect(x: 0, y: 0, width: 320, height: 600)
+        panel.layoutSubtreeIfNeeded()
+        XCTAssertNil(panel.layer?.backgroundColor, "the sheet is the ground, not a fill")
+        if #available(macOS 26.0, *) {
+            XCTAssertNotNil(panel.glassHost)
+            XCTAssertEqual(panel.glassHost?.frame, panel.bounds, "full-bleed, no inset")
+            XCTAssertNotNil(panel.glassTint)
+        }
+        for view in panel.contentViews.values + panel.placeholders.values.map({ $0 as NSView }) {
+            XCTAssertNil(view.layer?.backgroundColor, "\(type(of: view)) paints over the glass")
+        }
+    }
+
     func testCodecRoundTripsEveryField() {
         let states: [String: ReviewPanelSessionState] = [
             "g-1": ReviewPanelSessionState(

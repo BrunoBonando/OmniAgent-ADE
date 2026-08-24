@@ -315,8 +315,8 @@ final class ReviewPanelInsightsView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = ShellPalette.content.cgColor
+        // No ground of its own: the panel behind it is the glass sheet, and an
+        // opaque fill here would be a slab sitting on top of it.
 
         zoomOutButton.onPress = { [weak self] in self?.zoomOut() }
         zoomInButton.onPress = { [weak self] in self?.zoomIn() }

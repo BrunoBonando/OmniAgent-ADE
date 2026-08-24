@@ -2290,15 +2290,9 @@ fn build_engine_argv(
             })
         }
         "codex" => {
-            let mut argv = vec!["codex".to_string()];
-            if let Some(bin) = resolve_mcp_server_binary() {
-                let command = serde_json::to_string(&bin.to_string_lossy())?;
-                let data_dir = serde_json::to_string(&data_dir.to_string_lossy())?;
-                argv.push("--config".to_string());
-                argv.push(format!(
-                    "mcp_servers.omniagent={{command={command},args=[],env={{OMNIAGENT_ADE_DATA_DIR={data_dir}}}}}"
-                ));
-            } else {
+            let mcp_binary = resolve_mcp_server_binary();
+            let argv = codex_argv(data_dir, mcp_binary.as_deref())?;
+            if mcp_binary.is_none() {
                 eprintln!(
                     "omniagent-ade: omniagent-mcp binary not found next to the app \
                      binary; launching codex for session {session_id} without ADE's MCP wiring"
@@ -2392,6 +2386,19 @@ fn build_engine_argv(
              \"shell\", \"copilot\", \"antigravity\")"
         )),
     }
+}
+
+fn codex_argv(data_dir: &Path, mcp_binary: Option<&Path>) -> Result<Vec<String>> {
+    let mut argv = vec!["codex".to_string()];
+    if let Some(bin) = mcp_binary {
+        let command = serde_json::to_string(&bin.to_string_lossy())?;
+        let data_dir = serde_json::to_string(&data_dir.to_string_lossy())?;
+        argv.push("--config".to_string());
+        argv.push(format!(
+            "mcp_servers.omniagent={{command={command},args=[],env={{OMNIAGENT_ADE_DATA_DIR={data_dir}}}}}"
+        ));
+    }
+    Ok(argv)
 }
 
 /// The shell binary a `shell` session should execute.
@@ -3654,33 +3661,19 @@ mod tests {
 
     #[test]
     fn codex_gets_omniagent_mcp_wiring() {
-        let exe = std::env::current_exe().unwrap();
-        let sibling = exe.parent().unwrap().join("omniagent-mcp");
+        let tmp_bin = tempfile::tempdir().unwrap();
+        let sibling = tmp_bin.path().join("omniagent-mcp");
         std::fs::write(&sibling, b"fake").unwrap();
-        struct RemoveOnDrop(PathBuf);
-        impl Drop for RemoveOnDrop {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.0);
-            }
-        }
-        let _sibling_guard = RemoveOnDrop(sibling.clone());
 
         let tmp = tempfile::tempdir().unwrap();
-        let req = CreateSessionRequest {
-            project: "demo".into(),
-            engine: "codex".into(),
-            cwd: tmp.path().to_string_lossy().into_owned(),
-            briefing: None,
-            restore_id: None,
-        };
-        let cmd = build_engine_command(&req, tmp.path(), "sess-codex-mcp", ClaudeIdentity::Stock)
-            .unwrap();
+        let argv = codex_argv(tmp.path(), Some(&sibling)).unwrap();
 
-        assert_eq!(cmd.argv[1], "--config");
-        assert!(cmd.argv[2].contains("mcp_servers.omniagent="));
-        assert!(cmd.argv[2].contains(&serde_json::to_string(&sibling.to_string_lossy()).unwrap()));
+        assert_eq!(argv[0], "codex");
+        assert_eq!(argv[1], "--config");
+        assert!(argv[2].contains("mcp_servers.omniagent="));
+        assert!(argv[2].contains(&serde_json::to_string(&sibling.to_string_lossy()).unwrap()));
         assert!(
-            cmd.argv[2].contains(&serde_json::to_string(&tmp.path().to_string_lossy()).unwrap())
+            argv[2].contains(&serde_json::to_string(&tmp.path().to_string_lossy()).unwrap())
         );
     }
 

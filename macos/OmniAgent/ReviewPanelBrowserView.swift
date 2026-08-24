@@ -107,8 +107,8 @@ final class ReviewPanelBrowserView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = ShellPalette.content.cgColor
+        // No ground of its own: the panel behind it is the glass sheet, and an
+        // opaque fill here would be a slab sitting on top of it.
 
         backButton.onPress = { [weak self] in self?.currentNavigator?.goBack() }
         forwardButton.onPress = { [weak self] in self?.currentNavigator?.goForward() }

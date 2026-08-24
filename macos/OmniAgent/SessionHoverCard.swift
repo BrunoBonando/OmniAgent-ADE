@@ -987,7 +987,12 @@ final class HoverKPITileView: NSView {
     )
     private let labelField = ShellFont.label(font: ShellFont.ui(11.5), color: ShellPalette.inkSecondary)
 
-    init(caption: String, accessory: NSView) {
+    /// `showsHeadline` off drops the big value/label row entirely — the git
+    /// tile has three peer numbers of its own in its accessory now, and a
+    /// headline above them would just be a fourth, redundant one.
+    /// `showsCaption` off drops the tile's own title too, for the same tile:
+    /// three labelled numbers already say what they are.
+    init(caption: String, accessory: NSView, showsHeadline: Bool = true, showsCaption: Bool = true) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
@@ -1007,6 +1012,7 @@ final class HoverKPITileView: NSView {
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 6
+        header.isHidden = !showsCaption
 
         // First baseline, so `14` and `files` sit on one line the way a
         // sentence does rather than being centred against each other.
@@ -1014,6 +1020,7 @@ final class HoverKPITileView: NSView {
         value.orientation = .horizontal
         value.alignment = .firstBaseline
         value.spacing = 5
+        value.isHidden = !showsHeadline
 
         // The caption and the number sit at the top, the bar at the *bottom*.
         // The two tiles are held to one height, and a bar pinned under its own
@@ -1029,8 +1036,14 @@ final class HoverKPITileView: NSView {
         addSubview(accessory)
 
         // The gap is a floor plus a preference: the natural height is the
-        // preference, and the taller of the two tiles pushes past it.
-        let hug = accessory.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 9)
+        // preference, and the taller of the two tiles pushes past it. With
+        // neither caption nor headline there is nothing for `accessory` to
+        // clear, and the same 9pt would just be dead air above the numbers —
+        // so this tile's height stays closer to its neighbour's, rather than
+        // both stretching to match whichever grew, which is how a tile with
+        // half the content ends up with none of the difference to show for it.
+        let gap: CGFloat = (showsHeadline || showsCaption) ? 9 : 1
+        let hug = accessory.topAnchor.constraint(equalTo: top.bottomAnchor, constant: gap)
         hug.priority = .defaultLow
 
         NSLayoutConstraint.activate([
@@ -1040,7 +1053,7 @@ final class HoverKPITileView: NSView {
             accessory.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.padding),
             accessory.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padding),
             accessory.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.padding),
-            accessory.topAnchor.constraint(greaterThanOrEqualTo: top.bottomAnchor, constant: 9),
+            accessory.topAnchor.constraint(greaterThanOrEqualTo: top.bottomAnchor, constant: gap),
             hug,
             header.widthAnchor.constraint(equalTo: top.widthAnchor),
             value.widthAnchor.constraint(equalTo: top.widthAnchor),
@@ -1083,15 +1096,23 @@ final class HoverKPITileView: NSView {
 
     override func mouseEntered(with event: NSEvent) { onHover?() }
 
+    /// Instant, not faded: this tile sits above `page` and is meant to read
+    /// as fixed while a tab switch turns the content underneath it — a
+    /// half-second cross-fade on its own background, landing in the same
+    /// moment as `page`'s push transition, is what made the fixed row look
+    /// like it was repainting along with the part that actually moves.
     func setSelected(_ selected: Bool) {
         guard isSelected != selected else { return }
         isSelected = selected
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         layer?.backgroundColor = (selected
             ? ShellPalette.cardFillHover
             : NSColor(white: 1, alpha: 0.045)).cgColor
         layer?.borderColor = (selected
             ? NSColor(white: 1, alpha: 0.16)
             : ShellPalette.hairline).cgColor
+        CATransaction.commit()
     }
 }
 
@@ -1204,6 +1225,20 @@ final class HoverWorkRowView: NSView {
 /// The table's rows are a fixed pool of four, shown and hidden rather than
 /// built and destroyed — which is what lets the card *grow* when a fifth
 /// terminal starts working instead of snapping to a new size.
+/// A 1pt hairline between two stat numbers — the git tab's trio and the git
+/// tile's own both separate their numbers with one.
+private func hoverDivider(height: CGFloat = 30) -> NSView {
+    let view = NSView()
+    view.wantsLayer = true
+    view.layer?.backgroundColor = ShellPalette.hairlineStrong.cgColor
+    view.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+        view.widthAnchor.constraint(equalToConstant: 1),
+        view.heightAnchor.constraint(equalToConstant: height),
+    ])
+    return view
+}
+
 /// One of the git tab's three headline numbers: the figure in the colour of
 /// what it means — amber for work not committed, green for work staged, the
 /// accent for work already landed — and under it the noun it counts.
@@ -1211,13 +1246,26 @@ final class HoverGitStatView: NSView {
     private let valueField: NSTextField
     private let captionField: NSTextField
 
-    init(caption: String, color: NSColor) {
-        valueField = ShellFont.label(font: ShellFont.ui(21, .semibold), color: color)
+    /// `size` is the value's own point size — 21 for the git tab's three
+    /// headline stats, smaller for the KPI tile's own trio, which has a third
+    /// the width to fit them in. `captionWidth`, given, lets the caption wrap
+    /// onto a second line at that width instead of truncating on one — the
+    /// tile's own trio needs it to fit "files changed" under a 46pt number;
+    /// the git tab's three wider stats have room and leave it unset.
+    init(caption: String, color: NSColor, size: CGFloat = 21, captionWidth: CGFloat? = nil) {
+        valueField = ShellFont.label(font: ShellFont.ui(size, .semibold), color: color)
         captionField = ShellFont.label(caption, font: ShellFont.ui(11), color: ShellPalette.inkTertiary)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         valueField.alignment = .center
         captionField.alignment = .center
+        if let captionWidth {
+            captionField.usesSingleLineMode = false
+            captionField.cell?.wraps = true
+            captionField.lineBreakMode = .byWordWrapping
+            captionField.maximumNumberOfLines = 2
+            captionField.preferredMaxLayoutWidth = captionWidth
+        }
 
         let stack = NSStackView(views: [valueField, captionField])
         stack.orientation = .vertical
@@ -1237,6 +1285,7 @@ final class HoverGitStatView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
     func apply(_ value: Int) { valueField.stringValue = "\(value)" }
+    func apply(_ value: String) { valueField.stringValue = value }
 }
 
 /// One line of the git tab's commit list: hash, subject, age.
@@ -1327,7 +1376,7 @@ final class HoverGitPanelView: NSView {
         reviewButton.isHidden = true
 
         let stats = NSStackView(views: [
-            changedStat, divider(), stagedStat, divider(), committedStat,
+            changedStat, hoverDivider(), stagedStat, hoverDivider(), committedStat,
         ])
         stats.orientation = .horizontal
         stats.alignment = .centerY
@@ -1404,17 +1453,6 @@ final class HoverGitPanelView: NSView {
             : "\(git.files) files awaiting commit"
     }
 
-    private func divider() -> NSView {
-        let view = NSView()
-        view.wantsLayer = true
-        view.layer?.backgroundColor = ShellPalette.hairlineStrong.cgColor
-        view.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            view.widthAnchor.constraint(equalToConstant: 1),
-            view.heightAnchor.constraint(equalToConstant: 30),
-        ])
-        return view
-    }
 }
 
 final class HoverDashboardView: NSView {
@@ -1422,8 +1460,17 @@ final class HoverDashboardView: NSView {
     private let diffBar = HoverDiffBarView()
     private let panesTile: HoverKPITileView
     private let gitTile: HoverKPITileView
-    private let addedField = ShellFont.label(font: ShellFont.ui(11, .medium), color: ShellPalette.green)
-    private let removedField = ShellFont.label(font: ShellFont.ui(11, .medium), color: ShellPalette.red)
+    /// The git tile's own trio, sized to share a row three-up rather than the
+    /// 21pt the wider git-tab body affords its own copy of the same idea.
+    private let filesStat = HoverGitStatView(
+        caption: "files changed", color: ShellPalette.amber, size: 14, captionWidth: 52
+    )
+    private let addedStat = HoverGitStatView(
+        caption: "lines added", color: ShellPalette.green, size: 14, captionWidth: 52
+    )
+    private let removedStat = HoverGitStatView(
+        caption: "lines removed", color: ShellPalette.red, size: 14, captionWidth: 52
+    )
     private let tableCaption = ShellFont.label(
         "WORKING NOW",
         font: ShellFont.ui(10, .semibold),
@@ -1436,6 +1483,11 @@ final class HoverDashboardView: NSView {
     private let rows = NSStackView()
     private let tiles = NSStackView()
     private let gitPanel = HoverGitPanelView()
+    /// Everything under the tiles: the working table, or the git panel — the
+    /// part of the card a tab switch actually turns. A sibling of `tiles` in
+    /// `stack`, not a child of it, so nothing about swapping its content ever
+    /// touches the tiles above.
+    private let page = NSStackView()
 
     /// The two tiles are the card's tabs, and what is under them is whichever
     /// one the pointer is on. Terminals to begin with — the card is opened from
@@ -1450,19 +1502,42 @@ final class HoverDashboardView: NSView {
     }
 
     override init(frame frameRect: NSRect) {
-        let diffNumbers = NSStackView(views: [addedField, removedField, diffBar])
-        diffNumbers.orientation = .horizontal
-        diffNumbers.alignment = .centerY
-        diffNumbers.spacing = 6
-        // The bar takes whatever the two numbers leave; the numbers are the
-        // fact and must never be the thing that truncates.
-        addedField.setContentHuggingPriority(.required, for: .horizontal)
-        removedField.setContentHuggingPriority(.required, for: .horizontal)
-        addedField.setContentCompressionResistancePriority(.required, for: .horizontal)
-        removedField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        // The tile's own trio — files changed, lines added, lines removed —
+        // three peers in a row with a hairline between each, the bar that
+        // draws their ratio underneath. `.fillEqually` on just the three
+        // numbers is what actually guarantees each one its third of the row:
+        // `.fill` sizes every arranged view to its own content first and only
+        // hands out leftover space after, which is how a two-line caption
+        // this tight on room ends up narrower than the room it had. The
+        // hairlines sit outside that arrangement, centred in the gaps.
+        let stats = NSStackView(views: [filesStat, addedStat, removedStat])
+        stats.orientation = .horizontal
+        stats.distribution = .fillEqually
+        stats.spacing = 8
+        let filesGap = hoverDivider(height: 36)
+        let addedGap = hoverDivider(height: 36)
+        stats.addSubview(filesGap)
+        stats.addSubview(addedGap)
+        NSLayoutConstraint.activate([
+            filesGap.centerXAnchor.constraint(equalTo: filesStat.trailingAnchor, constant: 4),
+            filesGap.centerYAnchor.constraint(equalTo: stats.centerYAnchor),
+            addedGap.centerXAnchor.constraint(equalTo: addedStat.trailingAnchor, constant: 4),
+            addedGap.centerYAnchor.constraint(equalTo: stats.centerYAnchor),
+        ])
+        let gitAccessory = NSStackView(views: [stats, diffBar])
+        gitAccessory.orientation = .vertical
+        gitAccessory.alignment = .leading
+        gitAccessory.spacing = 6
 
         panesTile = HoverKPITileView(caption: "Terminals", accessory: panesBar)
-        gitTile = HoverKPITileView(caption: "Files changed", accessory: diffNumbers)
+        // No title, no headline: three labelled numbers already say what this
+        // tile is, and "Files changed" above them would just repeat the first.
+        gitTile = HoverKPITileView(
+            caption: "Files changed",
+            accessory: gitAccessory,
+            showsHeadline: false,
+            showsCaption: false
+        )
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -1490,7 +1565,12 @@ final class HoverDashboardView: NSView {
         rows.spacing = 9
         for view in rowViews { rows.addArrangedSubview(view) }
 
-        let stack = NSStackView(views: [tiles, tableHeader, rows, gitPanel])
+        page.orientation = .vertical
+        page.alignment = .leading
+        page.spacing = 6
+        for view in [tableHeader, rows, gitPanel] { page.addArrangedSubview(view) }
+
+        let stack = NSStackView(views: [tiles, page])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
@@ -1511,20 +1591,40 @@ final class HoverDashboardView: NSView {
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             tiles.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            tableHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            rows.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            gitPanel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            page.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            tableHeader.widthAnchor.constraint(equalTo: page.widthAnchor),
+            rows.widthAnchor.constraint(equalTo: page.widthAnchor),
+            gitPanel.widthAnchor.constraint(equalTo: page.widthAnchor),
+            stats.widthAnchor.constraint(equalTo: gitAccessory.widthAnchor),
+            diffBar.widthAnchor.constraint(equalTo: gitAccessory.widthAnchor),
         ] + rowViews.map { $0.widthAnchor.constraint(equalTo: rows.widthAnchor) })
     }
 
-    /// Switches tab. The panel resizes itself on its next tick — a tenth of a
-    /// second — so nothing here has to reach up and ask for it.
+    /// Fired right after a tab switch changes what `page` shows, so the
+    /// panel can resize to fit it in the same beat as the fade below rather
+    /// than waiting on whichever quarter-second tick lands next — a resize
+    /// that arrives late reads as the whole card catching up, tiles included,
+    /// since the tiles sit inside the same window being resized.
+    var onTabSwitch: (() -> Void)?
+
+    /// Switches tab. This used to hand `page`'s own layer a `CATransition`
+    /// push — technically scoped to just that layer, but a real Liquid Glass
+    /// card samples and refracts its *whole* surface live, so an explicit
+    /// layer transition anywhere inside it made the entire card visibly
+    /// recomposite, tiles included, not just the part actually changing. A
+    /// plain alpha fade is what `setHidden` already uses for a row within
+    /// the same tab, with no such flicker — reusing it here, through the
+    /// same `animated: true` path, is what makes this tab switch trustworthy
+    /// rather than novel.
     func select(_ next: Tab) {
         guard tab != next, !(next == .git && gitTile.isHidden) else { return }
+        let goingToGit = next == .git
         tab = next
-        panesTile.setSelected(next == .terminals)
-        gitTile.setSelected(next == .git)
-        if let dashboard { apply(dashboard, animated: true) }
+        panesTile.setSelected(!goingToGit)
+        gitTile.setSelected(goingToGit)
+        guard let dashboard else { return }
+        syncPage(dashboard, animated: true)
+        onTabSwitch?()
     }
 
     @available(*, unavailable)
@@ -1550,15 +1650,11 @@ final class HoverDashboardView: NSView {
 
         if let git = dashboard.git {
             gitTile.isHidden = false
-            gitTile.apply(
-                value: "\(git.files)",
-                label: git.files == 1 ? "file" : "files",
-                hint: nil
-            )
-            addedField.stringValue = "+\(git.added)"
+            filesStat.apply(git.files)
+            addedStat.apply("+\(git.added)")
             // A real minus sign, not a hyphen: it sits beside a `+` at the same
             // optical weight, which a hyphen does not.
-            removedField.stringValue = "\u{2212}\(git.removed)"
+            removedStat.apply("\u{2212}\(git.removed)")
             diffBar.apply(added: git.added, removed: git.removed)
         } else {
             gitTile.isHidden = true
@@ -1574,11 +1670,20 @@ final class HoverDashboardView: NSView {
             guard view.isHidden != hidden else { continue }
             setHidden(view, hidden, animated: animated)
         }
-        let empty = count == 0 || tab != .terminals
-        setHidden(tableHeader, empty, animated: animated)
-        setHidden(rows, empty, animated: animated)
 
         gitPanel.apply(dashboard)
+        syncPage(dashboard, animated: animated)
+    }
+
+    /// Which half of `page` is showing: the table, when there is one and the
+    /// tab is on it; the git panel, when the tab is on that; otherwise
+    /// neither. Called on every tick, where `animated` only fades a row that
+    /// actually gained or lost content, and from `select`, where the tab
+    /// itself just changed and the whole swap fades.
+    private func syncPage(_ dashboard: SessionDashboard, animated: Bool) {
+        let showsTable = !dashboard.rows.isEmpty && tab == .terminals
+        setHidden(tableHeader, !showsTable, animated: animated)
+        setHidden(rows, !showsTable, animated: animated)
         setHidden(gitPanel, tab != .git, animated: animated)
     }
 
@@ -2097,9 +2202,10 @@ final class SessionHoverCardController {
     static let openDelay: TimeInterval = 0.12
     static let tickInterval: TimeInterval = 0.1
     /// How long the pointer may be on neither the row nor the card before the
-    /// card goes. Long enough to cross the gap between them without hurrying,
-    /// and to read the card from just outside it.
-    static let closeGrace: TimeInterval = 3
+    /// card goes — one second, enough to cross the gap between them without
+    /// hurrying. Hovering a different row does not wait on this at all: that
+    /// is `hover` calling `present()` straight away, below.
+    static let closeGrace: TimeInterval = 1
     /// Between the row's right edge and the card — the arrowhead's lane, plus
     /// enough that its tip lands just off the row rather than on top of it.
     static var gap: CGFloat { HoverCardShellView.lane + 4 }
@@ -2143,7 +2249,16 @@ final class SessionHoverCardController {
         panel.hidesOnDeactivate = false
         panel.animationBehavior = .none
         panel.collectionBehavior = [.transient, .ignoresCycle]
+        // Always on top: a child window alone only outranks its own parent,
+        // and the card has to clear whatever else the app has floating —
+        // same level `CommandPaletteController` uses for the same reason.
+        panel.level = .floating
         panel.contentView = shell
+        // A tab switch changes `page`'s height; the panel has to catch up in
+        // the same beat as the fade, not on whichever tick lands next — a
+        // resize arriving up to a tenth of a second late reads as the whole
+        // card catching up around the fade rather than growing with it.
+        shell.body.dashboardView.onTabSwitch = { [weak self] in self?.resizeToFitContent() }
     }
 
     deinit {
@@ -2336,20 +2451,26 @@ final class SessionHoverCardController {
             }
         }
         body.apply(model)
+        resizeToFitContent()
+    }
+
+    /// Resizes (and repositions) the panel to whatever `shell` currently
+    /// wants to be. Shared by the periodic tick — where a pane started or
+    /// stopped working and the table gained or lost a row — and by a tab
+    /// switch's `onTabSwitch`, which needs this in the same beat as its own
+    /// fade rather than on whichever tick lands next. A move with no resize
+    /// is just the row scrolling under the card, and animating that lags.
+    private func resizeToFitContent() {
+        guard let target, let parent, let row = rowFrame?(target) else { return }
         let frame = Self.frame(size: Self.panelSize(card: shell.cardSize), row: row, container: parent.frame)
-        if !frame.equalTo(panel.frame) {
-            // A pane started or stopped working and the table gained or lost a
-            // row: animate the height so the card grows to cover it rather than
-            // snapping to a new size under a stationary pointer. A move with no
-            // resize is just the row scrolling, and animating that lags.
-            if ShellMotion.reduced || frame.size.equalTo(panel.frame.size) {
-                panel.setFrame(frame, display: true)
-            } else {
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.2
-                    context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 0.85, 0.25, 1)
-                    panel.animator().setFrame(frame, display: true)
-                }
+        guard !frame.equalTo(panel.frame) else { return }
+        if ShellMotion.reduced || frame.size.equalTo(panel.frame.size) {
+            panel.setFrame(frame, display: true)
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 0.85, 0.25, 1)
+                panel.animator().setFrame(frame, display: true)
             }
         }
         // The row moves under the card as the sidebar reloads; the drop keeps

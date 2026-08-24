@@ -575,28 +575,6 @@ final class SidebarSystemStatsView: NSView {
 
 // MARK: - The sidebar
 
-/// The blue the glass column wears. Its backing layer *is* the gradient, so
-/// the wash resizes with the sheet and there is no sublayer frame for anyone
-/// to keep in step.
-private final class SidebarGlassTintView: NSView {
-    override func makeBackingLayer() -> CALayer {
-        let layer = CAGradientLayer()
-        layer.colors = ShellPalette.sidebarGlassTint.map(\.cgColor)
-        // (0.5, 1) is the top of a layer's y-up unit space — the direction
-        // `NSGradient`'s -90° gave the opaque gradient this replaces.
-        layer.startPoint = CGPoint(x: 0.5, y: 1)
-        layer.endPoint = CGPoint(x: 0.5, y: 0)
-        return layer
-    }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-}
 
 /// The sidebar itself: one flat column, top to bottom — nav rows, the
 /// Workspaces section with the workspaces tree, the account row.
@@ -706,7 +684,7 @@ final class NavigationSidebarView: NSView {
         // rather than by an autoresizing mask: the mask scales from this
         // view's own frame, which at init is whatever the caller passed —
         // usually zero, and zero scales to zero.
-        let tint = SidebarGlassTintView()
+        let tint = ShellGlassTintView()
         if let glass = WorkspaceGlass.sheet(content: tint) {
             glassHost = glass
             glassTint = tint
