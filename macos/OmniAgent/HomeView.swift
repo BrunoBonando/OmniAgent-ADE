@@ -6,9 +6,10 @@ import AppKit
 // the "Under development" placeholder for `.home` only; To Do List keeps the
 // placeholder.
 //
-// A pure design surface, by decision (2026-08-22): nothing on it acts yet —
-// no control starts a session or routes anywhere. The behavior comes as its
-// own step, on top of this screen.
+// Interactive but inert, by decision (2026-08-24 revision of the 2026-08-22
+// design-only rule): every control hovers, focuses and presses like the real
+// thing — the composer takes typing — but every press lands in a deliberately
+// empty `onPress`. The behavior comes as its own step, on top of this screen.
 //
 // Deliberately all AppKit, on the same `ShellPalette`/`ShellFont` tokens the
 // sidebar wears, and transparent throughout — `PaneGroundView` behind it is
@@ -17,10 +18,73 @@ import AppKit
 
 // MARK: - Small parts
 
+/// The hover, cursor, key and press machinery every interactive Home element
+/// shares — `ShellRowView`'s idiom, without the row. A view with no `onPress`
+/// is scenery: no hover paint, no hand cursor, no key handling. Presses fire,
+/// and every press on this screen is wired to an empty closure on purpose —
+/// the feel ships now, the behavior later.
+class HomeInteractiveView: NSView {
+    var onPress: (() -> Void)?
+    private(set) var isHovered = false
+    private var tracking: NSTrackingArea?
+
+    override var acceptsFirstResponder: Bool { onPress != nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    /// The tests' way in, and the tracking area's: one path for both.
+    func setHovered(_ hovered: Bool) {
+        guard onPress != nil, hovered != isHovered else { return }
+        isHovered = hovered
+        applyHover()
+    }
+
+    /// Override point: paint the hovered/base state from `isHovered`.
+    func applyHover() {}
+
+    override func resetCursorRects() {
+        guard onPress != nil else { return }
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard onPress != nil,
+              bounds.contains(convert(event.locationInWindow, from: nil))
+        else { return super.mouseUp(with: event) }
+        onPress?()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let key = event.charactersIgnoringModifiers
+        if onPress != nil, key == "\r" || key == " " {
+            onPress?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
 /// A rounded token-styled card — the composer, the suggestions, and every
-/// section body wear this.
-final class HomeCardView: NSView {
+/// section body wear this. With an `onPress` it hovers into the brighter
+/// fill-and-stroke pair the design gives clickable cards.
+final class HomeCardView: HomeInteractiveView {
+    private let baseFill: NSColor
+
     init(cornerRadius: CGFloat = 12, fill: NSColor = ShellPalette.cardFill) {
+        baseFill = fill
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
@@ -33,11 +97,85 @@ final class HomeCardView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func applyHover() {
+        layer?.backgroundColor = (isHovered ? ShellPalette.cardFillHover : baseFill).cgColor
+        layer?.borderColor = (isHovered ? ShellPalette.cardStrokeHover : ShellPalette.cardStroke).cgColor
+    }
+
+    /// The composer's editing state wears the hover stroke without the hover
+    /// fill — a focus ring in the design's own vocabulary.
+    func setFocused(_ focused: Bool) {
+        layer?.borderColor = (focused ? ShellPalette.cardStrokeHover : ShellPalette.cardStroke).cgColor
+    }
+}
+
+/// An invisible hover tile around an inline control — the composer's plus,
+/// engine chip, "Auto" and send, the meta strip's "Add workspace", the
+/// release card's changelog link. Base and hover fills are configurable so
+/// the send circle can keep its accent pair.
+final class HomeHotspotView: HomeInteractiveView {
+    private let baseFill: NSColor
+    private let hoverFill: NSColor
+
+    init(
+        wrapping content: NSView,
+        padding: NSEdgeInsets = NSEdgeInsets(top: 4, left: 6, bottom: 4, right: 6),
+        cornerRadius: CGFloat = 6,
+        baseFill: NSColor = .clear,
+        hoverFill: NSColor = ShellPalette.hover,
+        accessibilityLabel: String
+    ) {
+        self.baseFill = baseFill
+        self.hoverFill = hoverFill
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        layer?.cornerRadius = cornerRadius
+        layer?.cornerCurve = .continuous
+        layer?.backgroundColor = baseFill.cgColor
+        content.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding.left),
+            content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding.right),
+            content.topAnchor.constraint(equalTo: topAnchor, constant: padding.top),
+            content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -padding.bottom),
+        ])
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(accessibilityLabel)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func applyHover() {
+        layer?.backgroundColor = (isHovered ? hoverFill : baseFill).cgColor
+    }
+}
+
+/// The composer's real text field: type into it and it takes the words; only
+/// sending them anywhere is still to come. Focus is surfaced so the card can
+/// wear its editing stroke.
+final class HomeComposerField: NSTextField {
+    var onFocusChange: ((Bool) -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { onFocusChange?(true) }
+        return became
+    }
+
+    override func textDidEndEditing(_ notification: Notification) {
+        super.textDidEndEditing(notification)
+        onFocusChange?(false)
+    }
 }
 
 /// The design's small secondary button: icon-tile fill, card stroke, 12.5pt
-/// medium label. Renders only — the whole screen is design-only for now.
-final class HomePillView: NSView {
+/// medium label, and the brighter fill on hover.
+final class HomePillView: HomeInteractiveView {
     let label: NSTextField
 
     init(_ title: String) {
@@ -60,10 +198,17 @@ final class HomePillView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel(title)
+        // Interactive from birth — and inert from birth, like the rest of
+        // the screen.
+        onPress = {}
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func applyHover() {
+        layer?.backgroundColor = (isHovered ? ShellPalette.cardFillHover : ShellPalette.iconTile).cgColor
+    }
 }
 
 // MARK: - Home
@@ -72,11 +217,26 @@ final class HomeSurfaceView: NSView {
     // Exposed for the tests, which assert the design's words without walking
     // the whole tree.
     let composerCard = HomeCardView(cornerRadius: 14, fill: ShellPalette.fieldFill)
-    let composerPrompt = ShellFont.label(
-        "Ask anything, or start a session. Use / for commands…",
-        font: ShellFont.ui(14),
-        color: ShellPalette.inkMuted
-    )
+    let composerPrompt: HomeComposerField = {
+        let field = HomeComposerField()
+        field.isBordered = false
+        field.isBezeled = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = ShellFont.ui(14)
+        field.textColor = ShellPalette.ink
+        field.placeholderAttributedString = NSAttributedString(
+            string: "Ask anything, or start a session. Use / for commands…",
+            attributes: [
+                .foregroundColor: ShellPalette.inkMuted,
+                .font: ShellFont.ui(14),
+            ]
+        )
+        field.lineBreakMode = .byTruncatingTail
+        field.usesSingleLineMode = true
+        field.translatesAutoresizingMaskIntoConstraints = false
+        return field
+    }()
     private(set) var suggestionCards: [HomeCardView] = []
     let viewAllPill = HomePillView("View all")
     let addWorkspaceLabel = ShellFont.label(
@@ -94,6 +254,7 @@ final class HomeSurfaceView: NSView {
         font: ShellFont.ui(13.5, .semibold),
         color: ShellPalette.ink
     )
+    private(set) var sendControl: HomeHotspotView?
 
     private let column = NSStackView()
 
@@ -191,42 +352,66 @@ final class HomeSurfaceView: NSView {
     }
 
     private func buildComposer() {
+        composerPrompt.onFocusChange = { [weak self] focused in
+            self?.composerCard.setFocused(focused)
+        }
+
         let engine = EngineLauncher.defaultEngine()
         let engineIcon = NSImageView()
         engineIcon.image = engine.iconImage
         engineIcon.contentTintColor = ShellPalette.inkSecondary
         engineIcon.imageScaling = .scaleProportionallyDown
+        engineIcon.translatesAutoresizingMaskIntoConstraints = false
         let engineName = ShellFont.label(
             engine.displayName,
             font: ShellFont.ui(12.5, .medium),
             color: ShellPalette.inkSecondary
         )
-        let auto = ShellFont.label("Auto", font: ShellFont.ui(12.5), color: ShellPalette.inkTertiary)
+        let chipStack = NSStackView(views: [engineIcon, engineName])
+        chipStack.orientation = .horizontal
+        chipStack.spacing = 7
+        let engineChip = HomeHotspotView(
+            wrapping: chipStack,
+            accessibilityLabel: "Engine: \(engine.displayName)"
+        )
+        engineChip.onPress = {}
 
-        let send = NSView()
-        send.translatesAutoresizingMaskIntoConstraints = false
-        send.wantsLayer = true
-        send.layer?.cornerRadius = 16
-        send.layer?.backgroundColor = ShellPalette.accentIconTile.cgColor
+        let plus = HomeHotspotView(
+            wrapping: symbol("plus", pointSize: 13, weight: .medium, color: ShellPalette.inkTertiary),
+            accessibilityLabel: "Attach"
+        )
+        plus.onPress = {}
+
+        let auto = HomeHotspotView(
+            wrapping: ShellFont.label("Auto", font: ShellFont.ui(12.5), color: ShellPalette.inkTertiary),
+            accessibilityLabel: "Model: Auto"
+        )
+        auto.onPress = {}
+
+        let sendBox = NSView()
+        sendBox.translatesAutoresizingMaskIntoConstraints = false
         let arrow = symbol("arrow.up", pointSize: 13, weight: .semibold, color: ShellPalette.accentBright)
-        send.addSubview(arrow)
+        sendBox.addSubview(arrow)
+        let send = HomeHotspotView(
+            wrapping: sendBox,
+            padding: NSEdgeInsets(),
+            cornerRadius: 16,
+            baseFill: ShellPalette.accentIconTile,
+            hoverFill: ShellPalette.accentRail,
+            accessibilityLabel: "Send"
+        )
+        send.onPress = {}
+        sendControl = send
 
         let separator = NSView()
         separator.translatesAutoresizingMaskIntoConstraints = false
         separator.wantsLayer = true
         separator.layer?.backgroundColor = ShellPalette.cardStroke.cgColor
 
-        let controls = NSStackView(views: [
-            symbol("plus", pointSize: 13, weight: .medium, color: ShellPalette.inkTertiary),
-            engineIcon, engineName, separator, auto, NSView(), send,
-        ])
+        let controls = NSStackView(views: [plus, engineChip, separator, auto, NSView(), send])
         controls.orientation = .horizontal
         controls.alignment = .centerY
-        controls.spacing = 10
-        controls.setCustomSpacing(14, after: controls.arrangedSubviews[0])
-        controls.setCustomSpacing(7, after: engineIcon)
-        controls.setCustomSpacing(14, after: engineName)
-        controls.setCustomSpacing(14, after: separator)
+        controls.spacing = 8
         controls.translatesAutoresizingMaskIntoConstraints = false
 
         let meta = buildComposerMeta()
@@ -240,14 +425,14 @@ final class HomeSurfaceView: NSView {
             engineIcon.heightAnchor.constraint(equalToConstant: 16),
             separator.widthAnchor.constraint(equalToConstant: 1),
             separator.heightAnchor.constraint(equalToConstant: 16),
-            send.widthAnchor.constraint(equalToConstant: 32),
-            send.heightAnchor.constraint(equalToConstant: 32),
-            arrow.centerXAnchor.constraint(equalTo: send.centerXAnchor),
-            arrow.centerYAnchor.constraint(equalTo: send.centerYAnchor),
+            sendBox.widthAnchor.constraint(equalToConstant: 32),
+            sendBox.heightAnchor.constraint(equalToConstant: 32),
+            arrow.centerXAnchor.constraint(equalTo: sendBox.centerXAnchor),
+            arrow.centerYAnchor.constraint(equalTo: sendBox.centerYAnchor),
 
             composerPrompt.topAnchor.constraint(equalTo: composerCard.topAnchor, constant: 20),
             composerPrompt.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 20),
-            composerPrompt.trailingAnchor.constraint(lessThanOrEqualTo: composerCard.trailingAnchor, constant: -20),
+            composerPrompt.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -20),
             controls.topAnchor.constraint(equalTo: composerPrompt.bottomAnchor, constant: 18),
             controls.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 16),
             controls.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -14),
@@ -273,9 +458,11 @@ final class HomeSurfaceView: NSView {
 
         let rule = ShellSeparator()
         let addIcon = symbol("plus", pointSize: 10, weight: .medium, color: ShellPalette.inkMuted)
-        let add = NSStackView(views: [addIcon, addWorkspaceLabel])
-        add.orientation = .horizontal
-        add.spacing = 6
+        let addStack = NSStackView(views: [addIcon, addWorkspaceLabel])
+        addStack.orientation = .horizontal
+        addStack.spacing = 6
+        let add = HomeHotspotView(wrapping: addStack, accessibilityLabel: "Add workspace")
+        add.onPress = {}
         let chip = NSStackView(views: [workspaceChipTile, workspaceChipName])
         chip.orientation = .horizontal
         chip.spacing = 7
@@ -296,9 +483,6 @@ final class HomeSurfaceView: NSView {
             row.trailingAnchor.constraint(equalTo: strip.trailingAnchor, constant: -16),
         ])
 
-        add.setAccessibilityElement(true)
-        add.setAccessibilityRole(.button)
-        add.setAccessibilityLabel("Add workspace")
         return strip
     }
 
@@ -310,6 +494,7 @@ final class HomeSurfaceView: NSView {
         ]
         let cards = suggestions.map { name, text in
             let card = HomeCardView()
+            card.onPress = {}
             let icon = symbol(name, pointSize: 15, weight: .regular, color: ShellPalette.inkTertiary)
             let body = wrapping(text, font: ShellFont.ui(13), color: ShellPalette.inkSecondary)
             card.addSubview(icon)
@@ -475,11 +660,13 @@ final class HomeSurfaceView: NSView {
             ])
             return row
         }
-        let changelog = ShellFont.label(
+        let changelogLabel = ShellFont.label(
             "Read changelog ↗",
             font: ShellFont.ui(13, .medium),
             color: ShellPalette.accentBright
         )
+        let changelog = HomeHotspotView(wrapping: changelogLabel, accessibilityLabel: "Read changelog")
+        changelog.onPress = {}
         let changes = NSStackView(views: bullets + [changelog])
         changes.orientation = .vertical
         changes.alignment = .leading

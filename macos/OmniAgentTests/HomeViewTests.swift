@@ -1,9 +1,10 @@
 import XCTest
 @testable import OmniAgent
 
-/// The Home screen: the design's words and a layout pass that must not throw
-/// the constraint engine. Deliberately no behavior tests — the screen is a
-/// pure design surface for now (2026-08-22): nothing on it acts.
+/// The Home screen: the design's words, the interactive feel, and a layout
+/// pass that must not throw the constraint engine. The controls hover, focus
+/// and press like the real thing, and every press is deliberately inert
+/// (2026-08-24) — so these tests assert the feel, never an effect.
 final class HomeViewTests: XCTestCase {
     private func makeHome() -> HomeSurfaceView {
         let home = HomeSurfaceView()
@@ -23,9 +24,13 @@ final class HomeViewTests: XCTestCase {
 
     /// The design's sections and copy are on screen.
     func testTheHomeScreenSaysWhatTheDesignSays() {
-        let labels = allLabels(in: makeHome())
+        let home = makeHome()
+        XCTAssertEqual(
+            home.composerPrompt.placeholderAttributedString?.string,
+            "Ask anything, or start a session. Use / for commands…"
+        )
+        let labels = allLabels(in: home)
         for expected in [
-            "Ask anything, or start a session. Use / for commands…",
             "Up next",
             "You're all caught up",
             "Extend your experience",
@@ -56,6 +61,49 @@ final class HomeViewTests: XCTestCase {
 
         home.refresh(workspaceID: nil, workspaceName: nil)
         XCTAssertEqual(home.workspaceChipName.stringValue, "No workspace")
+    }
+
+    /// A suggestion card and a pill wear the brighter fill under the pointer
+    /// and put it back when it leaves; the pointer's paint never fires an
+    /// effect because every press on this screen is an empty closure.
+    func testHoverPaintsAndUnpaintsTheInteractiveFills() throws {
+        let home = makeHome()
+        let card = try XCTUnwrap(home.suggestionCards.first)
+        XCTAssertNotNil(card.onPress, "a suggestion card is interactive")
+        card.setHovered(true)
+        XCTAssertEqual(card.layer?.backgroundColor, ShellPalette.cardFillHover.cgColor)
+        XCTAssertEqual(card.layer?.borderColor, ShellPalette.cardStrokeHover.cgColor)
+        card.setHovered(false)
+        XCTAssertEqual(card.layer?.backgroundColor, ShellPalette.cardFill.cgColor)
+        XCTAssertEqual(card.layer?.borderColor, ShellPalette.cardStroke.cgColor)
+
+        home.viewAllPill.setHovered(true)
+        XCTAssertEqual(home.viewAllPill.layer?.backgroundColor, ShellPalette.cardFillHover.cgColor)
+        home.viewAllPill.setHovered(false)
+        XCTAssertEqual(home.viewAllPill.layer?.backgroundColor, ShellPalette.iconTile.cgColor)
+
+        // Inert by decision: pressing must be possible and must do nothing.
+        card.onPress?()
+        home.viewAllPill.onPress?()
+        home.sendControl?.onPress?()
+    }
+
+    /// The composer takes typing, and editing wears the design's focus
+    /// stroke on the card.
+    func testTheComposerTakesTypingAndWearsTheFocusStroke() {
+        let home = makeHome()
+        XCTAssertTrue(home.composerPrompt.isEditable)
+
+        home.composerCard.setFocused(true)
+        XCTAssertEqual(home.composerCard.layer?.borderColor, ShellPalette.cardStrokeHover.cgColor)
+        home.composerCard.setFocused(false)
+        XCTAssertEqual(home.composerCard.layer?.borderColor, ShellPalette.cardStroke.cgColor)
+
+        // The card itself is scenery — no press, so no hover paint and no
+        // hand cursor.
+        XCTAssertNil(home.composerCard.onPress)
+        home.composerCard.setHovered(true)
+        XCTAssertEqual(home.composerCard.layer?.backgroundColor, ShellPalette.fieldFill.cgColor)
     }
 
     /// A full layout pass at a real window size, over the real pane ground,
