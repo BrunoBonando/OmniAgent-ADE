@@ -130,6 +130,33 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(labels.count, 1)
     }
 
+    /// The mechanism Task 2 turns on, at the view level: a *second*
+    /// `appendMessages` that extends the turn already on screen must rebuild
+    /// that one row in place, and a third that flips role must add one beside
+    /// it. Every other turn test either calls `appendMessages` once or works
+    /// on `TranscriptTurn` directly, so the remove-and-rebuild loop had only
+    /// ever run with nothing to remove — an off-by-one in it would duplicate
+    /// or drop a row and nothing would notice.
+    func testASecondAppendRebuildsTheGrowingTurnInPlace() {
+        let view = makeView()
+        view.appendMessages([
+            TranscriptMessage(id: "1", isUser: true, blocks: [.text("hi")]),
+            TranscriptMessage(id: "2", isUser: false, blocks: [.text("on it")]),
+        ])
+        XCTAssertEqual(view.descendants(PaneAppMessageRowView.self).count, 2)
+
+        // Same role as the row already on screen: it grows, it does not
+        // gain a neighbour.
+        view.appendMessages([TranscriptMessage(id: "3", isUser: false, blocks: [.text("done")])])
+        XCTAssertEqual(view.descendants(PaneAppMessageRowView.self).count, 2)
+        XCTAssertEqual(rowTexts(of: view), ["hi", "on it done"])
+
+        // A role flip opens a row instead, leaving the rebuilt one alone.
+        view.appendMessages([TranscriptMessage(id: "4", isUser: true, blocks: [.text("thanks")])])
+        XCTAssertEqual(view.descendants(PaneAppMessageRowView.self).count, 3)
+        XCTAssertEqual(rowTexts(of: view), ["hi", "on it done", "thanks"])
+    }
+
     // MARK: - Tool labels
 
     /// A `Bash` command is routinely a multi-line script. The tool line is a
@@ -145,6 +172,16 @@ final class PaneAppViewTests: XCTestCase {
             multi.intrinsicContentSize.height,
             single.intrinsicContentSize.height,
             accuracy: 0.5
+        )
+    }
+
+    /// And it flattens to *one* space per break, whatever the breaks are: a
+    /// blank line, a `\r\n`, or a detail that opens or closes with a newline
+    /// all used to leave doubled or dangling spaces in the label.
+    func testToolLabelCollapsesRunsOfNewlinesToASingleSpace() {
+        XCTAssertEqual(
+            PaneAppView.toolLabel(name: "Bash", detail: "\r\necho one\n\necho two\n").stringValue,
+            "▸ Bash  echo one echo two"
         )
     }
 
@@ -207,6 +244,16 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(blocks, [.paragraph("| a | b |\n| 1 | 2 |")])
     }
 
+    /// Prose wrapped across several lines is one paragraph, not one paragraph
+    /// per line. The scanner only breaks a paragraph on a blank line or a
+    /// line that opens another block — and the block-per-line regression is
+    /// invisible in every other fixture here, all of which are single-line,
+    /// while on screen it would change the spacing of every reply.
+    func testParseKeepsAMultiLineParagraphWhole() {
+        let blocks = MarkdownBlock.parse("first line\nsecond line\nthird line")
+        XCTAssertEqual(blocks, [.paragraph("first line\nsecond line\nthird line")])
+    }
+
     func testParseKeepsBlocksInOrder() {
         let blocks = MarkdownBlock.parse("# Title\npara\n- item\n```\ncode\n```")
         XCTAssertEqual(blocks, [
@@ -245,6 +292,29 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(lines[2], "1")
     }
 
+    /// One column is where both halves of the renderer degenerate: nothing to
+    /// `joined(separator: "  ")` between, and the trailing-space trim is the
+    /// only thing left keeping the padding off the end of every line.
+    func testRenderTableWithASingleColumn() {
+        let rendered = PaneAppView.renderTable(header: ["name"], rows: [["Swift"], ["CSS"]])
+
+        XCTAssertEqual(rendered.components(separatedBy: "\n"), ["name", "─────", "Swift", "CSS"])
+    }
+
+    /// A body row *wider* than its header. Ordinary enough in markdown, and
+    /// the failure mode of the obvious simplification (`columns =
+    /// header.count`) is not a misrender: it is `Array(repeating:count:)`
+    /// with a negative count, which traps — an app crash on well-formed
+    /// input.
+    func testRenderTableKeepsABodyRowWiderThanItsHeader() {
+        let rendered = PaneAppView.renderTable(header: ["a"], rows: [["1", "2"]])
+        let lines = rendered.components(separatedBy: "\n")
+
+        XCTAssertEqual(lines.count, 3)
+        XCTAssertEqual(lines[0], "a")
+        XCTAssertEqual(lines[2], "1  2", "the column the header never had is still rendered")
+    }
+
     /// A table reaches the row as one monospaced card, not as prose.
     func testATableRendersAsAMonospacedBlock() {
         let row = PaneAppMessageRowView(turn: TranscriptTurn(
@@ -270,6 +340,25 @@ final class PaneAppViewTests: XCTestCase {
 
         XCTAssertGreaterThan(headingSize, proseSize)
         XCTAssertEqual(heading.stringValue, "Results")
+    }
+
+    /// A heading runs through the same inline parser its paragraphs do —
+    /// `### The \`parse\` scanner` is routine Claude output, and a plain
+    /// label printed its backticks. The code run is monospaced at the
+    /// *heading's* size, not body size.
+    func testAHeadingRendersInlineCodeRatherThanItsBackticks() throws {
+        let heading = PaneAppView.headingLabel(level: 2, text: "The `parse` scanner")
+        XCTAssertEqual(heading.stringValue, "The parse scanner", "no literal backticks")
+
+        let attributed = heading.attributedStringValue
+        let codeRange = (attributed.string as NSString).range(of: "parse")
+        let codeFont = try XCTUnwrap(
+            attributed.attribute(.font, at: codeRange.location, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertEqual(codeFont, ShellFont.mono(15))
+
+        let plainFont = try XCTUnwrap(attributed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        XCTAssertEqual(plainFont, ShellFont.ui(15, .semibold), "the rest keeps the heading's own weight")
     }
 
     /// List items get their marker and stay one view per item, so a long item
@@ -375,11 +464,42 @@ final class PaneAppViewTests: XCTestCase {
         let group = PaneAppWorkGroupView(calls: [("Bash", "ls"), ("Bash", "pwd")])
         let detail = group.descendants(NSTextField.self).filter { $0.stringValue.hasPrefix("▸") }
         XCTAssertEqual(detail.count, 2, "detail is built up front, not on expand")
+        let collapsedHeight = group.fittingSize.height
 
         group.toggle()
 
         XCTAssertTrue(group.isExpanded)
         XCTAssertFalse(detail[0].isHiddenOrHasHiddenAncestor)
+        // Unhiding alone is not revealing: a stack that never relaid out
+        // would pass the assertion above and still draw nothing but the
+        // header. The group has to get taller.
+        XCTAssertGreaterThan(group.fittingSize.height, collapsedHeight)
+    }
+
+    /// A reply lands a row every ~0.3s for as long as it runs, and each one
+    /// rebuilds the growing turn's row from scratch. A group the user opened
+    /// mid-reply has to come back open, or it slams shut on the next poll and
+    /// goes on doing it for the rest of the turn.
+    func testAnExpandedWorkGroupSurvivesItsTurnGrowing() throws {
+        let view = makeView()
+        view.appendMessages([
+            TranscriptMessage(id: "1", isUser: false, blocks: [
+                .tool(name: "Bash", detail: "ls"),
+                .tool(name: "Bash", detail: "pwd"),
+            ]),
+        ])
+        let group = try XCTUnwrap(view.descendants(PaneAppWorkGroupView.self).first)
+        group.toggle()
+        XCTAssertTrue(group.isExpanded)
+
+        // The rest of the same reply — the reader drops `tool_result` rows,
+        // so this stays one turn and that row is destroyed and rebuilt.
+        view.appendMessages([TranscriptMessage(id: "2", isUser: false, blocks: [.text("done")])])
+
+        XCTAssertEqual(view.descendants(PaneAppMessageRowView.self).count, 1)
+        let rebuilt = try XCTUnwrap(view.descendants(PaneAppWorkGroupView.self).first)
+        XCTAssertFalse(rebuilt === group, "the row really was rebuilt, so this is not a trivial pass")
+        XCTAssertTrue(rebuilt.isExpanded, "an expanded group must not snap shut mid-reply")
     }
 
     // MARK: - Markdown
@@ -494,6 +614,32 @@ final class PaneAppViewTests: XCTestCase {
         let glass = try XCTUnwrap(container.subviews.first as? NSGlassEffectView)
         XCTAssertEqual(glass.style, .regular, "the approval card's own material")
         XCTAssertNil(glass.tintColor, "no wash of colour over it")
+    }
+
+    /// Focus has to be visible. `focusRingType` is `.none` and the field's
+    /// own bordered container is gone (it folded into the glass), so without
+    /// a stroke of its own a focused composer is pixel-identical to an idle
+    /// one and nothing on screen says where keystrokes are going.
+    func testFocusingTheComposerStrokesTheGlass() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        let window = show(view)
+        defer { window.close() }
+        let container = try XCTUnwrap(view.composerField.superview)
+        let restingWidth = container.layer?.borderWidth ?? 0
+
+        XCTAssertTrue(window.makeFirstResponder(view.composerField), "the composer takes focus")
+
+        XCTAssertEqual(container.layer?.borderWidth, 1)
+        XCTAssertEqual(
+            container.layer?.borderColor,
+            ShellPalette.accent.withAlphaComponent(0.5).cgColor,
+            "the accent stroke, the same one the field's own container wore before Task 6"
+        )
+
+        // And it goes away again: a permanent stroke says "focused" forever.
+        XCTAssertTrue(window.makeFirstResponder(nil))
+        XCTAssertEqual(container.layer?.borderWidth, restingWidth)
     }
 
     /// Attach puts the path into the draft, which is what the transport can
@@ -728,16 +874,26 @@ final class PaneAppViewTests: XCTestCase {
     }
 
     /// The complementary case: a user already at the bottom follows new
-    /// messages down.
+    /// messages down — all the way down.
+    ///
+    /// "The bottom" is the end of the *scrollable range*, not the document's
+    /// bottom edge: `contentInsets.bottom` pads the range by the glass
+    /// composer's height precisely so the last row can travel past it.
+    /// Pinning `clip.bounds.maxY` to the document height alone (which this
+    /// test did until the whole-branch review) asserts the exact position
+    /// that leaves the newest reply sitting under the composer, and is why
+    /// that bug shipped.
     func testAppendingWhileAtTheBottomScrollsToTheBottom() throws {
         let view = makeView()
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 120)
         view.appendMessages(manyMessages(count: 10, startingAt: 0))
 
         let clip = try scrollClipView(in: view)
+        let inset = view.scrollView.contentInsets.bottom
+        XCTAssertGreaterThan(inset, 40, "the composer's clearance is what makes this test mean anything")
         let documentHeight = try messageStackHeight(in: view)
         XCTAssertEqual(
-            clip.bounds.maxY, documentHeight, accuracy: 1,
+            clip.bounds.maxY, documentHeight + inset, accuracy: 1,
             "the initial append (nothing on screen yet) scrolls to the bottom"
         )
 
@@ -745,8 +901,31 @@ final class PaneAppViewTests: XCTestCase {
         let newDocumentHeight = try messageStackHeight(in: view)
         XCTAssertGreaterThan(newDocumentHeight, documentHeight, "the second batch must actually have grown the content")
         XCTAssertEqual(
-            clip.bounds.maxY, newDocumentHeight, accuracy: 1,
+            clip.bounds.maxY, newDocumentHeight + inset, accuracy: 1,
             "still at the bottom, so the second append follows the new messages down"
+        )
+    }
+
+    /// What the inset is *for*, asserted where a reader can see it: after an
+    /// append that follows the conversation down, the last row's bottom edge
+    /// is clear of the glass composer rather than behind it.
+    ///
+    /// Measured in the view's own coordinates against the glass's real frame,
+    /// so it holds whatever the composer's height works out to. Under the
+    /// pre-review `scrollToBottom` this row's bottom sat at y = 0 — a whole
+    /// clearance under the glass.
+    func testTheNewestRowScrollsClearOfTheComposer() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
+        view.appendMessages(manyMessages(count: 10, startingAt: 0))
+
+        let glass = try XCTUnwrap(view.composerField.superview)
+        let lastRow = try XCTUnwrap(view.descendants(PaneAppMessageRowView.self).last)
+        let rowInView = lastRow.convert(lastRow.bounds, to: view)
+
+        XCTAssertGreaterThanOrEqual(
+            rowInView.minY, glass.frame.maxY - 1,
+            "the newest message must not park under the composer"
         )
     }
 
@@ -771,23 +950,54 @@ final class PaneAppViewTests: XCTestCase {
 
     // MARK: - Offscreen render
 
-    /// A full layout pass at a real pane size, with a couple of rendered
-    /// messages — one with a fenced code block, one with a tool call — and
-    /// the composer beneath, neither throws nor collapses. Drops a PNG when
-    /// `PANE_RENDER_DIR` is set
+    /// A full layout pass at a real pane size, with one message of every kind
+    /// this view knows how to draw — prose, a heading, a list, a fenced code
+    /// block, a table, an inline single tool call and a collapsed work group
+    /// — behind the glass composer, neither throws nor collapses. Drops a PNG
+    /// when `PANE_RENDER_DIR` is set
     /// (`TEST_RUNNER_PANE_RENDER_DIR=/tmp/pane-app ./macos/build.sh test`).
+    ///
+    /// The fixture is deliberately the whole vocabulary: this is the only
+    /// test that lays every block kind out together at a real width, so a
+    /// constraint that only conflicts in company shows up here or nowhere.
     func testTheAppViewLaysOutOffscreen() throws {
         let view = makeView()
         view.frame = NSRect(x: 0, y: 0, width: 420, height: 640)
         view.appendMessages([
             TranscriptMessage(id: "1", isUser: true, blocks: [.text("Can you check the build?")]),
             TranscriptMessage(id: "2", isUser: false, blocks: [
-                .text("Sure — running it now. Here's the **relevant** bit:\n\n```swift\nlet x = 1\n```"),
+                .text("""
+                Sure — running it now. Here's the **relevant** bit:
+
+                ## Findings
+
+                - the scanner keeps its fences
+                - the table lines up
+
+                ```swift
+                let x = 1
+                ```
+
+                | target | tests |
+                |---|---|
+                | OmniAgent | 1280 |
+                | mcp-server | 42 |
+                """),
+                .tool(name: "Read", detail: "macos/OmniAgent/PaneAppView.swift"),
+                .text("Then the suite:"),
                 .tool(name: "Bash", detail: "./macos/build.sh test"),
+                .tool(name: "Bash", detail: "git status --short"),
             ]),
         ])
         let window = show(view)
         defer { window.close() }
+
+        // The vocabulary really is all on screen — a fixture that silently
+        // stopped producing a group or a table would still render.
+        XCTAssertEqual(view.descendants(PaneAppWorkGroupView.self).count, 1, "the two Bash calls")
+        let labels = view.descendants(NSTextField.self).map(\.stringValue)
+        XCTAssertTrue(labels.contains { $0.contains("─") }, "the table's rule row")
+        XCTAssertTrue(labels.contains("▸ Read  macos/OmniAgent/PaneAppView.swift"), "the inline single call")
 
         let rep = try XCTUnwrap(render(view))
         saveRenderForInspection(rep, named: "pane-app-view")

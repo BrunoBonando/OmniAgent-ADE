@@ -111,8 +111,10 @@ enum MarkdownBlock: Equatable {
     }
 
     /// The cells of one `|`-delimited row, outer pipes dropped and each cell
-    /// trimmed. Internal so the table tests can build expectations with it.
-    static func cells(_ line: String) -> [String] {
+    /// trimmed. `private`: nothing outside this scanner splits a pipe row —
+    /// the table tests assert on the `.table` case `parse` hands back, which
+    /// is the shape that actually reaches a view.
+    private static func cells(_ line: String) -> [String] {
         var text = line.trimmingCharacters(in: .whitespaces)
         if text.hasPrefix("|") { text.removeFirst() }
         if text.hasSuffix("|") { text.removeLast() }
@@ -212,6 +214,11 @@ final class PaneAppView: NSView {
         let container = NSView()
         container.wantsLayer = true
         container.translatesAutoresizingMaskIntoConstraints = false
+        // Set on both branches, not just the flat-card one: the focus stroke
+        // (`setComposerFocused`) rides on *this* layer's border, and a border
+        // with no radius would square off the glass's rounded corners.
+        container.layer?.cornerRadius = 14
+        container.layer?.cornerCurve = .continuous
         if let glass = WorkspaceGlass.sheet(cornerRadius: 14) {
             glass.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(glass)
@@ -222,14 +229,17 @@ final class PaneAppView: NSView {
                 glass.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             ])
         } else {
-            container.layer?.cornerRadius = 14
-            container.layer?.cornerCurve = .continuous
             container.layer?.backgroundColor = ShellPalette.fieldFill.cgColor
             container.layer?.borderWidth = 1
             container.layer?.borderColor = ShellPalette.hairlineStrong.cgColor
         }
         return container
     }()
+    /// The glass container's stroke while the composer is *not* focused —
+    /// captured in `init` from whichever branch above built it (nothing at
+    /// all over real glass, the flat card's hairline before macOS 26) so
+    /// `setComposerFocused` can put it back exactly rather than guessing.
+    private var composerRestingBorder: (width: CGFloat, color: CGColor?) = (0, nil)
     /// Internal rather than `private` so the composer tests can read and set
     /// the draft directly.
     let composerField: HomeComposerField = {
@@ -323,6 +333,10 @@ final class PaneAppView: NSView {
 
         composerField.target = self
         composerField.action = #selector(submitComposer)
+        composerRestingBorder = (composerGlass.layer?.borderWidth ?? 0, composerGlass.layer?.borderColor)
+        composerField.onFocusChange = { [weak self] focused in
+            self?.setComposerFocused(focused)
+        }
 
         let attachButton = Self.composerButton(symbol: "paperclip", accessibility: "Attach a file")
         attachButton.target = self
@@ -344,7 +358,18 @@ final class PaneAppView: NSView {
             addSubview(view)
         }
 
+        // What the reader can actually see: the scroll view runs the full
+        // height *behind* the glass, so centring "Nothing yet." in it would
+        // sit it a glass-height below the optical centre.
+        let readableArea = NSLayoutGuide()
+        addLayoutGuide(readableArea)
+
         NSLayoutConstraint.activate([
+            readableArea.topAnchor.constraint(equalTo: topAnchor),
+            readableArea.leadingAnchor.constraint(equalTo: leadingAnchor),
+            readableArea.trailingAnchor.constraint(equalTo: trailingAnchor),
+            readableArea.bottomAnchor.constraint(equalTo: composerGlass.topAnchor),
+
             // Full height: the transcript scrolls *behind* the glass, and the
             // content inset below is what keeps the last message reachable.
             scrollView.topAnchor.constraint(equalTo: topAnchor),
@@ -352,8 +377,8 @@ final class PaneAppView: NSView {
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            emptyStateLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
-            emptyStateLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+            emptyStateLabel.centerXAnchor.constraint(equalTo: readableArea.centerXAnchor),
+            emptyStateLabel.centerYAnchor.constraint(equalTo: readableArea.centerYAnchor),
 
             composerGlass.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.composerGlassMargin),
             composerGlass.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.composerGlassMargin),
@@ -411,6 +436,22 @@ final class PaneAppView: NSView {
     /// built from, rather than a second constant that could disagree with it.
     private static let composerGlassMargin: CGFloat = 12
 
+    /// The only thing on screen that says where keystrokes are going. The
+    /// field's own bordered container is gone — it folded into the glass —
+    /// and `focusRingType` is `.none`, so without this a focused and an
+    /// unfocused composer are pixel-identical.
+    ///
+    /// The stroke rides on the glass *container's* layer, which is the
+    /// composer's outer edge now that the inner one is gone: a layer's border
+    /// draws over its own sublayers, so it stays visible above the glass
+    /// panel filling it.
+    private func setComposerFocused(_ focused: Bool) {
+        composerGlass.layer?.borderWidth = focused ? 1 : composerRestingBorder.width
+        composerGlass.layer?.borderColor = focused
+            ? ShellPalette.accent.withAlphaComponent(0.5).cgColor
+            : composerRestingBorder.color
+    }
+
     private static func composerButton(symbol: String, accessibility: String) -> NSButton {
         let button = NSButton()
         button.bezelStyle = .regularSquare
@@ -454,17 +495,22 @@ final class PaneAppView: NSView {
 
     // MARK: - Messages
 
-    /// Appends one row per message, in order. The one path both the poll
-    /// timer and the tests use to put a row on screen — a poll's messages are
-    /// the ones appended to the transcript since the last call, so there is
-    /// nothing to diff against and nothing already on screen is rebuilt.
+    /// Folds `messages` into the conversation and redraws whatever that
+    /// changed. The one path both the poll timer and the tests use to put a
+    /// row on screen.
     ///
-    /// The single exception is a transcript Claude rewrote, which `poll()`
-    /// re-reads from the start and reports as `didReset`. That is answered by
-    /// `clearMessages()` *before* this runs, not by diffing here.
+    /// Rows are per *turn*, not per message, so this is not a pure append:
+    /// Claude Code writes each `tool_use` as its own assistant row and the
+    /// reader drops `tool_result` rows entirely, so an entire reply is one
+    /// turn that *grows* across polls. A message extending the turn already
+    /// on screen destroys that turn's row and rebuilds it from the merged
+    /// blocks; only a role flip adds a row beside. At most one existing row
+    /// is ever touched — the last one — because a batch either extends the
+    /// last turn or opens a new one.
     ///
-    /// Rows are per *turn*, not per message, so a message that extends the
-    /// turn already on screen rebuilds that one row rather than adding one.
+    /// A transcript Claude rewrote is the one case this does not answer:
+    /// `poll()` re-reads it from the start and reports `didReset`, which
+    /// `clearMessages()` handles *before* this runs.
     func appendMessages(_ messages: [TranscriptMessage]) {
         guard !messages.isEmpty else { return }
         // Measured before a single row is added: a user already scrolled up
@@ -476,13 +522,35 @@ final class PaneAppView: NSView {
         // Everything from the first changed turn onwards is redrawn. In
         // practice that is one row: a poll either extends the last turn or
         // opens one.
+        //
+        // Work groups the user expanded are the one piece of view state that
+        // has to survive that rebuild: a reply lands a row every ~0.3s for as
+        // long as it runs, so a group opened mid-reply would otherwise snap
+        // shut on the very next poll, and go on doing it forever.
+        var expansion: [Bool] = []
         while messageStack.arrangedSubviews.count > firstChanged,
               let row = messageStack.arrangedSubviews.last {
+            expansion = (row as? PaneAppMessageRowView)?.workGroups.map(\.isExpanded) ?? []
             messageStack.removeArrangedSubview(row)
             row.removeFromSuperview()
         }
-        for turn in turns[firstChanged...] {
+        // ponytail: whole-row rebuild per poll; append-in-place if long turns
+        // get slow. Two costs are accepted deliberately here, not overlooked:
+        // a text selection inside the in-progress turn is destroyed with its
+        // views on every poll, and rebuilding the whole turn each time makes
+        // the work quadratic in its length. The fix for both is the same —
+        // `PaneAppMessageRowView.append(blocks:)`, adding only the new blocks
+        // to the row already standing — and it is its own task, not a
+        // drive-by here.
+        for (offset, turn) in turns[firstChanged...].enumerated() {
             let row = PaneAppMessageRowView(turn: turn)
+            // By index: the rebuilt row's groups are the same runs in the
+            // same order, plus any the new blocks added on the end.
+            if offset == 0 {
+                for (group, wasExpanded) in zip(row.workGroups, expansion) where wasExpanded {
+                    group.toggle()
+                }
+            }
             messageStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: messageStack.widthAnchor).isActive = true
         }
@@ -518,14 +586,31 @@ final class PaneAppView: NSView {
         emptyStateLabel.isHidden = false
     }
 
-    private func isScrolledToBottom() -> Bool {
+    /// The scroll offset at which the newest message sits clear of the glass
+    /// composer — the end of the scrollable range, which is *not* the
+    /// document's bottom edge.
+    ///
+    /// `layout()` pads the range with `contentInsets.bottom` precisely so the
+    /// last row can travel past the glass. Scrolling to
+    /// `documentHeight - clipHeight` stops one clearance short of that and
+    /// parks the newest reply under the composer, which is exactly what the
+    /// inset exists to prevent.
+    private var bottomScrollOffset: CGFloat {
         let clip = scrollView.contentView
-        return clip.bounds.maxY >= messageStack.frame.height - 2
+        let range = messageStack.frame.height + scrollView.contentInsets.bottom
+        return max(0, range - clip.bounds.height)
+    }
+
+    /// Measured against the same target `scrollToBottom` moves to. Anything
+    /// looser reads a user scrolled up by less than the glass's clearance as
+    /// "at bottom" and yanks them down on the next poll.
+    private func isScrolledToBottom() -> Bool {
+        scrollView.contentView.bounds.origin.y >= bottomScrollOffset - 2
     }
 
     private func scrollToBottom() {
         let clip = scrollView.contentView
-        clip.scroll(to: NSPoint(x: 0, y: max(0, messageStack.frame.height - clip.bounds.height)))
+        clip.scroll(to: NSPoint(x: 0, y: bottomScrollOffset))
         scrollView.reflectScrolledClipView(clip)
     }
 
@@ -604,9 +689,17 @@ final class PaneAppView: NSView {
     /// carried over from that intent rather than from a font markdown never
     /// supplied.
     ///
+    /// `baseFont` is what every non-code run gets, and what a bold or italic
+    /// run is derived from — so a heading can run through here too and have
+    /// its inline `` `code` `` rendered rather than printed with its
+    /// backticks, which is routine in Claude's output.
+    ///
     /// Internal rather than `private` so `PaneAppViewTests` can assert on the
     /// result directly.
-    static func attributedMarkdown(_ raw: String) -> NSAttributedString {
+    static func attributedMarkdown(
+        _ raw: String,
+        baseFont: NSFont = ShellFont.ui(13)
+    ) -> NSAttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         let parsed = (try? AttributedString(markdown: raw, options: options))
             .map { NSAttributedString($0) } ?? NSAttributedString(string: raw)
@@ -616,7 +709,9 @@ final class PaneAppView: NSView {
         result.enumerateAttribute(.inlinePresentationIntent, in: whole, options: []) { value, range, _ in
             let intent: InlinePresentationIntent = (value as? NSNumber)
                 .map { InlinePresentationIntent(rawValue: $0.uintValue) } ?? []
-            var font = intent.contains(.code) ? ShellFont.mono(13) : ShellFont.ui(13)
+            // Monospaced at the base font's own size, so inline code in a
+            // heading is the heading's size rather than body size.
+            var font = intent.contains(.code) ? ShellFont.mono(baseFont.pointSize) : baseFont
             var traits: NSFontTraitMask = []
             if intent.contains(.stronglyEmphasized) { traits.insert(.boldFontMask) }
             if intent.contains(.emphasized) { traits.insert(.italicFontMask) }
@@ -649,10 +744,11 @@ final class PaneAppView: NSView {
     /// A fenced code span: monospaced, on its own card, scrolling sideways
     /// rather than wrapping a long line.
     ///
-    /// Internal rather than `fileprivate` so `PaneAppViewTests` can call it
-    /// directly, and so `renderTable`'s output can be drawn into the same
-    /// card a fenced code block gets.
-    static func codeBlockView(_ code: String) -> NSView {
+    /// `fileprivate` rather than `private` so `PaneAppMessageRowView` can
+    /// reach it, and so `renderTable`'s output can be drawn into the same
+    /// card a fenced code block gets. Nothing outside this file builds one:
+    /// the tests assert on the card through a rendered row.
+    fileprivate static func codeBlockView(_ code: String) -> NSView {
         let container = NSView()
         container.wantsLayer = true
         container.layer?.backgroundColor = ShellPalette.cardFill.cgColor
@@ -706,6 +802,15 @@ final class PaneAppView: NSView {
     /// magnitude more code, they have to negotiate width with the enclosing
     /// stack (a fight `codeBlockView`'s width constraint already documents),
     /// and they buy selectable cells nobody asked for.
+    ///
+    /// Not solved, only improved: `cell.count` counts *characters*, which is
+    /// closer to the truth than the UTF-16 units `String.padding(toLength:)`
+    /// would have used, but it is still not the width a monospaced font
+    /// draws. A CJK ideograph or an emoji is one character and two columns
+    /// wide, so a table containing either is padded short and its columns
+    /// step right from there. Left as is: the terminal's own table misaligns
+    /// the same way, and measuring true display width needs an East-Asian
+    /// width table nothing in this app has.
     static func renderTable(header: [String], rows: [[String]]) -> String {
         let all = [header] + rows
         let columns = all.map(\.count).max() ?? 0
@@ -746,6 +851,7 @@ final class PaneAppView: NSView {
     /// distinguishable sizes is as far as the difference stays useful.
     static func headingLabel(level: Int, text: String) -> NSTextField {
         let size: CGFloat = level <= 1 ? 17 : (level == 2 ? 15 : 13)
+        let font = ShellFont.ui(size, .semibold)
         let field = NSTextField(labelWithString: text)
         field.isSelectable = true
         field.isEditable = false
@@ -753,8 +859,12 @@ final class PaneAppView: NSView {
         field.isBordered = false
         field.maximumNumberOfLines = 0
         field.lineBreakMode = .byWordWrapping
-        field.font = ShellFont.ui(size, .semibold)
+        field.font = font
         field.textColor = ShellPalette.ink
+        // Through the same inline parser paragraphs and list items use, at
+        // the heading's own weight and size: `### The \`parse\` scanner` is
+        // ordinary Claude output, and a plain label prints its backticks.
+        field.attributedStringValue = attributedMarkdown(text, baseFont: font)
         field.translatesAutoresizingMaskIntoConstraints = false
         return field
     }
@@ -805,8 +915,13 @@ final class PaneAppView: NSView {
         // sizes a text field's intrinsic content around embedded newlines
         // regardless of that flag, so the newlines have to go before the
         // string ever reaches the field.)
-        let flatDetail = detail.components(separatedBy: .newlines).joined(separator: " ")
-        let text = detail.isEmpty ? "▸ \(name)" : "▸ \(name)  \(flatDetail)"
+        //
+        // `split` rather than `components(separatedBy:)`: it drops the empty
+        // pieces, so a blank line does not become a double space, a `\r\n`
+        // does not become a stray one, and a detail that starts or ends with
+        // a newline does not pad the label with whitespace.
+        let flatDetail = detail.split(whereSeparator: \.isNewline).joined(separator: " ")
+        let text = flatDetail.isEmpty ? "▸ \(name)" : "▸ \(name)  \(flatDetail)"
         let field = NSTextField(labelWithString: text)
         field.isSelectable = true
         field.isEditable = false
@@ -825,6 +940,12 @@ final class PaneAppView: NSView {
     /// A homogeneous run can name its tool honestly; a mixed one cannot, and
     /// listing every name would rebuild the wall of text this collapse
     /// exists to remove — so it counts steps instead.
+    ///
+    /// Only ever called with two or more names: a run of one renders inline
+    /// and never becomes a group at all (`PaneAppMessageRowView.flushRun`).
+    /// The single-name branch is defensive, kept so a future caller cannot
+    /// get "1 Bash calls" out of it, and its test pins that rather than a
+    /// group that exists.
     static func workSummary(for names: [String]) -> String {
         guard let first = names.first else { return "" }
         if names.count == 1 { return first }
@@ -833,8 +954,23 @@ final class PaneAppView: NSView {
     }
 }
 
-/// One `TranscriptTurn`, laid out once at append time and never rebuilt.
+/// One `TranscriptTurn`, laid out whole in `init` from the blocks it is
+/// handed.
+///
+/// A row is *not* built once and kept: a turn grows as its reply lands, and
+/// `PaneAppView.appendMessages` answers that by throwing this view away and
+/// constructing a new one from the merged blocks. Nothing here mutates after
+/// `init`, which is what makes that safe — and why the only view state worth
+/// keeping, a work group's expansion, is carried across by the caller through
+/// `workGroups` rather than living in here.
 final class PaneAppMessageRowView: NSView {
+    /// This row's work groups, in the order they were built — the handle
+    /// `PaneAppView.appendMessages` restores expansion state through when it
+    /// rebuilds a growing turn. (A traversal would do as well; this is the
+    /// one the row already knows for free, and the recursive `descendants`
+    /// helper the tests use is test-only.)
+    private(set) var workGroups: [PaneAppWorkGroupView] = []
+
     init(turn: TranscriptTurn) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -867,7 +1003,9 @@ final class PaneAppMessageRowView: NSView {
                     add(view, to: body)
                 }
             } else {
-                add(PaneAppWorkGroupView(calls: run), to: body)
+                let group = PaneAppWorkGroupView(calls: run)
+                workGroups.append(group)
+                add(group, to: body)
             }
             run = []
         }
@@ -931,27 +1069,41 @@ final class PaneAppMessageRowView: NSView {
 /// A run of consecutive tool calls in one turn, collapsed to a summary line
 /// that expands on click.
 ///
-/// The detail is built up front and merely hidden, never built on expand:
-/// `PaneAppMessageRowView` lays a row out once and never rebuilds it, and
-/// growing the view tree mid-scroll is exactly the kind of relayout that
-/// contract exists to avoid.
+/// The detail is built up front and merely hidden, never built on expand.
+/// Not because rows are never rebuilt — a growing turn's row *is* rebuilt on
+/// every poll — but because expansion state survives those rebuilds
+/// (`PaneAppView.appendMessages` reapplies it), so a group can be expanded
+/// from its first frame and the toggle must be a plain `isHidden` flip on a
+/// tree that is already there rather than a mid-scroll construction.
 final class PaneAppWorkGroupView: NSView {
     private(set) var isExpanded = false
     private let chevron: NSTextField
     private let detail = NSStackView()
+    /// The clickable strip, kept for the cursor tracking area below: only the
+    /// header toggles, so the pointing hand must not cover the detail lines.
+    private let header: NSStackView
+    private var cursorTracking: NSTrackingArea?
 
     init(calls: [(name: String, detail: String)]) {
         chevron = ShellFont.label("⌄", font: ShellFont.ui(11), color: ShellPalette.inkFaint)
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-
+        let summaryText = PaneAppView.workSummary(for: calls.map(\.name))
         let summary = ShellFont.label(
-            PaneAppView.workSummary(for: calls.map(\.name)),
+            summaryText,
             font: ShellFont.ui(12),
             color: ShellPalette.inkMuted
         )
+        header = NSStackView(views: [chevron, summary])
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
 
-        let header = NSStackView(views: [chevron, summary])
+        // The header looks like a line of text and behaves like a control.
+        // Without this it is invisible to VoiceOver and gives the pointer no
+        // hint that it does anything.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.disclosureTriangle)
+        setAccessibilityLabel(summaryText)
+        setAccessibilityExpanded(isExpanded)
+
         header.orientation = .horizontal
         header.alignment = .firstBaseline
         header.spacing = 6
@@ -991,6 +1143,25 @@ final class PaneAppWorkGroupView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+    /// The pointing hand over the header only — the detail lines below are
+    /// selectable text and must keep the I-beam. `.cursorUpdate` on an
+    /// explicit rect rather than a cursor rect for the same reason
+    /// `PaneApprovalBar`'s buttons use one: these views are laid out by a
+    /// stack that moves them, and a cursor rect is a frame the window caches.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let cursorTracking { removeTrackingArea(cursorTracking) }
+        let area = NSTrackingArea(
+            rect: convert(header.bounds, from: header),
+            options: [.cursorUpdate, .activeInKeyWindow],
+            owner: self
+        )
+        addTrackingArea(area)
+        cursorTracking = area
+    }
+
+    override func cursorUpdate(with event: NSEvent) { NSCursor.pointingHand.set() }
+
     @objc private func handleClick() { toggle() }
 
     /// Internal rather than private so the tests can drive expansion without
@@ -999,5 +1170,6 @@ final class PaneAppWorkGroupView: NSView {
         isExpanded.toggle()
         detail.isHidden = !isExpanded
         chevron.stringValue = isExpanded ? "⌃" : "⌄"
+        setAccessibilityExpanded(isExpanded)
     }
 }
