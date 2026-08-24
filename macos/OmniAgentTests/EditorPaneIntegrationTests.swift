@@ -1196,8 +1196,11 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertNil(workspace.editorPane(for: id))
     }
 
-    /// ⇧⌘W: the window holds itself open while anything is unsaved.
-    func testWindowCloseAsksAboutDirtyEditorTabs() throws {
+    /// ⇧⌘W / the red button now just hide the window — the app is
+    /// menu-bar-resident, so nothing behind it is destroyed and a dirty
+    /// editor tab has nothing to lose. The save prompt still runs, always,
+    /// on a real quit (`testQuitPromptsEveryWindowWithDirtyEditorTabs`).
+    func testWindowCloseHidesImmediatelyEvenWithDirtyEditorTabs() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
@@ -1206,57 +1209,24 @@ final class EditorPaneIntegrationTests: XCTestCase {
         let id = try XCTUnwrap(controller.workspaceView.focusedPaneID)
         let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: id))
         pane.modelForTesting { $0.setDirty(true, at: 0) }
+        pane.confirmSave = { _, _ in XCTFail("closing the window destroys nothing — there is nothing to save") }
 
-        var asked = 0
-        pane.confirmSave = { _, decide in
-            asked += 1
-            decide(.cancel)
-        }
-        XCTAssertFalse(controller.windowShouldClose(window), "unsaved work holds the window open")
-        XCTAssertTrue(pollUntil(timeout: 10) { asked == 1 })
-        XCTAssertTrue(window.isVisible)
-        XCTAssertEqual(pane.model.tabs.count, 1)
-
-        pane.confirmSave = { _, decide in
-            asked += 1
-            decide(.discard)
-        }
-        XCTAssertFalse(
-            controller.windowShouldClose(window),
-            "the delegate still answers no — it closes the window itself once the prompt resolves"
-        )
-        XCTAssertTrue(pollUntil(timeout: 10) { asked == 2 })
-        XCTAssertTrue(pollUntilClosed(window), "…and the window is gone")
+        XCTAssertFalse(controller.windowShouldClose(window), "the delegate hides the window itself")
+        XCTAssertFalse(window.isVisible)
+        XCTAssertEqual(pane.model.tabs.count, 1, "the dirty tab is untouched, just off screen")
     }
 
-    /// A workspace holding no editor buffer at all never delays its own close
-    /// — that is the one case answerable without asking the page.
-    func testWindowCloseIsImmediateWithNoEditorBuffers() throws {
+    /// A workspace with no editor buffers at all behaves exactly the same
+    /// way — the dirty check that used to gate this close went with the
+    /// prompt it gated.
+    func testWindowCloseHidesImmediatelyWithNoEditorBuffers() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
         let window = try XCTUnwrap(controller.window)
 
-        XCTAssertTrue(controller.windowShouldClose(window))
-        XCTAssertTrue(window.isVisible, "…and it is AppKit that closes it, not us")
-    }
-
-    /// With a buffer on screen the close goes through the asynchronous walk —
-    /// but a clean workspace is never *prompted*, it just closes a run-loop
-    /// turn later.
-    func testWindowCloseWithACleanBufferAsksTheUserNothing() throws {
-        let controller = makeController()
-        defer { controller.close() }
-        controller.showWindow(nil)
-        let window = try XCTUnwrap(controller.window)
-        controller.openFileInEditor(try makeTempFile("a.swift", "x"), pinned: true)
-        let id = try XCTUnwrap(controller.workspaceView.focusedPaneID)
-        let pane = try XCTUnwrap(controller.workspaceView.editorPane(for: id))
-        waitUntilReady(pane)
-        pane.confirmSave = { _, _ in XCTFail("nothing is unsaved") }
-
-        XCTAssertFalse(controller.windowShouldClose(window), "the answer arrives asynchronously")
-        XCTAssertTrue(pollUntilClosed(window), "…and it closes itself once it has one")
+        XCTAssertFalse(controller.windowShouldClose(window))
+        XCTAssertFalse(window.isVisible)
     }
 
     /// ⌘Q walks every window that has something to lose, and one cancel stops
@@ -1355,10 +1325,6 @@ final class EditorPaneIntegrationTests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
         return satisfied()
-    }
-
-    private func pollUntilClosed(_ window: NSWindow) -> Bool {
-        pollUntil { !window.isVisible }
     }
 
     private func makeTempFile(_ name: String, _ contents: String) throws -> URL {
