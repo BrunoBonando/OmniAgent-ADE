@@ -518,7 +518,10 @@ final class PaneAppView: NSView {
 
     /// A wrapping, selectable prose label — markdown rendered, but block
     /// structure left as literal lines per `attributedMarkdown`.
-    fileprivate static func proseLabel(_ raw: String) -> NSTextField {
+    ///
+    /// Internal rather than `fileprivate` so `PaneAppViewTests` can call it
+    /// directly.
+    static func proseLabel(_ raw: String) -> NSTextField {
         let field = NSTextField(labelWithString: "")
         field.isSelectable = true
         field.isEditable = false
@@ -533,7 +536,11 @@ final class PaneAppView: NSView {
 
     /// A fenced code span: monospaced, on its own card, scrolling sideways
     /// rather than wrapping a long line.
-    fileprivate static func codeBlockView(_ code: String) -> NSView {
+    ///
+    /// Internal rather than `fileprivate` so `PaneAppViewTests` can call it
+    /// directly, and so `renderTable`'s output can be drawn into the same
+    /// card a fenced code block gets.
+    static func codeBlockView(_ code: String) -> NSView {
         let container = NSView()
         container.wantsLayer = true
         container.layer?.backgroundColor = ShellPalette.cardFill.cgColor
@@ -577,6 +584,99 @@ final class PaneAppView: NSView {
             label.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
         ])
         return container
+    }
+
+    /// A markdown table as one monospaced, column-padded string — the same
+    /// shape the terminal draws, and drawn into the same card a fenced code
+    /// block gets.
+    ///
+    /// Deliberately not `NSGridView`/`NSTableView`: those are an order of
+    /// magnitude more code, they have to negotiate width with the enclosing
+    /// stack (a fight `codeBlockView`'s width constraint already documents),
+    /// and they buy selectable cells nobody asked for.
+    static func renderTable(header: [String], rows: [[String]]) -> String {
+        let all = [header] + rows
+        let columns = all.map(\.count).max() ?? 0
+        guard columns > 0 else { return "" }
+
+        // Ragged rows are ordinary markdown; they are padded out rather than
+        // rejected, so a short row cannot index past a column width below.
+        let padded = all.map { row in
+            row + Array(repeating: "", count: columns - row.count)
+        }
+        var widths = Array(repeating: 0, count: columns)
+        for row in padded {
+            for (index, cell) in row.enumerated() {
+                widths[index] = max(widths[index], cell.count)
+            }
+        }
+
+        // Not `String.padding(toLength:)`: that counts UTF-16 units while
+        // `cell.count` counts characters, and the two disagree the moment a
+        // cell contains an emoji or a combining mark.
+        func pad(_ cell: String, to width: Int) -> String {
+            cell + String(repeating: " ", count: max(0, width - cell.count))
+        }
+        func line(_ row: [String]) -> String {
+            row.enumerated()
+                .map { pad($0.element, to: widths[$0.offset]) }
+                .joined(separator: "  ")
+                .replacingOccurrences(of: " +$", with: "", options: .regularExpression)
+        }
+
+        let rule = widths.map { String(repeating: "─", count: $0) }.joined(separator: "  ")
+        return ([line(padded[0]), rule] + padded.dropFirst().map(line))
+            .joined(separator: "\n")
+    }
+
+    /// A heading: body prose, scaled up and weighted by level. Levels below
+    /// 3 flatten together — a transcript is not a document outline, and three
+    /// distinguishable sizes is as far as the difference stays useful.
+    static func headingLabel(level: Int, text: String) -> NSTextField {
+        let size: CGFloat = level <= 1 ? 17 : (level == 2 ? 15 : 13)
+        let field = NSTextField(labelWithString: text)
+        field.isSelectable = true
+        field.isEditable = false
+        field.drawsBackground = false
+        field.isBordered = false
+        field.maximumNumberOfLines = 0
+        field.lineBreakMode = .byWordWrapping
+        field.font = ShellFont.ui(size, .semibold)
+        field.textColor = ShellPalette.ink
+        field.translatesAutoresizingMaskIntoConstraints = false
+        return field
+    }
+
+    /// A list: one row per item, marker in its own column so a wrapping item
+    /// hangs under itself rather than under the marker above it.
+    static func listView(items: [String], ordered: Bool) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 3
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        for (index, item) in items.enumerated() {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .firstBaseline
+            row.spacing = 6
+            row.translatesAutoresizingMaskIntoConstraints = false
+
+            let marker = ShellFont.label(
+                ordered ? "\(index + 1)." : "•",
+                font: ShellFont.ui(13),
+                color: ShellPalette.inkTertiary
+            )
+            marker.setContentHuggingPriority(.required, for: .horizontal)
+            let body = proseLabel(item)
+
+            row.addArrangedSubview(marker)
+            row.addArrangedSubview(body)
+            stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        return stack
     }
 
     /// The `▸ name  detail` line a tool call renders as — no box, no fill,
@@ -658,15 +758,15 @@ final class PaneAppMessageRowView: NSView {
                 switch markdown {
                 case .paragraph(let prose):
                     return PaneAppView.proseLabel(prose)
-                case .heading(_, let text):
-                    return PaneAppView.proseLabel(text)
-                case .list(let items, _):
-                    return PaneAppView.proseLabel(items.joined(separator: "\n"))
+                case .heading(let level, let text):
+                    return PaneAppView.headingLabel(level: level, text: text)
+                case .list(let items, let ordered):
+                    return PaneAppView.listView(items: items, ordered: ordered)
                 case .code(let code):
                     return PaneAppView.codeBlockView(code)
                 case .table(let header, let rows):
                     return PaneAppView.codeBlockView(
-                        ([header] + rows).map { $0.joined(separator: "  ") }.joined(separator: "\n")
+                        PaneAppView.renderTable(header: header, rows: rows)
                     )
                 }
             }

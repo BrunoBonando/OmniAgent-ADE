@@ -217,6 +217,80 @@ final class PaneAppViewTests: XCTestCase {
         ])
     }
 
+    // MARK: - Block views
+
+    /// Columns pad to their widest cell, header included, so the table lines up
+    /// the way the terminal's does. A rule row separates header from body.
+    func testRenderTablePadsColumnsToTheirWidestCell() {
+        let rendered = PaneAppView.renderTable(
+            header: ["", "lines"],
+            rows: [["Swift", "69158"], ["CSS", "9726"]]
+        )
+        let lines = rendered.components(separatedBy: "\n")
+
+        XCTAssertEqual(lines.count, 4)
+        XCTAssertEqual(lines[0], "       lines")
+        XCTAssertTrue(lines[1].hasPrefix("─────"))
+        XCTAssertEqual(lines[2], "Swift  69158")
+        XCTAssertEqual(lines[3], "CSS    9726")
+    }
+
+    /// A ragged row is padded out to the table's column count rather than
+    /// throwing the alignment off or crashing on a missing index.
+    func testRenderTablePadsARaggedRow() {
+        let rendered = PaneAppView.renderTable(header: ["a", "b"], rows: [["1"]])
+        let lines = rendered.components(separatedBy: "\n")
+
+        XCTAssertEqual(lines.count, 3)
+        XCTAssertEqual(lines[2], "1")
+    }
+
+    /// A table reaches the row as one monospaced card, not as prose.
+    func testATableRendersAsAMonospacedBlock() {
+        let row = PaneAppMessageRowView(turn: TranscriptTurn(
+            id: "1",
+            isUser: false,
+            blocks: [.text("| a | b |\n|---|---|\n| 1 | 2 |")]
+        ))
+        let monospaced = row.descendants(NSTextField.self).filter {
+            $0.font?.fontName == ShellFont.mono(12).fontName
+        }
+
+        XCTAssertEqual(monospaced.count, 1)
+        XCTAssertTrue(monospaced[0].stringValue.contains("─"))
+    }
+
+    /// A heading is visibly bigger than body prose — the difference a reader
+    /// scans by.
+    func testAHeadingIsLargerThanBodyProse() {
+        let heading = PaneAppView.headingLabel(level: 2, text: "Results")
+        let prose = PaneAppView.proseLabel("Results")
+        let headingSize = heading.font?.pointSize ?? 0
+        let proseSize = prose.font?.pointSize ?? 0
+
+        XCTAssertGreaterThan(headingSize, proseSize)
+        XCTAssertEqual(heading.stringValue, "Results")
+    }
+
+    /// List items get their marker and stay one view per item, so a long item
+    /// wraps under its own bullet instead of under the one above.
+    func testAListRendersOneMarkedRowPerItem() {
+        let list = PaneAppView.listView(items: ["one", "two"], ordered: false)
+        let labels = list.descendants(NSTextField.self)
+
+        XCTAssertEqual(labels.count, 4, "a marker and a body label per item")
+        XCTAssertEqual(labels[0].stringValue, "•")
+        XCTAssertEqual(labels[1].stringValue, "one")
+    }
+
+    func testAnOrderedListNumbersItsItems() {
+        let list = PaneAppView.listView(items: ["one", "two"], ordered: true)
+        let labels = list.descendants(NSTextField.self)
+
+        XCTAssertEqual(labels[0].stringValue, "1.")
+        XCTAssertEqual(labels[2].stringValue, "2.")
+    }
+
     // MARK: - Markdown
 
     /// `**bold**` produces a bold run; every other run keeps the exact base
