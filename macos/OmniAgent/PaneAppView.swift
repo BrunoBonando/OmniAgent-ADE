@@ -181,15 +181,47 @@ final class PaneAppView: NSView {
     /// point a real view at a transcript they own instead of the real one.
     private let home: URL
 
-    private let scrollView: ShellScrollView
+    /// Internal rather than `private` so the composer-layout tests can
+    /// measure the inset the glass overlay depends on. Still a `let` — only
+    /// its visibility widens.
+    let scrollView: ShellScrollView
     private let messageStack = NSStackView()
     private let emptyStateLabel = ShellFont.label(
         "Nothing yet.",
         font: ShellFont.ui(13),
         color: ShellPalette.inkFaint
     )
-    private let fieldContainer = NSView()
-    private let composerField: HomeComposerField = {
+    /// `.withinWindow`, not `.behindWindow`: this overlay floats over the
+    /// transcript inside the pane, so what it should sample is the content
+    /// scrolling under it. `.behindWindow` — what `CommandPaletteController`
+    /// uses, correctly, for its own window — would sample the desktop
+    /// instead and show nothing of the conversation.
+    ///
+    /// `.hudWindow`, not `.regular` (the brief's guess): `NSVisualEffectView`
+    /// has no `.regular` material — that case belongs to `NSGlassEffectView`
+    /// `.style`, the real macOS 26 glass this codebase already reserves for
+    /// `WorkspaceGlass`/`CommandPaletteController`. `.hudWindow` is this
+    /// class's own dark floating-chrome material and is the one
+    /// `CommandPaletteController` already uses for its pre-26 fallback panel,
+    /// so it keeps this overlay visually consistent with the app's other
+    /// glass rather than introducing a second look.
+    private let composerGlass: NSVisualEffectView = {
+        let effect = NSVisualEffectView()
+        effect.material = .hudWindow
+        effect.blendingMode = .withinWindow
+        effect.state = .active
+        effect.wantsLayer = true
+        effect.layer?.cornerRadius = 14
+        effect.layer?.cornerCurve = .continuous
+        effect.layer?.borderWidth = 1
+        effect.layer?.borderColor = ShellPalette.cardStroke.cgColor
+        effect.layer?.masksToBounds = true
+        effect.translatesAutoresizingMaskIntoConstraints = false
+        return effect
+    }()
+    /// Internal rather than `private` so the composer tests can read and set
+    /// the draft directly.
+    let composerField: HomeComposerField = {
         let field = HomeComposerField()
         field.isBordered = false
         field.isBezeled = false
@@ -278,50 +310,75 @@ final class PaneAppView: NSView {
         messageStack.spacing = 10
         messageStack.translatesAutoresizingMaskIntoConstraints = false
 
-        fieldContainer.wantsLayer = true
-        fieldContainer.layer?.backgroundColor = ShellPalette.fieldFill.cgColor
-        fieldContainer.layer?.cornerRadius = 10
-        fieldContainer.layer?.cornerCurve = .continuous
-        fieldContainer.layer?.borderWidth = 1
-        fieldContainer.layer?.borderColor = ShellPalette.cardStroke.cgColor
-        fieldContainer.translatesAutoresizingMaskIntoConstraints = false
-
-        let separator = ShellSeparator()
-
         composerField.target = self
         composerField.action = #selector(submitComposer)
-        composerField.onFocusChange = { [weak self] focused in
-            self?.fieldContainer.layer?.borderColor =
-                (focused ? ShellPalette.accent.withAlphaComponent(0.5) : ShellPalette.cardStroke).cgColor
-        }
 
-        fieldContainer.addSubview(composerField)
-        for view in [scrollView, emptyStateLabel, separator, fieldContainer] as [NSView] {
+        let attachButton = Self.composerButton(symbol: "paperclip", accessibility: "Attach a file")
+        attachButton.target = self
+        attachButton.action = #selector(chooseAttachment)
+
+        let sendButton = Self.composerButton(symbol: "arrow.up", accessibility: "Send")
+        sendButton.target = self
+        sendButton.action = #selector(submitComposer)
+
+        let controls = NSStackView(views: [attachButton, NSView(), sendButton])
+        controls.orientation = .horizontal
+        controls.alignment = .centerY
+        controls.spacing = 8
+        controls.translatesAutoresizingMaskIntoConstraints = false
+
+        composerGlass.addSubview(composerField)
+        composerGlass.addSubview(controls)
+        for view in [scrollView, emptyStateLabel, composerGlass] as [NSView] {
             addSubview(view)
         }
 
         NSLayoutConstraint.activate([
+            // Full height: the transcript scrolls *behind* the glass, and the
+            // content inset below is what keeps the last message reachable.
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: separator.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             emptyStateLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyStateLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
 
-            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            composerGlass.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            composerGlass.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            composerGlass.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
 
-            fieldContainer.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 10),
-            fieldContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            fieldContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            fieldContainer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            fieldContainer.heightAnchor.constraint(equalToConstant: 36),
+            composerField.topAnchor.constraint(equalTo: composerGlass.topAnchor, constant: 12),
+            composerField.leadingAnchor.constraint(equalTo: composerGlass.leadingAnchor, constant: 14),
+            composerField.trailingAnchor.constraint(equalTo: composerGlass.trailingAnchor, constant: -14),
 
-            composerField.leadingAnchor.constraint(equalTo: fieldContainer.leadingAnchor, constant: 10),
-            composerField.trailingAnchor.constraint(equalTo: fieldContainer.trailingAnchor, constant: -10),
-            composerField.centerYAnchor.constraint(equalTo: fieldContainer.centerYAnchor),
+            controls.topAnchor.constraint(equalTo: composerField.bottomAnchor, constant: 10),
+            controls.leadingAnchor.constraint(equalTo: composerGlass.leadingAnchor, constant: 10),
+            controls.trailingAnchor.constraint(equalTo: composerGlass.trailingAnchor, constant: -10),
+            controls.bottomAnchor.constraint(equalTo: composerGlass.bottomAnchor, constant: -10),
+            controls.heightAnchor.constraint(equalToConstant: 26),
         ])
+
+        // AppKit would otherwise fold its own automatic insets into these and
+        // the inset would not match the glass.
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets(
+            top: 0,
+            left: 0,
+            // Glass height (12 + field + 10 + 26 + 10) plus its 12pt margin,
+            // so the last message scrolls clear rather than parking under it.
+            bottom: Self.composerClearance,
+            right: 0
+        )
+        // Negative, verified rather than assumed: `contentInsets.bottom`
+        // alone already shrinks the vertical scroller's frame by that same
+        // amount (confirmed with a throwaway offscreen probe — a 300pt-tall
+        // scroll view's scroller measured 213pt with `scrollerInsets` left at
+        // zero). This negative inset exactly cancels that automatic shrink,
+        // restoring the scroller to the view's full height so its track still
+        // represents the whole scrollable range — including the padded tail
+        // under the glass — rather than being pushed up and truncated.
+        scrollView.scrollerInsets = NSEdgeInsets(top: 0, left: 0, bottom: -Self.composerClearance, right: 0)
     }
 
     @available(*, unavailable)
@@ -332,6 +389,52 @@ final class PaneAppView: NSView {
     }
 
     // MARK: - Composer
+
+    /// How much room the glass composer takes out of the transcript's scroll
+    /// area — the overlay's own height plus its bottom margin.
+    ///
+    /// Measured, not guessed: 75 (12 top inset + 17 for a single-line
+    /// `ShellFont.ui(14)` field + 10 gap + 26 controls row + 10 bottom inset)
+    /// plus the glass's own 12pt margin off the view's bottom = 87. A
+    /// throwaway offscreen-window test read `composerField.superview!.frame`
+    /// after a real layout pass to get the 17 — the brief's 90 assumed a
+    /// taller field (as if it were the 32pt-tall `fieldContainer` this
+    /// replaces) and would have left 3pt of dead gap under the glass.
+    private static let composerClearance: CGFloat = 87
+
+    private static func composerButton(symbol: String, accessibility: String) -> NSButton {
+        let button = NSButton()
+        button.bezelStyle = .regularSquare
+        button.isBordered = false
+        button.image = NSImage(
+            systemSymbolName: symbol,
+            accessibilityDescription: accessibility
+        )
+        button.contentTintColor = ShellPalette.inkTertiary
+        button.imageScaling = .scaleProportionallyDown
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        return button
+    }
+
+    @objc private func chooseAttachment() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        insertAttachment(path: url.path)
+    }
+
+    /// Puts a file's path into the draft. A path is what the transport can
+    /// carry — the composer's text goes into a live PTY — and what Claude
+    /// Code already knows how to open.
+    func insertAttachment(path: String) {
+        let draft = composerField.stringValue.trimmingCharacters(in: .whitespaces)
+        composerField.stringValue = draft.isEmpty ? path : "\(draft) \(path)"
+        window?.makeFirstResponder(composerField)
+    }
 
     @objc private func submitComposer() {
         let text = composerField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)

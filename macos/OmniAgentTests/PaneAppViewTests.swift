@@ -440,6 +440,47 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(field.stringValue, "")
     }
 
+    // MARK: - Composer
+
+    /// The transcript runs the full height of the view and scrolls *behind*
+    /// the composer, with enough bottom inset that the last message can clear
+    /// the glass instead of parking under it.
+    func testTranscriptScrollsBehindTheComposer() {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(view.scrollView.frame.height, view.frame.height, accuracy: 0.5)
+        XCTAssertGreaterThan(view.scrollView.contentInsets.bottom, 40)
+    }
+
+    /// The glass is a real material, not a flat fill — it has to agree with
+    /// the approval card that can sit right above it.
+    func testTheComposerSitsOnGlass() {
+        let view = makeView()
+        let effects = view.descendants(NSVisualEffectView.self)
+
+        XCTAssertEqual(effects.count, 1)
+        XCTAssertEqual(effects[0].blendingMode, .withinWindow)
+    }
+
+    /// Attach puts the path into the draft, which is what the transport can
+    /// carry and what Claude Code already understands.
+    func testAttachInsertsThePathIntoTheDraft() {
+        let view = makeView()
+        view.composerField.stringValue = "look at"
+        view.insertAttachment(path: "/tmp/a.swift")
+
+        XCTAssertEqual(view.composerField.stringValue, "look at /tmp/a.swift")
+    }
+
+    func testAttachIntoAnEmptyDraftLeavesNoLeadingSpace() {
+        let view = makeView()
+        view.insertAttachment(path: "/tmp/a.swift")
+
+        XCTAssertEqual(view.composerField.stringValue, "/tmp/a.swift")
+    }
+
     // MARK: - isLive gates the timer
 
     func testIsLiveGatesTheTimer() {
