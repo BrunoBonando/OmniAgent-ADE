@@ -208,3 +208,45 @@ final class ClaudeTranscriptReader {
         return ""
     }
 }
+
+/// One conversational turn: the consecutive `TranscriptMessage`s of a single
+/// role, merged.
+///
+/// The merge exists because Claude Code writes each `tool_use` as its own
+/// assistant row, so one reply arrives as several rows and a view drawing a
+/// role label per row stamps "Claude" six times down a single answer.
+struct TranscriptTurn: Equatable {
+    /// The first merged message's id — stable for as long as the turn grows.
+    let id: String
+    let isUser: Bool
+    var blocks: [TranscriptBlock]
+
+    static func group(_ messages: [TranscriptMessage]) -> [TranscriptTurn] {
+        var turns: [TranscriptTurn] = []
+        append(messages, to: &turns)
+        return turns
+    }
+
+    /// Merges `messages` into `turns`, extending the last turn whenever the
+    /// role matches and opening a new one when it flips.
+    ///
+    /// Returns the index of the first turn this changed, so a caller holding
+    /// one view per turn redraws from there instead of rebuilding the whole
+    /// conversation. `turns.count` when `messages` was empty — a valid
+    /// "nothing from here on" for the caller's loop.
+    @discardableResult
+    static func append(_ messages: [TranscriptMessage], to turns: inout [TranscriptTurn]) -> Int {
+        var firstChanged = turns.count
+        for message in messages {
+            if let last = turns.last, last.isUser == message.isUser {
+                turns[turns.count - 1].blocks.append(contentsOf: message.blocks)
+            } else {
+                turns.append(
+                    TranscriptTurn(id: message.id, isUser: message.isUser, blocks: message.blocks)
+                )
+            }
+            firstChanged = min(firstChanged, turns.count - 1)
+        }
+        return firstChanged
+    }
+}

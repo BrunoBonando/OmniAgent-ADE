@@ -73,6 +73,12 @@ final class PaneAppView: NSView {
     /// 0.3s later.
     private(set) var pollInFlight = false
 
+    /// The conversation as turns, mirroring `messageStack`'s arranged
+    /// subviews one-for-one. Held because a turn *grows*: a poll landing
+    /// another assistant row extends the last turn, and its row view has to
+    /// be rebuilt from the merged blocks rather than appended beside.
+    private var turns: [TranscriptTurn] = []
+
     /// Called on the main queue at the end of every poll cycle, whatever it
     /// found and whatever it did with it. Nil in the app: this is the seam the
     /// polling tests wait on, so they can drive the real timer path as an
@@ -191,17 +197,31 @@ final class PaneAppView: NSView {
     /// The single exception is a transcript Claude rewrote, which `poll()`
     /// re-reads from the start and reports as `didReset`. That is answered by
     /// `clearMessages()` *before* this runs, not by diffing here.
+    ///
+    /// Rows are per *turn*, not per message, so a message that extends the
+    /// turn already on screen rebuilds that one row rather than adding one.
     func appendMessages(_ messages: [TranscriptMessage]) {
         guard !messages.isEmpty else { return }
         // Measured before a single row is added: a user already scrolled up
         // to read earlier messages must not be yanked back down by a reply
         // arriving behind their back.
         let wasAtBottom = isScrolledToBottom()
-        for message in messages {
-            let row = PaneAppMessageRowView(message: message)
+
+        let firstChanged = TranscriptTurn.append(messages, to: &turns)
+        // Everything from the first changed turn onwards is redrawn. In
+        // practice that is one row: a poll either extends the last turn or
+        // opens one.
+        while messageStack.arrangedSubviews.count > firstChanged,
+              let row = messageStack.arrangedSubviews.last {
+            messageStack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+        for turn in turns[firstChanged...] {
+            let row = PaneAppMessageRowView(turn: turn)
             messageStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: messageStack.widthAnchor).isActive = true
         }
+
         emptyStateLabel.isHidden = true
         // Forced unconditionally, not just when scrolling: `messageStack`'s
         // height must be current the *next* time this runs too, and a user
@@ -220,6 +240,7 @@ final class PaneAppView: NSView {
     /// zero, so the rows it hands back include ones already on screen, and
     /// appending them to what is there would draw the conversation twice.
     private func clearMessages() {
+        turns = []
         for row in messageStack.arrangedSubviews {
             // Both halves: `removeArrangedSubview` only stops the stack
             // *arranging* the view, it leaves it a subview drawing where it
@@ -477,9 +498,9 @@ final class PaneAppView: NSView {
     }
 }
 
-/// One `TranscriptMessage`, laid out once at append time and never rebuilt.
+/// One `TranscriptTurn`, laid out once at append time and never rebuilt.
 final class PaneAppMessageRowView: NSView {
-    init(message: TranscriptMessage) {
+    init(turn: TranscriptTurn) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -490,13 +511,13 @@ final class PaneAppMessageRowView: NSView {
         body.translatesAutoresizingMaskIntoConstraints = false
 
         let roleLabel = ShellFont.label(
-            message.isUser ? "You" : "Claude",
+            turn.isUser ? "You" : "Claude",
             font: ShellFont.ui(11, .semibold),
-            color: message.isUser ? ShellPalette.inkTertiary : ShellPalette.accent
+            color: turn.isUser ? ShellPalette.inkTertiary : ShellPalette.accent
         )
         body.addArrangedSubview(roleLabel)
 
-        for block in message.blocks {
+        for block in turn.blocks {
             for view in Self.blockViews(for: block) {
                 body.addArrangedSubview(view)
                 // `.leading` alignment only pins each arranged view's leading

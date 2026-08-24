@@ -66,6 +66,70 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertTrue(toolLine.stringValue.contains("/x.swift"))
     }
 
+    // MARK: - Turns
+
+    /// One reply arrives as several assistant rows — Claude Code writes each
+    /// tool call as its own. They are one turn, and get one role label.
+    func testGroupMergesConsecutiveSameRoleMessages() {
+        let turns = TranscriptTurn.group([
+            TranscriptMessage(id: "1", isUser: true, blocks: [.text("hi")]),
+            TranscriptMessage(id: "2", isUser: false, blocks: [.text("on it")]),
+            TranscriptMessage(id: "3", isUser: false, blocks: [.tool(name: "Bash", detail: "ls")]),
+            TranscriptMessage(id: "4", isUser: false, blocks: [.text("done")]),
+        ])
+
+        XCTAssertEqual(turns.count, 2)
+        XCTAssertTrue(turns[0].isUser)
+        XCTAssertEqual(turns[1].id, "2", "a turn keeps its first message's id")
+        XCTAssertEqual(turns[1].blocks.count, 3, "blocks concatenate in order")
+        XCTAssertEqual(turns[1].blocks.first, .text("on it"))
+    }
+
+    /// A poll landing another assistant row extends the turn already on screen
+    /// rather than opening a second one — and says which turn to redraw.
+    func testAppendExtendsTheLastTurnWhenTheRoleMatches() {
+        var turns = TranscriptTurn.group([
+            TranscriptMessage(id: "1", isUser: false, blocks: [.text("a")]),
+        ])
+        let changed = TranscriptTurn.append(
+            [TranscriptMessage(id: "2", isUser: false, blocks: [.text("b")])],
+            to: &turns
+        )
+
+        XCTAssertEqual(turns.count, 1)
+        XCTAssertEqual(turns[0].blocks.count, 2)
+        XCTAssertEqual(changed, 0)
+    }
+
+    /// A role flip opens a new turn, and only that new turn needs drawing.
+    func testAppendOpensANewTurnWhenTheRoleFlips() {
+        var turns = TranscriptTurn.group([
+            TranscriptMessage(id: "1", isUser: false, blocks: [.text("a")]),
+        ])
+        let changed = TranscriptTurn.append(
+            [TranscriptMessage(id: "2", isUser: true, blocks: [.text("b")])],
+            to: &turns
+        )
+
+        XCTAssertEqual(turns.count, 2)
+        XCTAssertEqual(changed, 1)
+    }
+
+    /// The view stamps one role label per turn, not one per row.
+    func testOneRoleLabelPerTurn() {
+        let view = makeView()
+        view.appendMessages([
+            TranscriptMessage(id: "1", isUser: false, blocks: [.text("on it")]),
+            TranscriptMessage(id: "2", isUser: false, blocks: [.tool(name: "Bash", detail: "ls")]),
+            TranscriptMessage(id: "3", isUser: false, blocks: [.tool(name: "Read", detail: "/x")]),
+        ])
+
+        let rows = view.descendants(PaneAppMessageRowView.self)
+        XCTAssertEqual(rows.count, 1)
+        let labels = view.descendants(NSTextField.self).filter { $0.stringValue == "Claude" }
+        XCTAssertEqual(labels.count, 1)
+    }
+
     // MARK: - Tool labels
 
     /// A `Bash` command is routinely a multi-line script. The tool line is a
@@ -220,7 +284,10 @@ final class PaneAppViewTests: XCTestCase {
     func testARewrittenTranscriptReplacesTheConversationRatherThanDoublingIt() throws {
         let (view, transcript) = try makeViewOnATempTranscript()
         let opening = ["the first message", "the second message"]
-        try write([row("one", opening[0]), row("two", opening[1])], to: transcript)
+        // Alternating roles: two same-role rows would merge into one turn
+        // (Task 2) and this test is about row *count* surviving a reset, not
+        // about grouping.
+        try write([row("one", opening[0]), row("two", opening[1], isUser: false)], to: transcript)
 
         view.isLive = true
         waitForPoll(in: view) { !rowTexts(of: $0).isEmpty }
@@ -248,7 +315,10 @@ final class PaneAppViewTests: XCTestCase {
     func testAPollLandingAfterThePaneGoesDownKeepsItsMessages() throws {
         let (view, transcript) = try makeViewOnATempTranscript()
         let both = ["the first message", "the second message"]
-        try write([row("one", both[0]), row("two", both[1])], to: transcript)
+        // Alternating roles: two same-role rows would merge into one turn
+        // (Task 2) and this test is about both rows surviving a mid-read
+        // pane teardown, not about grouping.
+        try write([row("one", both[0]), row("two", both[1], isUser: false)], to: transcript)
 
         view.isLive = true
         XCTAssertTrue(view.pollInFlight, "the read is out on the background queue")
@@ -309,8 +379,14 @@ final class PaneAppViewTests: XCTestCase {
         try (rows.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
-    private func row(_ id: String, _ text: String) -> String {
-        #"{"type":"user","uuid":"\#(id)","isSidechain":false,"message":{"content":"\#(text)"}}"#
+    /// `isUser` defaults to `true` for every existing call site that only
+    /// ever wrote one role. Two rows written with the same role now merge
+    /// into one `TranscriptTurn` (Task 2) — a caller after two *distinct*
+    /// rows must alternate it, the same way a real transcript alternates a
+    /// prompt and a reply.
+    private func row(_ id: String, _ text: String, isUser: Bool = true) -> String {
+        let type = isUser ? "user" : "assistant"
+        return #"{"type":"\#(type)","uuid":"\#(id)","isSidechain":false,"message":{"content":"\#(text)"}}"#
     }
 
     // MARK: - Scroll pinning
