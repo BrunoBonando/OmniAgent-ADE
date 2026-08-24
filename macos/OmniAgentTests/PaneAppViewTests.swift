@@ -4,11 +4,36 @@ import XCTest
 @testable import OmniAgent
 
 /// `PaneAppView`: rows for a fed transcript, the fence splitter, markdown
-/// typography, the empty state, composer submission, and the poll timer's
-/// `isLive` gate. Not wired into any pane yet — that is Task 3.
+/// typography, the empty state, composer submission, the poll timer's
+/// `isLive` gate — and the reader → view seam, where a real view is pointed at
+/// a real JSONL file and driven through its actual polling path.
 final class PaneAppViewTests: XCTestCase {
+    private var tempDirectory: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PaneAppViewTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        if let tempDirectory {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+        tempDirectory = nil
+        try super.tearDownWithError()
+    }
+
+    /// A view fed by hand. Its `home` is a directory that does not exist, so
+    /// a tick that does slip through resolves nothing and reads no file —
+    /// these tests are about what `appendMessages` draws, not about polling.
     private func makeView() -> PaneAppView {
-        PaneAppView(sessionID: "session-1", cwd: "/tmp/pane-app-view-tests")
+        PaneAppView(
+            sessionID: "session-1",
+            cwd: "/tmp/pane-app-view-tests",
+            home: URL(fileURLWithPath: "/tmp/pane-app-view-tests-no-home")
+        )
     }
 
     // MARK: - Rows
@@ -133,6 +158,141 @@ final class PaneAppViewTests: XCTestCase {
 
         view.isLive = false
         XCTAssertNil(view.pollTimer)
+    }
+
+    // MARK: - The reader → view seam
+
+    /// Two facts about the very first tick, both asserted synchronously and
+    /// neither of them timing-dependent.
+    ///
+    /// It goes out in the same turn as `isLive`: a repeating `Timer` alone
+    /// first fires one interval in, which is a third of a second of "Nothing
+    /// yet." on every switch into App view before the whole conversation pops
+    /// in at once.
+    ///
+    /// And when that assignment returns, nothing must have been resolved yet.
+    /// `ClaudeModel.resolvedTranscriptURL` lists `~/.claude/projects` and
+    /// stats a candidate under every directory in it — ~40 syscalls, repeated
+    /// on every tick for as long as the transcript has not appeared — which
+    /// `EngineModel`'s own header (`EngineLauncher.swift`) forbids on the main
+    /// thread. The reader is built out of that resolution, so a reader
+    /// standing here already is proof the syscalls ran here too.
+    func testTheFirstPollFiresAtOnceAndResolvesTheTranscriptOffTheMainThread() throws {
+        let (view, transcript) = try makeViewOnATempTranscript()
+        try write([row("r1", "hello")], to: transcript)
+
+        view.isLive = true
+        XCTAssertTrue(view.pollInFlight, "the first tick goes out with isLive, not 0.3s behind it")
+        XCTAssertNil(view.reader, "and nothing stat'd ~/.claude on this thread to build one")
+
+        waitForPoll(in: view)
+        view.isLive = false
+
+        XCTAssertNotNil(view.reader, "resolved by the time the poll lands — on the background queue")
+        XCTAssertEqual(rowTexts(of: view), ["hello"])
+    }
+
+    /// The shrink join, which nothing crossed before this: the reader answers
+    /// a rewritten transcript by re-reading it from byte zero
+    /// (`ClaudeTranscriptTests.testFileShrinkingResetsAndRereadsFromTheStart`),
+    /// and this view never removed a row — so without the reset signal the
+    /// stale conversation stayed on screen with the rewritten one appended
+    /// beneath it. Reachable whenever Claude compacts or `/clear`s while the
+    /// App view is up.
+    func testARewrittenTranscriptReplacesTheConversationRatherThanDoublingIt() throws {
+        let (view, transcript) = try makeViewOnATempTranscript()
+        let opening = ["the first message", "the second message"]
+        try write([row("one", opening[0]), row("two", opening[1])], to: transcript)
+
+        view.isLive = true
+        waitForPoll(in: view) { !rowTexts(of: $0).isEmpty }
+        XCTAssertEqual(rowTexts(of: view), opening)
+
+        // Replaced whole and shorter than the reader's offset — what
+        // compaction leaves behind.
+        try write([row("one", "compacted")], to: transcript)
+        waitForPoll(in: view) { rowTexts(of: $0) != opening }
+        view.isLive = false
+
+        XCTAssertEqual(
+            rowTexts(of: view), ["compacted"],
+            "the rewritten transcript replaces the conversation; it is not appended to it"
+        )
+    }
+
+    /// A poll that lands after the pane has gone down must keep its messages.
+    /// `poll()` advanced the reader's byte offset on the background queue, so
+    /// rows dropped on the way in are gone for the reader's life — which is
+    /// the pane's life — leaving a hole in the middle of the conversation that
+    /// nothing can refill. And a pane goes down mid-read routinely rather than
+    /// by a millisecond race: `camera`'s didSet runs a visibility pass per
+    /// pinch event, so any zoom-out over a live App view is a candidate.
+    func testAPollLandingAfterThePaneGoesDownKeepsItsMessages() throws {
+        let (view, transcript) = try makeViewOnATempTranscript()
+        let both = ["the first message", "the second message"]
+        try write([row("one", both[0]), row("two", both[1])], to: transcript)
+
+        view.isLive = true
+        XCTAssertTrue(view.pollInFlight, "the read is out on the background queue")
+
+        // The pinch: the visibility pass flips this false and stops the timer,
+        // while that read is already past `poll()`.
+        view.isLive = false
+        XCTAssertNil(view.pollTimer, "so nothing will ever poll again to re-offer these rows")
+
+        waitForPoll(in: view)
+        XCTAssertEqual(
+            rowTexts(of: view), both,
+            "rows the reader already consumed have nowhere else to come from"
+        )
+    }
+
+    // MARK: - Polling helpers
+
+    /// A real view over a transcript this test owns: a `~/.claude` tree under
+    /// a temp home, so the view finds the file through
+    /// `ClaudeModel.resolvedTranscriptURL` exactly as it does in the app,
+    /// rather than being handed a URL no production path would produce.
+    private func makeViewOnATempTranscript() throws -> (view: PaneAppView, transcript: URL) {
+        let home = tempDirectory.appendingPathComponent("home")
+        let cwd = "/tmp/pane-app-view-polling"
+        let sessionID = "polling-session"
+        let url = ClaudeModel.transcriptURL(sessionID: sessionID, cwd: cwd, home: home)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        let view = PaneAppView(sessionID: sessionID, cwd: cwd, home: home)
+        view.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        return (view, url)
+    }
+
+    /// Waits for a poll cycle to land — an event, not a sleep: `onPollLanded`
+    /// fires on the main queue at the end of every cycle, whatever it found.
+    /// `until` picks the *right* cycle, since the timer goes on firing every
+    /// 0.3s and a poll that finds nothing new lands too.
+    private func waitForPoll(
+        in view: PaneAppView,
+        until predicate: @escaping (PaneAppView) -> Bool = { _ in true }
+    ) {
+        let landed = expectation(description: "a poll cycle lands")
+        // Cycles behind the one being waited for are not an API violation.
+        landed.assertForOverFulfill = false
+        view.onPollLanded = { [weak view] in
+            guard let view, predicate(view) else { return }
+            landed.fulfill()
+        }
+        wait(for: [landed], timeout: 5)
+        view.onPollLanded = nil
+    }
+
+    /// Atomically, because that is how a compacted transcript arrives: the
+    /// file at this path is replaced whole rather than edited in place.
+    private func write(_ rows: [String], to url: URL) throws {
+        try (rows.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func row(_ id: String, _ text: String) -> String {
+        #"{"type":"user","uuid":"\#(id)","isSidechain":false,"message":{"content":"\#(text)"}}"#
     }
 
     // MARK: - Scroll pinning
@@ -312,6 +472,16 @@ final class PaneAppViewTests: XCTestCase {
         let directory = URL(fileURLWithPath: dir, isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try? png.write(to: directory.appendingPathComponent("\(name).png"))
+    }
+}
+
+/// What the conversation reads as on screen, one string per row, the role
+/// label aside — which is where a duplicated conversation becomes visible.
+/// A free function rather than a method so the escaping poll predicates can
+/// use it without capturing the test case.
+private func rowTexts(of view: PaneAppView) -> [String] {
+    view.descendants(PaneAppMessageRowView.self).map { row in
+        row.descendants(NSTextField.self).dropFirst().map(\.stringValue).joined(separator: " ")
     }
 }
 

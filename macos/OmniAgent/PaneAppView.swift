@@ -16,12 +16,17 @@ enum PaneAppTextSegment: Equatable {
 /// deliberately does not conform to `PaneContentView`: it is never, itself,
 /// the thing a pane shows in place of the other.
 ///
-/// Two moving parts: an append-only scrolling message list fed by a 0.3s poll
-/// of the transcript file, and a single-line composer whose `onSubmit` Task 3
-/// routes into the live PTY.
+/// Two moving parts: a scrolling message list fed by a 0.3s poll of the
+/// transcript file — grown by appending, and only ever emptied whole, when
+/// Claude rewrites the transcript out from under the reader — and a
+/// single-line composer whose `onSubmit` Task 3 routes into the live PTY.
 final class PaneAppView: NSView {
     private let sessionID: String
     private let cwd: String
+    /// Where `~/.claude/projects` is looked for — `ClaudeModel`'s own seam,
+    /// carried here for the same reason it exists there: the polling tests
+    /// point a real view at a transcript they own instead of the real one.
+    private let home: URL
 
     private let scrollView: ShellScrollView
     private let messageStack = NSStackView()
@@ -51,15 +56,28 @@ final class PaneAppView: NSView {
     }()
 
     /// Nil until the transcript file first exists. Created once
-    /// `ClaudeModel.resolvedTranscriptURL` finds it and never torn down — the
-    /// reader's own byte offset is what keeps every later poll cheap.
-    private var reader: ClaudeTranscriptReader?
+    /// `ClaudeModel.resolvedTranscriptURL` finds it — on the background queue,
+    /// never here — and never torn down afterwards: the reader's own byte
+    /// offset is what keeps every later poll cheap.
+    ///
+    /// Internal rather than `private` so the polling tests can see both that
+    /// it eventually appears *and* that it is not there the instant a tick is
+    /// fired, which is the whole observable content of that background hop.
+    private(set) var reader: ClaudeTranscriptReader?
     /// Internal rather than `private` so the timer test can see a tick get
     /// scheduled and invalidated without sitting through real 0.3s ticks.
     private(set) var pollTimer: Timer?
     /// One read in flight at a time — a slow disk must not pile up polls
-    /// behind it.
-    private var pollInFlight = false
+    /// behind it. Internal rather than `private` so the polling tests can see
+    /// that going live fires its first tick in that same turn rather than
+    /// 0.3s later.
+    private(set) var pollInFlight = false
+
+    /// Called on the main queue at the end of every poll cycle, whatever it
+    /// found and whatever it did with it. Nil in the app: this is the seam the
+    /// polling tests wait on, so they can drive the real timer path as an
+    /// event instead of sleeping on the run loop.
+    var onPollLanded: (() -> Void)?
 
     /// The composer's text, on Enter. Task 3 routes it into the live PTY.
     var onSubmit: ((String) -> Void)?
@@ -79,9 +97,10 @@ final class PaneAppView: NSView {
     /// requiring a click first.
     var primaryResponderView: NSView { composerField }
 
-    init(sessionID: String, cwd: String) {
+    init(sessionID: String, cwd: String, home: URL = ClaudeModel.homeDirectory) {
         self.sessionID = sessionID
         self.cwd = cwd
+        self.home = home
         scrollView = ShellScrollView(documentView: messageStack)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -165,9 +184,13 @@ final class PaneAppView: NSView {
     // MARK: - Messages
 
     /// Appends one row per message, in order. The one path both the poll
-    /// timer and the tests use to put a row on screen — `poll()` only ever
-    /// hands back messages appended since the last call, so there is nothing
-    /// to diff against and nothing already on screen is ever rebuilt.
+    /// timer and the tests use to put a row on screen — a poll's messages are
+    /// the ones appended to the transcript since the last call, so there is
+    /// nothing to diff against and nothing already on screen is rebuilt.
+    ///
+    /// The single exception is a transcript Claude rewrote, which `poll()`
+    /// re-reads from the start and reports as `didReset`. That is answered by
+    /// `clearMessages()` *before* this runs, not by diffing here.
     func appendMessages(_ messages: [TranscriptMessage]) {
         guard !messages.isEmpty else { return }
         // Measured before a single row is added: a user already scrolled up
@@ -188,6 +211,25 @@ final class PaneAppView: NSView {
         if wasAtBottom {
             scrollToBottom()
         }
+    }
+
+    /// Empties the conversation, back to the state a fresh view opens in.
+    ///
+    /// Only ever for a transcript Claude rewrote out from under the reader
+    /// (compaction, `/clear`): `poll()` answers that by starting over at byte
+    /// zero, so the rows it hands back include ones already on screen, and
+    /// appending them to what is there would draw the conversation twice.
+    private func clearMessages() {
+        for row in messageStack.arrangedSubviews {
+            // Both halves: `removeArrangedSubview` only stops the stack
+            // *arranging* the view, it leaves it a subview drawing where it
+            // last sat.
+            messageStack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+        // Whatever follows in the same pass re-hides this; a rewrite that left
+        // nothing behind correctly reads as an empty conversation again.
+        emptyStateLabel.isHidden = false
     }
 
     private func isScrolledToBottom() -> Bool {
@@ -212,6 +254,10 @@ final class PaneAppView: NSView {
         timer.tolerance = 0.1
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
+        // A repeating `Timer` first fires one interval in, so without this
+        // every switch into App view shows "Nothing yet." for a third of a
+        // second before the whole conversation pops in at once.
+        tick()
     }
 
     private func stopPolling() {
@@ -221,27 +267,42 @@ final class PaneAppView: NSView {
 
     private func tick() {
         guard !pollInFlight else { return }
-        if reader == nil {
-            // The transcript does not exist until the pane's first exchange;
-            // keep looking for it every tick rather than giving up after one
-            // miss.
-            guard let url = ClaudeModel.resolvedTranscriptURL(sessionID: sessionID, cwd: cwd) else { return }
-            reader = ClaudeTranscriptReader(url: url)
-        }
-        guard let reader else { return }
         pollInFlight = true
+        let (sessionID, cwd, home) = (self.sessionID, self.cwd, self.home)
+        let existing = reader
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let messages = reader.poll()
+            // Finding the file is background work too, not just reading it.
+            // The transcript does not exist until the pane's first exchange,
+            // so this runs on *every* tick until it does — indefinitely, per
+            // App-mode pane — and `resolvedTranscriptURL` lists
+            // `~/.claude/projects` and stats a candidate under every directory
+            // in it, ~40 syscalls a time. `EngineModel`'s header states the
+            // rule that applies (`EngineLauncher.swift`): everything there
+            // reads the filesystem, so call it from a background queue.
+            let reader = existing ?? ClaudeModel.resolvedTranscriptURL(
+                sessionID: sessionID, cwd: cwd, home: home
+            ).map { ClaudeTranscriptReader(url: $0) }
+            let update = reader?.poll() ?? .nothing
             DispatchQueue.main.async {
                 guard let self else { return }
+                // Whatever this cycle did with what it found, it landed.
+                defer { self.onPollLanded?() }
                 self.pollInFlight = false
-                // `stopPolling()` invalidates the timer but cannot cancel
-                // work already handed to the background queue — without this
-                // guard, a poll that started while live and finishes after
-                // `isLive` flipped false would still mutate a view nobody is
-                // supposed to be watching anymore.
-                guard self.isLive else { return }
-                self.appendMessages(messages)
+                self.reader = reader
+                // Deliberately *not* gated on `isLive`. `poll()` advanced the
+                // reader's byte offset on the background queue, so these rows
+                // exist nowhere but this closure and no later poll will ever
+                // hand them back — dropping them because the pane went down
+                // mid-read leaves a permanent hole in the middle of the
+                // conversation. And a pane goes down mid-read routinely, not
+                // by a millisecond race: `camera`'s didSet runs a visibility
+                // pass per pinch event, so any zoom-out with a read in flight
+                // would do it. Landing them anyway is safe — arranged
+                // subviews and a layout pass, no drawing, on a view AppKit is
+                // not compositing — and `stopPolling` has already invalidated
+                // the timer, so at most one poll can ever arrive this way.
+                if update.didReset { self.clearMessages() }
+                self.appendMessages(update.messages)
             }
         }
     }

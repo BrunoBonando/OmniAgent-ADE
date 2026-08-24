@@ -43,7 +43,7 @@ final class ClaudeTranscriptTests: XCTestCase {
         let url = try fixture(rows.joined(separator: "\n") + "\n", name: "decode.jsonl")
         let reader = ClaudeTranscriptReader(url: url)
 
-        let messages = reader.poll()
+        let messages = reader.poll().messages
 
         XCTAssertEqual(messages.count, 2)
         XCTAssertEqual(messages[0].id, "u1")
@@ -68,11 +68,11 @@ final class ClaudeTranscriptTests: XCTestCase {
         let url = try fixture(complete + "\n" + partial, name: "partial.jsonl")
         let reader = ClaudeTranscriptReader(url: url)
 
-        let firstPoll = reader.poll()
+        let firstPoll = reader.poll().messages
         XCTAssertEqual(firstPoll.map(\.id), ["first"])
 
         try append(#"o"}}"# + "\n", to: url)
-        let secondPoll = reader.poll()
+        let secondPoll = reader.poll().messages
 
         XCTAssertEqual(secondPoll.map(\.id), ["partial"])
         XCTAssertEqual(secondPoll.first?.blocks, [.text("two")])
@@ -86,12 +86,12 @@ final class ClaudeTranscriptTests: XCTestCase {
         let url = try fixture(row1 + "\n" + row2 + "\n", name: "incremental.jsonl")
         let reader = ClaudeTranscriptReader(url: url)
 
-        XCTAssertEqual(reader.poll().map(\.id), ["r1", "r2"])
+        XCTAssertEqual(reader.poll().messages.map(\.id), ["r1", "r2"])
 
         let row3 = #"{"type":"user","uuid":"r3","isSidechain":false,"message":{"content":"three"}}"#
         try append(row3 + "\n", to: url)
 
-        XCTAssertEqual(reader.poll().map(\.id), ["r3"])
+        XCTAssertEqual(reader.poll().messages.map(\.id), ["r3"])
     }
 
     /// A fresh pane has no transcript yet; the reader must stay ready for
@@ -100,27 +100,49 @@ final class ClaudeTranscriptTests: XCTestCase {
         let url = tempDirectory.appendingPathComponent("not-yet-written.jsonl")
         let reader = ClaudeTranscriptReader(url: url)
 
-        XCTAssertEqual(reader.poll(), [])
+        XCTAssertEqual(reader.poll(), .nothing)
 
         let row = #"{"type":"user","uuid":"r1","isSidechain":false,"message":{"content":"hi"}}"#
         try (row + "\n").write(to: url, atomically: true, encoding: .utf8)
 
-        XCTAssertEqual(reader.poll().map(\.id), ["r1"])
+        XCTAssertEqual(reader.poll().messages.map(\.id), ["r1"])
     }
 
     /// Claude rewriting the file (compaction, `/clear`) can leave it shorter
     /// than the reader's offset; that must reset the reader rather than
-    /// leaving it parked past the new end forever.
+    /// leaving it parked past the new end forever — **and say so**. Starting
+    /// over at byte zero means re-emitting rows the caller already has, so a
+    /// silent reset is indistinguishable to a caller from an ordinary batch
+    /// of new messages, which is how the App view came to draw a rewritten
+    /// conversation twice.
     func testFileShrinkingResetsAndRereadsFromTheStart() throws {
         let longRow = #"{"type":"user","uuid":"long","isSidechain":false,"message":{"content":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#
         let url = try fixture(longRow + "\n", name: "shrink.jsonl")
         let reader = ClaudeTranscriptReader(url: url)
-        XCTAssertEqual(reader.poll().map(\.id), ["long"])
+        let first = reader.poll()
+        XCTAssertEqual(first.messages.map(\.id), ["long"])
+        XCTAssertFalse(first.didReset, "an ordinary first read is not a reset")
 
         let shortRow = #"{"type":"user","uuid":"short","isSidechain":false,"message":{"content":"hi"}}"#
         try (shortRow + "\n").write(to: url, atomically: true, encoding: .utf8)
 
-        XCTAssertEqual(reader.poll().map(\.id), ["short"])
+        let afterRewrite = reader.poll()
+        XCTAssertEqual(afterRewrite.messages.map(\.id), ["short"])
+        XCTAssertTrue(afterRewrite.didReset, "and the caller is told to throw away what it had")
+    }
+
+    /// A rewrite that leaves nothing to read still has to be reported: the
+    /// caller's conversation is stale either way, and this poll returns
+    /// through the "no new bytes" exit rather than the decoding one.
+    func testATruncatedFileReportsTheResetEvenWithNoMessagesToShowForIt() throws {
+        let row = #"{"type":"user","uuid":"before","isSidechain":false,"message":{"content":"a longish message"}}"#
+        let url = try fixture(row + "\n", name: "truncated.jsonl")
+        let reader = ClaudeTranscriptReader(url: url)
+        XCTAssertEqual(reader.poll().messages.map(\.id), ["before"])
+
+        try "".write(to: url, atomically: true, encoding: .utf8)
+
+        XCTAssertEqual(reader.poll(), TranscriptUpdate(messages: [], didReset: true))
     }
 
     /// A small `firstReadTailBytes` forces the starting offset into the
@@ -140,7 +162,7 @@ final class ClaudeTranscriptTests: XCTestCase {
         let tailBytes = UInt64(tail.utf8.count) + 10
         let reader = ClaudeTranscriptReader(url: url, firstReadTailBytes: tailBytes)
 
-        let messages = reader.poll()
+        let messages = reader.poll().messages
 
         XCTAssertEqual(messages.map(\.id), ["middle", "last"])
         XCTAssertEqual(messages.last?.blocks, [.text("last")])

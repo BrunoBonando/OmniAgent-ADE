@@ -24,6 +24,28 @@ struct TranscriptMessage: Equatable {
     let blocks: [TranscriptBlock]
 }
 
+/// What one `poll()` found: the rows it decoded, and whether the file was
+/// rewritten out from under the reader before it read them.
+///
+/// The flag exists because those two facts mean opposite things to a caller.
+/// Ordinarily a poll's messages are the ones appended since the last call, so
+/// a view appends them and rebuilds nothing. After a rewrite the reader starts
+/// over at byte zero, so the same poll hands back rows the view already has on
+/// screen — appending those would draw the conversation twice. Reporting the
+/// reset rather than quietly re-emitting is what lets the view answer it.
+struct TranscriptUpdate: Equatable {
+    /// Decoded from the bytes appended since the previous call — or, when
+    /// `didReset`, from the start of the rewritten file.
+    let messages: [TranscriptMessage]
+    /// Claude rewrote the transcript (compaction, `/clear`) and this poll
+    /// started over from its beginning. Everything the caller was showing is
+    /// stale: it must clear it before appending `messages`.
+    let didReset: Bool
+
+    /// Nothing found, nothing to answer for — a missing file, or no new bytes.
+    static let nothing = TranscriptUpdate(messages: [], didReset: false)
+}
+
 /// Turns a Claude Code transcript
 /// (`~/.claude/projects/<slug(cwd)>/<uuid>.jsonl` — see
 /// `ClaudeConversation`/`ClaudeModel.transcriptURL` in `EngineLauncher.swift`
@@ -53,15 +75,20 @@ final class ClaudeTranscriptReader {
     }
 
     /// Messages decoded from bytes appended since the previous call — or, on
-    /// the first call, from this reader's starting offset. `[]` while the
+    /// the first call, from this reader's starting offset. Empty while the
     /// file does not exist yet, or once nothing new has landed since the
     /// last poll.
-    func poll() -> [TranscriptMessage] {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+    ///
+    /// `didReset` marks the one case where the messages are *not* merely new:
+    /// a rewritten file is re-read from its start, so rows the caller already
+    /// has come back with it. See `TranscriptUpdate`.
+    func poll() -> TranscriptUpdate {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return .nothing }
         defer { try? handle.close() }
-        guard let size = try? handle.seekToEnd() else { return [] }
+        guard let size = try? handle.seekToEnd() else { return .nothing }
 
         var discardLeadingFragment = false
+        var didReset = false
         if !hasStarted {
             hasStarted = true
             // ponytail: 1MB tail ≈ 200 messages; paged loading if scrollback ever matters
@@ -72,7 +99,10 @@ final class ClaudeTranscriptReader {
         } else if size < offset {
             // Claude rewrote the file out from under us (compaction, /clear);
             // nothing before the new end is trustworthy, so this starts over
-            // rather than staying parked past the new end forever.
+            // rather than staying parked past the new end forever — and says
+            // so, because starting over means re-emitting rows the caller is
+            // already showing.
+            didReset = true
             offset = 0
             carry = Data()
         }
@@ -80,7 +110,7 @@ final class ClaudeTranscriptReader {
         guard size > offset,
               (try? handle.seek(toOffset: offset)) != nil,
               let data = try? handle.readToEnd()
-        else { return [] }
+        else { return TranscriptUpdate(messages: [], didReset: didReset) }
         offset = size
 
         var chunk = data
@@ -109,7 +139,7 @@ final class ClaudeTranscriptReader {
         // Whatever is left after the last newline is a row still being
         // written; re-wrapped fresh so its indices start at zero again.
         carry = Data(combined[lineStart...])
-        return messages
+        return TranscriptUpdate(messages: messages, didReset: didReset)
     }
 
     private static let newline = UInt8(ascii: "\n")
