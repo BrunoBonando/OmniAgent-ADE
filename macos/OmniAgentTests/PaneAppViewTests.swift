@@ -62,12 +62,7 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(secondLabels.first?.stringValue, "Claude")
         XCTAssertEqual(secondLabels.first?.textColor, ShellPalette.accent)
 
-        // Not `.contains("Read")`: a single-call run's work-group *header*
-        // reads as the bare tool name too (`workSummary`), so that alone
-        // matches both it and the detail line. The `▸` prefix is unique to
-        // `toolLabel`'s own rendering.
-        let toolLine = try XCTUnwrap(secondLabels.first { $0.stringValue.hasPrefix("▸") })
-        XCTAssertTrue(toolLine.stringValue.contains("Read"))
+        let toolLine = try XCTUnwrap(secondLabels.first { $0.stringValue.contains("Read") })
         XCTAssertTrue(toolLine.stringValue.contains("/x.swift"))
     }
 
@@ -331,17 +326,49 @@ final class PaneAppViewTests: XCTestCase {
     }
 
     /// Prose on both sides of a run keeps its place — work reads where it
-    /// happened, rather than being hoisted to the top of the turn.
+    /// happened, rather than being hoisted to the top of the turn. A run of
+    /// two so it actually collapses into a group (a run of one renders
+    /// inline and would not exercise this ordering at all).
     func testProseKeepsItsPlaceAroundAWorkGroup() {
         let row = PaneAppMessageRowView(turn: TranscriptTurn(id: "1", isUser: false, blocks: [
             .text("on it"),
             .tool(name: "Bash", detail: "ls"),
+            .tool(name: "Bash", detail: "pwd"),
             .text("done"),
         ]))
         let body = row.descendants(NSStackView.self).first!
         let kinds = body.arrangedSubviews.map { $0 is PaneAppWorkGroupView }
 
         XCTAssertEqual(kinds, [false, false, true, false], "role label, prose, group, prose")
+    }
+
+    /// A run of exactly one call is not the wall of shell commands the
+    /// collapse exists to remove — it renders inline, exactly as it did
+    /// before work groups existed, with no group to expand at all.
+    func testASingleToolCallRendersInlineRatherThanCollapsing() {
+        let row = PaneAppMessageRowView(turn: TranscriptTurn(id: "1", isUser: false, blocks: [
+            .tool(name: "Read", detail: "/x.swift"),
+        ]))
+
+        XCTAssertEqual(row.descendants(PaneAppWorkGroupView.self).count, 0)
+
+        let inline = row.descendants(NSTextField.self).filter { $0.stringValue.hasPrefix("▸") }
+        XCTAssertEqual(inline.count, 1)
+        XCTAssertEqual(inline[0].stringValue, "▸ Read  /x.swift")
+    }
+
+    /// Two runs separated by prose stay two groups — the prose between them
+    /// must not let them merge into one.
+    func testTwoRunsSeparatedByProseProduceTwoGroups() {
+        let row = PaneAppMessageRowView(turn: TranscriptTurn(id: "1", isUser: false, blocks: [
+            .tool(name: "Bash", detail: "ls"),
+            .tool(name: "Bash", detail: "pwd"),
+            .text("in between"),
+            .tool(name: "Bash", detail: "whoami"),
+            .tool(name: "Bash", detail: "date"),
+        ]))
+
+        XCTAssertEqual(row.descendants(PaneAppWorkGroupView.self).count, 2)
     }
 
     func testExpandingAWorkGroupRevealsItsCalls() {

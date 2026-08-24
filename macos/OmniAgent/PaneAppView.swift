@@ -746,7 +746,17 @@ final class PaneAppMessageRowView: NSView {
         var run: [(name: String, detail: String)] = []
         func flushRun() {
             guard !run.isEmpty else { return }
-            add(PaneAppWorkGroupView(calls: run), to: body)
+            // A run of one is not the wall of shell commands the collapse
+            // exists to remove — it renders inline, exactly as it did before
+            // work groups existed. Only two or more calls collapse.
+            if run.count == 1 {
+                let call = run[0]
+                for view in Self.blockViews(for: .tool(name: call.name, detail: call.detail)) {
+                    add(view, to: body)
+                }
+            } else {
+                add(PaneAppWorkGroupView(calls: run), to: body)
+            }
             run = []
         }
         for block in turn.blocks {
