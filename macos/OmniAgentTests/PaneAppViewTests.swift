@@ -703,43 +703,59 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(container.layer?.borderWidth, restingWidth)
     }
 
-    /// The focus glow: `PaneWorkspaceView.updateWorkingRing`'s own idiom —
-    /// a spinning `CAGradientLayer`, created only while wanted and removed
-    /// from its superlayer entirely (not merely hidden) once it is not.
-    /// Focusing a live composer must create exactly one, spinning; blurring
-    /// it must remove it rather than leaving a paused animation behind.
+    /// The focus glow: `PaneWorkspaceView.updateWorkingRing`'s own idiom at
+    /// its core — a spinning `CAGradientLayer`, created only while wanted
+    /// and removed from its superlayer entirely (not merely hidden) once it
+    /// is not. Focusing a live, key-window composer must create the
+    /// container, with the gradient inside it spinning; blurring it must
+    /// remove the container rather than leaving a paused animation behind.
+    /// `reducedMotionForTesting`/`isKeyWindowForTesting` are set explicitly
+    /// here (not left to `nil`/the live setting) so this passes on any
+    /// runner regardless of its own Reduce Motion setting or whether its
+    /// app is active, rather than only on the ones lucky enough to have
+    /// both already lined up.
     func testFocusingALiveComposerCreatesTheGlowAndBlurRemovesIt() throws {
         let view = makeView()
         view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
         view.isLive = true
+        view.reducedMotionForTesting = false
+        view.isKeyWindowForTesting = true
         let window = show(view)
         defer { window.close() }
         let glass = try XCTUnwrap(view.composerField.superview)
 
-        XCTAssertNil(glowLayer(on: glass), "no glow before focus")
+        XCTAssertNil(glowContainer(on: glass), "no glow before focus")
 
         XCTAssertTrue(window.makeFirstResponder(view.composerField))
-        let glow = try XCTUnwrap(glowLayer(on: glass), "focus creates the glow")
-        XCTAssertNotNil(glow.animation(forKey: "om-spin"), "and it spins")
+        let gradient = try XCTUnwrap(glowGradient(on: glass), "focus creates the glow")
+        XCTAssertNotNil(gradient.animation(forKey: "om-spin"), "and it spins")
 
         XCTAssertTrue(window.makeFirstResponder(nil))
-        XCTAssertNil(glowLayer(on: glass), "blur removes it entirely, not just hides it")
+        XCTAssertNil(glowContainer(on: glass), "blur removes it entirely, not just hides it")
 
         view.isLive = false
     }
 
     /// A pane in Terminal mode (`isLive == false`) never spends the glow's
     /// animated blur on a composer nobody is looking at, even if it somehow
-    /// takes focus.
+    /// takes focus. `reducedMotionForTesting`/`isKeyWindowForTesting` set
+    /// explicitly, same reason as above — without them this passed
+    /// vacuously (nil either way, for a reason unrelated to `isLive`) on a
+    /// runner with Reduce Motion on, or simply because this test host's own
+    /// `NSApplication` is never active and no window it creates genuinely
+    /// becomes key, without either ever actually exercising the `isLive`
+    /// gate this test is named for.
     func testTheGlowIsNotCreatedWhenThePaneIsNotLive() throws {
         let view = makeView()
         view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        view.reducedMotionForTesting = false
+        view.isKeyWindowForTesting = true
         let window = show(view)
         defer { window.close() }
         let glass = try XCTUnwrap(view.composerField.superview)
 
         XCTAssertTrue(window.makeFirstResponder(view.composerField))
-        XCTAssertNil(glowLayer(on: glass))
+        XCTAssertNil(glowContainer(on: glass))
     }
 
     /// Reduce Motion's fallback is the border stroke alone
@@ -753,22 +769,124 @@ final class PaneAppViewTests: XCTestCase {
         view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
         view.isLive = true
         view.reducedMotionForTesting = true
+        view.isKeyWindowForTesting = true
         let window = show(view)
         defer { window.close() }
         let glass = try XCTUnwrap(view.composerField.superview)
 
         XCTAssertTrue(window.makeFirstResponder(view.composerField))
-        XCTAssertNil(glowLayer(on: glass), "no glow under Reduce Motion")
+        XCTAssertNil(glowContainer(on: glass), "no glow under Reduce Motion")
         XCTAssertEqual(glass.layer?.borderWidth, 1, "the stroke fallback still works")
 
         view.isLive = false
     }
 
-    /// Every match in `glass`'s own sublayers — the glow rides directly on
-    /// `composerGlass.layer`, not on a subview, per the same idiom
+    /// The fix for "sweeps as a bar rather than circling": a `CAGradientLayer`'s
+    /// own *shape* rotates with its `transform`, so if the glow's bled,
+    /// non-square rect were the layer that spins, it would sweep its own
+    /// corners through the frame as it turns. Structurally, that means the
+    /// container found by `glowContainer` must never itself carry the spin
+    /// animation, must be masked by an even-odd `CAShapeLayer`, and the
+    /// gradient inside it — the layer that *does* carry the spin — must be
+    /// square and at least as large as the container's own diagonal, so no
+    /// rotation angle can uncover a corner of the container it sits in.
+    func testTheGlowMasksANonRotatingContainerRatherThanRotatingItsOwnShape() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        view.isLive = true
+        view.reducedMotionForTesting = false
+        view.isKeyWindowForTesting = true
+        let window = show(view)
+        defer { window.close() }
+        let glass = try XCTUnwrap(view.composerField.superview)
+        XCTAssertTrue(window.makeFirstResponder(view.composerField))
+
+        let container = try XCTUnwrap(glowContainer(on: glass))
+        XCTAssertNil(container.animation(forKey: "om-spin"), "the container itself never rotates")
+        let mask = try XCTUnwrap(container.mask as? CAShapeLayer)
+        XCTAssertEqual(mask.fillRule, .evenOdd)
+        XCTAssertNotNil(mask.path, "a band, not the container's whole (unmasked) rect")
+
+        let gradient = try XCTUnwrap(glowGradient(on: glass))
+        XCTAssertNotNil(gradient.animation(forKey: "om-spin"), "the gradient inside it is what spins")
+        XCTAssertEqual(gradient.frame.width, gradient.frame.height, accuracy: 0.5, "square")
+        XCTAssertGreaterThanOrEqual(
+            gradient.frame.width,
+            hypot(container.frame.width, container.frame.height) - 0.5,
+            "big enough that no rotation angle can uncover a corner of the container"
+        )
+
+        view.isLive = false
+    }
+
+    /// The halo must never bleed past the glass's own margin off the pane's
+    /// bottom edge: `PaneWorkspaceView.roundChildren` masks every pane
+    /// (this view included) to its own rounded rect, so bleed past that
+    /// margin is a straight cut across the halo rather than a fade, at the
+    /// pane's own edge.
+    func testTheGlowNeverBleedsPastTheComposersOwnBottomMargin() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        view.isLive = true
+        view.reducedMotionForTesting = false
+        view.isKeyWindowForTesting = true
+        let window = show(view)
+        defer { window.close() }
+        let glass = try XCTUnwrap(view.composerField.superview)
+        XCTAssertTrue(window.makeFirstResponder(view.composerField))
+
+        let container = try XCTUnwrap(glowContainer(on: glass))
+        let bleed = glass.bounds.minY - container.frame.minY
+        let margin = view.scrollView.contentInsets.bottom - glass.frame.height
+
+        XCTAssertGreaterThan(bleed, 0, "the halo actually bleeds outward")
+        XCTAssertLessThanOrEqual(bleed, margin, "never further than the glass's own bottom margin")
+
+        view.isLive = false
+    }
+
+    /// A window resigning key runs none of this view's own focus callbacks
+    /// (`HomeComposerField.onFocusChange` fires only from
+    /// `textDidEndEditing`, which losing key status alone does not trigger)
+    /// — so the glow's own gate has to check key status directly, and has
+    /// to be re-evaluated when it changes, rather than trusting focus alone
+    /// once and never again. Drives `isKeyWindowForTesting` directly rather
+    /// than a real window's key status: confirmed directly (see that
+    /// property's own doc comment) that no window this test host creates
+    /// ever genuinely becomes key, `makeKeyAndOrderFront` included, since
+    /// its `NSApplication` is never the active app under `xcodebuild test`.
+    func testTheGlowStopsWhenTheWindowIsNoLongerKeyAndResumesWhenItIsAgain() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        view.isLive = true
+        view.reducedMotionForTesting = false
+        view.isKeyWindowForTesting = true
+        let window = show(view)
+        defer { window.close() }
+        let glass = try XCTUnwrap(view.composerField.superview)
+        XCTAssertTrue(window.makeFirstResponder(view.composerField))
+        XCTAssertNotNil(glowContainer(on: glass), "focused, live, key: the glow is up")
+
+        view.isKeyWindowForTesting = false
+        XCTAssertNil(glowContainer(on: glass), "and it stops when the window is no longer key, even though focus never changed")
+
+        view.isKeyWindowForTesting = true
+        XCTAssertNotNil(glowContainer(on: glass), "and resumes when it becomes key again")
+
+        view.isLive = false
+    }
+
+    /// The container `updateComposerGlow` inserts directly on
+    /// `composerGlass.layer` — found by its `CAShapeLayer` mask, which
+    /// nothing else on this glass ever sets, the same idiom
     /// `PaneWorkspaceViewTests` uses to find `updateWorkingRing`'s layer.
-    private func glowLayer(on glass: NSView) -> CAGradientLayer? {
-        glass.layer?.sublayers?.compactMap { $0 as? CAGradientLayer }.first
+    private func glowContainer(on glass: NSView) -> CALayer? {
+        glass.layer?.sublayers?.first { $0.mask is CAShapeLayer }
+    }
+
+    /// The spinning gradient inside `glowContainer(on:)`.
+    private func glowGradient(on glass: NSView) -> CAGradientLayer? {
+        glowContainer(on: glass)?.sublayers?.compactMap { $0 as? CAGradientLayer }.first
     }
 
     /// Attach puts the path into the draft, which is what the transport can

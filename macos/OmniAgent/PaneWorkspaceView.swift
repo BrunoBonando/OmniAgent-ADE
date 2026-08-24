@@ -3764,9 +3764,13 @@ final class PaneContainerView: NSView, NSDraggingSource {
     private func makeAppViewIfNeeded() {
         guard appView == nil, let descriptor = workspace?.descriptor(for: paneID) else { return }
         let view = PaneAppView(sessionID: descriptor.sessionID, cwd: descriptor.cwd)
-        // `applyLayout` frames every child by hand; `PaneAppView` builds itself
-        // with Auto Layout inside and switches this off in its own init. The
-        // header's title label is the same story, and does the same thing.
+        // `applyLayout` frames every child by hand, so this view's own frame
+        // has to stay authoritative rather than Auto-Layout-driven. Belt-
+        // and-braces, not load-bearing: `PaneAppView` no longer switches
+        // this off in its own init (it leaves TAMIC at its default `true`
+        // there), so this line is a second, explicit guarantee of the same
+        // thing rather than the one place it happens. The header's title
+        // label is the same story, and does the same thing.
         view.translatesAutoresizingMaskIntoConstraints = true
         view.onSubmit = { [weak self] text in
             // Not `sendInput(text + "\r")`: a half-typed line sitting in the

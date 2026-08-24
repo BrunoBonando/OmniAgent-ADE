@@ -218,10 +218,13 @@ final class PaneAppView: NSView {
         container.translatesAutoresizingMaskIntoConstraints = false
         // Set on both branches, not just the flat-card one: the focus stroke
         // (`setComposerFocused`) rides on *this* layer's border, and a border
-        // with no radius would square off the glass's rounded corners.
-        container.layer?.cornerRadius = 14
+        // with no radius would square off the glass's rounded corners. Also
+        // what `updateComposerGlow`'s mask cuts its own inner (unbled) edge
+        // to, via `composerGlassCornerRadius` — the same number, not a
+        // second one that could drift from it.
+        container.layer?.cornerRadius = PaneAppView.composerGlassCornerRadius
         container.layer?.cornerCurve = .continuous
-        if let glass = WorkspaceGlass.sheet(cornerRadius: 14) {
+        if let glass = WorkspaceGlass.sheet(cornerRadius: PaneAppView.composerGlassCornerRadius) {
             glass.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(glass)
             NSLayoutConstraint.activate([
@@ -242,13 +245,18 @@ final class PaneAppView: NSView {
     /// all over real glass, the flat card's hairline before macOS 26) so
     /// `setComposerFocused` can put it back exactly rather than guessing.
     private var composerRestingBorder: (width: CGFloat, color: CGColor?) = (0, nil)
-    /// The focus glow: a blurred, spinning blue→purple halo bled outside the
-    /// glass, in the idiom `PaneWorkspaceView.updateWorkingRing` already
-    /// establishes for a travelling conic-gradient ring — created only while
-    /// wanted and removed from its superlayer entirely otherwise, never left
-    /// paused. `nil` whenever it is not on screen, which is most of the
-    /// time: see `updateComposerGlow`.
-    private var composerGlow: CAGradientLayer?
+    /// The focus glow's non-rotating *container* (see `updateComposerGlow`):
+    /// a plain `CALayer` carrying a `CAShapeLayer` mask and, inside it, the
+    /// spinning gradient — created only while wanted and removed from its
+    /// superlayer entirely otherwise, never left paused. `nil` whenever it
+    /// is not on screen, which is most of the time.
+    private var composerGlow: CALayer?
+    /// Observers for the window's key-status notifications —
+    /// `updateComposerGlow`'s key-window gate needs to be re-evaluated on
+    /// every change, not just read once. Rebuilt in `viewDidMoveToWindow`
+    /// the same way `PaneWorkspaceView`'s own `occlusionObserver` is: torn
+    /// down and, if there is a new window, rebuilt against it.
+    private var keyWindowObservers: [NSObjectProtocol] = []
     /// Internal rather than `private` so the composer tests can read and set
     /// the draft directly.
     let composerField: HomeComposerField = {
@@ -323,14 +331,35 @@ final class PaneAppView: NSView {
     private var isComposerFocused = false
 
     /// Test seam: `ShellMotion.reduced` reads a live, global accessibility
-    /// setting nothing in a unit test can flip (see the existing
-    /// `XCTSkipIf(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-    /// …)` pattern elsewhere in this codebase, e.g.
-    /// `PaneViewModeTests.swift`), which would leave the Reduce-Motion path
-    /// of the composer glow untested on any runner that happens to have it
-    /// off. `nil` — every real pane — defers to the real setting.
+    /// setting nothing in a unit test can flip. This codebase's existing
+    /// precedent for that (`throw XCTSkip("under Reduce Motion …")` when the
+    /// live setting is already off — `DeskCameraFlightTests.swift:59-60`,
+    /// `DeskCanvasInputTests.swift:62`) only ever *skips*, which would leave
+    /// the composer glow's Reduce-Motion path untested on any runner that
+    /// happens to have it off. `nil` — every real pane — defers to the real
+    /// setting.
     var reducedMotionForTesting: Bool?
     private var reducedMotion: Bool { reducedMotionForTesting ?? ShellMotion.reduced }
+
+    /// Test seam for `updateComposerGlow`'s key-window gate, for the same
+    /// reason `reducedMotionForTesting` exists: `window?.isKeyWindow` is a
+    /// live, external condition a unit test cannot produce either. Worse
+    /// than `ShellMotion.reduced` here, in fact — confirmed directly rather
+    /// than assumed, `NSApplication.shared.isActive` reads `false` under
+    /// `xcodebuild test`, so no window this test host creates ever becomes
+    /// genuinely key no matter how it is shown (`window.makeKeyAndOrderFront(nil)`
+    /// included — a real window is still enough for everything else this
+    /// test file's own `show(_:)` needs, since first-responder changes and
+    /// `draw(_:)` do not require true key status), which would leave the
+    /// key-window gate itself entirely untested rather than merely
+    /// untested under one motion setting. `didSet` re-runs
+    /// `updateComposerGlow` the same way a real `NSWindow`
+    /// did-become/resign-key notification does. `nil` — every real pane —
+    /// defers to the real window.
+    var isKeyWindowForTesting: Bool? {
+        didSet { updateComposerGlow() }
+    }
+    private var isComposerWindowKey: Bool { isKeyWindowForTesting ?? (window?.isKeyWindow ?? false) }
 
     /// Where keyboard focus should land when this view is the pane's active
     /// content — the composer, so typing starts a message rather than
@@ -353,22 +382,28 @@ final class PaneAppView: NSView {
         super.init(frame: .zero)
         // `translatesAutoresizingMaskIntoConstraints` deliberately left at
         // its default `true` — NOT set `false` the way most Auto-Layout-
-        // internal views in this file are. `PaneContainerView.applyLayout`
-        // positions this view by assigning `.frame` directly
-        // (`appView?.frame = surface.frame`), never through an
-        // `NSLayoutConstraint` from its superview; with TAMIC `false` this
-        // view's own width has *nothing at all* pinning it externally, so
+        // internal views in this file are. `PaneWorkspaceView.makeAppViewIfNeeded`
+        // already sets this back to `true` itself, one line after
+        // constructing this view — so production was never actually
+        // exposed to what `false` here would have meant. But
+        // `PaneAppViewTests` constructs this view directly, without going
+        // through that line, and `false` there is genuinely unsafe:
+        // `PaneContainerView.applyLayout` positions this view by assigning
+        // `.frame` directly (`appView?.frame = surface.frame`), never
+        // through an `NSLayoutConstraint` from its superview, so with
+        // nothing external pinning this view's own size either,
         // `messageStack`/`composerGlass`'s new `.defaultHigh` 880pt
         // preference (below) is free to satisfy itself by growing this
         // view's own frame outward — confirmed with a throwaway offscreen
-        // probe: a `PaneAppView` framed 500×600 and added as an ordinary
-        // frame-positioned subview of a real host in a real window (the
-        // shape `PaneContainerView` actually uses) grew itself to 960×117 the
-        // moment `appendMessages`' own `layoutSubtreeIfNeeded()` ran, wildly
-        // overflowing its host. TAMIC `true` is what pins a directly-`.frame`-
-        // assigned view's own size against exactly that — the same probe,
-        // otherwise identical, stayed at 500×600 with the column correctly
-        // capped to 420pt.
+        // probe: a `PaneAppView` framed 500×600, `false` here, and added as
+        // an ordinary frame-positioned subview of a plain host in a real
+        // window (the shape `PaneContainerView` actually embeds it in) grew
+        // itself to 960×117 the moment `appendMessages`' own
+        // `layoutSubtreeIfNeeded()` ran. Leaving TAMIC at its default here
+        // makes this view's own construction match the shape it actually
+        // runs in, rather than depending on that one call site alone to
+        // correct it — the same probe, otherwise identical, stayed at
+        // 500×600 with the column correctly capped to 420pt.
         wantsLayer = true
         // Opaque, and the same background every real pane-content view uses
         // (`PaneContainerView.paneBackgroundColor` — see `BrowserPaneView`,
@@ -494,6 +529,31 @@ final class PaneAppView: NSView {
 
     deinit {
         pollTimer?.invalidate()
+        for observer in keyWindowObservers { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    /// The composer glow's key-window gate (`updateComposerGlow`) needs to
+    /// be re-evaluated on every key-status change, not just read once at
+    /// focus time — a window resigning key runs neither `setComposerFocused`
+    /// nor any other callback already wired here (`HomeComposerField` only
+    /// calls `onFocusChange` from `textDidEndEditing`, which a window
+    /// merely losing key status does not trigger). Same shape as
+    /// `PaneWorkspaceView`'s own `occlusionObserver`: torn down here first,
+    /// then rebuilt against whatever window this view now has, if any.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        for observer in keyWindowObservers { NotificationCenter.default.removeObserver(observer) }
+        keyWindowObservers = []
+        guard let window else { return }
+        let center = NotificationCenter.default
+        keyWindowObservers = [
+            center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) {
+                [weak self] _ in self?.updateComposerGlow()
+            },
+            center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) {
+                [weak self] _ in self?.updateComposerGlow()
+            },
+        ]
     }
 
     /// Reconciles the transcript's bottom clearance against the glass
@@ -505,16 +565,15 @@ final class PaneAppView: NSView {
     override func layout() {
         super.layout()
         let clearance = composerGlass.frame.height + Self.composerGlassMargin
-        // `composerGlow`'s frame is inset-negative relative to the glass
-        // (see `updateComposerGlow`), so it has to be resynced against the
-        // glass's real, laid-out bounds on every pass too — the same reason
-        // `clearance` above is read from `frame.height` rather than kept as
-        // an authored constant. Unconditional, unlike the block below: a
-        // resize can move the glass without changing its height, and the
-        // guard beneath would then skip a glow that needs to move with it.
-        composerGlow?.frame = composerGlass.bounds.insetBy(
-            dx: -Self.composerGlowBleed, dy: -Self.composerGlowBleed
-        )
+        // `composerGlow`'s geometry (the container's frame, its mask's path,
+        // and the spinning gradient's own frame inside it) is all derived
+        // from the glass's bounds, so it has to be resynced on every pass
+        // too — the same reason `clearance` above is read from
+        // `frame.height` rather than kept as an authored constant.
+        // Unconditional, unlike the block below: a resize can move the
+        // glass without changing its height, and the guard beneath would
+        // then skip a glow that needs to move with it.
+        if let composerGlow { layOutComposerGlow(composerGlow) }
         guard scrollView.contentInsets.bottom != clearance else { return }
         scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: clearance, right: 0)
         // Negative, verified rather than assumed: `contentInsets.bottom`
@@ -564,61 +623,100 @@ final class PaneAppView: NSView {
         updateComposerGlow()
     }
 
-    /// How far `composerGlow` bleeds past the glass's own edge on every
-    /// side, and how strongly it is blurred — the two numbers that turn a
-    /// hard-edged gradient into a soft halo escaping the glass rather than a
-    /// ring painted on it.
-    private static let composerGlowBleed: CGFloat = 36
+    /// The glass's own corner radius — also what `updateComposerGlow`'s
+    /// mask cuts its inner (unbled) edge to, so the two agree.
+    private static let composerGlassCornerRadius: CGFloat = 14
+
+    /// How far the glow bleeds past the glass's own edge on every side, and
+    /// how strongly it is blurred — the two numbers that turn a hard-edged
+    /// gradient into a soft halo escaping the glass rather than a ring
+    /// painted on it.
+    ///
+    /// Bleed is kept `<=` `composerGlassMargin` (18 against 20) rather than
+    /// past it: `PaneWorkspaceView.roundChildren` masks every pane, this
+    /// view included, to its own rounded rect (`appView.layer?.masksToBounds
+    /// = true`), so bleed past the glass's own margin off the pane's bottom
+    /// edge is not a fade at all there — it is a straight cut across the
+    /// halo at the pane's edge. Verified by inspection of that call, not
+    /// assumed safe by construction.
+    private static let composerGlowBleed: CGFloat = 18
     private static let composerGlowBlurRadius: CGFloat = 28
 
     /// The design's signature glow, reused for the composer: "make it shiny
     /// with a nice circling effect with blue and purple out of focus." Same
-    /// idiom as `PaneWorkspaceView.updateWorkingRing` — a `CAGradientLayer`
-    /// of type `.conic` spun by an `om-spin` `CABasicAnimation`, created
-    /// only while wanted and removed from its superlayer (not merely
-    /// hidden, and never left paused) otherwise, so an unfocused composer
-    /// costs nothing.
+    /// idiom as `PaneWorkspaceView.updateWorkingRing` at its core — a
+    /// `CAGradientLayer` of type `.conic` spun by an `om-spin`
+    /// `CABasicAnimation`, created only while wanted and removed from its
+    /// superlayer (not merely hidden, and never left paused) otherwise, so
+    /// an unfocused composer costs nothing.
     ///
-    /// Differs from the working ring in two ways rather than one: the ramp
-    /// runs `accent` → `accentPurple` instead of a single hue, and the layer
-    /// is deliberately inset *outside* the glass's own bounds
-    /// (`composerGlowBleed`) and Core-Image-blurred (`composerGlowBlurRadius`)
-    /// so it reads as a bled, out-of-focus halo rather than a hard ring —
-    /// the working ring is a travelling arc precisely because everything but
-    /// its 1pt border is covered by opaque pane chrome; this glass has no
-    /// such occluder around it, so the softness has to come from the layer
-    /// itself.
+    /// Structured as two layers rather than one, which the working ring
+    /// does not need: a non-rotating `container` sized to the glass's own
+    /// bled (non-square) rect, masked by a `CAShapeLayer` even-odd path —
+    /// the bled rounded rect minus the glass's own rounded rect — and,
+    /// inside it, the spinning gradient itself, square and sized to the
+    /// container's diagonal so no rotation angle can uncover a corner.
     ///
-    /// Gated on focus, `isLive` and Reduce Motion together: an always-
-    /// spinning blurred gradient on every open App-mode pane is exactly the
-    /// cost `updateWorkingRing`'s own comment warns a permanent animation
-    /// would be.
+    /// Both halves answer the same mistake a single rotated, bled-rect-
+    /// shaped `CAGradientLayer` makes: a layer's *shape* rotates with its
+    /// `transform`, so a non-square layer rotated in place sweeps its own
+    /// corners through the frame as it turns — at ~90° a 952×179 bled rect
+    /// becomes a 179×952 column reaching hundreds of points into the
+    /// transcript, while the band at the glass's left and right ends falls
+    /// outside the layer and goes transparent. The working ring's own layer
+    /// rotates too, but gets away with it only because its comment says
+    /// opaque pane chrome covers everything but its own 1pt border; this
+    /// glass has no such occluder on either branch (`WorkspaceGlass.sheet`
+    /// returns `nil` below macOS 26, and the flat-card fallback's own fill
+    /// is this layer's `backgroundColor`, which paints *under* every
+    /// sublayer here — nothing hides an unmasked layer's full bounds
+    /// there), so confinement has to come from the mask rather than from
+    /// anything sitting over it. The container never rotates and the mask
+    /// confines its paint regardless of angle; only the square gradient
+    /// inside spins, and being square, its conic hue sweep reads as an
+    /// actual circle rather than the ellipse a non-square layer would bake
+    /// into it.
+    ///
+    /// Gated on focus, `isLive`, Reduce Motion and the window's own key
+    /// status together: an always-spinning blurred gradient on every open
+    /// App-mode pane is exactly the cost `updateWorkingRing`'s own comment
+    /// warns a permanent animation would be, and a window resigning key
+    /// runs none of this view's own focus callbacks (`HomeComposerField`
+    /// only calls `onFocusChange` from `textDidEndEditing`), so without the
+    /// key check the glow would keep spinning on a background window.
     private func updateComposerGlow() {
-        let wanted = isComposerFocused && isLive && !reducedMotion
+        let wanted = isComposerFocused && isLive && !reducedMotion && isComposerWindowKey
         guard wanted else {
             composerGlow?.removeFromSuperlayer()
             composerGlow = nil
             return
         }
         guard composerGlow == nil else { return }
-        let glow = CAGradientLayer()
-        glow.type = .conic
-        glow.frame = composerGlass.bounds.insetBy(
-            dx: -Self.composerGlowBleed, dy: -Self.composerGlowBleed
-        )
-        glow.startPoint = CGPoint(x: 0.5, y: 0.5)
-        glow.endPoint = CGPoint(x: 0.5, y: 0)
-        glow.colors = [
+
+        let container = CALayer()
+        let gradient = CAGradientLayer()
+        gradient.type = .conic
+        gradient.startPoint = CGPoint(x: 0.5, y: 0.5)
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)
+        gradient.colors = [
             ShellPalette.accent.withAlphaComponent(0).cgColor,
             ShellPalette.accent.withAlphaComponent(0.55).cgColor,
             ShellPalette.accentPurple.withAlphaComponent(0.9).cgColor,
             ShellPalette.accent.withAlphaComponent(0.55).cgColor,
             ShellPalette.accent.withAlphaComponent(0).cgColor,
         ]
-        glow.locations = [0, 0.25, 0.5, 0.75, 1]
+        gradient.locations = [0, 0.25, 0.5, 0.75, 1]
+        // A `CIFilter` on a layer costs an offscreen pass — the one other
+        // filter/shadow in this file (`PaneContainerView.updateChrome`'s own
+        // comment) avoids exactly that cost by never adding a second one.
+        // This is the first `layer.filters` use in `macos/`, taken
+        // deliberately rather than by accident: the animated property is
+        // `transform.rotation.z` on `gradient`, not the filter's own input,
+        // so Core Animation rasterises the blurred content once and spins
+        // that cached result rather than re-running the filter every frame.
         if let blur = CIFilter(name: "CIGaussianBlur") {
             blur.setValue(Self.composerGlowBlurRadius, forKey: kCIInputRadiusKey)
-            glow.filters = [blur]
+            gradient.filters = [blur]
         }
         let spin = CABasicAnimation(keyPath: "transform.rotation.z")
         spin.fromValue = 0
@@ -626,14 +724,68 @@ final class PaneAppView: NSView {
         spin.duration = 3
         spin.repeatCount = .infinity
         spin.isRemovedOnCompletion = false
-        glow.add(spin, forKey: "om-spin")
-        // Behind the glass panel filling the container (that panel occupies
-        // exactly the container's bounds; the glow's bled overflow around it
-        // is the only part of this layer ever actually seen), and never
-        // clipped — `composerGlass.layer?.masksToBounds` is left `false` in
-        // `init` for exactly this.
-        composerGlass.layer?.insertSublayer(glow, at: 0)
-        composerGlow = glow
+        gradient.add(spin, forKey: "om-spin")
+
+        container.addSublayer(gradient)
+        layOutComposerGlow(container)
+        // Index doesn't matter for confinement any more — the mask does
+        // that — but `at: 0` keeps it behind the glass panel for the same
+        // reason it always was: never clipped, since
+        // `composerGlass.layer?.masksToBounds` is left `false` in `init`
+        // for exactly this.
+        composerGlass.layer?.insertSublayer(container, at: 0)
+        composerGlow = container
+        // Created before this view's first layout pass — while
+        // `composerGlass.bounds` still reads `.zero` — would otherwise sit
+        // at that size until something else happens to schedule a layout;
+        // this makes it certain rather than incidental.
+        needsLayout = true
+    }
+
+    /// (Re)computes `composerGlow`'s geometry from `composerGlass`'s
+    /// current, real bounds: the container's own frame, its mask's path,
+    /// and the spinning gradient's frame inside it. Called both from
+    /// `updateComposerGlow` (to lay a freshly built container out for the
+    /// first time) and from `layout()` (to keep it in step with the glass
+    /// on every later pass) — one seam rather than the same maths kept in
+    /// sync by hand in two places.
+    private func layOutComposerGlow(_ container: CALayer) {
+        let bleed = Self.composerGlowBleed
+        let glassBounds = composerGlass.bounds
+        let outerRect = glassBounds.insetBy(dx: -bleed, dy: -bleed)
+        container.frame = outerRect
+
+        let mask = CAShapeLayer()
+        let path = CGMutablePath()
+        let outerCornerRadius = Self.composerGlassCornerRadius + bleed
+        path.addRoundedRect(
+            in: CGRect(origin: .zero, size: outerRect.size),
+            cornerWidth: outerCornerRadius, cornerHeight: outerCornerRadius
+        )
+        path.addRoundedRect(
+            in: CGRect(x: bleed, y: bleed, width: glassBounds.width, height: glassBounds.height),
+            cornerWidth: Self.composerGlassCornerRadius, cornerHeight: Self.composerGlassCornerRadius
+        )
+        // Even-odd, not the default nonzero rule: two closed subpaths added
+        // independently (an outer rounded rect, an inner one) both wind the
+        // same direction, and nonzero would fill *both* solid rather than
+        // punching the inner one out of the outer — even-odd only cares
+        // about crossing parity, not winding direction, so it does not
+        // matter that neither path was built to wind the other way.
+        mask.path = path
+        mask.fillRule = .evenOdd
+        mask.frame = CGRect(origin: .zero, size: outerRect.size)
+        container.mask = mask
+
+        guard let gradient = container.sublayers?.first as? CAGradientLayer else { return }
+        // Square, and sized to the container's own diagonal — the longest
+        // distance from its centre to any point in it — so no rotation
+        // angle can ever turn a corner of `gradient` inside the container's
+        // own bounds into daylight.
+        let side = hypot(outerRect.width, outerRect.height)
+        gradient.frame = CGRect(
+            x: (outerRect.width - side) / 2, y: (outerRect.height - side) / 2, width: side, height: side
+        )
     }
 
     private static func composerButton(symbol: String, accessibility: String) -> NSButton {
