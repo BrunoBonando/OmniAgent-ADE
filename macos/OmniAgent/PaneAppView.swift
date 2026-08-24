@@ -450,8 +450,19 @@ final class PaneAppView: NSView {
     /// The `▸ name  detail` line a tool call renders as — no box, no fill,
     /// truncated at the tail rather than wrapped, since a long shell command
     /// is a line to skim, not read in full.
-    fileprivate static func toolLabel(name: String, detail: String) -> NSTextField {
-        let text = detail.isEmpty ? "▸ \(name)" : "▸ \(name)  \(detail)"
+    ///
+    /// Internal rather than `fileprivate` so `PaneAppViewTests` can measure
+    /// the label directly.
+    static func toolLabel(name: String, detail: String) -> NSTextField {
+        // `maximumNumberOfLines` caps *wrapping*, not hard newlines — a
+        // `Bash` command is routinely a multi-line script, and without this
+        // collapse one tool call used to spill twenty lines into the
+        // transcript. (`usesSingleLineMode` does not help here: AppKit still
+        // sizes a text field's intrinsic content around embedded newlines
+        // regardless of that flag, so the newlines have to go before the
+        // string ever reaches the field.)
+        let flatDetail = detail.components(separatedBy: .newlines).joined(separator: " ")
+        let text = detail.isEmpty ? "▸ \(name)" : "▸ \(name)  \(flatDetail)"
         let field = NSTextField(labelWithString: text)
         field.isSelectable = true
         field.isEditable = false

@@ -66,6 +66,24 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertTrue(toolLine.stringValue.contains("/x.swift"))
     }
 
+    // MARK: - Tool labels
+
+    /// A `Bash` command is routinely a multi-line script. The tool line is a
+    /// line to skim, not a script to read: however many newlines the detail
+    /// carries, the label stays exactly one line tall.
+    func testToolLabelStaysOneLineForAMultiLineCommand() {
+        let single = PaneAppView.toolLabel(name: "Bash", detail: "echo one")
+        let multi = PaneAppView.toolLabel(
+            name: "Bash",
+            detail: "echo one\necho two\necho three\necho four"
+        )
+        XCTAssertEqual(
+            multi.intrinsicContentSize.height,
+            single.intrinsicContentSize.height,
+            accuracy: 0.5
+        )
+    }
+
     // MARK: - Fence splitting
 
     func testSplitFencesProducesTheProseAndCodeSequence() {
