@@ -86,10 +86,14 @@ final class PaneAppView: NSView {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        // Opaque, and the same background every other panel surface in this
-        // app uses: this view is drawn *over* the still-running terminal, and
-        // a translucent one would show both at once.
-        layer?.backgroundColor = ShellPalette.content.cgColor
+        // Opaque, and the same background every real pane-content view uses
+        // (`PaneContainerView.paneBackgroundColor` — see `BrowserPaneView`,
+        // `EditorPaneView`, et al.): this view is drawn *over* the
+        // still-running terminal, and a translucent one would show both at
+        // once, while `ShellPalette.content` (the workspace-chrome panels'
+        // own background) would show a visible seam against the pane around
+        // it.
+        layer?.backgroundColor = PaneContainerView.paneBackgroundColor.cgColor
 
         messageStack.orientation = .vertical
         messageStack.alignment = .leading
@@ -231,6 +235,12 @@ final class PaneAppView: NSView {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.pollInFlight = false
+                // `stopPolling()` invalidates the timer but cannot cancel
+                // work already handed to the background queue — without this
+                // guard, a poll that started while live and finishes after
+                // `isLive` flipped false would still mutate a view nobody is
+                // supposed to be watching anymore.
+                guard self.isLive else { return }
                 self.appendMessages(messages)
             }
         }

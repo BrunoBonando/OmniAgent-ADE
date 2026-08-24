@@ -135,6 +135,77 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertNil(view.pollTimer)
     }
 
+    // MARK: - Scroll pinning
+
+    /// A user who has scrolled up to read earlier messages must not be
+    /// yanked back down by a reply arriving behind their back —
+    /// `isScrolledToBottom()` is measured before a single row is appended,
+    /// so a position set between two `appendMessages` calls must survive the
+    /// second one untouched. This is also a regression guard for a real bug
+    /// self-review found in this exact path: `appendMessages` originally
+    /// only forced layout inside its `wasAtBottom` branch, leaving
+    /// `messageStack`'s height stale for the *next* call's measurement
+    /// whenever the user had scrolled away from the bottom.
+    func testAppendingWhileScrolledUpLeavesThePositionUnchanged() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 120)
+        view.appendMessages(manyMessages(count: 10, startingAt: 0))
+
+        let clip = try scrollClipView(in: view)
+        // The append above found nothing on screen yet, so
+        // `isScrolledToBottom()` was trivially true and scrolled to the
+        // bottom; scroll back to the top to simulate a user reading earlier
+        // messages.
+        clip.scroll(to: .zero)
+        let scrolledPosition = clip.bounds.origin
+        XCTAssertEqual(scrolledPosition, .zero, "the view must actually have overflowed for this test to mean anything")
+
+        view.appendMessages(manyMessages(count: 10, startingAt: 10))
+        XCTAssertEqual(clip.bounds.origin, scrolledPosition, "a user scrolled up must not be moved by a later append")
+    }
+
+    /// The complementary case: a user already at the bottom follows new
+    /// messages down.
+    func testAppendingWhileAtTheBottomScrollsToTheBottom() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 120)
+        view.appendMessages(manyMessages(count: 10, startingAt: 0))
+
+        let clip = try scrollClipView(in: view)
+        let documentHeight = try messageStackHeight(in: view)
+        XCTAssertEqual(
+            clip.bounds.maxY, documentHeight, accuracy: 1,
+            "the initial append (nothing on screen yet) scrolls to the bottom"
+        )
+
+        view.appendMessages(manyMessages(count: 10, startingAt: 10))
+        let newDocumentHeight = try messageStackHeight(in: view)
+        XCTAssertGreaterThan(newDocumentHeight, documentHeight, "the second batch must actually have grown the content")
+        XCTAssertEqual(
+            clip.bounds.maxY, newDocumentHeight, accuracy: 1,
+            "still at the bottom, so the second append follows the new messages down"
+        )
+    }
+
+    private func manyMessages(count: Int, startingAt offset: Int) -> [TranscriptMessage] {
+        (0..<count).map { index in
+            TranscriptMessage(
+                id: "msg-\(offset + index)",
+                isUser: index.isMultiple(of: 2),
+                blocks: [.text("Message number \(offset + index), with enough words in it to take up some real vertical space in the row.")]
+            )
+        }
+    }
+
+    private func scrollClipView(in view: PaneAppView) throws -> NSClipView {
+        try XCTUnwrap(view.descendants(ShellScrollView.self).first).contentView
+    }
+
+    private func messageStackHeight(in view: PaneAppView) throws -> CGFloat {
+        let scroll = try XCTUnwrap(view.descendants(ShellScrollView.self).first)
+        return try XCTUnwrap(scroll.documentView).frame.height
+    }
+
     // MARK: - Offscreen render
 
     /// A full layout pass at a real pane size, with a couple of rendered
