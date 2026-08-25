@@ -215,6 +215,41 @@ final class ClaudeTranscriptTests: XCTestCase {
         XCTAssertEqual(ClaudeModel.current(sessionID: sessionID, cwd: cwd, home: home), "claude-opus-5")
     }
 
+    // MARK: - Usage
+
+    func testDecodeReadsPerMessageUsage() throws {
+        let line = """
+        {"type":"assistant","uuid":"1","message":{"content":"hi","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}}}
+        """
+        let url = tempDirectory.appendingPathComponent("t.jsonl")
+        try (line + "\n").write(to: url, atomically: true, encoding: .utf8)
+
+        let messages = ClaudeTranscriptReader(url: url).poll().messages
+        let usage = try XCTUnwrap(messages.first?.usage)
+        XCTAssertEqual(usage.input, 10)
+        XCTAssertEqual(usage.output, 5)
+        XCTAssertEqual(usage.cacheRead, 100)
+        XCTAssertEqual(usage.cacheCreation, 20)
+        XCTAssertEqual(usage.contextTokens, 130, "context is input + cache read + cache creation")
+        XCTAssertEqual(usage.totalTokens, 135)
+    }
+
+    func testARowWithNoUsageContributesNothing() {
+        let a = TranscriptUsage(input: 10, output: 5, cacheRead: 0, cacheCreation: 0)
+        let b = TranscriptUsage(input: 1, output: 1, cacheRead: 0, cacheCreation: 0)
+        XCTAssertEqual(TranscriptUsage.total(of: [a, b]), 17)
+        XCTAssertEqual(TranscriptUsage.total(of: []), 0)
+    }
+
+    /// Context is the CURRENT window fill, so it is the latest row's figure, not
+    /// a sum — summing it would grow without bound and mean nothing.
+    func testContextIsTheLatestRowNotASum() {
+        let older = TranscriptUsage(input: 10, output: 0, cacheRead: 100, cacheCreation: 0)
+        let newer = TranscriptUsage(input: 20, output: 0, cacheRead: 300, cacheCreation: 5)
+        XCTAssertEqual(TranscriptUsage.latestContext(of: [older, newer]), 325)
+        XCTAssertEqual(TranscriptUsage.latestContext(of: []), 0)
+    }
+
     // MARK: - Fixtures
 
     private func fixture(_ text: String, name: String) throws -> URL {
