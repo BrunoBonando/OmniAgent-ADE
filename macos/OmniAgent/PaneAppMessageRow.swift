@@ -241,21 +241,36 @@ final class PaneAppMessageRowView: NSView {
 
     private static func blockViews(for block: TranscriptBlock) -> [NSView] {
         switch block {
+        // The splitter runs *before* the markdown parser, not after: a
+        // system block's body is machinery that happens to contain fences,
+        // pipes and hashes, and parsing it as markdown would render the
+        // machinery as a document.
         case .text(let text):
-            return MarkdownBlock.parse(text).map { markdown -> NSView in
-                switch markdown {
-                case .paragraph(let prose):
-                    return PaneAppView.proseLabel(prose)
-                case .heading(let level, let text):
-                    return PaneAppView.headingLabel(level: level, text: text)
-                case .list(let items, let ordered):
-                    return PaneAppView.listView(items: items, ordered: ordered)
-                case .code(let code):
-                    return PaneAppView.codeBlockView(code)
-                case .table(let header, let rows):
-                    return PaneAppView.codeBlockView(
-                        PaneAppView.renderTable(header: header, rows: rows)
-                    )
+            return SystemBlockSplitter.split(text).flatMap { segment -> [NSView] in
+                switch segment {
+                case .prose(let prose):
+                    return MarkdownBlock.parse(prose).map { markdown -> NSView in
+                        switch markdown {
+                        case .paragraph(let prose):
+                            return PaneAppView.proseLabel(prose)
+                        case .heading(let level, let text):
+                            return PaneAppView.headingLabel(level: level, text: text)
+                        case .list(let items, let ordered):
+                            return PaneAppView.listView(items: items, ordered: ordered)
+                        case .code(let code):
+                            return PaneAppView.codeBlockView(code)
+                        case .table(let header, let rows):
+                            return PaneAppView.codeBlockView(
+                                PaneAppView.renderTable(header: header, rows: rows)
+                            )
+                        }
+                    }
+                case .system(let block):
+                    // One live number, not an event: it belongs in the stats
+                    // bar, and a chip for it in the flow would be a chip per
+                    // reply saying the same thing.
+                    guard block.kind != .totalTokens else { return [] }
+                    return [PaneAppSystemChipView(block: block)]
                 }
             }
         case .tool(let name, let detail):
@@ -369,5 +384,130 @@ final class PaneAppWorkGroupView: NSView {
         detail.isHidden = !isExpanded
         chevron.stringValue = isExpanded ? "⌃" : "⌄"
         setAccessibilityExpanded(isExpanded)
+    }
+}
+
+/// One folded-away system block, at the point in the conversation where it
+/// happened — position is information a side panel would throw away.
+///
+/// Like `PaneAppWorkGroupView`, the body is built up front and merely
+/// hidden: a growing turn's row is destroyed and rebuilt on every poll, so
+/// the toggle must be an `isHidden` flip on a tree that is already there.
+final class PaneAppSystemChipView: NSView {
+    private(set) var isExpanded = false
+    private let chevron: NSTextField
+    private let detail = NSStackView()
+    /// The clickable strip, kept for the cursor tracking area below: only the
+    /// header toggles, so the pointing hand must not cover the selectable
+    /// body text underneath it.
+    private let header: NSStackView
+    private var cursorTracking: NSTrackingArea?
+
+    init(block: SystemBlock) {
+        chevron = ShellFont.label("⌄", font: ShellFont.ui(11), color: ShellPalette.inkFaint)
+        let titleText = Self.label(for: block.kind)
+        let title = ShellFont.label(
+            titleText,
+            font: ShellFont.ui(12),
+            color: ShellPalette.inkMuted
+        )
+        header = NSStackView(views: [chevron, title])
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        // The header looks like a line of text and behaves like a control —
+        // without this it is invisible to VoiceOver, exactly as for a work
+        // group's summary line.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.disclosureTriangle)
+        setAccessibilityLabel(titleText)
+        setAccessibilityExpanded(isExpanded)
+
+        header.orientation = .horizontal
+        header.alignment = .firstBaseline
+        header.spacing = 6
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        // Monospace is allowed *inside* an expanded chip and nowhere else in
+        // the flow — the body is machinery, and machinery reads as machinery.
+        let body = NSTextField(labelWithString: block.body)
+        body.isSelectable = true
+        body.isEditable = false
+        body.drawsBackground = false
+        body.isBordered = false
+        body.maximumNumberOfLines = 0
+        body.lineBreakMode = .byWordWrapping
+        body.font = ShellFont.mono(11)
+        body.textColor = ShellPalette.inkTertiary
+        body.translatesAutoresizingMaskIntoConstraints = false
+
+        detail.orientation = .vertical
+        detail.alignment = .leading
+        detail.isHidden = true
+        detail.translatesAutoresizingMaskIntoConstraints = false
+        detail.addArrangedSubview(body)
+
+        let stack = NSStackView(views: [header, detail])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            // `.leading` alignment pins one edge only; without this the body
+            // reports its unwrapped single-line width and pushes the column
+            // open instead of wrapping inside it.
+            body.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+
+        header.addGestureRecognizer(
+            NSClickGestureRecognizer(target: self, action: #selector(handleClick))
+        )
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// The pointing hand over the header only — the body below is selectable
+    /// text and must keep the I-beam. `.cursorUpdate` on an explicit rect for
+    /// the same reason `PaneAppWorkGroupView` uses one: a stack moves these
+    /// views, and a cursor rect is a frame the window caches.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let cursorTracking { removeTrackingArea(cursorTracking) }
+        let area = NSTrackingArea(
+            rect: convert(header.bounds, from: header),
+            options: [.cursorUpdate, .activeInKeyWindow],
+            owner: self
+        )
+        addTrackingArea(area)
+        cursorTracking = area
+    }
+
+    override func cursorUpdate(with event: NSEvent) { NSCursor.pointingHand.set() }
+
+    @objc private func handleClick() { toggle() }
+
+    /// Internal rather than private so the tests can drive expansion without
+    /// synthesising a click.
+    func toggle() {
+        isExpanded.toggle()
+        detail.isHidden = !isExpanded
+        chevron.stringValue = isExpanded ? "⌃" : "⌄"
+        setAccessibilityExpanded(isExpanded)
+    }
+
+    private static func label(for kind: SystemBlockKind) -> String {
+        switch kind {
+        case .taskNotification: return "agent finished"
+        case .systemReminder: return "system note"
+        case .commandName, .commandMessage, .commandArgs: return "command"
+        case .localCommandStdout: return "command output"
+        case .totalTokens: return "tokens"
+        }
     }
 }

@@ -723,6 +723,58 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertTrue(rebuilt.isExpanded, "an expanded group must not snap shut mid-reply")
     }
 
+    // MARK: - System chips
+
+    func testASystemBlockRendersAsACollapsedChipInPlace() {
+        let row = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "1", isUser: false, blocks: [
+                .text("before\n<system-reminder>\nbe careful\n</system-reminder>\nafter"),
+            ]),
+            showsAvatar: true
+        )
+
+        let chips = row.descendants(PaneAppSystemChipView.self)
+        XCTAssertEqual(chips.count, 1)
+        XCTAssertFalse(chips[0].isExpanded, "collapsed by default")
+
+        let body = try? XCTUnwrap(row.bodyStack)
+        let kinds = body?.arrangedSubviews.map { $0 is PaneAppSystemChipView } ?? []
+        XCTAssertEqual(kinds, [false, true, false], "prose, chip, prose — in place")
+    }
+
+    func testExpandingASystemChipRevealsItsBody() {
+        let chip = PaneAppSystemChipView(block: SystemBlock(kind: .systemReminder, body: "be careful"))
+        let detail = chip.descendants(NSTextField.self).filter { $0.stringValue.contains("be careful") }
+        XCTAssertEqual(detail.count, 1, "body is built up front, not on expand")
+
+        let before = chip.fittingSize.height
+        chip.toggle()
+        XCTAssertTrue(chip.isExpanded)
+        XCTAssertGreaterThan(chip.fittingSize.height, before)
+    }
+
+    /// `<total_tokens>` is one live number, not an event. It belongs in the stats
+    /// bar and never in the conversation flow.
+    func testTotalTokensProducesNoChip() {
+        let row = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "1", isUser: false, blocks: [
+                .text("answer\n<total_tokens>15000000 tokens left</total_tokens>"),
+            ]),
+            showsAvatar: true
+        )
+        XCTAssertEqual(row.descendants(PaneAppSystemChipView.self).count, 0)
+    }
+
+    /// A collapsed chip's header is UI font like everything else — only its
+    /// expanded body is machinery, and only machinery gets monospace.
+    func testACollapsedChipHeaderIsNotMonospaced() throws {
+        let chip = PaneAppSystemChipView(block: SystemBlock(kind: .systemReminder, body: "x"))
+        let header = try XCTUnwrap(
+            chip.descendants(NSTextField.self).first { $0.stringValue == "system note" }
+        )
+        XCTAssertEqual(header.font?.fontName, ShellFont.ui(12).fontName)
+    }
+
     // MARK: - Markdown
 
     /// `**bold**` produces a bold run; every other run keeps the exact base
