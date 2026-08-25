@@ -860,6 +860,10 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     private let dots = ShellDotsView()
     private let bar = NSView()
     private let isCurrent: Bool
+    /// The workspace's folder colour, when one is customized — worn by the
+    /// rail and the selection fill, so a selected session reads in its own
+    /// workspace's colour rather than the standard accent.
+    private let tint: NSColor?
     /// A nested session — indented under its parent, wearing the connector
     /// and the dimmed workspace name (the 2026-08-20 redesign's §3).
     let isNested: Bool
@@ -875,10 +879,12 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
         statuses: [RemoteSessionStatus?],
         awaitingCount: Int = 0,
         nested: Bool = false,
-        workspaceName: String? = nil
+        workspaceName: String? = nil,
+        tint: NSColor? = nil
     ) {
         self.session = session
         isCurrent = session.isCurrent
+        self.tint = tint
         isNested = nested
         titleField = ShellFont.label(
             session.label,
@@ -894,7 +900,12 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
 
         bar.wantsLayer = true
         bar.layer?.cornerRadius = 2
-        bar.layer?.backgroundColor = (session.isCurrent ? ShellPalette.accent : .clear).cgColor
+        // The rail is always drawn: the workspace's folder colour (else the
+        // standard accent) while this session is the current one, a dim grey
+        // otherwise, so every row reads as part of the same column.
+        bar.layer?.backgroundColor = (
+            session.isCurrent ? (tint ?? ShellPalette.accent) : ShellPalette.inkFainter
+        ).cgColor
         bar.translatesAutoresizingMaskIntoConstraints = false
 
         dots.apply(
@@ -906,13 +917,15 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
         let indent: CGFloat = nested ? 14 : 0
         for view in [bar, titleField, dots] { addSubview(view) }
         NSLayoutConstraint.activate([
-            // Indented under its workspace row — the folder's label column.
-            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16 + indent),
+            // Indented under its workspace row — the folder's label column,
+            // so a session name starts at the same x as its workspace name
+            // (chevron 5 + 15, folder +3 + 17, title +6 = 46).
+            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 32 + indent),
             bar.widthAnchor.constraint(equalToConstant: 2.5),
             bar.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             bar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
 
-            titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 30 + indent),
+            titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 46 + indent),
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
             titleField.trailingAnchor.constraint(equalTo: dots.leadingAnchor, constant: -8),
 
@@ -928,7 +941,7 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
             connector = line
             addSubview(line)
             NSLayoutConstraint.activate([
-                line.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 19),
+                line.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 35),
                 line.widthAnchor.constraint(equalToConstant: 8),
                 line.topAnchor.constraint(equalTo: topAnchor),
                 line.bottomAnchor.constraint(equalTo: centerYAnchor),
@@ -993,7 +1006,7 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     override func refreshBackground() {
         let fill: NSColor
         if isCurrent {
-            fill = ShellPalette.accentSelection
+            fill = tint?.withAlphaComponent(0.14) ?? ShellPalette.accentSelection
         } else if isHovered {
             fill = NSColor(white: 1, alpha: 0.055)
         } else {

@@ -112,7 +112,7 @@ final class WorkspaceEmptyRowView: NSView {
         addSubview(titleField)
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 24),
-            titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 30),
+            titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 46),
             titleField.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
@@ -371,7 +371,10 @@ final class WorkspacesTreeView: NSView {
                 }
                 .count,
             nested: nested,
-            workspaceName: nested ? workspaceLabel : nil
+            workspaceName: nested ? workspaceLabel : nil,
+            // The rail wears the workspace's folder colour; looked up here so
+            // the Status and Last-updated modes get it too, not just the tree.
+            tint: lastRender.entries.first { $0.id == session.project }?.tint
         )
         row.onPress = { [weak self] in self?.onSelectSession?(session) }
         row.onRename = { [weak self] name in self?.onRenameSession?(session, name) }
