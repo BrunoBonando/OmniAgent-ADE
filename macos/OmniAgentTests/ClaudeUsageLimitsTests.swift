@@ -135,4 +135,165 @@ final class ClaudeUsageLimitsPollerTests: XCTestCase {
         wait(for: [pushed], timeout: 5)
         poller.removeObserver(self)
     }
+    // MARK: - Reset instants
+
+    /// The whole point of parsing the phrase: a real instant to count down to.
+    func testAResetPhraseBecomesAnInstant() throws {
+        let now = try XCTUnwrap(date(2026, 8, 25, 15, 0))
+        let parsed = try XCTUnwrap(ClaudeUsageLimits.resetDate(from: "Aug 25 at 8:30pm", now: now))
+        let fields = Calendar.current.dateComponents([.month, .day, .hour, .minute], from: parsed)
+        XCTAssertEqual(fields.month, 8)
+        XCTAssertEqual(fields.day, 25)
+        XCTAssertEqual(fields.hour, 20, "8:30pm is 20:30")
+        XCTAssertEqual(fields.minute, 30)
+    }
+
+    /// `/usage` writes a whole hour without minutes — `resets Aug 28 at 11am`.
+    func testAWholeHourPhraseParsesToo() throws {
+        let now = try XCTUnwrap(date(2026, 8, 25, 15, 0))
+        let parsed = try XCTUnwrap(ClaudeUsageLimits.resetDate(from: "Aug 28 at 11am", now: now))
+        let fields = Calendar.current.dateComponents([.month, .day, .hour], from: parsed)
+        XCTAssertEqual([fields.month, fields.day, fields.hour], [8, 28, 11])
+    }
+
+    /// The phrase carries no year, so a December reading of a January reset has
+    /// to roll forward rather than land eleven months in the past.
+    func testAResetPastTheYearEndRollsForward() throws {
+        let now = try XCTUnwrap(date(2026, 12, 31, 23, 0))
+        let parsed = try XCTUnwrap(ClaudeUsageLimits.resetDate(from: "Jan 1 at 9am", now: now))
+        XCTAssertGreaterThan(parsed, now, "next year's January, not this one's")
+        XCTAssertEqual(Calendar.current.component(.year, from: parsed), 2027)
+    }
+
+    func testAnUnreadablePhraseHasNoInstant() {
+        XCTAssertNil(ClaudeUsageLimits.resetDate(from: "in a little while"))
+        XCTAssertNil(ClaudeUsageLimits.resetDate(from: ""))
+        XCTAssertNil(ClaudeUsageLimits.resetDate(from: nil))
+    }
+
+    func testTimeLeftReadsAtTheCoarsenessTheSidebarShows() throws {
+        let now = try XCTUnwrap(date(2026, 8, 25, 15, 0))
+        XCTAssertEqual(ClaudeUsageLimits.timeLeft(until: date(2026, 8, 25, 19, 12), now: now), "4h 12m")
+        XCTAssertEqual(ClaudeUsageLimits.timeLeft(until: date(2026, 8, 28, 10, 0), now: now), "2d 19h")
+        XCTAssertEqual(ClaudeUsageLimits.timeLeft(until: date(2026, 8, 25, 15, 25), now: now), "25m")
+        XCTAssertEqual(ClaudeUsageLimits.timeLeft(until: date(2026, 8, 25, 14, 0), now: now), "now")
+        XCTAssertNil(ClaudeUsageLimits.timeLeft(until: nil, now: now))
+    }
+
+    /// End to end: the two limits carry instants of their own, off one real
+    /// `/usage` block.
+    func testParsedLimitsCarryTheirResetInstants() {
+        let limits = ClaudeUsageLimits.parse(
+            "Current session: 4% used · resets Aug 25 at 8:30pm (Europe/Berlin)\n"
+            + "Current week (all models): 40% used · resets Aug 28 at 11am (Europe/Berlin)"
+        )
+        XCTAssertNotNil(limits.sessionResetsAt)
+        XCTAssertNotNil(limits.weekResetsAt)
+    }
+
+    // MARK: - The activity gate
+
+    /// An idle machine must not spend quota re-reading a number that cannot
+    /// have moved. `start()` fetches once; the tick after it does not.
+    func testAnIdleTickDoesNotFetch() {
+        var runs = 0
+        poller.runnerForTesting = {
+            runs += 1
+            return "Current session: 5% used · resets Aug 25 at 8:30pm"
+        }
+        expectPush { self.poller.refresh() }
+        XCTAssertEqual(runs, 1)
+
+        expectNoPush { self.poller.refreshIfWorthIt() }
+        XCTAssertEqual(runs, 1, "nothing was sent, so nothing was worth asking about")
+    }
+
+    func testSendingSomethingEarnsTheNextFetch() {
+        var runs = 0
+        poller.runnerForTesting = {
+            runs += 1
+            return "Current session: 5% used · resets Aug 25 at 8:30pm"
+        }
+        expectPush { self.poller.refresh() }
+        poller.noteActivity()
+        expectPush { self.poller.refreshIfWorthIt() }
+        XCTAssertEqual(runs, 2)
+    }
+
+    /// The one case where idleness does not earn a skip: the window rolled
+    /// over, so the percentage now describes a window that no longer exists.
+    ///
+    /// The phrase is built from the clock rather than hardcoded — a fixed
+    /// date would be read as *next* year's by `resetDate`'s wrap rule and the
+    /// rollover would never be seen, which is what a hardcoded "Jan 1" fixture
+    /// did on the first run of this test.
+    func testARolledOverWindowFetchesEvenWhileIdle() {
+        var runs = 0
+        let anHourAgo = phrase(for: Date().addingTimeInterval(-3600))
+        poller.runnerForTesting = {
+            runs += 1
+            return "Current session: 5% used · resets \(anHourAgo)"
+        }
+        expectPush { self.poller.refresh() }
+        XCTAssertEqual(runs, 1)
+
+        expectPush { self.poller.refreshIfWorthIt() }
+        XCTAssertEqual(runs, 2, "a stale window is worth one request")
+    }
+
+    /// The wrap rule is months wide, not a day: a week-old reset is a stale
+    /// reading that must stay in the past, because staying in the past is what
+    /// tells the poller to go and look again.
+    func testARecentlyPassedResetStaysInThePast() throws {
+        let now = Date()
+        let lastWeek = try XCTUnwrap(
+            ClaudeUsageLimits.resetDate(from: phrase(for: now.addingTimeInterval(-7 * 86_400)), now: now)
+        )
+        XCTAssertLessThan(lastWeek, now, "not rolled forward into next year")
+    }
+
+    /// `/usage`'s own rendering of an instant, which is what the parser reads.
+    private func phrase(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.amSymbol = "am"
+        formatter.pmSymbol = "pm"
+        formatter.dateFormat = "MMM d 'at' h:mma"
+        return formatter.string(from: date)
+    }
+
+    /// A failed fetch must not count as "seen" — otherwise one timeout parks
+    /// the readout until the next thing is sent.
+    func testAFailedFetchLeavesTheGateOpen() {
+        poller.runnerForTesting = { "" }
+        expectPush { self.poller.refresh() }
+        var runs = 0
+        poller.runnerForTesting = {
+            runs += 1
+            return "Current session: 5% used · resets Aug 25 at 8:30pm"
+        }
+        expectPush { self.poller.refreshIfWorthIt() }
+        XCTAssertEqual(runs, 1, "the failure did not close the gate")
+    }
+
+    private func date(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int) -> Date? {
+        Calendar.current.date(
+            from: DateComponents(year: year, month: month, day: day, hour: hour, minute: minute)
+        )
+    }
+
+    /// The counterpart to `expectPush`: runs `body` and asserts no push
+    /// followed. Two main-queue hops, so it drains past anything the call
+    /// could have scheduled before deciding nothing happened.
+    private func expectNoPush(_ body: () -> Void) {
+        var pushed = false
+        poller.addObserver(self) { pushed = true }
+        body()
+        let drained = expectation(description: "the main queue drained")
+        DispatchQueue.main.async { DispatchQueue.main.async { drained.fulfill() } }
+        wait(for: [drained], timeout: 5)
+        poller.removeObserver(self)
+        XCTAssertFalse(pushed)
+    }
+
 }

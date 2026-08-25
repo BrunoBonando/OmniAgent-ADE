@@ -458,11 +458,30 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         // Ctrl+E (end of line) then Ctrl+U (kill to beginning) — covers both
         // readline and TUI input handlers used by Claude and Copilot.
         sendInput("\u{05}\u{15}")
-        sendInput(command + "\r")
+        sendInput(Self.framed(command) + "\r")
         guard !saved.isEmpty else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.sendInput(saved)
         }
+    }
+
+    /// How a command reaches the TUI: as-is when it is one line, wrapped in
+    /// bracketed paste when it is several.
+    ///
+    /// Without the wrapper each embedded newline *submits* — a five-line
+    /// message would arrive as five separate prompts. `ESC[200~ … ESC[201~`
+    /// is what a terminal sends around a real paste, and a TUI that
+    /// understands it inserts the whole run as one multi-line draft instead.
+    ///
+    /// Safe to send unconditionally? No — a TUI that has not enabled
+    /// bracketed paste receives the escape as literal text, so it is applied
+    /// only where it is needed and a single-line command keeps the exact
+    /// bytes it has always been sent. Claude's TUI does enable it: it emits
+    /// `ESC[?2004h` on startup, verified against a real `claude` in a PTY
+    /// rather than assumed from the fact that most TUIs do.
+    static func framed(_ command: String) -> String {
+        guard command.contains(where: \.isNewline) else { return command }
+        return "\u{1b}[200~" + command + "\u{1b}[201~"
     }
 
     /// The text currently typed on the cursor's input line, with the prompt

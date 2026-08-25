@@ -554,4 +554,72 @@ final class NavigationSidebarTests: XCTestCase {
         }
         return nil
     }
+    // MARK: - Claude limits card
+
+    /// It sits above the machine gauges, which is where the question said to
+    /// put it — and both survive.
+    func testTheClaudeCardSitsAboveTheMachineGauges() {
+        let sidebar = makeSidebar()
+        XCTAssertGreaterThan(
+            sidebar.claudeLimits.frame.minY, sidebar.statsRow.frame.minY,
+            "higher up the column than CPU/MEM/GPU"
+        )
+        XCTAssertGreaterThan(sidebar.statsRow.frame.height, 0, "the gauges are still there")
+    }
+
+    func testTheBarsReadTheLimitsAndTheirCountdowns() throws {
+        let card = SidebarClaudeLimitsView()
+        card.frame = NSRect(x: 0, y: 0, width: 232, height: SidebarClaudeLimitsView.height)
+        let now = try XCTUnwrap(
+            Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 25, hour: 15))
+        )
+        card.apply(
+            ClaudeUsageLimits.parse(
+                "Current session: 40% used · resets Aug 25 at 8:30pm\n"
+                + "Current week (all models): 95% used · resets Aug 28 at 11am"
+            ),
+            now: now
+        )
+        card.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(card.sessionRow.bar.fillFraction, 0.4, accuracy: 0.001)
+        XCTAssertEqual(card.sessionRow.remaining, "5h 30m")
+        XCTAssertEqual(card.weekRow.bar.fillFraction, 0.95, accuracy: 0.001)
+        XCTAssertEqual(card.weekRow.remaining, "2d 20h")
+    }
+
+    /// The machine gauges' thresholds, so one glance down the column reads
+    /// amber the same way whatever it is measuring.
+    func testTheFillWearsThePressureColour() {
+        let bar = SidebarLimitBarView()
+        bar.apply(0.4)
+        XCTAssertEqual(bar.fillColor, ShellPalette.green)
+        bar.apply(0.75)
+        XCTAssertEqual(bar.fillColor, ShellPalette.amber)
+        bar.apply(0.95)
+        XCTAssertEqual(bar.fillColor, ShellPalette.red)
+    }
+
+    /// "0% used" and "we have no reading" must not look the same.
+    func testNoReadingIsAnEmptyTrackNotAZeroFill() {
+        let card = SidebarClaudeLimitsView()
+        card.apply(nil)
+        XCTAssertEqual(card.sessionRow.remaining, "—")
+        XCTAssertNil(card.sessionRow.bar.fraction)
+        XCTAssertEqual(card.sessionRow.bar.fillColor, ShellPalette.inkTertiary)
+
+        card.apply(ClaudeUsageLimits.parse("Current session: 0% used · resets Aug 25 at 8:30pm"))
+        XCTAssertEqual(card.sessionRow.bar.fraction, 0, "a real zero, not a missing reading")
+    }
+
+    /// The bar takes the width the two labels do not — without this it
+    /// collapses to nothing and the labels stretch across the card.
+    func testTheBarTakesTheSlackBetweenTheLabels() {
+        let card = SidebarClaudeLimitsView()
+        card.frame = NSRect(x: 0, y: 0, width: 232, height: SidebarClaudeLimitsView.height)
+        card.apply(ClaudeUsageLimits.parse("Current session: 40% used · resets Aug 25 at 8:30pm"))
+        card.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(card.sessionRow.bar.frame.width, 40)
+    }
+
 }

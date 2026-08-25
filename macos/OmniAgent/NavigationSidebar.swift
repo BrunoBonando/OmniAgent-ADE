@@ -607,6 +607,7 @@ final class NavigationSidebarView: NSView {
     private(set) var navRows: [SidebarNavRowView] = []
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
     let workspacesTree = WorkspacesTreeView()
+    let claudeLimits = SidebarClaudeLimitsView()
     let statsRow = SidebarSystemStatsView()
     let accountRow = SidebarAccountRowView()
     private(set) var destination: WorkspaceDestination = .home
@@ -691,7 +692,9 @@ final class NavigationSidebarView: NSView {
             addSubview(glass)
         }
 
-        for view in [navStack, workspacesHeader, scroll, statsRow, accountRow] { addSubview(view) }
+        for view in [navStack, workspacesHeader, scroll, claudeLimits, statsRow, accountRow] {
+            addSubview(view)
+        }
 
         // Last, and so on top of everything: the rows are all inset from this
         // edge, so it never covers one, and being topmost means it cannot be
@@ -721,7 +724,11 @@ final class NavigationSidebarView: NSView {
             scroll.topAnchor.constraint(equalTo: workspacesHeader.bottomAnchor, constant: 2),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: statsRow.topAnchor, constant: -8),
+            scroll.bottomAnchor.constraint(equalTo: claudeLimits.topAnchor, constant: -8),
+
+            claudeLimits.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            claudeLimits.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            claudeLimits.bottomAnchor.constraint(equalTo: statsRow.topAnchor, constant: -8),
 
             statsRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             statsRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),

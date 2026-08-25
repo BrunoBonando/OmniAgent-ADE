@@ -1918,184 +1918,6 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(rep.pixelsHigh, 640)
     }
 
-    // MARK: - Stats bar
-
-    func testTheStatsBarShowsFourReadoutsWhenItFits() {
-        let bar = PaneAppStatsBar()
-        bar.frame = NSRect(x: 0, y: 0, width: 880, height: 34)
-        bar.tokens = 341_000
-        bar.context = 130_500
-        bar.limits = ClaudeUsageLimits.parse(
-            "Current session: 9% used · resets Aug 25 at 2:10pm\n"
-            + "Current week (all models): 37% used · resets Aug 28 at 11am"
-        )
-        bar.layoutSubtreeIfNeeded()
-
-        XCTAssertEqual(bar.visibleReadoutCount, 4)
-        let text = bar.descendants(NSTextField.self).map(\.stringValue).joined(separator: " ")
-        XCTAssertTrue(text.contains("9%"))
-        XCTAssertTrue(text.contains("37%"))
-    }
-
-    /// Panes live in a grid and are often narrow. The bar keeps Context — the only
-    /// readout that changes minute to minute — and puts the rest behind a tap,
-    /// rather than wrapping or clipping.
-    func testTheStatsBarCollapsesOnANarrowPane() {
-        let bar = PaneAppStatsBar()
-        bar.frame = NSRect(x: 0, y: 0, width: 320, height: 34)
-        bar.tokens = 341_000
-        bar.context = 130_500
-        bar.layoutSubtreeIfNeeded()
-
-        XCTAssertEqual(bar.visibleReadoutCount, 1)
-        // By view, not by text. `descendants` walks hidden views too, so
-        // searching the joined `stringValue`s for "context" found the Context
-        // *title* label whether it was hidden or not — the assertion passed
-        // identically for a bar that kept Tokens and hid Context.
-        XCTAssertFalse(bar.contextReadout.isHidden, "the one that changes minute to minute")
-        XCTAssertTrue(bar.tokensReadout.isHidden)
-        XCTAssertTrue(bar.sessionReadout.isHidden)
-        XCTAssertTrue(bar.weekReadout.isHidden)
-    }
-
-    /// "…with the rest behind a tap." There was no tap: below 560pt three
-    /// readouts vanished with no way to see them again short of resizing the
-    /// pane, which in a grid is not always possible.
-    func testTappingANarrowBarBringsTheHiddenReadoutsBack() {
-        let bar = PaneAppStatsBar()
-        bar.frame = NSRect(x: 0, y: 0, width: 320, height: 34)
-        bar.tokens = 341_000
-        bar.context = 130_500
-        bar.layoutSubtreeIfNeeded()
-        XCTAssertTrue(bar.tokensReadout.isHidden, "hidden to start with")
-
-        bar.mouseDown(with: click(in: bar))
-        bar.layoutSubtreeIfNeeded()
-
-        XCTAssertTrue(bar.isExpanded)
-        XCTAssertEqual(bar.visibleReadoutCount, 4)
-        XCTAssertFalse(bar.tokensReadout.isHidden)
-        XCTAssertFalse(bar.sessionReadout.isHidden)
-        XCTAssertFalse(bar.weekReadout.isHidden)
-
-        bar.mouseDown(with: click(in: bar))
-        bar.layoutSubtreeIfNeeded()
-        XCTAssertTrue(bar.tokensReadout.isHidden, "and the tap folds it away again")
-    }
-
-    /// `modelName`/`modelPercent` were parsed, unit-tested, and rendered
-    /// nowhere at all — the spec puts them in "the expanded state", which is
-    /// this one.
-    func testTheExpandedBarShowsThePerModelWeeklyLine() {
-        let bar = PaneAppStatsBar()
-        bar.frame = NSRect(x: 0, y: 0, width: 880, height: 34)
-        bar.limits = ClaudeUsageLimits.parse(
-            "Current week (all models): 37% used · resets Aug 28 at 11am\n"
-            + "Current week (Fable): 10% used · resets Aug 28 at 11am"
-        )
-        bar.layoutSubtreeIfNeeded()
-        XCTAssertTrue(bar.modelLabel.isHidden, "a fifth number would crowd the collapsed bar")
-
-        bar.mouseDown(with: click(in: bar))
-        bar.layoutSubtreeIfNeeded()
-
-        XCTAssertFalse(bar.modelLabel.isHidden)
-        XCTAssertTrue(bar.modelLabel.stringValue.contains("Fable"))
-        XCTAssertTrue(bar.modelLabel.stringValue.contains("10%"))
-    }
-
-    /// A bar that has never had a per-model line has nothing to expand *to*
-    /// there, and must not open an empty row.
-    func testTheExpandedBarHidesThePerModelLineWhenThereIsNone() {
-        let bar = PaneAppStatsBar()
-        bar.frame = NSRect(x: 0, y: 0, width: 880, height: 34)
-        bar.limits = nil
-
-        bar.mouseDown(with: click(in: bar))
-        bar.layoutSubtreeIfNeeded()
-
-        XCTAssertTrue(bar.isExpanded)
-        XCTAssertTrue(bar.modelLabel.isHidden)
-    }
-
-    /// Spec §4 asks for "an explicit manual refresh". The glyph is a control,
-    /// so its click is delivered to it and never reaches the bar's own
-    /// `mouseDown` — pinned here, because a bar that expanded instead of
-    /// refreshing would look identical in a screenshot.
-    func testTheRefreshGlyphAsksForAFreshReadingRatherThanExpanding() {
-        let bar = PaneAppStatsBar()
-        bar.frame = NSRect(x: 0, y: 0, width: 880, height: 34)
-        var asked = 0
-        bar.onRefreshRequested = { asked += 1 }
-
-        bar.refreshButton.performClick(nil)
-
-        XCTAssertEqual(asked, 1)
-        XCTAssertFalse(bar.isExpanded, "the glyph is not the expand target")
-    }
-
-    /// The stats bar is wired to the app-wide poller, which is the only thing
-    /// that ever takes a reading.
-    func testTheAppViewWiresTheBarsRefreshToThePoller() throws {
-        let view = makeView()
-        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
-        let bar = try XCTUnwrap(view.descendants(PaneAppStatsBar.self).first)
-        XCTAssertNotNil(bar.onRefreshRequested)
-    }
-
-    /// A left-click at the bar's centre, in its own coordinates. Sent
-    /// directly to `mouseDown` rather than through the window: the bar is not
-    /// in one here, and what is being pinned is the handler, not hit-testing
-    /// (`testTheRefreshGlyphAsksForAFreshReading…` pins the exclusion).
-    private func click(in view: NSView) -> NSEvent {
-        NSEvent.mouseEvent(
-            with: .leftMouseDown,
-            location: NSPoint(x: view.bounds.midX, y: view.bounds.midY),
-            modifierFlags: [],
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            eventNumber: 0,
-            clickCount: 1,
-            pressure: 1
-        )!
-    }
-
-    /// A pane that has never had a successful fetch says so rather than showing a
-    /// confident zero.
-    func testUnknownLimitsReadAsPendingNotZero() {
-        let bar = PaneAppStatsBar()
-        bar.frame = NSRect(x: 0, y: 0, width: 880, height: 34)
-        bar.limits = nil
-        bar.layoutSubtreeIfNeeded()
-
-        let text = bar.descendants(NSTextField.self).map(\.stringValue).joined(separator: " ")
-        XCTAssertFalse(text.contains("0%"), "never a fabricated zero")
-        XCTAssertTrue(text.contains("—"))
-    }
-
-    /// The brief's own version of this asserted `bar.frame.minY < height / 2`
-    /// for "pinned to the top", which is the flipped-coordinates reading and
-    /// is wrong here: `PaneAppView` overrides nothing, so `isFlipped` is
-    /// `false` and y is measured up from the *bottom* edge — the same
-    /// convention `testTheNewestRowScrollsClearOfTheComposer` already relies
-    /// on when it puts the bottom composer's glass *below* the last row's
-    /// `minY`. Confirmed with a throwaway offscreen probe: a bar pinned
-    /// `topAnchor + 8` inside an unflipped 1400×600 host laid out at
-    /// `minY = 564`, not 8. So the comparison is inverted and the assertion
-    /// kept — a top-pinned bar's `minY` sits in the *upper* half.
-    func testTheBarSitsOnGlassBelowTheHeaderAndAboveTheTranscript() throws {
-        let view = makeView()
-        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
-        let window = show(view)
-        defer { window.close() }
-        view.layoutSubtreeIfNeeded()
-
-        let bar = try XCTUnwrap(view.descendants(PaneAppStatsBar.self).first)
-        XCTAssertGreaterThan(bar.frame.minY, view.frame.height / 2, "pinned to the top")
-        XCTAssertGreaterThan(view.scrollView.contentInsets.top, 0, "transcript clears it")
-    }
-
     // MARK: - Arrival
 
     /// Rows genuinely arrive in batches on the 0.3s poll, so animating an arrival
@@ -2222,6 +2044,189 @@ final class PaneAppViewTests: XCTestCase {
         let directory = URL(fileURLWithPath: dir, isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try? png.write(to: directory.appendingPathComponent("\(name).png"))
+    }
+
+    // MARK: - Multi-line composer
+
+    /// The reason the composer could stay single-line for so long, and the
+    /// reason it no longer has to: a multi-line draft is wrapped in bracketed
+    /// paste, so the TUI inserts its newlines instead of submitting on each.
+    func testAMultiLineCommandIsWrappedInBracketedPaste() {
+        let framed = TerminalSurfaceView.framed("first\nsecond")
+        XCTAssertEqual(framed, "\u{1b}[200~first\nsecond\u{1b}[201~")
+    }
+
+    /// A TUI that has *not* enabled bracketed paste would render the escape as
+    /// literal text, so the wrapper is applied only where it is needed.
+    func testASingleLineCommandIsSentUnchanged() {
+        XCTAssertEqual(TerminalSurfaceView.framed("just one line"), "just one line")
+        XCTAssertEqual(TerminalSurfaceView.framed(""), "")
+    }
+
+    func testTheComposerGrowsWithAWrappingDraft() {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 700)
+        let window = show(view)
+        defer { window.close() }
+        view.layoutSubtreeIfNeeded()
+        let oneLine = view.composerField.frame.height
+
+        view.composerField.stringValue = String(repeating: "a long sentence that wraps ", count: 12)
+        view.updateComposerHeight()
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertGreaterThan(view.composerField.frame.height, oneLine, "it grew")
+    }
+
+    /// The cap is the whole point: past it a draft scrolls inside the field
+    /// rather than pushing the card up over the transcript.
+    func testAVeryLongDraftStopsAtTheCap() {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 700)
+        let window = show(view)
+        defer { window.close() }
+        view.layoutSubtreeIfNeeded()
+
+        view.composerField.stringValue = String(repeating: "line\n", count: 200)
+        view.updateComposerHeight()
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertLessThan(
+            view.composerField.frame.height, view.frame.height / 2,
+            "capped, not grown to swallow the pane"
+        )
+    }
+
+    // MARK: - Expanding the composer
+
+    func testTheExpandButtonGrowsTheComposerAndLightsTheScrim() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 700)
+        let window = show(view)
+        defer { window.close() }
+        view.layoutSubtreeIfNeeded()
+        let collapsed = view.composerField.frame.height
+        let scrim = try XCTUnwrap(view.descendants(PaneAppExpandScrimView.self).first)
+        XCTAssertTrue(scrim.isHidden, "nothing dimmed while collapsed")
+
+        view.expandButton.performClick(nil)
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(view.isComposerExpanded)
+        XCTAssertGreaterThan(view.composerField.frame.height, collapsed)
+        XCTAssertFalse(scrim.isHidden, "the transcript recedes behind the card")
+    }
+
+    func testPressingItAgainCollapses() {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 700)
+        let window = show(view)
+        defer { window.close() }
+        view.layoutSubtreeIfNeeded()
+        let collapsed = view.composerField.frame.height
+
+        view.expandButton.performClick(nil)
+        view.expandButton.performClick(nil)
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertFalse(view.isComposerExpanded)
+        XCTAssertEqual(view.composerField.frame.height, collapsed, accuracy: 1)
+    }
+
+    /// Expand must never make the composer *smaller*, which a flat share of a
+    /// short pane would otherwise work out to.
+    func testExpandingInAShortPaneNeverShrinksTheComposer() {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 260)
+        let window = show(view)
+        defer { window.close() }
+        view.layoutSubtreeIfNeeded()
+        let collapsed = view.composerField.frame.height
+
+        view.setComposerExpanded(true)
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertGreaterThanOrEqual(view.composerField.frame.height, collapsed)
+    }
+
+    /// Sending is what an expanded composer was expanded for, so it lets go
+    /// afterwards rather than leaving the transcript dimmed.
+    func testSubmittingCollapsesAnExpandedComposer() {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 700)
+        let window = show(view)
+        defer { window.close() }
+        var sent: String?
+        view.onSubmit = { sent = $0 }
+        view.setComposerExpanded(true)
+        view.composerField.stringValue = "a long thought"
+
+        view.submitComposer()
+
+        XCTAssertEqual(sent, "a long thought")
+        XCTAssertFalse(view.isComposerExpanded)
+        XCTAssertEqual(view.composerField.stringValue, "")
+    }
+
+    /// AppKit maps Return *and* Shift+Return to `insertNewline:`, so the only
+    /// thing separating "send" from "new line" is the modifier read off the
+    /// event. Unshifted returns false — the field's own action submits.
+    func testAnUnshiftedReturnIsLeftToSubmit() {
+        let view = makeView()
+        XCTAssertFalse(
+            view.control(
+                view.composerField,
+                textView: NSTextView(),
+                doCommandBy: #selector(NSResponder.insertNewline(_:))
+            ),
+            "not handled here, so the field's action fires"
+        )
+    }
+
+    /// Escape lets go of an expanded composer without reaching for the button.
+    func testEscapeCollapsesAnExpandedComposer() {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 700)
+        let window = show(view)
+        defer { window.close() }
+        view.setComposerExpanded(true)
+
+        let handled = view.control(
+            view.composerField,
+            textView: NSTextView(),
+            doCommandBy: #selector(NSResponder.cancelOperation(_:))
+        )
+
+        XCTAssertTrue(handled)
+        XCTAssertFalse(view.isComposerExpanded)
+    }
+
+    /// A click on the dim is a click away from the composer — the same way
+    /// out focus mode already gives you.
+    func testAClickOnTheScrimCollapses() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 700)
+        let window = show(view)
+        defer { window.close() }
+        view.setComposerExpanded(true)
+        let scrim = try XCTUnwrap(view.descendants(PaneAppExpandScrimView.self).first)
+
+        scrim.onClick?()
+
+        XCTAssertFalse(view.isComposerExpanded)
+    }
+
+    /// And escape stays out of the way when there is nothing to collapse —
+    /// otherwise it would swallow every other escape the pane wants.
+    func testEscapeIsIgnoredWhileCollapsed() {
+        let view = makeView()
+        XCTAssertFalse(
+            view.control(
+                view.composerField,
+                textView: NSTextView(),
+                doCommandBy: #selector(NSResponder.cancelOperation(_:))
+            )
+        )
     }
 }
 

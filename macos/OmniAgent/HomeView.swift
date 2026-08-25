@@ -161,6 +161,35 @@ final class HomeHotspotView: HomeInteractiveView {
 final class HomeComposerField: NSTextField {
     var onFocusChange: ((Bool) -> Void)?
 
+    /// Turns the field into a wrapping, multi-line one. Opt-in rather than
+    /// the default: the Home screen's composer is a single-line design
+    /// surface and this same class draws it, so flipping the class over
+    /// would resize a screen that never asked to grow.
+    ///
+    /// The field editor scrolls within whatever height its owner constrains
+    /// the field to, so the caller caps the height and lets long drafts
+    /// scroll rather than clipping them.
+    func allowMultipleLines() {
+        usesSingleLineMode = false
+        lineBreakMode = .byWordWrapping
+        maximumNumberOfLines = 0
+        cell?.wraps = true
+        cell?.isScrollable = false
+    }
+
+    /// The height this field's current text wants at `width`, which is what
+    /// a growing composer sizes itself from. Never below one line: an empty
+    /// draft still needs somewhere to put the caret.
+    func fittingHeight(forWidth width: CGFloat) -> CGFloat {
+        guard let cell, width > 0 else { return 0 }
+        let bounds = NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)
+        let measured = cell.cellSize(forBounds: bounds).height
+        // `cellSize(forBounds:)` measures the *text*, and an empty field has
+        // none — it would collapse to nothing without this floor.
+        let oneLine = (font?.boundingRectForFont.height ?? 17).rounded(.up)
+        return max(measured, oneLine)
+    }
+
     /// Whether the keyboard is actually in this field.
     ///
     /// `window?.firstResponder === self` is the wrong question and answers

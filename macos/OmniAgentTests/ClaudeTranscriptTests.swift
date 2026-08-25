@@ -215,59 +215,6 @@ final class ClaudeTranscriptTests: XCTestCase {
         XCTAssertEqual(ClaudeModel.current(sessionID: sessionID, cwd: cwd, home: home), "claude-opus-5")
     }
 
-    // MARK: - Usage
-
-    func testDecodeReadsPerMessageUsage() throws {
-        let line = """
-        {"type":"assistant","uuid":"1","message":{"content":"hi","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}}}
-        """
-        let url = tempDirectory.appendingPathComponent("t.jsonl")
-        try (line + "\n").write(to: url, atomically: true, encoding: .utf8)
-
-        let messages = ClaudeTranscriptReader(url: url).poll().messages
-        let usage = try XCTUnwrap(messages.first?.usage)
-        XCTAssertEqual(usage.input, 10)
-        XCTAssertEqual(usage.output, 5)
-        XCTAssertEqual(usage.cacheRead, 100)
-        XCTAssertEqual(usage.cacheCreation, 20)
-        XCTAssertEqual(usage.contextTokens, 130, "context is input + cache read + cache creation")
-        XCTAssertEqual(usage.totalTokens, 135)
-    }
-
-    /// Through the decoder, not through two hand-built `TranscriptUsage`
-    /// values: the previous version of this test summed two constructed
-    /// figures and never decoded a row lacking `usage` at all, so the `nil`
-    /// branch it is named after was never executed. Claude Code writes rows
-    /// with no `usage` object routinely — every user row, for a start.
-    func testARowWithNoUsageContributesNothing() throws {
-        let rows = [
-            #"{"type":"user","uuid":"u1","message":{"content":"how many lines?"}}"#,
-            #"{"type":"assistant","uuid":"a1","message":{"content":"about 341k","usage":{"input_tokens":10,"output_tokens":5}}}"#,
-        ]
-        let url = try fixture(rows.joined(separator: "\n") + "\n", name: "no-usage.jsonl")
-
-        let messages = ClaudeTranscriptReader(url: url).poll().messages
-
-        XCTAssertEqual(messages.count, 2)
-        XCTAssertNil(messages[0].usage, "no `usage` key means no usage, not a zeroed one")
-        // The turn's own accumulation is what the stats bar reads, and the
-        // usage-less row must neither break it nor be counted.
-        var turns: [TranscriptTurn] = []
-        _ = TranscriptTurn.append(messages, to: &turns)
-        XCTAssertEqual(TranscriptUsage.total(of: turns.flatMap(\.usages)), 15)
-        XCTAssertEqual(turns.flatMap(\.usages).count, 1, "one contribution, from the row that had one")
-        XCTAssertEqual(TranscriptUsage.total(of: []), 0)
-    }
-
-    /// Context is the CURRENT window fill, so it is the latest row's figure, not
-    /// a sum — summing it would grow without bound and mean nothing.
-    func testContextIsTheLatestRowNotASum() {
-        let older = TranscriptUsage(input: 10, output: 0, cacheRead: 100, cacheCreation: 0)
-        let newer = TranscriptUsage(input: 20, output: 0, cacheRead: 300, cacheCreation: 5)
-        XCTAssertEqual(TranscriptUsage.latestContext(of: [older, newer]), 325)
-        XCTAssertEqual(TranscriptUsage.latestContext(of: []), 0)
-    }
-
     // MARK: - Fixtures
 
     private func fixture(_ text: String, name: String) throws -> URL {

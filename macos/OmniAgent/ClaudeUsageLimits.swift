@@ -12,6 +12,12 @@ struct ClaudeUsageLimits: Equatable {
     let modelName: String?
     let modelPercent: Int?
 
+    /// `sessionResets`/`weekResets` as real instants, when the phrase was one
+    /// this can read. The sidebar counts down against these locally rather
+    /// than re-fetching to watch a clock tick.
+    var sessionResetsAt: Date? { Self.resetDate(from: sessionResets) }
+    var weekResetsAt: Date? { Self.resetDate(from: weekResets) }
+
     static let empty = ClaudeUsageLimits(
         sessionPercent: nil, sessionResets: nil,
         weekPercent: nil, weekResets: nil,
@@ -64,6 +70,66 @@ struct ClaudeUsageLimits: Equatable {
         }
         return phrase.trimmingCharacters(in: .whitespaces)
     }
+
+    /// How far into the past a reset may land before it is read as next
+    /// year's rather than this year's. See `resetDate` for why it is months.
+    static let yearWrapThreshold: TimeInterval = 180 * 86_400
+
+    /// `"Aug 25 at 8:30pm"` → an instant. Nil for anything else, which is the
+    /// only honest answer: a phrase this cannot read must leave the countdown
+    /// blank rather than invent one.
+    ///
+    /// Parsed in the *local* zone deliberately — `resetPhrase` strips the
+    /// `(Europe/Berlin)` suffix precisely because `/usage` already renders the
+    /// time in the machine's own zone, so re-applying it would be a second
+    /// conversion of an already-converted number.
+    static func resetDate(from phrase: String?, now: Date = Date()) -> Date? {
+        guard let phrase, !phrase.isEmpty else { return nil }
+        let calendar = Calendar.current
+        for format in ["MMM d 'at' h:mma", "MMM d 'at' ha"] {
+            let formatter = DateFormatter()
+            // Fixed locale: this parses `/usage`'s output, which is English
+            // regardless of what the machine's region is set to.
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = calendar
+            formatter.timeZone = calendar.timeZone
+            formatter.amSymbol = "am"
+            formatter.pmSymbol = "pm"
+            formatter.dateFormat = format
+            guard let parsed = formatter.date(from: phrase) else { continue }
+            // The phrase carries no year, so `parsed` lands in the formatter's
+            // default one (2000). Rebuild it onto the current year, and roll
+            // forward if that puts it far in the past — which is what happens
+            // every New Year's Eve, when "Jan 1 at 9am" is next year's.
+            var fields = calendar.dateComponents([.month, .day, .hour, .minute], from: parsed)
+            fields.year = calendar.component(.year, from: now)
+            guard let candidate = calendar.date(from: fields) else { continue }
+            // Half a year, not a day. These windows are hours or a week wide,
+            // so a reset a *few days* back is a genuinely stale reading and
+            // must stay in the past — that is exactly what tells the poller
+            // the window rolled over. Only a gap no real window could explain
+            // is the calendar wrapping instead.
+            if candidate < now.addingTimeInterval(-Self.yearWrapThreshold) {
+                fields.year = fields.year! + 1
+                return calendar.date(from: fields)
+            }
+            return candidate
+        }
+        return nil
+    }
+
+    /// How long until `date`, at the coarseness a glanceable readout wants:
+    /// `2d 19h`, `4h 12m`, `12m`. Never seconds — this is refreshed a minute
+    /// at a time, so a ticking second would be a lie between ticks.
+    static func timeLeft(until date: Date?, now: Date = Date()) -> String? {
+        guard let date else { return nil }
+        let seconds = Int(date.timeIntervalSince(now))
+        guard seconds > 0 else { return "now" }
+        let minutes = seconds / 60
+        if minutes >= 1440 { return "\(minutes / 1440)d \((minutes % 1440) / 60)h" }
+        if minutes >= 60 { return "\(minutes / 60)h \(minutes % 60)m" }
+        return "\(max(minutes, 1))m"
+    }
 }
 
 /// One app-wide poller for `/usage`.
@@ -87,6 +153,15 @@ final class ClaudeUsageLimitsPoller {
 
     private var inFlight = false
     private var timer: DispatchSourceTimer?
+
+    /// Whether anything has been sent to an engine since the last reading
+    /// landed. Starts `true` so the first scheduled tick always fetches.
+    ///
+    /// This is what makes the repeating timer cheap: `/usage` is a real
+    /// request against the very quota it reports, and a machine left open
+    /// overnight would otherwise spend a slice of that quota every five
+    /// minutes to re-read a number that cannot have moved.
+    private var activitySinceLastFetch = true
     private let queue = DispatchQueue(label: "com.omniagent.usage-limits")
 
     /// Every live App pane that wants the push, keyed by its own identity.
@@ -126,9 +201,40 @@ final class ClaudeUsageLimitsPoller {
             repeating: Self.interval,
             leeway: .seconds(30)
         )
-        source.setEventHandler { [weak self] in self?.refresh() }
+        source.setEventHandler { [weak self] in self?.refreshIfWorthIt() }
         source.resume()
         timer = source
+    }
+
+    /// Records that something was sent to an engine, which is what earns the
+    /// next scheduled fetch. Cheap and idempotent — call it on every submit.
+    func noteActivity() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.noteActivity() }
+            return
+        }
+        activitySinceLastFetch = true
+    }
+
+    /// The scheduled tick's fetch, skipped while the machine is idle.
+    ///
+    /// The reset-date escape hatch is not an optimisation, it is correctness:
+    /// once a window rolls over, the percentages held here describe a window
+    /// that no longer exists, and no amount of idleness makes a stale 92%
+    /// worth showing. That is the one case where a fetch is worth making with
+    /// nothing sent since the last one.
+    func refreshIfWorthIt() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.refreshIfWorthIt() }
+            return
+        }
+        guard !activitySinceLastFetch else { return refresh() }
+        let now = Date()
+        let rolled = [latest?.sessionResetsAt, latest?.weekResetsAt]
+            .compactMap { $0 }
+            .contains { $0 <= now }
+        guard rolled else { return }
+        refresh()
     }
 
     /// One fetch. Safe to call from anywhere — the state it guards
@@ -157,7 +263,13 @@ final class ClaudeUsageLimitsPoller {
                 self.inFlight = false
                 // A fetch that parsed nothing leaves the last good value in
                 // place: stale beats blank.
-                if parsed != .empty { self.latest = parsed }
+                if parsed != .empty {
+                    self.latest = parsed
+                    // Cleared only on a reading that actually landed. A failed
+                    // or timed-out fetch leaves the flag set so the next tick
+                    // tries again rather than treating the failure as "seen".
+                    self.activitySinceLastFetch = false
+                }
                 for observer in self.observers.values { observer() }
             }
         }
@@ -173,6 +285,7 @@ final class ClaudeUsageLimitsPoller {
         timer?.cancel()
         timer = nil
         inFlight = false
+        activitySinceLastFetch = true
     }
 
     private static func runUsage() -> String {

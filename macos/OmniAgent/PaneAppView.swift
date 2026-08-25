@@ -190,11 +190,6 @@ final class PaneAppView: NSView {
     /// its visibility widens.
     let scrollView: ShellScrollView
 
-    /// The four-readout glass strip pinned over the top of the transcript.
-    /// Internal rather than `private` so the stats-bar tests can find it
-    /// without reaching through `descendants`.
-    let statsBar = PaneAppStatsBar()
-
     private let messageStack = NSStackView()
     private let emptyStateLabel = ShellFont.label(
         "Nothing yet.",
@@ -277,12 +272,40 @@ final class PaneAppView: NSView {
             string: "Ask anything…",
             attributes: [.foregroundColor: ShellPalette.inkFaint, .font: ShellFont.ui(14)]
         )
-        // ponytail: single-line; the PTY takes one line per send anyway
-        field.lineBreakMode = .byTruncatingTail
-        field.usesSingleLineMode = true
+        // Wraps and grows. The PTY used to take one line per send, which is
+        // what kept this single-line; `TerminalSurfaceView.framed` wraps a
+        // multi-line draft in bracketed paste now, so the newlines reach the
+        // TUI as newlines instead of as submits.
+        field.allowMultipleLines()
         field.translatesAutoresizingMaskIntoConstraints = false
         return field
     }()
+
+    /// The full-pane dim behind an expanded composer. Below `composerGlass`
+    /// and above everything else, so the transcript recedes and the card
+    /// being typed into is the only lit thing in the pane.
+    ///
+    /// Built once and kept hidden rather than made on demand: it carries a
+    /// `WorkspaceGlass` sheet, and constructing one mid-animation is a
+    /// visible hitch.
+    private let expandScrim = PaneAppExpandScrimView()
+
+    /// Whether the composer is in its expanded state. Internal rather than
+    /// `private` so the tests can read it without going through the button.
+    private(set) var isComposerExpanded = false
+
+    /// Grows the composer to most of the pane and back. Internal rather than
+    /// `private` so a test can press it rather than call the action directly
+    /// — pressing is what proves it is wired.
+    let expandButton = PaneAppView.composerButton(
+        symbol: "arrow.up.left.and.arrow.down.right",
+        accessibility: "Expand the composer"
+    )
+
+    /// The field's own height, driven by content while collapsed and by the
+    /// pane while expanded. Assigned in `init`, so implicitly unwrapped
+    /// rather than optional at every use.
+    private var composerFieldHeight: NSLayoutConstraint!
 
     /// Nil until the transcript file first exists. Created once
     /// `ClaudeModel.resolvedTranscriptURL` finds it — on the background queue,
@@ -324,15 +347,6 @@ final class PaneAppView: NSView {
         didSet {
             guard isLive != oldValue else { return }
             isLive ? startPolling() : stopPolling()
-            // Registered on the way up and removed on the way down, so a pane
-            // nobody is looking at is not still being pushed at — and, more
-            // to the point, is not still holding a slot in a registry that
-            // used to be one closure wide.
-            if isLive {
-                driveUsageLimitsPoller()
-            } else {
-                ClaudeUsageLimitsPoller.shared.removeObserver(self)
-            }
             // A pane can go non-live (Task 3 flips this on the Terminal ⇄ App
             // toggle) while the composer still holds focus — the glow must
             // not keep spinning on a view nobody is looking at.
@@ -484,10 +498,9 @@ final class PaneAppView: NSView {
         composerGlass.onBackgroundClick = { [weak self] in
             self?.focusComposerAtEndOfDraft()
         }
-        // The explicit manual refresh. The scheduled one is minutes apart by
-        // design (`/usage` is a real request against the limits it reports),
-        // so this is how a user who just hit a limit sees it move.
-        statsBar.onRefreshRequested = { ClaudeUsageLimitsPoller.shared.refresh() }
+        expandScrim.onClick = { [weak self] in
+            self?.setComposerExpanded(false)
+        }
         // Left `false` (the layer default) deliberately, not just left
         // alone: the focus glow (`updateComposerGlow`) is inset *outside*
         // this layer's own bounds on purpose, and `true` here would clip it
@@ -503,7 +516,10 @@ final class PaneAppView: NSView {
         sendButton.target = self
         sendButton.action = #selector(submitComposer)
 
-        let controls = NSStackView(views: [attachButton, NSView(), sendButton])
+        expandButton.target = self
+        expandButton.action = #selector(toggleComposerExpanded)
+
+        let controls = NSStackView(views: [attachButton, expandButton, NSView(), sendButton])
         controls.orientation = .horizontal
         controls.alignment = .centerY
         controls.spacing = 8
@@ -511,11 +527,10 @@ final class PaneAppView: NSView {
 
         composerGlass.addSubview(composerField)
         composerGlass.addSubview(controls)
-        // `statsBar` last, so it sits *over* the scroll view rather than
-        // under it — the transcript scrolls behind it exactly the way it
-        // scrolls behind the glass composer, and `contentInsets.top` below
-        // is what keeps the first message reachable.
-        for view in [scrollView, emptyStateLabel, composerGlass, statsBar] as [NSView] {
+        // Ordered: the scrim covers the transcript, the glass sits over the
+        // scrim. `expandScrim` before `composerGlass` in this list is the
+        // whole of that z-order.
+        for view in [scrollView, emptyStateLabel, expandScrim, composerGlass] as [NSView] {
             addSubview(view)
         }
 
@@ -571,21 +586,27 @@ final class PaneAppView: NSView {
             composerField.leadingAnchor.constraint(equalTo: composerGlass.leadingAnchor, constant: 14),
             composerField.trailingAnchor.constraint(equalTo: composerGlass.trailingAnchor, constant: -14),
 
+            expandScrim.topAnchor.constraint(equalTo: topAnchor),
+            expandScrim.bottomAnchor.constraint(equalTo: bottomAnchor),
+            expandScrim.leadingAnchor.constraint(equalTo: leadingAnchor),
+            expandScrim.trailingAnchor.constraint(equalTo: trailingAnchor),
+
             controls.topAnchor.constraint(equalTo: composerField.bottomAnchor, constant: 18),
             controls.leadingAnchor.constraint(equalTo: composerGlass.leadingAnchor, constant: 10),
             controls.trailingAnchor.constraint(equalTo: composerGlass.trailingAnchor, constant: -10),
             controls.bottomAnchor.constraint(equalTo: composerGlass.bottomAnchor, constant: -24),
             controls.heightAnchor.constraint(equalToConstant: 26),
-
-            // The same centred column again, so the bar's edges line up with
-            // the transcript's and the composer's rather than spanning the
-            // pane. No height constraint on purpose: the bar's height is its
-            // own content's, and `layout()` reads it back to size the
-            // transcript's top inset.
-            statsBar.topAnchor.constraint(equalTo: topAnchor, constant: Self.statsBarMargin),
-            statsBar.centerXAnchor.constraint(equalTo: centerXAnchor),
-            statsBar.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 40),
         ])
+
+        // The field's height is authored rather than intrinsic: a wrapping
+        // `NSTextField` grows without bound, and the whole point of the cap
+        // is that a long draft scrolls inside the card instead of pushing
+        // the card up over the transcript.
+        composerFieldHeight = composerField.heightAnchor.constraint(
+            equalToConstant: composerField.fittingHeight(forWidth: Self.transcriptColumnWidth - 28)
+        )
+        composerFieldHeight.isActive = true
+        composerField.delegate = self
         // Above every *content* priority but below required, which is the
         // only band that means what this cap means: "as wide as 880pt unless
         // a required constraint says otherwise".
@@ -611,11 +632,9 @@ final class PaneAppView: NSView {
         // horizontally, so it publishes no content-size constraint and
         // nothing pushes its glass outward — the identical 750-against-750
         // tie is sitting under it unresolved, waiting for a field that does
-        // report a width. `statsBar` is not even theoretically immune: it is
-        // four label pairs, each publishing exactly the 750 content-size
-        // constraint described above. Raising only the transcript would
-        // leave both traps armed.
-        for column in [messageStack, composerGlass, statsBar] as [NSView] {
+        // report a width. Raising only the transcript would leave that trap
+        // armed.
+        for column in [messageStack, composerGlass] as [NSView] {
             let width = column.widthAnchor.constraint(equalToConstant: Self.transcriptColumnWidth)
             width.priority = Self.transcriptColumnWidthPriority
             width.isActive = true
@@ -677,13 +696,6 @@ final class PaneAppView: NSView {
     override func layout() {
         super.layout()
         let clearance = composerGlass.frame.height + Self.composerGlassMargin
-        // The same discipline at the top, and for a sharper reason: the
-        // stats bar carries no height constraint at all — its height is
-        // whatever its two stacked labels and their 6pt insets work out to,
-        // which is ~45pt, not the ~34pt an authored constant would have
-        // guessed. One margin above the bar (its own `topAnchor` constant)
-        // and one below it before the first message.
-        let topClearance = statsBar.frame.height + Self.statsBarMargin * 2
         // `composerGlow`'s geometry (the container's frame, its mask's path,
         // and the spinning gradient's own frame inside it) is all derived
         // from the glass's bounds, so it has to be resynced on every pass
@@ -693,10 +705,16 @@ final class PaneAppView: NSView {
         // glass without changing its height, and the guard beneath would
         // then skip a glow that needs to move with it.
         if let composerGlow { layOutComposerGlow(composerGlow) }
+        // After `super.layout()`, so the field's width is the resolved one
+        // rather than whatever it was before this pass.
+        updateComposerHeight()
+        // Top inset is zero now that the stats bar is gone: nothing floats
+        // over the head of the transcript, so the first message wants the
+        // pane's own top edge rather than clearance under a strip.
         guard scrollView.contentInsets.bottom != clearance
-            || abs(scrollView.contentInsets.top - topClearance) > 0.5
+            || abs(scrollView.contentInsets.top) > 0.5
         else { return }
-        scrollView.contentInsets = NSEdgeInsets(top: topClearance, left: 0, bottom: clearance, right: 0)
+        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: clearance, right: 0)
         // Negative, verified rather than assumed: `contentInsets.bottom`
         // alone already shrinks the vertical scroller's frame by that same
         // amount (confirmed with a throwaway offscreen probe — a 300pt-tall
@@ -705,21 +723,16 @@ final class PaneAppView: NSView {
         // restoring the scroller to the view's full height so its track still
         // represents the whole scrollable range — including the padded tail
         // under the glass — rather than being pushed up and truncated.
-        // Same cancellation at the top, measured the same way rather than
-        // assumed by symmetry: a throwaway offscreen probe put a 400pt-tall
-        // scroll view's legacy scroller at y=61, height 339, under a 61pt
-        // `contentInsets.top` and a zero `scrollerInsets.top`; at -61 it was
-        // back to y=0, height 400.
         scrollView.scrollerInsets = NSEdgeInsets(
-            top: -topClearance, left: 0, bottom: -clearance, right: 0
+            top: 0, left: 0, bottom: -clearance, right: 0
         )
     }
 
     // MARK: - Composer
 
-    /// `HomeView.swift:275-292`'s own 880pt column width, reused for all
-    /// three columns — the transcript (`messageStack`), the composer
-    /// (`composerGlass`) and the stats bar (`statsBar`) — so they line up.
+    /// `HomeView.swift:275-292`'s own 880pt column width, reused for both
+    /// columns — the transcript (`messageStack`) and the composer
+    /// (`composerGlass`) — so they line up.
     private static let transcriptColumnWidth: CGFloat = 880
 
     /// One below `.required`, so the cap yields to required constraints —
@@ -735,12 +748,6 @@ final class PaneAppView: NSView {
     /// 880pt column now, with its own 40pt escape-hatch floor, rather than a
     /// fixed margin off the pane's edges.)
     private static let composerGlassMargin: CGFloat = 20
-
-    /// The gap above the stats bar, and again between it and the first
-    /// message. Tighter than `composerGlassMargin` because the bar is chrome
-    /// rather than a place to type: it wants to read as attached to the top
-    /// edge, not floating over the middle of the pane.
-    private static let statsBarMargin: CGFloat = 8
 
     /// The only thing on screen that says where keystrokes are going. The
     /// field's own bordered container is gone — it folded into the glass —
@@ -1046,11 +1053,83 @@ final class PaneAppView: NSView {
         window?.makeFirstResponder(composerField)
     }
 
-    @objc private func submitComposer() {
+    /// Internal rather than `private` so a test can send without
+    /// synthesising a click on the button.
+    @objc func submitComposer() {
         let text = composerField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         onSubmit?(text)
         composerField.stringValue = ""
+        // What earns the next scheduled `/usage` fetch. Sending is the only
+        // thing that can move those numbers, so it is the only thing that
+        // makes re-reading them worth a request.
+        ClaudeUsageLimitsPoller.shared.noteActivity()
+        // An expanded composer has done its job once the long draft is gone.
+        if isComposerExpanded { setComposerExpanded(false) }
+        updateComposerHeight()
+    }
+
+    // MARK: - Composer size
+
+    /// The tallest the field grows on its own, in points — about six lines at
+    /// 14pt. Past this a draft scrolls inside the field rather than pushing
+    /// the card further up over the transcript; the expand button is the way
+    /// to see more of it at once.
+    private static let collapsedFieldCap: CGFloat = 116
+
+    /// The share of the pane an expanded composer takes.
+    private static let expandedPaneShare: CGFloat = 0.6
+
+    /// Everything in the card that is not the field: the 22pt inset above it,
+    /// the 18pt gap below, the 26pt controls row and the 24pt bottom inset.
+    private static let composerChromeHeight: CGFloat = 22 + 18 + 26 + 24
+
+    /// Sizes the field: to its content while collapsed, to the pane while
+    /// expanded.
+    ///
+    /// Called on every keystroke and on every resize, so it returns early
+    /// when nothing moved — an unchanged constant still triggers a layout
+    /// pass, and a pass per keystroke is visible on a long draft.
+    func updateComposerHeight() {
+        let width = max(composerField.bounds.width, 1)
+        let target: CGFloat
+        if isComposerExpanded {
+            target = expandedFieldHeight()
+        } else {
+            target = min(composerField.fittingHeight(forWidth: width), Self.collapsedFieldCap)
+        }
+        guard abs(composerFieldHeight.constant - target) > 0.5 else { return }
+        composerFieldHeight.constant = target
+        needsLayout = true
+    }
+
+    /// The field's height in the expanded state, floored at the collapsed cap
+    /// so "expand" never makes the composer *smaller* — which is what a share
+    /// of a short pane would otherwise work out to.
+    private func expandedFieldHeight() -> CGFloat {
+        max(bounds.height * Self.expandedPaneShare - Self.composerChromeHeight, Self.collapsedFieldCap)
+    }
+
+    @objc private func toggleComposerExpanded() {
+        setComposerExpanded(!isComposerExpanded)
+    }
+
+    /// Internal rather than `private` so a test can drive both directions
+    /// without synthesising two button presses.
+    func setComposerExpanded(_ expanded: Bool) {
+        guard expanded != isComposerExpanded else { return }
+        isComposerExpanded = expanded
+        expandButton.image = NSImage(
+            systemSymbolName: expanded
+                ? "arrow.down.right.and.arrow.up.left"
+                : "arrow.up.left.and.arrow.down.right",
+            accessibilityDescription: expanded ? "Collapse the composer" : "Expand the composer"
+        )
+        expandScrim.setVisible(expanded)
+        updateComposerHeight()
+        // Expanding is a request to write, so the caret goes where the writing
+        // happens without a second click.
+        if expanded { focusComposerAtEndOfDraft() }
     }
 
     // MARK: - Messages
@@ -1293,53 +1372,8 @@ final class PaneAppView: NSView {
                 // the timer, so at most one poll can ever arrive this way.
                 if update.didReset { self.clearMessages() }
                 self.appendMessages(update.messages)
-                self.refreshConversationStats()
             }
         }
-    }
-
-    // MARK: - Stats
-
-    /// The two per-conversation readouts, recomputed from the usage figures
-    /// `TranscriptTurn` accumulated as the transcript was read — this pane's
-    /// own transcript, not `UsageAnalytics`, which buckets per project and is
-    /// the wrong unit for a pane.
-    ///
-    /// The account-global pair is read back here too, not only taken from
-    /// the poller's push. That pull used to be a *mitigation*: the poller held
-    /// a single closure, so with several App panes open only the most recently
-    /// live one was still wired to it, and this line was what kept the rest
-    /// off a permanent "—". The registry fixes that properly now, and the pull
-    /// stays because it is what catches a pane that went live *after* the last
-    /// reading landed — there is no push to wait for in that case, and the
-    /// next one is minutes away. Free either way: a property read of an
-    /// account-global value every pane would show identically anyway.
-    private func refreshConversationStats() {
-        let usages = turns.flatMap(\.usages)
-        statsBar.tokens = TranscriptUsage.total(of: usages)
-        statsBar.context = TranscriptUsage.latestContext(of: usages)
-        if let latest = ClaudeUsageLimitsPoller.shared.latest {
-            statsBar.limits = latest
-        }
-    }
-
-    /// One app-wide poller, refreshed in minutes, driven when a pane goes
-    /// live rather than per poll tick. `/usage` is a real request against the
-    /// very limits it reports, so measuring usage consumes usage — eight
-    /// panes polling would be eight times the cost for one account-global
-    /// number, and a 0.3s transcript tick would be worse still.
-    private func driveUsageLimitsPoller() {
-        // Keyed by this pane, not a single shared closure: registering used to
-        // *replace* whatever the previously live pane had registered, so with
-        // two App panes open only the newer one was ever pushed to.
-        //
-        // The "never shell out from the suite" guard lives in `refresh()`
-        // itself now rather than here, so it holds for the refresh glyph and
-        // the repeating timer too, not only for this caller.
-        ClaudeUsageLimitsPoller.shared.addObserver(self) { [weak self] in
-            self?.statsBar.limits = ClaudeUsageLimitsPoller.shared.latest
-        }
-        ClaudeUsageLimitsPoller.shared.start()
     }
 
     // MARK: - Markdown
@@ -1644,5 +1678,108 @@ private final class ComposerCardView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         onBackgroundClick?()
+    }
+}
+
+/// The full-pane dim behind an expanded composer.
+///
+/// A `WorkspaceGlass` sheet where the platform has one and a flat scrim
+/// otherwise, fading rather than snapping — the composer growing under a
+/// backdrop that appeared instantly reads as two unrelated events.
+final class PaneAppExpandScrimView: NSView {
+    /// How long the dim takes to arrive or leave. Matched to the composer's
+    /// own growth so the two read as one movement.
+    static let fadeDuration: TimeInterval = 0.18
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        isHidden = true
+        alphaValue = 0
+        if let glass = WorkspaceGlass.sheet(cornerRadius: 0) {
+            glass.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(glass)
+            NSLayoutConstraint.activate([
+                glass.topAnchor.constraint(equalTo: topAnchor),
+                glass.bottomAnchor.constraint(equalTo: bottomAnchor),
+                glass.leadingAnchor.constraint(equalTo: leadingAnchor),
+                glass.trailingAnchor.constraint(equalTo: trailingAnchor),
+            ])
+        } else {
+            layer?.backgroundColor = NSColor(white: 0, alpha: 0.45).cgColor
+        }
+        // Swallows clicks aimed at the transcript behind it: while the
+        // composer is expanded the transcript is backdrop, and a click that
+        // fell through to it would select text nobody can see properly.
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// Called for a click on the dim rather than on the composer.
+    var onClick: (() -> Void)?
+
+    /// A click on the backdrop is a click *away* from the composer, which is
+    /// the idiom focus mode already uses here: esc, or a click outside.
+    /// Swallowed either way — it must never reach the transcript and select
+    /// text nobody can properly see.
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+
+    /// Fades in or out, landing instantly under Reduce Motion — the same rule
+    /// every other animation in this view follows.
+    func setVisible(_ visible: Bool) {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if visible { isHidden = false }
+        guard !reduceMotion else {
+            alphaValue = visible ? 1 : 0
+            isHidden = !visible
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.fadeDuration
+            animator().alphaValue = visible ? 1 : 0
+        } completionHandler: { [weak self] in
+            guard let self else { return }
+            // Re-read rather than captured: a fast toggle can land this
+            // completion after the *next* transition started, and hiding on a
+            // stale value would blank a scrim that is meant to be up.
+            if self.alphaValue == 0 { self.isHidden = true }
+        }
+    }
+}
+
+extension PaneAppView: NSTextFieldDelegate {
+    /// Grows the card as the draft wraps.
+    func controlTextDidChange(_ notification: Notification) {
+        updateComposerHeight()
+    }
+
+    /// Return submits; Shift+Return breaks the line; Escape collapses.
+    ///
+    /// AppKit maps *both* Return and Shift+Return to `insertNewline:`, so the
+    /// modifier has to be read off the event that caused the selector — there
+    /// is no separate command for the shifted one. (`insertNewlineIgnoringFieldEditor:`
+    /// is Option+Return's, which keeps working and is left alone.)
+    func control(
+        _ control: NSControl,
+        textView: NSTextView,
+        doCommandBy commandSelector: Selector
+    ) -> Bool {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            let shifted = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
+            guard shifted else { return false }
+            textView.insertNewlineIgnoringFieldEditor(nil)
+            updateComposerHeight()
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)), isComposerExpanded {
+            setComposerExpanded(false)
+            return true
+        }
+        return false
     }
 }

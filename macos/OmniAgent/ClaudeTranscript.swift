@@ -13,36 +13,6 @@ enum TranscriptBlock: Equatable {
     case tool(name: String, detail: String)
 }
 
-/// One assistant row's token usage, as Claude Code writes it.
-///
-/// Read per message rather than aggregated per project: the App view's
-/// readouts are about *this conversation*, and `UsageAnalytics` buckets by
-/// project, which is the wrong unit for a pane.
-struct TranscriptUsage: Equatable {
-    let input: Int
-    let output: Int
-    let cacheRead: Int
-    let cacheCreation: Int
-
-    /// What the model is currently carrying — everything that had to be sent,
-    /// which is the window fill. Output is excluded: it is generated, not
-    /// carried.
-    var contextTokens: Int { input + cacheRead + cacheCreation }
-
-    /// Everything this row cost, in and out.
-    var totalTokens: Int { input + output + cacheRead + cacheCreation }
-
-    static func total(of usages: [TranscriptUsage]) -> Int {
-        usages.reduce(0) { $0 + $1.totalTokens }
-    }
-
-    /// The CURRENT window fill — the latest row's figure. Summing context
-    /// across rows would grow without bound and mean nothing.
-    static func latestContext(of usages: [TranscriptUsage]) -> Int {
-        usages.last?.contextTokens ?? 0
-    }
-}
-
 /// One `user` or `assistant` row of a Claude transcript, already filtered
 /// down to what the app view renders. Never empty: a row left with no
 /// blocks after filtering — a `tool_result`-only `user` row, a
@@ -52,10 +22,6 @@ struct TranscriptMessage: Equatable {
     let id: String
     let isUser: Bool
     let blocks: [TranscriptBlock]
-    /// `nil` on every `user` row and on any assistant row Claude wrote
-    /// without a `usage` object — a row with no figures contributes nothing
-    /// rather than counting as zero-cost.
-    var usage: TranscriptUsage?
 }
 
 /// What one `poll()` found: the rows it decoded, and whether the file was
@@ -200,15 +166,7 @@ final class ClaudeTranscriptReader {
 
         let blocks = blocks(from: message["content"])
         guard !blocks.isEmpty else { return nil }
-        let usage = (message["usage"] as? [String: Any]).map {
-            TranscriptUsage(
-                input: $0["input_tokens"] as? Int ?? 0,
-                output: $0["output_tokens"] as? Int ?? 0,
-                cacheRead: $0["cache_read_input_tokens"] as? Int ?? 0,
-                cacheCreation: $0["cache_creation_input_tokens"] as? Int ?? 0
-            )
-        }
-        return TranscriptMessage(id: uuid, isUser: type == "user", blocks: blocks, usage: usage)
+        return TranscriptMessage(id: uuid, isUser: type == "user", blocks: blocks)
     }
 
     /// `message.content` is either a bare string or an array of typed
@@ -262,11 +220,6 @@ struct TranscriptTurn: Equatable {
     let id: String
     let isUser: Bool
     var blocks: [TranscriptBlock]
-    /// Every merged message's usage, in order, so a view can sum a
-    /// conversation's cost — and read its latest context fill — without
-    /// re-reading the transcript. Rows that carried no figures leave no
-    /// entry.
-    var usages: [TranscriptUsage] = []
 
     static func group(_ messages: [TranscriptMessage]) -> [TranscriptTurn] {
         var turns: [TranscriptTurn] = []
@@ -287,14 +240,12 @@ struct TranscriptTurn: Equatable {
         for message in messages {
             if let last = turns.last, last.isUser == message.isUser {
                 turns[turns.count - 1].blocks.append(contentsOf: message.blocks)
-                if let usage = message.usage { turns[turns.count - 1].usages.append(usage) }
             } else {
                 turns.append(
                     TranscriptTurn(
                         id: message.id,
                         isUser: message.isUser,
-                        blocks: message.blocks,
-                        usages: message.usage.map { [$0] } ?? []
+                        blocks: message.blocks
                     )
                 )
             }
