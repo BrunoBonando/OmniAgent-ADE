@@ -1002,6 +1002,11 @@ final class PaneAppView: NSView {
         // arriving behind their back.
         let wasAtBottom = isScrolledToBottom()
 
+        // Read before the append so a genuinely *new* turn can be told from
+        // the last turn merely growing: only the former arrives, and the
+        // latter is torn down and rebuilt on every single poll for as long as
+        // a reply runs — re-animating that would be a flicker, not an arrival.
+        let turnsBefore = turns.count
         let firstChanged = TranscriptTurn.append(messages, to: &turns)
         // Everything from the first changed turn onwards is redrawn. In
         // practice that is one row: a poll either extends the last turn or
@@ -1030,8 +1035,10 @@ final class PaneAppView: NSView {
         // turn's flag is decided by the turn *before* it, which may be one
         // this loop never touches.
         let flags = PaneAppMessageRowView.avatarFlags(for: turns)
+        var arrived: [NSView] = []
         for (offset, turn) in turns[firstChanged...].enumerated() {
             let row = PaneAppMessageRowView(turn: turn, showsAvatar: flags[firstChanged + offset])
+            if firstChanged + offset >= turnsBefore { arrived.append(row) }
             // By index: the rebuilt row's groups are the same runs in the
             // same order, plus any the new blocks added on the end.
             if offset == 0 {
@@ -1049,9 +1056,44 @@ final class PaneAppView: NSView {
         // scrolled up (who skips the `scrollToBottom()` below) would
         // otherwise leave it stale until AppKit's own next display pass.
         layoutSubtreeIfNeeded()
+        // After layout, so the rise animates a row that already knows where it
+        // is going to sit.
+        for row in arrived { animateArrival(of: row) }
         if wasAtBottom {
             scrollToBottom()
         }
+    }
+
+    /// A row that just arrived fades and rises into place.
+    ///
+    /// Not a typewriter. The transcript JSONL only gains complete rows, so
+    /// there are no tokens to stream — but rows genuinely do arrive in batches
+    /// on the poll, and animating that arrival reflects a real event. A
+    /// typewriter reveal on already-complete text would look like streaming
+    /// while deliberately making a finished answer slower to read.
+    ///
+    /// `wantsLayer` is set *before* the reduce-motion guard, not after it as
+    /// the brief had it: a row is not layer-backed on its own here — measured,
+    /// `row.layer` comes back nil for a freshly added row even though
+    /// `PaneAppView` itself is layer-backed — so guarding first left a
+    /// reduce-motion row with no layer at all, and
+    /// `testNoArrivalAnimationUnderReduceMotion`'s opacity check read 0
+    /// through `?? 0` and failed. The row must be layer-backed either way;
+    /// only the animation is conditional.
+    private func animateArrival(of row: NSView) {
+        row.wantsLayer = true
+        guard !reducedMotion else { return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        let rise = CABasicAnimation(keyPath: "transform.translation.y")
+        rise.fromValue = 8
+        rise.toValue = 0
+        let group = CAAnimationGroup()
+        group.animations = [fade, rise]
+        group.duration = 0.2
+        group.timingFunction = ShellMotion.timing
+        row.layer?.add(group, forKey: "om-arrive")
     }
 
     /// Empties the conversation, back to the state a fresh view opens in.

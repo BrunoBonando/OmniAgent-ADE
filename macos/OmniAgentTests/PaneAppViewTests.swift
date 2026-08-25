@@ -1766,6 +1766,38 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertGreaterThan(view.scrollView.contentInsets.top, 0, "transcript clears it")
     }
 
+    // MARK: - Arrival
+
+    /// Rows genuinely arrive in batches on the 0.3s poll, so animating an arrival
+    /// reflects something true. This is not a typewriter: the text is complete the
+    /// instant it is on screen.
+    func testANewlyAppendedRowAnimatesIn() throws {
+        let view = makeView()
+        view.reducedMotionForTesting = false
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+
+        view.appendMessages([TranscriptMessage(id: "1", isUser: false, blocks: [.text("hi")])])
+
+        let row = try XCTUnwrap(view.descendants(PaneAppMessageRowView.self).first)
+        XCTAssertNotNil(row.layer?.animation(forKey: "om-arrive"))
+    }
+
+    func testNoArrivalAnimationUnderReduceMotion() throws {
+        let view = makeView()
+        view.reducedMotionForTesting = true
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+
+        view.appendMessages([TranscriptMessage(id: "1", isUser: false, blocks: [.text("hi")])])
+
+        let row = try XCTUnwrap(view.descendants(PaneAppMessageRowView.self).first)
+        XCTAssertNil(row.layer?.animation(forKey: "om-arrive"))
+        XCTAssertEqual(row.layer?.opacity ?? 0, 1, accuracy: 0.01, "visible, just not animated")
+    }
+
     // MARK: - Offscreen render helpers
     // Copied from `DeskCanvasNodeViewsTests.swift:531-560` — this repo's
     // per-file render-drop convention rather than a shared helper.
