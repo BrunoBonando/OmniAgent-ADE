@@ -26,6 +26,41 @@ final class PaneAppViewTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+    /// The conversation the 880pt cap actually has to survive: `.text`
+    /// blocks of long, unbroken single-line prose. A wrapping `NSTextField`
+    /// reports its *single-line* width as its intrinsic width, so each of
+    /// these wants well over a thousand points and pushes outward on
+    /// anything holding the column in.
+    private static let longProse: [TranscriptMessage] = [
+        TranscriptMessage(id: "1", isUser: true, blocks: [
+            .text(
+                "Walk me through how the transcript column is supposed to lay itself out when the "
+                + "pane is dragged very wide, and why the composer underneath it ends up lining up "
+                + "with the prose above it rather than spanning the whole pane on its own."
+            ),
+        ]),
+        TranscriptMessage(id: "2", isUser: false, blocks: [
+            .text(
+                "The transcript sits in a centred column capped at eight hundred and eighty points "
+                + "wide, so prose keeps a readable measure no matter how far the pane is opened, and "
+                + "the composer reuses that exact column so the two agree edge for edge on screen."
+            ),
+            .text(
+                "On a pane narrower than the column itself the cap gives way at a forty point leading "
+                + "floor rather than clipping against the pane's edge, which is the same escape hatch "
+                + "the home screen's own content column uses, for the same reason and at the same size."
+            ),
+        ]),
+    ]
+
+    /// A table far wider than the column, rendered into the same
+    /// horizontally-scrolling card a fenced code block gets.
+    private static let wideTableMarkdown = """
+    | column one heading | column two heading | column three heading | column four heading | column five heading |
+    | --- | --- | --- | --- | --- |
+    | a fairly long cell | another fairly long cell | a third fairly long cell | a fourth long cell | a fifth long cell |
+    """
+
     /// A view fed by hand. Its `home` is a directory that does not exist, so
     /// a tick that does slip through resolves nothing and reads no file —
     /// these tests are about what `appendMessages` draws, not about polling.
@@ -602,11 +637,85 @@ final class PaneAppViewTests: XCTestCase {
         let window = show(view)
         defer { window.close() }
 
+        // Fed, not empty. An empty stack has no content pushing back against
+        // the cap, so it measures 880pt whether or not the cap actually
+        // holds — which is precisely how a full-width transcript once shipped
+        // under a green version of this test.
+        view.appendMessages(Self.longProse)
+        view.layoutSubtreeIfNeeded()
+
         let content = try XCTUnwrap(view.scrollView.documentView)
         let column = try XCTUnwrap(content.subviews.first, "messageStack, the transcript column")
 
         XCTAssertEqual(column.frame.width, 880, accuracy: 0.5)
         XCTAssertEqual(column.frame.midX, content.frame.midX, accuracy: 0.5, "centred, not just capped")
+    }
+
+    /// The same cap at the width Bruno's real window runs at, where the gap
+    /// between 880pt and the pane is wide enough for a whole paragraph to fit
+    /// on one unwrapped line — the shape the bug was actually reported in.
+    ///
+    /// Separate from the 1400pt case above rather than replacing it: a cap
+    /// that survives a 1400pt pane and not a 2000pt one is a cap that is
+    /// really just "whatever the widest label wants", and only the wider
+    /// pane tells those two apart.
+    func testTheMessageColumnStaysCappedOnAVeryWidePaneWithProse() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 2000, height: 900)
+        let window = show(view)
+        defer { window.close() }
+
+        view.appendMessages(Self.longProse)
+        view.layoutSubtreeIfNeeded()
+
+        let content = try XCTUnwrap(view.scrollView.documentView)
+        let column = try XCTUnwrap(content.subviews.first, "messageStack, the transcript column")
+
+        XCTAssertEqual(column.frame.width, 880, accuracy: 0.5)
+        XCTAssertEqual(column.frame.midX, content.frame.midX, accuracy: 0.5, "centred, not just capped")
+
+        // The rows too, not just the stack around them: a row is pinned to
+        // the stack's width, so a row wider than the cap means the cap was
+        // read as a suggestion somewhere further down the chain.
+        for row in view.descendants(PaneAppMessageRowView.self) {
+            XCTAssertLessThanOrEqual(row.frame.width, 880.5, "a row spilling past the column")
+        }
+    }
+
+    /// Long unbroken content that deliberately refuses to wrap — a code
+    /// fence with a very long line, and a wide table, both of which render
+    /// into the horizontally-scrolling card — must overflow *inside* the
+    /// card, never by widening the column that holds it.
+    func testAWideCodeBlockScrollsInsteadOfWideningTheColumn() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 2000, height: 900)
+        let window = show(view)
+        defer { window.close() }
+
+        let longLine = String(repeating: "let averyLongIdentifierName = compute(argument:) // ", count: 12)
+        view.appendMessages([
+            TranscriptMessage(id: "1", isUser: false, blocks: [
+                .text("```\n\(longLine)\n```"),
+            ]),
+            TranscriptMessage(id: "2", isUser: false, blocks: [
+                .text(Self.wideTableMarkdown),
+            ]),
+        ])
+        view.layoutSubtreeIfNeeded()
+
+        let content = try XCTUnwrap(view.scrollView.documentView)
+        let column = try XCTUnwrap(content.subviews.first, "messageStack, the transcript column")
+
+        XCTAssertEqual(column.frame.width, 880, accuracy: 0.5)
+
+        // The overflow has to land somewhere, and the card's own scroll view
+        // is where: its document is wider than the card that clips it.
+        let cards = view.descendants(NSScrollView.self).filter { $0 !== view.scrollView }
+        XCTAssertFalse(cards.isEmpty, "the code fence and the table both render into a card")
+        XCTAssertTrue(
+            cards.contains { ($0.documentView?.frame.width ?? 0) > $0.contentView.bounds.width },
+            "the long line overflows inside the card rather than widening the column"
+        )
     }
 
     /// The same escape hatch `HomeView`'s column uses: on a window too
@@ -618,6 +727,12 @@ final class PaneAppViewTests: XCTestCase {
         view.frame = NSRect(x: 0, y: 0, width: 500, height: 600)
         let window = show(view)
         defer { window.close() }
+
+        // Fed for the same reason the wide case is: whatever holds the cap
+        // down must still be breakable by the required leading floor once
+        // there is real content pushing the other way.
+        view.appendMessages(Self.longProse)
+        view.layoutSubtreeIfNeeded()
 
         let content = try XCTUnwrap(view.scrollView.documentView)
         let column = try XCTUnwrap(content.subviews.first)

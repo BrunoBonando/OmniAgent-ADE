@@ -510,12 +510,35 @@ final class PaneAppView: NSView {
             controls.bottomAnchor.constraint(equalTo: composerGlass.bottomAnchor, constant: -24),
             controls.heightAnchor.constraint(equalToConstant: 26),
         ])
-        // `.defaultHigh`, not required: on a window narrow enough that the
-        // 40pt leading floor above would otherwise conflict with it, this is
-        // the constraint that has to lose.
+        // Above every *content* priority but below required, which is the
+        // only band that means what this cap means: "as wide as 880pt unless
+        // a required constraint says otherwise".
+        //
+        // `.defaultHigh` — the obvious-looking choice, and what this was —
+        // is a bug, because 750 is also AppKit's default horizontal
+        // *compression resistance* for every label. A wrapping `NSTextField`
+        // publishes an `NSContentSizeLayoutConstraint` for its **single-line**
+        // width (a paragraph of Claude's prose measures ~1500pt), and the
+        // chain from that label up to `messageStack` — label width == body
+        // width == row width == stack width — is required at every link. So
+        // at 750 the cap and the label's own width sat at *equal* priority
+        // with no way to satisfy both, and the solver was free to drop
+        // either: it dropped the cap, and the transcript ran full width.
+        // (Confirmed by dumping `constraintsAffectingLayout(for: .horizontal)`
+        // on the column: the label's `CompressionResistance:750` content-size
+        // constraint was in the resolved layout and the 880pt cap was not,
+        // leaving a 1537.5pt column on a 2000pt pane — the label's 1509.5pt
+        // intrinsic width plus the row's 14pt insets.)
+        //
+        // Both columns, one rule, deliberately: the composer only *looks*
+        // immune. `composerField` reports `noIntrinsicMetric` horizontally,
+        // so it publishes no content-size constraint and nothing pushes its
+        // glass outward — the identical 750-against-750 tie is sitting under
+        // it unresolved, waiting for a field that does report a width.
+        // Raising only the transcript would leave that trap armed.
         for column in [messageStack, composerGlass] {
             let width = column.widthAnchor.constraint(equalToConstant: Self.transcriptColumnWidth)
-            width.priority = .defaultHigh
+            width.priority = Self.transcriptColumnWidthPriority
             width.isActive = true
         }
 
@@ -601,6 +624,12 @@ final class PaneAppView: NSView {
     /// the two line up.
     private static let transcriptColumnWidth: CGFloat = 880
 
+    /// One below `.required`, so the cap yields to required constraints —
+    /// the 40pt leading floor on a narrow pane — and to nothing else. In
+    /// particular it must outrank content: see the width constraints in
+    /// `init` for why `.defaultHigh` was not high enough to be a cap at all.
+    private static let transcriptColumnWidthPriority = NSLayoutConstraint.Priority(999)
+
     /// The glass's own margin off the view's *bottom* edge — the single
     /// authored number the clearance in `layout()` is built from, rather
     /// than a second constant that could disagree with it. (Leading and
@@ -637,7 +666,7 @@ final class PaneAppView: NSView {
     /// How far the glow bleeds past the glass's own edge on every side, and
     /// how strongly it is blurred — chosen together, not independently.
     ///
-    /// Bleed is kept `<=` `composerGlassMargin` (18 against 20) rather than
+    /// Bleed is kept `<=` `composerGlassMargin` (10 against 20) rather than
     /// past it: `PaneWorkspaceView.roundChildren` masks every pane, this
     /// view included, to its own rounded rect (`appView.layer?.masksToBounds
     /// = true`), so bleed past the glass's own margin off the pane's bottom
@@ -655,12 +684,14 @@ final class PaneAppView: NSView {
     /// already cut it off there, which is exactly the hard edge this radius
     /// exists to avoid reintroducing. Half the band's width is comfortably
     /// inside that limit while still tapering across a real fraction of it.
-    /// (28 was tuned for the 36pt bleed this replaced; halving the bleed to
-    /// 18 without also lowering this left a 28pt blur mostly clipped by an
-    /// 18pt band — a smear, not a glow, which is what sent both numbers
-    /// back for reconsideration together here.)
-    private static let composerGlowBleed: CGFloat = 18
-    private static let composerGlowBlurRadius: CGFloat = 9
+    /// (28 was tuned for the 36pt bleed two revisions back; halving the bleed
+    /// without also lowering this left a 28pt blur mostly clipped by the
+    /// band — a smear, not a glow, which is what sent both numbers back for
+    /// reconsideration together. They have moved together ever since: 36/28,
+    /// then 18/9, and now 10/5, the glow on screen still reading as too
+    /// thick a band at 18.)
+    private static let composerGlowBleed: CGFloat = 10
+    private static let composerGlowBlurRadius: CGFloat = 5
 
     /// The design's signature glow, reused for the composer: "make it shiny
     /// with a nice circling effect with blue and purple out of focus." Same
