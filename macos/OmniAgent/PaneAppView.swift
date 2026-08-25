@@ -324,7 +324,15 @@ final class PaneAppView: NSView {
         didSet {
             guard isLive != oldValue else { return }
             isLive ? startPolling() : stopPolling()
-            if isLive { driveUsageLimitsPoller() }
+            // Registered on the way up and removed on the way down, so a pane
+            // nobody is looking at is not still being pushed at — and, more
+            // to the point, is not still holding a slot in a registry that
+            // used to be one closure wide.
+            if isLive {
+                driveUsageLimitsPoller()
+            } else {
+                ClaudeUsageLimitsPoller.shared.removeObserver(self)
+            }
             // A pane can go non-live (Task 3 flips this on the Terminal ⇄ App
             // toggle) while the composer still holds focus — the glow must
             // not keep spinning on a view nobody is looking at.
@@ -476,6 +484,10 @@ final class PaneAppView: NSView {
         composerGlass.onBackgroundClick = { [weak self] in
             self?.focusComposerAtEndOfDraft()
         }
+        // The explicit manual refresh. The scheduled one is minutes apart by
+        // design (`/usage` is a real request against the limits it reports),
+        // so this is how a user who just hit a limit sees it move.
+        statsBar.onRefreshRequested = { ClaudeUsageLimitsPoller.shared.refresh() }
         // Left `false` (the layer default) deliberately, not just left
         // alone: the focus glow (`updateComposerGlow`) is inset *outside*
         // this layer's own bounds on purpose, and `true` here would clip it
@@ -620,6 +632,9 @@ final class PaneAppView: NSView {
     deinit {
         pollTimer?.invalidate()
         for observer in keyWindowObservers { NotificationCenter.default.removeObserver(observer) }
+        // The registry is app-wide and the pane is not: a closure left behind
+        // would be a dead entry the poller calls forever.
+        ClaudeUsageLimitsPoller.shared.removeObserver(self)
     }
 
     /// The composer glow's key-window gate (`updateComposerGlow`) needs to
@@ -702,9 +717,9 @@ final class PaneAppView: NSView {
 
     // MARK: - Composer
 
-    /// `HomeView.swift:275-292`'s own 880pt column width, reused for both
-    /// the transcript (`messageStack`) and the composer (`composerGlass`) so
-    /// the two line up.
+    /// `HomeView.swift:275-292`'s own 880pt column width, reused for all
+    /// three columns — the transcript (`messageStack`), the composer
+    /// (`composerGlass`) and the stats bar (`statsBar`) — so they line up.
     private static let transcriptColumnWidth: CGFloat = 880
 
     /// One below `.required`, so the cap yields to required constraints —
@@ -1119,11 +1134,24 @@ final class PaneAppView: NSView {
         layoutSubtreeIfNeeded()
         // After layout, so the rise animates a row that already knows where it
         // is going to sit.
-        for row in arrived { animateArrival(of: row) }
+        //
+        // Capped, because a bulk load is not an arrival. Two shapes of bulk
+        // load reach here: the first poll of an existing transcript, which is
+        // the common case when a busy pane is switched into App mode and lands
+        // its whole history in one pass; and the re-read after a compaction or
+        // `/clear`, where `clearMessages()` emptied `turns` and every row on
+        // screen is being *redrawn*, not delivered. Uncapped, both fade and
+        // rise two hundred rows at once, which is the opposite of "this just
+        // arrived". A real poll delivers one row, so the cap costs nothing
+        // where the animation is honest.
+        for row in arrived.suffix(Self.arrivalCap) { animateArrival(of: row) }
         if wasAtBottom {
             scrollToBottom()
         }
     }
+
+    /// At most this many rows animate in one pass. See `appendMessages`.
+    private static let arrivalCap = 3
 
     /// A row that just arrived fades and rises into place.
     ///
@@ -1277,12 +1305,15 @@ final class PaneAppView: NSView {
     /// own transcript, not `UsageAnalytics`, which buckets per project and is
     /// the wrong unit for a pane.
     ///
-    /// The account-global pair is read back here too, not only pushed by
-    /// `onChange`. `ClaudeUsageLimitsPoller` holds a *single* `onChange`
-    /// closure, so with several App panes open only the pane that went live
-    /// most recently is still wired to it; this one line is what keeps the
-    /// others from sitting on a stale "—" forever. Free — a property read of
-    /// an account-global value every pane would show identically anyway.
+    /// The account-global pair is read back here too, not only taken from
+    /// the poller's push. That pull used to be a *mitigation*: the poller held
+    /// a single closure, so with several App panes open only the most recently
+    /// live one was still wired to it, and this line was what kept the rest
+    /// off a permanent "—". The registry fixes that properly now, and the pull
+    /// stays because it is what catches a pane that went live *after* the last
+    /// reading landed — there is no push to wait for in that case, and the
+    /// next one is minutes away. Free either way: a property read of an
+    /// account-global value every pane would show identically anyway.
     private func refreshConversationStats() {
         let usages = turns.flatMap(\.usages)
         statsBar.tokens = TranscriptUsage.total(of: usages)
@@ -1298,15 +1329,17 @@ final class PaneAppView: NSView {
     /// panes polling would be eight times the cost for one account-global
     /// number, and a 0.3s transcript tick would be worse still.
     private func driveUsageLimitsPoller() {
-        // Never under XCTest, the same rule and for the same reason as
-        // `EngineLauncher.prewarm`: `refresh()` shells out to `claude -p
-        // /usage`, and a suite that spawns that once per App-view test both
-        // burns the account's real quota and leaves subprocesses behind.
-        guard NSClassFromString("XCTestCase") == nil else { return }
-        ClaudeUsageLimitsPoller.shared.onChange = { [weak self] in
+        // Keyed by this pane, not a single shared closure: registering used to
+        // *replace* whatever the previously live pane had registered, so with
+        // two App panes open only the newer one was ever pushed to.
+        //
+        // The "never shell out from the suite" guard lives in `refresh()`
+        // itself now rather than here, so it holds for the refresh glyph and
+        // the repeating timer too, not only for this caller.
+        ClaudeUsageLimitsPoller.shared.addObserver(self) { [weak self] in
             self?.statsBar.limits = ClaudeUsageLimitsPoller.shared.latest
         }
-        ClaudeUsageLimitsPoller.shared.refresh()
+        ClaudeUsageLimitsPoller.shared.start()
     }
 
     // MARK: - Markdown

@@ -1513,6 +1513,47 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(editor.selectedRange, NSRange(location: 10, length: 0), "at the end of the draft")
     }
 
+    /// The other half of the same rule, and the one the spec names by hand:
+    /// "a click on the send button submits rather than focusing".
+    /// `ComposerCardView.mouseDown` is a blanket container handler, so what
+    /// keeps the send button working is nothing more than hit-testing
+    /// delivering the click to the deepest view — this is the assertion that
+    /// pins it.
+    ///
+    /// `hitTest` for the exclusion and `performClick` for the action, rather
+    /// than a synthesised `mouseDown` on the button: `NSButton.mouseDown`
+    /// runs a nested tracking loop that waits for a mouse-up nobody is going
+    /// to send.
+    func testAClickOnTheSendButtonSubmitsRatherThanFocusing() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+        var submitted: [String] = []
+        view.onSubmit = { submitted.append($0) }
+        view.composerField.stringValue = "ship it"
+
+        let glass = try XCTUnwrap(view.composerField.superview)
+        let send = try XCTUnwrap(
+            view.descendants(NSButton.self)
+                .first { $0.image?.accessibilityDescription == "Send" },
+            "the composer's send button"
+        )
+        let centre = view.convert(NSPoint(x: send.bounds.midX, y: send.bounds.midY), from: send)
+        let hit = try XCTUnwrap(view.hitTest(view.convert(centre, to: view.superview)))
+        XCTAssertTrue(hit === send, "the button takes its own clicks, not the card's blanket handler")
+        XCTAssertFalse(hit === glass)
+
+        send.performClick(nil)
+
+        XCTAssertEqual(submitted, ["ship it"], "it submitted")
+        XCTAssertEqual(view.composerField.stringValue, "", "and cleared the draft")
+        XCTAssertFalse(
+            view.composerField.currentEditorIsFirstResponder,
+            "and did not fall through to the card's focus-the-field handler"
+        )
+    }
+
     /// One table, not two: the header's colour dot and the composer's tint
     /// both come through here, so they can never disagree about what colour a
     /// pane is. `"default"` and anything unrecognised are not colours — the
@@ -1907,8 +1948,117 @@ final class PaneAppViewTests: XCTestCase {
         bar.layoutSubtreeIfNeeded()
 
         XCTAssertEqual(bar.visibleReadoutCount, 1)
-        let text = bar.descendants(NSTextField.self).map(\.stringValue).joined(separator: " ")
-        XCTAssertTrue(text.lowercased().contains("context"))
+        // By view, not by text. `descendants` walks hidden views too, so
+        // searching the joined `stringValue`s for "context" found the Context
+        // *title* label whether it was hidden or not — the assertion passed
+        // identically for a bar that kept Tokens and hid Context.
+        XCTAssertFalse(bar.contextReadout.isHidden, "the one that changes minute to minute")
+        XCTAssertTrue(bar.tokensReadout.isHidden)
+        XCTAssertTrue(bar.sessionReadout.isHidden)
+        XCTAssertTrue(bar.weekReadout.isHidden)
+    }
+
+    /// "…with the rest behind a tap." There was no tap: below 560pt three
+    /// readouts vanished with no way to see them again short of resizing the
+    /// pane, which in a grid is not always possible.
+    func testTappingANarrowBarBringsTheHiddenReadoutsBack() {
+        let bar = PaneAppStatsBar()
+        bar.frame = NSRect(x: 0, y: 0, width: 320, height: 34)
+        bar.tokens = 341_000
+        bar.context = 130_500
+        bar.layoutSubtreeIfNeeded()
+        XCTAssertTrue(bar.tokensReadout.isHidden, "hidden to start with")
+
+        bar.mouseDown(with: click(in: bar))
+        bar.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(bar.isExpanded)
+        XCTAssertEqual(bar.visibleReadoutCount, 4)
+        XCTAssertFalse(bar.tokensReadout.isHidden)
+        XCTAssertFalse(bar.sessionReadout.isHidden)
+        XCTAssertFalse(bar.weekReadout.isHidden)
+
+        bar.mouseDown(with: click(in: bar))
+        bar.layoutSubtreeIfNeeded()
+        XCTAssertTrue(bar.tokensReadout.isHidden, "and the tap folds it away again")
+    }
+
+    /// `modelName`/`modelPercent` were parsed, unit-tested, and rendered
+    /// nowhere at all — the spec puts them in "the expanded state", which is
+    /// this one.
+    func testTheExpandedBarShowsThePerModelWeeklyLine() {
+        let bar = PaneAppStatsBar()
+        bar.frame = NSRect(x: 0, y: 0, width: 880, height: 34)
+        bar.limits = ClaudeUsageLimits.parse(
+            "Current week (all models): 37% used · resets Aug 28 at 11am\n"
+            + "Current week (Fable): 10% used · resets Aug 28 at 11am"
+        )
+        bar.layoutSubtreeIfNeeded()
+        XCTAssertTrue(bar.modelLabel.isHidden, "a fifth number would crowd the collapsed bar")
+
+        bar.mouseDown(with: click(in: bar))
+        bar.layoutSubtreeIfNeeded()
+
+        XCTAssertFalse(bar.modelLabel.isHidden)
+        XCTAssertTrue(bar.modelLabel.stringValue.contains("Fable"))
+        XCTAssertTrue(bar.modelLabel.stringValue.contains("10%"))
+    }
+
+    /// A bar that has never had a per-model line has nothing to expand *to*
+    /// there, and must not open an empty row.
+    func testTheExpandedBarHidesThePerModelLineWhenThereIsNone() {
+        let bar = PaneAppStatsBar()
+        bar.frame = NSRect(x: 0, y: 0, width: 880, height: 34)
+        bar.limits = nil
+
+        bar.mouseDown(with: click(in: bar))
+        bar.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(bar.isExpanded)
+        XCTAssertTrue(bar.modelLabel.isHidden)
+    }
+
+    /// Spec §4 asks for "an explicit manual refresh". The glyph is a control,
+    /// so its click is delivered to it and never reaches the bar's own
+    /// `mouseDown` — pinned here, because a bar that expanded instead of
+    /// refreshing would look identical in a screenshot.
+    func testTheRefreshGlyphAsksForAFreshReadingRatherThanExpanding() {
+        let bar = PaneAppStatsBar()
+        bar.frame = NSRect(x: 0, y: 0, width: 880, height: 34)
+        var asked = 0
+        bar.onRefreshRequested = { asked += 1 }
+
+        bar.refreshButton.performClick(nil)
+
+        XCTAssertEqual(asked, 1)
+        XCTAssertFalse(bar.isExpanded, "the glyph is not the expand target")
+    }
+
+    /// The stats bar is wired to the app-wide poller, which is the only thing
+    /// that ever takes a reading.
+    func testTheAppViewWiresTheBarsRefreshToThePoller() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let bar = try XCTUnwrap(view.descendants(PaneAppStatsBar.self).first)
+        XCTAssertNotNil(bar.onRefreshRequested)
+    }
+
+    /// A left-click at the bar's centre, in its own coordinates. Sent
+    /// directly to `mouseDown` rather than through the window: the bar is not
+    /// in one here, and what is being pinned is the handler, not hit-testing
+    /// (`testTheRefreshGlyphAsksForAFreshReading…` pins the exclusion).
+    private func click(in view: NSView) -> NSEvent {
+        NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: view.bounds.midX, y: view.bounds.midY),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        )!
     }
 
     /// A pane that has never had a successful fetch says so rather than showing a
@@ -1976,6 +2126,32 @@ final class PaneAppViewTests: XCTestCase {
         let row = try XCTUnwrap(view.descendants(PaneAppMessageRowView.self).first)
         XCTAssertNil(row.layer?.animation(forKey: "om-arrive"))
         XCTAssertEqual(row.layer?.opacity ?? 0, 1, accuracy: 0.01, "visible, just not animated")
+    }
+
+    /// A bulk load is not an arrival. Switching a busy pane into App mode
+    /// lands its whole history in one pass, and so does the re-read after a
+    /// compaction or `/clear` — uncapped, every row on screen faded and rose
+    /// at once, which says "this just arrived" about a conversation that has
+    /// been sitting in a file for an hour.
+    func testABulkHistoryLoadDoesNotAnimateEveryRow() {
+        let view = makeView()
+        view.reducedMotionForTesting = false
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+
+        // Alternating roles, because consecutive same-role messages merge into
+        // one turn and one row — ten same-role messages would be a single row.
+        view.appendMessages((0..<10).map {
+            TranscriptMessage(id: "\($0)", isUser: $0.isMultiple(of: 2), blocks: [.text("row \($0)")])
+        })
+
+        let rows = view.descendants(PaneAppMessageRowView.self)
+        XCTAssertEqual(rows.count, 10)
+        let animated = rows.filter { $0.layer?.animation(forKey: "om-arrive") != nil }
+        XCTAssertLessThanOrEqual(animated.count, 3, "the newest few, not the whole history")
+        XCTAssertNil(rows[0].layer?.animation(forKey: "om-arrive"), "the oldest row did not just arrive")
+        XCTAssertNotNil(rows[9].layer?.animation(forKey: "om-arrive"), "the newest one did")
     }
 
     // MARK: - Offscreen render helpers

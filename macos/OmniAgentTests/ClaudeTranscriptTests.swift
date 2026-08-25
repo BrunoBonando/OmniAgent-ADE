@@ -234,10 +234,28 @@ final class ClaudeTranscriptTests: XCTestCase {
         XCTAssertEqual(usage.totalTokens, 135)
     }
 
-    func testARowWithNoUsageContributesNothing() {
-        let a = TranscriptUsage(input: 10, output: 5, cacheRead: 0, cacheCreation: 0)
-        let b = TranscriptUsage(input: 1, output: 1, cacheRead: 0, cacheCreation: 0)
-        XCTAssertEqual(TranscriptUsage.total(of: [a, b]), 17)
+    /// Through the decoder, not through two hand-built `TranscriptUsage`
+    /// values: the previous version of this test summed two constructed
+    /// figures and never decoded a row lacking `usage` at all, so the `nil`
+    /// branch it is named after was never executed. Claude Code writes rows
+    /// with no `usage` object routinely — every user row, for a start.
+    func testARowWithNoUsageContributesNothing() throws {
+        let rows = [
+            #"{"type":"user","uuid":"u1","message":{"content":"how many lines?"}}"#,
+            #"{"type":"assistant","uuid":"a1","message":{"content":"about 341k","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+        ]
+        let url = try fixture(rows.joined(separator: "\n") + "\n", name: "no-usage.jsonl")
+
+        let messages = ClaudeTranscriptReader(url: url).poll().messages
+
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertNil(messages[0].usage, "no `usage` key means no usage, not a zeroed one")
+        // The turn's own accumulation is what the stats bar reads, and the
+        // usage-less row must neither break it nor be counted.
+        var turns: [TranscriptTurn] = []
+        _ = TranscriptTurn.append(messages, to: &turns)
+        XCTAssertEqual(TranscriptUsage.total(of: turns.flatMap(\.usages)), 15)
+        XCTAssertEqual(turns.flatMap(\.usages).count, 1, "one contribution, from the row that had one")
         XCTAssertEqual(TranscriptUsage.total(of: []), 0)
     }
 
