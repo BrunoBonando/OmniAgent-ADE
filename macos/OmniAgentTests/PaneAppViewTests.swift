@@ -1697,6 +1697,75 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(rep.pixelsHigh, 640)
     }
 
+    // MARK: - Stats bar
+
+    func testTheStatsBarShowsFourReadoutsWhenItFits() {
+        let bar = PaneAppStatsBar()
+        bar.frame = NSRect(x: 0, y: 0, width: 880, height: 34)
+        bar.tokens = 341_000
+        bar.context = 130_500
+        bar.limits = ClaudeUsageLimits.parse(
+            "Current session: 9% used · resets Aug 25 at 2:10pm\n"
+            + "Current week (all models): 37% used · resets Aug 28 at 11am"
+        )
+        bar.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(bar.visibleReadoutCount, 4)
+        let text = bar.descendants(NSTextField.self).map(\.stringValue).joined(separator: " ")
+        XCTAssertTrue(text.contains("9%"))
+        XCTAssertTrue(text.contains("37%"))
+    }
+
+    /// Panes live in a grid and are often narrow. The bar keeps Context — the only
+    /// readout that changes minute to minute — and puts the rest behind a tap,
+    /// rather than wrapping or clipping.
+    func testTheStatsBarCollapsesOnANarrowPane() {
+        let bar = PaneAppStatsBar()
+        bar.frame = NSRect(x: 0, y: 0, width: 320, height: 34)
+        bar.tokens = 341_000
+        bar.context = 130_500
+        bar.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(bar.visibleReadoutCount, 1)
+        let text = bar.descendants(NSTextField.self).map(\.stringValue).joined(separator: " ")
+        XCTAssertTrue(text.lowercased().contains("context"))
+    }
+
+    /// A pane that has never had a successful fetch says so rather than showing a
+    /// confident zero.
+    func testUnknownLimitsReadAsPendingNotZero() {
+        let bar = PaneAppStatsBar()
+        bar.frame = NSRect(x: 0, y: 0, width: 880, height: 34)
+        bar.limits = nil
+        bar.layoutSubtreeIfNeeded()
+
+        let text = bar.descendants(NSTextField.self).map(\.stringValue).joined(separator: " ")
+        XCTAssertFalse(text.contains("0%"), "never a fabricated zero")
+        XCTAssertTrue(text.contains("—"))
+    }
+
+    /// The brief's own version of this asserted `bar.frame.minY < height / 2`
+    /// for "pinned to the top", which is the flipped-coordinates reading and
+    /// is wrong here: `PaneAppView` overrides nothing, so `isFlipped` is
+    /// `false` and y is measured up from the *bottom* edge — the same
+    /// convention `testTheNewestRowScrollsClearOfTheComposer` already relies
+    /// on when it puts the bottom composer's glass *below* the last row's
+    /// `minY`. Confirmed with a throwaway offscreen probe: a bar pinned
+    /// `topAnchor + 8` inside an unflipped 1400×600 host laid out at
+    /// `minY = 564`, not 8. So the comparison is inverted and the assertion
+    /// kept — a top-pinned bar's `minY` sits in the *upper* half.
+    func testTheBarSitsOnGlassBelowTheHeaderAndAboveTheTranscript() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+        view.layoutSubtreeIfNeeded()
+
+        let bar = try XCTUnwrap(view.descendants(PaneAppStatsBar.self).first)
+        XCTAssertGreaterThan(bar.frame.minY, view.frame.height / 2, "pinned to the top")
+        XCTAssertGreaterThan(view.scrollView.contentInsets.top, 0, "transcript clears it")
+    }
+
     // MARK: - Offscreen render helpers
     // Copied from `DeskCanvasNodeViewsTests.swift:531-560` — this repo's
     // per-file render-drop convention rather than a shared helper.

@@ -157,6 +157,7 @@
 		10000000000000000000101 /* PaneAppMessageRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000101 /* PaneAppMessageRow.swift */; };
 		10000000000000000000102 /* PaneAppSystemBlocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000102 /* PaneAppSystemBlocks.swift */; };
 		10000000000000000000104 /* ClaudeUsageLimits.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000104 /* ClaudeUsageLimits.swift */; };
+		10000000000000000000106 /* PaneAppStatsBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000106 /* PaneAppStatsBar.swift */; };
 		10000000000000000000061 /* WorkspaceFilesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000061 /* WorkspaceFilesTests.swift */; };
 		10000000000000000000071 /* EngineLauncherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000071 /* EngineLauncherTests.swift */; };
 		FC3606719F77D1F856C827D9 /* ClaudeTranscriptTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 712943C7B868840E1BB009CB /* ClaudeTranscriptTests.swift */; };
@@ -352,6 +353,7 @@
 		20000000000000000000101 /* PaneAppMessageRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAppMessageRow.swift; sourceTree = "<group>"; };
 		20000000000000000000102 /* PaneAppSystemBlocks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAppSystemBlocks.swift; sourceTree = "<group>"; };
 		20000000000000000000104 /* ClaudeUsageLimits.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeUsageLimits.swift; sourceTree = "<group>"; };
+		20000000000000000000106 /* PaneAppStatsBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAppStatsBar.swift; sourceTree = "<group>"; };
 		20000000000000000000061 /* WorkspaceFilesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFilesTests.swift; sourceTree = "<group>"; };
 		20000000000000000000071 /* EngineLauncherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineLauncherTests.swift; sourceTree = "<group>"; };
 		712943C7B868840E1BB009CB /* ClaudeTranscriptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeTranscriptTests.swift; sourceTree = "<group>"; };
@@ -473,6 +475,7 @@
 				20000000000000000000101 /* PaneAppMessageRow.swift */,
 				20000000000000000000102 /* PaneAppSystemBlocks.swift */,
 				20000000000000000000104 /* ClaudeUsageLimits.swift */,
+				20000000000000000000106 /* PaneAppStatsBar.swift */,
 				20000000000000000000049 /* Assets.xcassets */,
 				A04759722BBF431AA1576C0D /* monaco */,
 			);
@@ -763,6 +766,7 @@
 				10000000000000000000101 /* PaneAppMessageRow.swift in Sources */,
 				10000000000000000000102 /* PaneAppSystemBlocks.swift in Sources */,
 				10000000000000000000104 /* ClaudeUsageLimits.swift in Sources */,
+				10000000000000000000106 /* PaneAppStatsBar.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
