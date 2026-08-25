@@ -1350,6 +1350,186 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(view.composerField.stringValue, "/tmp/a.swift")
     }
 
+    // MARK: - Pane colour and focus
+
+    /// Two Claude panes side by side are told apart by their `/color`, and the
+    /// composer is the piece of App-mode chrome the eye is already on — so an
+    /// amber pane glows amber rather than the app accent every other pane
+    /// wears. Compared on the RGB components alone (`prefix(3)`): the ramp
+    /// builds its stops with `withAlphaComponent`, so no stop is the token
+    /// itself, and the question is which *hue* is circling.
+    func testTheGlowTakesThePanesOwnColour() throws {
+        let view = makeView()
+        view.reducedMotionForTesting = false
+        view.isKeyWindowForTesting = true
+        view.isLive = true
+        view.paneTint = ShellPalette.amber
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+
+        window.makeFirstResponder(view.composerField)
+        view.layoutSubtreeIfNeeded()
+
+        let container = try XCTUnwrap(view.glowContainerForTesting)
+        let gradient = try XCTUnwrap(container.sublayers?.compactMap { $0 as? CAGradientLayer }.first)
+        let colors = try XCTUnwrap(gradient.colors as? [CGColor])
+        XCTAssertTrue(
+            colors.contains { $0.components?.prefix(3) == ShellPalette.amber.cgColor.components?.prefix(3) },
+            "an amber pane gets an amber glow"
+        )
+        XCTAssertFalse(
+            colors.contains { $0.components?.prefix(3) == ShellPalette.accentPurple.cgColor.components?.prefix(3) },
+            "and not the app's violet crossfading through it"
+        )
+
+        view.isLive = false
+    }
+
+    /// Most panes have no `/color`, and those keep the design's own
+    /// blue→purple sweep — the tint is an override, not a replacement for the
+    /// default ramp.
+    func testAPaneWithNoColourKeepsTheDefaultRamp() throws {
+        let view = makeView()
+        view.reducedMotionForTesting = false
+        view.isKeyWindowForTesting = true
+        view.isLive = true
+        view.paneTint = nil
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+
+        window.makeFirstResponder(view.composerField)
+        view.layoutSubtreeIfNeeded()
+
+        let container = try XCTUnwrap(view.glowContainerForTesting)
+        let gradient = try XCTUnwrap(container.sublayers?.compactMap { $0 as? CAGradientLayer }.first)
+        let colors = try XCTUnwrap(gradient.colors as? [CGColor])
+        // Components, not whole `CGColor`s: every stop carries its own alpha
+        // (`0`, `0.55`, `0.9`), so none of them equals the bare token.
+        XCTAssertTrue(
+            colors.contains { $0.components?.prefix(3) == ShellPalette.accentPurple.cgColor.components?.prefix(3) },
+            "the purple half of the default ramp"
+        )
+        XCTAssertTrue(
+            colors.contains { $0.components?.prefix(3) == ShellPalette.accent.cgColor.components?.prefix(3) },
+            "and the blue half it ramps from"
+        )
+
+        view.isLive = false
+    }
+
+    /// A `/color` typed into a pane that is already focused has to reach the
+    /// glow that is already spinning: `updateComposerGlow` builds its ramp
+    /// once and then returns early for as long as the container exists, so
+    /// without a teardown on the tint change the old hue would keep circling
+    /// until the next blur.
+    func testChangingThePanesColourWhileFocusedRebuildsTheGlow() throws {
+        let view = makeView()
+        view.reducedMotionForTesting = false
+        view.isKeyWindowForTesting = true
+        view.isLive = true
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+        XCTAssertTrue(window.makeFirstResponder(view.composerField))
+        XCTAssertNotNil(view.glowContainerForTesting, "focused, live, key: the glow is up")
+
+        view.paneTint = ShellPalette.amber
+
+        let container = try XCTUnwrap(view.glowContainerForTesting, "still up, not torn down for good")
+        let gradient = try XCTUnwrap(container.sublayers?.compactMap { $0 as? CAGradientLayer }.first)
+        let colors = try XCTUnwrap(gradient.colors as? [CGColor])
+        XCTAssertTrue(
+            colors.contains { $0.components?.prefix(3) == ShellPalette.amber.cgColor.components?.prefix(3) },
+            "and it is amber now, without waiting for a blur"
+        )
+        XCTAssertNotNil(gradient.animation(forKey: "om-spin"), "and still spinning")
+        // The stroke underneath it wears the tint too — it is the Reduce-Motion
+        // and non-key fallback, so a tinted pane that never glows still says
+        // which pane it is.
+        let glass = try XCTUnwrap(view.composerField.superview)
+        XCTAssertEqual(
+            glass.layer?.borderColor, ShellPalette.amber.withAlphaComponent(0.5).cgColor
+        )
+
+        view.isLive = false
+    }
+
+    /// The card is 107pt tall and the field is one line near its top, so most
+    /// of it looks typable and is not. A click anywhere in the card focuses the
+    /// field, caret at the END of the draft — never mid-word, never selecting it.
+    func testClickingTheComposerCardFocusesTheFieldAtTheEnd() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+        view.composerField.stringValue = "half typed"
+
+        view.focusComposerAtEndOfDraft()
+
+        XCTAssertTrue(view.composerField.currentEditorIsFirstResponder)
+        let editor = try XCTUnwrap(view.composerField.currentEditor())
+        XCTAssertEqual(editor.selectedRange, NSRange(location: 10, length: 0))
+    }
+
+    /// And the click actually reaches it: the card's own `mouseDown` is what
+    /// the empty acreage of the glass hands to `focusComposerAtEndOfDraft`.
+    /// Sent through `NSView.hitTest` from a point in the card that no control
+    /// occupies, so this fails if a glass panel, a control, or a stray
+    /// subview ever starts swallowing the click instead.
+    func testAClickInTheCardsEmptyAcreageLandsOnTheCardItself() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 1400, height: 600)
+        let window = show(view)
+        defer { window.close() }
+        let glass = try XCTUnwrap(view.composerField.superview)
+        view.composerField.stringValue = "half typed"
+
+        // The vertical middle of the card: below the single-line field
+        // (22pt from the top, ~17pt tall) and above the 26pt controls row
+        // (24pt off the bottom) — bare card, the acreage this is about.
+        let midGap = NSPoint(x: glass.frame.midX, y: glass.frame.minY + (glass.frame.height / 2))
+        // `hitTest` takes its point in the receiver's *superview* space.
+        let hit = try XCTUnwrap(view.hitTest(view.convert(midGap, to: view.superview)))
+        XCTAssertTrue(hit === glass || hit.isDescendant(of: glass), "the click lands inside the card")
+        XCTAssertFalse(hit.isDescendant(of: view.composerField), "and not on the field itself")
+
+        let click = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: view.convert(midGap, to: nil),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+        hit.mouseDown(with: click)
+
+        XCTAssertTrue(view.composerField.currentEditorIsFirstResponder, "and the caret is in the field")
+        let editor = try XCTUnwrap(view.composerField.currentEditor())
+        XCTAssertEqual(editor.selectedRange, NSRange(location: 10, length: 0), "at the end of the draft")
+    }
+
+    /// One table, not two: the header's colour dot and the composer's tint
+    /// both come through here, so they can never disagree about what colour a
+    /// pane is. `"default"` and anything unrecognised are not colours — the
+    /// dot falls back to its own faint white, the composer to the app accent.
+    func testClaudeTintResolvesTheEightColourNames() {
+        XCTAssertEqual(PaneHeaderView.claudeTint(for: "red"), .systemRed)
+        XCTAssertEqual(PaneHeaderView.claudeTint(for: "blue"), .systemBlue)
+        XCTAssertEqual(PaneHeaderView.claudeTint(for: "green"), .systemGreen)
+        XCTAssertEqual(PaneHeaderView.claudeTint(for: "yellow"), .systemYellow)
+        XCTAssertEqual(PaneHeaderView.claudeTint(for: "purple"), .systemPurple)
+        XCTAssertEqual(PaneHeaderView.claudeTint(for: "orange"), .systemOrange)
+        XCTAssertEqual(PaneHeaderView.claudeTint(for: "pink"), .systemPink)
+        XCTAssertEqual(PaneHeaderView.claudeTint(for: "cyan"), .systemTeal)
+        XCTAssertNil(PaneHeaderView.claudeTint(for: "default"), "no colour is not a colour")
+        XCTAssertNil(PaneHeaderView.claudeTint(for: "chartreuse"))
+    }
+
     // MARK: - isLive gates the timer
 
     func testIsLiveGatesTheTimer() {

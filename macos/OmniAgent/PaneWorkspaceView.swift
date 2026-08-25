@@ -1681,6 +1681,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
         updateVisibility()
         updateLayout()
+        restoreComposerFocusAfterMove()
     }
 
     /// Trades two panes' cells. Everything else — the shape, every dragged
@@ -1693,8 +1694,32 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         grid.swap(first, second)
         self.grid = grid
         updateLayout()
+        restoreComposerFocusAfterMove()
         onPanesChanged?()
         return true
+    }
+
+    /// A move re-frames every container in the grid, and can chip, hide and
+    /// unhide the App view on the way through (`reflowForSize` crossing the
+    /// filmstrip threshold does exactly that). The rule this restores: if the
+    /// App view is the focused pane's active content, the caret is in its
+    /// composer — a pane you were typing into and then moved is still a pane
+    /// you are typing into.
+    ///
+    /// Guarded on the first responder already being inside this workspace, so
+    /// a move driven from the sidebar or a menu never yanks the keyboard out
+    /// of wherever it actually was. `askOverlay` outranks it for the reason
+    /// `restoreFocus` gives: an unanswered question owns the keyboard until it
+    /// is answered.
+    private func restoreComposerFocusAfterMove() {
+        guard
+            let focusedPaneID,
+            let container = containers[focusedPaneID],
+            container.askOverlay == nil,
+            let responder = window?.firstResponder as? NSView,
+            responder.isDescendant(of: self)
+        else { return }
+        container.focusAppComposerIfShowing()
     }
 
     /// Publishes one pane's live agent status to its chrome. The window
@@ -3752,10 +3777,24 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// keyboard to the terminal hidden behind it.
     func focusActiveContent() {
         if viewMode == .app, let appView {
-            window?.makeFirstResponder(appView.primaryResponderView)
+            // Not a bare `makeFirstResponder`: an `NSTextField` taking first
+            // responder selects its whole value, so a pane refocused with a
+            // half-typed draft in it would lose that draft to the next
+            // keystroke. See `PaneAppView.focusComposerAtEndOfDraft`.
+            appView.focusComposerAtEndOfDraft()
         } else {
             surface.focus()
         }
+    }
+
+    /// Puts the caret back in the App view's composer, and only there: a
+    /// terminal-mode pane, or one whose App view is not on screen, is left
+    /// exactly as it was. `focusActiveContent`'s narrower sibling, for the
+    /// paths (a grid move) that must not hand a *terminal* pane's keyboard
+    /// around as a side effect of re-framing it.
+    func focusAppComposerIfShowing() {
+        guard viewMode == .app, let appView, !appView.isHidden else { return }
+        appView.focusComposerAtEndOfDraft()
     }
 
     /// The App view, built on demand from the pane's own descriptor — the
@@ -3764,6 +3803,11 @@ final class PaneContainerView: NSView, NSDraggingSource {
     private func makeAppViewIfNeeded() {
         guard appView == nil, let descriptor = workspace?.descriptor(for: paneID) else { return }
         let view = PaneAppView(sessionID: descriptor.sessionID, cwd: descriptor.cwd)
+        // The composer wears the pane's `/color`, the same colour the header's
+        // own badge draws — `descriptorChanged` keeps it current afterwards, so
+        // a `/color` typed into a live pane reaches the composer without a
+        // rebuild.
+        view.paneTint = PaneHeaderView.claudeTint(for: descriptor.claudeColor)
         // `applyLayout` frames every child by hand, so this view's own frame
         // has to stay authoritative rather than Auto-Layout-driven. Belt-
         // and-braces, not load-bearing: `PaneAppView` no longer switches
@@ -4401,6 +4445,11 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // Color badge: only Claude terminals support `/color`.
         header.claudeColor = descriptor.kind == .terminal && descriptor.engine == .claude
             ? descriptor.claudeColor : nil
+        // …and so does the App view's composer, from the same expression: the
+        // badge in the header and the glow under the composer are the one
+        // pane's one colour, and reading it twice from `descriptor` is how they
+        // stay that way.
+        appView?.paneTint = header.claudeColor.flatMap(PaneHeaderView.claudeTint(for:))
         // Model badge: a terminal running an agent, once anything can say
         // which model — see `PaneDescriptor.model`. A shell has none.
         header.model = descriptor.kind == .terminal && descriptor.engine != .shell
@@ -4846,20 +4895,36 @@ final class PaneHeaderView: NSView {
     /// The model badge, clicked — opens the `/model` picker menu.
     var onModelMenuRequested: ((NSView) -> Void)?
 
+    /// The colour `/color` means by this name, or `nil` when it names no
+    /// colour at all — `"default"`, and anything unrecognised.
+    ///
+    /// Extracted from `colorDotImage(for:)` rather than copied beside it: the
+    /// App view's composer wears the pane's own tint too (its focus glow and
+    /// its focus stroke, `PaneAppView.paneTint`), and two switches over the
+    /// same eight names are two chances for the badge in the header and the
+    /// glow under the composer to disagree about what colour a pane is.
+    ///
+    /// `nil` rather than a stand-in grey, because the two callers want
+    /// different things from "no colour": the dot still has to draw
+    /// something (its own faint white), while the composer has to fall back
+    /// to the app's own accent ramp rather than tint itself grey.
+    static func claudeTint(for color: String) -> NSColor? {
+        switch color {
+        case "red": return .systemRed
+        case "blue": return .systemBlue
+        case "green": return .systemGreen
+        case "yellow": return .systemYellow
+        case "purple": return .systemPurple
+        case "orange": return .systemOrange
+        case "pink": return .systemPink
+        case "cyan": return .systemTeal
+        default: return nil
+        }
+    }
+
     /// A 10×10 filled circle in the colour `/color` uses for this name.
     static func colorDotImage(for color: String) -> NSImage {
-        let fill: NSColor
-        switch color {
-        case "red": fill = .systemRed
-        case "blue": fill = .systemBlue
-        case "green": fill = .systemGreen
-        case "yellow": fill = .systemYellow
-        case "purple": fill = .systemPurple
-        case "orange": fill = .systemOrange
-        case "pink": fill = .systemPink
-        case "cyan": fill = .systemTeal
-        default: fill = NSColor(white: 1, alpha: 0.4)
-        }
+        let fill = claudeTint(for: color) ?? NSColor(white: 1, alpha: 0.4)
         return NSImage(size: NSSize(width: 10, height: 10), flipped: false) { rect in
             fill.setFill()
             NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5)).fill()

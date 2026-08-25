@@ -218,8 +218,8 @@ final class PaneAppView: NSView {
     /// is dark HUD chrome for a floating *window* panel
     /// (`CommandPaletteController`'s own pre-26 fallback), and reads wrong
     /// pasted onto in-pane content.
-    private let composerGlass: NSView = {
-        let container = NSView()
+    private let composerGlass: ComposerCardView = {
+        let container = ComposerCardView()
         container.wantsLayer = true
         container.translatesAutoresizingMaskIntoConstraints = false
         // Set on both branches, not just the flat-card one: the focus stroke
@@ -368,6 +368,38 @@ final class PaneAppView: NSView {
     }
     private var isComposerWindowKey: Bool { isKeyWindowForTesting ?? (window?.isKeyWindow ?? false) }
 
+    /// The pane's own `/color`, resolved by `PaneHeaderView.claudeTint(for:)`
+    /// — `nil` for `"default"` and for every pane that has no colour, which
+    /// is most of them.
+    ///
+    /// The composer is the one piece of App-mode chrome the eye lands on, so
+    /// it is what carries the pane's identity: a `/color orange` pane gets an
+    /// orange focus stroke and an orange glow rather than the app accent every
+    /// other pane wears, which is what makes two Claude panes side by side
+    /// tellable apart at a glance while typing into one of them.
+    ///
+    /// The glow is torn down rather than left alone on a change:
+    /// `updateComposerGlow` builds its colour ramp once at creation and then
+    /// returns early for as long as the container exists, so a `/color` typed
+    /// while the composer is already focused would otherwise keep spinning the
+    /// old hue until the next blur.
+    var paneTint: NSColor? {
+        didSet {
+            guard paneTint != oldValue else { return }
+            composerGlow?.removeFromSuperlayer()
+            composerGlow = nil
+            // Restrokes the border *and* re-runs `updateComposerGlow` — the
+            // one call rather than two, since the stroke wears the tint too.
+            setComposerFocused(isComposerFocused)
+        }
+    }
+
+    /// The focus glow's container (`updateComposerGlow`), for the tests —
+    /// `composerGlow` itself stays `private`, and finding it by walking
+    /// `composerGlass`'s sublayers means the tests can only ever assert on
+    /// whatever the walk happens to match.
+    var glowContainerForTesting: CALayer? { composerGlow }
+
     /// Where keyboard focus should land when this view is the pane's active
     /// content — the composer, so typing starts a message rather than
     /// requiring a click first.
@@ -440,6 +472,9 @@ final class PaneAppView: NSView {
         composerRestingBorder = (composerGlass.layer?.borderWidth ?? 0, composerGlass.layer?.borderColor)
         composerField.onFocusChange = { [weak self] focused in
             self?.setComposerFocused(focused)
+        }
+        composerGlass.onBackgroundClick = { [weak self] in
+            self?.focusComposerAtEndOfDraft()
         }
         // Left `false` (the layer default) deliberately, not just left
         // alone: the focus glow (`updateComposerGlow`) is inset *outside*
@@ -704,13 +739,33 @@ final class PaneAppView: NSView {
     private func setComposerFocused(_ focused: Bool) {
         composerGlass.layer?.borderWidth = focused ? 1 : composerRestingBorder.width
         composerGlass.layer?.borderColor = focused
-            ? ShellPalette.accent.withAlphaComponent(0.5).cgColor
+            ? (paneTint ?? ShellPalette.accent).withAlphaComponent(0.5).cgColor
             : composerRestingBorder.color
         // The stroke above is the Reduce-Motion / no-window fallback and
         // stays regardless — `updateComposerGlow` decides for itself whether
         // the glow on top of it is also wanted.
         isComposerFocused = focused
         updateComposerGlow()
+    }
+
+    /// Focus the field with the caret at the end of any existing draft.
+    ///
+    /// The glass card is ~107pt tall while the field is a single line near its
+    /// top, so most of the card looks typable and is not. A click anywhere in
+    /// it lands the caret where the user would keep typing — the end — rather
+    /// than mid-word or over a selected draft. (`becomeFirstResponder` on an
+    /// `NSTextField` selects the whole value, so without the second half of
+    /// this the next keystroke would silently replace the draft.)
+    ///
+    /// Also what every focus path into an App-mode pane calls
+    /// (`PaneContainerView.focusActiveContent`), so a pane focused by the
+    /// keyboard, by the sidebar, or by a move that re-frames the grid all
+    /// arrive at the same place.
+    func focusComposerAtEndOfDraft() {
+        window?.makeFirstResponder(composerField)
+        if let editor = composerField.currentEditor() {
+            editor.selectedRange = NSRange(location: composerField.stringValue.count, length: 0)
+        }
     }
 
     /// The glass's own corner radius — also what `updateComposerGlow`'s
@@ -813,12 +868,18 @@ final class PaneAppView: NSView {
         gradient.type = .conic
         gradient.startPoint = CGPoint(x: 0.5, y: 0.5)
         gradient.endPoint = CGPoint(x: 0.5, y: 0)
+        // A tinted pane's glow is that one hue's own ramp, not its hue
+        // crossfaded into the app's violet: two unrelated colours circling
+        // each other reads as a fault rather than as the pane's colour. An
+        // untinted pane keeps the design's blue→purple sweep exactly.
+        let edge = paneTint ?? ShellPalette.accent
+        let peak = paneTint ?? ShellPalette.accentPurple
         gradient.colors = [
-            ShellPalette.accent.withAlphaComponent(0).cgColor,
-            ShellPalette.accent.withAlphaComponent(0.55).cgColor,
-            ShellPalette.accentPurple.withAlphaComponent(0.9).cgColor,
-            ShellPalette.accent.withAlphaComponent(0.55).cgColor,
-            ShellPalette.accent.withAlphaComponent(0).cgColor,
+            edge.withAlphaComponent(0).cgColor,
+            edge.withAlphaComponent(0.55).cgColor,
+            peak.withAlphaComponent(0.9).cgColor,
+            edge.withAlphaComponent(0.55).cgColor,
+            edge.withAlphaComponent(0).cgColor,
         ]
         gradient.locations = [0, 0.25, 0.5, 0.75, 1]
         // A `CIFilter` on a layer costs an offscreen pass — the one other
@@ -1522,5 +1583,33 @@ final class PaneAppView: NSView {
         if names.count == 1 { return first }
         if names.allSatisfy({ $0 == first }) { return "\(names.count) \(first) calls" }
         return "\(names.count) steps"
+    }
+}
+
+/// The composer's glass card, which is clickable in the places nothing else
+/// claimed.
+///
+/// The card is ~107pt tall and the field is one line near its top, so the
+/// large majority of what reads as "the composer" is bare container: clicking
+/// it did nothing at all, which is the "looks typable and is not" complaint.
+///
+/// A `mouseDown` override rather than the `NSClickGestureRecognizer` the plan
+/// reached for first, and deliberately: a gesture recognizer attached to this
+/// view sits in the window's event routing for every event destined for this
+/// view *or any of its descendants* — the two control buttons and the field
+/// itself included — so it would have had to be taught to stand off each of
+/// them. `mouseDown` is delivered only to the deepest view that actually hit
+/// (the field, a button, or — the only case this cares about — this
+/// container), so the buttons and the field keep their own handling untouched
+/// with nothing to opt out of. `NSGlassEffectView`/the flat fill filling this
+/// container do not swallow it either: `NSView.mouseDown`'s own default
+/// implementation passes an unhandled event up the responder chain, which
+/// from a subview is this view.
+private final class ComposerCardView: NSView {
+    /// Called for a click on the card that no control inside it took.
+    var onBackgroundClick: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        onBackgroundClick?()
     }
 }

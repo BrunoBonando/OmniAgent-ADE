@@ -161,6 +161,23 @@ final class HomeHotspotView: HomeInteractiveView {
 final class HomeComposerField: NSTextField {
     var onFocusChange: ((Bool) -> Void)?
 
+    /// Whether the keyboard is actually in this field.
+    ///
+    /// `window?.firstResponder === self` is the wrong question and answers
+    /// `false` on a focused field: an `NSTextField` hands first responder
+    /// straight on to the window's shared *field editor*, so the responder
+    /// the window reports while you type into this field is an `NSTextView`,
+    /// not the field. This asks about that editor instead — and about this
+    /// field's own (`currentEditor()` returns `nil` unless the field is the
+    /// one editing), so a second field being edited does not read as this
+    /// one. `window.isKeyWindow` is deliberately not part of it: it is
+    /// unusable under `xcodebuild test`, where no window this host makes ever
+    /// genuinely becomes key.
+    var currentEditorIsFirstResponder: Bool {
+        guard let editor = currentEditor() else { return false }
+        return window?.firstResponder === editor
+    }
+
     override func becomeFirstResponder() -> Bool {
         let became = super.becomeFirstResponder()
         if became { onFocusChange?(true) }
