@@ -404,15 +404,24 @@ final class PaneAppView: NSView {
         // runs in, rather than depending on that one call site alone to
         // correct it — the same probe, otherwise identical, stayed at
         // 500×600 with the column correctly capped to 420pt.
+        // Not `PaneContainerView.paneBackgroundColor`. That opaque black
+        // exists because a terminal theme with any transparency washes its own
+        // text out (`PaneGroundView`'s own comment says so) — a constraint
+        // about the *terminal*. App mode has no terminal theme to protect, so
+        // it takes the workspace ground's gradient and reads as its own
+        // surface rather than as a terminal wearing a chat's clothes.
+        //
+        // Same end-points as `PaneGroundView`, and for its reason: a gradient's
+        // unit space is y-up, this view is unflipped (no `isFlipped` override),
+        // so `1` is the top edge and the light belongs there. Rendered rather
+        // than reasoned about, by
+        // `testTheAppViewGroundIsLitFromTheTopLikeTheWorkspaceGround`.
+        let ground = CAGradientLayer()
+        ground.colors = PaneGroundView.colors.map(\.cgColor)
+        ground.startPoint = CGPoint(x: 0.5, y: 1)
+        ground.endPoint = CGPoint(x: 0.5, y: 0)
         wantsLayer = true
-        // Opaque, and the same background every real pane-content view uses
-        // (`PaneContainerView.paneBackgroundColor` — see `BrowserPaneView`,
-        // `EditorPaneView`, et al.): this view is drawn *over* the
-        // still-running terminal, and a translucent one would show both at
-        // once, while `ShellPalette.content` (the workspace-chrome panels'
-        // own background) would show a visible seam against the pane around
-        // it.
-        layer?.backgroundColor = PaneContainerView.paneBackgroundColor.cgColor
+        layer = ground
 
         messageStack.orientation = .vertical
         messageStack.alignment = .leading

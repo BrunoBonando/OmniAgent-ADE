@@ -72,6 +72,62 @@ final class PaneAppViewTests: XCTestCase {
         )
     }
 
+    // MARK: - Ground
+
+    /// App mode is not a terminal, so it does not wear terminal black. It takes
+    /// the workspace ground's own gradient — the one `PaneGroundView` paints
+    /// behind the grid — because the reason panes go opaque ("a terminal theme
+    /// with any transparency washes its own text out") is about the terminal,
+    /// and there is no terminal theme here to protect.
+    func testTheAppViewPaintsTheWorkspaceGroundGradient() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        view.layoutSubtreeIfNeeded()
+
+        let gradient = try XCTUnwrap(view.layer as? CAGradientLayer, "not a flat fill")
+        let colors = try XCTUnwrap(gradient.colors as? [CGColor])
+        XCTAssertEqual(colors.count, 2)
+        XCTAssertEqual(colors[0], PaneGroundView.colors[0].cgColor)
+        XCTAssertEqual(colors[1], PaneGroundView.colors[1].cgColor)
+    }
+
+    /// And it is lit from the same end as the ground it borrows — which end
+    /// the light is at is not free: a gradient's unit space is y-up and
+    /// whether that survives depends on the view's flippedness, so it is
+    /// rendered and anchored by a marker at the top of the screen, exactly
+    /// like `testTheGroundUnderThePanesIsLitFromTheTop` does for the ground.
+    func testTheAppViewGroundIsLitFromTheTopLikeTheWorkspaceGround() throws {
+        let view = makeView()
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
+        view.appendMessages(Self.longProse)
+        let window = show(view)
+        defer { window.close() }
+        // Unflipped, so the top of the screen is the *high* y.
+        let marker = NSView(frame: NSRect(x: 0, y: view.bounds.height - 6, width: 300, height: 6))
+        marker.wantsLayer = true
+        marker.layer?.backgroundColor = NSColor.green.cgColor
+        view.addSubview(marker)
+        window.displayIfNeeded()
+        view.layoutSubtreeIfNeeded()
+
+        let image = try XCTUnwrap(render(view))
+        // Two points in from the right edge: the column is centred and capped,
+        // so this strip is the ground itself rather than any row's fill.
+        func pixel(_ row: Int) -> NSColor {
+            image.colorAt(x: image.pixelsWide - 2, y: row)?.usingColorSpace(.sRGB) ?? .black
+        }
+        let anchor = try XCTUnwrap(
+            (0..<image.pixelsHigh).first { pixel($0).greenComponent > 0.8 },
+            "the marker has to show up, or the render proves nothing"
+        )
+        let rows = anchor < image.pixelsHigh / 2
+            ? Array(0..<image.pixelsHigh)
+            : Array((0..<image.pixelsHigh).reversed())
+        let top = pixel(rows[rows.count / 10])
+        let bottom = pixel(rows[rows.count - rows.count / 20])
+        XCTAssertGreaterThan(top.brightnessComponent, bottom.brightnessComponent + 0.02, "lit from the top")
+    }
+
     // MARK: - Rows
 
     /// One row per fed message, in order; the right role label on each; and
