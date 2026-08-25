@@ -130,9 +130,10 @@ final class PaneAppViewTests: XCTestCase {
 
     // MARK: - Rows
 
-    /// One row per fed message, in order; the right role label on each; and
-    /// a `.tool` block's label carries both its name and its detail.
-    func testRowsRenderRoleLabelsAndToolBlockContent() throws {
+    /// One row per fed message, in order; the right speaker on each — the
+    /// user in a bubble under the "Dev Mode" mark, the agent on the ground —
+    /// and a `.tool` block's label carries both its name and its detail.
+    func testRowsRenderSpeakersAndToolBlockContent() throws {
         let view = makeView()
         let messages: [TranscriptMessage] = [
             TranscriptMessage(id: "1", isUser: true, blocks: [.text("Hi there")]),
@@ -146,16 +147,130 @@ final class PaneAppViewTests: XCTestCase {
         let rows = view.descendants(PaneAppMessageRowView.self)
         XCTAssertEqual(rows.count, messages.count)
 
-        let firstLabels = rows[0].descendants(NSTextField.self)
-        XCTAssertEqual(firstLabels.first?.stringValue, "You")
-        XCTAssertEqual(firstLabels.first?.textColor, ShellPalette.inkTertiary)
+        XCTAssertEqual(rows[0].descendants(PaneAppAvatarView.self).count, 1)
+        XCTAssertNotNil(rows[0].bubbleView, "the user's turn is in a bubble")
+        let name = try XCTUnwrap(
+            rows[0].descendants(NSTextField.self).first { $0.stringValue == "Dev Mode" }
+        )
+        XCTAssertEqual(name.textColor, ShellPalette.inkTertiary)
 
-        let secondLabels = rows[1].descendants(NSTextField.self)
-        XCTAssertEqual(secondLabels.first?.stringValue, "Claude")
-        XCTAssertEqual(secondLabels.first?.textColor, ShellPalette.accent)
+        XCTAssertEqual(rows[1].descendants(PaneAppAvatarView.self).count, 1)
+        XCTAssertNil(rows[1].bubbleView, "the agent's turn sits on the ground")
 
-        let toolLine = try XCTUnwrap(secondLabels.first { $0.stringValue.contains("Read") })
+        let toolLine = try XCTUnwrap(
+            rows[1].descendants(NSTextField.self).first { $0.stringValue.contains("Read") }
+        )
         XCTAssertTrue(toolLine.stringValue.contains("/x.swift"))
+    }
+
+    // MARK: - Speakers
+
+    /// One avatar per run of consecutive same-role turns: it shows on the first
+    /// turn of a run and is omitted on the rest, reappearing only after the other
+    /// party speaks.
+    func testAvatarShowsOncePerRunOfTurns() {
+        let turns = [
+            TranscriptTurn(id: "1", isUser: true, blocks: [.text("hi")]),
+            TranscriptTurn(id: "2", isUser: false, blocks: [.text("a")]),
+            TranscriptTurn(id: "3", isUser: false, blocks: [.text("b")]),
+            TranscriptTurn(id: "4", isUser: true, blocks: [.text("more")]),
+            TranscriptTurn(id: "5", isUser: false, blocks: [.text("c")]),
+        ]
+        XCTAssertEqual(
+            PaneAppMessageRowView.avatarFlags(for: turns),
+            [true, true, false, true, true]
+        )
+    }
+
+    func testAvatarFlagsOnAnEmptyConversation() {
+        XCTAssertEqual(PaneAppMessageRowView.avatarFlags(for: []), [])
+    }
+
+    /// The user speaks in a bubble; the agent does not. A wide table inside an
+    /// agent bubble would push it to nearly the full column, so the bubble would
+    /// stop distinguishing anything exactly where answers are longest.
+    func testOnlyTheUserGetsABubble() {
+        let user = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "1", isUser: true, blocks: [.text("hi")]),
+            showsAvatar: true
+        )
+        let agent = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "2", isUser: false, blocks: [.text("hello")]),
+            showsAvatar: true
+        )
+
+        XCTAssertNotNil(user.bubbleView, "the user's turn is in a bubble")
+        XCTAssertNil(agent.bubbleView, "the agent's turn sits on the ground")
+    }
+
+    /// The avatar is built only when the row opens a run — a suppressed avatar is
+    /// absent, not hidden, so it takes no layout space in the gutter.
+    func testASuppressedAvatarIsNotBuilt() {
+        let opening = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "1", isUser: false, blocks: [.text("a")]),
+            showsAvatar: true
+        )
+        let continuing = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "2", isUser: false, blocks: [.text("b")]),
+            showsAvatar: false
+        )
+
+        XCTAssertEqual(opening.descendants(PaneAppAvatarView.self).count, 1)
+        XCTAssertEqual(continuing.descendants(PaneAppAvatarView.self).count, 0)
+    }
+
+    /// Agent prose is indented to clear the avatar gutter, so a continuing turn
+    /// still lines up under the one that opened the run.
+    ///
+    /// Two rows built directly rather than fed through `appendMessages`: a
+    /// continuing agent turn cannot be produced from messages at all, because
+    /// `TranscriptTurn.append` merges consecutive same-role messages into one
+    /// turn, so a fed conversation's turns always alternate and every flag
+    /// comes back `true`. The suppressed case is the defensive one, and this
+    /// is the only way to lay it out. Both rows are pinned to the same 880pt
+    /// column with real prose in them, so the indent is measured against
+    /// content, not an empty stack.
+    func testAgentProseAlignsWhetherOrNotItsRowShowsAnAvatar() throws {
+        let opening = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "1", isUser: false, blocks: [.text("second")]),
+            showsAvatar: true
+        )
+        let continuing = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "2", isUser: false, blocks: [.text("third")]),
+            showsAvatar: false
+        )
+        let column = NSView(frame: NSRect(x: 0, y: 0, width: 880, height: 200))
+        column.addSubview(opening)
+        column.addSubview(continuing)
+        NSLayoutConstraint.activate([
+            opening.topAnchor.constraint(equalTo: column.topAnchor),
+            opening.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            opening.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            continuing.topAnchor.constraint(equalTo: opening.bottomAnchor),
+            continuing.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            continuing.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+        ])
+        let window = show(column)
+        defer { window.close() }
+        column.layoutSubtreeIfNeeded()
+
+        let second = try XCTUnwrap(opening.proseOriginInWindow)
+        let third = try XCTUnwrap(continuing.proseOriginInWindow)
+        XCTAssertEqual(second.x, third.x, accuracy: 0.5)
+        // Not merely equal: both have to clear the gutter. Two rows agreeing
+        // on a zero indent would satisfy the assertion above and put the
+        // agent's prose straight through its own avatar. Measured against the
+        // avatar's own trailing edge rather than against `side + 10`, because
+        // Auto Layout positions a label by its *alignment* rect and
+        // `NSTextField` insets that 2pt in from its frame — an assertion on
+        // the raw constant reads 36 where the constraint says 38 and pins
+        // AppKit's text inset instead of the design's gutter.
+        let mark = try XCTUnwrap(opening.descendants(PaneAppAvatarView.self).first)
+        XCTAssertGreaterThanOrEqual(
+            second.x,
+            mark.convert(CGPoint.zero, to: nil).x + PaneAppAvatarView.side,
+            "prose starts past the avatar, not through it"
+        )
     }
 
     // MARK: - Turns
@@ -207,8 +322,8 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(changed, 1)
     }
 
-    /// The view stamps one role label per turn, not one per row.
-    func testOneRoleLabelPerTurn() {
+    /// The view stamps one avatar per turn, not one per row.
+    func testOneAvatarPerTurn() {
         let view = makeView()
         view.appendMessages([
             TranscriptMessage(id: "1", isUser: false, blocks: [.text("on it")]),
@@ -218,8 +333,7 @@ final class PaneAppViewTests: XCTestCase {
 
         let rows = view.descendants(PaneAppMessageRowView.self)
         XCTAssertEqual(rows.count, 1)
-        let labels = view.descendants(NSTextField.self).filter { $0.stringValue == "Claude" }
-        XCTAssertEqual(labels.count, 1)
+        XCTAssertEqual(view.descendants(PaneAppAvatarView.self).count, 1)
     }
 
     /// The mechanism Task 2 turns on, at the view level: a *second*
@@ -409,11 +523,14 @@ final class PaneAppViewTests: XCTestCase {
 
     /// A table reaches the row as one monospaced card, not as prose.
     func testATableRendersAsAMonospacedBlock() {
-        let row = PaneAppMessageRowView(turn: TranscriptTurn(
-            id: "1",
-            isUser: false,
-            blocks: [.text("| a | b |\n|---|---|\n| 1 | 2 |")]
-        ))
+        let row = PaneAppMessageRowView(
+            turn: TranscriptTurn(
+                id: "1",
+                isUser: false,
+                blocks: [.text("| a | b |\n|---|---|\n| 1 | 2 |")]
+            ),
+            showsAvatar: true
+        )
         let monospaced = row.descendants(NSTextField.self).filter {
             $0.font?.fontName == ShellFont.mono(12).fontName
         }
@@ -491,12 +608,15 @@ final class PaneAppViewTests: XCTestCase {
     /// Consecutive tool calls become one group, collapsed, with the detail
     /// built but hidden — expansion must not have to re-derive anything.
     func testConsecutiveToolCallsCollapseIntoOneGroup() {
-        let row = PaneAppMessageRowView(turn: TranscriptTurn(id: "1", isUser: false, blocks: [
-            .text("on it"),
-            .tool(name: "Bash", detail: "ls"),
-            .tool(name: "Bash", detail: "pwd"),
-            .text("done"),
-        ]))
+        let row = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "1", isUser: false, blocks: [
+                .text("on it"),
+                .tool(name: "Bash", detail: "ls"),
+                .tool(name: "Bash", detail: "pwd"),
+                .text("done"),
+            ]),
+            showsAvatar: true
+        )
 
         let groups = row.descendants(PaneAppWorkGroupView.self)
         XCTAssertEqual(groups.count, 1)
@@ -510,26 +630,32 @@ final class PaneAppViewTests: XCTestCase {
     /// happened, rather than being hoisted to the top of the turn. A run of
     /// two so it actually collapses into a group (a run of one renders
     /// inline and would not exercise this ordering at all).
-    func testProseKeepsItsPlaceAroundAWorkGroup() {
-        let row = PaneAppMessageRowView(turn: TranscriptTurn(id: "1", isUser: false, blocks: [
-            .text("on it"),
-            .tool(name: "Bash", detail: "ls"),
-            .tool(name: "Bash", detail: "pwd"),
-            .text("done"),
-        ]))
-        let body = row.descendants(NSStackView.self).first!
+    func testProseKeepsItsPlaceAroundAWorkGroup() throws {
+        let row = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "1", isUser: false, blocks: [
+                .text("on it"),
+                .tool(name: "Bash", detail: "ls"),
+                .tool(name: "Bash", detail: "pwd"),
+                .text("done"),
+            ]),
+            showsAvatar: true
+        )
+        let body = try XCTUnwrap(row.bodyStack)
         let kinds = body.arrangedSubviews.map { $0 is PaneAppWorkGroupView }
 
-        XCTAssertEqual(kinds, [false, false, true, false], "role label, prose, group, prose")
+        XCTAssertEqual(kinds, [false, true, false], "prose, group, prose")
     }
 
     /// A run of exactly one call is not the wall of shell commands the
     /// collapse exists to remove — it renders inline, exactly as it did
     /// before work groups existed, with no group to expand at all.
     func testASingleToolCallRendersInlineRatherThanCollapsing() {
-        let row = PaneAppMessageRowView(turn: TranscriptTurn(id: "1", isUser: false, blocks: [
-            .tool(name: "Read", detail: "/x.swift"),
-        ]))
+        let row = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "1", isUser: false, blocks: [
+                .tool(name: "Read", detail: "/x.swift"),
+            ]),
+            showsAvatar: true
+        )
 
         XCTAssertEqual(row.descendants(PaneAppWorkGroupView.self).count, 0)
 
@@ -541,13 +667,16 @@ final class PaneAppViewTests: XCTestCase {
     /// Two runs separated by prose stay two groups — the prose between them
     /// must not let them merge into one.
     func testTwoRunsSeparatedByProseProduceTwoGroups() {
-        let row = PaneAppMessageRowView(turn: TranscriptTurn(id: "1", isUser: false, blocks: [
-            .tool(name: "Bash", detail: "ls"),
-            .tool(name: "Bash", detail: "pwd"),
-            .text("in between"),
-            .tool(name: "Bash", detail: "whoami"),
-            .tool(name: "Bash", detail: "date"),
-        ]))
+        let row = PaneAppMessageRowView(
+            turn: TranscriptTurn(id: "1", isUser: false, blocks: [
+                .tool(name: "Bash", detail: "ls"),
+                .tool(name: "Bash", detail: "pwd"),
+                .text("in between"),
+                .tool(name: "Bash", detail: "whoami"),
+                .tool(name: "Bash", detail: "date"),
+            ]),
+            showsAvatar: true
+        )
 
         XCTAssertEqual(row.descendants(PaneAppWorkGroupView.self).count, 2)
     }
@@ -1593,7 +1722,12 @@ final class PaneAppViewTests: XCTestCase {
 /// use it without capturing the test case.
 private func rowTexts(of view: PaneAppView) -> [String] {
     view.descendants(PaneAppMessageRowView.self).map { row in
-        row.descendants(NSTextField.self).dropFirst().map(\.stringValue).joined(separator: " ")
+        // Through `bodyStack`, not "every label but the first": the speaker
+        // is an avatar now, and the user's "Dev Mode" name label sits beside
+        // it outside the body — so dropping the first label would eat a line
+        // of the agent's actual prose.
+        guard let body = row.bodyStack else { return "" }
+        return body.descendants(NSTextField.self).map(\.stringValue).joined(separator: " ")
     }
 }
 

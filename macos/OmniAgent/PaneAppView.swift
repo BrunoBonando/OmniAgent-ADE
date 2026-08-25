@@ -981,8 +981,12 @@ final class PaneAppView: NSView {
         // `PaneAppMessageRowView.append(blocks:)`, adding only the new blocks
         // to the row already standing — and it is its own task, not a
         // drive-by here.
+        // Over the whole conversation, not just the tail being redrawn: a
+        // turn's flag is decided by the turn *before* it, which may be one
+        // this loop never touches.
+        let flags = PaneAppMessageRowView.avatarFlags(for: turns)
         for (offset, turn) in turns[firstChanged...].enumerated() {
-            let row = PaneAppMessageRowView(turn: turn)
+            let row = PaneAppMessageRowView(turn: turn, showsAvatar: flags[firstChanged + offset])
             // By index: the rebuilt row's groups are the same runs in the
             // same order, plus any the new blocks added on the end.
             if offset == 0 {

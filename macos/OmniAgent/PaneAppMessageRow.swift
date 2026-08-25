@@ -1,5 +1,57 @@
 import AppKit
 
+/// The speaker's mark beside a run of turns. Built only for the turn that
+/// opens a run: a suppressed avatar is absent rather than hidden, so it takes
+/// no space in the gutter and a continuing turn's prose still lines up.
+final class PaneAppAvatarView: NSView {
+    enum Kind { case agent, user }
+
+    static let side: CGFloat = 28
+
+    init(kind: Kind) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = Self.side / 2
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+
+        let image = NSImageView()
+        image.imageScaling = .scaleProportionallyUpOrDown
+        image.translatesAutoresizingMaskIntoConstraints = false
+        switch kind {
+        case .agent:
+            layer?.backgroundColor = ShellPalette.accentIconTile.cgColor
+            image.image = OmniAgentMark.image
+            image.contentTintColor = .white
+        case .user:
+            layer?.backgroundColor = ShellPalette.iconTile.cgColor
+            // ponytail: SF Symbol, not a bundled silhouette. The reference
+            // image is a generic head-and-shoulders; the symbol is its
+            // equivalent, tints with the palette, and stays sharp at any
+            // scale. Swap in an imageset here if a specific face is wanted.
+            image.image = NSImage(
+                systemSymbolName: "person.crop.circle.fill",
+                accessibilityDescription: "Dev Mode"
+            )
+            image.contentTintColor = ShellPalette.inkTertiary
+        }
+
+        addSubview(image)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: Self.side),
+            heightAnchor.constraint(equalToConstant: Self.side),
+            image.centerXAnchor.constraint(equalTo: centerXAnchor),
+            image.centerYAnchor.constraint(equalTo: centerYAnchor),
+            image.widthAnchor.constraint(equalToConstant: Self.side - 8),
+            image.heightAnchor.constraint(equalToConstant: Self.side - 8),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
 /// One `TranscriptTurn`, laid out whole in `init` from the blocks it is
 /// handed.
 ///
@@ -17,7 +69,45 @@ final class PaneAppMessageRowView: NSView {
     /// helper the tests use is test-only.)
     private(set) var workGroups: [PaneAppWorkGroupView] = []
 
-    init(turn: TranscriptTurn) {
+    /// The vertical stack holding this turn's rendered blocks. Internal so
+    /// the ordering tests can assert what landed in it, and so
+    /// `proseOriginInWindow` can find the first prose view.
+    private(set) var bodyStack: NSStackView?
+
+    /// The user's bubble, or nil for an agent turn — the agent's prose sits
+    /// directly on the ground. Internal so the layout tests can tell the two
+    /// shapes apart without reading colours.
+    private(set) var bubbleView: NSView?
+
+    /// Where this row's first prose view starts, in window coordinates — the
+    /// seam the alignment test measures.
+    var proseOriginInWindow: CGPoint? {
+        guard let body = bodyStack, let first = body.arrangedSubviews.first else { return nil }
+        return first.convert(CGPoint.zero, to: nil)
+    }
+
+    /// True at each index whose turn opens a run of its speaker. Pure: the
+    /// avatar rule is "once per run", and a run is exactly what
+    /// `TranscriptTurn` already models.
+    ///
+    /// In a conversation built by `TranscriptTurn.append` every flag comes
+    /// back true, because that merge is what makes consecutive same-role
+    /// *turns* impossible in the first place. The false case is deliberate
+    /// slack, not dead weight: it is the rule stated where the rule belongs,
+    /// so a caller that ever hands over turns grouped some other way — a
+    /// filtered view, a search result — draws one avatar per run rather than
+    /// one per row.
+    static func avatarFlags(for turns: [TranscriptTurn]) -> [Bool] {
+        var flags: [Bool] = []
+        var previousWasUser: Bool?
+        for turn in turns {
+            flags.append(previousWasUser != turn.isUser)
+            previousWasUser = turn.isUser
+        }
+        return flags
+    }
+
+    init(turn: TranscriptTurn, showsAvatar: Bool) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -26,13 +116,7 @@ final class PaneAppMessageRowView: NSView {
         body.alignment = .leading
         body.spacing = 4
         body.translatesAutoresizingMaskIntoConstraints = false
-
-        let roleLabel = ShellFont.label(
-            turn.isUser ? "You" : "Claude",
-            font: ShellFont.ui(11, .semibold),
-            color: turn.isUser ? ShellPalette.inkTertiary : ShellPalette.accent
-        )
-        body.addArrangedSubview(roleLabel)
+        bodyStack = body
 
         // Consecutive tool calls are one run and collapse together; anything
         // else flushes the run in progress first, so work keeps its place
@@ -66,13 +150,81 @@ final class PaneAppMessageRowView: NSView {
         }
         flushRun()
 
-        addSubview(body)
-        NSLayoutConstraint.activate([
-            body.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            body.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            body.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            body.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-        ])
+        // Wide enough for the avatar plus the air beside it, so an agent's
+        // prose clears the gutter whether or not this row draws a mark in it.
+        let gutter = PaneAppAvatarView.side + 10
+        let avatar = showsAvatar
+            ? PaneAppAvatarView(kind: turn.isUser ? .user : .agent)
+            : nil
+
+        if turn.isUser {
+            let bubble = NSView()
+            bubble.wantsLayer = true
+            bubble.layer?.backgroundColor = ShellPalette.cardFill.cgColor
+            bubble.layer?.cornerRadius = 14
+            bubble.layer?.cornerCurve = .continuous
+            bubble.layer?.borderWidth = 1
+            bubble.layer?.borderColor = ShellPalette.cardStroke.cgColor
+            bubble.translatesAutoresizingMaskIntoConstraints = false
+            bubble.addSubview(body)
+            bubbleView = bubble
+            addSubview(bubble)
+            NSLayoutConstraint.activate([
+                body.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 12),
+                body.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 14),
+                body.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -14),
+                body.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -12),
+                bubble.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+                bubble.trailingAnchor.constraint(equalTo: trailingAnchor),
+                // The bubble hugs its content — nothing stretches it — and
+                // this floor is what stops a long question from running the
+                // whole column and reading as a banner instead of a question.
+                bubble.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: gutter),
+            ])
+
+            if let avatar {
+                // Below the bubble, not beside it: both are pinned to the
+                // trailing edge, so a shared top would stack the mark on top
+                // of the words.
+                let name = ShellFont.label(
+                    "Dev Mode",
+                    font: ShellFont.ui(11, .semibold),
+                    color: ShellPalette.inkTertiary
+                )
+                let credit = NSStackView(views: [name, avatar])
+                credit.orientation = .horizontal
+                credit.alignment = .centerY
+                credit.spacing = 8
+                credit.translatesAutoresizingMaskIntoConstraints = false
+                addSubview(credit)
+                NSLayoutConstraint.activate([
+                    credit.topAnchor.constraint(equalTo: bubble.bottomAnchor, constant: 6),
+                    credit.trailingAnchor.constraint(equalTo: trailingAnchor),
+                    credit.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+                ])
+            } else {
+                bubble.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10).isActive = true
+            }
+        } else {
+            addSubview(body)
+            NSLayoutConstraint.activate([
+                body.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+                body.leadingAnchor.constraint(equalTo: leadingAnchor, constant: gutter),
+                body.trailingAnchor.constraint(equalTo: trailingAnchor),
+                body.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            ])
+
+            if let avatar {
+                addSubview(avatar)
+                NSLayoutConstraint.activate([
+                    avatar.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+                    avatar.leadingAnchor.constraint(equalTo: leadingAnchor),
+                    // A one-line answer is shorter than the mark beside it;
+                    // without this the avatar draws over the row below.
+                    bottomAnchor.constraint(greaterThanOrEqualTo: avatar.bottomAnchor),
+                ])
+            }
+        }
     }
 
     @available(*, unavailable)
