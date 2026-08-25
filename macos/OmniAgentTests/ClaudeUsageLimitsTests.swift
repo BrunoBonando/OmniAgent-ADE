@@ -197,9 +197,14 @@ final class ClaudeUsageLimitsPollerTests: XCTestCase {
     /// have moved. `start()` fetches once; the tick after it does not.
     func testAnIdleTickDoesNotFetch() {
         var runs = 0
+        // Built from the clock, not a fixed date: a hardcoded wall-clock
+        // reset is in the past for part of every day, and a reset in the past
+        // trips the rolled-over escape hatch and fetches — so this test
+        // passed in the afternoon and failed in the evening.
+        let soon = phrase(for: Date().addingTimeInterval(3600))
         poller.runnerForTesting = {
             runs += 1
-            return "Current session: 5% used · resets Aug 25 at 8:30pm"
+            return "Current session: 5% used · resets \(soon)"
         }
         expectPush { self.poller.refresh() }
         XCTAssertEqual(runs, 1)
@@ -210,9 +215,10 @@ final class ClaudeUsageLimitsPollerTests: XCTestCase {
 
     func testSendingSomethingEarnsTheNextFetch() {
         var runs = 0
+        let soon = phrase(for: Date().addingTimeInterval(3600))
         poller.runnerForTesting = {
             runs += 1
-            return "Current session: 5% used · resets Aug 25 at 8:30pm"
+            return "Current session: 5% used · resets \(soon)"
         }
         expectPush { self.poller.refresh() }
         poller.noteActivity()
@@ -268,9 +274,10 @@ final class ClaudeUsageLimitsPollerTests: XCTestCase {
         poller.runnerForTesting = { "" }
         expectPush { self.poller.refresh() }
         var runs = 0
+        let soon = phrase(for: Date().addingTimeInterval(3600))
         poller.runnerForTesting = {
             runs += 1
-            return "Current session: 5% used · resets Aug 25 at 8:30pm"
+            return "Current session: 5% used · resets \(soon)"
         }
         expectPush { self.poller.refreshIfWorthIt() }
         XCTAssertEqual(runs, 1, "the failure did not close the gate")

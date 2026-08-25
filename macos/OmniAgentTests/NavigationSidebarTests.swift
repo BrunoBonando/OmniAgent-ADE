@@ -556,8 +556,8 @@ final class NavigationSidebarTests: XCTestCase {
     }
     // MARK: - Claude limits card
 
-    /// It sits above the machine gauges, which is where the question said to
-    /// put it — and both survive.
+    /// It sits above the machine gauges, which is where it was asked to go —
+    /// and both survive.
     func testTheClaudeCardSitsAboveTheMachineGauges() {
         let sidebar = makeSidebar()
         XCTAssertGreaterThan(
@@ -567,32 +567,73 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertGreaterThan(sidebar.statsRow.frame.height, 0, "the gauges are still there")
     }
 
-    func testTheBarsReadTheLimitsAndTheirCountdowns() throws {
+    private func makeLimitsCard() -> SidebarClaudeLimitsView {
         let card = SidebarClaudeLimitsView()
-        card.frame = NSRect(x: 0, y: 0, width: 232, height: SidebarClaudeLimitsView.height)
-        let now = try XCTUnwrap(
-            Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 25, hour: 15))
+        card.frame = NSRect(
+            x: 0, y: 0, width: ShellMetrics.sidebarWidth - 16, height: SidebarClaudeLimitsView.height
         )
+        return card
+    }
+
+    private let noon = Calendar.current.date(
+        from: DateComponents(year: 2026, month: 8, day: 25, hour: 12)
+    )!
+
+    /// The number is the fastest read on the card, and it was missing
+    /// entirely — the card showed a bar and nothing else.
+    func testEachColumnLeadsWithItsPercentage() {
+        let card = makeLimitsCard()
         card.apply(
             ClaudeUsageLimits.parse(
-                "Current session: 40% used · resets Aug 25 at 8:30pm\n"
-                + "Current week (all models): 95% used · resets Aug 28 at 11am"
+                "Current session: 4% used · resets Aug 25 at 3:00pm\n"
+                + "Current week (all models): 41% used · resets Aug 28 at 11am"
             ),
-            now: now
+            now: noon
+        )
+        XCTAssertEqual(card.sessionColumn.readout, "4%")
+        XCTAssertEqual(card.weekColumn.readout, "41%")
+    }
+
+    /// A bare `2d 11h` does not say whether it is time spent or time left.
+    func testTheCountdownSaysWhatItIs() {
+        let card = makeLimitsCard()
+        card.apply(
+            ClaudeUsageLimits.parse(
+                "Current session: 4% used · resets Aug 25 at 3:00pm\n"
+                + "Current week (all models): 41% used · resets Aug 28 at 11am"
+            ),
+            now: noon
+        )
+        XCTAssertEqual(card.sessionColumn.remaining, "3h 0m left")
+        XCTAssertEqual(card.weekColumn.remaining, "2d 23h left")
+    }
+
+    /// Equal-width columns are what stop the two bars starting or ending at
+    /// different x — the ragged edges the first version had, where each row
+    /// sized itself around its own label and its own countdown.
+    func testTheTwoBarsShareAStartAndAnEnd() {
+        let card = makeLimitsCard()
+        card.apply(
+            ClaudeUsageLimits.parse(
+                "Current session: 4% used · resets Aug 25 at 3:00pm\n"
+                + "Current week (all models): 41% used · resets Aug 28 at 11am"
+            ),
+            now: noon
         )
         card.layoutSubtreeIfNeeded()
 
-        XCTAssertEqual(card.sessionRow.bar.fillFraction, 0.4, accuracy: 0.001)
-        XCTAssertEqual(card.sessionRow.remaining, "5h 30m")
-        XCTAssertEqual(card.weekRow.bar.fillFraction, 0.95, accuracy: 0.001)
-        XCTAssertEqual(card.weekRow.remaining, "2d 20h")
+        let session = card.sessionColumn.bar.convert(card.sessionColumn.bar.bounds, to: card)
+        let week = card.weekColumn.bar.convert(card.weekColumn.bar.bounds, to: card)
+        XCTAssertEqual(session.width, week.width, accuracy: 0.5, "same length")
+        XCTAssertEqual(session.minY, week.minY, accuracy: 0.5, "same baseline")
+        XCTAssertGreaterThan(session.width, 30, "wide enough to read a level")
     }
 
-    /// The machine gauges' thresholds, so one glance down the column reads
-    /// amber the same way whatever it is measuring.
-    func testTheFillWearsThePressureColour() {
+    /// Fill is what has been spent and the colour ramps with it, so a full bar
+    /// is always red — "full" and "bad" never disagree.
+    func testTheFillAndItsColourAgree() {
         let bar = SidebarLimitBarView()
-        bar.apply(0.4)
+        bar.apply(0.41)
         XCTAssertEqual(bar.fillColor, ShellPalette.green)
         bar.apply(0.75)
         XCTAssertEqual(bar.fillColor, ShellPalette.amber)
@@ -600,26 +641,75 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(bar.fillColor, ShellPalette.red)
     }
 
-    /// "0% used" and "we have no reading" must not look the same.
-    func testNoReadingIsAnEmptyTrackNotAZeroFill() {
-        let card = SidebarClaudeLimitsView()
-        card.apply(nil)
-        XCTAssertEqual(card.sessionRow.remaining, "—")
-        XCTAssertNil(card.sessionRow.bar.fraction)
-        XCTAssertEqual(card.sessionRow.bar.fillColor, ShellPalette.inkTertiary)
-
-        card.apply(ClaudeUsageLimits.parse("Current session: 0% used · resets Aug 25 at 8:30pm"))
-        XCTAssertEqual(card.sessionRow.bar.fraction, 0, "a real zero, not a missing reading")
+    /// The number wears the same verdict as its bar, so the two cannot say
+    /// different things about the same window.
+    func testTheNumberWearsTheBarsVerdict() {
+        let card = makeLimitsCard()
+        card.apply(ClaudeUsageLimits.parse("Current session: 95% used · resets Aug 25 at 3:00pm"), now: noon)
+        XCTAssertEqual(card.sessionColumn.readoutColor, ShellPalette.red)
+        XCTAssertEqual(card.sessionColumn.bar.fillColor, ShellPalette.red)
     }
 
-    /// The bar takes the width the two labels do not — without this it
-    /// collapses to nothing and the labels stretch across the card.
-    func testTheBarTakesTheSlackBetweenTheLabels() {
-        let card = SidebarClaudeLimitsView()
-        card.frame = NSRect(x: 0, y: 0, width: 232, height: SidebarClaudeLimitsView.height)
-        card.apply(ClaudeUsageLimits.parse("Current session: 40% used · resets Aug 25 at 8:30pm"))
+    /// A fresh window reads 0%, and drawing that as an empty track made it
+    /// pixel-identical to having no reading at all. This is the whole reason
+    /// the Session row looked broken.
+    func testARealZeroStillDrawsSomething() {
+        let card = makeLimitsCard()
+        card.frame = NSRect(x: 0, y: 0, width: 216, height: SidebarClaudeLimitsView.height)
+        card.apply(ClaudeUsageLimits.parse("Current session: 0% used · resets Aug 25 at 3:00pm"), now: noon)
         card.layoutSubtreeIfNeeded()
-        XCTAssertGreaterThan(card.sessionRow.bar.frame.width, 40)
+
+        XCTAssertEqual(card.sessionColumn.readout, "0%")
+        XCTAssertGreaterThanOrEqual(
+            card.sessionColumn.bar.fillWidth, SidebarLimitBarView.minimumFillWidth,
+            "a real zero still shows a nub"
+        )
+    }
+
+    /// And no reading at all draws nothing, so the two states stay distinct.
+    func testNoReadingDrawsNothingAndSaysSo() {
+        let card = makeLimitsCard()
+        card.apply(nil, now: noon)
+        card.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(card.sessionColumn.readout, "—")
+        XCTAssertEqual(card.sessionColumn.remaining, "no reading")
+        XCTAssertNil(card.sessionColumn.bar.fraction)
+        XCTAssertEqual(card.sessionColumn.bar.fillWidth, 0, "empty track, not a zero fill")
+    }
+
+    /// A `/usage` that reports only the week must not blank the session half.
+    /// It used to, and an empty bar beside a dash is what that looked like.
+    func testAWeekOnlyReadingKeepsTheSession() {
+        let full = ClaudeUsageLimits.parse(
+            "Current session: 4% used · resets Aug 25 at 3:00pm\n"
+            + "Current week (all models): 41% used · resets Aug 28 at 11am"
+        )
+        let weekOnly = ClaudeUsageLimits.parse(
+            "Current week (all models): 43% used · resets Aug 28 at 11am"
+        )
+
+        let merged = weekOnly.merged(onto: full)
+
+        XCTAssertEqual(merged.sessionPercent, 4, "kept from the last reading that had one")
+        XCTAssertEqual(merged.sessionResets, "Aug 25 at 3:00pm")
+        XCTAssertEqual(merged.weekPercent, 43, "the fresh half won")
+    }
+
+    /// Merged per window, not per field: a session that reported a percentage
+    /// but no readable reset must not inherit the previous window's reset and
+    /// count down to the wrong moment.
+    func testAWindowIsKeptOrReplacedWhole() {
+        let full = ClaudeUsageLimits.parse("Current session: 4% used · resets Aug 25 at 3:00pm")
+        // A session line carrying no `resets` clause at all, so the phrase is
+        // genuinely absent rather than merely unparseable.
+        let noPhrase = ClaudeUsageLimits.parse("Current session: 9% used")
+
+        let merged = noPhrase.merged(onto: full)
+
+        XCTAssertEqual(merged.sessionPercent, 9, "the fresh window won")
+        XCTAssertNil(merged.sessionResets, "and did not inherit the old window's reset time")
+        XCTAssertNil(merged.sessionResetsAt, "so there is no instant to count down to")
     }
 
 }

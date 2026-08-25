@@ -24,6 +24,29 @@ struct ClaudeUsageLimits: Equatable {
         modelName: nil, modelPercent: nil
     )
 
+    /// This reading laid over `previous`, window by window.
+    ///
+    /// A `/usage` run that reports only the week — which happens when there is
+    /// no live session window — used to blank the session half wholesale,
+    /// because the whole value was replaced rather than merged. The row then
+    /// showed an empty bar and a dash, which is indistinguishable from a
+    /// broken readout and is exactly what it was mistaken for.
+    func merged(onto previous: ClaudeUsageLimits?) -> ClaudeUsageLimits {
+        guard let previous else { return self }
+        return ClaudeUsageLimits(
+            // Per window, not per field: a session that reported a percentage
+            // but no parseable reset phrase must not keep the *previous*
+            // window's reset time, which would be a countdown to the wrong
+            // moment. Either the whole window is new or the whole one is kept.
+            sessionPercent: sessionPercent ?? previous.sessionPercent,
+            sessionResets: sessionPercent != nil ? sessionResets : previous.sessionResets,
+            weekPercent: weekPercent ?? previous.weekPercent,
+            weekResets: weekPercent != nil ? weekResets : previous.weekResets,
+            modelName: modelName ?? previous.modelName,
+            modelPercent: modelPercent ?? previous.modelPercent
+        )
+    }
+
     /// Line-oriented, because the output is line-oriented. Anything that does
     /// not match is ignored rather than treated as an error.
     static func parse(_ output: String) -> ClaudeUsageLimits {
@@ -264,7 +287,7 @@ final class ClaudeUsageLimitsPoller {
                 // A fetch that parsed nothing leaves the last good value in
                 // place: stale beats blank.
                 if parsed != .empty {
-                    self.latest = parsed
+                    self.latest = parsed.merged(onto: self.latest)
                     // Cleared only on a reading that actually landed. A failed
                     // or timed-out fetch leaves the flag set so the next tick
                     // tries again rather than treating the failure as "seen".

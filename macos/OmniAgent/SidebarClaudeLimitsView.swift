@@ -1,30 +1,40 @@
 import AppKit
 
-/// One limit's horizontal bar: a dim track with a fill across it.
+/// One limit's bar: a dim track with a fill across it.
 ///
 /// A plain pair of layers rather than `NSProgressIndicator`, which draws its
 /// own aqua-tinted geometry and neither takes this palette's fill colours nor
-/// sits at a 3pt height without fighting.
+/// sits at this height without fighting.
 final class SidebarLimitBarView: NSView {
-    static let height: CGFloat = 4
+    static let height: CGFloat = 6
 
     private let track = CALayer()
     private let fill = CALayer()
 
     /// 0…1, or nil for "no reading yet" — an empty track rather than a zero
-    /// fill, because "0% used" and "we do not know" must not look the same.
+    /// fill, because "you have used none of it" and "we do not know" must not
+    /// look the same. See `minimumFillWidth` for the other half of that.
     private(set) var fraction: Double?
 
     /// What the fill currently reads, for a test that would otherwise have to
     /// render the layer to find out.
     var fillFraction: Double { fraction ?? 0 }
     var fillColor: NSColor? { fill.backgroundColor.map { NSColor(cgColor: $0) ?? .clear } }
+    /// The fill's drawn width — the thing `minimumFillWidth` is about.
+    var fillWidth: CGFloat { fill.frame.width }
+
+    /// A real reading of 0% still draws a nub this wide.
+    ///
+    /// Without it a fresh session window renders as an empty track, which is
+    /// pixel-identical to having no reading at all — the exact "why does this
+    /// row look broken" this card was rebuilt over.
+    static var minimumFillWidth: CGFloat { height }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
-        track.backgroundColor = NSColor(white: 1, alpha: 0.10).cgColor
+        track.backgroundColor = NSColor(white: 1, alpha: 0.12).cgColor
         track.cornerRadius = Self.height / 2
         fill.cornerRadius = Self.height / 2
         fill.backgroundColor = ShellPalette.green.cgColor
@@ -38,14 +48,20 @@ final class SidebarLimitBarView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+    /// The fill is what has been *spent*, and the colour ramps with it, so a
+    /// full bar is always red and "full" and "bad" never disagree. Same
+    /// thresholds as the machine gauges directly below this card.
+    static func colour(for fraction: Double?) -> NSColor {
+        guard let fraction else { return ShellPalette.inkTertiary }
+        if fraction >= 0.9 { return ShellPalette.red }
+        if fraction >= 0.7 { return ShellPalette.amber }
+        return ShellPalette.green
+    }
+
     func apply(_ value: Double?) {
         fraction = value.map { min(max($0, 0), 1) }
-        // The machine gauges' own thresholds, so one glance down the sidebar
-        // reads amber the same way whatever it is measuring.
-        fill.backgroundColor = (fraction.map {
-            $0 >= 0.9 ? ShellPalette.red : $0 >= 0.7 ? ShellPalette.amber : ShellPalette.green
-        } ?? ShellPalette.inkTertiary).cgColor
-        setAccessibilityValue(fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "unknown")
+        fill.backgroundColor = Self.colour(for: fraction).cgColor
+        setAccessibilityValue(fraction.map { "\(Int(($0 * 100).rounded()))% used" } ?? "no reading")
         needsLayout = true
     }
 
@@ -56,59 +72,73 @@ final class SidebarLimitBarView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         track.frame = bounds
-        fill.frame = NSRect(x: 0, y: 0, width: bounds.width * (fraction ?? 0), height: bounds.height)
+        if let fraction {
+            let width = max(bounds.width * fraction, Self.minimumFillWidth)
+            fill.frame = NSRect(x: 0, y: 0, width: min(width, bounds.width), height: bounds.height)
+        } else {
+            fill.frame = .zero
+        }
         CATransaction.commit()
     }
 }
 
-/// One labelled limit: `Session ▓▓░░░░ 4h 12m`.
-final class SidebarLimitRowView: NSView {
+/// One limit as a column: the percentage big, the window's name under it, the
+/// bar under that, and how long is left at the bottom.
+///
+/// Deliberately `SidebarStatGaugeView`'s rhythm — big number over a small
+/// caption — because this card sits directly on top of that one and the two
+/// used to read as different design languages: the gauges led with `56%` at
+/// 18pt while this card showed a bar and no number at all.
+final class SidebarLimitColumnView: NSView {
     let bar = SidebarLimitBarView()
-    private let nameField: NSTextField
+    private let valueField: NSTextField
+    private let captionField: NSTextField
     private let remainingField: NSTextField
 
-    /// What the right-hand countdown reads — asserted directly by the tests.
+    /// What the big number reads, asserted directly rather than rendered.
+    var readout: String { valueField.stringValue }
+    var readoutColor: NSColor? { valueField.textColor }
+    /// The countdown under the bar, `"4h 54m left"`.
     var remaining: String { remainingField.stringValue }
 
     init(name: String) {
-        nameField = ShellFont.label(
+        valueField = ShellFont.label(
+            "—",
+            font: ShellFont.ui(18, .semibold),
+            color: ShellPalette.inkTertiary
+        )
+        captionField = ShellFont.label(
             name,
-            font: ShellFont.ui(10.5, .medium),
-            color: ShellPalette.inkMuted
+            font: ShellFont.ui(10, .semibold),
+            color: ShellPalette.inkTertiary,
+            tracking: 0.5
         )
         remainingField = ShellFont.label(
             "—",
-            font: ShellFont.ui(10.5),
+            font: ShellFont.ui(10),
             color: ShellPalette.inkTertiary
         )
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        remainingField.alignment = .right
+        for field in [valueField, captionField, remainingField] { field.alignment = .center }
 
-        let row = NSStackView(views: [nameField, bar, remainingField])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 7
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
-
-        // The two labels keep their intrinsic widths and the bar takes the
-        // rest — without this the bar collapses to nothing and the labels
-        // stretch, which is the opposite of what the row is for.
-        nameField.setContentHuggingPriority(.required, for: .horizontal)
-        remainingField.setContentHuggingPriority(.required, for: .horizontal)
-        nameField.setContentCompressionResistancePriority(.required, for: .horizontal)
-        remainingField.setContentCompressionResistancePriority(.required, for: .horizontal)
-        bar.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
+        let stack = NSStackView(views: [valueField, captionField, bar, remainingField])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 3
+        // The bar spans the column; the labels centre in it.
+        stack.setCustomSpacing(6, after: captionField)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor),
-            row.topAnchor.constraint(equalTo: topAnchor),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bar.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         setAccessibilityElement(true)
-        setAccessibilityRole(.group)
+        setAccessibilityRole(.progressIndicator)
         setAccessibilityLabel(name)
     }
 
@@ -116,26 +146,33 @@ final class SidebarLimitRowView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
     /// `percent` is what `/usage` reported; `resetsAt` is when the window
-    /// rolls over. Either may be absent and the row still reads sensibly.
+    /// rolls over. Either may be absent and the column still reads sensibly.
     func apply(percent: Int?, resetsAt: Date?, now: Date = Date()) {
-        bar.apply(percent.map { Double($0) / 100 })
-        remainingField.stringValue = ClaudeUsageLimits.timeLeft(until: resetsAt, now: now) ?? "—"
-        setAccessibilityValue("\(percent.map { "\($0)% used" } ?? "unknown"), \(remaining) left")
+        let fraction = percent.map { Double($0) / 100 }
+        bar.apply(fraction)
+        valueField.stringValue = percent.map { "\($0)%" } ?? "—"
+        valueField.textColor = SidebarLimitBarView.colour(for: fraction)
+        // "left" spelled out, because a bare `2d 11h` does not say whether it
+        // is time spent, time left, or time until something else entirely.
+        remainingField.stringValue = ClaudeUsageLimits.timeLeft(until: resetsAt, now: now)
+            .map { $0 == "now" ? "resetting" : "\($0) left" }
+            ?? "no reading"
+        setAccessibilityValue("\(readout) used, \(remaining)")
     }
 }
 
-/// Claude's own rate-limit windows, pinned above the machine gauges in the
-/// sidebar's bottom stack: how much of the five-hour session and of the week
-/// is spent, and how long until each rolls over.
+/// Claude's own rate-limit windows, pinned above the machine gauges: how much
+/// of the five-hour session and of the week is spent, and how long each has
+/// left before it rolls over.
 ///
 /// Account-global, so it lives here rather than in a pane — every App view
 /// would otherwise render the identical two numbers, which is what the pane's
 /// old stats bar did.
 final class SidebarClaudeLimitsView: NSView {
-    static let height: CGFloat = 58
+    static let height: CGFloat = 108
 
-    let sessionRow = SidebarLimitRowView(name: "Session")
-    let weekRow = SidebarLimitRowView(name: "Week")
+    let sessionColumn = SidebarLimitColumnView(name: "SESSION")
+    let weekColumn = SidebarLimitColumnView(name: "WEEK")
 
     /// Ticks the two countdowns down without spending a `/usage` request. The
     /// percentages only move when the poller fetches; the clock moves anyway.
@@ -164,10 +201,21 @@ final class SidebarClaudeLimitsView: NSView {
             color: ShellPalette.inkTertiary,
             tracking: 0.5
         )
-        let stack = NSStackView(views: [caption, sessionRow, weekRow])
+        let columns = NSStackView(views: [sessionColumn, Self.divider(), weekColumn])
+        columns.orientation = .horizontal
+        columns.alignment = .top
+        columns.distribution = .fill
+        columns.spacing = 10
+        columns.translatesAutoresizingMaskIntoConstraints = false
+        // Equal widths, so neither column's own content can make the two bars
+        // start or end at different x — the ragged edges this card had when
+        // each row sized itself around its own label and countdown.
+        weekColumn.widthAnchor.constraint(equalTo: sessionColumn.widthAnchor).isActive = true
+
+        let stack = NSStackView(views: [caption, columns])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 5
+        stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         for view in [glass, stack].compactMap({ $0 }) { addSubview(view) }
@@ -176,8 +224,7 @@ final class SidebarClaudeLimitsView: NSView {
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            sessionRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            weekRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            columns.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         if let glass {
             glass.translatesAutoresizingMaskIntoConstraints = false
@@ -196,6 +243,18 @@ final class SidebarClaudeLimitsView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// `SidebarSystemStatsView.divider()`'s own hairline, so the two cards
+    /// split their columns identically.
+    private static func divider() -> NSView {
+        let line = NSView()
+        line.wantsLayer = true
+        line.translatesAutoresizingMaskIntoConstraints = false
+        line.layer?.backgroundColor = ShellPalette.hairlineStrong.cgColor
+        line.widthAnchor.constraint(equalToConstant: 1).isActive = true
+        line.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        return line
+    }
 
     /// Registers for the poller's push and starts it, and ticks the local
     /// clock — both only while there is a window, the same rule
@@ -224,9 +283,9 @@ final class SidebarClaudeLimitsView: NSView {
     /// Internal rather than private so the tests can drive it with a fixed
     /// `now` instead of waiting a minute for the clock.
     func apply(_ limits: ClaudeUsageLimits?, now: Date = Date()) {
-        sessionRow.apply(
+        sessionColumn.apply(
             percent: limits?.sessionPercent, resetsAt: limits?.sessionResetsAt, now: now
         )
-        weekRow.apply(percent: limits?.weekPercent, resetsAt: limits?.weekResetsAt, now: now)
+        weekColumn.apply(percent: limits?.weekPercent, resetsAt: limits?.weekResetsAt, now: now)
     }
 }
