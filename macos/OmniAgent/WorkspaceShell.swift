@@ -888,7 +888,7 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
         isNested = nested
         titleField = ShellFont.label(
             session.label,
-            font: ShellFont.ui(14, session.isCurrent ? .semibold : .medium),
+            font: ShellFont.ui(14, .medium),
             color: session.isCurrent ? ShellPalette.ink : ShellPalette.inkSecondary
         )
         super.init(frame: .zero)
