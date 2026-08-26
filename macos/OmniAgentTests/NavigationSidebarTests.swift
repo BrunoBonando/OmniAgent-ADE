@@ -881,14 +881,45 @@ final class NavigationSidebarTests: XCTestCase {
         )
     }
 
-    /// The needle points where the number says, end to end.
-    func testTheNeedleSpansTheDial() {
+    /// Where the needle actually *points*, which is not what
+    /// `needleFraction` reports: that echoes the value it was handed, and was
+    /// happily reading 0.11 while a sign error had the needle past vertical on
+    /// the right-hand side of the dial.
+    func testTheNeedlePointsWhereTheNumberSays() {
+        // Hard left at nothing.
+        let empty = SidebarDialGaugeView.needleDirection(for: 0)
+        XCTAssertEqual(empty.x, -1, accuracy: 0.001, "left, not right")
+        XCTAssertEqual(empty.y, 0, accuracy: 0.001)
+
+        // Straight up at half.
+        let half = SidebarDialGaugeView.needleDirection(for: 0.5)
+        XCTAssertEqual(half.x, 0, accuracy: 0.001)
+        XCTAssertEqual(half.y, 1, accuracy: 0.001, "up")
+
+        // Hard right at full.
+        let full = SidebarDialGaugeView.needleDirection(for: 1)
+        XCTAssertEqual(full.x, 1, accuracy: 0.001, "right")
+        XCTAssertEqual(full.y, 0, accuracy: 0.001)
+
+        // And the reading Bruno caught it on: 11% belongs on the left.
+        XCTAssertLessThan(SidebarDialGaugeView.needleDirection(for: 0.11).x, 0)
+    }
+
+    /// The real invariant, and the one a sign error breaks: the needle points
+    /// at the end of its own arc. Checked across the sweep rather than at the
+    /// three corners a wrong formula can still happen to satisfy.
+    func testTheNeedleAgreesWithTheArc() {
+        for step in stride(from: 0.0, through: 1.0, by: 0.05) {
+            let needle = SidebarDialGaugeView.needleDirection(for: step)
+            let arc = SidebarDialGaugeView.arcDirection(for: step)
+            XCTAssertEqual(needle.x, arc.x, accuracy: 0.001, "x at \(step)")
+            XCTAssertEqual(needle.y, arc.y, accuracy: 0.001, "y at \(step)")
+        }
+    }
+
+    func testADialWithNoReadingRests() {
         let dial = SidebarDialGaugeView()
         dial.frame = NSRect(x: 0, y: 0, width: 49, height: SidebarStatGaugeView.dialHeight)
-        dial.apply(0, animated: false)
-        XCTAssertEqual(dial.needleFraction, 0, accuracy: 0.001, "hard left at nothing")
-        dial.apply(1, animated: false)
-        XCTAssertEqual(dial.needleFraction, 1, accuracy: 0.001, "hard right at full")
         dial.apply(nil, animated: false)
         XCTAssertEqual(dial.needleFraction, 0, "no reading rests at the left")
         assertHue(dial.progressColor, ShellPalette.inkTertiary, "and wears no verdict")

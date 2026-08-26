@@ -423,8 +423,45 @@ final class SidebarDialGaugeView: NSView {
     private(set) var fraction: Double?
 
     /// What the needle is pointing at, in turns of the dial: 0 hard left, 1
-    /// hard right. A test can read this without measuring a rotation matrix.
+    /// hard right.
+    ///
+    /// This is the value that went *in*. It says nothing about where the
+    /// needle actually points — a sign error in the rotation left this reading
+    /// 0.11 while the needle sat past vertical on the right. Use `needleTip`
+    /// for that.
     var needleFraction: Double { fraction ?? 0 }
+
+    /// The rotation applied to the needle for `fraction`, counterclockwise
+    /// from straight up.
+    ///
+    /// Half a turn each way: hard left at 0, up at a half, hard right at 1.
+    /// The needle is drawn pointing up, and positive z-rotation is
+    /// counterclockwise in this view's unflipped geometry — so the angle
+    /// *decreases* as the dial fills. Getting that sign backwards is what put
+    /// the needle on the wrong side of the dial.
+    static func rotation(for fraction: Double) -> CGFloat {
+        (0.5 - CGFloat(min(max(fraction, 0), 1))) * .pi
+    }
+
+    /// Which way the needle points, as a unit vector in this view's space.
+    ///
+    /// Derived the same way the layer's own transform is, so it moves with the
+    /// needle rather than describing it from memory: rotating the up vector
+    /// `(0, 1)` by `rotation(for:)` gives `(-sin θ, cos θ)`.
+    static func needleDirection(for fraction: Double) -> NSPoint {
+        let angle = rotation(for: fraction)
+        return NSPoint(x: -sin(angle), y: cos(angle))
+    }
+
+    /// Where on the arc `fraction` falls, as a unit vector — the needle's own
+    /// direction is supposed to equal this, and a test says so.
+    ///
+    /// The arc is swept from `π` to `0`, so the angle runs backwards as the
+    /// dial fills.
+    static func arcDirection(for fraction: Double) -> NSPoint {
+        let angle = (1 - CGFloat(min(max(fraction, 0), 1))) * .pi
+        return NSPoint(x: cos(angle), y: sin(angle))
+    }
     var progressColor: NSColor? {
         progress.strokeColor.map { NSColor(cgColor: $0) ?? .clear }
     }
@@ -478,10 +515,8 @@ final class SidebarDialGaugeView: NSView {
             CAMediaTimingFunction(name: .easeInEaseOut)
         )
         progress.strokeEnd = CGFloat(fraction ?? 0)
-        // Drawn pointing straight up, so half a turn either way covers the
-        // dial: hard left at 0, hard right at 1.
         needle.transform = CATransform3DMakeRotation(
-            (CGFloat(fraction ?? 0) - 0.5) * .pi, 0, 0, 1
+            Self.rotation(for: fraction ?? 0), 0, 0, 1
         )
         CATransaction.commit()
         setAccessibilityValue(fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "no reading")
