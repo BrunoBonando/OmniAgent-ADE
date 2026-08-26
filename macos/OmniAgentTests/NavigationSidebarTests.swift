@@ -642,11 +642,89 @@ final class NavigationSidebarTests: XCTestCase {
         )
         XCTAssertEqual(card.sessionColumn.toolTip, "3h 0m left")
         XCTAssertEqual(card.sessionColumn.timeBar.toolTip, "3h 0m left")
+        XCTAssertFalse(
+            try XCTUnwrap(card.sessionColumn.toolTip).contains("clock"),
+            "nothing to warn about, so nothing said"
+        )
         let labels = descendants(NSTextField.self, under: card.sessionColumn)
         XCTAssertFalse(labels.isEmpty)
         for label in labels {
             XCTAssertEqual(label.toolTip, "3h 0m left", "the number is hoverable too")
         }
+    }
+
+    // MARK: - Pace
+
+    /// The projection is "at this rate, where does this window end up" — a
+    /// fraction of the limit, not of the time.
+    func testTheProjectionIsWhereThisRateLands() {
+        // A tenth of the quota with a fifth of the window gone lands at half.
+        XCTAssertEqual(
+            try XCTUnwrap(SidebarLimitColumnView.projectedUsage(usage: 0.10, elapsed: 0.20)),
+            0.5, accuracy: 0.001
+        )
+        // Nine tenths spent with a fifth gone blows through four and a half
+        // times over.
+        XCTAssertEqual(
+            try XCTUnwrap(SidebarLimitColumnView.projectedUsage(usage: 0.90, elapsed: 0.20)),
+            4.5, accuracy: 0.001
+        )
+    }
+
+    /// Two requests in the opening minutes project to anything at all, and a
+    /// bar that cries wolf on the first move is ignored by lunchtime.
+    func testTheProjectionWaitsForEnoughWindowToJudge() {
+        XCTAssertNil(SidebarLimitColumnView.projectedUsage(usage: 0.5, elapsed: 0.01))
+        XCTAssertNil(SidebarLimitColumnView.projectedUsage(usage: 0, elapsed: 0.5), "spent nothing")
+        XCTAssertNil(SidebarLimitColumnView.projectedUsage(usage: nil, elapsed: 0.5))
+        XCTAssertNil(SidebarLimitColumnView.projectedUsage(usage: 0.5, elapsed: nil))
+    }
+
+    /// The breakpoint is where the projection stops fitting in the window,
+    /// not a taste call about what counts as "a lot".
+    func testTheRampTurnsWhereTheProjectionStopsFitting() {
+        XCTAssertEqual(SidebarLimitColumnView.paceColour(projected: 0.9), ShellPalette.green)
+        XCTAssertEqual(SidebarLimitColumnView.paceColour(projected: 1.0), ShellPalette.green, "lands exactly on it")
+        XCTAssertEqual(SidebarLimitColumnView.paceColour(projected: 1.2), ShellPalette.amber)
+        XCTAssertEqual(SidebarLimitColumnView.paceColour(projected: 2.0), ShellPalette.red)
+        XCTAssertEqual(
+            SidebarLimitColumnView.paceColour(projected: nil), SidebarSegmentedBarView.onPace,
+            "too early to judge, so no verdict"
+        )
+    }
+
+    /// Time running out is good news, so a window nearly over while spending
+    /// stayed in budget must NOT go red — the thing this ramp exists to avoid.
+    func testAWindowNearlyOverButWellPacedStaysGreen() throws {
+        let card = makeLimitsCard()
+        let now = try XCTUnwrap(
+            Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 11))
+        )
+        // 12 minutes from a reset five hours wide, and only 40% spent.
+        card.apply(
+            ClaudeUsageLimits.parse("Current session: 40% used · resets Aug 26 at 11:12am"),
+            now: now
+        )
+        XCTAssertEqual(card.sessionColumn.timeBar.fillColor, ShellPalette.green)
+        XCTAssertEqual(card.sessionColumn.timeBar.filledSegments, 5, "the window is nearly gone")
+    }
+
+    /// And the case worth warning about: quota draining far faster than the
+    /// clock, with most of the window still to run.
+    func testOutspendingTheClockGoesRedAndSaysWhy() throws {
+        let card = makeLimitsCard()
+        let now = try XCTUnwrap(
+            Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 11))
+        )
+        // Four of five hours still to come, and 80% already gone.
+        card.apply(
+            ClaudeUsageLimits.parse("Current session: 80% used · resets Aug 26 at 3:00pm"),
+            now: now
+        )
+        XCTAssertEqual(card.sessionColumn.timeBar.fillColor, ShellPalette.red)
+        let tip = try XCTUnwrap(card.sessionColumn.toolTip)
+        XCTAssertTrue(tip.contains("left"), "still says the time")
+        XCTAssertTrue(tip.contains("clock"), "and says why it is red")
     }
 
     // MARK: - Reading order

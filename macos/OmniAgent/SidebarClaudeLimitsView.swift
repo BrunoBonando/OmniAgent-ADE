@@ -92,9 +92,10 @@ final class SidebarPercentBarView: NSView {
 ///
 /// Deliberately blocky where `SidebarPercentBarView` is a pill — the two sit
 /// stacked in the same column and must not read as one bar drawn twice. And
-/// deliberately *neutral*, not on the pressure ramp: a window running out is
-/// good news, since it is about to reset, and painting that red would say
-/// "danger" at the moment there is least to worry about.
+/// Coloured by *pace* rather than by how much window is left. Time running
+/// out is good news — the window is about to reset — so ramping on elapsed
+/// time would shout danger at the moment there is least to worry about. What
+/// is worth a warning is outspending the clock, which is what this ramps on.
 final class SidebarSegmentedBarView: NSView {
     static let height: CGFloat = 5
     private static let gap: CGFloat = 2
@@ -127,7 +128,7 @@ final class SidebarSegmentedBarView: NSView {
             // Bright enough to separate from its own track at a glance: at
             // `inkMuted` a spent block and an unspent one were the same grey
             // in an offscreen render, which makes the whole bar decoration.
-            fill.backgroundColor = NSColor(white: 1, alpha: 0.55).cgColor
+            fill.backgroundColor = Self.onPace.cgColor
             fill.cornerRadius = 1.5
             layer?.addSublayer(track)
             layer?.addSublayer(fill)
@@ -142,8 +143,18 @@ final class SidebarSegmentedBarView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
-    func apply(_ value: Double?) {
+    /// The colour of a block that is keeping up with the clock. Neutral on
+    /// purpose: most of the time there is nothing to say, and a bar that is
+    /// always coloured has spent its ability to mean anything.
+    static let onPace = NSColor(white: 1, alpha: 0.55)
+
+    /// What the fill currently reads, for a test that would otherwise have to
+    /// render the layer.
+    var fillColor: NSColor? { fillLayers.first?.backgroundColor.map { NSColor(cgColor: $0) ?? .clear } }
+
+    func apply(_ value: Double?, colour: NSColor = SidebarSegmentedBarView.onPace) {
         fraction = value.map { min(max($0, 0), 1) }
+        for fill in fillLayers { fill.backgroundColor = colour.cgColor }
         needsLayout = true
     }
 
@@ -251,17 +262,62 @@ final class SidebarLimitColumnView: NSView {
         bar.apply(fraction)
         valueField.stringValue = percent.map { "\($0)%" } ?? "—"
         valueField.textColor = SidebarPercentBarView.colour(for: fraction)
-        timeBar.apply(Self.elapsedFraction(until: resetsAt, windowLength: windowLength, now: now))
+        let elapsed = Self.elapsedFraction(until: resetsAt, windowLength: windowLength, now: now)
+        let projected = Self.projectedUsage(usage: fraction, elapsed: elapsed)
+        timeBar.apply(elapsed, colour: Self.paceColour(projected: projected))
         // "left" spelled out, because a bare `2d 11h` does not say whether it
         // is time spent, time left, or time until something else entirely.
+        //
+        // And the pace spelled out with it, because the blocks' colour is the
+        // one thing on this card whose meaning is not self-evident: a red bar
+        // nobody can explain is worse than a grey one.
         remaining = ClaudeUsageLimits.timeLeft(until: resetsAt, now: now)
-            .map { $0 == "now" ? "resetting" : "\($0) left" }
+            .map { "\($0 == "now" ? "resetting" : "\($0) left")\(Self.paceNote(projected: projected))" }
             ?? "no reading"
         // On every subview too: an `NSView`'s tooltip covers its own rect, and
         // the labels and bars sit on top of this one — without this, hovering
         // the actual number is the one place that shows nothing.
         for view in [self] + subviews + subviews.flatMap(\.subviews) { view.toolTip = remaining }
         setAccessibilityValue("\(readout) used, \(remaining)")
+    }
+
+    /// Where this window's spending is headed by the time it resets, as a
+    /// fraction of the limit: 1.0 lands exactly on it, 2.0 hits the wall
+    /// halfway through.
+    ///
+    /// A straight-line extrapolation, which is the honest amount of maths for
+    /// a sidebar readout — it answers "at this rate", nothing more.
+    ///
+    /// Nil until there is enough window behind us to extrapolate from: in the
+    /// first minutes two requests project to anything at all, and a bar that
+    /// cries wolf on the opening move gets ignored by lunchtime.
+    static func projectedUsage(usage: Double?, elapsed: Double?) -> Double? {
+        guard let usage, let elapsed, elapsed >= 0.05, usage > 0 else { return nil }
+        return usage / elapsed
+    }
+
+    /// Green while the projection lands inside the limit, amber once it does
+    /// not, red once it overshoots by half again.
+    ///
+    /// The breakpoint is 1.0 for a reason a threshold like 0.7 would not
+    /// have: it is not a taste call about "a lot", it is the point where the
+    /// projection stops fitting in the window.
+    static func paceColour(projected: Double?) -> NSColor {
+        guard let projected else { return SidebarSegmentedBarView.onPace }
+        if projected > 1.5 { return ShellPalette.red }
+        if projected > 1.0 { return ShellPalette.amber }
+        return ShellPalette.green
+    }
+
+    /// What the blocks' colour is saying, in words.
+    static func paceNote(projected: Double?) -> String {
+        guard let projected, projected > 1 else { return "" }
+        // Rounded to a whole multiple: "1.7× the clock" is false precision on
+        // a straight-line guess.
+        let times = Int(projected.rounded())
+        return times >= 2
+            ? " · spending \(times)× the clock"
+            : " · spending faster than the clock"
     }
 
     /// How far through the window `now` is, 0…1.

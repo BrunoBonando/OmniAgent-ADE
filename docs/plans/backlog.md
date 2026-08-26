@@ -120,6 +120,15 @@ Worth catching properly: shared `NSApp.mainMenu` / key-window state across
 test classes is the usual cause of this shape, and an intermittent test is one
 nobody trusts and everybody re-runs.
 
+A **second** intermittent full-suite failure followed on the same day. Its
+identity was lost — the run was piped through a filter that kept only the
+verdict line — and the immediate rerun passed 1391 tests with zero failures.
+So: two intermittent failures in one day, one of them identified, neither
+reproducible on demand.
+
+Lesson already applied: keep the full log when running the suite, or the next
+one is unidentifiable too.
+
 **Done when:** either the shared state is isolated per test, or the flake is
 reproduced often enough to name its real cause.
 
