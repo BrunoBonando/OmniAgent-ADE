@@ -52,15 +52,72 @@ final class SidebarPercentBarView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
-    /// The fill is how much is *used*, and the colour ramps with it, so a full
-    /// bar is always red and "full" and "bad" never disagree. The single
-    /// definition of that ramp: the machine gauges call this too, rather than
-    /// carrying their own copy of the same three thresholds.
+    /// The fill is how full a thing is, and the colour ramps with it: green to
+    /// 70%, amber to 90%, red beyond.
+    ///
+    /// Continuous rather than three steps. A hard switch makes the bar jump
+    /// between two states with nothing in between, so the colour only ever
+    /// tells you which bucket you are in; sliding through the change means the
+    /// bar is already warming before it is a warning, and you can see it
+    /// coming. The stops:
+    ///
+    /// - `0…0.60`   green
+    /// - `0.60…0.70` green sliding into amber, so 70% *arrives* amber
+    /// - `0.70…0.80` amber
+    /// - `0.80…0.90` amber sliding into red, so 90% *arrives* red
+    /// - `0.90…1`   red
+    ///
+    /// And the colour strengthens the closer the bar gets to its limit, so a
+    /// bar at 8% sits quietly and one about to hit the wall does not. Hue says
+    /// which band you are in; strength says how close to the end of it.
+    ///
+    /// The single definition of the ramp: every bar and every number in both
+    /// cards calls this, rather than carrying its own copy of the thresholds.
     static func colour(for fraction: Double?) -> NSColor {
         guard let fraction else { return ShellPalette.inkTertiary }
-        if fraction >= 0.9 { return ShellPalette.red }
-        if fraction >= 0.7 { return ShellPalette.amber }
-        return ShellPalette.green
+        return hue(for: fraction).withAlphaComponent(strength(for: fraction))
+    }
+
+    /// Which band the fraction is in, before strength is applied.
+    static func hue(for fraction: Double) -> NSColor {
+        if fraction <= 0.60 { return ShellPalette.green }
+        if fraction < 0.70 {
+            return blend(ShellPalette.green, ShellPalette.amber, (fraction - 0.60) / 0.10)
+        }
+        if fraction <= 0.80 { return ShellPalette.amber }
+        if fraction < 0.90 {
+            return blend(ShellPalette.amber, ShellPalette.red, (fraction - 0.80) / 0.10)
+        }
+        return ShellPalette.red
+    }
+
+    /// How present the colour is, rising with the fill.
+    ///
+    /// Floored well above transparent rather than starting at nothing: this
+    /// paints the *numbers* as well as the bars, and a `8%` faded toward the
+    /// background to make a point about being low is a readout you have to
+    /// squint at. Legibility is not the thing to spend for an effect.
+    static func strength(for fraction: Double) -> CGFloat {
+        0.80 + 0.20 * min(max(fraction, 0), 1)
+    }
+
+    /// `from` and `to` mixed at `t`, in sRGB.
+    ///
+    /// Component-wise in a fixed space rather than `NSColor.blended(withFraction:)`,
+    /// which mixes in whatever space the receiver happens to be in and would
+    /// make the ramp depend on how the palette colours were built.
+    static func blend(_ from: NSColor, _ to: NSColor, _ t: Double) -> NSColor {
+        guard let a = from.usingColorSpace(.sRGB), let b = to.usingColorSpace(.sRGB) else {
+            return to
+        }
+        let t = min(max(t, 0), 1)
+        func mix(_ x: CGFloat, _ y: CGFloat) -> CGFloat { x + (y - x) * t }
+        return NSColor(
+            srgbRed: mix(a.redComponent, b.redComponent),
+            green: mix(a.greenComponent, b.greenComponent),
+            blue: mix(a.blueComponent, b.blueComponent),
+            alpha: mix(a.alphaComponent, b.alphaComponent)
+        )
     }
 
     func apply(_ value: Double?) {
@@ -92,10 +149,14 @@ final class SidebarPercentBarView: NSView {
 ///
 /// Deliberately blocky where `SidebarPercentBarView` is a pill — the two sit
 /// stacked in the same column and must not read as one bar drawn twice. And
-/// Coloured by *pace* rather than by how much window is left. Time running
-/// out is good news — the window is about to reset — so ramping on elapsed
-/// time would shout danger at the moment there is least to worry about. What
-/// is worth a warning is outspending the clock, which is what this ramps on.
+/// Coloured by how much of the window has gone, on the same ramp as every
+/// other bar in both cards — a full block bar is red like a full anything
+/// else. Bruno's call, after seeing a nearly-spent five-hour window sitting
+/// there in green: whatever the colour *means*, one card that colours two
+/// bars by two different rules reads as a bug.
+///
+/// The pace reading it used to carry is not lost; it moved into the hover,
+/// which already spelled it out in words.
 final class SidebarSegmentedBarView: NSView {
     static let height: CGFloat = 5
     private static let gap: CGFloat = 2
@@ -128,7 +189,7 @@ final class SidebarSegmentedBarView: NSView {
             // Bright enough to separate from its own track at a glance: at
             // `inkMuted` a spent block and an unspent one were the same grey
             // in an offscreen render, which makes the whole bar decoration.
-            fill.backgroundColor = Self.onPace.cgColor
+            fill.backgroundColor = ShellPalette.green.cgColor
             fill.cornerRadius = 1.5
             layer?.addSublayer(track)
             layer?.addSublayer(fill)
@@ -143,18 +204,14 @@ final class SidebarSegmentedBarView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
-    /// The colour of a block that is keeping up with the clock. Neutral on
-    /// purpose: most of the time there is nothing to say, and a bar that is
-    /// always coloured has spent its ability to mean anything.
-    static let onPace = NSColor(white: 1, alpha: 0.55)
-
     /// What the fill currently reads, for a test that would otherwise have to
     /// render the layer.
     var fillColor: NSColor? { fillLayers.first?.backgroundColor.map { NSColor(cgColor: $0) ?? .clear } }
 
-    func apply(_ value: Double?, colour: NSColor = SidebarSegmentedBarView.onPace) {
+    func apply(_ value: Double?) {
         fraction = value.map { min(max($0, 0), 1) }
-        for fill in fillLayers { fill.backgroundColor = colour.cgColor }
+        let paint = SidebarPercentBarView.colour(for: fraction)
+        for fill in fillLayers { fill.backgroundColor = paint.cgColor }
         needsLayout = true
     }
 
@@ -264,13 +321,14 @@ final class SidebarLimitColumnView: NSView {
         valueField.textColor = SidebarPercentBarView.colour(for: fraction)
         let elapsed = Self.elapsedFraction(until: resetsAt, windowLength: windowLength, now: now)
         let projected = Self.projectedUsage(usage: fraction, elapsed: elapsed)
-        timeBar.apply(elapsed, colour: Self.paceColour(projected: projected))
+        timeBar.apply(elapsed)
         // "left" spelled out, because a bare `2d 11h` does not say whether it
         // is time spent, time left, or time until something else entirely.
         //
-        // And the pace spelled out with it, because the blocks' colour is the
-        // one thing on this card whose meaning is not self-evident: a red bar
-        // nobody can explain is worse than a grey one.
+        // And the pace spelled out with it. The blocks no longer carry it in
+        // their colour, so the hover is the only place it lives — worth
+        // keeping, since "80% spent with four hours still to run" is the one
+        // thing on this card you might actually act on.
         remaining = ClaudeUsageLimits.timeLeft(until: resetsAt, now: now)
             .map { "\($0 == "now" ? "resetting" : "\($0) left")\(Self.paceNote(projected: projected))" }
             ?? "no reading"
@@ -294,19 +352,6 @@ final class SidebarLimitColumnView: NSView {
     static func projectedUsage(usage: Double?, elapsed: Double?) -> Double? {
         guard let usage, let elapsed, elapsed >= 0.05, usage > 0 else { return nil }
         return usage / elapsed
-    }
-
-    /// Green while the projection lands inside the limit, amber once it does
-    /// not, red once it overshoots by half again.
-    ///
-    /// The breakpoint is 1.0 for a reason a threshold like 0.7 would not
-    /// have: it is not a taste call about "a lot", it is the point where the
-    /// projection stops fitting in the window.
-    static func paceColour(projected: Double?) -> NSColor {
-        guard let projected else { return SidebarSegmentedBarView.onPace }
-        if projected > 1.5 { return ShellPalette.red }
-        if projected > 1.0 { return ShellPalette.amber }
-        return ShellPalette.green
     }
 
     /// What the blocks' colour is saying, in words.

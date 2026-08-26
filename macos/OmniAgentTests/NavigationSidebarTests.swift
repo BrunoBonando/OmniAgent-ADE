@@ -158,12 +158,16 @@ final class NavigationSidebarTests: XCTestCase {
     func testTheGaugesWearThePressureColour() {
         let stats = SidebarSystemStatsView()
         stats.apply(cpu: 0.3, memory: 0.75, gpu: 0.95)
-        XCTAssertEqual(stats.cpuGauge.readoutColor, ShellPalette.green)
-        XCTAssertEqual(stats.memoryGauge.readoutColor, ShellPalette.amber)
-        XCTAssertEqual(stats.gpuGauge.readoutColor, ShellPalette.red)
+        // Hue, not identity: the ramp also varies how present the colour is
+        // with the fill, so an exact match would now be asserting the
+        // strength curve by accident. `testTheColourStrengthensTowardTheLimit`
+        // asserts that half deliberately.
+        assertHue(stats.cpuGauge.readoutColor, ShellPalette.green)
+        assertHue(stats.memoryGauge.readoutColor, ShellPalette.amber)
+        assertHue(stats.gpuGauge.readoutColor, ShellPalette.red)
 
         stats.apply(cpu: 0.3, memory: 0.75, gpu: nil)
-        XCTAssertEqual(stats.gpuGauge.readoutColor, ShellPalette.inkTertiary)
+        XCTAssertEqual(stats.gpuGauge.readoutColor, ShellPalette.inkTertiary, "no sample, no verdict")
     }
 
     /// The kernel answers on this machine: memory is always readable and in
@@ -680,22 +684,10 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertNil(SidebarLimitColumnView.projectedUsage(usage: 0.5, elapsed: nil))
     }
 
-    /// The breakpoint is where the projection stops fitting in the window,
-    /// not a taste call about what counts as "a lot".
-    func testTheRampTurnsWhereTheProjectionStopsFitting() {
-        XCTAssertEqual(SidebarLimitColumnView.paceColour(projected: 0.9), ShellPalette.green)
-        XCTAssertEqual(SidebarLimitColumnView.paceColour(projected: 1.0), ShellPalette.green, "lands exactly on it")
-        XCTAssertEqual(SidebarLimitColumnView.paceColour(projected: 1.2), ShellPalette.amber)
-        XCTAssertEqual(SidebarLimitColumnView.paceColour(projected: 2.0), ShellPalette.red)
-        XCTAssertEqual(
-            SidebarLimitColumnView.paceColour(projected: nil), SidebarSegmentedBarView.onPace,
-            "too early to judge, so no verdict"
-        )
-    }
-
-    /// Time running out is good news, so a window nearly over while spending
-    /// stayed in budget must NOT go red — the thing this ramp exists to avoid.
-    func testAWindowNearlyOverButWellPacedStaysGreen() throws {
+    /// The blocks ramp on how much window has gone, on the same ramp as every
+    /// other bar. A nearly-spent window is red whatever the spending did — the
+    /// card colours two bars by one rule rather than two.
+    func testANearlySpentWindowIsRedWhateverTheSpendingDid() throws {
         let card = makeLimitsCard()
         let now = try XCTUnwrap(
             Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 11))
@@ -705,13 +697,15 @@ final class NavigationSidebarTests: XCTestCase {
             ClaudeUsageLimits.parse("Current session: 40% used · resets Aug 26 at 11:12am"),
             now: now
         )
-        XCTAssertEqual(card.sessionColumn.timeBar.fillColor, ShellPalette.green)
+        assertHue(card.sessionColumn.timeBar.fillColor, ShellPalette.red)
         XCTAssertEqual(card.sessionColumn.timeBar.filledSegments, 5, "the window is nearly gone")
+        // The usage bar still reads the spending, which is 40% and fine.
+        assertHue(card.sessionColumn.bar.fillColor, ShellPalette.green)
     }
 
-    /// And the case worth warning about: quota draining far faster than the
-    /// clock, with most of the window still to run.
-    func testOutspendingTheClockGoesRedAndSaysWhy() throws {
+    /// Pace no longer shows in the blocks' colour, so the hover is the only
+    /// place it lives — and it is the one thing here you might act on.
+    func testOutspendingTheClockIsSaidInTheHover() throws {
         let card = makeLimitsCard()
         let now = try XCTUnwrap(
             Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 11))
@@ -721,10 +715,9 @@ final class NavigationSidebarTests: XCTestCase {
             ClaudeUsageLimits.parse("Current session: 80% used · resets Aug 26 at 3:00pm"),
             now: now
         )
-        XCTAssertEqual(card.sessionColumn.timeBar.fillColor, ShellPalette.red)
         let tip = try XCTUnwrap(card.sessionColumn.toolTip)
         XCTAssertTrue(tip.contains("left"), "still says the time")
-        XCTAssertTrue(tip.contains("clock"), "and says why it is red")
+        XCTAssertTrue(tip.contains("4×"), "and how far ahead of the clock the spending is")
     }
 
     // MARK: - Reading order
@@ -772,9 +765,9 @@ final class NavigationSidebarTests: XCTestCase {
         card.layoutSubtreeIfNeeded()
 
         XCTAssertEqual(card.cpuGauge.bar.fillFraction, 0.34, accuracy: 0.001)
-        XCTAssertEqual(card.cpuGauge.bar.fillColor, ShellPalette.green)
-        XCTAssertEqual(card.memoryGauge.bar.fillColor, ShellPalette.amber)
-        XCTAssertEqual(card.gpuGauge.bar.fillColor, ShellPalette.red)
+        assertHue(card.cpuGauge.bar.fillColor, ShellPalette.green)
+        assertHue(card.memoryGauge.bar.fillColor, ShellPalette.amber)
+        assertHue(card.gpuGauge.bar.fillColor, ShellPalette.red)
         XCTAssertGreaterThan(card.cpuGauge.bar.frame.width, 20, "the bar spans its column")
     }
 
@@ -783,8 +776,8 @@ final class NavigationSidebarTests: XCTestCase {
     func testTheGaugesNumberAndBarAgree() {
         let card = SidebarSystemStatsView()
         card.apply(cpu: 0.95, memory: nil, gpu: nil)
-        XCTAssertEqual(card.cpuGauge.readoutColor, ShellPalette.red)
-        XCTAssertEqual(card.cpuGauge.bar.fillColor, ShellPalette.red)
+        assertHue(card.cpuGauge.readoutColor, ShellPalette.red)
+        XCTAssertEqual(card.cpuGauge.readoutColor, card.cpuGauge.bar.fillColor, "one ramp")
         XCTAssertEqual(card.memoryGauge.readout, "—")
         XCTAssertNil(card.memoryGauge.bar.fraction, "no sample, empty track")
     }
@@ -801,6 +794,39 @@ final class NavigationSidebarTests: XCTestCase {
             card.cpuGauge.fittingSize.height, SidebarSystemStatsView.height,
             "the column still fits inside the card"
         )
+    }
+
+    // MARK: - Colour helpers
+
+    /// The ramp mixes hues and varies alpha, so identity comparison against a
+    /// palette colour is the wrong question. This asks the right one: is this
+    /// the same colour, ignoring how present it is.
+    private func assertHue(
+        _ colour: NSColor?, _ expected: NSColor, line: UInt = #line
+    ) {
+        guard
+            let actual = colour?.usingColorSpace(.sRGB),
+            let want = expected.usingColorSpace(.sRGB)
+        else { return XCTFail("not an sRGB colour", line: line) }
+        XCTAssertEqual(actual.redComponent, want.redComponent, accuracy: 0.02, line: line)
+        XCTAssertEqual(actual.greenComponent, want.greenComponent, accuracy: 0.02, line: line)
+        XCTAssertEqual(actual.blueComponent, want.blueComponent, accuracy: 0.02, line: line)
+    }
+
+    /// Whether `colour` sits between two others on every channel — what "part
+    /// way from green to amber" means without pinning an exact mix.
+    private func isBetween(_ colour: NSColor, _ from: NSColor, _ to: NSColor) -> Bool {
+        guard
+            let c = colour.usingColorSpace(.sRGB),
+            let a = from.usingColorSpace(.sRGB),
+            let b = to.usingColorSpace(.sRGB)
+        else { return false }
+        func within(_ x: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> Bool {
+            x >= min(lo, hi) - 0.001 && x <= max(lo, hi) + 0.001
+        }
+        return within(c.redComponent, a.redComponent, b.redComponent)
+            && within(c.greenComponent, a.greenComponent, b.greenComponent)
+            && within(c.blueComponent, a.blueComponent, b.blueComponent)
     }
 
     // MARK: - Claude limits card
@@ -884,11 +910,50 @@ final class NavigationSidebarTests: XCTestCase {
     func testTheFillAndItsColourAgree() {
         let bar = SidebarPercentBarView()
         bar.apply(0.41)
-        XCTAssertEqual(bar.fillColor, ShellPalette.green)
+        assertHue(bar.fillColor, ShellPalette.green)
         bar.apply(0.75)
-        XCTAssertEqual(bar.fillColor, ShellPalette.amber)
+        assertHue(bar.fillColor, ShellPalette.amber)
         bar.apply(0.95)
-        XCTAssertEqual(bar.fillColor, ShellPalette.red)
+        assertHue(bar.fillColor, ShellPalette.red)
+    }
+
+    /// Green to 70, amber to 90, red beyond — and the change slides rather
+    /// than snapping, so the bar is warming before it is a warning.
+    func testTheRampSlidesBetweenBandsRatherThanSnapping() {
+        // Squarely inside a band: the band's own colour, nothing mixed in.
+        assertHue(SidebarPercentBarView.hue(for: 0.30), ShellPalette.green)
+        assertHue(SidebarPercentBarView.hue(for: 0.75), ShellPalette.amber)
+        assertHue(SidebarPercentBarView.hue(for: 0.95), ShellPalette.red)
+
+        // The stops Bruno named: 70% has arrived at amber, 90% at red.
+        assertHue(SidebarPercentBarView.hue(for: 0.70), ShellPalette.amber)
+        assertHue(SidebarPercentBarView.hue(for: 0.90), ShellPalette.red)
+
+        // And between them it is genuinely in between, not one or the other.
+        let warming = SidebarPercentBarView.hue(for: 0.65)
+        XCTAssertNotEqual(warming, ShellPalette.green)
+        XCTAssertNotEqual(warming, ShellPalette.amber)
+        XCTAssertTrue(
+            isBetween(warming, ShellPalette.green, ShellPalette.amber),
+            "65% is part way from green to amber"
+        )
+        XCTAssertTrue(
+            isBetween(SidebarPercentBarView.hue(for: 0.85), ShellPalette.amber, ShellPalette.red),
+            "85% is part way from amber to red"
+        )
+    }
+
+    /// The closer to the limit, the stronger the colour.
+    func testTheColourStrengthensTowardTheLimit() {
+        XCTAssertLessThan(
+            SidebarPercentBarView.strength(for: 0.08),
+            SidebarPercentBarView.strength(for: 0.95),
+            "a nearly-full bar is more present than a nearly-empty one"
+        )
+        XCTAssertEqual(SidebarPercentBarView.strength(for: 1), 1, accuracy: 0.001)
+        // Floored well clear of transparent: this paints the numbers too, and
+        // a faded `8%` is a readout you have to squint at.
+        XCTAssertGreaterThanOrEqual(SidebarPercentBarView.strength(for: 0), 0.8)
     }
 
     /// The number wears the same verdict as its bar, so the two cannot say
@@ -896,8 +961,10 @@ final class NavigationSidebarTests: XCTestCase {
     func testTheNumberWearsTheBarsVerdict() {
         let card = makeLimitsCard()
         card.apply(ClaudeUsageLimits.parse("Current session: 95% used · resets Aug 25 at 3:00pm"), now: noon)
-        XCTAssertEqual(card.sessionColumn.readoutColor, ShellPalette.red)
-        XCTAssertEqual(card.sessionColumn.bar.fillColor, ShellPalette.red)
+        assertHue(card.sessionColumn.readoutColor, ShellPalette.red)
+        // The property that actually matters: one ramp, so the number and its
+        // own bar cannot disagree about the same figure.
+        XCTAssertEqual(card.sessionColumn.readoutColor, card.sessionColumn.bar.fillColor)
     }
 
     /// A fresh window reads 0%, and drawing that as an empty track made it
