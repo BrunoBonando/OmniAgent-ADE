@@ -678,6 +678,40 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(card.sessionColumn.bar.fillWidth, 0, "empty track, not a zero fill")
     }
 
+    /// The card was trimmed from 108pt to 74pt because it crowded the
+    /// sidebar. That trim is only safe while the content still fits: a later
+    /// font bump or an extra line would clip silently, since the height is
+    /// authored rather than intrinsic.
+    func testTheCardIsTallEnoughForItsOwnContent() {
+        let card = makeLimitsCard()
+        card.apply(
+            ClaudeUsageLimits.parse(
+                "Current session: 100% used · resets Aug 28 at 11am\n"
+                + "Current week (all models): 100% used · resets Aug 28 at 11am"
+            ),
+            now: noon
+        )
+        card.layoutSubtreeIfNeeded()
+
+        for column in [card.sessionColumn, card.weekColumn] {
+            XCTAssertLessThanOrEqual(
+                column.fittingSize.height, SidebarClaudeLimitsView.height,
+                "the column fits inside the card"
+            )
+            XCTAssertGreaterThan(column.bar.frame.width, 0, "and the bar survived the trim")
+        }
+    }
+
+    /// Shorter than it was, and still clearly the taller of the two cards —
+    /// it carries four lines of content to the gauges' two.
+    func testTheCardIsNoTallerThanItNeedsToBe() {
+        XCTAssertEqual(SidebarClaudeLimitsView.height, 74)
+        XCTAssertLessThan(
+            SidebarClaudeLimitsView.height, 90,
+            "the sidebar has a workspace list to show as well"
+        )
+    }
+
     /// A `/usage` that reports only the week must not blank the session half.
     /// It used to, and an empty bar beside a dash is what that looked like.
     func testAWeekOnlyReadingKeepsTheSession() {

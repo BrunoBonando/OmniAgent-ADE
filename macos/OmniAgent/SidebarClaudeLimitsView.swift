@@ -6,7 +6,7 @@ import AppKit
 /// own aqua-tinted geometry and neither takes this palette's fill colours nor
 /// sits at this height without fighting.
 final class SidebarLimitBarView: NSView {
-    static let height: CGFloat = 6
+    static let height: CGFloat = 5
 
     private let track = CALayer()
     private let fill = CALayer()
@@ -104,7 +104,7 @@ final class SidebarLimitColumnView: NSView {
     init(name: String) {
         valueField = ShellFont.label(
             "—",
-            font: ShellFont.ui(18, .semibold),
+            font: ShellFont.ui(17, .semibold),
             color: ShellPalette.inkTertiary
         )
         captionField = ShellFont.label(
@@ -125,9 +125,9 @@ final class SidebarLimitColumnView: NSView {
         let stack = NSStackView(views: [valueField, captionField, bar, remainingField])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 3
+        stack.spacing = 2
         // The bar spans the column; the labels centre in it.
-        stack.setCustomSpacing(6, after: captionField)
+        stack.setCustomSpacing(5, after: captionField)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -165,11 +165,16 @@ final class SidebarLimitColumnView: NSView {
 /// of the five-hour session and of the week is spent, and how long each has
 /// left before it rolls over.
 ///
+/// No `CLAUDE` header row: it cost a full line plus its spacing in a sidebar
+/// that was being crowded, and the machine-gauges card directly below carries
+/// no header either — so the two now match. The column captions and the
+/// accessibility label are what name it.
+///
 /// Account-global, so it lives here rather than in a pane — every App view
 /// would otherwise render the identical two numbers, which is what the pane's
 /// old stats bar did.
 final class SidebarClaudeLimitsView: NSView {
-    static let height: CGFloat = 108
+    static let height: CGFloat = 74
 
     let sessionColumn = SidebarLimitColumnView(name: "SESSION")
     let weekColumn = SidebarLimitColumnView(name: "WEEK")
@@ -195,12 +200,6 @@ final class SidebarClaudeLimitsView: NSView {
             layer?.borderColor = ShellPalette.hairlineStrong.cgColor
         }
 
-        let caption = ShellFont.label(
-            "CLAUDE",
-            font: ShellFont.ui(10, .semibold),
-            color: ShellPalette.inkTertiary,
-            tracking: 0.5
-        )
         let columns = NSStackView(views: [sessionColumn, Self.divider(), weekColumn])
         columns.orientation = .horizontal
         columns.alignment = .top
@@ -212,19 +211,12 @@ final class SidebarClaudeLimitsView: NSView {
         // each row sized itself around its own label and countdown.
         weekColumn.widthAnchor.constraint(equalTo: sessionColumn.widthAnchor).isActive = true
 
-        let stack = NSStackView(views: [caption, columns])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        for view in [glass, stack].compactMap({ $0 }) { addSubview(view) }
+        for view in [glass, columns].compactMap({ $0 }) { addSubview(view) }
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.height),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            columns.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            columns.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            columns.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            columns.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         if let glass {
             glass.translatesAutoresizingMaskIntoConstraints = false
@@ -252,7 +244,7 @@ final class SidebarClaudeLimitsView: NSView {
         line.translatesAutoresizingMaskIntoConstraints = false
         line.layer?.backgroundColor = ShellPalette.hairlineStrong.cgColor
         line.widthAnchor.constraint(equalToConstant: 1).isActive = true
-        line.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        line.heightAnchor.constraint(equalToConstant: 30).isActive = true
         return line
     }
 
