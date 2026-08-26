@@ -157,7 +157,7 @@ final class NavigationSidebarTests: XCTestCase {
     /// amber past 70%, red past 90% — and no verdict at all without a reading.
     func testTheGaugesWearThePressureColour() {
         let stats = SidebarSystemStatsView()
-        stats.apply(cpu: 0.3, memory: 0.75, gpu: 0.95)
+        stats.apply(cpu: 0.3, memory: 0.75, gpu: 0.95, animated: false)
         // Hue, not identity: the ramp also varies how present the colour is
         // with the fill, so an exact match would now be asserting the
         // strength curve by accident. `testTheColourStrengthensTowardTheLimit`
@@ -166,7 +166,7 @@ final class NavigationSidebarTests: XCTestCase {
         assertHue(stats.memoryGauge.readoutColor, ShellPalette.amber)
         assertHue(stats.gpuGauge.readoutColor, ShellPalette.red)
 
-        stats.apply(cpu: 0.3, memory: 0.75, gpu: nil)
+        stats.apply(cpu: 0.3, memory: 0.75, gpu: nil, animated: false)
         XCTAssertEqual(stats.gpuGauge.readoutColor, ShellPalette.inkTertiary, "no sample, no verdict")
     }
 
@@ -860,7 +860,7 @@ final class NavigationSidebarTests: XCTestCase {
         card.frame = NSRect(
             x: 0, y: 0, width: ShellMetrics.sidebarWidth - 16, height: SidebarSystemStatsView.height
         )
-        card.apply(cpu: 0.34, memory: 0.78, gpu: 0.95)
+        card.apply(cpu: 0.34, memory: 0.78, gpu: 0.95, animated: false)
         card.layoutSubtreeIfNeeded()
 
         XCTAssertEqual(card.cpuGauge.dial.needleFraction, 0.34, accuracy: 0.001)
@@ -1009,7 +1009,7 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(SidebarSystemStatsView.height, 76, "62 with bars, 76 with dials")
         let card = SidebarSystemStatsView()
         card.frame = NSRect(x: 0, y: 0, width: 216, height: SidebarSystemStatsView.height)
-        card.apply(cpu: 1, memory: 1, gpu: 1)
+        card.apply(cpu: 1, memory: 1, gpu: 1, animated: false)
         card.layoutSubtreeIfNeeded()
         XCTAssertLessThanOrEqual(
             card.cpuGauge.fittingSize.height, SidebarSystemStatsView.height,
@@ -1351,6 +1351,121 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(gauge.readout, "—")
     }
 
+    // MARK: - Colour travelling with the number
+
+    /// The colour walks the ramp with the count rather than switching at the
+    /// end — a gauge crossing into amber does it gradually.
+    func testTheColourWalksTheRampWithTheNumber() {
+        let gauge = SidebarStatGaugeView(name: "CPU")
+        gauge.apply(0.2, animated: false)
+        assertHue(gauge.readoutColor, ShellPalette.green)
+
+        // Straight past amber into red, so the crossing is unmissable.
+        gauge.apply(0.95)
+        settle(within: 0.4) { gauge.countingLabel.current > 60 }
+
+        // Caught mid-count in the amber band, not still green and not yet red.
+        let midway = try? XCTUnwrap(gauge.readoutColor)
+        XCTAssertNotNil(midway)
+        XCTAssertNotEqual(midway, ShellPalette.green, "it has left green behind")
+        settle(within: SidebarMotion.duration + 0.5) { !gauge.countingLabel.isCounting }
+        assertHue(gauge.readoutColor, ShellPalette.red, "and arrives at red")
+    }
+
+    /// The dial's arc is repainted with the number, so the two never disagree
+    /// about the same figure mid-count.
+    func testTheArcIsRepaintedWithTheNumber() {
+        let gauge = SidebarStatGaugeView(name: "MEM")
+        gauge.apply(0.1, animated: false)
+        gauge.apply(0.95)
+        settle(within: 0.4) { gauge.countingLabel.current > 60 }
+
+        XCTAssertEqual(
+            gauge.readoutColor, gauge.dial.progressColor,
+            "number and arc, one colour, every frame"
+        )
+    }
+
+    /// And the Claude card's bar the same way.
+    func testTheLimitsBarIsRepaintedWithTheNumber() {
+        let card = makeLimitsCard()
+        card.apply(ClaudeUsageLimits.parse("Current session: 5% used · resets Aug 25 at 3:00pm"), now: noon, animated: false)
+        card.apply(ClaudeUsageLimits.parse("Current session: 95% used · resets Aug 25 at 3:00pm"), now: noon)
+        settle(within: 0.4) { card.sessionColumn.countingLabel.current > 60 }
+
+        XCTAssertEqual(
+            card.sessionColumn.readoutColor, card.sessionColumn.bar.fillColor,
+            "number and bar, one colour, every frame"
+        )
+    }
+
+    // MARK: - The countdown's own colour
+
+    /// The countdown reads the same thing the blocks under it read, so it
+    /// wears their colour rather than the usage bar's.
+    func testTheCountdownWearsTheTimeBarsColour() throws {
+        let card = makeLimitsCard()
+        let now = try XCTUnwrap(
+            Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 11))
+        )
+        // Barely any quota spent, but the window nearly gone: the two bars are
+        // deliberately different colours here, which is what makes this
+        // discriminate.
+        card.apply(
+            ClaudeUsageLimits.parse("Current session: 4% used · resets Aug 26 at 11:06am"),
+            now: now, animated: false
+        )
+        card.setShowingTime(true, animated: false)
+
+        assertHue(card.sessionColumn.timeLabel.textColor, ShellPalette.red, "the window is spent")
+        assertHue(card.sessionColumn.bar.fillColor, ShellPalette.green, "the quota is not")
+        XCTAssertEqual(
+            card.sessionColumn.timeLabel.textColor, card.sessionColumn.timeBar.fillColor,
+            "the countdown matches its own bar"
+        )
+    }
+
+    /// Big enough to read at a glance, since it is what a click on the card is
+    /// for.
+    func testTheCountdownIsLargerThanItWas() throws {
+        let card = makeLimitsCard()
+        let size = try XCTUnwrap(card.sessionColumn.timeLabel.font?.pointSize)
+        XCTAssertGreaterThan(size, 10, "larger than the 10pt it started at")
+    }
+
+    /// On a first launch the card has no reading, then gets one — and travels
+    /// to it from nothing rather than appearing already there.
+    func testTheLimitsCardStartsFromZeroAndTravels() {
+        let card = makeLimitsCard()
+        card.apply(nil, now: noon)
+        XCTAssertEqual(card.sessionColumn.countingLabel.current, 0)
+        XCTAssertEqual(card.sessionColumn.bar.fillWidth, 0, "an empty track, not a filled one")
+
+        card.apply(
+            ClaudeUsageLimits.parse(
+                "Current session: 41% used · resets Aug 25 at 3:00pm\n"
+                + "Current week (all models): 62% used · resets Aug 28 at 11am"
+            ),
+            now: noon
+        )
+
+        XCTAssertTrue(card.sessionColumn.countingLabel.isCounting, "session travels")
+        XCTAssertTrue(card.weekColumn.countingLabel.isCounting, "week travels")
+        settle(within: SidebarMotion.duration + 0.5) { !card.weekColumn.countingLabel.isCounting }
+        XCTAssertEqual(card.sessionColumn.readout, "41%")
+        XCTAssertEqual(card.weekColumn.readout, "62%")
+    }
+
+    /// Both cards move at one pace. The card-flip keeps its own, because a
+    /// reveal is not a reading.
+    func testBothCardsShareOneDuration() {
+        XCTAssertEqual(SidebarDialGaugeView.sweepDuration, SidebarMotion.duration)
+        XCTAssertLessThan(
+            SidebarLimitColumnView.flipDuration, SidebarMotion.duration,
+            "turning the card over is a reveal, and stays quick"
+        )
+    }
+
     // MARK: - Claude limits card
 
     /// It sits above the machine gauges, which is where it was asked to go —
@@ -1482,7 +1597,12 @@ final class NavigationSidebarTests: XCTestCase {
     /// different things about the same window.
     func testTheNumberWearsTheBarsVerdict() {
         let card = makeLimitsCard()
-        card.apply(ClaudeUsageLimits.parse("Current session: 95% used · resets Aug 25 at 3:00pm"), now: noon)
+        // Settled, not travelling: the colour walks the ramp with the count
+        // now, so an animated apply is green on its first frame by design.
+        card.apply(
+            ClaudeUsageLimits.parse("Current session: 95% used · resets Aug 25 at 3:00pm"),
+            now: noon, animated: false
+        )
         assertHue(card.sessionColumn.readoutColor, ShellPalette.red)
         // The property that actually matters: one ramp, so the number and its
         // own bar cannot disagree about the same figure.

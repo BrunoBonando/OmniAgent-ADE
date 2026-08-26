@@ -365,9 +365,19 @@ final class SidebarPercentBarView: NSView {
         // is a toy.
         pendingRise = (fraction ?? 0) >= previous
         pendingAnimation = (fraction ?? 0) != previous
-        fill.backgroundColor = Self.colour(for: fraction).cgColor
+        setFillColour(for: fraction)
         setAccessibilityValue(fraction.map { "\(Int(($0 * 100).rounded()))% used" } ?? "no reading")
         needsLayout = true
+    }
+
+    /// Repaints without touching geometry, so the colour can be walked through
+    /// the ramp frame by frame while the fill travels — green does not become
+    /// amber in one step any more than 41% becomes 62% in one step.
+    func setFillColour(for value: Double?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fill.backgroundColor = Self.colour(for: value).cgColor
+        CATransaction.commit()
     }
 
     override func layout() {
@@ -481,9 +491,18 @@ final class SidebarSegmentedBarView: NSView {
         // dragged is a toy.
         pendingRise = (fraction ?? 0) >= previous
         pendingAnimation = (fraction ?? 0) != previous
-        let paint = SidebarPercentBarView.colour(for: fraction)
-        for fill in fillLayers { fill.backgroundColor = paint.cgColor }
+        setFillColour(for: fraction)
         needsLayout = true
+    }
+
+    /// Repaints every block without touching geometry — see
+    /// `SidebarPercentBarView.setFillColour`.
+    func setFillColour(for value: Double?) {
+        let paint = SidebarPercentBarView.colour(for: value).cgColor
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for fill in fillLayers { fill.backgroundColor = paint }
+        CATransaction.commit()
     }
 
     override func layout() {
@@ -594,12 +613,21 @@ final class SidebarLimitColumnView: NSView {
         )
         timeLabel = ShellFont.label(
             "—",
-            font: ShellFont.ui(10),
+            font: ShellFont.ui(12, .medium),
             color: ShellPalette.inkMuted
         )
         super.init(frame: .zero)
         counter = SidebarCountingLabel { [weak self] value in
-            self?.valueField.stringValue = "\(Int(value.rounded()))%"
+            guard let self else { return }
+            self.valueField.stringValue = "\(Int(value.rounded()))%"
+            // The colour walks the ramp with the number, so green does not
+            // become amber in one step any more than 41% becomes 62% in one.
+            // This is the *only* place a live reading's colour is set — the
+            // branch in `apply` covers the no-reading case, where there is
+            // nothing to travel and so no frames to paint.
+            let reached = value / 100
+            self.valueField.textColor = SidebarPercentBarView.colour(for: reached)
+            self.bar.setFillColour(for: reached)
         }
         translatesAutoresizingMaskIntoConstraints = false
         for field in [valueField, captionField, timeLabel] { field.alignment = .center }
@@ -664,11 +692,16 @@ final class SidebarLimitColumnView: NSView {
             // a number, so there is nothing to count through.
             counter.settle(at: 0)
             valueField.stringValue = "—"
+            // The count paints the number while it travels; with no reading to
+            // travel to, the colour has to be set here instead.
+            valueField.textColor = SidebarPercentBarView.colour(for: nil)
         }
-        valueField.textColor = SidebarPercentBarView.colour(for: fraction)
         let elapsed = Self.elapsedFraction(until: resetsAt, windowLength: windowLength, now: now)
         let projected = Self.projectedUsage(usage: fraction, elapsed: elapsed)
         timeBar.apply(elapsed)
+        // The countdown wears its own bar's colour rather than the usage
+        // bar's: it is reading the same thing the blocks under it read.
+        timeLabel.textColor = SidebarPercentBarView.colour(for: elapsed)
         // "left" spelled out, because a bare `2d 11h` does not say whether it
         // is time spent, time left, or time until something else entirely.
         //

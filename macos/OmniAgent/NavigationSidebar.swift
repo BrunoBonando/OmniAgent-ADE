@@ -514,8 +514,7 @@ final class SidebarDialGaugeView: NSView {
 
     func apply(_ value: Double?, animated: Bool = true) {
         fraction = value.map { min(max($0, 0), 1) }
-        // The same ramp as everything else in both cards.
-        progress.strokeColor = SidebarPercentBarView.colour(for: fraction).cgColor
+        setArcColour(for: fraction)
         // Explicit, for the same reason the bars are: an implicit animation is
         // an action, and actions are suppressed wherever AppKit has disabled
         // them. Filed under known keys so a test can see the motion was set up
@@ -533,6 +532,16 @@ final class SidebarDialGaugeView: NSView {
             animated: animated, rising: true, bothWays: true, key: Self.needleKey
         )
         setAccessibilityValue(fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "no reading")
+    }
+
+    /// Repaints the arc without touching the needle or its sweep, so the
+    /// colour can be walked through the ramp frame by frame while the needle
+    /// travels — see `SidebarPercentBarView.setFillColour`.
+    func setArcColour(for value: Double?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        progress.strokeColor = SidebarPercentBarView.colour(for: value).cgColor
+        CATransaction.commit()
     }
 
     override func layout() {
@@ -611,7 +620,13 @@ final class SidebarStatGaugeView: NSView {
         )
         super.init(frame: .zero)
         counter = SidebarCountingLabel { [weak self] value in
-            self?.valueField.stringValue = "\(Int(value.rounded()))%"
+            guard let self else { return }
+            self.valueField.stringValue = "\(Int(value.rounded()))%"
+            // The colour walks the ramp with the number, so a gauge crossing
+            // into amber does it gradually rather than in one step.
+            let reached = value / 100
+            self.valueField.textColor = SidebarPercentBarView.colour(for: reached)
+            self.dial.setArcColour(for: reached)
         }
         translatesAutoresizingMaskIntoConstraints = false
         valueField.alignment = .center
@@ -661,9 +676,13 @@ final class SidebarStatGaugeView: NSView {
             counter.settle(at: 0)
             valueField.stringValue = "—"
         }
-        // Through the bar's own ramp rather than a second copy of the same
-        // three thresholds, so the number and the bar cannot drift apart.
-        valueField.textColor = SidebarPercentBarView.colour(for: fraction)
+        if fraction == nil {
+            // The count paints the number while it travels; with no sample to
+            // travel to, the colour has to be set here instead. Through the
+            // bar's own ramp either way, rather than a second copy of the same
+            // thresholds, so a number and its dial cannot drift apart.
+            valueField.textColor = SidebarPercentBarView.colour(for: nil)
+        }
         setAccessibilityValue(valueField.stringValue)
     }
 
