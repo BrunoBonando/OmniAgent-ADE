@@ -874,10 +874,10 @@ final class NavigationSidebarTests: XCTestCase {
     /// The needle travels rather than jumping — the reason for a dial over a
     /// bar on numbers that are resampled every two seconds.
     func testTheNeedleTravelsRatherThanJumping() {
-        XCTAssertGreaterThan(SidebarDialGaugeView.sweepDuration, 0.2, "long enough to read as motion")
+        XCTAssertGreaterThan(SidebarDialGaugeView.sweepDuration, 1, "unhurried")
         XCTAssertLessThan(
             SidebarDialGaugeView.sweepDuration, 2,
-            "and short enough to settle before the next 2s sample"
+            "and still finishing before the next 2s sample"
         )
     }
 
@@ -911,6 +911,7 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertGreaterThan(middle, opening, "speeds up out of the start")
         XCTAssertGreaterThan(middle, closing, "and slows down into the finish")
         XCTAssertLessThan(opening, 0.25, "the opening third is unhurried")
+        XCTAssertGreaterThan(middle, 0.5, "and the middle carries most of it")
     }
 
     /// It leaves from a standstill rather than snapping into motion.
@@ -1227,15 +1228,10 @@ final class NavigationSidebarTests: XCTestCase {
 
         XCTAssertGreaterThan(seen.count, 5, "it passed through, it did not jump")
         XCTAssertEqual(seen.last ?? 0, 30, accuracy: 0.001, "and arrived")
-        // Every value between the two readings, in order and inside the range.
-        XCTAssertEqual(seen, seen.sorted(), "counts upward, never backwards")
-        for value in seen {
-            XCTAssertGreaterThanOrEqual(value, 20)
-            XCTAssertLessThanOrEqual(value, 30)
-        }
         XCTAssertTrue(
-            seen.contains { $0 > 22 && $0 < 28 }, "and through the middle of the range"
+            seen.contains { $0 > 22 && $0 < 28 }, "through the middle of the range"
         )
+        XCTAssertGreaterThanOrEqual(seen.min() ?? 0, 20, "never below where it started")
     }
 
     /// It counts at the animation's pace, not at a constant rate: the middle
@@ -1256,10 +1252,9 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertGreaterThan(middle, opening, "speeds up out of the start")
     }
 
-    /// The figure is clamped where the bar is not: the curve runs past the
-    /// reading, and a readout showing 48% when the reading is 46% is stating
-    /// something untrue.
-    func testTheNumberNeverCountsPastItsReading() {
+    /// The count drifts past its reading and eases back onto it, the way the
+    /// bar beside it does.
+    func testTheNumberDriftsPastAndSettles() {
         var seen: [Double] = []
         let counter = SidebarCountingLabel { seen.append($0) }
         counter.count(to: 0, animated: false)
@@ -1268,7 +1263,36 @@ final class NavigationSidebarTests: XCTestCase {
         counter.count(to: 46, animated: true)
         settle(within: SidebarMotion.duration + 0.5) { !counter.isCounting }
 
-        XCTAssertLessThanOrEqual(seen.max() ?? 0, 46, "never reads higher than the reading")
+        XCTAssertGreaterThan(seen.max() ?? 0, 46, "ran past the reading")
+        XCTAssertEqual(seen.last ?? 0, 46, accuracy: 0.001, "and settled on it")
+    }
+
+    /// But never past what a percentage can be. Momentum does not make `103%`
+    /// a number anybody is settling toward.
+    func testTheNumberNeverShowsAnImpossiblePercentage() {
+        var seen: [Double] = []
+        let counter = SidebarCountingLabel { seen.append($0) }
+        counter.count(to: 40, animated: false)
+        seen.removeAll()
+
+        counter.count(to: 100, animated: true)
+        settle(within: SidebarMotion.duration + 0.5) { !counter.isCounting }
+
+        XCTAssertLessThanOrEqual(seen.max() ?? 0, 100, "capped at a real reading")
+        XCTAssertEqual(seen.last ?? 0, 100, accuracy: 0.001)
+    }
+
+    /// And the same at the bottom of the range.
+    func testTheNumberNeverShowsANegativePercentage() {
+        var seen: [Double] = []
+        let counter = SidebarCountingLabel { seen.append($0) }
+        counter.count(to: 60, animated: false)
+        seen.removeAll()
+
+        counter.count(to: 0, animated: true)
+        settle(within: SidebarMotion.duration + 0.5) { !counter.isCounting }
+
+        XCTAssertGreaterThanOrEqual(seen.min() ?? -1, 0, "never below nothing")
     }
 
     /// First launch: everything starts at nothing and counts up to what it

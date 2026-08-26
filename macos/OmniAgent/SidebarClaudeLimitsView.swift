@@ -6,9 +6,15 @@ import AppKit
 /// way — the cards already share a colour ramp, and motion is the other half
 /// of reading as one design.
 enum SidebarMotion {
-    /// Long enough to read as travel, comfortably shorter than the two-second
-    /// sample interval so each reading settles before the next arrives.
-    static let duration: TimeInterval = 0.5
+    /// Unhurried on purpose. The machine gauges resample every two seconds,
+    /// so at this length a needle is still travelling when the next reading is
+    /// most of the way there — which is the point: the card reads as something
+    /// continuously alive rather than a thing that flicks between states.
+    ///
+    /// Still short of the sample interval, so a reading does finish before its
+    /// successor lands. An interrupted one continues from where it visibly was
+    /// rather than restarting, so overrunning would degrade gracefully anyway.
+    static let duration: TimeInterval = 1.2
 
     /// Eases away from rest, runs quickest through the middle, slows as it
     /// arrives — carrying a little past the reading before settling onto it.
@@ -16,19 +22,20 @@ enum SidebarMotion {
     /// The first control point's `y` of 0 is the standing start: the curve
     /// leaves at zero velocity instead of snapping into motion. The second
     /// point above 1 is what takes it beyond the destination before it eases
-    /// back — about 6% past, which is visible without reading as a bounce.
+    /// back — about 12% past, and roughly a third of the duration is spent on
+    /// the way back, which is what makes the arrival read as settling rather
+    /// than as a bounce.
     ///
     /// The two `x` values are what make it an S at all, and they have to run
     /// in order: a second point sitting *before* the first draws something
     /// that is not an ease-in-out however promising its `y` values look. The
     /// numbers here were measured rather than guessed — equal thirds of the
-    /// duration cover 20%, 62% and 18% of the distance, and half the duration
-    /// lands within a whisker of half the journey.
-    static let overshoot = CAMediaTimingFunction(controlPoints: 0.55, 0, 0.65, 1.35)
+    /// duration cover 17%, 63% and 21% of the distance.
+    static let overshoot = CAMediaTimingFunction(controlPoints: 0.65, 0, 0.70, 1.55)
 
     /// The same slow-fast-slow shape with the overshoot taken out, for the
     /// things that have nowhere to put it.
-    static let settle = CAMediaTimingFunction(controlPoints: 0.55, 0, 0.65, 1)
+    static let settle = CAMediaTimingFunction(controlPoints: 0.65, 0, 0.70, 1)
 
     /// Which of the two a change should use.
     ///
@@ -115,11 +122,14 @@ enum SidebarMotion {
 /// move as one thing — a number that snapped while its bar travelled would
 /// read as two unrelated events.
 ///
-/// **Clamped to the destination, unlike the bar.** The curve carries a couple
-/// of percent past the reading, which is right for a graphic and wrong for a
-/// figure: a bar bulging a hair beyond its mark is momentum, a readout saying
-/// `48%` when the reading is `46%` is stating something untrue. So the bar
-/// keeps the overshoot and the number does not.
+/// **Overshoots with the bar, but never past what the figure can legally be.**
+/// The number was clamped to its destination at first, on the reasoning that a
+/// readout showing `48%` when the reading is `46%` states something untrue.
+/// Bruno's call to let it run: a counter that drifts past and settles reads as
+/// a live instrument, and the value it lands on is the true one. What it still
+/// will not do is show an *impossible* figure — `103%` is not a reading
+/// anybody is settling toward — so the travel is bounded by `range` rather
+/// than by the destination.
 ///
 /// Driven by a `Timer` rather than a display link: this is a label redrawing a
 /// short string, the work per frame is one `stringValue` assignment, and a
@@ -133,6 +143,7 @@ final class SidebarCountingLabel {
     private var began = Date()
     private var from: Double = 0
     private var to: Double = 0
+    private let range: ClosedRange<Double>
     private let render: (Double) -> Void
 
     /// The value last rendered — where a new count starts, so a reading
@@ -140,7 +151,11 @@ final class SidebarCountingLabel {
     private(set) var current: Double = 0
 
     /// `render` is handed the value to display and decides how to write it.
-    init(render: @escaping (Double) -> Void) {
+    /// `range` bounds the travel, overshoot included — the readouts here are
+    /// percentages, and no amount of momentum makes `103%` a number worth
+    /// showing.
+    init(range: ClosedRange<Double> = 0...100, render: @escaping (Double) -> Void) {
+        self.range = range
         self.render = render
     }
 
@@ -172,12 +187,12 @@ final class SidebarCountingLabel {
                 self.render(self.to)
                 return
             }
-            // Clamped: the curve runs past 1 near the end, and a figure must
-            // never read higher than the reading it is counting to.
-            let progress = min(
-                max(SidebarMotion.progress(SidebarMotion.overshoot, atElapsed: elapsed), 0), 1
-            )
-            self.current = self.from + (self.to - self.from) * progress
+            // Unclamped progress, so the count runs past its reading and
+            // eases back the way the bar beside it does — bounded only by what
+            // a percentage is allowed to be.
+            let progress = SidebarMotion.progress(SidebarMotion.overshoot, atElapsed: elapsed)
+            let value = self.from + (self.to - self.from) * progress
+            self.current = min(max(value, self.range.lowerBound), self.range.upperBound)
             self.render(self.current)
         }
         // `.common`, so a number does not freeze mid-count while the sidebar
