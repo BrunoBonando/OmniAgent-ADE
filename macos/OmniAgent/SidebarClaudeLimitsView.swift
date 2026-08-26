@@ -249,6 +249,13 @@ final class SidebarSegmentedBarView: NSView {
 final class SidebarLimitColumnView: NSView {
     let bar = SidebarPercentBarView()
     let timeBar: SidebarSegmentedBarView
+    /// The countdown in words, face down over the two bars until asked for.
+    ///
+    /// It occupies the bars' own band rather than a row of its own — a 10pt
+    /// line is almost exactly as tall as `bar` + its gap + `timeBar` — so
+    /// turning the card over costs no height and nothing below it moves.
+    let timeLabel: NSTextField
+    private let barsBox = NSView()
     private let valueField: NSTextField
     private let captionField: NSTextField
     /// Named for length, not `window` — `NSView.window` already owns that.
@@ -281,19 +288,44 @@ final class SidebarLimitColumnView: NSView {
             color: ShellPalette.inkTertiary,
             tracking: 0.5
         )
+        timeLabel = ShellFont.label(
+            "—",
+            font: ShellFont.ui(10),
+            color: ShellPalette.inkMuted
+        )
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        for field in [valueField, captionField] { field.alignment = .center }
+        for field in [valueField, captionField, timeLabel] { field.alignment = .center }
+        timeLabel.alphaValue = 0
+
+        // The two bars and the countdown share one band: the bars stacked in
+        // it, the words laid over them, one visible at a time.
+        let bars = NSStackView(views: [bar, timeBar])
+        bars.orientation = .vertical
+        bars.alignment = .centerX
+        bars.spacing = 3
+        bars.translatesAutoresizingMaskIntoConstraints = false
+        barsBox.translatesAutoresizingMaskIntoConstraints = false
+        barsBox.addSubview(bars)
+        barsBox.addSubview(timeLabel)
+        NSLayoutConstraint.activate([
+            bars.leadingAnchor.constraint(equalTo: barsBox.leadingAnchor),
+            bars.trailingAnchor.constraint(equalTo: barsBox.trailingAnchor),
+            bars.topAnchor.constraint(equalTo: barsBox.topAnchor),
+            bars.bottomAnchor.constraint(equalTo: barsBox.bottomAnchor),
+            timeLabel.centerXAnchor.constraint(equalTo: barsBox.centerXAnchor),
+            timeLabel.centerYAnchor.constraint(equalTo: barsBox.centerYAnchor),
+            timeLabel.leadingAnchor.constraint(greaterThanOrEqualTo: barsBox.leadingAnchor),
+        ])
 
         // Caption first: the label names the thing, then the number answers
         // it. Reading `12%` before knowing it is the session is backwards.
-        let stack = NSStackView(views: [captionField, valueField, bar, timeBar])
+        let stack = NSStackView(views: [captionField, valueField, barsBox])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 1
         // The bars span the column; the labels centre in it.
         stack.setCustomSpacing(5, after: valueField)
-        stack.setCustomSpacing(3, after: bar)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -301,8 +333,9 @@ final class SidebarLimitColumnView: NSView {
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            bar.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            timeBar.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            barsBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            bar.widthAnchor.constraint(equalTo: barsBox.widthAnchor),
+            timeBar.widthAnchor.constraint(equalTo: barsBox.widthAnchor),
         ])
         setAccessibilityElement(true)
         setAccessibilityRole(.progressIndicator)
@@ -330,13 +363,51 @@ final class SidebarLimitColumnView: NSView {
         // keeping, since "80% spent with four hours still to run" is the one
         // thing on this card you might actually act on.
         remaining = ClaudeUsageLimits.timeLeft(until: resetsAt, now: now)
-            .map { "\($0 == "now" ? "resetting" : "\($0) left")\(Self.paceNote(projected: projected))" }
+            .map { $0 == "now" ? "resetting" : "\($0) left" }
             ?? "no reading"
-        // On every subview too: an `NSView`'s tooltip covers its own rect, and
-        // the labels and bars sit on top of this one — without this, hovering
-        // the actual number is the one place that shows nothing.
-        for view in [self] + subviews + subviews.flatMap(\.subviews) { view.toolTip = remaining }
-        setAccessibilityValue("\(readout) used, \(remaining)")
+        timeLabel.stringValue = remaining
+        // The hover says more than the face can fit: the pace note is the one
+        // figure here you might act on, and it does not fit in a column this
+        // narrow at a legible size.
+        let hover = remaining + Self.paceNote(projected: projected)
+        // Down the whole subtree, not two levels of it. An `NSView`'s tooltip
+        // covers only its own rect, and the bars sit three deep now that they
+        // share a band with the countdown — a hand-unrolled two levels used to
+        // reach them and silently stopped when that band was added.
+        Self.applyToolTip(hover, to: self)
+        setAccessibilityValue("\(readout) used, \(hover)")
+    }
+
+    /// Sets `text` as the tooltip of `view` and everything under it.
+    private static func applyToolTip(_ text: String, to view: NSView) {
+        view.toolTip = text
+        for child in view.subviews { applyToolTip(text, to: child) }
+    }
+
+    /// How long the turn takes. Fast, because it is a reveal rather than a
+    /// transition between two screens — anything slower reads as a delay
+    /// between the click and the answer.
+    static let flipDuration: TimeInterval = 0.14
+
+    /// Whether the words are showing instead of the bars.
+    private(set) var isShowingTime = false
+
+    /// Turns the column over. Instant under Reduce Motion, like every other
+    /// animation in this app.
+    func setShowingTime(_ showing: Bool, animated: Bool = true) {
+        guard showing != isShowingTime else { return }
+        isShowingTime = showing
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard animated, !reduceMotion else {
+            barsBox.subviews.first?.alphaValue = showing ? 0 : 1
+            timeLabel.alphaValue = showing ? 1 : 0
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.flipDuration
+            barsBox.subviews.first?.animator().alphaValue = showing ? 0 : 1
+            timeLabel.animator().alphaValue = showing ? 1 : 0
+        }
     }
 
     /// Where this window's spending is headed by the time it resets, as a
@@ -403,6 +474,47 @@ final class SidebarClaudeLimitsView: NSView {
     /// Ticks the two countdowns down without spending a `/usage` request. The
     /// percentages only move when the poller fetches; the clock moves anyway.
     private var clock: Timer?
+
+    /// How long the words stay up before the card turns back by itself.
+    ///
+    /// Long enough to read two short durations without hurrying, short enough
+    /// that a card left face-up by a stray click does not stay that way.
+    static let revealDuration: TimeInterval = 7
+
+    private var revealTimer: Timer?
+
+    /// Whether the card is showing the countdowns instead of the bars. Both
+    /// columns turn together — the card is one thing, not two.
+    var isShowingTime: Bool { sessionColumn.isShowingTime }
+
+    /// Anywhere on the card, because the card is the button.
+    ///
+    /// No `hitTest` override to force that: `ShellFont.label` builds
+    /// non-selectable fields and the bars are plain views, so an unhandled
+    /// `mouseDown` walks the responder chain up to here on its own. Overriding
+    /// `hitTest` *would* have caught every click and cost the per-subview
+    /// tooltips, which are what carry the pace note.
+    override func mouseDown(with event: NSEvent) {
+        setShowingTime(!isShowingTime)
+    }
+
+    /// Internal rather than private so a test can turn the card over without
+    /// synthesising a click.
+    func setShowingTime(_ showing: Bool, animated: Bool = true) {
+        revealTimer?.invalidate()
+        revealTimer = nil
+        for column in [sessionColumn, weekColumn] {
+            column.setShowingTime(showing, animated: animated)
+        }
+        guard showing else { return }
+        let timer = Timer(timeInterval: Self.revealDuration, repeats: false) { [weak self] _ in
+            self?.setShowingTime(false)
+        }
+        // `.common`, so a card left face-up while the sidebar is being
+        // scrolled or dragged still turns back rather than freezing mid-reveal.
+        RunLoop.main.add(timer, forMode: .common)
+        revealTimer = timer
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -476,8 +588,13 @@ final class SidebarClaudeLimitsView: NSView {
         super.viewDidMoveToWindow()
         clock?.invalidate()
         clock = nil
+        revealTimer?.invalidate()
+        revealTimer = nil
         guard window != nil else {
             ClaudeUsageLimitsPoller.shared.removeObserver(self)
+            // Face down again: a card that went away mid-reveal must not come
+            // back still showing words with no timer left to turn it over.
+            for column in [sessionColumn, weekColumn] { column.setShowingTime(false, animated: false) }
             return
         }
         ClaudeUsageLimitsPoller.shared.addObserver(self) { [weak self] in

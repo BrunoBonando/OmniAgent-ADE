@@ -107,7 +107,7 @@ it only if the packaged-daemon benchmark is worth the reframing work.
 
 ---
 
-## 5b. An intermittent keyboard test
+## 5b. Intermittent failures in event-synthesising tests
 
 `WorkspaceWindowControllerTests.testCommandOptionODoesNotTurnOffOptionAsMeta`
 failed once in a full-suite run on 2026-08-26, at the final assertion
@@ -120,17 +120,26 @@ Worth catching properly: shared `NSApp.mainMenu` / key-window state across
 test classes is the usual cause of this shape, and an intermittent test is one
 nobody trusts and everybody re-runs.
 
-A **second** intermittent full-suite failure followed on the same day. Its
-identity was lost — the run was piped through a filter that kept only the
-verdict line — and the immediate rerun passed 1391 tests with zero failures.
-So: two intermittent failures in one day, one of them identified, neither
-reproducible on demand.
+A **second** followed the same day, its identity lost to a filter that kept
+only the verdict line. A **third** the day after:
+`PaneApprovalButtonClickTests.testClickingApproveSendsEnter`, asserting that a
+click on Approve writes `\r` to the session — it wrote nothing. It too passes
+in isolation.
 
-Lesson already applied: keep the full log when running the suite, or the next
-one is unidentifiable too.
+Three data points, and they have a shape: every one is a test that
+**synthesises an AppKit event** — a key equivalent, a click — and every one
+passes alone and fails only in a full run. The common dependency is a window
+that has actually become key, which under `xcodebuild test` is timing
+dependent and shared across test classes. That is a hypothesis with a test:
+if a failing case is preceded by another class leaving a window key, ordering
+is the cause.
 
-**Done when:** either the shared state is isolated per test, or the flake is
-reproduced often enough to name its real cause.
+Lesson already applied: keep the full log when running the suite. It is what
+turned the third failure from "something broke" into a named test with an
+assertion, and what makes this entry a diagnosis rather than a shrug.
+
+**Done when:** either event-synthesising tests stop depending on ambient
+key-window state, or the ordering hypothesis above is confirmed and fixed.
 
 ## 6. Browser-PKCE login
 

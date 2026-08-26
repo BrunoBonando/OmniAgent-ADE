@@ -399,13 +399,145 @@ enum MachineStats {
 /// the big number over a small caption. Except there the colour names the
 /// column and here it *is* the reading — green while comfortable, amber past
 /// 70%, red past 90%.
+/// A half-circle dial with a needle: the machine's own readouts, which are a
+/// live signal rather than a quota.
+///
+/// The needle *travels* to a new sample instead of jumping to it. That is the
+/// point of a dial over a bar here — these numbers are resampled every two
+/// seconds, and a needle sweeping to 60% reads as a machine getting busier,
+/// where a bar that redraws at a new length each tick just flickers.
+final class SidebarDialGaugeView: NSView {
+    /// How long the needle takes to travel. Comfortably longer than the 2s
+    /// sample interval would allow to *queue up*, and comfortably shorter than
+    /// it — so each sample lands and settles before the next arrives.
+    static let sweepDuration: TimeInterval = 0.45
+
+    private static let lineWidth: CGFloat = 4
+    private static let hubRadius: CGFloat = 3
+
+    private let track = CAShapeLayer()
+    private let progress = CAShapeLayer()
+    private let needle = CAShapeLayer()
+    private let hub = CAShapeLayer()
+
+    private(set) var fraction: Double?
+
+    /// What the needle is pointing at, in turns of the dial: 0 hard left, 1
+    /// hard right. A test can read this without measuring a rotation matrix.
+    var needleFraction: Double { fraction ?? 0 }
+    var progressColor: NSColor? {
+        progress.strokeColor.map { NSColor(cgColor: $0) ?? .clear }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        for arc in [track, progress] {
+            arc.fillColor = nil
+            arc.lineWidth = Self.lineWidth
+            arc.lineCap = .round
+            layer?.addSublayer(arc)
+        }
+        track.strokeColor = NSColor(white: 1, alpha: 0.10).cgColor
+        progress.strokeColor = ShellPalette.green.cgColor
+        progress.strokeEnd = 0
+        needle.strokeColor = ShellPalette.ink.cgColor
+        needle.lineWidth = 2
+        needle.lineCap = .round
+        hub.fillColor = ShellPalette.ink.cgColor
+        for part in [needle, hub] { layer?.addSublayer(part) }
+        setAccessibilityElement(true)
+        setAccessibilityRole(.progressIndicator)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// Tall enough for the arc and its stroke, given the width it gets. The
+    /// half below the diameter is empty by definition, so the dial claims
+    /// none of it and the number sits there instead.
+    static func height(forWidth width: CGFloat) -> CGFloat {
+        radius(forWidth: width) + lineWidth / 2 + hubRadius
+    }
+
+    private static func radius(forWidth width: CGFloat) -> CGFloat {
+        max((width - lineWidth) / 2, 1)
+    }
+
+    func apply(_ value: Double?, animated: Bool = true) {
+        fraction = value.map { min(max($0, 0), 1) }
+        // The same ramp as everything else in both cards.
+        progress.strokeColor = SidebarPercentBarView.colour(for: fraction).cgColor
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let duration = animated && !reduceMotion ? Self.sweepDuration : 0
+        CATransaction.begin()
+        CATransaction.setDisableActions(duration == 0)
+        CATransaction.setAnimationDuration(duration)
+        CATransaction.setAnimationTimingFunction(
+            CAMediaTimingFunction(name: .easeInEaseOut)
+        )
+        progress.strokeEnd = CGFloat(fraction ?? 0)
+        // Drawn pointing straight up, so half a turn either way covers the
+        // dial: hard left at 0, hard right at 1.
+        needle.transform = CATransform3DMakeRotation(
+            (CGFloat(fraction ?? 0) - 0.5) * .pi, 0, 0, 1
+        )
+        CATransaction.commit()
+        setAccessibilityValue(fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "no reading")
+    }
+
+    override func layout() {
+        super.layout()
+        let radius = min(
+            Self.radius(forWidth: bounds.width),
+            bounds.height - Self.lineWidth / 2 - Self.hubRadius
+        )
+        // The hub sits on the diameter, which is this view's own bottom edge
+        // less the room the hub itself needs.
+        let centre = NSPoint(x: bounds.midX, y: Self.hubRadius)
+        let arc = CGMutablePath()
+        arc.addArc(
+            center: centre, radius: radius,
+            startAngle: .pi, endAngle: 0, clockwise: true
+        )
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for layer in [track, progress] {
+            layer.frame = bounds
+            layer.path = arc
+        }
+        let stem = CGMutablePath()
+        stem.move(to: NSPoint(x: 0, y: 0))
+        stem.addLine(to: NSPoint(x: 0, y: radius - Self.lineWidth - 2))
+        needle.path = stem
+        // Positioned rather than framed, so the rotation in `apply` turns the
+        // needle about the hub instead of about a corner.
+        needle.bounds = NSRect(x: 0, y: 0, width: 0, height: radius)
+        needle.position = centre
+        needle.anchorPoint = NSPoint(x: 0.5, y: 0)
+        hub.path = CGPath(
+            ellipseIn: NSRect(
+                x: centre.x - Self.hubRadius, y: centre.y - Self.hubRadius,
+                width: Self.hubRadius * 2, height: Self.hubRadius * 2
+            ),
+            transform: nil
+        )
+        CATransaction.commit()
+    }
+}
+
 final class SidebarStatGaugeView: NSView {
     private let valueField: NSTextField
     private let captionField: NSTextField
-    /// The same bar the Claude card uses, for the same reason it exists there:
-    /// a number alone makes you read it, a bar lets you glance at it. Sharing
-    /// the type is what keeps the two cards one design rather than two.
-    let bar = SidebarPercentBarView()
+    /// A dial rather than the Claude card's bar.
+    ///
+    /// These three are a live signal resampled every two seconds, not a quota
+    /// filling up once: a needle that travels reads as a machine getting
+    /// busier, where a bar redrawn at a new length each tick only flickers.
+    /// The colour ramp is still shared, so the two cards disagree about the
+    /// shape and about nothing else.
+    let dial = SidebarDialGaugeView()
     private(set) var fraction: Double?
 
     /// What the gauge currently reads — a fact a test can assert without
@@ -431,15 +563,13 @@ final class SidebarStatGaugeView: NSView {
         valueField.alignment = .center
         captionField.alignment = .center
 
-        // Caption first: the label names the thing, then the number answers
-        // it. The Claude card above stacks its columns the same way.
-        let stack = NSStackView(views: [captionField, valueField, bar])
+        // Caption, dial, then the number under the arc it belongs to — the
+        // arrangement of the reference gauges, and the label still names the
+        // thing before the number answers it.
+        let stack = NSStackView(views: [captionField, dial, valueField])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 1
-        // The Claude card's own gap between a number and its bar, so the two
-        // cards breathe identically.
-        stack.setCustomSpacing(5, after: valueField)
+        stack.spacing = 2
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -450,7 +580,8 @@ final class SidebarStatGaugeView: NSView {
             // the width of the word "MEM".
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            bar.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            dial.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            dial.heightAnchor.constraint(equalToConstant: Self.dialHeight),
         ])
         setAccessibilityElement(true)
         setAccessibilityRole(.progressIndicator)
@@ -460,9 +591,15 @@ final class SidebarStatGaugeView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+    /// How much of the column the arc gets. Authored rather than derived from
+    /// the width, because the width is only known after layout and a dial that
+    /// resizes the card as the sidebar is dragged is worse than a slightly
+    /// small arc.
+    static let dialHeight: CGFloat = 26
+
     func apply(_ value: Double?) {
         fraction = value.map { min(max($0, 0), 1) }
-        bar.apply(fraction)
+        dial.apply(fraction)
         valueField.stringValue = fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "—"
         // Through the bar's own ramp rather than a second copy of the same
         // three thresholds, so the number and the bar cannot drift apart.
@@ -476,7 +613,7 @@ final class SidebarStatGaugeView: NSView {
 /// columns split by hairlines — resampled every two seconds while the sidebar
 /// is on screen.
 final class SidebarSystemStatsView: NSView {
-    static let height: CGFloat = 62
+    static let height: CGFloat = 76
 
     let cpuGauge = SidebarStatGaugeView(name: "CPU")
     let memoryGauge = SidebarStatGaugeView(name: "MEM")

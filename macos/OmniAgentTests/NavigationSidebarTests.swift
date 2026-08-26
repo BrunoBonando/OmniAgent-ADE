@@ -720,6 +720,105 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertTrue(tip.contains("4×"), "and how far ahead of the clock the spending is")
     }
 
+    // MARK: - Turning the card over
+
+    /// A click anywhere on the bubble shows the countdowns; the bars go.
+    func testAClickAnywhereTurnsTheCardOver() {
+        let card = makeLimitsCard()
+        card.apply(
+            ClaudeUsageLimits.parse(
+                "Current session: 12% used · resets Aug 25 at 3:00pm\n"
+                + "Current week (all models): 41% used · resets Aug 28 at 11am"
+            ),
+            now: noon
+        )
+        XCTAssertFalse(card.isShowingTime, "bars first")
+
+        card.setShowingTime(true, animated: false)
+
+        XCTAssertTrue(card.isShowingTime)
+        XCTAssertEqual(card.sessionColumn.timeLabel.stringValue, "3h 0m left")
+        XCTAssertEqual(card.weekColumn.timeLabel.stringValue, "2d 23h left")
+        XCTAssertEqual(card.sessionColumn.timeLabel.alphaValue, 1, accuracy: 0.001)
+        XCTAssertEqual(card.weekColumn.timeLabel.alphaValue, 1, accuracy: 0.001)
+    }
+
+    /// The card is one thing, so both columns turn together — a half-turned
+    /// card showing a bar beside a countdown would read as broken.
+    func testBothColumnsTurnTogether() {
+        let card = makeLimitsCard()
+        card.setShowingTime(true, animated: false)
+        XCTAssertTrue(card.sessionColumn.isShowingTime)
+        XCTAssertTrue(card.weekColumn.isShowingTime)
+        card.setShowingTime(false, animated: false)
+        XCTAssertFalse(card.sessionColumn.isShowingTime)
+        XCTAssertFalse(card.weekColumn.isShowingTime)
+    }
+
+    /// Clicking again turns it straight back rather than waiting out the
+    /// seven seconds.
+    func testClickingAgainTurnsItBack() {
+        let card = makeLimitsCard()
+        card.setShowingTime(true, animated: false)
+        card.setShowingTime(false, animated: false)
+        XCTAssertFalse(card.isShowingTime)
+        XCTAssertEqual(card.sessionColumn.timeLabel.alphaValue, 0, accuracy: 0.001)
+    }
+
+    /// It turns back by itself, so a stray click does not leave the card
+    /// face-up for the rest of the session.
+    func testItTurnsBackOnItsOwn() {
+        XCTAssertEqual(SidebarClaudeLimitsView.revealDuration, 7)
+        let card = makeLimitsCard()
+        card.setShowingTime(true, animated: false)
+
+        let turnedBack = expectation(description: "the card turned back")
+        // Just past the reveal, rather than a fixed sleep: the timer is real,
+        // and polling for the state it sets is what actually proves it fired.
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { timer in
+            guard !card.isShowingTime else { return }
+            timer.invalidate()
+            turnedBack.fulfill()
+        }
+        wait(for: [turnedBack], timeout: SidebarClaudeLimitsView.revealDuration + 3)
+        // The state, not the alpha: the turn back is animated, so at the
+        // instant the flag flips the fade still has 0.14s to run. The alpha
+        // end-state is `testClickingAgainTurnsItBack`'s job, which turns the
+        // card unanimated precisely so it can assert it.
+        XCTAssertFalse(card.sessionColumn.isShowingTime)
+        XCTAssertFalse(card.weekColumn.isShowingTime)
+    }
+
+    /// Turning the card over must not move anything: the words sit in the
+    /// bars' own band rather than in a row of their own.
+    func testTurningItOverCostsNoHeight() {
+        let card = makeLimitsCard()
+        card.apply(ClaudeUsageLimits.parse("Current session: 12% used · resets Aug 25 at 3:00pm"), now: noon)
+        card.layoutSubtreeIfNeeded()
+        let barsUp = card.sessionColumn.frame
+
+        card.setShowingTime(true, animated: false)
+        card.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(card.sessionColumn.frame, barsUp, "nothing moved")
+        XCTAssertEqual(card.frame.height, SidebarClaudeLimitsView.height)
+    }
+
+    /// The face shows the time; the hover still carries the pace, which does
+    /// not fit in a column this narrow at a legible size.
+    func testTheFaceIsShortAndTheHoverIsFull() throws {
+        let card = makeLimitsCard()
+        let now = try XCTUnwrap(
+            Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 11))
+        )
+        card.apply(
+            ClaudeUsageLimits.parse("Current session: 80% used · resets Aug 26 at 3:00pm"),
+            now: now
+        )
+        XCTAssertEqual(card.sessionColumn.timeLabel.stringValue, "4h 0m left", "no pace on the face")
+        XCTAssertTrue(try XCTUnwrap(card.sessionColumn.toolTip).contains("4×"), "pace on the hover")
+    }
+
     // MARK: - Reading order
 
     /// The label names the thing, then the number answers it. Reading `12%`
@@ -754,9 +853,9 @@ final class NavigationSidebarTests: XCTestCase {
 
     // MARK: - Machine gauges
 
-    /// The gauges wear the same bar as the Claude card above them — one bar,
-    /// one ramp, one reading of what "full" means.
-    func testTheGaugesCarryABarToo() {
+    /// The gauges are dials, and they wear the Claude card's ramp — the two
+    /// cards disagree about the shape and about nothing else.
+    func testTheGaugesCarryADial() {
         let card = SidebarSystemStatsView()
         card.frame = NSRect(
             x: 0, y: 0, width: ShellMetrics.sidebarWidth - 16, height: SidebarSystemStatsView.height
@@ -764,28 +863,53 @@ final class NavigationSidebarTests: XCTestCase {
         card.apply(cpu: 0.34, memory: 0.78, gpu: 0.95)
         card.layoutSubtreeIfNeeded()
 
-        XCTAssertEqual(card.cpuGauge.bar.fillFraction, 0.34, accuracy: 0.001)
-        assertHue(card.cpuGauge.bar.fillColor, ShellPalette.green)
-        assertHue(card.memoryGauge.bar.fillColor, ShellPalette.amber)
-        assertHue(card.gpuGauge.bar.fillColor, ShellPalette.red)
-        XCTAssertGreaterThan(card.cpuGauge.bar.frame.width, 20, "the bar spans its column")
+        XCTAssertEqual(card.cpuGauge.dial.needleFraction, 0.34, accuracy: 0.001)
+        assertHue(card.cpuGauge.dial.progressColor, ShellPalette.green)
+        assertHue(card.memoryGauge.dial.progressColor, ShellPalette.amber)
+        assertHue(card.gpuGauge.dial.progressColor, ShellPalette.red)
+        XCTAssertGreaterThan(card.cpuGauge.dial.frame.width, 20, "the dial spans its column")
+        XCTAssertGreaterThan(card.cpuGauge.dial.frame.height, 20, "and has room for an arc")
     }
 
-    /// The number and its bar share one ramp, so they cannot drift apart —
+    /// The needle travels rather than jumping — the reason for a dial over a
+    /// bar on numbers that are resampled every two seconds.
+    func testTheNeedleTravelsRatherThanJumping() {
+        XCTAssertGreaterThan(SidebarDialGaugeView.sweepDuration, 0.2, "long enough to read as motion")
+        XCTAssertLessThan(
+            SidebarDialGaugeView.sweepDuration, 2,
+            "and short enough to settle before the next 2s sample"
+        )
+    }
+
+    /// The needle points where the number says, end to end.
+    func testTheNeedleSpansTheDial() {
+        let dial = SidebarDialGaugeView()
+        dial.frame = NSRect(x: 0, y: 0, width: 49, height: SidebarStatGaugeView.dialHeight)
+        dial.apply(0, animated: false)
+        XCTAssertEqual(dial.needleFraction, 0, accuracy: 0.001, "hard left at nothing")
+        dial.apply(1, animated: false)
+        XCTAssertEqual(dial.needleFraction, 1, accuracy: 0.001, "hard right at full")
+        dial.apply(nil, animated: false)
+        XCTAssertEqual(dial.needleFraction, 0, "no reading rests at the left")
+        assertHue(dial.progressColor, ShellPalette.inkTertiary, "and wears no verdict")
+    }
+
+    /// The number and its dial share one ramp, so they cannot drift apart —
     /// the gauge used to carry its own copy of the same three thresholds.
-    func testTheGaugesNumberAndBarAgree() {
+    func testTheGaugesNumberAndDialAgree() {
         let card = SidebarSystemStatsView()
         card.apply(cpu: 0.95, memory: nil, gpu: nil)
         assertHue(card.cpuGauge.readoutColor, ShellPalette.red)
-        XCTAssertEqual(card.cpuGauge.readoutColor, card.cpuGauge.bar.fillColor, "one ramp")
+        XCTAssertEqual(card.cpuGauge.readoutColor, card.cpuGauge.dial.progressColor, "one ramp")
         XCTAssertEqual(card.memoryGauge.readout, "—")
-        XCTAssertNil(card.memoryGauge.bar.fraction, "no sample, empty track")
+        XCTAssertNil(card.memoryGauge.dial.fraction, "no sample, needle at rest")
     }
 
-    /// Adding the bars must not have cost the sidebar any height: they went
-    /// into padding the card already had.
-    func testTheGaugesCardDidNotGrow() {
-        XCTAssertEqual(SidebarSystemStatsView.height, 62)
+    /// A dial costs height a bar did not — an arc is half a circle and a bar
+    /// is a line. This pins what it actually cost, so the next change to this
+    /// card has to be deliberate about the sidebar it is sharing.
+    func testTheDialsHeightCostIsPinned() {
+        XCTAssertEqual(SidebarSystemStatsView.height, 76, "62 with bars, 76 with dials")
         let card = SidebarSystemStatsView()
         card.frame = NSRect(x: 0, y: 0, width: 216, height: SidebarSystemStatsView.height)
         card.apply(cpu: 1, memory: 1, gpu: 1)
@@ -802,15 +926,15 @@ final class NavigationSidebarTests: XCTestCase {
     /// palette colour is the wrong question. This asks the right one: is this
     /// the same colour, ignoring how present it is.
     private func assertHue(
-        _ colour: NSColor?, _ expected: NSColor, line: UInt = #line
+        _ colour: NSColor?, _ expected: NSColor, _ message: String = "", line: UInt = #line
     ) {
         guard
             let actual = colour?.usingColorSpace(.sRGB),
             let want = expected.usingColorSpace(.sRGB)
         else { return XCTFail("not an sRGB colour", line: line) }
-        XCTAssertEqual(actual.redComponent, want.redComponent, accuracy: 0.02, line: line)
-        XCTAssertEqual(actual.greenComponent, want.greenComponent, accuracy: 0.02, line: line)
-        XCTAssertEqual(actual.blueComponent, want.blueComponent, accuracy: 0.02, line: line)
+        XCTAssertEqual(actual.redComponent, want.redComponent, accuracy: 0.02, message, line: line)
+        XCTAssertEqual(actual.greenComponent, want.greenComponent, accuracy: 0.02, message, line: line)
+        XCTAssertEqual(actual.blueComponent, want.blueComponent, accuracy: 0.02, message, line: line)
     }
 
     /// Whether `colour` sits between two others on every channel — what "part
