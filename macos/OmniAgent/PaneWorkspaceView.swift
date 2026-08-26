@@ -617,7 +617,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         updateVisibility()
         updateLayout()
         focusPane(descriptor.sessionID)
-        onPanesChanged?()
+        notifyPanesChanged()
         return true
     }
 
@@ -1355,7 +1355,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
                 onFocusedPaneChanged?(nil)
             }
         }
-        onPanesChanged?()
+        notifyPanesChanged()
         return true
     }
 
@@ -1392,7 +1392,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         self.grid = grid
         updateLayout()
         restoreComposerFocusAfterMove()
-        onPanesChanged?()
+        notifyPanesChanged()
         return true
     }
 
@@ -1506,7 +1506,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // pane's descriptor without a layout pass, and the layout pass is the
         // other place the subtitle is re-derived.
         refreshFocusSubtitles()
-        onPanesChanged?()
+        notifyPanesChanged()
     }
 
     // MARK: - Focus
@@ -2328,15 +2328,32 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 
     /// Toggles every eligible pane's shortcut hint at once — edge-triggered,
     /// so a chord like ⌘⇧A held down doesn't restart the fade on every
-    /// `.flagsChanged` while ⌘ itself stays down. "Eligible" is `paneIDs`'
-    /// first ten: exactly the panes `AppDelegate`'s Panes menu gave a ⌘ key
-    /// equivalent (⌘1…⌘0) — see its own comment for why 11 and 12 have none.
+    /// `.flagsChanged` while ⌘ itself stays down.
     private func setCommandHintShown(_ shown: Bool) {
         guard isCommandHintShown != shown else { return }
         isCommandHintShown = shown
+        applyCommandHints(shown: shown)
+    }
+
+    /// Matches every eligible pane's hint to `shown`, right now — unlike
+    /// `setCommandHintShown`, unconditionally, not just on a state change.
+    /// "Eligible" is `paneIDs`' first ten: exactly the panes `AppDelegate`'s
+    /// Panes menu gave a ⌘ key equivalent (⌘1…⌘0) — see its own comment for
+    /// why 11 and 12 have none.
+    private func applyCommandHints(shown: Bool) {
         for (index, id) in paneIDs.enumerated() {
             containers[id]?.setShortcutHint(key: Self.shortcutKey(atFillOrderIndex: index), shown: shown)
         }
+    }
+
+    /// Every touch point that can add, remove, or reorder panes calls this
+    /// instead of `onPanesChanged` directly: `setCommandHintShown` only ever
+    /// reacts to `.flagsChanged`, so a pane opened by ⌘T *while ⌘ is already
+    /// held down* — no fresh flags event fires, ⌘ never went up and back down
+    /// — would otherwise open with no hint of its own until the next press.
+    private func notifyPanesChanged() {
+        if isCommandHintShown { applyCommandHints(shown: true) }
+        onPanesChanged?()
     }
 
     /// "1"…"9"/"0" for the ten panes ⌘ can reach, else `nil` — the one place
