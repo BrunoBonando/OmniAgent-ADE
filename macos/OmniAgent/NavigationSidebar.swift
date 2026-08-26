@@ -407,24 +407,12 @@ enum MachineStats {
 /// seconds, and a needle sweeping to 60% reads as a machine getting busier,
 /// where a bar that redraws at a new length each tick just flickers.
 final class SidebarDialGaugeView: NSView {
-    /// How long the needle takes to travel, overshoot and settle. Comfortably
-    /// shorter than the 2s sample interval, so each reading lands and comes to
-    /// rest before the next one arrives.
-    static let sweepDuration: TimeInterval = 0.5
-
-    /// The needle leaves fast, runs a little past the reading, and eases back
-    /// onto it — the way a real one on a spring would.
-    ///
-    /// `easeOutBack`: the second control point sits above 1, which is what
-    /// carries the curve past its destination before it returns. The first
-    /// control point's steep slope (1.56 over 0.34) is the fast departure;
-    /// everything after it is deceleration.
-    ///
-    /// Overshoot is *deliberately* possible past the ends of the dial. Nothing
-    /// breaks: `strokeEnd` clamps at 1, and a needle that swings a couple of
-    /// degrees beyond hard-right for a moment is the physical behaviour being
-    /// imitated, not a glitch.
-    static let sweepCurve = CAMediaTimingFunction(controlPoints: 0.34, 1.56, 0.64, 1)
+    /// The cards' shared motion. A needle springs in both directions, unlike
+    /// a bar: overshoot past either end of a dial costs nothing — `strokeEnd`
+    /// clamps at 1, and a needle swinging a couple of degrees beyond
+    /// hard-right for a moment is the behaviour being imitated.
+    static var sweepDuration: TimeInterval { SidebarMotion.duration }
+    static var sweepCurve: CAMediaTimingFunction { SidebarMotion.overshoot }
 
     private static let lineWidth: CGFloat = 4
     private static let hubRadius: CGFloat = 3
@@ -435,6 +423,14 @@ final class SidebarDialGaugeView: NSView {
     private let hub = CAShapeLayer()
 
     private(set) var fraction: Double?
+
+    static let strokeKey = "om-dial-stroke"
+    static let needleKey = "om-dial-needle"
+
+    /// The motion currently attached to the needle, if any.
+    var needleAnimation: CABasicAnimation? {
+        needle.animation(forKey: Self.needleKey) as? CABasicAnimation
+    }
 
     /// What the needle is pointing at, in turns of the dial: 0 hard left, 1
     /// hard right.
@@ -520,17 +516,22 @@ final class SidebarDialGaugeView: NSView {
         fraction = value.map { min(max($0, 0), 1) }
         // The same ramp as everything else in both cards.
         progress.strokeColor = SidebarPercentBarView.colour(for: fraction).cgColor
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let duration = animated && !reduceMotion ? Self.sweepDuration : 0
-        CATransaction.begin()
-        CATransaction.setDisableActions(duration == 0)
-        CATransaction.setAnimationDuration(duration)
-        CATransaction.setAnimationTimingFunction(Self.sweepCurve)
-        progress.strokeEnd = CGFloat(fraction ?? 0)
-        needle.transform = CATransform3DMakeRotation(
-            Self.rotation(for: fraction ?? 0), 0, 0, 1
+        // Explicit, for the same reason the bars are: an implicit animation is
+        // an action, and actions are suppressed wherever AppKit has disabled
+        // them. Filed under known keys so a test can see the motion was set up
+        // without a presentation layer that advances.
+        let target = CGFloat(fraction ?? 0)
+        SidebarMotion.move(
+            progress, "strokeEnd", to: target,
+            from: progress.presentation()?.strokeEnd ?? progress.strokeEnd,
+            animated: animated, rising: true, bothWays: true, key: Self.strokeKey
         )
-        CATransaction.commit()
+        SidebarMotion.move(
+            needle, "transform",
+            to: NSValue(caTransform3D: CATransform3DMakeRotation(Self.rotation(for: target), 0, 0, 1)),
+            from: (needle.presentation() ?? needle)?.value(forKeyPath: "transform"),
+            animated: animated, rising: true, bothWays: true, key: Self.needleKey
+        )
         setAccessibilityValue(fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "no reading")
     }
 

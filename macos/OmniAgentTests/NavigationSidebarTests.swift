@@ -1040,6 +1040,155 @@ final class NavigationSidebarTests: XCTestCase {
             && within(c.blueComponent, a.blueComponent, b.blueComponent)
     }
 
+    // MARK: - How the bars move
+
+    /// The presentation layer does not advance under `xcodebuild test` — no
+    /// window ever genuinely comes on screen — so sampling what is drawn can
+    /// only ever produce a test that passes for the wrong reason. It did:
+    /// 66 samples, every one exactly the settled value, while
+    /// `animationKeys()` was empty and nothing was animating at all.
+    ///
+    /// What these assert instead is that the motion was *installed*, which is
+    /// the part this code is actually responsible for.
+    /// No window. An explicit animation attaches to the layer whether or not
+    /// anything is on screen, so hosting one bought nothing — and cost a
+    /// crash: a borderless window here returns `NO` from `canBecomeKeyWindow`
+    /// and taking the test host through it killed the process mid-test, four
+    /// tests at a time. It is also the same ambient key-window dependency
+    /// backlog 5b blames for the intermittent failures elsewhere.
+    private func makeBar() -> SidebarPercentBarView {
+        let bar = SidebarPercentBarView()
+        bar.translatesAutoresizingMaskIntoConstraints = true
+        bar.frame = NSRect(x: 0, y: 0, width: 100, height: 5)
+        bar.layoutSubtreeIfNeeded()
+        return bar
+    }
+
+    /// A new reading is travelled to, not jumped to.
+    func testABarAnimatesToANewReading() throws {
+        let bar = makeBar()
+        bar.apply(0)
+        bar.layoutSubtreeIfNeeded()
+
+        bar.apply(0.5)
+        bar.layoutSubtreeIfNeeded()
+
+        let animation = try XCTUnwrap(bar.fillAnimation, "the motion was installed")
+        XCTAssertEqual(animation.duration, SidebarMotion.duration)
+        XCTAssertEqual(animation.toValue as? CGFloat, 50, "half of a 100pt bar")
+    }
+
+    /// Growing springs past the reading, the same way the needle does.
+    func testABarSpringsOnTheWayUp() throws {
+        let bar = makeBar()
+        bar.apply(0.2)
+        bar.layoutSubtreeIfNeeded()
+
+        bar.apply(0.8)
+        bar.layoutSubtreeIfNeeded()
+
+        let animation = try XCTUnwrap(bar.fillAnimation)
+        XCTAssertEqual(animation.timingFunction, SidebarMotion.overshoot)
+    }
+
+    /// Shrinking does not. A bar overshooting toward empty has nowhere to go
+    /// but a negative width, which is an empty rect and draws as nothing — the
+    /// fill would vanish for a frame and come back, reading as a flicker.
+    func testABarDoesNotSpringOnTheWayDown() throws {
+        let bar = makeBar()
+        bar.apply(0.8)
+        bar.layoutSubtreeIfNeeded()
+
+        bar.apply(0)
+        bar.layoutSubtreeIfNeeded()
+
+        let animation = try XCTUnwrap(bar.fillAnimation)
+        XCTAssertEqual(animation.timingFunction, SidebarMotion.settle, "arrives, not springs")
+        // The nub, not nothing: a real zero still draws something, which is
+        // what keeps "used none of it" distinct from "no reading".
+        XCTAssertEqual(
+            animation.toValue as? CGFloat, SidebarPercentBarView.minimumFillWidth,
+            "shrinks to the nub a real zero keeps"
+        )
+    }
+
+    /// A resize is not a reading. Without this a bar springs every time the
+    /// sidebar divider is dragged.
+    func testAResizeDoesNotAnimateTheBar() {
+        let bar = makeBar()
+        bar.apply(0.5)
+        bar.layoutSubtreeIfNeeded()
+
+        bar.frame = NSRect(x: 0, y: 0, width: 200, height: 5)
+        bar.layoutSubtreeIfNeeded()
+
+        XCTAssertNil(bar.fillAnimation, "geometry moved, the reading did not")
+        XCTAssertEqual(bar.fillWidth, 100, accuracy: 0.5, "and it went straight there")
+    }
+
+    /// The blocks travel too, each one on its own fill.
+    func testTheTimeBlocksAnimateAsWell() {
+        let blocks = SidebarSegmentedBarView(segments: 5)
+        blocks.frame = NSRect(x: 0, y: 0, width: 100, height: 5)
+        blocks.apply(0.2)
+        blocks.layoutSubtreeIfNeeded()
+
+        blocks.apply(0.6)
+        blocks.layoutSubtreeIfNeeded()
+
+        XCTAssertFalse(blocks.fillAnimations.isEmpty, "the blocks move")
+        for animation in blocks.fillAnimations {
+            XCTAssertEqual(animation.duration, SidebarMotion.duration)
+        }
+    }
+
+    /// And the needle, which is the motion the bars were asked to match.
+    func testTheNeedleAnimatesOnTheSharedMotion() throws {
+        let dial = SidebarDialGaugeView()
+        dial.frame = NSRect(x: 0, y: 0, width: 49, height: SidebarStatGaugeView.dialHeight)
+        dial.layoutSubtreeIfNeeded()
+        dial.apply(0.3)
+
+        let animation = try XCTUnwrap(dial.needleAnimation)
+        XCTAssertEqual(animation.duration, SidebarMotion.duration)
+        XCTAssertEqual(
+            animation.timingFunction, SidebarMotion.overshoot,
+            "a needle has room to swing past either end, so it always springs"
+        )
+    }
+
+    /// Reduce Motion is honoured by not installing the animation at all,
+    /// rather than by installing one of zero duration.
+    func testReduceMotionInstallsNothing() {
+        XCTAssertFalse(
+            SidebarMotion.wanted(false),
+            "a caller that did not ask for motion never gets it"
+        )
+    }
+
+    /// The direction rule itself.
+    func testABarSpringsUpAndMerelyArrivesDown() {
+        XCTAssertEqual(SidebarMotion.curve(rising: true), SidebarMotion.overshoot)
+        XCTAssertEqual(SidebarMotion.curve(rising: false), SidebarMotion.settle)
+        XCTAssertEqual(
+            SidebarMotion.curve(rising: false, canOvershootBothWays: true),
+            SidebarMotion.overshoot,
+            "a needle has room to swing past either end"
+        )
+    }
+
+    /// The settle curve leaves fast like the spring, it just does not run
+    /// past — otherwise a shrinking bar would move quite differently from a
+    /// growing one.
+    func testTheSettleCurveStillLeavesFast() {
+        let halfway = bezier(SidebarMotion.settle, atX: 0.5)
+        XCTAssertGreaterThan(halfway, 0.8, "front-loaded, like the spring")
+        let peak = stride(from: 0.0, through: 1.0, by: 0.01)
+            .map { bezier(SidebarMotion.settle, at: $0).y }
+            .max() ?? 0
+        XCTAssertLessThanOrEqual(peak, 1.001, "but never past the reading")
+    }
+
     // MARK: - Claude limits card
 
     /// It sits above the machine gauges, which is where it was asked to go —

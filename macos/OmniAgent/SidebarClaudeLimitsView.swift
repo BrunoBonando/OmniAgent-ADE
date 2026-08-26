@@ -1,5 +1,78 @@
 import AppKit
 
+/// The one definition of how these two cards move.
+///
+/// Shared so a needle and a bar arriving at the same reading arrive the same
+/// way — the cards already share a colour ramp, and motion is the other half
+/// of reading as one design.
+enum SidebarMotion {
+    /// Long enough to read as travel, comfortably shorter than the two-second
+    /// sample interval so each reading settles before the next arrives.
+    static let duration: TimeInterval = 0.5
+
+    /// Leaves fast, runs a little past the reading, eases back onto it. The
+    /// second control point above 1 is what carries it past; the first one's
+    /// slope, 1.56 over 0.34, is the fast departure.
+    static let overshoot = CAMediaTimingFunction(controlPoints: 0.34, 1.56, 0.64, 1)
+
+    /// The same fast departure and deceleration with the overshoot taken out.
+    static let settle = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
+
+    /// Which of the two a change should use.
+    ///
+    /// A needle has room to swing past either end of its dial, so it always
+    /// springs. A bar does not: overshooting a value on the way *down* means a
+    /// negative width, which is an empty rectangle — the fill vanishes for a
+    /// frame and comes back, which reads as a flicker rather than as physics.
+    /// So a bar springs on the way up and merely arrives on the way down.
+    static func curve(rising: Bool, canOvershootBothWays: Bool = false) -> CAMediaTimingFunction {
+        rising || canOvershootBothWays ? overshoot : settle
+    }
+
+    /// Whether motion is wanted at all: the caller's intent, overruled by
+    /// Reduce Motion the way every animation in this app is.
+    static func wanted(_ animated: Bool) -> Bool {
+        animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// Moves `layer`'s `keyPath` to `value`, travelling rather than jumping.
+    ///
+    /// **Explicit**, not a value set inside a transaction, and that is the
+    /// whole point. Implicit animations are *actions*, and AppKit runs a
+    /// layer-backed view's `layout()` inside a transaction with actions
+    /// disabled — so a sublayer frame set there animates silently nothing.
+    /// These bars did exactly that: correct-looking code, a transaction
+    /// carrying the right curve, and `animationKeys()` empty every time. An
+    /// explicit animation is not an action and is not suppressed.
+    ///
+    /// The model value is set first with actions off, so the layer's own state
+    /// is already the destination and the animation is only how it is seen to
+    /// arrive. `from` comes from the presentation, so a change arriving
+    /// mid-flight continues from where it visibly was instead of snapping.
+    static func move(
+        _ layer: CALayer,
+        _ keyPath: String,
+        to value: Any,
+        from previous: Any?,
+        animated: Bool,
+        rising: Bool,
+        bothWays: Bool = false,
+        key: String
+    ) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.setValue(value, forKeyPath: keyPath)
+        CATransaction.commit()
+        guard wanted(animated) else { return layer.removeAnimation(forKey: key) }
+        let animation = CABasicAnimation(keyPath: keyPath)
+        animation.fromValue = previous
+        animation.toValue = value
+        animation.duration = duration
+        animation.timingFunction = curve(rising: rising, canOvershootBothWays: bothWays)
+        layer.add(animation, forKey: key)
+    }
+}
+
 /// A percentage as a bar: a dim track with a fill across it.
 ///
 /// Shared by the Claude limits card and the machine gauges below it, which is
@@ -14,6 +87,10 @@ final class SidebarPercentBarView: NSView {
 
     private let track = CALayer()
     private let fill = CALayer()
+    /// Whether the next layout pass is a value change (animate) or a geometry
+    /// change (do not), and which way it is going.
+    private var pendingAnimation = false
+    private var pendingRise = true
 
     /// 0…1, or nil for "no reading yet" — an empty track rather than a zero
     /// fill, because "you have used none of it" and "we do not know" must not
@@ -26,6 +103,22 @@ final class SidebarPercentBarView: NSView {
     var fillColor: NSColor? { fill.backgroundColor.map { NSColor(cgColor: $0) ?? .clear } }
     /// The fill's drawn width — the thing `minimumFillWidth` is about.
     var fillWidth: CGFloat { fill.frame.width }
+
+    /// The width the fill is being drawn at *right now*, mid-animation.
+    ///
+    /// `fillWidth` is the model value and jumps to its destination the moment
+    /// the animation is set up; this is the presentation, which is the only
+    /// place an overshoot — or an overshoot through zero — is observable.
+    var presentedFillWidth: CGFloat? { fill.presentation()?.bounds.width }
+
+    /// Which animations are attached to the fill right now, and what curve
+    /// they carry. The presentation layer does not advance under
+    /// `xcodebuild test` — no window ever really comes on screen — so this is
+    /// how a test asks whether the motion was *set up*, which is the part this
+    /// code is responsible for.
+    var fillAnimation: CABasicAnimation? {
+        fill.animation(forKey: Self.widthKey) as? CABasicAnimation
+    }
 
     /// A real reading of 0% still draws a nub this wide.
     ///
@@ -41,6 +134,10 @@ final class SidebarPercentBarView: NSView {
         track.backgroundColor = NSColor(white: 1, alpha: 0.12).cgColor
         track.cornerRadius = Self.height / 2
         fill.cornerRadius = Self.height / 2
+        // Pinned by its left edge, so growing is a change to one property —
+        // `bounds.size.width` — rather than a frame change that has to move
+        // `position` in step with it.
+        fill.anchorPoint = NSPoint(x: 0, y: 0.5)
         fill.backgroundColor = ShellPalette.green.cgColor
         layer?.addSublayer(track)
         layer?.addSublayer(fill)
@@ -121,7 +218,13 @@ final class SidebarPercentBarView: NSView {
     }
 
     func apply(_ value: Double?) {
+        let previous = fraction ?? 0
         fraction = value.map { min(max($0, 0), 1) }
+        // Only a change in the *value* animates. A resize comes through
+        // `layout` too, and a bar that springs whenever the sidebar is dragged
+        // is a toy.
+        pendingRise = (fraction ?? 0) >= previous
+        pendingAnimation = (fraction ?? 0) != previous
         fill.backgroundColor = Self.colour(for: fraction).cgColor
         setAccessibilityValue(fraction.map { "\(Int(($0 * 100).rounded()))% used" } ?? "no reading")
         needsLayout = true
@@ -129,19 +232,36 @@ final class SidebarPercentBarView: NSView {
 
     override func layout() {
         super.layout()
-        // No implicit animation: this is re-laid-out on every sidebar resize
-        // and a quarter-second fill slide on each one reads as a glitch.
+        let animate = pendingAnimation
+        let rising = pendingRise
+        pendingAnimation = false
+        // The track is geometry and never animates; only the fill carries the
+        // value, so only the fill springs.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         track.frame = bounds
-        if let fraction {
-            let width = max(bounds.width * fraction, Self.minimumFillWidth)
-            fill.frame = NSRect(x: 0, y: 0, width: min(width, bounds.width), height: bounds.height)
-        } else {
-            fill.frame = .zero
-        }
         CATransaction.commit()
+
+        let width = fraction.map {
+            min(max(bounds.width * $0, Self.minimumFillWidth), bounds.width)
+        } ?? 0
+        let previous = fill.presentation()?.bounds.width ?? fill.bounds.width
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fill.position = NSPoint(x: 0, y: bounds.midY)
+        fill.bounds = NSRect(x: 0, y: 0, width: fill.bounds.width, height: bounds.height)
+        CATransaction.commit()
+        SidebarMotion.move(
+            fill, "bounds.size.width", to: width, from: previous,
+            animated: animate, rising: rising, key: Self.widthKey
+        )
     }
+
+    /// The key the fill's width animation is filed under, so a test can find
+    /// it. The presentation layer does not advance under `xcodebuild test` —
+    /// no window ever really comes on screen — so whether the motion was
+    /// *installed* is the part this code can be held to.
+    static let widthKey = "om-fill-width"
 }
 
 /// A window's progress, cut into the units it is actually made of: five
@@ -164,6 +284,10 @@ final class SidebarSegmentedBarView: NSView {
     let segments: Int
     private var trackLayers: [CALayer] = []
     private var fillLayers: [CALayer] = []
+    /// Whether the next layout pass is a value change (animate) or a geometry
+    /// change (do not), and which way it is going.
+    private var pendingAnimation = false
+    private var pendingRise = true
 
     /// How far through the window we are, 0…1. Nil when there is nothing to
     /// derive it from — every block empty rather than a guess.
@@ -186,6 +310,7 @@ final class SidebarSegmentedBarView: NSView {
             track.backgroundColor = NSColor(white: 1, alpha: 0.10).cgColor
             track.cornerRadius = 1.5
             let fill = CALayer()
+            fill.anchorPoint = NSPoint(x: 0, y: 0.5)
             // Bright enough to separate from its own track at a glance: at
             // `inkMuted` a spent block and an unspent one were the same grey
             // in an offscreen render, which makes the whole bar decoration.
@@ -209,7 +334,13 @@ final class SidebarSegmentedBarView: NSView {
     var fillColor: NSColor? { fillLayers.first?.backgroundColor.map { NSColor(cgColor: $0) ?? .clear } }
 
     func apply(_ value: Double?) {
+        let previous = fraction ?? 0
         fraction = value.map { min(max($0, 0), 1) }
+        // Only a change in the *value* animates. A resize goes through
+        // `layout` too, and a bar that springs every time the sidebar is
+        // dragged is a toy.
+        pendingRise = (fraction ?? 0) >= previous
+        pendingAnimation = (fraction ?? 0) != previous
         let paint = SidebarPercentBarView.colour(for: fraction)
         for fill in fillLayers { fill.backgroundColor = paint.cgColor }
         needsLayout = true
@@ -217,22 +348,49 @@ final class SidebarSegmentedBarView: NSView {
 
     override func layout() {
         super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
+        let animate = pendingAnimation
+        let rising = pendingRise
+        pendingAnimation = false
         let total = bounds.width - Self.gap * CGFloat(segments - 1)
         let width = max(total / CGFloat(segments), 1)
+        // The tracks are geometry and never animate; only the fills carry the
+        // value, so only the fills spring.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         for index in 0..<segments {
             let x = (width + Self.gap) * CGFloat(index)
             trackLayers[index].frame = NSRect(x: x, y: 0, width: width, height: bounds.height)
-            // Each block is one whole unit of the window, so its own fill is
-            // how far into *that* unit we are — the block being lived through
-            // is partly filled while the ones behind it are solid.
-            let progress = fraction.map { min(max($0 * Double(segments) - Double(index), 0), 1) } ?? 0
-            fillLayers[index].frame = NSRect(
-                x: x, y: 0, width: width * progress, height: bounds.height
-            )
         }
         CATransaction.commit()
+
+        for index in 0..<segments {
+            let x = (width + Self.gap) * CGFloat(index)
+            let fill = fillLayers[index]
+            // Each block is one whole unit of the window, so its own fill is
+            // how far into *that* unit we are — the block being lived through
+            // is partly filled, the ones behind it are solid.
+            let progress = fraction.map {
+                min(max($0 * Double(segments) - Double(index), 0), 1)
+            } ?? 0
+            let previous = fill.presentation()?.bounds.width ?? fill.bounds.width
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            fill.position = NSPoint(x: x, y: bounds.midY)
+            fill.bounds = NSRect(x: 0, y: 0, width: fill.bounds.width, height: bounds.height)
+            CATransaction.commit()
+            SidebarMotion.move(
+                fill, "bounds.size.width", to: width * progress, from: previous,
+                animated: animate, rising: rising, key: SidebarPercentBarView.widthKey
+            )
+        }
+    }
+
+    /// What the blocks' fills are animating, for the same reason
+    /// `SidebarPercentBarView.fillAnimation` exists.
+    var fillAnimations: [CABasicAnimation] {
+        fillLayers.compactMap {
+            $0.animation(forKey: SidebarPercentBarView.widthKey) as? CABasicAnimation
+        }
     }
 }
 
