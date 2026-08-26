@@ -881,6 +881,62 @@ final class NavigationSidebarTests: XCTestCase {
         )
     }
 
+    /// The sweep runs *past* the reading and eases back, rather than creeping
+    /// up to it. Evaluated off the curve itself rather than asserted from the
+    /// control points, so this says what the motion does and not merely which
+    /// four numbers were typed.
+    func testTheNeedleOvershootsAndSettles() {
+        let curve = SidebarDialGaugeView.sweepCurve
+        let samples = stride(from: 0.0, through: 1.0, by: 0.01).map { bezier(curve, at: $0) }
+
+        let peak = samples.map(\.y).max() ?? 0
+        XCTAssertGreaterThan(peak, 1.02, "runs past the destination")
+        XCTAssertLessThan(peak, 1.25, "and not so far that it reads as a bounce")
+
+        XCTAssertEqual(samples.last?.y ?? 0, 1, accuracy: 0.001, "and comes to rest on it")
+    }
+
+    /// Fast away, slow home. At the halfway point of the *animation* the
+    /// needle is already most of the way to the reading.
+    func testTheSweepStartsFastAndDecelerates() {
+        let curve = SidebarDialGaugeView.sweepCurve
+        // Progress at the moment half the duration has elapsed.
+        let halfway = bezier(curve, atX: 0.5)
+        XCTAssertGreaterThan(halfway, 0.8, "most of the distance is covered in the first half")
+
+        let firstQuarter = bezier(curve, atX: 0.25)
+        let lastQuarter = 1 - bezier(curve, atX: 0.75)
+        XCTAssertGreaterThan(
+            firstQuarter, lastQuarter,
+            "more ground covered leaving than arriving"
+        )
+    }
+
+    /// A cubic bezier with endpoints (0,0) and (1,1), evaluated at `t`.
+    private func bezier(_ curve: CAMediaTimingFunction, at t: Double) -> (x: Double, y: Double) {
+        var p1 = [Float](repeating: 0, count: 2)
+        var p2 = [Float](repeating: 0, count: 2)
+        curve.getControlPoint(at: 1, values: &p1)
+        curve.getControlPoint(at: 2, values: &p2)
+        func axis(_ a: Double, _ b: Double) -> Double {
+            3 * pow(1 - t, 2) * t * a + 3 * (1 - t) * pow(t, 2) * b + pow(t, 3)
+        }
+        return (axis(Double(p1[0]), Double(p2[0])), axis(Double(p1[1]), Double(p2[1])))
+    }
+
+    /// The curve's progress at elapsed fraction `x`. The bezier is parametric,
+    /// so `t` is not time — this searches for the `t` whose x is the elapsed
+    /// fraction, which is what a timing function actually means.
+    private func bezier(_ curve: CAMediaTimingFunction, atX x: Double) -> Double {
+        var low = 0.0
+        var high = 1.0
+        for _ in 0..<60 {
+            let mid = (low + high) / 2
+            if bezier(curve, at: mid).x < x { low = mid } else { high = mid }
+        }
+        return bezier(curve, at: (low + high) / 2).y
+    }
+
     /// Where the needle actually *points*, which is not what
     /// `needleFraction` reports: that echoes the value it was handed, and was
     /// happily reading 0.11 while a sign error had the needle past vertical on

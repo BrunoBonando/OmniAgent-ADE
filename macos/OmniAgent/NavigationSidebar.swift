@@ -407,10 +407,24 @@ enum MachineStats {
 /// seconds, and a needle sweeping to 60% reads as a machine getting busier,
 /// where a bar that redraws at a new length each tick just flickers.
 final class SidebarDialGaugeView: NSView {
-    /// How long the needle takes to travel. Comfortably longer than the 2s
-    /// sample interval would allow to *queue up*, and comfortably shorter than
-    /// it — so each sample lands and settles before the next arrives.
-    static let sweepDuration: TimeInterval = 0.45
+    /// How long the needle takes to travel, overshoot and settle. Comfortably
+    /// shorter than the 2s sample interval, so each reading lands and comes to
+    /// rest before the next one arrives.
+    static let sweepDuration: TimeInterval = 0.5
+
+    /// The needle leaves fast, runs a little past the reading, and eases back
+    /// onto it — the way a real one on a spring would.
+    ///
+    /// `easeOutBack`: the second control point sits above 1, which is what
+    /// carries the curve past its destination before it returns. The first
+    /// control point's steep slope (1.56 over 0.34) is the fast departure;
+    /// everything after it is deceleration.
+    ///
+    /// Overshoot is *deliberately* possible past the ends of the dial. Nothing
+    /// breaks: `strokeEnd` clamps at 1, and a needle that swings a couple of
+    /// degrees beyond hard-right for a moment is the physical behaviour being
+    /// imitated, not a glitch.
+    static let sweepCurve = CAMediaTimingFunction(controlPoints: 0.34, 1.56, 0.64, 1)
 
     private static let lineWidth: CGFloat = 4
     private static let hubRadius: CGFloat = 3
@@ -511,9 +525,7 @@ final class SidebarDialGaugeView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(duration == 0)
         CATransaction.setAnimationDuration(duration)
-        CATransaction.setAnimationTimingFunction(
-            CAMediaTimingFunction(name: .easeInEaseOut)
-        )
+        CATransaction.setAnimationTimingFunction(Self.sweepCurve)
         progress.strokeEnd = CGFloat(fraction ?? 0)
         needle.transform = CATransform3DMakeRotation(
             Self.rotation(for: fraction ?? 0), 0, 0, 1
