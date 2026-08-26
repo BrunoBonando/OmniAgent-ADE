@@ -554,6 +554,50 @@ final class NavigationSidebarTests: XCTestCase {
         }
         return nil
     }
+    // MARK: - Machine gauges
+
+    /// The gauges wear the same bar as the Claude card above them — one bar,
+    /// one ramp, one reading of what "full" means.
+    func testTheGaugesCarryABarToo() {
+        let card = SidebarSystemStatsView()
+        card.frame = NSRect(
+            x: 0, y: 0, width: ShellMetrics.sidebarWidth - 16, height: SidebarSystemStatsView.height
+        )
+        card.apply(cpu: 0.34, memory: 0.78, gpu: 0.95)
+        card.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(card.cpuGauge.bar.fillFraction, 0.34, accuracy: 0.001)
+        XCTAssertEqual(card.cpuGauge.bar.fillColor, ShellPalette.green)
+        XCTAssertEqual(card.memoryGauge.bar.fillColor, ShellPalette.amber)
+        XCTAssertEqual(card.gpuGauge.bar.fillColor, ShellPalette.red)
+        XCTAssertGreaterThan(card.cpuGauge.bar.frame.width, 20, "the bar spans its column")
+    }
+
+    /// The number and its bar share one ramp, so they cannot drift apart —
+    /// the gauge used to carry its own copy of the same three thresholds.
+    func testTheGaugesNumberAndBarAgree() {
+        let card = SidebarSystemStatsView()
+        card.apply(cpu: 0.95, memory: nil, gpu: nil)
+        XCTAssertEqual(card.cpuGauge.readoutColor, ShellPalette.red)
+        XCTAssertEqual(card.cpuGauge.bar.fillColor, ShellPalette.red)
+        XCTAssertEqual(card.memoryGauge.readout, "—")
+        XCTAssertNil(card.memoryGauge.bar.fraction, "no sample, empty track")
+    }
+
+    /// Adding the bars must not have cost the sidebar any height: they went
+    /// into padding the card already had.
+    func testTheGaugesCardDidNotGrow() {
+        XCTAssertEqual(SidebarSystemStatsView.height, 62)
+        let card = SidebarSystemStatsView()
+        card.frame = NSRect(x: 0, y: 0, width: 216, height: SidebarSystemStatsView.height)
+        card.apply(cpu: 1, memory: 1, gpu: 1)
+        card.layoutSubtreeIfNeeded()
+        XCTAssertLessThanOrEqual(
+            card.cpuGauge.fittingSize.height, SidebarSystemStatsView.height,
+            "the column still fits inside the card"
+        )
+    }
+
     // MARK: - Claude limits card
 
     /// It sits above the machine gauges, which is where it was asked to go —
@@ -632,7 +676,7 @@ final class NavigationSidebarTests: XCTestCase {
     /// Fill is what has been spent and the colour ramps with it, so a full bar
     /// is always red — "full" and "bad" never disagree.
     func testTheFillAndItsColourAgree() {
-        let bar = SidebarLimitBarView()
+        let bar = SidebarPercentBarView()
         bar.apply(0.41)
         XCTAssertEqual(bar.fillColor, ShellPalette.green)
         bar.apply(0.75)
@@ -661,7 +705,7 @@ final class NavigationSidebarTests: XCTestCase {
 
         XCTAssertEqual(card.sessionColumn.readout, "0%")
         XCTAssertGreaterThanOrEqual(
-            card.sessionColumn.bar.fillWidth, SidebarLimitBarView.minimumFillWidth,
+            card.sessionColumn.bar.fillWidth, SidebarPercentBarView.minimumFillWidth,
             "a real zero still shows a nub"
         )
     }

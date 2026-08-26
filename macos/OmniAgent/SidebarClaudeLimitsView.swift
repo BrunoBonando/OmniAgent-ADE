@@ -1,11 +1,15 @@
 import AppKit
 
-/// One limit's bar: a dim track with a fill across it.
+/// A percentage as a bar: a dim track with a fill across it.
+///
+/// Shared by the Claude limits card and the machine gauges below it, which is
+/// the point — one bar, one colour ramp, one reading of what "full" means,
+/// whether the number is a spent quota or a busy CPU.
 ///
 /// A plain pair of layers rather than `NSProgressIndicator`, which draws its
 /// own aqua-tinted geometry and neither takes this palette's fill colours nor
 /// sits at this height without fighting.
-final class SidebarLimitBarView: NSView {
+final class SidebarPercentBarView: NSView {
     static let height: CGFloat = 5
 
     private let track = CALayer()
@@ -48,9 +52,10 @@ final class SidebarLimitBarView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
-    /// The fill is what has been *spent*, and the colour ramps with it, so a
-    /// full bar is always red and "full" and "bad" never disagree. Same
-    /// thresholds as the machine gauges directly below this card.
+    /// The fill is how much is *used*, and the colour ramps with it, so a full
+    /// bar is always red and "full" and "bad" never disagree. The single
+    /// definition of that ramp: the machine gauges call this too, rather than
+    /// carrying their own copy of the same three thresholds.
     static func colour(for fraction: Double?) -> NSColor {
         guard let fraction else { return ShellPalette.inkTertiary }
         if fraction >= 0.9 { return ShellPalette.red }
@@ -90,7 +95,7 @@ final class SidebarLimitBarView: NSView {
 /// used to read as different design languages: the gauges led with `56%` at
 /// 18pt while this card showed a bar and no number at all.
 final class SidebarLimitColumnView: NSView {
-    let bar = SidebarLimitBarView()
+    let bar = SidebarPercentBarView()
     private let valueField: NSTextField
     private let captionField: NSTextField
     private let remainingField: NSTextField
@@ -151,7 +156,7 @@ final class SidebarLimitColumnView: NSView {
         let fraction = percent.map { Double($0) / 100 }
         bar.apply(fraction)
         valueField.stringValue = percent.map { "\($0)%" } ?? "—"
-        valueField.textColor = SidebarLimitBarView.colour(for: fraction)
+        valueField.textColor = SidebarPercentBarView.colour(for: fraction)
         // "left" spelled out, because a bare `2d 11h` does not say whether it
         // is time spent, time left, or time until something else entirely.
         remainingField.stringValue = ClaudeUsageLimits.timeLeft(until: resetsAt, now: now)

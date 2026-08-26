@@ -402,6 +402,10 @@ enum MachineStats {
 final class SidebarStatGaugeView: NSView {
     private let valueField: NSTextField
     private let captionField: NSTextField
+    /// The same bar the Claude card uses, for the same reason it exists there:
+    /// a number alone makes you read it, a bar lets you glance at it. Sharing
+    /// the type is what keeps the two cards one design rather than two.
+    let bar = SidebarPercentBarView()
     private(set) var fraction: Double?
 
     /// What the gauge currently reads — a fact a test can assert without
@@ -427,17 +431,24 @@ final class SidebarStatGaugeView: NSView {
         valueField.alignment = .center
         captionField.alignment = .center
 
-        let stack = NSStackView(views: [valueField, captionField])
+        let stack = NSStackView(views: [valueField, captionField, bar])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 1
+        // The Claude card's own gap between a caption and its bar, so the two
+        // cards breathe identically.
+        stack.setCustomSpacing(5, after: captionField)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
-            stack.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor),
+            // Full width rather than hugging its labels: the bar spans the
+            // column, and a stack sized to the widest label would cut it to
+            // the width of the word "MEM".
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bar.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         setAccessibilityElement(true)
         setAccessibilityRole(.progressIndicator)
@@ -449,15 +460,11 @@ final class SidebarStatGaugeView: NSView {
 
     func apply(_ value: Double?) {
         fraction = value.map { min(max($0, 0), 1) }
-        if let fraction {
-            valueField.stringValue = "\(Int((fraction * 100).rounded()))%"
-            valueField.textColor = fraction >= 0.9
-                ? ShellPalette.red
-                : fraction >= 0.7 ? ShellPalette.amber : ShellPalette.green
-        } else {
-            valueField.stringValue = "—"
-            valueField.textColor = ShellPalette.inkTertiary
-        }
+        bar.apply(fraction)
+        valueField.stringValue = fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "—"
+        // Through the bar's own ramp rather than a second copy of the same
+        // three thresholds, so the number and the bar cannot drift apart.
+        valueField.textColor = SidebarPercentBarView.colour(for: fraction)
         setAccessibilityValue(valueField.stringValue)
     }
 }

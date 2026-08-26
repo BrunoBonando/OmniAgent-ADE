@@ -107,6 +107,22 @@ it only if the packaged-daemon benchmark is worth the reframing work.
 
 ---
 
+## 5b. An intermittent keyboard test
+
+`WorkspaceWindowControllerTests.testCommandOptionODoesNotTurnOffOptionAsMeta`
+failed once in a full-suite run on 2026-08-26, at the final assertion
+(`delegate.bytes.isEmpty` — something wrote bytes to the terminal). It passes
+in isolation and passed on an immediate re-run of the same tree, so it is
+order- or state-dependent rather than a real regression, and it is unrelated
+to the sidebar work that happened to be in the tree at the time.
+
+Worth catching properly: shared `NSApp.mainMenu` / key-window state across
+test classes is the usual cause of this shape, and an intermittent test is one
+nobody trusts and everybody re-runs.
+
+**Done when:** either the shared state is isolated per test, or the flake is
+reproduced often enough to name its real cause.
+
 ## 6. Browser-PKCE login
 
 The agreed follow-up to the unmerged ADE+Core login branches, which are
