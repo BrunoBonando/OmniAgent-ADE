@@ -1,10 +1,12 @@
 import XCTest
 @testable import OmniAgent
 
-/// The Swift port of `ui/src/state/paneGrid.ts` must answer exactly what the
-/// TypeScript oracle answers — same ladder, same column-major fill, same hole
-/// padding, same 2 -> 3 lower-left placement, same 1-for-1 replacement. The
-/// cases below are the Swift transliteration of `paneGrid.test.ts`, plus the
+/// The Swift port of `ui/src/state/paneGrid.ts` answers what the TypeScript
+/// oracle answers for the ladder, the hole padding, the 2 -> 3 lower-left
+/// placement, and the 1-for-1 replacement — but NOT for fill order, which is
+/// row-major here against the oracle's column-major (see `PaneGrid.fillOrder`'s
+/// doc comment for why). The cases below are the Swift transliteration of
+/// `paneGrid.test.ts`, adjusted for that one divergence, plus the
 /// geometry/neighbour behaviour the web grid delegated to react-mosaic and the
 /// browser and the native workspace now owns itself.
 final class PaneGridTests: XCTestCase {
@@ -97,37 +99,35 @@ final class PaneGridTests: XCTestCase {
     }
 
     /// The layout `build` produces for a full third row, cell by cell, in the
-    /// column-major storage order `cells` uses.
+    /// column-major storage order `cells` uses — each column now holds every
+    /// third id (row-major fill), not three consecutive ones.
     func testBuildingTwelvePanesIsALiteralThreeByFourWithNoHoles() {
         let grid = PaneGrid.build(ids(12))!
         XCTAssertEqual(
             grid.cells,
             [
-                .pane("1"), .pane("2"), .pane("9"), // column 0, top to bottom
-                .pane("3"), .pane("4"), .pane("10"),
-                .pane("5"), .pane("6"), .pane("11"),
-                .pane("7"), .pane("8"), .pane("12"),
+                .pane("1"), .pane("5"), .pane("9"), // column 0, top to bottom
+                .pane("2"), .pane("6"), .pane("10"),
+                .pane("3"), .pane("7"), .pane("11"),
+                .pane("4"), .pane("8"), .pane("12"),
             ]
         )
         XCTAssertEqual(grid.paneIDs(), ids(12), "fill order, not storage order")
     }
 
-    /// The fill order every rung the TypeScript oracle knows about is still
-    /// plain column-major — the third-row rule must not disturb 1 through 8.
-    func testFillOrderIsPlainColumnMajorForEveryTwoRowRung() {
-        for shape in PaneGrid.ladder where shape.rows <= 2 {
-            XCTAssertEqual(
-                PaneGrid.fillOrder(cols: shape.cols, rows: shape.rows),
-                Array(0..<(shape.cols * shape.rows)),
-                "\(shape.cols)x\(shape.rows)"
-            )
-        }
+    /// Row by row, left to right — including the 1-2 row rungs, which used to
+    /// be a column-major identity. See `fillOrder`'s doc comment for the
+    /// stability this costs.
+    func testFillOrderReadsRowByRowLeftToRight() {
+        XCTAssertEqual(PaneGrid.fillOrder(cols: 2, rows: 2), [0, 2, 1, 3])
+        XCTAssertEqual(PaneGrid.fillOrder(cols: 4, rows: 2), [0, 2, 4, 6, 1, 3, 5, 7])
+        XCTAssertEqual(PaneGrid.fillOrder(cols: 4, rows: 3), [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8, 11])
     }
 
     func testDirectionalNeighboursReachTheThirdRow() {
-        let grid = PaneGrid.build(ids(12))!
-        XCTAssertEqual(grid.neighbor(of: "2", direction: .down), "9")
-        XCTAssertEqual(grid.neighbor(of: "9", direction: .up), "2")
+        let grid = PaneGrid.build(ids(12))! // row-major: row 2 is [9, 10, 11, 12]
+        XCTAssertEqual(grid.neighbor(of: "2", direction: .down), "6")
+        XCTAssertEqual(grid.neighbor(of: "9", direction: .up), "5")
         XCTAssertEqual(grid.neighbor(of: "9", direction: .right), "10")
         XCTAssertNil(grid.neighbor(of: "9", direction: .down), "the grid never wraps")
         XCTAssertNil(grid.neighbor(of: "9", direction: .left))
@@ -139,8 +139,8 @@ final class PaneGridTests: XCTestCase {
     /// bottom-right hole already follows.
     func testTheThirdRowsHolesAreNeverFocusTargets() {
         let grid = PaneGrid.build(ids(9))!
-        XCTAssertNil(grid.neighbor(of: "4", direction: .down), "column 1's third row is a hole")
-        XCTAssertEqual(grid.neighbor(of: "9", direction: .right), "4", "never lands on a hole")
+        XCTAssertNil(grid.neighbor(of: "6", direction: .down), "column 1's third row is a hole, nothing sits past it")
+        XCTAssertEqual(grid.neighbor(of: "9", direction: .right), "6", "falls back to the nearest real cell above the hole")
     }
 
     func testAThreeRowGridTilesItsBoundsExactly() {
@@ -172,28 +172,30 @@ final class PaneGridTests: XCTestCase {
         XCTAssertEqual(grid?.cells, [.pane("a"), .pane("b")])
     }
 
-    func testBuildThreePanesFillsTheTwoByTwoColumnMajorWithABottomRightHole() {
-        let grid = PaneGrid.build(["a", "b", "c"])
+    func testBuildThreePanesFillsTheTwoByTwoRowMajorWithABottomRightHole() {
+        let grid = PaneGrid.build(["a", "b", "c"]) // row 0: [a, b], row 1: [c, hole]
         XCTAssertEqual(grid?.cols, 2)
         XCTAssertEqual(grid?.rows, 2)
-        XCTAssertEqual(grid?.cells, [.pane("a"), .pane("b"), .pane("c"), .hole(0)])
+        XCTAssertEqual(grid?.cells, [.pane("a"), .pane("c"), .pane("b"), .hole(0)])
         XCTAssertEqual(grid?.paneIDs(), ["a", "b", "c"])
     }
 
     func testBuildFourPanesIsALiteralTwoByTwoWithNoHoles() {
+        // row 0: [a, b], row 1: [c, d]
         XCTAssertEqual(
             PaneGrid.build(["a", "b", "c", "d"])?.cells,
-            [.pane("a"), .pane("b"), .pane("c"), .pane("d")]
+            [.pane("a"), .pane("c"), .pane("b"), .pane("d")]
         )
     }
 
-    func testBuildFivePanesTakesTheThreeByTwoRungWithTheNewPaneAtopAHole() {
+    /// row 0: [1, 2, 3], row 1: [4, 5, hole].
+    func testBuildFivePanesTakesTheThreeByTwoRungReadingRowByRow() {
         let grid = PaneGrid.build(ids(5))
         XCTAssertEqual(grid?.cols, 3)
         XCTAssertEqual(grid?.rows, 2)
         XCTAssertEqual(
             grid?.cells,
-            [.pane("1"), .pane("2"), .pane("3"), .pane("4"), .pane("5"), .hole(0)]
+            [.pane("1"), .pane("4"), .pane("2"), .pane("5"), .pane("3"), .hole(0)]
         )
     }
 
@@ -234,11 +236,14 @@ final class PaneGridTests: XCTestCase {
         XCTAssertEqual(grid?.cells, [.pane("a"), .pane("c"), .pane("b"), .hole(0)])
     }
 
-    func testSyncedGrowingAFullTwoByTwoAddsAColumnWithoutMovingAnybody() {
+    /// Row-major growth is NOT free the way column-major was: widening every
+    /// row for a 5th pane shifts "3" and "4" down-left. See `fillOrder`'s doc
+    /// comment for the tradeoff.
+    func testSyncedGrowingAFullTwoByTwoIntoAThirdColumnReshufflesTheLastRow() {
         let grid = PaneGrid.synced(PaneGrid.build(ids(4)), desiredIDs: ids(5))
         XCTAssertEqual(
             grid?.cells,
-            [.pane("1"), .pane("2"), .pane("3"), .pane("4"), .pane("5"), .hole(0)]
+            [.pane("1"), .pane("4"), .pane("2"), .pane("5"), .pane("3"), .hole(0)]
         )
     }
 
@@ -258,7 +263,7 @@ final class PaneGridTests: XCTestCase {
         dragged?.swap("a", "c") // fill order becomes c, b, a
         XCTAssertEqual(dragged?.paneIDs(), ["c", "b", "a"])
         let grid = PaneGrid.synced(dragged, desiredIDs: ["a", "b", "c", "d"])
-        XCTAssertEqual(grid?.cells, [.pane("c"), .pane("b"), .pane("a"), .pane("d")])
+        XCTAssertEqual(grid?.cells, [.pane("c"), .pane("a"), .pane("b"), .pane("d")])
     }
 
     func testSyncedReturnsTheSameGridWhenMembershipHasNotMoved() {
@@ -283,7 +288,7 @@ final class PaneGridTests: XCTestCase {
     func testSyncedTreatsAOneForOneDiffAsAnInPlaceReplacement() {
         let before = PaneGrid.build(["a", "b", "c"])
         let after = PaneGrid.synced(before, desiredIDs: ["a", "b2", "c"])
-        XCTAssertEqual(after?.cells, [.pane("a"), .pane("b2"), .pane("c"), .hole(0)])
+        XCTAssertEqual(after?.cells, [.pane("a"), .pane("c"), .pane("b2"), .hole(0)])
     }
 
     func testSyncedDoesNotTreatATwoForTwoDiffAsAReplacement() {
@@ -296,7 +301,7 @@ final class PaneGridTests: XCTestCase {
     func testReplaceSwapsALeafInPlaceAndIsANoOpForAnUnknownID() {
         var grid = PaneGrid.build(["a", "b", "c"])!
         grid.replace("b", with: "b2")
-        XCTAssertEqual(grid.cells, [.pane("a"), .pane("b2"), .pane("c"), .hole(0)])
+        XCTAssertEqual(grid.cells, [.pane("a"), .pane("c"), .pane("b2"), .hole(0)])
         let untouched = grid
         grid.replace("ghost", with: "x")
         XCTAssertEqual(grid, untouched)
@@ -305,7 +310,7 @@ final class PaneGridTests: XCTestCase {
     func testSwapTradesTwoPanesAcrossColumnsAndLeavesEverybodyElseAlone() {
         var grid = PaneGrid.build(ids(4))!
         grid.swap("1", "4")
-        XCTAssertEqual(grid.cells, [.pane("4"), .pane("2"), .pane("3"), .pane("1")])
+        XCTAssertEqual(grid.cells, [.pane("4"), .pane("3"), .pane("2"), .pane("1")])
     }
 
     func testSwapKeepsTheShapeAndAnyManualResize() {
@@ -354,28 +359,33 @@ final class PaneGridTests: XCTestCase {
                 desiredIDs: fixture.holeRepair.desiredIDs
             )
         )
-        XCTAssertEqual(repaired.paneIDs(), fixture.holeRepair.expectedPaneIDs)
+        // Not `fixture.holeRepair.expectedPaneIDs` here: that field is the
+        // TypeScript oracle's column-major answer, and this is the one place
+        // in the fixture that's fill-order-sensitive (every per-shape
+        // `pane_ids` above is a round-trip identity, so it doesn't care). See
+        // `PaneGrid.fillOrder`'s doc comment for the native-only divergence.
+        XCTAssertEqual(repaired.paneIDs(), ["pane-1", "pane-2", "pane-3"])
         XCTAssertEqual(repaired.cells.filter(\.isHole).count, fixture.holeRepair.holes)
     }
 
     // MARK: - directional neighbours
 
     func testDirectionalNeighboursWalkTheGridWithoutWrapping() {
-        let grid = PaneGrid.build(ids(4))! // columns [1,2] [3,4]
-        XCTAssertEqual(grid.neighbor(of: "1", direction: .down), "2")
-        XCTAssertEqual(grid.neighbor(of: "1", direction: .right), "3")
+        let grid = PaneGrid.build(ids(4))! // row-major: row 0 [1,2], row 1 [3,4]
+        XCTAssertEqual(grid.neighbor(of: "1", direction: .down), "3")
+        XCTAssertEqual(grid.neighbor(of: "1", direction: .right), "2")
         XCTAssertNil(grid.neighbor(of: "1", direction: .up))
         XCTAssertNil(grid.neighbor(of: "1", direction: .left))
-        XCTAssertEqual(grid.neighbor(of: "4", direction: .left), "2")
-        XCTAssertEqual(grid.neighbor(of: "4", direction: .up), "3")
+        XCTAssertEqual(grid.neighbor(of: "4", direction: .left), "3")
+        XCTAssertEqual(grid.neighbor(of: "4", direction: .up), "2")
         XCTAssertNil(grid.neighbor(of: "4", direction: .right))
     }
 
     func testHorizontalNeighbourFallsBackToTheNearestRealCellWhenTheRowIsAHole() {
-        let grid = PaneGrid.build(["a", "b", "c"])! // columns [a,b] [c,hole]
-        XCTAssertEqual(grid.neighbor(of: "b", direction: .right), "c", "never lands on a hole")
-        XCTAssertNil(grid.neighbor(of: "c", direction: .down), "the hole below is not a target")
-        XCTAssertEqual(grid.neighbor(of: "c", direction: .left), "a")
+        let grid = PaneGrid.build(["a", "b", "c"])! // row-major: row 0 [a,b], row 1 [c,hole]
+        XCTAssertEqual(grid.neighbor(of: "c", direction: .right), "b", "never lands on a hole")
+        XCTAssertNil(grid.neighbor(of: "b", direction: .down), "the hole below is not a target")
+        XCTAssertEqual(grid.neighbor(of: "b", direction: .left), "a")
     }
 
     func testNeighbourIsNilForAnUnknownPane() {
@@ -385,11 +395,11 @@ final class PaneGridTests: XCTestCase {
     // MARK: - geometry
 
     func testLayoutTilesTheBoundsExactlyWithIntegralPaneFrames() {
-        let grid = PaneGrid.build(ids(4))!
+        let grid = PaneGrid.build(ids(4))! // row-major: row 0 [1,2], row 1 [3,4]
         let layout = grid.layout(in: bounds, dividerThickness: 6)
         XCTAssertEqual(layout.frames["1"], CGRect(x: 0, y: 0, width: 397, height: 297))
-        XCTAssertEqual(layout.frames["2"], CGRect(x: 0, y: 303, width: 397, height: 297))
-        XCTAssertEqual(layout.frames["3"], CGRect(x: 403, y: 0, width: 397, height: 297))
+        XCTAssertEqual(layout.frames["2"], CGRect(x: 403, y: 0, width: 397, height: 297))
+        XCTAssertEqual(layout.frames["3"], CGRect(x: 0, y: 303, width: 397, height: 297))
         XCTAssertEqual(layout.frames["4"], CGRect(x: 403, y: 303, width: 397, height: 297))
         for frame in layout.frames.values {
             XCTAssertEqual(frame, frame.integral)
@@ -421,7 +431,7 @@ final class PaneGridTests: XCTestCase {
     }
 
     func testMovingAVerticalDividerResizesOnlyItsTwoColumns() {
-        var grid = PaneGrid.build(ids(4))!
+        var grid = PaneGrid.build(ids(4))! // row-major: column 0 is [1,3], column 1 is [2,4]
         let divider = grid.layout(in: bounds, dividerThickness: 6).dividers.first { $0.axis == .vertical }!
         grid.moveDivider(
             divider,
@@ -432,12 +442,12 @@ final class PaneGridTests: XCTestCase {
         )
         let layout = grid.layout(in: bounds, dividerThickness: 6)
         XCTAssertEqual(layout.frames["1"]?.width, 497)
-        XCTAssertEqual(layout.frames["3"]?.width, 297)
+        XCTAssertEqual(layout.frames["2"]?.width, 297)
         XCTAssertEqual(layout.frames["1"]?.height, 297, "row heights are untouched")
     }
 
     func testMovingAHorizontalDividerResizesOnlyItsOwnColumn() {
-        var grid = PaneGrid.build(ids(4))!
+        var grid = PaneGrid.build(ids(4))! // row-major: column 0 is [1,3], column 1 is [2,4]
         let divider = grid.layout(in: bounds, dividerThickness: 6)
             .dividers.first { $0.axis == .horizontal && $0.column == 0 }!
         grid.moveDivider(
@@ -449,12 +459,12 @@ final class PaneGridTests: XCTestCase {
         )
         let layout = grid.layout(in: bounds, dividerThickness: 6)
         XCTAssertEqual(layout.frames["1"]?.height, 247)
-        XCTAssertEqual(layout.frames["2"]?.height, 347)
-        XCTAssertEqual(layout.frames["3"]?.height, 297, "the other column keeps its own split")
+        XCTAssertEqual(layout.frames["3"]?.height, 347)
+        XCTAssertEqual(layout.frames["2"]?.height, 297, "the other column keeps its own split")
     }
 
     func testDividerDragIsClampedToTheMinimumPaneSize() {
-        var grid = PaneGrid.build(ids(4))!
+        var grid = PaneGrid.build(ids(4))! // row-major: column 0 is [1,3], column 1 is [2,4]
         let divider = grid.layout(in: bounds, dividerThickness: 6).dividers.first { $0.axis == .vertical }!
         grid.moveDivider(
             divider,
@@ -465,7 +475,7 @@ final class PaneGridTests: XCTestCase {
         )
         let layout = grid.layout(in: bounds, dividerThickness: 6)
         XCTAssertEqual(layout.frames["1"]?.width, minimumPane.width)
-        XCTAssertEqual(layout.frames["3"]?.width, 794 - minimumPane.width)
+        XCTAssertEqual(layout.frames["2"]?.width, 794 - minimumPane.width)
     }
 
     func testReshapingResetsFractionsSoANewRungStartsEven() {

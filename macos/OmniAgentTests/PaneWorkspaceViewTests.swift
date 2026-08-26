@@ -297,12 +297,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
         // padding), so the outermost panes stop short of the view's own bounds.
         XCTAssertEqual(frames[0].minX, PaneWorkspaceView.gridInset)
         XCTAssertEqual(frames[0].minY, PaneWorkspaceView.gridInset)
-        // Column-major: pane 2 sits under pane 1, pane 3 tops the right column.
-        XCTAssertEqual(frames[1].minX, frames[0].minX)
-        XCTAssertGreaterThan(frames[1].minY, frames[0].minY)
-        XCTAssertGreaterThan(frames[2].minX, frames[0].minX)
-        XCTAssertEqual(frames[2].minY, PaneWorkspaceView.gridInset)
-        XCTAssertEqual(frames[2].maxX, workspace.gridBounds.maxX)
+        // Row-major: pane 2 sits beside pane 1 on the top row, pane 3 drops
+        // under pane 1 into the same column.
+        XCTAssertGreaterThan(frames[1].minX, frames[0].minX)
+        XCTAssertEqual(frames[1].minY, frames[0].minY)
+        XCTAssertEqual(frames[2].minX, frames[0].minX)
+        XCTAssertGreaterThan(frames[2].minY, frames[0].minY)
+        XCTAssertEqual(frames[1].maxX, workspace.gridBounds.maxX)
     }
 
     func testHolesGetAnAddTerminalPlaceholderInTheEmptyCell() {
@@ -433,7 +434,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
     func testSwapMovesFramesNotTerminals() {
         let workspace = makeWorkspace(panes: 4)
-        XCTAssertEqual(workspace.paneIDs, ["pane-1", "pane-3", "pane-2", "pane-4"])
+        XCTAssertEqual(workspace.paneIDs, ["pane-1", "pane-2", "pane-3", "pane-4"])
         let first = workspace.container(for: "pane-1")!
         let last = workspace.container(for: "pane-4")!
         let firstFrame = first.frame
@@ -445,7 +446,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(first.frame, lastFrame)
         XCTAssertEqual(last.frame, firstFrame)
         XCTAssertEqual(ObjectIdentifier(workspace.container(for: "pane-1")!.terminalSurface.terminalView), firstTerminal)
-        XCTAssertEqual(workspace.paneIDs, ["pane-4", "pane-3", "pane-2", "pane-1"])
+        XCTAssertEqual(workspace.paneIDs, ["pane-4", "pane-2", "pane-3", "pane-1"])
     }
 
     func testGroupingMetadataTravelsWithThePaneAcrossSwapAndReflow() {
@@ -594,10 +595,10 @@ final class PaneWorkspaceViewTests: XCTestCase {
     // MARK: - Focus
 
     func testClosingTheFocusedPaneMovesFocusToItsFillOrderNeighbour() {
-        let workspace = makeWorkspace(panes: 4) // fill order: 1, 3, 2, 4
+        let workspace = makeWorkspace(panes: 4) // fill order: 1, 2, 3, 4
         workspace.focusPane("pane-3")
         XCTAssertTrue(workspace.closePane("pane-3"))
-        XCTAssertEqual(workspace.focusedPaneID, "pane-1", "focus falls to the previous pane in fill order")
+        XCTAssertEqual(workspace.focusedPaneID, "pane-2", "focus falls to the previous pane in fill order")
 
         XCTAssertEqual(workspace.paneIDs, ["pane-1", "pane-2", "pane-4"])
         workspace.focusPane("pane-1")
@@ -631,21 +632,21 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         workspace.swapPaneRight(nil)
 
-        XCTAssertEqual(workspace.paneIDs, ["pane-2", "pane-3", "pane-1", "pane-4"])
+        XCTAssertEqual(workspace.paneIDs, ["pane-2", "pane-1", "pane-3", "pane-4"])
         XCTAssertEqual(workspace.focusedPaneID, "pane-1", "focus follows the pane, not the cell")
     }
 
     func testNumericSelectionPicksTheNthPaneInFillOrder() {
         let workspace = makeWorkspace(panes: 4)
-        XCTAssertEqual(workspace.paneIDs, ["pane-1", "pane-3", "pane-2", "pane-4"])
+        XCTAssertEqual(workspace.paneIDs, ["pane-1", "pane-2", "pane-3", "pane-4"])
         let item = NSMenuItem(title: "Pane 3", action: nil, keyEquivalent: "")
         item.tag = 3
         workspace.selectPane(item)
-        XCTAssertEqual(workspace.focusedPaneID, "pane-2", "the third cell in fill order, not the id")
+        XCTAssertEqual(workspace.focusedPaneID, "pane-3", "the third cell in fill order, not the id")
 
         item.tag = 9
         workspace.selectPane(item)
-        XCTAssertEqual(workspace.focusedPaneID, "pane-2", "an out-of-range index changes nothing")
+        XCTAssertEqual(workspace.focusedPaneID, "pane-3", "an out-of-range index changes nothing")
     }
 
     func testFocusIsRestoredToTheFocusedPaneWhenTheWindowIsActivated() {
@@ -689,7 +690,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(target.performDragOperation(info))
 
         XCTAssertFalse(target.isDropTarget)
-        XCTAssertEqual(workspace.paneIDs, ["pane-4", "pane-3", "pane-2", "pane-1"])
+        XCTAssertEqual(workspace.paneIDs, ["pane-4", "pane-2", "pane-3", "pane-1"])
         XCTAssertEqual(ObjectIdentifier(workspace.container(for: "pane-1")!.terminalSurface.terminalView), sourceTerminal)
     }
 
@@ -726,19 +727,19 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(target.surface.frame.maxY, target.bounds.maxY - PaneContainerView.borderWidth)
         XCTAssertEqual(target.header.frame.minY, PaneContainerView.borderWidth)
         XCTAssertEqual(target.layer?.cornerRadius, PaneContainerView.cornerRadius)
-        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.idleBorderColor.cgColor)
+        XCTAssertEqual(target.borderColorsForTesting, flat(PaneContainerView.idleBorderColor))
         XCTAssertTrue(target.dropHighlight.isHidden)
 
         workspace.focusPane("pane-1")
-        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.focusedBorderColor.cgColor)
+        XCTAssertEqual(target.borderColorsForTesting, flat(PaneContainerView.focusedBorderColor))
         workspace.focusPane("pane-4")
-        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.idleBorderColor.cgColor)
+        XCTAssertEqual(target.borderColorsForTesting, flat(PaneContainerView.idleBorderColor))
 
         XCTAssertEqual(target.draggingEntered(StubDraggingInfo(paneID: "pane-4")), .move)
         XCTAssertFalse(target.dropHighlight.isHidden, "the hovered pane is visibly the swap target")
         XCTAssertEqual(target.dropHighlight.frame, target.bounds)
         XCTAssertTrue(target.subviews.last === target.dropHighlight, "the tint sits above the terminal")
-        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.dropTargetBorderColor.cgColor)
+        XCTAssertEqual(target.borderColorsForTesting, flat(PaneContainerView.dropTargetBorderColor))
         XCTAssertNil(
             target.dropHighlight.hitTest(NSPoint(x: 5, y: 5)),
             "the tint never swallows a click meant for the pane"
@@ -746,7 +747,66 @@ final class PaneWorkspaceViewTests: XCTestCase {
 
         target.draggingExited(nil)
         XCTAssertTrue(target.dropHighlight.isHidden)
-        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.idleBorderColor.cgColor)
+        XCTAssertEqual(target.borderColorsForTesting, flat(PaneContainerView.idleBorderColor))
+    }
+
+    /// The focus glow's geometry and colour: bled 16pt past the pane on every
+    /// side (big enough to read as standing out from the rest of the grid),
+    /// and always a gradient between the pane's chosen colour and its live
+    /// status colour — never one alone.
+    func testPaneFocusGlowViewAppliesBleedAndGradientColors() {
+        let glow = PaneFocusGlowView()
+        XCTAssertTrue(glow.isHidden, "nothing to show before a pane is focused")
+
+        let rect = NSRect(x: 40, y: 40, width: 100, height: 60)
+        let edge = NSColor.systemRed
+        let peak = NSColor.systemBlue
+        glow.apply(around: rect, cornerRadius: 9, edge: edge, peak: peak, paneID: "pane-1")
+
+        XCTAssertFalse(glow.isHidden)
+        XCTAssertEqual(glow.frame, rect.insetBy(dx: -16, dy: -16))
+        let colors = glow.gradientForTesting?.colors as? [CGColor]
+        XCTAssertEqual(colors?.first, edge.withAlphaComponent(0).cgColor)
+        XCTAssertEqual(colors?[2], peak.withAlphaComponent(0.9).cgColor, "the gradient's peak is the status colour")
+        XCTAssertEqual(colors?.last, edge.withAlphaComponent(0).cgColor)
+
+        glow.apply(around: nil, cornerRadius: 0, edge: nil, peak: nil, paneID: nil)
+        XCTAssertTrue(glow.isHidden, "torn down once nothing is focused")
+        XCTAssertNil(glow.gradientForTesting)
+    }
+
+    /// The design ask, in full: land as the big halo, then settle smoothly
+    /// to a slim border within 0.75s — and only replay that intro when focus
+    /// actually lands on a *new* pane, not on every unrelated update to the
+    /// one already holding it.
+    func testPaneFocusGlowViewSettlesToASlimBorderOnlyOnANewFocus() throws {
+        let glow = PaneFocusGlowView()
+        let rect = NSRect(x: 40, y: 40, width: 100, height: 60)
+        let edge = NSColor.systemRed
+        let peak = NSColor.systemBlue
+
+        glow.apply(around: rect, cornerRadius: 9, edge: edge, peak: peak, paneID: "pane-1")
+        let mask = try XCTUnwrap(glow.layer?.mask as? CAShapeLayer)
+        let firstSettle = try XCTUnwrap(mask.animation(forKey: "om-settle") as? CABasicAnimation)
+        XCTAssertEqual(firstSettle.duration, 0.75, "the settle must land within 0.75s")
+        let expandedBox = (firstSettle.fromValue as! CGPath).boundingBoxOfPath
+        let settledBox = (firstSettle.toValue as! CGPath).boundingBoxOfPath
+        XCTAssertGreaterThan(expandedBox.width, settledBox.width, "it starts as the big halo and settles to a slim border")
+
+        // The same pane, some unrelated update (a resize, a status tick): no
+        // replay, the same animation instance keeps running.
+        glow.apply(around: rect, cornerRadius: 9, edge: edge, peak: peak, paneID: "pane-1")
+        XCTAssertTrue(
+            mask.animation(forKey: "om-settle") === firstSettle,
+            "an update to the same focused pane must not restart the settle"
+        )
+
+        // A different pane taking focus: the intro replays from the top.
+        glow.apply(around: rect, cornerRadius: 9, edge: edge, peak: peak, paneID: "pane-2")
+        XCTAssertFalse(
+            mask.animation(forKey: "om-settle") === firstSettle,
+            "a newly focused pane gets its own settle animation"
+        )
     }
 
     /// Exactly one cursor blinks at a time. Every other pane holds a steady
@@ -1211,16 +1271,16 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let target = workspace.container(for: "pane-1")!
         workspace.focusPane("pane-1")
         // Before anything has been reported, focus falls back to the accent.
-        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.focusedBorderColor.cgColor)
+        XCTAssertEqual(target.borderColorsForTesting, flat(PaneContainerView.focusedBorderColor))
 
-        func ring(_ status: RemoteSessionStatus, alpha: CGFloat) -> CGColor {
-            PaneStatusMarkView.color(for: status).withAlphaComponent(alpha).cgColor
+        func ring(_ status: RemoteSessionStatus, alpha: CGFloat) -> [CGColor] {
+            flat(PaneStatusMarkView.color(for: status).withAlphaComponent(alpha))
         }
         for status: RemoteSessionStatus in [.ready, .thinking, .toolExecution, .awaitingApproval, .error] {
             workspace.setStatus(status, for: "pane-1")
             XCTAssertEqual(target.status, status)
             XCTAssertEqual(
-                target.layer?.backgroundColor,
+                target.borderColorsForTesting,
                 ring(status, alpha: PaneContainerView.focusedRingAlpha),
                 "a focused pane's ring wears its own status colour (\(status))"
             )
@@ -1233,16 +1293,40 @@ final class PaneWorkspaceViewTests: XCTestCase {
         workspace.focusPane("pane-2")
         workspace.setStatus(.awaitingApproval, for: "pane-1")
         XCTAssertEqual(
-            target.layer?.backgroundColor,
+            target.borderColorsForTesting,
             ring(.awaitingApproval, alpha: PaneContainerView.urgentRingAlpha)
         )
         workspace.setStatus(.error, for: "pane-1")
         XCTAssertEqual(
-            target.layer?.backgroundColor,
+            target.borderColorsForTesting,
             ring(.error, alpha: PaneContainerView.urgentRingAlpha)
         )
         workspace.setStatus(.ready, for: "pane-1")
-        XCTAssertEqual(target.layer?.backgroundColor, PaneContainerView.idleBorderColor.cgColor)
+        XCTAssertEqual(target.borderColorsForTesting, flat(PaneContainerView.idleBorderColor))
+    }
+
+    /// A pane with a chosen colour (`/color`) blends it into the status
+    /// colour instead of showing the status alone — the border's own version
+    /// of what the focus glow already does. A pane left at its default
+    /// colour keeps exactly the flat status ring `ring(_:alpha:)` above
+    /// already covers; this is the addition, not a replacement for that.
+    func testAChosenColourBlendsIntoTheBorderInsteadOfReplacingTheStatus() {
+        let workspace = makeWorkspace(panes: 1)
+        let target = workspace.container(for: "pane-1")!
+        // The colour badge only shows for a Claude terminal (`descriptorChanged`).
+        workspace.updateDescriptor(for: "pane-1") {
+            $0.engine = .claude
+            $0.claudeColor = "red"
+        }
+        let chosen = PaneHeaderView.claudeTint(for: "red")!
+
+        workspace.focusPane("pane-1")
+        workspace.setStatus(.thinking, for: "pane-1")
+        let status = PaneStatusMarkView.color(for: .thinking).withAlphaComponent(PaneContainerView.focusedRingAlpha)
+        XCTAssertEqual(
+            target.borderColorsForTesting,
+            [chosen.withAlphaComponent(PaneContainerView.focusedRingAlpha).cgColor, status.cgColor]
+        )
     }
 
     /// The ring has to survive the corners. It is the container's background
@@ -1363,10 +1447,10 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(workspace.accessibilityLabel(), "Workspace panes")
         XCTAssertEqual(workspace.accessibilityChildren()?.count, 5)
 
-        // Fill order is 1, 3, 2, 4, 5 — pane-2 sits in the third cell.
+        // Fill order is 1, 2, 3, 4, 5 — pane-2 sits in the second cell.
         let second = workspace.container(for: "pane-2")!
         XCTAssertEqual(second.accessibilityRole(), .group)
-        XCTAssertEqual(second.accessibilityLabel(), "Terminal pane 3 of 5")
+        XCTAssertEqual(second.accessibilityLabel(), "Terminal pane 2 of 5")
         XCTAssertEqual(second.terminalSurface.terminalView.accessibilityLabel(), "Terminal")
 
         let grouped = workspace.container(for: "pane-5")!
@@ -2007,13 +2091,13 @@ final class PaneWorkspaceViewTests: XCTestCase {
         workspace.focusPane("pane-1")
         XCTAssertTrue(workspace.toggleZoom("pane-1"))
 
-        // ⌘3 — fill order is 1, 3, 2, 4, so the third is pane-2.
+        // ⌘3 — fill order is 1, 2, 3, 4, so the third is pane-3.
         XCTAssertTrue(workspace.focusPane(at: 3))
-        XCTAssertEqual(workspace.focusedPaneID, "pane-2")
-        XCTAssertEqual(workspace.zoomedPaneID, "pane-2", "the card follows ⌘3")
+        XCTAssertEqual(workspace.focusedPaneID, "pane-3")
+        XCTAssertEqual(workspace.zoomedPaneID, "pane-3", "the card follows ⌘3")
 
-        // ⌥← — back across the grid to pane-1.
-        XCTAssertTrue(workspace.focusNeighbor(.left))
+        // ⌥↑ — pane-3 sits directly under pane-1 now, not beside it.
+        XCTAssertTrue(workspace.focusNeighbor(.up))
         XCTAssertEqual(workspace.focusedPaneID, "pane-1")
         XCTAssertEqual(workspace.zoomedPaneID, "pane-1", "and follows ⌥arrow")
 
@@ -2042,10 +2126,10 @@ final class PaneWorkspaceViewTests: XCTestCase {
         workspace.focusPane("pane-4")
         XCTAssertTrue(workspace.closePane("pane-4"))
 
-        XCTAssertEqual(workspace.focusedPaneID, "pane-2", "focus falls to its fill-order neighbour")
+        XCTAssertEqual(workspace.focusedPaneID, "pane-3", "focus falls to its fill-order neighbour")
         XCTAssertEqual(
             workspace.zoomedPaneID,
-            "pane-2",
+            "pane-3",
             "and the card shows whoever has focus now, not the pane it started on"
         )
     }
@@ -2357,8 +2441,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
             PaneContainerView.borderWidth + 34,
             "with the terminal starting under the taller bar rather than behind it"
         )
-        // pane-2 sits in the third cell — fill order is 1, 3, 2, 4.
-        XCTAssertEqual(card.header.subtitle, "session restore · terminal 3 of 4")
+        // pane-2 sits in the second cell — fill order is 1, 2, 3, 4.
+        XCTAssertEqual(card.header.subtitle, "session restore · terminal 2 of 4")
         XCTAssertEqual(
             controls(in: card.header),
             [Self.restoreText, "Zoom this pane", "Close this pane"],
@@ -2534,10 +2618,10 @@ final class PaneWorkspaceViewTests: XCTestCase {
     }
 
     func testPaneOrdinalCountsAPanesPlaceAmongItsOwnSessionsTerminals() {
-        let workspace = makeWorkspace(panes: 4) // fill order: 1, 3, 2, 4
+        let workspace = makeWorkspace(panes: 4) // fill order: 1, 2, 3, 4
         XCTAssertEqual(ordinal(workspace, "pane-1"), [1, 4])
-        XCTAssertEqual(ordinal(workspace, "pane-3"), [2, 4])
-        XCTAssertEqual(ordinal(workspace, "pane-2"), [3, 4])
+        XCTAssertEqual(ordinal(workspace, "pane-2"), [2, 4])
+        XCTAssertEqual(ordinal(workspace, "pane-3"), [3, 4])
         XCTAssertEqual(ordinal(workspace, "pane-4"), [4, 4])
 
         XCTAssertTrue(workspace.closePane("pane-3"))
@@ -2564,7 +2648,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertTrue(workspace.toggleZoom("pane-2"))
         XCTAssertEqual(
             card.header.subtitle,
-            "Session 1 · terminal 3 of 4",
+            "Session 1 · terminal 2 of 4",
             "an unnamed session still gets both halves — the name the sidebar derives for it"
         )
 
@@ -2739,6 +2823,11 @@ final class PaneWorkspaceViewTests: XCTestCase {
     private func spinRunLoop() {
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
+
+    /// `PaneContainerView.borderColorsForTesting`'s shape with no chosen
+    /// colour to blend in: both gradient stops the same, which paints
+    /// identically to the flat fill the border used to be.
+    private func flat(_ color: NSColor) -> [CGColor] { [color.cgColor, color.cgColor] }
 
     /// What the yellow disc answers to — the one place the escape hatch is
     /// spelled out, and how these tests tell the cluster apart without the

@@ -412,6 +412,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     private var asyncFlushScheduled = false
     private var occlusionObserver: NSObjectProtocol?
     private var suspendsDrawing = false
+    /// ⌘1…⌘0's own hint, up for as long as ⌘ is held — set up in
+    /// `viewDidMoveToWindow`, toggled by `setCommandHintShown`.
+    private var commandFlagMonitor: Any?
+    private var commandHintResignObserver: NSObjectProtocol?
+    private var isCommandHintShown = false
+    /// The focused pane's border, replaced by this smoke-like glow — the same
+    /// spinning, blurred idiom as the App view's composer
+    /// (`PaneAppView.updateComposerGlow`), see `updateFocusGlow`.
+    private let focusGlow = PaneFocusGlowView()
 
     init(makeSurface: @escaping (PaneDescriptor) -> any PaneContentView) {
         self.makeSurface = makeSurface
@@ -429,6 +438,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // The overlay host carries the pane commands back to this view while a
         // card is up — see `PaneFocusOverlayView.commandTarget`.
         focusOverlay.commandTarget = self
+        // Above every pane and divider so it can lap onto a neighbour's own
+        // edge — see `PaneFocusGlowView`'s own doc comment for why it cannot
+        // live inside the focused pane's own (clipped) layer instead.
+        addSubview(focusGlow, positioned: .above, relativeTo: nil)
         resizeCoalescer.onSchedule = { [weak self] in self?.resizeScheduled() }
         resizeCoalescer.onFlush = { [weak self] sessions in
             guard let self else { return }
@@ -449,7 +462,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     // MARK: - Reading the workspace
 
     /// The panes **on screen**: the active session's, in fill order. Layout,
-    /// focus, ⌘1…⌘9 and drag-and-drop all mean this one.
+    /// focus, ⌘1…⌘0 and drag-and-drop all mean this one.
     var paneIDs: [String] { grid?.paneIDs() ?? [] }
 
     /// **Every** pane that exists, across every session, in a stable order.
@@ -805,6 +818,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             landCard(id)
             teardownOverlay()
         }
+        // `landCard` reparents outside of `updateLayout`, so nothing else
+        // here would notice the card is back in the grid — without this the
+        // glow stays exactly where `updateFocusGlow` last left it: gone,
+        // from the reparent it could not yet see when the shrink began.
+        updateFocusGlow()
     }
 
     /// Zoom only survives while it still means something: the pane has to be
@@ -1409,6 +1427,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // layout pass nobody triggered — this is the feed, so this is where it
         // reaches the card.
         filmstripItems[sessionID]?.status = status
+        // The focus glow's other gradient stop, same reasoning: nothing else
+        // schedules a repaint of it on a status feed that arrives outside any
+        // layout pass. Harmless when `sessionID` isn't the focused pane —
+        // `updateFocusGlow` rebuilds from `focusedPaneID` regardless.
+        updateFocusGlow()
         // A status change is exactly when a new answer has landed, so it is
         // also when the model behind a pane can have changed — this is the
         // tick, and the feature needs no timer of its own.
@@ -1468,6 +1491,9 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         guard descriptors[sessionID] != descriptor else { return }
         descriptors[sessionID] = descriptor
         containers[sessionID]?.descriptorChanged(descriptor)
+        // Covers a `/color` change on the focused pane — its own gradient
+        // stop, no different from the status one `setStatus` refreshes.
+        updateFocusGlow()
         if let card = filmstripItems[sessionID] {
             card.title = containers[sessionID]?.header.title ?? ""
             card.detail = filmstripDetail(for: sessionID)
@@ -1637,6 +1663,64 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             container.isFocused = id == focusedPaneID
         }
         updateSelection()
+        updateFocusGlow()
+    }
+
+    /// Keeps `focusGlow` matched to whichever pane is focused: its frame, its
+    /// corner radius, both ends of its colour gradient, and its identity —
+    /// the last is what lets `PaneFocusGlowView` tell "still this pane" from
+    /// "just landed on a new one" and only replay the settle animation for
+    /// the latter. Cheap enough to call after every focus, layout, status or
+    /// colour change rather than threading a "did this touch the focused
+    /// pane" check through each site — it only ever rebuilds for whichever
+    /// pane is focused (or zoomed).
+    private func updateFocusGlow() {
+        // While zoomed, the card is the one pane on screen and gets the
+        // glow instead of whichever last happened to hold keyboard focus —
+        // `focusedPaneID` can name a pane that isn't the card (`applyZoom`'s
+        // own comment: switching focus does not itself clear zoom), and
+        // there is nothing to wrap that in but the card.
+        let targetID = zoomedPaneID ?? focusedPaneID
+        guard
+            let targetID,
+            let container = containers[targetID],
+            !ShellMotion.reduced
+        else {
+            focusGlow.apply(around: nil, cornerRadius: 0, edge: nil, peak: nil, paneID: nil)
+            return
+        }
+        let inOverlay = container.superview === focusOverlay
+        guard inOverlay || container.superview === self else {
+            // Mid-reparent — lifting into the overlay or landing back out of
+            // it — with no settled frame to wrap this pass. `applyZoom` and
+            // `finishZoomTransition` both call this again once one completes.
+            focusGlow.apply(around: nil, cornerRadius: 0, edge: nil, peak: nil, paneID: nil)
+            return
+        }
+        let host: NSView = inOverlay ? focusOverlay : self
+        // Topmost in whichever host it belongs to, so its bleed draws over
+        // the neighbouring pane or the card's own backdrop rather than under
+        // it. Skipped in the grid host mid-`zoomTransition`: a drop swap's
+        // two movers and their shadows have their own exact stacking order
+        // (`performPaneDrop`/`castGlideShadow`), and this would reshuffle it
+        // out from under them for the length of the animation. The overlay
+        // host never runs that dance — only one pane is ever in it — so it
+        // re-tops unconditionally.
+        if inOverlay || zoomTransition == 0 {
+            host.addSubview(focusGlow, positioned: .above, relativeTo: nil)
+        }
+        // The same two ingredients `PaneContainerView.borderColors` blends for
+        // the ring this sits over — the chosen colour (or the app
+        // accent with nothing chosen) and the live status colour.
+        let edge = container.header.claudeColor.flatMap(PaneHeaderView.claudeTint(for:)) ?? ShellPalette.accent
+        let peak = PaneStatusMarkView.color(for: container.status)
+        focusGlow.apply(
+            around: container.frame,
+            cornerRadius: container.layer?.cornerRadius ?? PaneContainerView.cornerRadius,
+            edge: edge,
+            peak: peak,
+            paneID: targetID
+        )
     }
 
     /// The name the sidebar prints for a session: the one stored on its panes,
@@ -1823,6 +1907,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // this method and reads it again afterwards (`castGlideShadow`), so
         // clearing it unconditionally would cost the swap its shadow.
         defer { if reflowed { zoomTransition = 0 } }
+        // On every exit, not just the grid path below: the filmstrip and
+        // no-grid paths return early, and each is exactly a case where the
+        // focused pane's frame here is stale or does not exist any more.
+        defer { updateFocusGlow() }
         // Past the ladder's last comfortable rung the workspace stops tiling.
         // The `defer` above still runs, so the move into and out of the
         // filmstrip is animated like any other reshape.
@@ -2198,6 +2286,11 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         resizeDisplayLink = nil
         occlusionObserver.map(NotificationCenter.default.removeObserver)
         occlusionObserver = nil
+        commandHintResignObserver.map(NotificationCenter.default.removeObserver)
+        commandHintResignObserver = nil
+        commandFlagMonitor.map(NSEvent.removeMonitor)
+        commandFlagMonitor = nil
+        setCommandHintShown(false)
         guard let window else { return }
         let link = displayLink(target: self, selector: #selector(displayRefreshed))
         link.add(to: .main, forMode: .common)
@@ -2211,7 +2304,50 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             guard let window = notification.object as? NSWindow else { return }
             self?.setSuspendsDrawing(!window.occlusionState.contains(.visible))
         }
+        // A chord like ⌘⇥ away mid-hold must not leave the hint stuck on: the
+        // local monitor below only sees events this window receives, so
+        // losing key status is the one transition it cannot observe itself.
+        commandHintResignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in self?.setCommandHintShown(false) }
+        // ⌘1…⌘0's hint, on for exactly as long as ⌘ is held — see
+        // `setCommandHintShown`. Local, not global: this app's own window
+        // taking the event is exactly when a pane hint is relevant.
+        commandFlagMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.setCommandHintShown(event.modifierFlags.contains(.command))
+            return event
+        }
         restoreFocus()
+    }
+
+    deinit {
+        commandFlagMonitor.map(NSEvent.removeMonitor)
+    }
+
+    /// Toggles every eligible pane's shortcut hint at once — edge-triggered,
+    /// so a chord like ⌘⇧A held down doesn't restart the fade on every
+    /// `.flagsChanged` while ⌘ itself stays down. "Eligible" is `paneIDs`'
+    /// first ten: exactly the panes `AppDelegate`'s Panes menu gave a ⌘ key
+    /// equivalent (⌘1…⌘0) — see its own comment for why 11 and 12 have none.
+    private func setCommandHintShown(_ shown: Bool) {
+        guard isCommandHintShown != shown else { return }
+        isCommandHintShown = shown
+        for (index, id) in paneIDs.enumerated() {
+            containers[id]?.setShortcutHint(key: Self.shortcutKey(atFillOrderIndex: index), shown: shown)
+        }
+    }
+
+    /// "1"…"9"/"0" for the ten panes ⌘ can reach, else `nil` — the one place
+    /// that mapping lives, shared by the hint's own show/hide and the
+    /// "you're here" pulse `selectPane` fires below.
+    private static func shortcutKey(atFillOrderIndex index: Int) -> String? {
+        switch index {
+        case 0...8: return "\(index + 1)"
+        case 9: return "0"
+        default: return nil
+        }
     }
 
     @objc private func displayRefreshed() {
@@ -2260,10 +2396,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     @objc func swapPaneUp(_ sender: Any?) { swapWithNeighbor(.up) }
     @objc func swapPaneDown(_ sender: Any?) { swapWithNeighbor(.down) }
 
-    /// ⌘1…⌘9 — the menu item's `tag` is the 1-based pane index in fill order.
+    /// ⌘1…⌘0 — the menu item's `tag` is the 1-based pane index in fill order.
     @objc func selectPane(_ sender: Any?) {
         guard let tag = (sender as? NSMenuItem)?.tag else { return }
-        focusPane(at: tag)
+        let ids = paneIDs
+        guard focusPane(at: tag) else { return }
+        // The pulse only for what the chord could have shown a hint for —
+        // beyond pane 10 there's no key equivalent, so nothing to confirm.
+        guard let key = Self.shortcutKey(atFillOrderIndex: tag - 1) else { return }
+        containers[ids[tag - 1]]?.pulseChosenShortcut(key: key)
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -2571,6 +2712,43 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// answer pays it — see `dismissAsk`.
     private var unansweredCancel: (() -> Void)?
 
+    /// The ⌘-chord hint, up while ⌘ is held — see `PaneShortcutHintView`.
+    /// `nil` both when nothing has been shown yet and once this pane has no
+    /// working chord to show (past ⌘0's tenth pane).
+    private var shortcutHint: PaneShortcutHintView?
+
+    /// Driven by `PaneWorkspaceView`'s single `.flagsChanged` monitor, once
+    /// per pane per ⌘ press/release — not by this view watching the keyboard.
+    /// `key` is `nil` for a pane with no chord (past the tenth); passing one
+    /// only recreates the card when the key actually changed, so a held ⌘
+    /// through a pane reflow doesn't restart the fade mid-flight.
+    func setShortcutHint(key: String?, shown: Bool) {
+        guard let key else {
+            shortcutHint?.setShown(false)
+            return
+        }
+        let hint: PaneShortcutHintView
+        if let existing = shortcutHint, existing.key == key {
+            hint = existing
+        } else {
+            shortcutHint?.removeFromSuperview()
+            hint = PaneShortcutHintView(key: key)
+            addSubview(hint, positioned: .above, relativeTo: nil)
+            shortcutHint = hint
+            needsLayout = true
+        }
+        hint.setShown(shown)
+    }
+
+    /// The one-second confirmation once ⌘N actually lands here
+    /// (`PaneWorkspaceView.selectPane`) — ensures the hint exists (a menu
+    /// click, not a held ⌘, may never have shown one) and pulses it with
+    /// this pane's own live status colour. See `PaneShortcutHintView.pulseChosen`.
+    func pulseChosenShortcut(key: String) {
+        setShortcutHint(key: key, shown: true)
+        shortcutHint?.pulseChosen(statusColor: PaneStatusMarkView.color(for: status))
+    }
+
     /// Puts `title`/`message` on glass over this pane and waits. Exactly one
     /// of `options` runs, or `onCancel` if the card is dismissed with Esc, a
     /// click outside it, or another ask taking its place — so a caller with an
@@ -2770,6 +2948,13 @@ final class PaneContainerView: NSView, NSDraggingSource {
 
     override var isFlipped: Bool { true }
 
+    /// A gradient rather than a plain `CALayer`: `borderColors` blends the
+    /// pane's chosen colour into its status colour, and a flat
+    /// `backgroundColor` can only ever hold one of the two. `updateChrome`
+    /// sets both stops equal whenever there is only one colour to show, which
+    /// paints identically to the old flat fill.
+    override func makeBackingLayer() -> CALayer { CAGradientLayer() }
+
     override func layout() {
         super.layout()
         applyLayout()
@@ -2815,6 +3000,15 @@ final class PaneContainerView: NSView, NSDraggingSource {
         dropHighlight.frame = bounds
         askOverlay?.frame = bounds
         workingRing?.frame = bounds
+        // Upper-middle, just under the header — same per-pane-overlay
+        // convention as `askOverlay` above, sized to its own content instead
+        // of the whole pane.
+        shortcutHint?.frame = CGRect(
+            x: bounds.midX - PaneShortcutHintView.width / 2,
+            y: headerHeight + 12,
+            width: PaneShortcutHintView.width,
+            height: PaneShortcutHintView.height
+        )
     }
 
     private func updateChrome() {
@@ -2827,7 +3021,15 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // `box-shadow` is a layer of the overlay host for exactly this reason,
         // since this mask would clip a shadow of its own away.
         layer?.masksToBounds = true
-        layer?.backgroundColor = borderColor.cgColor
+        if let gradient = layer as? CAGradientLayer {
+            // Unit coordinates: this view is flipped, so — unlike
+            // `PaneGroundView`'s own comment on the same point — `0` is the
+            // top edge here, not `1`.
+            gradient.startPoint = CGPoint(x: 0.5, y: 0)
+            gradient.endPoint = CGPoint(x: 0.5, y: 1)
+            let (top, bottom) = borderColors
+            gradient.colors = [top.cgColor, bottom.cgColor]
+        }
         roundChildren(inside: radius)
         dropHighlight.isHidden = !isDropTarget
         updateWorkingRing()
@@ -2924,25 +3126,42 @@ final class PaneContainerView: NSView, NSDraggingSource {
         approvalPollTimer?.invalidate()
     }
 
-    /// Which colour the 1pt ring takes: a drop in flight first, then the
-    /// pane's live status in the sidebar's own palette — the ring, the
-    /// header's mark and the tree's dots must never disagree, which is why
-    /// this reads `PaneStatusMarkView.color(for:)` instead of keeping its own
-    /// copies. Focus brightens the ring; a question or an error keeps it
-    /// visible even on an unfocused pane, whose other statuses recede to the
-    /// hairline (the mark and the wash still carry them there).
-    private var borderColor: NSColor {
-        if isDropTarget { return Self.dropTargetBorderColor }
+    /// Which two colours the 1pt ring blends between, top to bottom: a drop
+    /// in flight first, then the pane's own chosen colour (`/color`) blended
+    /// with its live status colour — the same two ingredients the focus glow
+    /// blends (`PaneWorkspaceView.updateFocusGlow`), just as a plain gradient
+    /// here instead of spinning smoke. With no chosen colour to blend, the
+    /// ring falls back to exactly what it always wore: the live status in
+    /// the sidebar's own palette, flat — this reads `PaneStatusMarkView.color
+    /// (for:)` instead of keeping its own copy so the ring, the header's mark
+    /// and the tree's dots can never disagree. Focus brightens the ring; a
+    /// question or an error keeps it visible even on an unfocused pane, whose
+    /// other statuses recede to the hairline (the mark and the wash still
+    /// carry them there).
+    private var borderColors: (top: NSColor, bottom: NSColor) {
+        if isDropTarget { return (Self.dropTargetBorderColor, Self.dropTargetBorderColor) }
+        let chosen = header.claudeColor.flatMap(PaneHeaderView.claudeTint(for:))
         if isFocused {
-            guard let status else { return Self.focusedBorderColor }
-            return PaneStatusMarkView.color(for: status).withAlphaComponent(Self.focusedRingAlpha)
+            let base = status.map { PaneStatusMarkView.color(for: $0).withAlphaComponent(Self.focusedRingAlpha) }
+                ?? Self.focusedBorderColor
+            guard let chosen else { return (base, base) }
+            return (chosen.withAlphaComponent(Self.focusedRingAlpha), base)
         }
         switch status {
         case .awaitingApproval, .error:
-            return PaneStatusMarkView.color(for: status).withAlphaComponent(Self.urgentRingAlpha)
+            let base = PaneStatusMarkView.color(for: status).withAlphaComponent(Self.urgentRingAlpha)
+            guard let chosen else { return (base, base) }
+            return (chosen.withAlphaComponent(Self.urgentRingAlpha), base)
         default:
-            return Self.idleBorderColor
+            return (Self.idleBorderColor, Self.idleBorderColor)
         }
+    }
+
+    /// `borderColors` stays `private` — this is a test seam only, the same
+    /// convention as `PaneAppView.glowContainerForTesting`.
+    var borderColorsForTesting: [CGColor] {
+        let (top, bottom) = borderColors
+        return [top.cgColor, bottom.cgColor]
     }
 
     /// The design's signature: while an agent is actually thinking, a bright
@@ -3213,6 +3432,213 @@ final class PaneDropOverlayView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// The focused pane's border, over `PaneContainerView.borderColors`'
+/// gradient ring: the same spinning, blurred conic gradient as the App view's
+/// composer (`PaneAppView.updateComposerGlow`) — "make it shiny... out of
+/// focus" — bled just far enough past the pane's own edge to lap onto its
+/// neighbour, smaller than the composer's own halo.
+///
+/// A `PaneWorkspaceView`-level view, not a sublayer of the focused
+/// `PaneContainerView` itself: that container's own layer masks to its
+/// rounded bounds (see its own comment on `updateChrome`), which would clip
+/// this exactly at the edge it needs to cross. Living here, above every pane
+/// and divider (`PaneWorkspaceView.init`), it draws over a sliver of
+/// whichever pane is next door instead.
+///
+/// One instance for the whole grid, repositioned around whichever pane is
+/// focused (`PaneWorkspaceView.updateFocusGlow`) rather than one per pane:
+/// only one pane is ever focused at a time, so only one glow is ever
+/// spinning, the same economy `updateComposerGlow`'s own doc comment argues
+/// for.
+final class PaneFocusGlowView: NSView {
+    /// How far the glow bleeds past the pane's own edge the moment focus
+    /// lands — bigger and softer than the composer's own (`composerGlowBleed`
+    /// 10): the focused pane in a grid of eight has to read from across the
+    /// room, so it leans into standing out rather than merely touching its
+    /// neighbour. The view's own `frame` is pinned to this bleed at all
+    /// times, settled or not, so only the *mask* has to animate — see
+    /// `apply`.
+    private static let expandedBleed: CGFloat = 16
+    /// Where it settles, `settleDuration` later: a slim gradient border
+    /// close against the pane's own edge — the same halo pulled all the way
+    /// in, not a border colour swapped for a fancier one.
+    private static let settledBleed: CGFloat = 2
+    /// Constant through the settle rather than animated alongside the bleed:
+    /// a `CIFilter` parameter only animates through a second, fragile
+    /// keyframe path (`filters.<name>.inputRadius`), and this one number
+    /// already reads as soft smoke at 16pt out and a soft-edged hairline at
+    /// 2pt out without it.
+    private static let blurRadius: CGFloat = 3
+    private static let settleDuration: CFTimeInterval = 0.75
+
+    private var gradient: CAGradientLayer?
+    /// The pane this glow currently wraps. `apply` only replays the
+    /// expand-then-settle animation when this changes — a resize or a
+    /// colour change on the *same* still-focused pane just repositions or
+    /// recolours the already-settled state instead of restarting the intro
+    /// on every unrelated update.
+    private var currentPaneID: String?
+
+    /// `gradient` stays `private` — this is a test seam only, the same
+    /// convention as `PaneAppView.glowContainerForTesting`.
+    var gradientForTesting: CAGradientLayer? { gradient }
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        // Nothing is focused yet — same convention as `PaneDropOverlayView`
+        // just above, explicit rather than incidentally true of a zero frame.
+        isHidden = true
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
+    /// Bleeds onto a neighbour's own edge, and a click there must still reach
+    /// that pane — never a hit target, the same convention as
+    /// `PaneDropOverlayView` just above.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    /// Shows the glow around `rect` (a focused pane's own frame, in the
+    /// workspace's coordinate space, its own corner radius, `paneID` its
+    /// identity) coloured by a gradient between `edge` and `peak` — or tears
+    /// it down. The four are `nil`/absent together only: there is nothing to
+    /// colour without a pane to colour it for.
+    func apply(around rect: NSRect?, cornerRadius radius: CGFloat, edge: NSColor?, peak: NSColor?, paneID: String?) {
+        guard let rect, let edge, let peak, let paneID else {
+            gradient?.removeFromSuperlayer()
+            gradient = nil
+            layer?.mask = nil
+            currentPaneID = nil
+            isHidden = true
+            return
+        }
+        isHidden = false
+        let isNewFocus = paneID != currentPaneID
+        currentPaneID = paneID
+
+        // Driven by hand every call, not left to react to a resize or a
+        // colour change as a user gesture would — without this, Core
+        // Animation's default implicit action fires on every layout pass and
+        // the halo visibly lags a resizing or reflowing grid. The one
+        // deliberate exception is the settle itself, added as an *explicit*
+        // animation below — explicit animations play regardless of this.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
+        // Always sized to the *expanded* bleed, whether settled or not: the
+        // settle only pulls the mask's own painted band in, never the view
+        // itself, so there is no frame/position animation to keep in step
+        // with the mask's — one moving part instead of two.
+        let bleed = Self.expandedBleed
+        let outer = rect.insetBy(dx: -bleed, dy: -bleed)
+        frame = outer
+
+        let gradient = self.gradient ?? {
+            let layer = CAGradientLayer()
+            layer.type = .conic
+            layer.startPoint = CGPoint(x: 0.5, y: 0.5)
+            layer.endPoint = CGPoint(x: 0.5, y: 0)
+            // Softens the conic gradient's own colour steps — see the mask's
+            // own blur below for the band's two edges. Keeps spinning at
+            // every band width, settled or not — the same gradient effect
+            // throughout, just pulled progressively tighter to the edge.
+            if let blur = CIFilter(name: "CIGaussianBlur") {
+                blur.setValue(Self.blurRadius, forKey: kCIInputRadiusKey)
+                layer.filters = [blur]
+            }
+            let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+            spin.fromValue = 0
+            spin.toValue = 2 * Double.pi
+            spin.duration = 3
+            spin.repeatCount = .infinity
+            spin.isRemovedOnCompletion = false
+            layer.add(spin, forKey: "om-spin")
+            self.layer?.addSublayer(layer)
+            self.gradient = layer
+            return layer
+        }()
+        // Always a gradient between the pane's chosen colour and its live
+        // status colour — never one alone, and never crossfaded into a third,
+        // unrelated hue the way the composer's untinted sweep is.
+        gradient.colors = [
+            edge.withAlphaComponent(0).cgColor,
+            edge.withAlphaComponent(0.55).cgColor,
+            peak.withAlphaComponent(0.9).cgColor,
+            edge.withAlphaComponent(0.55).cgColor,
+            edge.withAlphaComponent(0).cgColor,
+        ]
+        gradient.locations = [0, 0.25, 0.5, 0.75, 1]
+        // Square, sized to the container's own diagonal, so no rotation angle
+        // ever turns a corner of the gradient inside daylight — the same
+        // reasoning as `PaneAppView.layOutComposerGlow`.
+        let side = hypot(outer.width, outer.height)
+        gradient.frame = CGRect(
+            x: (outer.width - side) / 2, y: (outer.height - side) / 2, width: side, height: side
+        )
+
+        // The even-odd band mask: an outer rounded rect minus the pane's own
+        // rounded rect, blurred so both edges of the band taper rather than
+        // cut hard — `layOutComposerGlow`'s own idiom. Only the *outer*
+        // rect's own inset moves (`bandPath`'s `bandBleed`); the inner one is
+        // always the pane's own rect, flush against its edge at every width.
+        let mask = (layer?.mask as? CAShapeLayer) ?? {
+            let shape = CAShapeLayer()
+            shape.fillRule = .evenOdd
+            if let blur = CIFilter(name: "CIGaussianBlur") {
+                blur.setValue(Self.blurRadius, forKey: kCIInputRadiusKey)
+                shape.filters = [blur]
+            }
+            layer?.mask = shape
+            return shape
+        }()
+        mask.frame = CGRect(origin: .zero, size: outer.size)
+
+        let settledPath = Self.bandPath(rect: rect, radius: radius, containerSize: outer.size, bandBleed: Self.settledBleed)
+        if isNewFocus {
+            // The moment focus lands: full smoke, then an explicit path
+            // animation carries it smoothly in to `settledPath` over
+            // `settleDuration` — the model value below is already the
+            // settled one, so a call landing mid-flight (a resize, a status
+            // tick) reads the right end state without replaying this.
+            let expandedPath = Self.bandPath(
+                rect: rect, radius: radius, containerSize: outer.size, bandBleed: Self.expandedBleed
+            )
+            let settle = CABasicAnimation(keyPath: "path")
+            settle.fromValue = expandedPath
+            settle.toValue = settledPath
+            settle.duration = Self.settleDuration
+            settle.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            mask.add(settle, forKey: "om-settle")
+        }
+        mask.path = settledPath
+    }
+
+    /// The band mask's path: an outer rounded rect `bandBleed` out from the
+    /// pane's own edge, minus the pane's own rounded rect flush against it.
+    /// `containerSize` is always the *expanded*-bleed frame (`apply`'s
+    /// `outer`), so `bandBleed` alone controls how wide the visible band is
+    /// — from a full 16pt halo at `expandedBleed` down to a 2pt hairline at
+    /// `settledBleed`, in the same local coordinate space either way, which
+    /// is what lets Core Animation morph smoothly between the two.
+    private static func bandPath(rect: NSRect, radius: CGFloat, containerSize: CGSize, bandBleed: CGFloat) -> CGPath {
+        let path = CGMutablePath()
+        let outerInset = expandedBleed - bandBleed
+        let outerRect = CGRect(origin: .zero, size: containerSize).insetBy(dx: outerInset, dy: outerInset)
+        let outerRadius = radius + bandBleed
+        path.addRoundedRect(in: outerRect, cornerWidth: outerRadius, cornerHeight: outerRadius)
+        path.addRoundedRect(
+            in: CGRect(x: expandedBleed, y: expandedBleed, width: rect.width, height: rect.height),
+            cornerWidth: radius, cornerHeight: radius
+        )
+        return path
+    }
 }
 
 /// The pane's chrome, from the design's terminal grid: a status mark that says

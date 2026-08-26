@@ -1,9 +1,11 @@
 import Foundation
 
 /// The native port of `ui/src/state/paneGrid.ts` — the founder's approved pane
-/// ladder, its column-major fill, its hole padding, and its two special-cased
-/// mutations, plus the geometry the web build delegated to react-mosaic and the
-/// browser.
+/// ladder, its hole padding, and its two special-cased mutations, plus the
+/// geometry the web build delegated to react-mosaic and the browser. One
+/// deliberate divergence: `fillOrder` reads row-major here (`1 2 3 4 / 5 6 7
+/// 8`) where the web build's `buildGrid` is still column-major — see
+/// `fillOrder`'s own doc comment.
 ///
 /// **Shape of the port.** The TypeScript oracle stores a react-mosaic tree
 /// (`PaneTree`: a leaf id, or a row/column split). Every tree `buildGrid`
@@ -100,31 +102,38 @@ struct PaneGrid: Equatable {
     static let maxPanes = 12
 
     /// The order cells are filled, as indices into `cells` (which is stored
-    /// column-major). Rows 0 and 1 fill column-major, exactly as they always
-    /// have; rows 2 and beyond then fill a row at a time, left to right.
+    /// column-major): row by row, left to right within each row — so pane
+    /// numbering (`paneIDs`, and the `⌘`-key hint it drives) reads the way a
+    /// grid is read on screen: `1 2 3 4 / 5 6 7 8`.
     ///
-    /// The split exists so the ninth pane does not reshuffle the eight already
-    /// on screen. A straight column-major fill of the 4x3 rung would seat panes
-    /// 1-3 down column 0 and push everybody else sideways; filling the two-row
-    /// band first means every pane keeps the exact cell it held in the 4x2 rung
-    /// and the newcomer opens the third row at column 0, leaving the three cells
-    /// beside it as holes for panes 10, 11 and 12 to claim in turn (founder
-    /// brief, 2026-08-18).
+    /// This is NOT free the way the old column-major fill was. Growing a rung
+    /// by a COLUMN (4 panes -> 5, 6 -> 7) widens every row, so panes already in
+    /// the last column shift down-left — e.g. opening a 5th pane turns what was
+    /// pane "3" into pane "4". Only growing by a ROW (8 -> 9, the third-row
+    /// rung) is still free: a new row appends after every earlier row's slots,
+    /// so nothing already on screen moves (see `testGrowingIntoTheThirdRow…`
+    /// in `PaneGridTests`). Bruno chose readable numbering over the stability
+    /// guarantee (2026-08-26) — the old column-major fill (`1 3 5 7 / 2 4 6 8`)
+    /// never reshuffled on ANY open/close; this trades that away for everything
+    /// short of the 9th pane.
     ///
-    /// For any rung with two rows or fewer this is the identity — the same
-    /// column-major order the TypeScript oracle and the committed fixture pin.
+    /// Native-only: `paneGrid.ts` (the legacy web build, capped at 8 panes) still
+    /// fills column-major and is not updated to match — `ui/` is frozen for new
+    /// work (see the repo's `CLAUDE.md`), and porting this back would mean
+    /// restructuring `buildGrid`'s row-split-of-column-splits mosaic tree into a
+    /// column-split-of-row-splits, a bigger change than this native-only
+    /// overlay feature needs. The committed fixture stays the TypeScript
+    /// oracle's own truth unedited — every per-shape `pane_ids` entry is a
+    /// round-trip identity (order-independent, so it holds either way), but
+    /// `hole_repair.expected_pane_ids` IS fill-order-sensitive and is left at
+    /// the column-major answer; `PaneGridTests.swift`'s fixture test asserts
+    /// this side's own (different) answer for that one field inline instead of
+    /// reading it off the fixture, rather than editing a file both ports share.
     static func fillOrder(cols: Int, rows: Int) -> [Int] {
         guard cols > 0, rows > 0 else { return [] }
-        let bandRows = min(rows, 2)
         var order: [Int] = []
         order.reserveCapacity(cols * rows)
-        for column in 0..<cols {
-            for row in 0..<bandRows {
-                order.append(column * rows + row)
-            }
-        }
-        guard rows > bandRows else { return order }
-        for row in bandRows..<rows {
+        for row in 0..<rows {
             for column in 0..<cols {
                 order.append(column * rows + row)
             }
@@ -135,8 +144,8 @@ struct PaneGrid: Equatable {
     private(set) var cols: Int
     private(set) var rows: Int
     /// Storage is column-major: column 0 top to bottom, then column 1, … The
-    /// order panes are *seated* in is `fillOrder`, which is this same order for
-    /// every rung up to 4x2 and differs only on the third row and below.
+    /// order panes are *seated* in is `fillOrder`, which reads row by row —
+    /// see its doc comment for why storage order and seating order differ.
     private(set) var cells: [PaneCell]
     private(set) var columnFractions: [Double]
     private(set) var rowFractions: [[Double]]
@@ -233,9 +242,9 @@ struct PaneGrid: Equatable {
 
     // MARK: - Identity
 
-    /// Every real (non-hole) id, in `fillOrder` — top to bottom within a column
-    /// for the first two rows, columns left to right, then a row at a time
-    /// below that. Exactly `paneIds` for every rung the TypeScript oracle knows.
+    /// Every real (non-hole) id, in `fillOrder` — row by row, left to right,
+    /// top row first. This is what `⌘1…⌘0` select and what the shortcut hint
+    /// numbers panes by (`AppDelegate.swift`'s Panes menu, `PaneWorkspaceView`).
     ///
     /// It has to be fill order rather than raw storage order: `synced` feeds
     /// this straight back into `build` on the next open, so any other order

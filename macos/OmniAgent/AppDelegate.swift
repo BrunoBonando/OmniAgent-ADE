@@ -247,8 +247,16 @@ enum ApplicationMenus {
         // Focus *mode* — the pane blown up over the others on a blurred
         // backdrop — not the item above, which only moves keyboard focus
         // into the terminal. ⌘↩ is Bruno's own binding, chosen over the
-        // design hint text's ⌃⌘F.
+        // design hint text's ⌃⌘F — kept as a second, hidden chord for the
+        // same action rather than dropped: two menu items, one action, only
+        // one of them shown, `allowsKeyEquivalentWhenHidden` is what keeps a
+        // hidden item's chord live (macOS 12+; without it a hidden item's key
+        // equivalent is inert).
         session.addItem(item("Focus This Terminal", Selector(("toggleFocusMode:")), "\r"))
+        let focusModeAltChord = item("Focus This Terminal", Selector(("toggleFocusMode:")), "f", [.command, .control])
+        focusModeAltChord.isHidden = true
+        focusModeAltChord.allowsKeyEquivalentWhenHidden = true
+        session.addItem(focusModeAltChord)
 
         // Pane commands travel the responder chain (target nil): directional
         // focus and swap land on PaneWorkspaceView, pane lifecycle on
@@ -269,13 +277,21 @@ enum ApplicationMenus {
             panes.addItem(item("Move Pane \(name)", swap, key, [.command, .control]))
         }
         panes.addItem(.separator())
-        // A key equivalent only up to nine: there is no single keystroke for
-        // "10", and handing AppKit a two-character equivalent gives an item
-        // that draws a nonsense shortcut and never fires. Panes 10-12 are still
-        // here as menu items (and still reachable from the palette and the
-        // grid); they simply have no ⌘ shortcut.
+        // ⌘0 for the tenth pane — the one other digit on the keyboard, and
+        // free (nothing else in this app binds it). Past that there is no
+        // single keystroke: a two-character equivalent gives an item that
+        // draws a nonsense shortcut and never fires. ⌘A and ⌘B, the next
+        // obvious candidates for 11/12, are already Select All and (by
+        // universal convention) Bold — reusing them would silently break
+        // text editing, so 11 and 12 stay unbound. They're still here as menu
+        // items (and still reachable from the palette and the grid).
         for index in 1...PaneGrid.maxPanes {
-            let key = index <= 9 ? "\(index)" : ""
+            let key: String
+            switch index {
+            case 1...9: key = "\(index)"
+            case 10: key = "0"
+            default: key = ""
+            }
             let selection = item("Pane \(index)", Selector(("selectPane:")), key)
             selection.tag = index
             panes.addItem(selection)
