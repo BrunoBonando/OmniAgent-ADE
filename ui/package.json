@@ -1,7 +1,7 @@
 {
   "name": "omniagent-ui",
   "private": true,
-  "version": "2026.8.26+011",
+  "version": "2026.8.26+013",
   "type": "module",
   "scripts": {
     "dev": "vite",

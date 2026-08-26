@@ -147,7 +147,7 @@ final class NavigationSidebarTests: XCTestCase {
     /// with no reading says so instead of inventing a number.
     func testTheGaugesRenderPercentagesAndClamp() {
         let stats = SidebarSystemStatsView()
-        stats.apply(cpu: 0.37, memory: 1.7, gpu: nil)
+        stats.apply(cpu: 0.37, memory: 1.7, gpu: nil, animated: false)
         XCTAssertEqual(stats.cpuGauge.readout, "37%")
         XCTAssertEqual(stats.memoryGauge.readout, "100%")
         XCTAssertEqual(stats.gpuGauge.readout, "—")
@@ -896,20 +896,29 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(samples.last?.y ?? 0, 1, accuracy: 0.001, "and comes to rest on it")
     }
 
-    /// Fast away, slow home. At the halfway point of the *animation* the
-    /// needle is already most of the way to the reading.
-    func testTheSweepStartsFastAndDecelerates() {
-        let curve = SidebarDialGaugeView.sweepCurve
-        // Progress at the moment half the duration has elapsed.
-        let halfway = bezier(curve, atX: 0.5)
-        XCTAssertGreaterThan(halfway, 0.8, "most of the distance is covered in the first half")
+    /// Slow away, quickest through the middle, slow arriving — an S, not a
+    /// ramp. Measured as speed over three equal slices of the duration, which
+    /// is what "starts slow and speeds up" actually means.
+    func testTheSweepEasesInAndOut() {
+        let curve = SidebarMotion.overshoot
+        func covered(_ from: Double, _ to: Double) -> Double {
+            bezier(curve, atX: to) - bezier(curve, atX: from)
+        }
+        let opening = covered(0, 1.0 / 3)
+        let middle = covered(1.0 / 3, 2.0 / 3)
+        let closing = covered(2.0 / 3, 1)
 
-        let firstQuarter = bezier(curve, atX: 0.25)
-        let lastQuarter = 1 - bezier(curve, atX: 0.75)
-        XCTAssertGreaterThan(
-            firstQuarter, lastQuarter,
-            "more ground covered leaving than arriving"
-        )
+        XCTAssertGreaterThan(middle, opening, "speeds up out of the start")
+        XCTAssertGreaterThan(middle, closing, "and slows down into the finish")
+        XCTAssertLessThan(opening, 0.25, "the opening third is unhurried")
+    }
+
+    /// It leaves from a standstill rather than snapping into motion.
+    func testTheSweepLeavesFromRest() {
+        // Over the first twentieth of the duration, a curve that starts at
+        // rest has barely moved; a linear one would have covered 5%.
+        XCTAssertLessThan(bezier(SidebarMotion.overshoot, atX: 0.05), 0.02)
+        XCTAssertLessThan(bezier(SidebarMotion.settle, atX: 0.05), 0.02)
     }
 
     /// A cubic bezier with endpoints (0,0) and (1,1), evaluated at `t`.
@@ -985,7 +994,7 @@ final class NavigationSidebarTests: XCTestCase {
     /// the gauge used to carry its own copy of the same three thresholds.
     func testTheGaugesNumberAndDialAgree() {
         let card = SidebarSystemStatsView()
-        card.apply(cpu: 0.95, memory: nil, gpu: nil)
+        card.apply(cpu: 0.95, memory: nil, gpu: nil, animated: false)
         assertHue(card.cpuGauge.readoutColor, ShellPalette.red)
         XCTAssertEqual(card.cpuGauge.readoutColor, card.cpuGauge.dial.progressColor, "one ramp")
         XCTAssertEqual(card.memoryGauge.readout, "—")
@@ -1177,16 +1186,145 @@ final class NavigationSidebarTests: XCTestCase {
         )
     }
 
-    /// The settle curve leaves fast like the spring, it just does not run
-    /// past — otherwise a shrinking bar would move quite differently from a
+    /// The settle curve has the same S-shape as the spring — it just does not
+    /// run past. Otherwise a shrinking bar would move quite differently from a
     /// growing one.
-    func testTheSettleCurveStillLeavesFast() {
-        let halfway = bezier(SidebarMotion.settle, atX: 0.5)
-        XCTAssertGreaterThan(halfway, 0.8, "front-loaded, like the spring")
+    func testTheSettleCurveIsTheSameShapeWithoutTheOvershoot() {
         let peak = stride(from: 0.0, through: 1.0, by: 0.01)
             .map { bezier(SidebarMotion.settle, at: $0).y }
             .max() ?? 0
-        XCTAssertLessThanOrEqual(peak, 1.001, "but never past the reading")
+        XCTAssertLessThanOrEqual(peak, 1.001, "never past the reading")
+
+        // Same slices, same verdict as the spring.
+        func covered(_ from: Double, _ to: Double) -> Double {
+            bezier(SidebarMotion.settle, atX: to) - bezier(SidebarMotion.settle, atX: from)
+        }
+        let middle = covered(1.0 / 3, 2.0 / 3)
+        XCTAssertGreaterThan(middle, covered(0, 1.0 / 3))
+        XCTAssertGreaterThan(middle, covered(2.0 / 3, 1))
+    }
+
+    // MARK: - Numbers that count
+
+    /// Runs the main runloop until `check` holds, or gives up.
+    private func settle(within seconds: TimeInterval, until check: () -> Bool) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline && !check() {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+    }
+
+    /// The number travels through the values between two readings rather than
+    /// cutting from one to the other.
+    func testTheNumberCountsThroughTheValuesBetween() {
+        var seen: [Double] = []
+        let counter = SidebarCountingLabel { seen.append($0) }
+        counter.count(to: 20, animated: false)
+        seen.removeAll()
+
+        counter.count(to: 30, animated: true)
+        settle(within: SidebarMotion.duration + 0.5) { !counter.isCounting }
+
+        XCTAssertGreaterThan(seen.count, 5, "it passed through, it did not jump")
+        XCTAssertEqual(seen.last ?? 0, 30, accuracy: 0.001, "and arrived")
+        // Every value between the two readings, in order and inside the range.
+        XCTAssertEqual(seen, seen.sorted(), "counts upward, never backwards")
+        for value in seen {
+            XCTAssertGreaterThanOrEqual(value, 20)
+            XCTAssertLessThanOrEqual(value, 30)
+        }
+        XCTAssertTrue(
+            seen.contains { $0 > 22 && $0 < 28 }, "and through the middle of the range"
+        )
+    }
+
+    /// It counts at the animation's pace, not at a constant rate: the middle
+    /// of the count covers more ground than either end.
+    func testTheNumberCountsAtTheAnimationsPace() {
+        var seen: [Double] = []
+        let counter = SidebarCountingLabel { seen.append($0) }
+        counter.count(to: 0, animated: false)
+        seen.removeAll()
+
+        counter.count(to: 100, animated: true)
+        settle(within: SidebarMotion.duration + 0.5) { !counter.isCounting }
+
+        XCTAssertGreaterThan(seen.count, 9, "enough samples to see a shape")
+        let third = seen.count / 3
+        let opening = seen[third] - seen[0]
+        let middle = seen[third * 2] - seen[third]
+        XCTAssertGreaterThan(middle, opening, "speeds up out of the start")
+    }
+
+    /// The figure is clamped where the bar is not: the curve runs past the
+    /// reading, and a readout showing 48% when the reading is 46% is stating
+    /// something untrue.
+    func testTheNumberNeverCountsPastItsReading() {
+        var seen: [Double] = []
+        let counter = SidebarCountingLabel { seen.append($0) }
+        counter.count(to: 0, animated: false)
+        seen.removeAll()
+
+        counter.count(to: 46, animated: true)
+        settle(within: SidebarMotion.duration + 0.5) { !counter.isCounting }
+
+        XCTAssertLessThanOrEqual(seen.max() ?? 0, 46, "never reads higher than the reading")
+    }
+
+    /// First launch: everything starts at nothing and counts up to what it
+    /// found, rather than appearing already at it.
+    func testAFirstReadingCountsUpFromZero() {
+        let gauge = SidebarStatGaugeView(name: "CPU")
+        XCTAssertEqual(gauge.countingLabel.current, 0, "starts at nothing")
+
+        gauge.apply(0.37)
+
+        XCTAssertTrue(gauge.countingLabel.isCounting, "it travels to the first reading")
+        settle(within: SidebarMotion.duration + 0.5) { !gauge.countingLabel.isCounting }
+        XCTAssertEqual(gauge.readout, "37%")
+    }
+
+    /// The same on the Claude card, whose first state is no reading at all.
+    func testTheLimitsCardAlsoCountsUpFromZero() {
+        let card = makeLimitsCard()
+        card.apply(nil, now: noon)
+        XCTAssertEqual(card.sessionColumn.readout, "—", "no reading is not a number")
+
+        card.apply(
+            ClaudeUsageLimits.parse("Current session: 41% used · resets Aug 25 at 3:00pm"),
+            now: noon
+        )
+
+        XCTAssertTrue(card.sessionColumn.countingLabel.isCounting)
+        settle(within: SidebarMotion.duration + 0.5) { !card.sessionColumn.countingLabel.isCounting }
+        XCTAssertEqual(card.sessionColumn.readout, "41%")
+    }
+
+    /// A reading arriving mid-count continues from where the number visibly
+    /// is, rather than snapping back to start again.
+    func testAReadingMidCountContinuesFromWhereItIs() {
+        var seen: [Double] = []
+        let counter = SidebarCountingLabel { seen.append($0) }
+        counter.count(to: 0, animated: false)
+        counter.count(to: 100, animated: true)
+        settle(within: 0.2) { counter.current > 5 }
+        let interrupted = counter.current
+        seen.removeAll()
+
+        counter.count(to: 50, animated: true)
+
+        XCTAssertEqual(seen.first ?? -1, interrupted, accuracy: 0.001, "picks up where it was")
+    }
+
+    /// Losing a reading is the absence of a number, not a journey to zero.
+    func testLosingAReadingDoesNotCountDown() {
+        let gauge = SidebarStatGaugeView(name: "GPU")
+        gauge.apply(0.5, animated: false)
+
+        gauge.apply(nil)
+
+        XCTAssertFalse(gauge.countingLabel.isCounting, "nothing to count to")
+        XCTAssertEqual(gauge.readout, "—")
     }
 
     // MARK: - Claude limits card
@@ -1223,7 +1361,7 @@ final class NavigationSidebarTests: XCTestCase {
                 "Current session: 4% used · resets Aug 25 at 3:00pm\n"
                 + "Current week (all models): 41% used · resets Aug 28 at 11am"
             ),
-            now: noon
+            now: noon, animated: false
         )
         XCTAssertEqual(card.sessionColumn.readout, "4%")
         XCTAssertEqual(card.weekColumn.readout, "41%")

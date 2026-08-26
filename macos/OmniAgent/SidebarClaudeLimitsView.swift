@@ -10,13 +10,25 @@ enum SidebarMotion {
     /// sample interval so each reading settles before the next arrives.
     static let duration: TimeInterval = 0.5
 
-    /// Leaves fast, runs a little past the reading, eases back onto it. The
-    /// second control point above 1 is what carries it past; the first one's
-    /// slope, 1.56 over 0.34, is the fast departure.
-    static let overshoot = CAMediaTimingFunction(controlPoints: 0.34, 1.56, 0.64, 1)
+    /// Eases away from rest, runs quickest through the middle, slows as it
+    /// arrives — carrying a little past the reading before settling onto it.
+    ///
+    /// The first control point's `y` of 0 is the standing start: the curve
+    /// leaves at zero velocity instead of snapping into motion. The second
+    /// point above 1 is what takes it beyond the destination before it eases
+    /// back — about 6% past, which is visible without reading as a bounce.
+    ///
+    /// The two `x` values are what make it an S at all, and they have to run
+    /// in order: a second point sitting *before* the first draws something
+    /// that is not an ease-in-out however promising its `y` values look. The
+    /// numbers here were measured rather than guessed — equal thirds of the
+    /// duration cover 20%, 62% and 18% of the distance, and half the duration
+    /// lands within a whisker of half the journey.
+    static let overshoot = CAMediaTimingFunction(controlPoints: 0.55, 0, 0.65, 1.35)
 
-    /// The same fast departure and deceleration with the overshoot taken out.
-    static let settle = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
+    /// The same slow-fast-slow shape with the overshoot taken out, for the
+    /// things that have nowhere to put it.
+    static let settle = CAMediaTimingFunction(controlPoints: 0.55, 0, 0.65, 1)
 
     /// Which of the two a change should use.
     ///
@@ -27,6 +39,30 @@ enum SidebarMotion {
     /// So a bar springs on the way up and merely arrives on the way down.
     static func curve(rising: Bool, canOvershootBothWays: Bool = false) -> CAMediaTimingFunction {
         rising || canOvershootBothWays ? overshoot : settle
+    }
+
+    /// How far along the journey the curve is after `x` of its duration.
+    ///
+    /// A timing function is parametric: its `t` is a position along the curve,
+    /// not a moment in time. So this searches for the `t` whose *x* is the
+    /// elapsed fraction and reads that point's `y`, which is what a timing
+    /// function actually means. Core Animation does this internally for a
+    /// layer; a number counting beside one has to do it out loud.
+    static func progress(_ curve: CAMediaTimingFunction, atElapsed x: Double) -> Double {
+        var p1 = [Float](repeating: 0, count: 2)
+        var p2 = [Float](repeating: 0, count: 2)
+        curve.getControlPoint(at: 1, values: &p1)
+        curve.getControlPoint(at: 2, values: &p2)
+        func axis(_ a: Double, _ b: Double, _ t: Double) -> Double {
+            3 * pow(1 - t, 2) * t * a + 3 * (1 - t) * pow(t, 2) * b + pow(t, 3)
+        }
+        var low = 0.0
+        var high = 1.0
+        for _ in 0..<40 {
+            let mid = (low + high) / 2
+            if axis(Double(p1[0]), Double(p2[0]), mid) < x { low = mid } else { high = mid }
+        }
+        return axis(Double(p1[1]), Double(p2[1]), (low + high) / 2)
     }
 
     /// Whether motion is wanted at all: the caller's intent, overruled by
@@ -70,6 +106,95 @@ enum SidebarMotion {
         animation.duration = duration
         animation.timingFunction = curve(rising: rising, canOvershootBothWays: bothWays)
         layer.add(animation, forKey: key)
+    }
+}
+
+/// A readout that counts to its new value rather than cutting to it.
+///
+/// On the same curve and the same duration as the bar beside it, so the two
+/// move as one thing — a number that snapped while its bar travelled would
+/// read as two unrelated events.
+///
+/// **Clamped to the destination, unlike the bar.** The curve carries a couple
+/// of percent past the reading, which is right for a graphic and wrong for a
+/// figure: a bar bulging a hair beyond its mark is momentum, a readout saying
+/// `48%` when the reading is `46%` is stating something untrue. So the bar
+/// keeps the overshoot and the number does not.
+///
+/// Driven by a `Timer` rather than a display link: this is a label redrawing a
+/// short string, the work per frame is one `stringValue` assignment, and a
+/// timer needs no view to hang off and no availability to guard.
+/// ponytail: swap it for `NSView.displayLink` if a number ever visibly stutters.
+final class SidebarCountingLabel {
+    /// Roughly a frame at 60Hz.
+    private static let step: TimeInterval = 1.0 / 60
+
+    private var timer: Timer?
+    private var began = Date()
+    private var from: Double = 0
+    private var to: Double = 0
+    private let render: (Double) -> Void
+
+    /// The value last rendered — where a new count starts, so a reading
+    /// arriving mid-count continues instead of jumping back.
+    private(set) var current: Double = 0
+
+    /// `render` is handed the value to display and decides how to write it.
+    init(render: @escaping (Double) -> Void) {
+        self.render = render
+    }
+
+    deinit { timer?.invalidate() }
+
+    /// Counts from wherever it is to `value`.
+    func count(to value: Double, animated: Bool) {
+        timer?.invalidate()
+        timer = nil
+        guard SidebarMotion.wanted(animated), value != current else {
+            current = value
+            render(value)
+            return
+        }
+        from = current
+        to = value
+        began = Date()
+        // The first frame, now rather than a sixtieth of a second from now.
+        // Without it the label holds whatever it last showed — on a first
+        // reading, the "—" placeholder — until the timer's first tick.
+        render(from)
+        let ticker = Timer(timeInterval: Self.step, repeats: true) { [weak self] timer in
+            guard let self else { return timer.invalidate() }
+            let elapsed = Date().timeIntervalSince(self.began) / SidebarMotion.duration
+            guard elapsed < 1 else {
+                timer.invalidate()
+                self.timer = nil
+                self.current = self.to
+                self.render(self.to)
+                return
+            }
+            // Clamped: the curve runs past 1 near the end, and a figure must
+            // never read higher than the reading it is counting to.
+            let progress = min(
+                max(SidebarMotion.progress(SidebarMotion.overshoot, atElapsed: elapsed), 0), 1
+            )
+            self.current = self.from + (self.to - self.from) * progress
+            self.render(self.current)
+        }
+        // `.common`, so a number does not freeze mid-count while the sidebar
+        // is being scrolled or a divider dragged.
+        RunLoop.main.add(ticker, forMode: .common)
+        timer = ticker
+    }
+
+    /// Whether a count is in flight.
+    var isCounting: Bool { timer != nil }
+
+    /// Puts the readout at `value` with no travel — for a state that is not a
+    /// new reading, such as losing one entirely.
+    func settle(at value: Double) {
+        timer?.invalidate()
+        timer = nil
+        current = value
     }
 }
 
@@ -416,12 +541,18 @@ final class SidebarLimitColumnView: NSView {
     private let barsBox = NSView()
     private let valueField: NSTextField
     private let captionField: NSTextField
+    /// Counts the percentage through every value between the old reading and
+    /// the new one, at the pace of the bar beside it.
+    private var counter: SidebarCountingLabel!
     /// Named for length, not `window` — `NSView.window` already owns that.
     private let windowLength: TimeInterval
 
     /// What the big number reads, asserted directly rather than rendered.
     var readout: String { valueField.stringValue }
     var readoutColor: NSColor? { valueField.textColor }
+    /// What the number is counting, so a test can watch it travel.
+    var countingLabel: SidebarCountingLabel { counter }
+
     /// The countdown, `"4h 54m left"` — on hover now rather than on screen.
     private(set) var remaining: String = "—"
 
@@ -452,6 +583,9 @@ final class SidebarLimitColumnView: NSView {
             color: ShellPalette.inkMuted
         )
         super.init(frame: .zero)
+        counter = SidebarCountingLabel { [weak self] value in
+            self?.valueField.stringValue = "\(Int(value.rounded()))%"
+        }
         translatesAutoresizingMaskIntoConstraints = false
         for field in [valueField, captionField, timeLabel] { field.alignment = .center }
         timeLabel.alphaValue = 0
@@ -505,10 +639,17 @@ final class SidebarLimitColumnView: NSView {
 
     /// `percent` is what `/usage` reported; `resetsAt` is when the window
     /// rolls over. Either may be absent and the column still reads sensibly.
-    func apply(percent: Int?, resetsAt: Date?, now: Date = Date()) {
+    func apply(percent: Int?, resetsAt: Date?, now: Date = Date(), animated: Bool = true) {
         let fraction = percent.map { Double($0) / 100 }
         bar.apply(fraction)
-        valueField.stringValue = percent.map { "\($0)%" } ?? "—"
+        if let percent {
+            counter.count(to: Double(percent), animated: animated)
+        } else {
+            // Losing a reading is not a journey to zero — it is the absence of
+            // a number, so there is nothing to count through.
+            counter.settle(at: 0)
+            valueField.stringValue = "—"
+        }
         valueField.textColor = SidebarPercentBarView.colour(for: fraction)
         let elapsed = Self.elapsedFraction(until: resetsAt, windowLength: windowLength, now: now)
         let projected = Self.projectedUsage(usage: fraction, elapsed: elapsed)
@@ -770,10 +911,14 @@ final class SidebarClaudeLimitsView: NSView {
 
     /// Internal rather than private so the tests can drive it with a fixed
     /// `now` instead of waiting a minute for the clock.
-    func apply(_ limits: ClaudeUsageLimits?, now: Date = Date()) {
+    func apply(_ limits: ClaudeUsageLimits?, now: Date = Date(), animated: Bool = true) {
         sessionColumn.apply(
-            percent: limits?.sessionPercent, resetsAt: limits?.sessionResetsAt, now: now
+            percent: limits?.sessionPercent, resetsAt: limits?.sessionResetsAt,
+            now: now, animated: animated
         )
-        weekColumn.apply(percent: limits?.weekPercent, resetsAt: limits?.weekResetsAt, now: now)
+        weekColumn.apply(
+            percent: limits?.weekPercent, resetsAt: limits?.weekResetsAt,
+            now: now, animated: animated
+        )
     }
 }

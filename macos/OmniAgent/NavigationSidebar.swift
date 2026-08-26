@@ -578,6 +578,9 @@ final class SidebarDialGaugeView: NSView {
 final class SidebarStatGaugeView: NSView {
     private let valueField: NSTextField
     private let captionField: NSTextField
+    /// Counts the percentage through every value between two samples, at the
+    /// pace of the needle beside it.
+    private var counter: SidebarCountingLabel!
     /// A dial rather than the Claude card's bar.
     ///
     /// These three are a live signal resampled every two seconds, not a quota
@@ -607,6 +610,9 @@ final class SidebarStatGaugeView: NSView {
             tracking: 0.5
         )
         super.init(frame: .zero)
+        counter = SidebarCountingLabel { [weak self] value in
+            self?.valueField.stringValue = "\(Int(value.rounded()))%"
+        }
         translatesAutoresizingMaskIntoConstraints = false
         valueField.alignment = .center
         captionField.alignment = .center
@@ -645,15 +651,25 @@ final class SidebarStatGaugeView: NSView {
     /// small arc.
     static let dialHeight: CGFloat = 26
 
-    func apply(_ value: Double?) {
+    func apply(_ value: Double?, animated: Bool = true) {
         fraction = value.map { min(max($0, 0), 1) }
-        dial.apply(fraction)
-        valueField.stringValue = fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "—"
+        dial.apply(fraction, animated: animated)
+        if let fraction {
+            counter.count(to: fraction * 100, animated: animated)
+        } else {
+            // No sample is the absence of a number, not a journey to zero.
+            counter.settle(at: 0)
+            valueField.stringValue = "—"
+        }
         // Through the bar's own ramp rather than a second copy of the same
         // three thresholds, so the number and the bar cannot drift apart.
         valueField.textColor = SidebarPercentBarView.colour(for: fraction)
         setAccessibilityValue(valueField.stringValue)
     }
+
+    /// What the number is counting, for a test that would otherwise have to
+    /// wait out an animation to see it.
+    var countingLabel: SidebarCountingLabel { counter }
 }
 
 /// The machine gauges pinned just above the account row: CPU, memory and GPU
@@ -746,10 +762,10 @@ final class SidebarSystemStatsView: NSView {
     }
 
     /// Split from `sample` so a test can feed fractions without a kernel.
-    func apply(cpu: Double?, memory: Double?, gpu: Double?) {
-        cpuGauge.apply(cpu)
-        memoryGauge.apply(memory)
-        gpuGauge.apply(gpu)
+    func apply(cpu: Double?, memory: Double?, gpu: Double?, animated: Bool = true) {
+        cpuGauge.apply(cpu, animated: animated)
+        memoryGauge.apply(memory, animated: animated)
+        gpuGauge.apply(gpu, animated: animated)
     }
 
     /// The hairline between two stats — the git tab's divider, a touch
