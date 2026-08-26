@@ -431,13 +431,15 @@ final class SidebarStatGaugeView: NSView {
         valueField.alignment = .center
         captionField.alignment = .center
 
-        let stack = NSStackView(views: [valueField, captionField, bar])
+        // Caption first: the label names the thing, then the number answers
+        // it. The Claude card above stacks its columns the same way.
+        let stack = NSStackView(views: [captionField, valueField, bar])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 1
-        // The Claude card's own gap between a caption and its bar, so the two
+        // The Claude card's own gap between a number and its bar, so the two
         // cards breathe identically.
-        stack.setCustomSpacing(5, after: captionField)
+        stack.setCustomSpacing(5, after: valueField)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([

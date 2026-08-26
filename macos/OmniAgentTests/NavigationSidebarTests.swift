@@ -554,6 +554,133 @@ final class NavigationSidebarTests: XCTestCase {
         }
         return nil
     }
+    // MARK: - The time blocks
+
+    /// The window cut into the units it is actually made of: five hours, or
+    /// seven days.
+    func testEachWindowIsCutIntoItsOwnUnits() {
+        let card = makeLimitsCard()
+        XCTAssertEqual(card.sessionColumn.timeBar.segments, 5, "five hours")
+        XCTAssertEqual(card.weekColumn.timeBar.segments, 7, "seven days")
+    }
+
+    /// `/usage` reports only when a window ends, so how far through it we are
+    /// is derived from the end: whatever is not still to come has gone.
+    func testHowFarThroughAWindowIsDerivedFromItsEnd() throws {
+        let now = try XCTUnwrap(
+            Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 11))
+        )
+        let fiveHours: TimeInterval = 5 * 3600
+
+        // 2h 18m still to come out of five hours, so 2h 42m has gone.
+        let partial = try XCTUnwrap(SidebarLimitColumnView.elapsedFraction(
+            until: now.addingTimeInterval(2 * 3600 + 18 * 60), windowLength: fiveHours, now: now
+        ))
+        XCTAssertEqual(partial, (fiveHours - (2 * 3600 + 18 * 60)) / fiveHours, accuracy: 0.001)
+
+        XCTAssertEqual(
+            SidebarLimitColumnView.elapsedFraction(
+                until: now.addingTimeInterval(-60), windowLength: fiveHours, now: now
+            ), 1, "a window past its reset is spent, not negative"
+        )
+        // A reset further out than one whole window means the length above is
+        // wrong; it must read as a fresh window rather than run off the end.
+        XCTAssertEqual(
+            SidebarLimitColumnView.elapsedFraction(
+                until: now.addingTimeInterval(fiveHours * 3), windowLength: fiveHours, now: now
+            ), 0
+        )
+        XCTAssertNil(SidebarLimitColumnView.elapsedFraction(
+            until: nil, windowLength: fiveHours, now: now
+        ))
+    }
+
+    /// The block being lived through is partly filled; the ones behind it are
+    /// solid. Rounding up is what makes the current block count as started.
+    func testTheBlockBeingLivedThroughCountsAsStarted() {
+        let bar = SidebarSegmentedBarView(segments: 5)
+        bar.apply(nil)
+        XCTAssertEqual(bar.filledSegments, 0, "no reading, no blocks")
+        bar.apply(0)
+        XCTAssertEqual(bar.filledSegments, 0, "a fresh window is empty")
+        bar.apply(0.46)
+        XCTAssertEqual(bar.filledSegments, 3, "two whole hours and into the third")
+        bar.apply(1)
+        XCTAssertEqual(bar.filledSegments, 5)
+    }
+
+    /// Blocks fill the same direction as the usage bar above them, so the
+    /// column has one rule rather than two opposite ones.
+    func testTheBlocksFillAsTheWindowIsSpent() throws {
+        let card = makeLimitsCard()
+        let now = try XCTUnwrap(
+            Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 11))
+        )
+        // Reset a whole week out: the week has only just begun.
+        card.apply(
+            ClaudeUsageLimits.parse("Current week (all models): 2% used · resets Sep 2 at 11am"),
+            now: now
+        )
+        let fresh = card.weekColumn.timeBar.filledSegments
+
+        // Reset an hour out: almost all of it has gone.
+        card.apply(
+            ClaudeUsageLimits.parse("Current week (all models): 90% used · resets Aug 26 at 12pm"),
+            now: now
+        )
+        XCTAssertGreaterThan(card.weekColumn.timeBar.filledSegments, fresh, "fills, not drains")
+        XCTAssertEqual(card.weekColumn.timeBar.filledSegments, 7)
+    }
+
+    /// The countdown is a hover now, and a tooltip covers only its own view —
+    /// so hovering the number itself has to work, not just the gaps.
+    func testHoveringAnywhereInTheColumnShowsTheTime() throws {
+        let card = makeLimitsCard()
+        card.apply(
+            ClaudeUsageLimits.parse("Current session: 12% used · resets Aug 25 at 3:00pm"),
+            now: noon
+        )
+        XCTAssertEqual(card.sessionColumn.toolTip, "3h 0m left")
+        XCTAssertEqual(card.sessionColumn.timeBar.toolTip, "3h 0m left")
+        let labels = descendants(NSTextField.self, under: card.sessionColumn)
+        XCTAssertFalse(labels.isEmpty)
+        for label in labels {
+            XCTAssertEqual(label.toolTip, "3h 0m left", "the number is hoverable too")
+        }
+    }
+
+    // MARK: - Reading order
+
+    /// The label names the thing, then the number answers it. Reading `12%`
+    /// before knowing it is the session is backwards.
+    func testTheCaptionSitsAboveTheNumber() {
+        let card = makeLimitsCard()
+        card.apply(ClaudeUsageLimits.parse("Current session: 12% used · resets Aug 25 at 3:00pm"), now: noon)
+        card.layoutSubtreeIfNeeded()
+        assertCaptionAboveNumber(in: card.sessionColumn, caption: "SESSION")
+
+        let gauges = SidebarSystemStatsView()
+        gauges.frame = NSRect(x: 0, y: 0, width: 216, height: SidebarSystemStatsView.height)
+        gauges.apply(cpu: 0.13, memory: nil, gpu: nil)
+        gauges.layoutSubtreeIfNeeded()
+        assertCaptionAboveNumber(in: gauges.cpuGauge, caption: "CPU")
+    }
+
+    /// A non-flipped view puts what is higher on screen at the larger `minY`.
+    private func assertCaptionAboveNumber(
+        in column: NSView, caption: String, line: UInt = #line
+    ) {
+        let labels = descendants(NSTextField.self, under: column)
+        guard
+            let captionField = labels.first(where: { $0.stringValue == caption }),
+            let valueField = labels.first(where: { $0.stringValue.hasSuffix("%") })
+        else { return XCTFail("missing \(caption) or its number", line: line) }
+        XCTAssertGreaterThan(
+            captionField.frame.minY, valueField.frame.minY,
+            "\(caption) sits above its number", line: line
+        )
+    }
+
     // MARK: - Machine gauges
 
     /// The gauges wear the same bar as the Claude card above them — one bar,
@@ -639,6 +766,7 @@ final class NavigationSidebarTests: XCTestCase {
     }
 
     /// A bare `2d 11h` does not say whether it is time spent or time left.
+    /// It lives on the hover now rather than on a row of its own.
     func testTheCountdownSaysWhatItIs() {
         let card = makeLimitsCard()
         card.apply(
@@ -749,7 +877,7 @@ final class NavigationSidebarTests: XCTestCase {
     /// Shorter than it was, and still clearly the taller of the two cards —
     /// it carries four lines of content to the gauges' two.
     func testTheCardIsNoTallerThanItNeedsToBe() {
-        XCTAssertEqual(SidebarClaudeLimitsView.height, 74)
+        XCTAssertEqual(SidebarClaudeLimitsView.height, 70)
         XCTAssertLessThan(
             SidebarClaudeLimitsView.height, 90,
             "the sidebar has a workspace list to show as well"

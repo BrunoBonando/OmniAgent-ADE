@@ -87,26 +87,121 @@ final class SidebarPercentBarView: NSView {
     }
 }
 
-/// One limit as a column: the percentage big, the window's name under it, the
-/// bar under that, and how long is left at the bottom.
+/// A window's progress, cut into the units it is actually made of: five
+/// blocks for the five-hour session, seven for the week.
 ///
-/// Deliberately `SidebarStatGaugeView`'s rhythm — big number over a small
-/// caption — because this card sits directly on top of that one and the two
-/// used to read as different design languages: the gauges led with `56%` at
-/// 18pt while this card showed a bar and no number at all.
+/// Deliberately blocky where `SidebarPercentBarView` is a pill — the two sit
+/// stacked in the same column and must not read as one bar drawn twice. And
+/// deliberately *neutral*, not on the pressure ramp: a window running out is
+/// good news, since it is about to reset, and painting that red would say
+/// "danger" at the moment there is least to worry about.
+final class SidebarSegmentedBarView: NSView {
+    static let height: CGFloat = 5
+    private static let gap: CGFloat = 2
+
+    let segments: Int
+    private var trackLayers: [CALayer] = []
+    private var fillLayers: [CALayer] = []
+
+    /// How far through the window we are, 0…1. Nil when there is nothing to
+    /// derive it from — every block empty rather than a guess.
+    private(set) var fraction: Double?
+
+    /// How many blocks are at least partly filled, which is the thing a test
+    /// can assert without measuring layers.
+    var filledSegments: Int {
+        guard let fraction, fraction > 0 else { return 0 }
+        return min(segments, Int((fraction * Double(segments)).rounded(.up)))
+    }
+
+    init(segments: Int) {
+        self.segments = segments
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        for _ in 0..<segments {
+            let track = CALayer()
+            track.backgroundColor = NSColor(white: 1, alpha: 0.10).cgColor
+            track.cornerRadius = 1.5
+            let fill = CALayer()
+            // Bright enough to separate from its own track at a glance: at
+            // `inkMuted` a spent block and an unspent one were the same grey
+            // in an offscreen render, which makes the whole bar decoration.
+            fill.backgroundColor = NSColor(white: 1, alpha: 0.55).cgColor
+            fill.cornerRadius = 1.5
+            layer?.addSublayer(track)
+            layer?.addSublayer(fill)
+            trackLayers.append(track)
+            fillLayers.append(fill)
+        }
+        heightAnchor.constraint(equalToConstant: Self.height).isActive = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.progressIndicator)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func apply(_ value: Double?) {
+        fraction = value.map { min(max($0, 0), 1) }
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let total = bounds.width - Self.gap * CGFloat(segments - 1)
+        let width = max(total / CGFloat(segments), 1)
+        for index in 0..<segments {
+            let x = (width + Self.gap) * CGFloat(index)
+            trackLayers[index].frame = NSRect(x: x, y: 0, width: width, height: bounds.height)
+            // Each block is one whole unit of the window, so its own fill is
+            // how far into *that* unit we are — the block being lived through
+            // is partly filled while the ones behind it are solid.
+            let progress = fraction.map { min(max($0 * Double(segments) - Double(index), 0), 1) } ?? 0
+            fillLayers[index].frame = NSRect(
+                x: x, y: 0, width: width * progress, height: bounds.height
+            )
+        }
+        CATransaction.commit()
+    }
+}
+
+/// One limit as a column: the window's name, the percentage big under it, how
+/// much is spent, and how far through the window we are.
+///
+/// `SidebarStatGaugeView`'s rhythm exactly — caption over a big number —
+/// because this card sits directly on top of that one, and the two used to
+/// read as different design languages.
+///
+/// The countdown is a tooltip rather than a line of text. It said the same
+/// thing the block bar says, and spending a whole row to repeat it was what
+/// made this card crowd the sidebar.
 final class SidebarLimitColumnView: NSView {
     let bar = SidebarPercentBarView()
+    let timeBar: SidebarSegmentedBarView
     private let valueField: NSTextField
     private let captionField: NSTextField
-    private let remainingField: NSTextField
+    /// Named for length, not `window` — `NSView.window` already owns that.
+    private let windowLength: TimeInterval
 
     /// What the big number reads, asserted directly rather than rendered.
     var readout: String { valueField.stringValue }
     var readoutColor: NSColor? { valueField.textColor }
-    /// The countdown under the bar, `"4h 54m left"`.
-    var remaining: String { remainingField.stringValue }
+    /// The countdown, `"4h 54m left"` — on hover now rather than on screen.
+    private(set) var remaining: String = "—"
 
-    init(name: String) {
+    /// `segments` is the unit the window is made of: five hours, or seven
+    /// days. `window` is how long the whole thing lasts.
+    ///
+    /// `windowLength` is authored rather than derived, because `/usage` reports
+    /// only when a window *ends*, never when it began. ponytail: a wrong
+    /// constant here misreports how far through you are — if Claude's session
+    /// window stops being five hours, this is the line that has to move.
+    init(name: String, segments: Int, windowLength: TimeInterval) {
+        self.windowLength = windowLength
+        timeBar = SidebarSegmentedBarView(segments: segments)
         valueField = ShellFont.label(
             "—",
             font: ShellFont.ui(17, .semibold),
@@ -118,21 +213,19 @@ final class SidebarLimitColumnView: NSView {
             color: ShellPalette.inkTertiary,
             tracking: 0.5
         )
-        remainingField = ShellFont.label(
-            "—",
-            font: ShellFont.ui(10),
-            color: ShellPalette.inkTertiary
-        )
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        for field in [valueField, captionField, remainingField] { field.alignment = .center }
+        for field in [valueField, captionField] { field.alignment = .center }
 
-        let stack = NSStackView(views: [valueField, captionField, bar, remainingField])
+        // Caption first: the label names the thing, then the number answers
+        // it. Reading `12%` before knowing it is the session is backwards.
+        let stack = NSStackView(views: [captionField, valueField, bar, timeBar])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 2
-        // The bar spans the column; the labels centre in it.
-        stack.setCustomSpacing(5, after: captionField)
+        stack.spacing = 1
+        // The bars span the column; the labels centre in it.
+        stack.setCustomSpacing(5, after: valueField)
+        stack.setCustomSpacing(3, after: bar)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -141,6 +234,7 @@ final class SidebarLimitColumnView: NSView {
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             bar.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            timeBar.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         setAccessibilityElement(true)
         setAccessibilityRole(.progressIndicator)
@@ -157,12 +251,31 @@ final class SidebarLimitColumnView: NSView {
         bar.apply(fraction)
         valueField.stringValue = percent.map { "\($0)%" } ?? "—"
         valueField.textColor = SidebarPercentBarView.colour(for: fraction)
+        timeBar.apply(Self.elapsedFraction(until: resetsAt, windowLength: windowLength, now: now))
         // "left" spelled out, because a bare `2d 11h` does not say whether it
         // is time spent, time left, or time until something else entirely.
-        remainingField.stringValue = ClaudeUsageLimits.timeLeft(until: resetsAt, now: now)
+        remaining = ClaudeUsageLimits.timeLeft(until: resetsAt, now: now)
             .map { $0 == "now" ? "resetting" : "\($0) left" }
             ?? "no reading"
+        // On every subview too: an `NSView`'s tooltip covers its own rect, and
+        // the labels and bars sit on top of this one — without this, hovering
+        // the actual number is the one place that shows nothing.
+        for view in [self] + subviews + subviews.flatMap(\.subviews) { view.toolTip = remaining }
         setAccessibilityValue("\(readout) used, \(remaining)")
+    }
+
+    /// How far through the window `now` is, 0…1.
+    ///
+    /// Derived from the end, because the end is all `/usage` gives: whatever
+    /// is not still to come has already gone. Clamped, so a reset further out
+    /// than one whole window — which would mean the window length below is
+    /// wrong — reads as a fresh window rather than a negative one.
+    static func elapsedFraction(
+        until resetsAt: Date?, windowLength: TimeInterval, now: Date
+    ) -> Double? {
+        guard let resetsAt, windowLength > 0 else { return nil }
+        let left = resetsAt.timeIntervalSince(now)
+        return min(max((windowLength - left) / windowLength, 0), 1)
     }
 }
 
@@ -179,10 +292,12 @@ final class SidebarLimitColumnView: NSView {
 /// would otherwise render the identical two numbers, which is what the pane's
 /// old stats bar did.
 final class SidebarClaudeLimitsView: NSView {
-    static let height: CGFloat = 74
+    static let height: CGFloat = 70
 
-    let sessionColumn = SidebarLimitColumnView(name: "SESSION")
-    let weekColumn = SidebarLimitColumnView(name: "WEEK")
+    /// Five hours in five blocks, seven days in seven — the units each window
+    /// is actually counted in, so a block means something you can name.
+    let sessionColumn = SidebarLimitColumnView(name: "SESSION", segments: 5, windowLength: 5 * 3600)
+    let weekColumn = SidebarLimitColumnView(name: "WEEK", segments: 7, windowLength: 7 * 86_400)
 
     /// Ticks the two countdowns down without spending a `/usage` request. The
     /// percentages only move when the poller fetches; the clock moves anyway.
