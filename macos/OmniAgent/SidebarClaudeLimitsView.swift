@@ -578,6 +578,16 @@ final class SidebarLimitColumnView: NSView {
     /// Counts the percentage through every value between the old reading and
     /// the new one, at the pace of the bar beside it.
     private var counter: SidebarCountingLabel!
+    /// The same, for how much of the window has gone.
+    ///
+    /// A second one because it counts a *different quantity*: the blocks and
+    /// the countdown are coloured by elapsed window, not by spent quota, and
+    /// those two are routinely in different bands — 4% of the quota with the
+    /// window nearly gone is a green bar over red blocks. One counter cannot
+    /// paint both without conflating them.
+    ///
+    /// It renders no text; it exists to walk two colours through the ramp.
+    private var timeCounter: SidebarCountingLabel!
     /// Named for length, not `window` — `NSView.window` already owns that.
     private let windowLength: TimeInterval
 
@@ -586,6 +596,9 @@ final class SidebarLimitColumnView: NSView {
     var readoutColor: NSColor? { valueField.textColor }
     /// What the number is counting, so a test can watch it travel.
     var countingLabel: SidebarCountingLabel { counter }
+
+    /// The same for the window's own colour, which counts a different figure.
+    var timeCountingLabel: SidebarCountingLabel { timeCounter }
 
     /// The countdown, `"4h 54m left"` — on hover now rather than on screen.
     private(set) var remaining: String = "—"
@@ -628,6 +641,11 @@ final class SidebarLimitColumnView: NSView {
             let reached = value / 100
             self.valueField.textColor = SidebarPercentBarView.colour(for: reached)
             self.bar.setFillColour(for: reached)
+        }
+        timeCounter = SidebarCountingLabel(range: 0...1) { [weak self] value in
+            guard let self else { return }
+            self.timeBar.setFillColour(for: value)
+            self.timeLabel.textColor = SidebarPercentBarView.colour(for: value)
         }
         translatesAutoresizingMaskIntoConstraints = false
         for field in [valueField, captionField, timeLabel] { field.alignment = .center }
@@ -699,9 +717,18 @@ final class SidebarLimitColumnView: NSView {
         let elapsed = Self.elapsedFraction(until: resetsAt, windowLength: windowLength, now: now)
         let projected = Self.projectedUsage(usage: fraction, elapsed: elapsed)
         timeBar.apply(elapsed)
+        if let elapsed {
+            timeCounter.count(to: elapsed, animated: animated)
+        } else {
+            // No reading, so no travel — and the blocks and countdown wear the
+            // same nothing-known grey the usage side does.
+            timeCounter.settle(at: 0)
+            timeBar.setFillColour(for: nil)
+            timeLabel.textColor = SidebarPercentBarView.colour(for: nil)
+        }
         // The countdown wears its own bar's colour rather than the usage
-        // bar's: it is reading the same thing the blocks under it read.
-        timeLabel.textColor = SidebarPercentBarView.colour(for: elapsed)
+        // bar's — it reads the same thing the blocks beneath it read — and
+        // `timeCounter` above is what paints both, frame by frame.
         // "left" spelled out, because a bare `2d 11h` does not say whether it
         // is time spent, time left, or time until something else entirely.
         //
@@ -847,14 +874,25 @@ final class SidebarClaudeLimitsView: NSView {
 
     /// Internal rather than private so a test can turn the card over without
     /// synthesising a click.
-    func setShowingTime(_ showing: Bool, animated: Bool = true) {
+    ///
+    /// `after` is how long the card stays face-up, and is a parameter so a
+    /// test can exercise the turn-back without waiting seven real seconds.
+    /// That wait was the whole of its flakiness: it passed alone and failed in
+    /// a full suite, where a machine busy with everything else is exactly when
+    /// a wall-clock deadline slips. The production default is asserted
+    /// separately, so shortening it here cannot quietly shorten it there.
+    func setShowingTime(
+        _ showing: Bool,
+        animated: Bool = true,
+        after: TimeInterval = SidebarClaudeLimitsView.revealDuration
+    ) {
         revealTimer?.invalidate()
         revealTimer = nil
         for column in [sessionColumn, weekColumn] {
             column.setShowingTime(showing, animated: animated)
         }
         guard showing else { return }
-        let timer = Timer(timeInterval: Self.revealDuration, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: after, repeats: false) { [weak self] _ in
             self?.setShowingTime(false)
         }
         // `.common`, so a card left face-up while the sidebar is being

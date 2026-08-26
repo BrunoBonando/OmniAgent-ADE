@@ -693,9 +693,11 @@ final class NavigationSidebarTests: XCTestCase {
             Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 11))
         )
         // 12 minutes from a reset five hours wide, and only 40% spent.
+        // Settled: the blocks' colour travels now too, so an animated apply
+        // wears its starting colour on the first frame by design.
         card.apply(
             ClaudeUsageLimits.parse("Current session: 40% used · resets Aug 26 at 11:12am"),
-            now: now
+            now: now, animated: false
         )
         assertHue(card.sessionColumn.timeBar.fillColor, ShellPalette.red)
         XCTAssertEqual(card.sessionColumn.timeBar.filledSegments, 5, "the window is nearly gone")
@@ -767,26 +769,33 @@ final class NavigationSidebarTests: XCTestCase {
 
     /// It turns back by itself, so a stray click does not leave the card
     /// face-up for the rest of the session.
+    ///
+    /// Driven on a short fuse rather than the real seven seconds: waiting out
+    /// wall-clock in a test is what made this fail in a full suite while
+    /// passing alone, and the mechanism under test is the timer, not its
+    /// length. The length has its own assertion below.
     func testItTurnsBackOnItsOwn() {
-        XCTAssertEqual(SidebarClaudeLimitsView.revealDuration, 7)
         let card = makeLimitsCard()
-        card.setShowingTime(true, animated: false)
+        card.setShowingTime(true, animated: false, after: 0.2)
+        XCTAssertTrue(card.isShowingTime)
 
         let turnedBack = expectation(description: "the card turned back")
-        // Just past the reveal, rather than a fixed sleep: the timer is real,
-        // and polling for the state it sets is what actually proves it fired.
-        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { timer in
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { timer in
             guard !card.isShowingTime else { return }
             timer.invalidate()
             turnedBack.fulfill()
         }
-        wait(for: [turnedBack], timeout: SidebarClaudeLimitsView.revealDuration + 3)
-        // The state, not the alpha: the turn back is animated, so at the
-        // instant the flag flips the fade still has 0.14s to run. The alpha
-        // end-state is `testClickingAgainTurnsItBack`'s job, which turns the
-        // card unanimated precisely so it can assert it.
+        wait(for: [turnedBack], timeout: 5)
+
         XCTAssertFalse(card.sessionColumn.isShowingTime)
         XCTAssertFalse(card.weekColumn.isShowingTime)
+    }
+
+    /// And the fuse the app actually uses: long enough to read two short
+    /// durations without hurrying, short enough that a stray click does not
+    /// leave the card turned over.
+    func testTheRevealLastsSevenSeconds() {
+        XCTAssertEqual(SidebarClaudeLimitsView.revealDuration, 7)
     }
 
     /// Turning the card over must not move anything: the words sit in the
@@ -1397,6 +1406,70 @@ final class NavigationSidebarTests: XCTestCase {
             card.sessionColumn.readoutColor, card.sessionColumn.bar.fillColor,
             "number and bar, one colour, every frame"
         )
+    }
+
+    /// Every coloured thing on both cards travels: the numbers, the usage
+    /// bars, the dial arcs, the time blocks and the countdown. This is the
+    /// audit — it was written because two of them were still switching in one
+    /// step after the first pass claimed all of them did.
+    func testEveryStatsColourTravels() throws {
+        let now = try XCTUnwrap(
+            Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 11))
+        )
+        // Machine gauges: green, heading for red.
+        let gauges = SidebarSystemStatsView()
+        gauges.apply(cpu: 0.05, memory: 0.05, gpu: 0.05, animated: false)
+        gauges.apply(cpu: 0.98, memory: 0.98, gpu: 0.98)
+        for gauge in [gauges.cpuGauge, gauges.memoryGauge, gauges.gpuGauge] {
+            assertHue(gauge.readoutColor, ShellPalette.green, "starts where it was")
+            assertHue(gauge.dial.progressColor, ShellPalette.green, "arc too")
+        }
+
+        // Claude card: quota green heading for red, window green heading for
+        // red, on their own separate journeys.
+        let card = makeLimitsCard()
+        card.apply(
+            ClaudeUsageLimits.parse("Current session: 5% used · resets Aug 26 at 3:55pm"),
+            now: now, animated: false
+        )
+        card.apply(
+            ClaudeUsageLimits.parse("Current session: 98% used · resets Aug 26 at 11:03am"),
+            now: now
+        )
+        let column = card.sessionColumn
+        assertHue(column.readoutColor, ShellPalette.green, "number starts where it was")
+        assertHue(column.bar.fillColor, ShellPalette.green, "usage bar too")
+        assertHue(column.timeBar.fillColor, ShellPalette.green, "time blocks too")
+        assertHue(column.timeLabel.textColor, ShellPalette.green, "and the countdown")
+
+        settle(within: SidebarMotion.duration + 0.6) {
+            !column.countingLabel.isCounting && !column.timeCountingLabel.isCounting
+                && !gauges.cpuGauge.countingLabel.isCounting
+        }
+
+        assertHue(gauges.cpuGauge.readoutColor, ShellPalette.red, "gauge arrives")
+        assertHue(gauges.cpuGauge.dial.progressColor, ShellPalette.red)
+        assertHue(column.readoutColor, ShellPalette.red, "quota arrives")
+        assertHue(column.bar.fillColor, ShellPalette.red)
+        assertHue(column.timeBar.fillColor, ShellPalette.red, "window arrives")
+        assertHue(column.timeLabel.textColor, ShellPalette.red)
+    }
+
+    /// The two journeys are genuinely separate: spending almost nothing while
+    /// the window runs out leaves a green bar over red blocks, and one counter
+    /// painting both would have to pick one.
+    func testTheWindowAndTheQuotaTravelSeparately() throws {
+        let now = try XCTUnwrap(
+            Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 11))
+        )
+        let card = makeLimitsCard()
+        card.apply(
+            ClaudeUsageLimits.parse("Current session: 4% used · resets Aug 26 at 11:03am"),
+            now: now, animated: false
+        )
+
+        assertHue(card.sessionColumn.bar.fillColor, ShellPalette.green, "barely any quota spent")
+        assertHue(card.sessionColumn.timeBar.fillColor, ShellPalette.red, "but the window is gone")
     }
 
     // MARK: - The countdown's own colour
