@@ -14,8 +14,6 @@ enum PaletteAction: Equatable {
     /// ⌃1…⌃9 and of the sidebar's session row — all three land in
     /// `WorkspaceWindowController.enterDeskSession`.
     case enterSession(group: String)
-    /// ⌘0 — the whole organigram, centred.
-    case zoomDeskToFit
     /// The focused editor's active file, diffed against HEAD — the palette's
     /// twin of the tab strip's ± toggle.
     case openDiffForCurrentFile(path: String)
@@ -476,9 +474,6 @@ struct CommandPaletteModel: Equatable {
                 }
             }
         }
-        commands.append(
-            PaletteCommand(id: "zoom-to-fit", title: "Zoom to fit", detail: "⌘0", action: .zoomDeskToFit)
-        )
         commands.append(
             PaletteCommand(id: "toggle-sidebar", title: "Toggle sidebar", detail: "⌃⌘S", action: .toggleSidebar)
         )

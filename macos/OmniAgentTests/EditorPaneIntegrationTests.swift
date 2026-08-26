@@ -687,6 +687,13 @@ final class EditorPaneIntegrationTests: XCTestCase {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
+        // Tall enough that the 2x2 rung this test exercises clears
+        // `PaneWorkspaceView.comfortablePaneHeight` and stays a grid rather
+        // than folding into the filmstrip — the same floor a real window
+        // gives it, just made explicit so the test does not depend on
+        // whatever size the host screen happens to hand back.
+        let window = try XCTUnwrap(controller.window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1200, height: 900), display: false)
         controller.applyDestination(.terminals)
         let a = try makeTempFile("a.swift", "x")
         let b = try makeTempFile("b.swift", "y")

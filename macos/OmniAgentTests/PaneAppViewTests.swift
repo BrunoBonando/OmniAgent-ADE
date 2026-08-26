@@ -1977,8 +1977,7 @@ final class PaneAppViewTests: XCTestCase {
     }
 
     // MARK: - Offscreen render helpers
-    // Copied from `DeskCanvasNodeViewsTests.swift:531-560` — this repo's
-    // per-file render-drop convention rather than a shared helper.
+    // This repo's per-file render-drop convention rather than a shared helper.
 
     /// A window, because a layer-backed view with no window never runs
     /// `draw(_:)` and the render comes back empty — the test would then pass

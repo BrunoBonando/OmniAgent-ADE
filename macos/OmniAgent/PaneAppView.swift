@@ -362,11 +362,9 @@ final class PaneAppView: NSView {
     /// Test seam: `ShellMotion.reduced` reads a live, global accessibility
     /// setting nothing in a unit test can flip. This codebase's existing
     /// precedent for that (`throw XCTSkip("under Reduce Motion …")` when the
-    /// live setting is already off — `DeskCameraFlightTests.swift:59-60`,
-    /// `DeskCanvasInputTests.swift:62`) only ever *skips*, which would leave
-    /// the composer glow's Reduce-Motion path untested on any runner that
-    /// happens to have it off. `nil` — every real pane — defers to the real
-    /// setting.
+    /// live setting is already off) only ever *skips*, which would leave the
+    /// composer glow's Reduce-Motion path untested on any runner that happens
+    /// to have it off. `nil` — every real pane — defers to the real setting.
     var reducedMotionForTesting: Bool?
     private var reducedMotion: Bool { reducedMotionForTesting ?? ShellMotion.reduced }
 

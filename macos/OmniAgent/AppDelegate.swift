@@ -290,11 +290,6 @@ enum ApplicationMenus {
         // keeps the two apart where the user looks for them.
         let desk = NSMenu(title: "Desk")
         main.addItem(withSubmenu: desk)
-        // ⌘0, the reset-the-zoom digit every canvas app uses. Free here: ⌘1…⌘9
-        // are pane selection and stop at nine.
-        desk.addItem(item("Zoom In", Selector(("zoomCanvasIn:")), "="))
-        desk.addItem(item("Zoom Out", Selector(("zoomCanvasOut:")), "-"))
-        desk.addItem(item("Zoom to Fit", Selector(("zoomDeskToFit:")), "0"))
         desk.addItem(item("Enter Session", Selector(("enterFocusedSession:"))))
         desk.addItem(.separator())
         // ⇧⌘[ / ⇧⌘], the system's own previous/next-tab chords, both unbound

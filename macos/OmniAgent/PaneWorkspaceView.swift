@@ -1230,52 +1230,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         return true
     }
 
-    /// The card rect one session occupies in canvas coordinates — the frame
-    /// the tidy tree gave its node.
-    ///
-    /// Keyed by group id, because a session node's id *is* its group id:
-    /// `DeskNode.Kind.session` "carries the group id used everywhere else in
-    /// the app". This is the only reader of `canvasLayout` in the level-of-
-    /// detail path, deliberately, so the whole path re-anchors here if the
-    /// layout pass ever stores its result somewhere else.
-    func canvasRect(forGroup group: String) -> CGRect? {
-        canvasLayout?.frames[group]
-    }
-
-
-    /// Whether the camera is far enough out that pane surfaces carry no
-    /// information: at `DeskCanvas.lodThreshold` 12pt type is 2.4pt. Below it
-    /// the surfaces come down and chips take their place.
-    ///
-    /// Not a compromise on live miniatures — there is nothing in those pixels,
-    /// only cost. SwiftTerm has no lever for it either: `metalScaleFactorOverride`
-    /// looks like one and is clamped by `max(1, …)`, so a shrunken terminal
-    /// still rasterizes at full backing scale.
-    var showsChips: Bool {
-        canvasMode && camera.scale < DeskCanvas.lodThreshold
-    }
-
-    /// The rect visibility is measured against while the camera is travelling.
-    ///
-    /// `flyCamera(to:)` sets `camera` to its destination at the *start* of the
-    /// animation — the model layer value leads, the presentation layer catches
-    /// up — so without this every card but the destination would be hidden on
-    /// frame one and the user would watch the tree blink out from under a
-    /// camera still moving through it. The flight sets this to the union of
-    /// both ends and clears it on arrival.
-    var transitionViewport: CGRect? {
-        didSet {
-            guard transitionViewport != oldValue else { return }
-            updateVisibility()
-        }
-    }
-
-    /// The panes AppKit is allowed to display.
-    ///
-    /// Normal mode: the active session's, unchanged. Canvas mode: every
-    /// session's, minus the cards the camera cannot see. Culling is what the
-    /// ≤12-to-≤96 jump needs — on the canvas nothing else takes a pane out of
-    /// the compositor.
+    /// The panes AppKit is allowed to display: the active session's, unchanged.
     private func onScreenPaneIDs() -> Set<String> {
         // The filmstrip shows a few panes of many. The rest are hidden exactly
         // the way another session's panes are — never torn down, still parsing
@@ -1284,14 +1239,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         if isFilmstrip, let layout = filmstripLayout {
             return Set(layout.heroIDs).union(heroFading)
         }
-        guard isCanvasMode else { return Set(paneIDs) }
-        let viewport = transitionViewport ?? camera.canvasViewport(in: bounds)
-        var ids: Set<String> = []
-        for group in groupOrder {
-            guard let rect = canvasRect(forGroup: group), rect.intersects(viewport) else { continue }
-            ids.formUnion(grids[group]?.paneIDs() ?? [])
-        }
-        return ids
+        return Set(paneIDs)
     }
 
     /// Only the active session's panes are on screen. The others are hidden,
@@ -1299,10 +1247,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// sessions must not. A hidden pane keeps parsing output into SwiftTerm's
     /// bounded buffer — so its scrollback is intact when you come back — and
     /// only stops drawing, the same trade an occluded window makes.
-    ///
-    /// In canvas mode every session is on screen at once, so "which session"
-    /// becomes the camera's question: a card whose node rect misses the
-    /// viewport is hidden.
     ///
     /// `isHidden` is the load-bearing half and `suspendsDrawing` is the
     /// belt-and-braces half, not the other way round. `suspendsDrawing` gates
@@ -1314,7 +1258,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         validateZoom()
         updateZoomAvailability()
         let visible = onScreenPaneIDs()
-        let chips = showsChips
         for (id, container) in containers {
             let onScreen = visible.contains(id)
             container.isHidden = !onScreen
@@ -1322,295 +1265,31 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             // to hear that the pane went off screen. Deliberately *not*
             // `suspendsDrawing`'s business — that gates the renderer kick and
             // nothing else, and this is the pane's own content answering the
-            // same question `isHidden` just did, which is why it is here rather
-            // than after the chip: `isChipped`'s didSet starts a crossfade, and
-            // a content view hidden on the next statement never fades at all.
+            // same question `isHidden` just did.
             container.applyContentVisibility()
             container.surface.suspendsDrawing = suspendsDrawing || !onScreen
-            container.isChipped = onScreen && chips
         }
-        // The camera decides who may blink as much as it decides who is on
-        // screen, and a camera move runs this pass and no other.
         updateSelection()
     }
 
     /// The one pane whose cursor may blink, and the only one wearing the
-    /// selected treatment.
+    /// selected treatment: the focused pane.
     ///
     /// A blinking cursor is a 0.7s repeating `Timer` forcing a
     /// full-resolution Metal frame, driven by the cursor *style* alone and
     /// immune to `suspendsDrawing`; `TerminalSurfaceView.isSelected`'s `didSet`
     /// swapping in `steadyTwin(of:)` is the only thing that stops it.
-    ///
-    /// Normal mode: the focused pane, exactly as before. Canvas mode: nobody,
-    /// unless the camera carries no transform at all over the focused pane's own
-    /// session — which is precisely the state in which a pane accepts input at
-    /// all, since every coordinate conversion in this file is blind to the
-    /// camera's layer transform below it.
-    ///
-    /// The same `isIdentityTransform` `canvasOwnsInput` turns on, and not
-    /// `isIdentity`: an entry flight is scale 1 over a card for 0.38s, and on
-    /// the looser test the session being *left* kept its cursor blinking — a
-    /// 0.7s timer forcing a full-resolution Metal frame — for every one of them.
-    private var selectablePaneID: String? {
-        guard isCanvasMode else { return focusedPaneID }
-        guard
-            let focusedPaneID,
-            descriptors[focusedPaneID]?.group == activeGroup,
-            camera.isIdentityTransform
-        else { return nil }
-        return focusedPaneID
-    }
+    private var selectablePaneID: String? { focusedPaneID }
 
     /// One writer for selection, the way `updateVisibility` is the one writer
     /// for `isHidden`/`suspendsDrawing`. Reached from both the focus pass and
-    /// the visibility pass, because either the focused pane or the camera can
-    /// change the answer and neither implies the other.
+    /// the visibility pass, so a focus change and a visibility change agree on
+    /// who is selected.
     private func updateSelection() {
         let selected = selectablePaneID
         for (id, container) in containers {
             container.isSelected = id == selected
         }
-    }
-
-    // MARK: - Desk canvas camera
-
-    /// The animation's key on this view's layer, named after the property it
-    /// animates the way `zoomLayer` keys by `animation.keyPath`.
-    static let cameraFlightKey = "sublayerTransform"
-
-    /// Which flight is current. Same discipline as `zoomTransitionToken`: a
-    /// completion does nothing unless the number it was given is still this one,
-    /// or an entry's completion lands a session the exit that followed it has
-    /// already flown away from.
-    private var cameraFlightToken = 0
-
-    /// The session this flight is an entry into, or `nil` for a flight that is
-    /// only a move — `fitAll`, a pan, a free zoom. Read once, on arrival.
-    private var pendingSessionEntry: String?
-
-    /// The pane a focus request is waiting on the flight for. `focusPane` cannot
-    /// focus across the canvas — the pane it wants is not on screen until the
-    /// camera gets there — so it names the pane and the landing does the rest.
-    private var pendingFocusPaneID: String?
-
-    /// Where the next flight begins when the presentation layer cannot answer.
-    /// Exactly `place`'s `start:` parameter and for exactly its reason: "a pane
-    /// that has just been reparented, whose presented position is still the one
-    /// it had in the view it left." Here it is a camera re-seated by a mode
-    /// change — the content moved into canvas coordinates this turn, and the
-    /// transform still presented belongs to the layout before it.
-    private var cameraFlightStart: DeskCamera?
-
-    /// What `fitAll` fits. `bounds` until the first canvas pass has run, so a
-    /// fit asked for before there is a canvas is a stationary camera rather than
-    /// a jump to nowhere.
-    var canvasContentRect: CGRect { canvasLayout?.contentRect ?? bounds }
-
-    /// Which session's card a canvas point falls in. A session node's id **is**
-    /// its group id — the same string `PaneDescriptor.group` and `activeGroup`
-    /// carry — so this is a lookup rather than a walk of the tree, and the
-    /// `grids` check is what keeps the root and workspace nodes out of it.
-    func sessionCard(containing point: CGPoint) -> String? {
-        canvasLayout?.frames
-            .first { grids[$0.key] != nil && $0.value.contains(point) }?
-            .key
-    }
-
-    /// The canvas's one animation, and the operation every way into and out of a
-    /// session resolves to: move the camera so a rect maps onto the viewport.
-    ///
-    /// The model value lands immediately and the *layer* is animated into it
-    /// from where it is presented — `place`'s discipline, for `place`'s reason:
-    /// everything downstream (hit testing, `canvasRect`, the next gesture) reads
-    /// the model, and only the eye reads the interpolation.
-    ///
-    /// A raw `CABasicAnimation`, never `NSView.animator()`, and `place` records
-    /// why: "The animator wraps each group's frame change in an
-    /// `_NSWindowTransformAnimation`, and instrumenting the transitions showed
-    /// two of those alive on one view whenever a second transition began inside
-    /// the first's 0.32s."
-    func flyCamera(to target: DeskCamera) {
-        // Before anything else, so a flight still in flight — animated or the
-        // instant Reduce Motion kind — can no longer land on this one's behalf.
-        cameraFlightToken += 1
-        let token = cameraFlightToken
-        // Read before the model moves: once `camera` is assigned the layer is
-        // already at the destination, and the presented value is the only record
-        // of where the eye currently is.
-        let from = cameraFlightStart?.transform
-            ?? layer?.presentation()?.sublayerTransform
-            ?? layer?.sublayerTransform
-            ?? CATransform3DIdentity
-        cameraFlightStart = nil
-        // Both ends of the flight stay on screen for its duration. `camera`'s
-        // setter re-derives the visible set, and it is assigned to the
-        // *destination* on frame one — so without this the card being left is
-        // hidden while the eye is still looking straight at it.
-        transitionViewport = camera.canvasViewport(in: bounds)
-            .union(target.canvasViewport(in: bounds))
-        camera = target
-        // Reduced motion still flies, it just lands instantly — and so does a
-        // flight in a view with no window, where, as `setZoomed` puts it, "an
-        // animation group's completion is not guaranteed to arrive at all.
-        // Sequencing the landing behind one that never comes would strand the
-        // transition half-done": here, a camera parked between two sessions with
-        // no pane accepting input.
-        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            finishCameraFlight(token)
-            return
-        }
-        let flight = CABasicAnimation(keyPath: Self.cameraFlightKey)
-        flight.fromValue = NSValue(caTransform3D: from)
-        flight.toValue = NSValue(caTransform3D: target.transform)
-        // The zoom's own duration and curve, so canvas zoom and pane focus zoom
-        // read as one system rather than as two animations that happen to be
-        // near each other.
-        flight.duration = Self.zoomTransitionDuration
-        flight.timingFunction = Self.zoomTimingFunction
-        layer?.add(flight, forKey: Self.cameraFlightKey)
-        // Scheduled rather than handed to the animation's delegate, for the same
-        // reason `setZoomed` schedules `finishZoomTransition`. A stale timer is
-        // harmless: `finishCameraFlight` refuses any token but the current one.
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.zoomTransitionDuration) {
-            [weak self] in
-            self?.finishCameraFlight(token)
-        }
-    }
-
-    /// The end of one flight's 0.38s, gated on the token so it only ever acts
-    /// for the flight it was created by.
-    private func finishCameraFlight(_ token: Int) {
-        guard token == cameraFlightToken else { return }
-        // By key rather than `removeAllAnimations()`, following `landCard`:
-        // "these two are the only ones this code adds, and yanking whatever else
-        // a layer happens to be running is how you break something you did not
-        // write." This view's layer is the shell's too.
-        layer?.removeAnimation(forKey: Self.cameraFlightKey)
-        // The flight is over, so the union of its two ends stops being the
-        // visible set and the camera's own viewport takes over again.
-        transitionViewport = nil
-        // Gated on the pending entry rather than on `camera.isIdentity`: the two
-        // mean the same thing while the tidy tree places cards at integral
-        // origins, and if it ever does not, a flight that refused to land would
-        // strand the camera mid-air with nothing accepting input. The snap in
-        // `landSession` fixes the fraction either way.
-        if let group = pendingSessionEntry {
-            pendingSessionEntry = nil
-            landSession(group)
-        }
-        // After the landing, never before it: an entry arrives at scale 1 over a
-        // card at canvas x=1600, and a camera stored from *that* instant would
-        // reopen the Desk with one card filling the viewport and the canvas
-        // holding the keyboard. `landSession` has turned the mode off by now, so
-        // the controller's canvas-mode gate refuses the write and the row keeps
-        // the camera the canvas itself was last left at.
-        onDeskCanvasChanged?()
-    }
-
-    /// The end of an entry: the camera has arrived over one card at scale 1, and
-    /// the view goes back to the single-session layout it has always had. The
-    /// two are the same pixels — a card is exactly the viewport — so this is a
-    /// change of bookkeeping, not a cut.
-    ///
-    /// It is also the only way `sublayerTransform` becomes a true identity. A
-    /// card at canvas x=1600 leaves the camera's origin at -1600, and every
-    /// `event.locationInWindow` conversion in this file — the dividers, the hole
-    /// tiles, the header buttons, the editor-tab drop zones — is blind to that
-    /// translation. Panes accept input at identity and nowhere else, which is
-    /// why leaving `canvasMode` on here would not do: on the canvas the arriving
-    /// card is drawn at its node rect, so "identity" and "this card fills the
-    /// viewport" are the same picture only once normal mode has laid that card
-    /// out in `bounds` again.
-    private func landSession(_ group: String) {
-        guard grids[group] != nil else {
-            // The session died in the air: its last terminal exited during the
-            // flight and `closePane` dropped the group. Returning would leave
-            // `canvasMode` on with the camera parked at scale 1 over a card that
-            // no longer exists — no session on screen and no landing left to
-            // come. The canvas is the honest place to be put down instead.
-            exitToCanvas()
-            return
-        }
-        activeGroup = group
-        // Back to the single-session layout, which lays `activeGroup`'s grid out
-        // in `bounds` — the same pixels the camera is looking at this instant,
-        // since a card *is* the viewport. The setter re-seats the camera at the
-        // identity and drops the node rects with it.
-        canvasMode = false
-        camera = DeskCamera(scale: 1, origin: .zero)
-        // Explicitly, with actions off, so the snap is a snap: a residual scale
-        // of 1.0000001 left behind by the interpolation is what makes the text
-        // permanently soft.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layer?.sublayerTransform = CATransform3DIdentity
-        CATransaction.commit()
-        updateVisibility()
-        updateLayout()
-        let requested = pendingFocusPaneID.flatMap {
-            grids[group]?.contains($0) == true ? $0 : nil
-        }
-        pendingFocusPaneID = nil
-        if let target = requested ?? paneIDs.first { focusPane(target) }
-        // Or the blink is left behind: "a focus-moving path that skips this
-        // helper leaves the blink behind the blur on a pane nobody can see, and
-        // reads as a cursor bug rather than a focus-mode one." Called from here
-        // rather than from `focusPane(_:)`, which `setZoomed` calls itself and
-        // would re-enter.
-        carryCardToFocusedPane()
-    }
-
-    /// One of the four ways in — a click on a card, a double-click, a session
-    /// shortcut, or a zoom that reaches identity over one card — and all four
-    /// are this: fly the camera so that card's rect maps onto the viewport, then
-    /// land.
-    func enterSession(_ group: String) {
-        guard grids[group] != nil else { return }
-        guard canvasMode else {
-            // Off the canvas the instant switch is still the right answer, and
-            // it is the one every existing caller and test expects.
-            activateGroup(group)
-            return
-        }
-        guard
-            bounds.width > 0, bounds.height > 0,
-            let card = canvasRect(forGroup: group)
-        else { return }
-        pendingSessionEntry = group
-        flyCamera(to: DeskCamera.focus(on: card, in: bounds))
-    }
-
-    /// The way out — ⌘0, Esc, or a pinch that went the other way — and the same
-    /// operation as the way in, aimed at `fitAll` instead of at one card.
-    func exitToCanvas() {
-        pendingSessionEntry = nil
-        pendingFocusPaneID = nil
-        guard bounds.width > 0, bounds.height > 0 else { return }
-        if !canvasMode {
-            // Join the canvas *where the session already is*, so the mode change
-            // shows nothing: `canvasMode` lays every group out at its node rect,
-            // and this camera puts the one that was filling `bounds` back
-            // exactly where it was. Both happen in this turn, before CA commits,
-            // so no frame is ever drawn with the layout changed and the camera
-            // not — and the flight is told to start here rather than from the
-            // presented transform, which still belongs to the old layout.
-            canvasMode = true
-            if let group = activeGroup, let card = canvasRect(forGroup: group) {
-                let seat = DeskCamera.focus(on: card, in: bounds)
-                camera = seat
-                cameraFlightStart = seat
-            }
-        }
-        flyCamera(to: DeskCamera.fitAll(content: canvasContentRect, in: bounds))
-        // The keyboard leaves with the camera. Coming out of a session the
-        // terminal is still the window's first responder, and nothing else on
-        // this path would take it back: esc would send ESC to that shell instead
-        // of aiming at fitAll, ↩ a newline instead of entering the selection,
-        // and the arrows would walk a cursor in a terminal rendered at a third
-        // of its size. `mouseDown` also takes it, but a click is not on the way
-        // out — a pinch, ⌘0 and esc are.
-        window?.makeFirstResponder(self)
     }
 
     /// Removes a pane, reflowing the grid down a rung when the count drops. If
@@ -1816,21 +1495,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         // screen. This is the single rule that makes the sidebar work: its
         // session rows and pane rows both already call through here, so
         // selecting either one switches sessions without a second code path.
-        // On the canvas, *anywhere but already inside that session* is a
-        // flight. `activeGroup` alone is the wrong test: it is whichever session
-        // was last landed in, and it keeps that value while the camera is out
-        // over the whole organigram — so a sidebar click on a pane of the
-        // last-visited session used to focus a pane the user cannot see, on a
-        // card the camera never moved to. `isIdentityTransform` is the question
-        // that actually matters: is this session filling the screen right now.
-        if canvasMode, activeGroup != group || !camera.isIdentityTransform {
-            // The switch still happens — `landSession` does it when the camera
-            // arrives — so every caller still ends up with `sessionID` focused,
-            // one camera move later.
-            pendingFocusPaneID = sessionID
-            enterSession(group)
-            return
-        }
         if activeGroup != group {
             activeGroup = group
             updateVisibility()
@@ -2121,253 +1785,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         sourceID != targetID && grid?.contains(sourceID) == true && grid?.contains(targetID) == true
     }
 
-    // MARK: - Canvas mode
-
-    /// The second layout mode. Normal mode: `activeGroup`'s grid fills `bounds`
-    /// and every other session is hidden. Canvas mode: *every* session's grid is
-    /// laid out at its own card rect in canvas coordinates, and `camera` decides
-    /// what is on screen.
-    ///
-    /// Canvas coordinates are this view's own, which is **flipped**
-    /// (`isFlipped == true`) while the window is not — the same convention
-    /// `PaneDividerView.mouseDragged` already depends on: "The workspace view is
-    /// flipped, the window is not: a downward drag is a *smaller* window y but a
-    /// *larger* workspace y." Node positions and the camera origin are in that
-    /// flipped space, y growing downward.
-    var canvasMode: Bool {
-        get { isCanvasMode }
-        set {
-            guard newValue != isCanvasMode else { return }
-            if newValue {
-                // Focus mode ends at the canvas door, and it has to end
-                // *synchronously*. The card lives in the window's content view
-                // (`installOverlayHost`), which is not under this view's
-                // `sublayerTransform` — a card left up would float at full size
-                // over a zoomed-out canvas — and `applyZoom` tracks exactly one
-                // `overlayPaneID`, whose comment records what a second owner
-                // costs: "A live terminal and its session, off screen with no
-                // way back."
-                setZoomed(nil)
-                // `setZoomed` only *schedules* the landing (0.38s later, via
-                // `DispatchQueue.main.asyncAfter` — never an animation group's
-                // completion, which is not guaranteed to arrive with no window
-                // or under Reduce Motion), and the canvas layout pass below does
-                // not run `applyZoom`, so nothing would ever bring the card home.
-                // Landing it here is idempotent: `landCard` clears
-                // `overlayIsCollapsing`, so the scheduled `finishZoomTransition`
-                // then finds nothing collapsing and does nothing.
-                finishZoomTransition(zoomTransitionToken)
-            } else {
-                // Normal mode must carry no transform at all.
-                camera = DeskCamera(scale: 1, origin: .zero)
-                // And no node rects either: `canvasLayout` is what a click is
-                // resolved against, and a stale one would answer for a canvas
-                // that is not on screen.
-                canvasLayout = nil
-                // And no organigram. Normal mode lays one session out in
-                // `bounds` and knows nothing about chips or connectors, so
-                // anything left behind would hang over the panes at a canvas
-                // frame no pass recomputes.
-                canvasChips.values.forEach { $0.removeFromSuperview() }
-                canvasChips.removeAll()
-                canvasEdges.removeFromSuperlayer()
-            }
-            isCanvasMode = newValue
-            // Unconditionally, and before the layout pass rather than after it:
-            // `updateVisibility` is what runs `validateZoom`, and `updateLayout`
-            // ends in `applyZoom`, which would otherwise act on a zoom this mode
-            // change has just invalidated. On the way *in* the canvas pass calls
-            // `updateVisibility` again from its own tail, once the node rects the
-            // camera is measured against exist; on the way *out* this call is the
-            // only one, and skipping it would leave every other session's panes
-            // unhidden on top of the active one.
-            updateVisibility()
-            updateLayout()
-        }
-    }
-
-    private var isCanvasMode = false
-
-    /// The camera, as one transform on `layer.sublayerTransform`.
-    ///
-    /// `sublayerTransform` rather than a scale on this view or on each card: it
-    /// applies to every sublayer without touching the view's own frame or any
-    /// container's frame, so container frames stay in canvas coordinates and
-    /// nothing downstream — `PaneGrid`, `place`, the resize coalescer, the PTY —
-    /// learns that a zoom happened. An ancestor transform never calls
-    /// `setFrameSize` on a descendant, so a camera move costs zero PTY resizes.
-    /// Edges and chips added later are sublayers of the same layer and inherit
-    /// it for free.
-    var camera = DeskCamera(scale: 1, origin: .zero) {
-        didSet {
-            guard camera != oldValue else { return }
-            applyCamera()
-            // What the grid and the zoom readout are both driven by. Raised per change, not debounced:
-            // it is a label, and a label that lags a pinch is worse than none.
-            onCameraChanged?()
-            // An ancestor transform moves no frame, so no layout pass follows a
-            // camera move and this is the only thing that re-derives what is on
-            // screen. Every path that changes the camera must come through the
-            // setter for that reason.
-            updateVisibility()
-        }
-    }
-
-    /// The organigram laid out in canvas mode. `nil` means "derive it from the
-    /// panes this view already holds" — `derivedCanvasRoot()`.
-    var canvasRoot: DeskNode? {
-        didSet {
-            guard isCanvasMode, canvasRoot != oldValue else { return }
-            updateLayout()
-        }
-    }
-
-    /// Nodes the user has dragged, by **node** id, in canvas coordinates.
-    /// Handed straight to `DeskCanvas.layout`, which excludes them from packing.
-    var canvasPins: [String: CGPoint] = [:] {
-        didSet {
-            guard canvasPins != oldValue else { return }
-            // The relayout is the canvas's business; the *announcement* is not.
-            // A restore hands these over before the canvas is on screen, and the
-            // controller still has to know it now holds the row's contents.
-            if isCanvasMode { updateLayout() }
-            onDeskCanvasChanged?()
-        }
-    }
-
-    /// Raised when the canvas's persistable state changes — a node dragged, the
-    /// camera panned or zoomed, a flight landed.
-    ///
-    /// Deliberately *not* raised by the camera's own `didSet`: normal mode is
-    /// entered by resetting the camera to the identity (`canvasMode`'s setter,
-    /// `landSession`), and a persistence path hung off that would write "the
-    /// canvas is parked in its own corner" over the camera the user actually
-    /// left, every single time they enter a session or leave the Desk. The
-    /// paths that raise it are the ones where a camera value means something:
-    /// the two gestures, and a flight's arrival.
-    ///
-    /// A drag and a pinch both raise it many times a second. That is the
-    /// controller's problem to damp — `write(_:to:)`'s unchanged-value
-    /// suppression cannot help with a value that genuinely differs every frame,
-    /// so `persistDeskCanvas` debounces instead.
-    var onDeskCanvasChanged: (() -> Void)?
-
-    /// Raised on every camera change, undebounced, for chrome that has to track
-    /// the zoom — the readout in the corner. Distinct from
-    /// `onDeskCanvasChanged`, which exists to *persist* and is debounced for it:
-    /// a label updated on a debounce lags the pinch that caused it.
-    var onCameraChanged: (() -> Void)?
-
-    /// True while a camera flight into a session is still in the air.
-    ///
-    /// The one thing an outside observer cannot otherwise tell: `canvasMode` is
-    /// still on for the whole 0.38s of an entry, and `camera` is already at the
-    /// destination. The restore path asks because it lands *after* the restore
-    /// chain's `focusPane(lastFocusedPaneOnLaunch)`, which on the canvas is a
-    /// flight into that session — seating a stored camera on top of it, or
-    /// worse flying back out to `fitAll`, would undo the one thing the focus
-    /// restore exists for.
-    var isEnteringSession: Bool { pendingSessionEntry != nil }
-
-    /// The node rects the last canvas pass produced — what `DeskCamera.fitAll`
-    /// fits (`contentRect`) and what hit testing resolves a click against.
-    private(set) var canvasLayout: DeskCanvasLayout?
-
-    /// Node id -> chip, for the organigram's non-session nodes only. A session
-    /// node needs no chip: its card *is* its pane grid, drawn by the same
-    /// layout pass that positions everything else.
-    ///
-    /// Pooled by node id rather than rebuilt each pass, the way
-    /// `syncHolePlaceholders(_:holeIDs:)` pools hole tiles — a chip rebuilt
-    /// every layout would drop the keyboard selection ring mid-arrow-walk.
-    private var canvasChips: [String: DeskCanvasChipView] = [:]
-
-    /// Every connector as one path. One layer, not one per edge: the tree is
-    /// redrawn whenever a node moves, and N layers would each need their own
-    /// `lineWidth` compensation.
-    private let canvasEdges = DeskCanvasEdgeLayer()
-
-    /// A session card is exactly the Desk viewport, which is this view's own
-    /// bounds: that is what makes "the camera at 1.0 over this card" and "you are
-    /// in that session" the same picture. Every card is therefore the same
-    /// rectangle — a 1-pane session and a 12-pane session are the same size —
-    /// and resizing the window re-lays out the whole canvas.
-    var canvasCardSize: CGSize { bounds.size }
-
-    /// `camera.transform` unchanged, and that is a measured claim rather than a
-    /// hopeful one.
-    ///
-    /// `DeskCamera.transform` is written for a top-left origin —
-    /// `viewPoint = scale * canvasPoint + origin`, exactly what
-    /// `DeskCamera.canvasPoint(from:)` inverts — so it is only the right
-    /// transform to install if `sublayerTransform` scales sublayers about the
-    /// bounds *corner*. Two facts, both measured in
-    /// `PaneWorkspaceCanvasModeTests` rather than assumed, say that it does:
-    /// `sublayerTransform` pivots about the parent layer's **anchor point** (a
-    /// sublayer at 100 under a 0.5 scale renders at 50 with an anchor of
-    /// `(0, 0)` and at 350 with `(0.5, 0.5)`, and `isGeometryFlipped` does not
-    /// change that), and AppKit gives a layer-backed `NSView` an anchor of
-    /// `(0, 0)` with `position` at the frame's origin — not UIKit's centred
-    /// default. A centred anchor would need `translate((scale - 1) * centre)`
-    /// folded in here; a corner anchor needs nothing, so nothing is done.
-    ///
-    /// At the identity camera the transform is identity, so normal mode carries
-    /// no transform at all.
-    private func applyCamera() {
-        guard let layer else { return }
-        // Actions off: the camera's own moves are explicit `CABasicAnimation`s
-        // added by key, and CoreAnimation's implicit 0.25s action underneath one
-        // of those is a second animation on the same property.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layer.sublayerTransform = camera.transform
-        CATransaction.commit()
-        // The connectors are strokes in canvas units under that same transform,
-        // so the camera scale is what says how many screen points one of those
-        // is worth — and a camera move runs no layout pass, which makes this the
-        // only hook the compensation has. `nil` in normal mode, where there is
-        // no organigram to stroke.
-        if let canvasLayout { canvasEdges.apply(canvasLayout, scale: camera.scale) }
-    }
-
-    /// The organigram this view can derive on its own: the account at the root,
-    /// one workspace node per project — the Desk level is folded into it, since
-    /// it is 1:1 with a workspace and as its own level only makes the tree
-    /// taller — and one session node per group, in `groupOrder`'s first-seen
-    /// order.
-    ///
-    /// A node id **is** the thing it names: a session node's id is its group id,
-    /// a workspace node's id is its project id, the root's is `"root"`. No
-    /// prefixing scheme and no join table, which is what makes
-    /// `canvasLayout.frames[group]` a card rect directly.
-    func derivedCanvasRoot() -> DeskNode {
-        var projectOrder: [String] = []
-        var sessionsByProject: [String: [DeskNode]] = [:]
-        for group in groupOrder {
-            let project = grids[group]?.paneIDs()
-                .compactMap { descriptors[$0]?.project }
-                .first { !$0.isEmpty } ?? ""
-            if sessionsByProject[project] == nil {
-                projectOrder.append(project)
-                sessionsByProject[project] = []
-            }
-            sessionsByProject[project]?.append(
-                DeskNode(id: group, kind: .session(group), children: [])
-            )
-        }
-        return DeskNode(
-            id: "root",
-            kind: .root,
-            children: projectOrder.map { project in
-                DeskNode(
-                    id: project,
-                    kind: .workspace(project),
-                    children: sessionsByProject[project] ?? []
-                )
-            }
-        )
-    }
-
     // MARK: - Occlusion
 
     /// Fully occluded panes stop asking for draws. Output keeps being parsed
@@ -2398,9 +1815,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// Applies the grid's calculated frames. Every pane whose frame actually
     /// moved schedules a coalesced PTY resize.
     func updateLayout() {
-        // Canvas mode answers the same question differently: every session's
-        // grid at its own card rect, not `activeGroup`'s filling `bounds`.
-        if isCanvasMode { return updateCanvasLayout() }
         // Before the frames are read, so a reshape and the placement it causes
         // are one pass and no intermediate shape is ever on screen.
         let reflowed = reflowForSize()
@@ -2486,9 +1900,8 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
                 heroFadeToken += 1
                 containers.values.forEach { $0.layer?.opacity = 1 }
             }
-            // The rail's chips go up (or come down) before anything is placed:
-            // `place` reads `isChipped` to decide whether the pane's PTY
-            // follows its box.
+            // Recomputes which panes are on screen before anything is placed:
+            // entering or leaving the rail changes `onScreenPaneIDs()`'s answer.
             updateVisibility()
             changed = true
         }
@@ -2693,173 +2106,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         updateFilmstripLayout()
     }
 
-    /// Canvas mode's layout pass: every session's grid at its own card rect in
-    /// canvas coordinates, plus the camera.
-    ///
-    /// The card rects come from `DeskCanvas.layout`. A session node's id **is**
-    /// its group id and a workspace node's id **is** its project id, so
-    /// `layout.frames[group]` is the card rect directly.
-    private func updateCanvasLayout() {
-        let root = canvasRoot ?? derivedCanvasRoot()
-        let layout = DeskCanvas.layout(root: root, cardSize: canvasCardSize, pinned: canvasPins)
-        canvasLayout = layout
-        var holes: [CGRect] = []
-        var activeDividers: [PaneDivider] = []
-        for group in groupOrder {
-            guard let grid = grids[group] else { continue }
-            guard let card = layout.frames[group] else {
-                // A session the tree does not name has no card to sit in. Not
-                // torn down — this view never kills a session — simply not on
-                // the canvas.
-                // Deliberately no `isHidden` write here. `updateVisibility()`
-                // is the sole owner of per-pane visibility and suspension —
-                // `setSuspendsDrawing`'s comment records the bug that arises
-                // when something else writes it ("assigning the flag directly
-                // un-suspended them") — and a group with no card rect is
-                // exactly what the viewport rule there resolves to nothing.
-                continue
-            }
-            // The same `gridInset` normal mode applies to `bounds`, applied to
-            // the card instead: a card *is* the Desk viewport, so the panes
-            // inside it sit exactly where scale 1.0 shows them.
-            let cardLayout = grid.layout(
-                in: card.insetBy(dx: Self.gridInset, dy: Self.gridInset),
-                dividerThickness: Self.dividerThickness
-            )
-            for cell in grid.cells {
-                guard let frame = cardLayout.frames[cell.id] else { continue }
-                guard let paneID = cell.paneID else {
-                    holes.append(frame)
-                    continue
-                }
-                // The overlay guard normal mode makes, for the same reason it
-                // makes it: "Whatever is in the overlay host — the card, or one
-                // still shrinking out of it — has a frame in that host's
-                // coordinates, and `applyZoom` is what sets it. Guarded on
-                // parentage rather than on zoom state, which changes one layout
-                // pass earlier." Entering canvas mode lands the card first, so
-                // this is normally empty — but a pane still on its way home must
-                // never be reframed into canvas coordinates behind
-                // `applyZoom`'s back.
-                guard paneID != overlayPaneID, let container = containers[paneID] else { continue }
-                place(container, at: frame)
-            }
-            if group == activeGroup { activeDividers = cardLayout.dividers }
-        }
-        // Only the on-camera session's seams. A `PaneDividerView` is painted the
-        // canvas's own background colour, so a card without them looks identical
-        // — and `moveDivider` resolves a drag against `grid`, the *active*
-        // session's, so a seam belonging to another card could only ever move the
-        // wrong one.
-        syncDividerViews(activeDividers)
-        syncCanvasHolePlaceholders(holes)
-        applyCamera()
-        updateAccessibilityLabels()
-        refreshFocusSubtitles()
-        syncCanvasChrome(layout, root: root)
-        // Canvas mode's visible set is a function of the node rects this pass
-        // just computed and of the camera, and nothing else recomputes it when
-        // a window resize re-lays the canvas out.
-        updateVisibility()
-    }
-
-    /// Positions the organigram's chips and connectors for `layout`.
-    ///
-    /// Chips go **below** every pane container, the same `positioned:`
-    /// relationship `syncCanvasHolePlaceholders(_:)` uses, so a card always
-    /// composites over the tree rather than the other way round; the connectors
-    /// go below even those, as sublayer 0.
-    ///
-    /// Only the root and workspace nodes get one. A session's chip would be a
-    /// label pasted over its own live grid — below `DeskCanvas.lodThreshold`
-    /// that grid already draws itself as `PaneChipView`s, which is the
-    /// level-of-detail answer and not this one.
-    private func syncCanvasChrome(_ layout: DeskCanvasLayout, root: DeskNode) {
-        var live: Set<String> = []
-        func walk(_ node: DeskNode) {
-            // `defer`, so the early return a session node takes below still
-            // walks the rest of the tree underneath it.
-            defer { node.children.forEach(walk) }
-            let role: DeskCanvasChipView.Role
-            switch node.kind {
-            case .session: return          // a session's card is its grid
-            case .root: role = .account
-            case .workspace: role = .workspace
-            }
-            guard let frame = layout.frames[node.id] else { return }
-            live.insert(node.id)
-            let chip: DeskCanvasChipView
-            if let existing = canvasChips[node.id] {
-                chip = existing
-            } else {
-                chip = DeskCanvasChipView(role: role)
-                canvasChips[node.id] = chip
-                addSubview(chip, positioned: .below, relativeTo: nil)
-            }
-            chip.frame = frame
-            chip.isSelected = (selectedNodeID == node.id)
-            switch node.kind {
-            case .root:
-                chip.apply(title: accountDisplayName, detail: nil, tint: nil, status: nil)
-            case .workspace(let project):
-                // The chip derives its own initials from the title it is given
-                // (`DeskCanvasChipView.drawLeading`), so this hands it the name
-                // and the tile follows — and the name is what
-                // `testAWorkspaceNameFitsTheColumnTheLayoutActuallyGivesIt`
-                // sizes the title column against.
-                chip.apply(
-                    title: SessionOutline.projectLabel(project),
-                    detail: ShellPalette.sessionCountLabel(node.children.count),
-                    tint: ShellPalette.avatarGradient(forID: project),
-                    status: nil
-                )
-            case .session:
-                return
-            }
-        }
-        walk(root)
-        for (id, chip) in canvasChips where !live.contains(id) {
-            chip.removeFromSuperview()
-            canvasChips.removeValue(forKey: id)
-        }
-        if canvasEdges.superlayer !== layer {
-            layer?.insertSublayer(canvasEdges, at: 0)
-        }
-        canvasEdges.apply(layout, scale: camera.scale)
-    }
-
-    /// The chips' selection rings, without a layout pass. The arrows walk
-    /// `selectedNodeID` and nothing else re-runs the canvas pass for a keypress,
-    /// so this is the ring's only hook between one layout and the next — and the
-    /// ring is a redraw, which is exactly what `DeskCanvasChipView.isSelected`
-    /// costs.
-    private func updateCanvasChipSelection() {
-        for (id, chip) in canvasChips {
-            chip.isSelected = (id == selectedNodeID)
-        }
-    }
-
-    /// What the root node is called. Nothing hands this view a display name
-    /// of its own, so it uses the machine account's — and falls back to the
-    /// spec's own word for the node on a system that has none. (The sidebar's
-    /// account row is a "Not signed in" placeholder since the 2026-08-20
-    /// redesign; this canvas node is about the person at the keyboard, not an
-    /// account.)
-    private var accountDisplayName: String {
-        let name = NSFullUserName()
-        return name.isEmpty ? "You" : name
-    }
-
-    // MARK: - Testing seams
-
-    /// `canvasChips` and `canvasEdges` are private — nothing outside this file
-    /// has business reaching into the organigram's view tree — and these four
-    /// are how the tests see that a layout pass actually installed it.
-    var canvasChipIDsForTesting: [String] { Array(canvasChips.keys) }
-    func canvasChipForTesting(_ id: String) -> DeskCanvasChipView? { canvasChips[id] }
-    var canvasEdgePathForTesting: CGPath? { canvasEdges.path }
-    var canvasEdgeLineWidthForTesting: CGFloat { canvasEdges.lineWidth }
-
     /// The focused card's subtitle counts panes ("terminal 3 of 4"), so it goes
     /// stale whenever the on-screen set changes without anything touching the
     /// zoomed pane's own descriptor — closing a sibling renumbers the rest.
@@ -2908,8 +2154,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         }
     }
 
-    /// One hole tile, wired to this view's callbacks. Extracted so canvas mode
-    /// can build the same tile while pooling by frame instead of by cell id.
+    /// One hole tile, wired to this view's callbacks.
     private func makeHolePlaceholder() -> PaneHolePlaceholderView {
         let placeholder = PaneHolePlaceholderView(
             onActivate: { [weak self] in self?.onRequestNewPane?() },
@@ -2920,30 +2165,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             self?.onEditorTabDropOnHole?(payload)
         }
         return placeholder
-    }
-
-    /// Canvas mode's hole tiles: every card's, pooled by frame, seated below the
-    /// containers exactly as `syncHolePlaceholders` seats them. A hole's cell id
-    /// is only unique *inside* one grid — `PaneGrid.holeID(_:)` numbers from 0
-    /// per grid — so the canvas cannot key its tiles the way that one does.
-    ///
-    /// The tiles' callbacks carry no group (`onRequestNewPane` and friends never
-    /// have), so only the card the camera is over may be clickable — which is
-    /// what the identity-scale interactivity rule already guarantees: below 1.0
-    /// nothing in a pane takes input, and at 1.0 exactly one card fills the
-    /// viewport and it is `activeGroup`'s.
-    private func syncCanvasHolePlaceholders(_ frames: [CGRect]) {
-        while holePlaceholders.count > frames.count {
-            holePlaceholders.removeLast().removeFromSuperview()
-        }
-        while holePlaceholders.count < frames.count {
-            let placeholder = makeHolePlaceholder()
-            holePlaceholders.append(placeholder)
-            addSubview(placeholder, positioned: .below, relativeTo: subviews.first)
-        }
-        for (placeholder, frame) in zip(holePlaceholders, frames) {
-            placeholder.frame = frame
-        }
     }
 
     /// Slides one seam and reframes immediately; the PTY hears about it on the
@@ -3057,469 +2278,14 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             return hasNeighbor(.down)
         case #selector(selectPane(_:)):
             return menuItem.tag >= 1 && menuItem.tag <= paneIDs.count
-        case #selector(zoomCanvasIn(_:)):
-            return isCanvasMode && camera.scale < DeskCamera.maxScale
-        case #selector(zoomCanvasOut(_:)):
-            return isCanvasMode && camera.scale > minimumCanvasScale
         default:
             return true
         }
     }
 
-    // MARK: - Canvas input
-
-    /// The node the arrows walk and `↩` enters. `nil` when the pointer last
-    /// landed on empty canvas.
-    var selectedNodeID: String? {
-        didSet {
-            guard oldValue != selectedNodeID else { return }
-            // Before the callback, and not through it: the callback belongs to
-            // whoever owns this view, and the ring on this view's own chips is
-            // not theirs to have to remember.
-            updateCanvasChipSelection()
-            onCanvasSelectionChanged?(selectedNodeID)
-        }
-    }
-
-    /// Fired when a drag ends having pinned something — the persistence task's
-    /// save hook for the `desk_canvas_native` row.
-    var onCanvasPinsChanged: (([String: CGPoint]) -> Void)?
-
-    /// Fired when the selected node changes, so the chips can draw their ring
-    /// without this section knowing what a chip is.
-    var onCanvasSelectionChanged: ((String?) -> Void)?
-
-    /// One ⌘+ / ⌘- step. Multiplicative, so in and out are exact inverses.
-    static let canvasZoomStep: CGFloat = 1.25
-
-    /// Whether the Desk destination is the one on screen — the canvas *or* a
-    /// session reached from it.
-    ///
-    /// `canvasMode` is the *layout* question, and it is false while the user is
-    /// inside a session: `landSession` turns it off as it lands, precisely so
-    /// that "identity" and "this card fills the viewport" are the same picture.
-    /// So a gesture guarded on `canvasMode` alone cannot fire from inside a
-    /// session — and the way back *out* of one is a gesture. Which destination
-    /// is showing is something only the window controller knows; this is where
-    /// it says so, and `applyDestination(_:)` is its only writer.
-    var deskCanvasLoaded = false
-
-    /// How much of a pinch counts as "out". A trackpad reports a pinch as a
-    /// stream of small `magnification` deltas and a resting hand reports noise,
-    /// so the way out of a session needs a threshold rather than a sign test.
-    static let canvasPinchOutFactor: CGFloat = 0.98
-
-    /// How far a node has to travel before a click becomes a drag, in **canvas**
-    /// units rather than window units. `PaneHeaderView.mouseDragged`'s 4pt
-    /// threshold is the window-space equivalent, and it is only ever read at
-    /// identity scale; at 0.2 a 3pt window twitch is 15pt of canvas and would
-    /// throw a node across the tree.
-    static let canvasDragThreshold: CGFloat = 3
-
-    private var draggingNodeID: String?
-    private var dragOriginInCanvas: CGPoint = .zero
-    private var dragNodeOriginInCanvas: CGPoint = .zero
-    private var didDragNode = false
-
-    /// The tree the canvas is actually laid out from: whatever was handed in,
-    /// and the derived one when nothing was. `canvasRoot` is `nil` by default
-    /// and `nil` means "derive it" — the same thing `updateCanvasLayout()`
-    /// means by it. Every reader here goes through this rather than through
-    /// `canvasRoot`, or a hit test would resolve against a tree the layout pass
-    /// never used, which is to say against nothing at all.
-    private var canvasTree: DeskNode { canvasRoot ?? derivedCanvasRoot() }
-
-    /// The zoom floor: the whole tree on screen. Derived from `fitAll` rather
-    /// than kept as a constant, because the floor moves when a session opens, a
-    /// node is dragged, or the window is resized.
-    var minimumCanvasScale: CGFloat {
-        guard
-            let content = canvasLayout?.contentRect,
-            content.width > 0, content.height > 0,
-            bounds.width > 0, bounds.height > 0
-        else { return DeskCamera.maxScale }
-        return min(DeskCamera.maxScale, DeskCamera.fitAll(content: content, in: bounds).scale)
-    }
-
-    /// The correctness boundary the whole design rests on.
-    ///
-    /// `NSView` coordinate conversion and `event.locationInWindow` are blind to
-    /// a `CALayer` transform, and this file has roughly ten call sites that
-    /// depend on them: `PaneDividerView.mouseDragged`'s window-space delta and
-    /// its `resetCursorRects`, `PaneHeaderView.mouseDragged`'s 4pt travel
-    /// threshold, `PaneHeaderButton.mouseUp`'s
-    /// `bounds.contains(convert(event.locationInWindow, from: nil))` and its
-    /// `.activeInKeyWindow, .inVisibleRect` tracking areas,
-    /// `PaneHolePlaceholderView.mouseMoved`/`mouseUp`/`dispatch(at:)`/
-    /// `updateTrackingAreas`/`resetCursorRects`, `applyZoom`'s
-    /// `convert(container.frame, to: host)`, `collapseZoom`'s
-    /// `convert(cell, to: host)`, and `PaneContainerView.editorTabDropZone`.
-    ///
-    /// Every one of them is right exactly when `sublayerTransform` is the
-    /// identity matrix and wrong under any other, so that — and not "the camera
-    /// looks landed" — is what hands input back to the panes.
-    ///
-    /// `isIdentityTransform`, deliberately, and **not** `isIdentity`: the
-    /// latter is scale 1 with a whole-pixel origin, which every entry flight
-    /// satisfies for its whole 0.38s while the transform is a translation of
-    /// hundreds of points. Guarding on it handed clicks to whichever container's
-    /// *frame* happened to contain the point — a pane of some other session,
-    /// drawn nowhere near the pointer — and a flight whose landing bailed left
-    /// that state up permanently.
-    var canvasOwnsInput: Bool { isCanvasMode && !camera.isIdentityTransform }
-
-    /// At the identity transform every conversion above is already correct and
-    /// this defers to `super` — the panes behave exactly as they do with no
-    /// canvas at all. Anywhere else the canvas is the answer to every hit and no
-    /// descendant ever sees a mouse event, which is what keeps those ten sites
-    /// right. This is not a feature cut; it is the invariant.
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard canvasOwnsInput else { return super.hitTest(point) }
-        // `point` arrives in the SUPERVIEW's coordinates, so containment is
-        // against `frame`, not `bounds`: this view is flipped and its superview
-        // is not, and `bounds` is the flipped space on the other side of that.
-        return frame.contains(point) ? self : nil
-    }
-
-    /// The node under a point given in this view's own (flipped) coordinates.
-    ///
-    /// Smallest area first, ties broken by id. Nodes are allowed to overlap —
-    /// v1 has no collision avoidance, "it is the user's canvas" — so the answer
-    /// has to be both deterministic and the one the eye picked: a chip dropped
-    /// on a card is what you clicked, not the card behind it.
-    func canvasNode(at viewPoint: CGPoint) -> String? {
-        guard let layout = canvasLayout else { return nil }
-        let canvasPoint = camera.canvasPoint(from: viewPoint)
-        return layout.frames
-            .filter { $0.value.contains(canvasPoint) }
-            .min { first, second in
-                let a = first.value.width * first.value.height
-                let b = second.value.width * second.value.height
-                return a == b ? first.key < second.key : a < b
-            }?
-            .key
-    }
-
-    /// Translates the camera. Event-free so the geometry can be checked without
-    /// synthesizing an `NSScrollWheel`, the way `focusCardFrame(in:)` is static
-    /// and pure "so the geometry can be checked without a window".
-    func panCanvas(by delta: CGSize) {
-        guard isCanvasMode else { return }
-        camera = DeskCamera(
-            scale: camera.scale,
-            origin: CGPoint(x: camera.origin.x + delta.width, y: camera.origin.y + delta.height)
-        )
-        // Where the user left the canvas is worth remembering, and a pan is one
-        // of the two ways they say so. Raised per event rather than at the end
-        // of a scroll — AppKit's momentum phase makes "the end" a guess — and
-        // damped by `persistDeskCanvas`'s debounce instead.
-        onDeskCanvasChanged?()
-    }
-
-    /// Rescales about a fixed point in this view's coordinates — the pointer for
-    /// a pinch or a ⌘-scroll, the viewport centre for ⌘+ / ⌘-.
-    ///
-    /// Written out rather than delegating to `DeskCamera.clamped(minScale:in:)`,
-    /// which re-centres on the viewport by definition: a pinch that walks the
-    /// canvas out from under your fingers is the first thing anyone notices.
-    /// The forward map is the inverse of `canvasPoint(from:)` —
-    /// `viewPoint = canvasPoint * scale + origin` — so holding the anchor still
-    /// means `origin = viewPoint - anchor * newScale`.
-    func zoomCanvas(by factor: CGFloat, about viewPoint: CGPoint) {
-        guard isCanvasMode, factor > 0 else { return }
-        let anchor = camera.canvasPoint(from: viewPoint)
-        let scale = min(DeskCamera.maxScale, max(minimumCanvasScale, camera.scale * factor))
-        camera = DeskCamera(
-            scale: scale,
-            origin: CGPoint(
-                x: viewPoint.x - anchor.x * scale,
-                y: viewPoint.y - anchor.y * scale
-            )
-        )
-        // The other half of "where the user left the canvas" — see `panCanvas`.
-        onDeskCanvasChanged?()
-    }
-
-    /// `zoomCanvas`, plus the resolution the spec's "one operation" demands: a
-    /// gesture that runs the scale into the 1.0 ceiling over a session card
-    /// finishes the job and enters that session, instead of parking at scale 1
-    /// with a fractional origin — which `DeskCamera.isIdentity` rejects, so the
-    /// panes would stay dead under a camera that looks like it arrived.
-    func pinchCanvas(by factor: CGFloat, about viewPoint: CGPoint) {
-        // `deskCanvasLoaded` and not `canvasMode` alone: inside a session the
-        // layout mode is off (`landSession`), and a pinch from inside one is
-        // exactly the gesture that has to bring you back out.
-        guard isCanvasMode || deskCanvasLoaded else { return }
-        // `isIdentity` here where its neighbours ask `canvasOwnsInput`, and the
-        // difference is the point: a camera parked at scale 1 over a card — in
-        // a session, or mid-entry-flight with the landing still to come — has
-        // nowhere to zoom in to, and pinching out of it is the way back. Sent
-        // through `zoomCanvas` instead, an entry flight would be pinched out of
-        // and then land the session anyway 0.38s later; `exitToCanvas` is the
-        // one that also cancels the arrival.
-        guard isCanvasMode, !camera.isIdentity else {
-            // At identity — inside a session, or on the canvas parked over one
-            // card — the only pinch with an answer is the one that goes back
-            // out, and it is the same operation ⌘0 and esc resolve to. Pinching
-            // *in* does nothing: 1.0 is the ceiling, and
-            // `metalRenderingScaleFactor()` clamps at `max(1, …)`, so a terminal
-            // cannot rasterize sharper than 1× in any case.
-            if factor <= Self.canvasPinchOutFactor { exitToCanvas() }
-            return
-        }
-        zoomCanvas(by: factor, about: viewPoint)
-        guard camera.scale >= DeskCamera.maxScale,
-              let id = canvasNode(at: viewPoint),
-              let node = deskNode(id, in: canvasTree),
-              case .session(let group) = node.kind
-        else { return }
-        enterSession(group)
-    }
-
-    /// The tree is small — one account, a handful of workspaces, at most eight
-    /// sessions — so a walk costs nothing and there is no index to keep in sync.
-    private func deskNode(_ id: String, in node: DeskNode) -> DeskNode? {
-        if node.id == id { return node }
-        for child in node.children {
-            if let found = deskNode(id, in: child) { return found }
-        }
-        return nil
-    }
-
-    /// Moves `id` to an absolute canvas position, carrying its whole subtree by
-    /// the same delta and pinning every node it moved.
-    ///
-    /// Absolute, not an offset from an auto slot: a pinned node is excluded from
-    /// packing entirely and its unpinned siblings close the gap, so there is no
-    /// slot left to be an offset from. The subtree is pinned as well as its
-    /// root — a pinned parent with unpinned children would keep its position
-    /// while the packer walked the children back under the empty slot.
-    func moveNode(_ id: String, to canvasPoint: CGPoint) {
-        guard
-            isCanvasMode,
-            let node = deskNode(id, in: canvasTree),
-            let frame = canvasLayout?.frames[id]
-        else { return }
-        let delta = CGPoint(x: canvasPoint.x - frame.origin.x, y: canvasPoint.y - frame.origin.y)
-        var pins = canvasPins
-        for moved in deskSubtreeIDs(of: node) {
-            guard let origin = canvasLayout?.frames[moved]?.origin else { continue }
-            pins[moved] = CGPoint(x: origin.x + delta.x, y: origin.y + delta.y)
-        }
-        canvasPins = pins
-        updateLayout()
-        onCanvasPinsChanged?(pins)
-    }
-
-    private func deskSubtreeIDs(of node: DeskNode) -> [String] {
-        [node.id] + node.children.flatMap(deskSubtreeIDs(of:))
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        guard canvasOwnsInput else { return super.mouseDown(with: event) }
-        // An entry flight owns the next 0.38s and cannot be argued with: its
-        // landing is already scheduled (`DispatchQueue.main.asyncAfter`,
-        // token-guarded) and arrives whatever happens here. So a click in that
-        // window would select or drag a node on a canvas the user is a third of
-        // a second from leaving — and a drag pins that node, which
-        // `onDeskCanvasChanged` then persists. Swallowed rather than allowed to
-        // fight a landing it cannot stop.
-        if isEnteringSession { return }
-        // Where the canvas owns input it holds the keyboard too: arrows move
-        // the node selection, ↩ enters, and nothing typed can reach a terminal
-        // nobody can read.
-        window?.makeFirstResponder(self)
-        let viewPoint = convert(event.locationInWindow, from: nil)
-        guard let id = canvasNode(at: viewPoint), let frame = canvasLayout?.frames[id] else {
-            selectedNodeID = nil
-            // Empty space is the canvas itself, and dragging it moves the
-            // camera — the other half of "scroll zooms". A node under the
-            // pointer still wins, because dragging an object moves the object.
-            beginCanvasPan(at: viewPoint)
-            return
-        }
-        selectedNodeID = id
-        if event.clickCount == 2 {
-            enterCanvasNode(id)
-            return
-        }
-        draggingNodeID = id
-        didDragNode = false
-        dragOriginInCanvas = camera.canvasPoint(from: viewPoint)
-        dragNodeOriginInCanvas = frame.origin
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard canvasOwnsInput else { return super.mouseDragged(with: event) }
-        let viewPoint = convert(event.locationInWindow, from: nil)
-        // A pan is measured in view points and handed straight to the camera:
-        // the content must keep up with the pointer exactly, which is what
-        // moving the origin by the pointer's own delta means.
-        if let last = panLastViewPoint {
-            panCanvas(by: CGSize(width: viewPoint.x - last.x, height: viewPoint.y - last.y))
-            panLastViewPoint = viewPoint
-            return
-        }
-        guard let id = draggingNodeID else { return super.mouseDragged(with: event) }
-        let canvasPoint = camera.canvasPoint(from: viewPoint)
-        let delta = CGPoint(
-            x: canvasPoint.x - dragOriginInCanvas.x,
-            y: canvasPoint.y - dragOriginInCanvas.y
-        )
-        if !didDragNode, hypot(delta.x, delta.y) < Self.canvasDragThreshold { return }
-        didDragNode = true
-        moveNode(id, to: CGPoint(
-            x: dragNodeOriginInCanvas.x + delta.x,
-            y: dragNodeOriginInCanvas.y + delta.y
-        ))
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        guard canvasOwnsInput else { return super.mouseUp(with: event) }
-        endCanvasPan()
-        draggingNodeID = nil
-        didDragNode = false
-    }
-
-    /// One operation for every way in — a double-click, `↩` on a selection, a
-    /// pinch that reached the ceiling, a session shortcut: *animate the camera
-    /// so that rect maps onto the viewport*. A session node lands in the
-    /// session; a chip node frames its subtree, because there is no session to
-    /// be in.
-    func enterCanvasNode(_ id: String) {
-        guard isCanvasMode, let node = deskNode(id, in: canvasTree) else { return }
-        switch node.kind {
-        case .session(let group):
-            enterSession(group)
-        case .root, .workspace:
-            guard let rect = canvasSubtreeRect(of: node) else { return }
-            flyCamera(to: DeskCamera.focus(on: rect, in: bounds)
-                .clamped(minScale: minimumCanvasScale, in: bounds))
-        }
-    }
-
-    private func canvasSubtreeRect(of node: DeskNode) -> CGRect? {
-        guard let layout = canvasLayout else { return nil }
-        var rect = layout.frames[node.id]
-        for child in node.children {
-            guard let childRect = canvasSubtreeRect(of: child) else { continue }
-            rect = rect.map { $0.union(childRect) } ?? childRect
-        }
-        return rect
-    }
-
-    /// Exactly while the canvas owns input — which is every canvas state but
-    /// the identity transform, the 0.38s of an entry flight included.
-    /// `PaneWorkspaceView` has never accepted first responder — inside a
-    /// session it must keep not accepting it, or a click on the gap between
-    /// panes would take the keyboard off a terminal.
-    override var acceptsFirstResponder: Bool { canvasOwnsInput }
-
-    override func keyDown(with event: NSEvent) {
-        guard canvasOwnsInput else { return super.keyDown(with: event) }
-        switch event.keyCode {
-        case 123: moveNodeSelection(.left)
-        case 124: moveNodeSelection(.right)
-        case 125: moveNodeSelection(.down)
-        case 126: moveNodeSelection(.up)
-        case 36, 76: // ↩ and the numeric keypad's
-            if let selectedNodeID { enterCanvasNode(selectedNodeID) }
-        case 53: // esc — the same one operation, aimed at fitAll
-            selectedNodeID = nil
-            exitToCanvas()
-        default:
-            // Deliberately dropped rather than passed on: below identity the
-            // panes are unreadable, and a keystroke that reached one would be
-            // typed into a terminal nobody can see.
-            NSSound.beep()
-        }
-    }
-
-    /// Walks the selection to the nearest node in one direction.
-    ///
-    /// Flipped space — `isFlipped` is `true`, y grows downward — so `.up` is a
-    /// *smaller* y. `PaneDividerView.mouseDragged` already depends on the same
-    /// convention. Ties break on the node id so the walk is deterministic.
-    func moveNodeSelection(_ direction: PaneDirection) {
-        guard isCanvasMode, let layout = canvasLayout, !layout.frames.isEmpty else { return }
-        guard let current = selectedNodeID, let from = layout.frames[current] else {
-            selectedNodeID = nodeNearest(
-                camera.canvasPoint(from: CGPoint(x: bounds.midX, y: bounds.midY))
-            )
-            return
-        }
-        let origin = CGPoint(x: from.midX, y: from.midY)
-        let candidates = layout.frames.filter { id, rect in
-            guard id != current else { return false }
-            let dx = rect.midX - origin.x
-            let dy = rect.midY - origin.y
-            switch direction {
-            case .left: return dx < -0.5
-            case .right: return dx > 0.5
-            case .up: return dy < -0.5
-            case .down: return dy > 0.5
-            }
-        }
-        guard let best = candidates.min(by: { first, second in
-            let a = hypot(first.value.midX - origin.x, first.value.midY - origin.y)
-            let b = hypot(second.value.midX - origin.x, second.value.midY - origin.y)
-            return a == b ? first.key < second.key : a < b
-        }) else { return }
-        selectedNodeID = best.key
-    }
-
-    private func nodeNearest(_ point: CGPoint) -> String? {
-        canvasLayout?.frames.min { first, second in
-            let a = hypot(first.value.midX - point.x, first.value.midY - point.y)
-            let b = hypot(second.value.midX - point.x, second.value.midY - point.y)
-            return a == b ? first.key < second.key : a < b
-        }?.key
-    }
-
-    /// ⌘= and ⌘-. Responder-chain commands rather than more `keyDown` cases,
-    /// so the View menu can validate and show them the way ⌘1…⌘9 already do
-    /// through `selectPane(_:)`.
-    @objc func zoomCanvasIn(_ sender: Any?) {
-        zoomCanvas(by: Self.canvasZoomStep, about: CGPoint(x: bounds.midX, y: bounds.midY))
-    }
-
-    @objc func zoomCanvasOut(_ sender: Any?) {
-        zoomCanvas(by: 1 / Self.canvasZoomStep, about: CGPoint(x: bounds.midX, y: bounds.midY))
-    }
-
-    // ⌘0 is deliberately not a command on this view. Task 10b's Desk menu binds
-    // it to the controller's `zoomDeskToFit:`, which calls `exitToCanvas()` —
-    // one owner for one shortcut. A `fitCanvas(_:)` here would be a second
-    // selector for the same operation, reachable by nothing.
-
-    // MARK: - Canvas gestures
-
-    /// Pinch. `magnification` is a per-event delta fraction, so it multiplies.
-    ///
-    /// `magnify:` is a responder-chain message, so at identity scale — where
-    /// `hitTest` hands the event to a pane — an unhandled pinch still bubbles up
-    /// to here, which is how pinching out of a session works. `pinchCanvas`
-    /// owns the decision either way; this is only the adapter.
-    override func magnify(with event: NSEvent) {
-        guard isCanvasMode || deskCanvasLoaded else { return super.magnify(with: event) }
-        pinchCanvas(by: 1 + event.magnification, about: convert(event.locationInWindow, from: nil))
-    }
-
-    /// Scroll zooms about the pointer; it does not pan.
-    ///
-    /// The spatial-canvas convention — Miro, Figma, every map — and what the
-    /// canvas needs, because panning is now the drag. A mouse has one wheel and
-    /// two axes to travel, so the wheel cannot be the pan without stranding
-    /// half the canvas behind a modifier.
-    ///
-    /// `scrollingDeltaY`, not `deltaY`: the precise-device value is in points
-    /// and already carries the natural-scroll direction, while `deltaY` is in
-    /// wheel "lines" and a trackpad rounds small moves to zero. A wheel with no
-    /// precise deltas reports whole lines, which need a coarser divisor or one
-    /// click would be imperceptible.
-    ///
-    /// Multiplied rather than added, because scale is multiplicative: a fixed
-    /// step crawls at 1.0 and leaps at `fitAll`.
+    /// Scroll zooms the filmstrip rail when the pointer is over it, so a
+    /// wheel event there scrolls the rail rather than the window; everywhere
+    /// else this defers to `super`.
     override func scrollWheel(with event: NSEvent) {
         if isFilmstrip, let layout = filmstripLayout, layout.maxScroll > 0,
            layout.railBounds.contains(convert(event.locationInWindow, from: nil)) {
@@ -3539,39 +2305,7 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             updateFilmstripLayout()
             return
         }
-        guard canvasOwnsInput else { return super.scrollWheel(with: event) }
-        let unit = event.hasPreciseScrollingDeltas
-            ? event.scrollingDeltaY / 200
-            : event.scrollingDeltaY / 12
-        guard unit != 0, unit.isFinite else { return }
-        // Clamped so one violent flick cannot invert the factor (a negative
-        // scale mirrors the whole canvas) or cross the whole zoom range in a
-        // single event.
-        let factor = min(2, max(0.5, 1 + unit))
-        pinchCanvas(by: factor, about: convert(event.locationInWindow, from: nil))
-    }
-
-    /// Where a canvas pan last saw the pointer, or `nil` when the drag in
-    /// progress is a node drag rather than a pan.
-    private var panLastViewPoint: CGPoint?
-
-    /// Whether this view pushed the closed-hand cursor and still owes a `pop()`.
-    /// `NSCursor`'s stack is global and unbalanced pushes leak into every other
-    /// view in the window.
-    private var didPushPanCursor = false
-
-    private func beginCanvasPan(at viewPoint: CGPoint) {
-        panLastViewPoint = viewPoint
-        guard window != nil, !didPushPanCursor else { return }
-        NSCursor.closedHand.push()
-        didPushPanCursor = true
-    }
-
-    private func endCanvasPan() {
-        panLastViewPoint = nil
-        guard didPushPanCursor else { return }
-        NSCursor.pop()
-        didPushPanCursor = false
+        super.scrollWheel(with: event)
     }
 
     private func hasNeighbor(_ direction: PaneDirection) -> Bool {
@@ -3650,7 +2384,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
         didSet {
             guard status != oldValue else { return }
             header.status = status
-            chip.status = status
             // The unselected pane's veil is tinted by the same status.
             (surface as? TerminalSurfaceView)?.wash.status = status
             updateApprovalBar()
@@ -3687,10 +2420,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
     /// for the same compositing reason.
     let dropHighlight = PaneDropOverlayView()
 
-    /// The level-of-detail stand-in — see `PaneChipView`. A sibling of
-    /// `header`/`surface`/`approvalBar`, because `surface` is `let`.
-    let chip = PaneChipView()
-
     /// The pane's chat rendering of its own Claude transcript, once anyone has
     /// asked for it — see `PaneAppView`. Built on the first switch into `.app`
     /// and kept for the pane's life, because most panes are shells, browsers
@@ -3710,10 +2439,9 @@ final class PaneContainerView: NSView, NSDraggingSource {
             if viewMode == .app { makeAppViewIfNeeded() }
             header.viewMode = viewMode
             applyContentVisibility()
-            // Directly rather than through `needsLayout`, for the reason
-            // `isChipped` gives: the incoming view has to be framed in the same
-            // turn it is shown, and the windowless test host never turns a run
-            // loop to deliver a later pass at all.
+            // Directly rather than through `needsLayout`: the incoming view has
+            // to be framed in the same turn it is shown, and the windowless
+            // test host never turns a run loop to deliver a later pass at all.
             applyLayout()
             // Only the terminal has a stale drawable to come back to. It spent
             // App mode hidden, so its own `setNeedsDisplay` scheduled nothing,
@@ -3733,17 +2461,15 @@ final class PaneContainerView: NSView, NSDraggingSource {
         }
     }
 
-    /// The content view the pane is actually showing — what the chip fades
-    /// against and what the focus machinery aims at. Falls back to the surface
-    /// whenever App mode has no view yet, so there is never a moment with no
-    /// answer.
+    /// The content view the pane is actually showing — what the focus
+    /// machinery aims at. Falls back to the surface whenever App mode has no
+    /// view yet, so there is never a moment with no answer.
     var activeContentView: NSView { viewMode == .app ? (appView ?? surface) : surface }
 
     /// The one writer of which content a pane is showing, the way
-    /// `EditorPaneView.setContentVisibility` is for the editor's three: the
-    /// chip replaces both content views, and the view mode picks between them
-    /// once the chip is down. Two independent writers of one `isHidden` is a
-    /// bug waiting for the order of two callers to change.
+    /// `EditorPaneView.setContentVisibility` is for the editor's three. Two
+    /// independent writers of one `isHidden` is a bug waiting for the order of
+    /// two callers to change.
     ///
     /// `fileprivate` rather than `private` only because
     /// `PaneWorkspaceView.updateVisibility` — the sole owner of whether a pane
@@ -3754,21 +2480,12 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // falls back: a switch that could not build one must leave the pane
         // showing its terminal rather than showing nothing at all.
         let showsApp = viewMode == .app && appView != nil
-        // Nothing polls a transcript nobody can see: a pane in another session,
-        // one drawn as a chip, or one showing its terminal all cost nothing.
-        // Always answered, fade or no fade — it is a timer, not a pixel.
-        appView?.isLive = !isHidden && !isChipped && showsApp
-        // A crossfade owns both content views for the length of it: both are
-        // up, one is travelling to opacity 0, and hiding the loser now would
-        // cut that fade to a pop — precisely the glitch `crossfadeChip` exists
-        // to prevent. `settleChipFade` clears the flag and calls this again on
-        // the other side, so the state below is applied either way, one settle
-        // later. This is load-bearing beyond the pass that starts the fade:
-        // `camera`'s didSet runs `updateVisibility` on *every* pinch event, so
-        // without it the second event of a zoom-out would cut the first's fade.
-        guard !isCrossfadingChip else { return }
-        surface.isHidden = isChipped || showsApp
-        appView?.isHidden = isChipped || !showsApp
+        // Nothing polls a transcript nobody can see: a pane in another
+        // session, or one showing its terminal, both cost nothing. Always
+        // answered — it is a timer, not a pixel.
+        appView?.isLive = !isHidden && showsApp
+        surface.isHidden = showsApp
+        appView?.isHidden = !showsApp
     }
 
     /// Puts the keyboard in whichever content the pane is showing — the
@@ -3823,8 +2540,8 @@ final class PaneContainerView: NSView, NSDraggingSource {
             (self?.surface as? TerminalSurfaceView)?.sendCommandClearingInput(text)
         }
         // Directly above the surface it replaces, and so below the approval
-        // bar, the chip and the drop highlight: an amber question and a
-        // level-of-detail placeholder both outrank the pane's content.
+        // bar and the drop highlight: an amber question outranks the pane's
+        // content.
         addSubview(view, positioned: .above, relativeTo: surface)
         appView = view
         // The last chrome pass ran before this view existed, so it would sit
@@ -3833,152 +2550,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // `roundChildren` exists to prevent. Its own comment records why no
         // offscreen render would show it.
         updateChrome()
-    }
-
-    /// How long a pane takes to become its placeholder, and back.
-    static let chipFadeDuration: TimeInterval = 0.18
-    private static let chipFadeKey = "chipFade"
-    private var chipFadeToken = 0
-    /// Whether a crossfade is in flight — both content members up, one of them
-    /// on its way to opacity 0. `applyContentVisibility` stands off while this
-    /// is true; see the reason there.
-    private var isCrossfadingChip = false
-
-    /// Whether this pane is drawn as a chip instead of as itself.
-    ///
-    /// The surface is **hidden**, not merely suspended: `suspendsDrawing`
-    /// gates only the extra renderer kick `TerminalSurfaceView.feed` posts,
-    /// while SwiftTerm keeps calling `setNeedsDisplay` on every feed. A hidden
-    /// view is not composited and its `setNeedsDisplay` schedules nothing.
-    ///
-    /// The header goes down with it. It carries the same three facts the chip
-    /// does — mark, engine, name — and at the scale a chip exists for it is
-    /// three points tall: two labels for one pane, one of them unreadable.
-    /// The approval bar needs no such treatment; the chip is opaque, fills the
-    /// pane and is stacked above it.
-    ///
-    /// Written only by `PaneWorkspaceView.updateVisibility()`, which is the
-    /// sole owner of per-pane visibility. Anything that assigns this from
-    /// elsewhere is overwritten by that method's next call — the same trap
-    /// `setSuspendsDrawing`'s comment already records for `suspendsDrawing`.
-    var isChipped = false {
-        didSet {
-            guard isChipped != oldValue else { return }
-            crossfadeChip()
-            // Directly, not through `needsLayout`: a chip that arrives one
-            // layout pass later is a blank pane for a frame, and the windowless
-            // test host never turns a run loop to deliver that pass at all.
-            applyLayout()
-            // Un-hiding is not a repaint. While the surface was down its own
-            // `setNeedsDisplay` scheduled nothing, and `MacTerminalView.draw(_:)`
-            // opens with `if metalView != nil { return }` — so the CG-path nudge
-            // `suspendsDrawing`'s didSet does is a no-op once Metal is on, and an
-            // idle terminal would come back showing a stale drawable until its
-            // next byte arrives. `requestRendererDraw()` is the primitive that
-            // actually paints; it is not on `PaneContentView`, hence the cast —
-            // the same one `approvalBar.onChoose` makes. Only when the terminal
-            // is the one coming back: an App-mode pane's terminal stays hidden,
-            // and has no stale drawable anyone can see.
-            if !isChipped, viewMode == .terminal {
-                (surface as? TerminalSurfaceView)?.requestRendererDraw()
-            }
-        }
-    }
-
-    /// The swap between a live pane and its placeholder, as a fade rather than
-    /// a cut.
-    ///
-    /// A pane that pops into a placeholder mid-zoom reads as a glitch at
-    /// exactly the moment the user is moving the camera and watching for
-    /// motion. Both are up for the length of the fade, then the loser is hidden
-    /// — hidden, not merely faded, because `isHidden` is the whole point of the
-    /// level of detail: a view at opacity 0 is still composited and still
-    /// answers `setNeedsDisplay`.
-    ///
-    /// Follows the file's two animation rules: raw `CABasicAnimation` rather
-    /// than `NSView.animator()`, and a settle scheduled on
-    /// `DispatchQueue.main.asyncAfter` behind a token rather than an animation
-    /// group's completion, which is not guaranteed to arrive at all. With no
-    /// window or under Reduce Motion it settles synchronously — so the
-    /// windowless test host sees the final state the instant `isChipped` is
-    /// written, exactly as it did before there was a fade.
-    private func crossfadeChip() {
-        chipFadeToken += 1
-        let token = chipFadeToken
-        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            settleChipFade(token)
-            return
-        }
-        isCrossfadingChip = true
-        chip.isHidden = false
-        // The content view the pane is actually showing, not always the
-        // surface: in App mode the terminal is the one that stays down, and
-        // un-hiding it here would put it under the fade instead of the chat.
-        // Deliberately not `applyContentVisibility()` — this is the state
-        // *during* the fade, with both members up; the settle applies the one
-        // it was heading for.
-        let content = activeContentView
-        content.isHidden = false
-        header.isHidden = false
-        // The chip is sized and seated by the same pass that sizes the surface,
-        // and it has to be in place *before* it is faded in rather than one
-        // layout later — a placeholder that arrives after its own fade is a
-        // blank rectangle for the length of it.
-        applyLayout()
-        fadeChipMember(chip, to: isChipped ? 1 : 0)
-        fadeChipMember(content, to: isChipped ? 0 : 1)
-        fadeChipMember(header, to: isChipped ? 0 : 1)
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.chipFadeDuration) { [weak self] in
-            self?.settleChipFade(token)
-        }
-    }
-
-    private func fadeChipMember(_ view: NSView, to opacity: Float) {
-        view.wantsLayer = true
-        guard let layer = view.layer else { return }
-        // By key, never `removeAllAnimations()`: a pane crossing the threshold
-        // twice in one flick would otherwise yank whatever else its layer is
-        // running — the trap `landCard`'s comment records.
-        layer.removeAnimation(forKey: Self.chipFadeKey)
-        let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = layer.presentation()?.opacity ?? layer.opacity
-        fade.toValue = opacity
-        fade.duration = Self.chipFadeDuration
-        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        layer.opacity = opacity
-        layer.add(fade, forKey: Self.chipFadeKey)
-    }
-
-    /// The state the fade was always heading for, applied by whichever of the
-    /// two paths gets there first.
-    private func settleChipFade(_ token: Int) {
-        guard token == chipFadeToken else { return }
-        // Cleared before anything below reads it: `applyContentVisibility` is
-        // what applies the state this fade was heading for, and it stands off
-        // while this is true.
-        isCrossfadingChip = false
-        chip.layer?.removeAnimation(forKey: Self.chipFadeKey)
-        surface.layer?.removeAnimation(forKey: Self.chipFadeKey)
-        header.layer?.removeAnimation(forKey: Self.chipFadeKey)
-        // The app view whether or not it was the one faded: a mode switched
-        // mid-fade would otherwise leave the view it faded out parked at
-        // opacity 0, invisible the next time it is shown.
-        appView?.layer?.removeAnimation(forKey: Self.chipFadeKey)
-        chip.layer?.opacity = 1
-        surface.layer?.opacity = 1
-        header.layer?.opacity = 1
-        appView?.layer?.opacity = 1
-        chip.isHidden = !isChipped
-        header.isHidden = isChipped
-        // Which of the two content views comes back is the view mode's
-        // question, not this one's — see `applyContentVisibility`.
-        applyContentVisibility()
-        applyLayout()
-        // Only when the terminal is the one coming back; an App-mode pane has
-        // no stale drawable to repaint. See `isChipped`'s didSet.
-        if !isChipped, viewMode == .terminal {
-            (surface as? TerminalSurfaceView)?.requestRendererDraw()
-        }
     }
 
     /// The design's amber strip along the bottom while the agent is blocked on
@@ -4184,8 +2755,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
             (self?.surface as? TerminalSurfaceView)?.sendInput(input)
         }
         addSubview(approvalBar)
-        chip.isHidden = true
-        addSubview(chip)
         addSubview(dropHighlight, positioned: .above, relativeTo: nil)
         updateChrome()
         registerForDraggedTypes([PaneWorkspaceView.paneDragType, PaneWorkspaceView.editorTabDragType])
@@ -4243,11 +2812,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
             width: width,
             height: barHeight
         )
-        // The whole pane inside its 1pt ring: the chip replaces the header and
-        // the surface together, so it takes the box both of them shared.
-        // Framed on every pass, hidden or not, so it is right the instant it
-        // is shown.
-        chip.frame = CGRect(x: inset, y: inset, width: width, height: max(0, bounds.height - inset * 2))
         dropHighlight.frame = bounds
         askOverlay?.frame = bounds
         workingRing?.frame = bounds
@@ -4291,7 +2855,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
         let inner = max(0, radius - Self.borderWidth)
         header.wantsLayer = true
         surface.wantsLayer = true
-        chip.wantsLayer = true
         // The screen-bottom corner pair belongs to whichever child sits on the
         // bottom edge — the approval bar takes it over while it is showing.
         func screenBottom(of child: NSView) -> CACornerMask {
@@ -4308,11 +2871,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
             (header as NSView, screenTop(of: header)),
             (surface as NSView, approvalBar.isHidden ? screenBottom(of: surface) : []),
             (approvalBar as NSView, screenBottom(of: approvalBar)),
-            // The chip is the only child on both edges at once, so it takes
-            // both pairs — which is also why the flip cannot bite here, and why
-            // it is written as the union of the two helpers rather than as a
-            // four-corner literal the next author would have to re-derive.
-            (chip as NSView, screenTop(of: chip).union(screenBottom(of: chip))),
         ]
         // The App view stands in the surface's box exactly (`applyLayout`
         // frames it from `surface.frame`), so it takes the surface's corners
@@ -4434,12 +2992,6 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // is called, and the sidebar already used it.
         header.title = SessionOutline.paneLabel(descriptor)
         header.engine = descriptor.kind == .terminal ? descriptor.engine : nil
-        // The chip says the same three things the header says, from the same
-        // two expressions, so the two can never disagree about a pane.
-        chip.title = header.title
-        chip.engine = header.engine
-        // What the placeholder draws: a terminal, a browser or a file viewer.
-        chip.kind = descriptor.kind
         header.isEngineMenuAvailable = descriptor.kind == .terminal
         header.isRenameAvailable = descriptor.kind == .terminal
         // Color badge: only Claude terminals support `/color`.
@@ -4608,7 +3160,7 @@ final class PaneFocusOverlayView: NSView {
     /// and this host's whole job is to hold a view that is being reparented.
     weak var commandTarget: PaneWorkspaceView?
 
-    /// The nine pane commands and the two canvas ones, and nothing else.
+    /// The nine pane commands, and nothing else.
     /// Forwarding whatever the workspace merely *responds to* would also forward
     /// the selectors it inherits from `NSView` — `print:` is the classic — so a
     /// Print item added later would resolve to the pane grid while a card is up
@@ -4625,8 +3177,6 @@ final class PaneFocusOverlayView: NSView {
         #selector(PaneWorkspaceView.swapPaneUp(_:)),
         #selector(PaneWorkspaceView.swapPaneDown(_:)),
         #selector(PaneWorkspaceView.selectPane(_:)),
-        #selector(PaneWorkspaceView.zoomCanvasIn(_:)),
-        #selector(PaneWorkspaceView.zoomCanvasOut(_:)),
     ]
 
     override func supplementalTarget(forAction action: Selector, sender: Any?) -> Any? {

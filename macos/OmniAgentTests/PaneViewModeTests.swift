@@ -86,66 +86,6 @@ final class PaneViewModeTests: XCTestCase {
         )
     }
 
-    // MARK: - The chip
-
-    /// The chip replaces the pane whole, so it outranks the view mode: both
-    /// content views go down for it, and the one that comes back up is the one
-    /// the pane was showing — never the terminal by default.
-    func testTheChipHidesBothContentViewsAndComesBackToTheModeItLeft() throws {
-        let workspace = makeWorkspace()
-        let container = try XCTUnwrap(workspace.container(for: "pane-1"))
-        container.viewMode = .app
-        let appView = try XCTUnwrap(container.appView)
-
-        container.isChipped = true
-        XCTAssertTrue(container.surface.isHidden)
-        XCTAssertTrue(appView.isHidden)
-        XCTAssertFalse(appView.isLive, "and a pane drawn as a placeholder polls nothing")
-
-        container.isChipped = false
-        XCTAssertTrue(container.surface.isHidden, "the terminal is not resurrected by the chip going down")
-        XCTAssertFalse(appView.isHidden)
-        XCTAssertTrue(appView.isLive)
-    }
-
-    /// The visibility pass must not cut a chip crossfade — not the pass that
-    /// starts it, and not the ones behind it.
-    ///
-    /// `updateVisibility` is the sole writer of `isChipped`, and that didSet
-    /// starts a 0.18s fade with both content views up. The same pass also has
-    /// to tell the App view whether the pane is on screen, and that call
-    /// assigns `surface.isHidden` — so it stands off while a fade is in flight
-    /// and lets `settleChipFade` land the final state. `camera`'s didSet runs a
-    /// pass per pinch event, so "the ones behind it" is every zoom-out into
-    /// chips rather than an edge case.
-    ///
-    /// Needs a real window: without one `crossfadeChip` settles synchronously
-    /// (`DeskCanvasLODTests.testTheChipCrossfadeStillSettlesSynchronouslyWithNoWindow`)
-    /// and there is no fade to cut.
-    func testAVisibilityPassDoesNotCutTheChipCrossfade() throws {
-        try XCTSkipIf(
-            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-            "with Reduce Motion the swap is a cut by design — there is no fade to protect"
-        )
-        let (workspace, window) = makeCanvasWorkspaceInWindow()
-        defer { window.close() }
-        let container = try XCTUnwrap(workspace.container(for: "pane-1"))
-        XCTAssertNotNil(container.window, "the fixture's premise: a fade needs a window")
-        XCTAssertFalse(container.isChipped)
-
-        // Out past the level-of-detail threshold: this pass flips `isChipped`
-        // and starts the fade.
-        workspace.camera = DeskCamera(scale: DeskCanvas.lodThreshold / 2, origin: .zero)
-        XCTAssertTrue(container.isChipped, "the fixture's other premise")
-        XCTAssertFalse(container.chip.isHidden, "the placeholder is up")
-        XCTAssertFalse(container.surface.isHidden, "and the terminal is still up, fading out")
-
-        // The next pinch event of the same gesture, landing mid-fade.
-        workspace.camera = DeskCamera(scale: DeskCanvas.lodThreshold / 2.1, origin: .zero)
-        XCTAssertTrue(container.isChipped, "no chip change — this pass only re-derives visibility")
-        XCTAssertFalse(container.surface.isHidden, "and it leaves the fade alone")
-    }
-
     // MARK: - Polling
 
     /// `isLive` is the poll timer's switch, so it has to track whether anyone
@@ -347,29 +287,6 @@ final class PaneViewModeTests: XCTestCase {
         workspace.frame = CGRect(x: 0, y: 0, width: width, height: 800)
         XCTAssertTrue(workspace.addPane(makeDescriptor("pane-1")))
         return workspace
-    }
-
-    /// The same workspace in a real window and in canvas mode, so
-    /// `crossfadeChip` takes its animated branch instead of settling on the
-    /// spot.
-    private func makeCanvasWorkspaceInWindow() -> (PaneWorkspaceView, NSWindow) {
-        let workspace = makeWorkspace()
-        let window = NSWindow(
-            contentRect: workspace.frame,
-            styleMask: [.titled, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        // `PaneWorkspaceViewTests.makeAttachedWorkspace` records why at length:
-        // AppKit frees a closed window that ARC still holds a reference to, and
-        // the dangling registrations crash a *later* test inside a
-        // CoreAnimation commit.
-        window.isReleasedWhenClosed = false
-        window.contentView = workspace
-        window.makeKeyAndOrderFront(nil)
-        workspace.canvasMode = true
-        workspace.layoutSubtreeIfNeeded()
-        return (workspace, window)
     }
 
     private func makeDescriptor(

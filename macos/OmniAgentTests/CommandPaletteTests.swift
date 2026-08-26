@@ -33,7 +33,7 @@ final class CommandPaletteTests: XCTestCase {
             [
                 "session:alpha/g1", "enter:g1", "focus:a",
                 "destination:home", "destination:todo", "destination:terminals",
-                "new-pane", "new-browser", "new-editor", "new-session", "zoom-to-fit", "toggle-sidebar",
+                "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
             ]
         )
 
@@ -49,7 +49,7 @@ final class CommandPaletteTests: XCTestCase {
                 "session:alpha/g1", "enter:g1", "focus:a",
                 "destination:home", "destination:todo", "destination:terminals",
                 "new-pane", "new-browser", "new-editor", "new-session",
-                "close-pane", "interrupt", "reattach", "zoom-to-fit", "toggle-sidebar",
+                "close-pane", "interrupt", "reattach", "toggle-sidebar",
             ]
         )
         XCTAssertEqual(focused.first { $0.id == "close-pane" }?.action, .closePane(sessionID: "a"))
@@ -120,7 +120,7 @@ final class CommandPaletteTests: XCTestCase {
                 .map(\.id),
             [
                 "destination:home", "destination:todo", "destination:terminals",
-                "new-pane", "new-browser", "new-editor", "new-session", "zoom-to-fit", "toggle-sidebar",
+                "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
             ]
         )
     }
@@ -280,7 +280,7 @@ final class CommandPaletteTests: XCTestCase {
     /// Terminals section beside the panes it contains — emitted before the
     /// pane rows so the section stays one consecutive run, which is the only
     /// thing the table's heading logic relies on.
-    func testTheCanvasOffersOneEnterRowPerSessionAndOneZoomToFit() throws {
+    func testOneEnterRowPerSession() {
         let commands = CommandPaletteModel.build(
             panes: [
                 pane("a", project: "alpha", group: "g1", groupLabel: "Build"),
@@ -302,11 +302,6 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(enters.map(\.detail), ["⌃1", "⌃2", "⌃1"], "the digit is per project, like ⌃1…⌃9 is")
         XCTAssertEqual(enters.map(\.section), [.terminals, .terminals, .terminals])
         XCTAssertEqual(enters.first?.action, .enterSession(group: "g1"))
-
-        let fit = try XCTUnwrap(commands.first { $0.id == "zoom-to-fit" })
-        XCTAssertEqual(fit.detail, "⌘0")
-        XCTAssertEqual(fit.action, .zoomDeskToFit)
-        XCTAssertEqual(fit.section, .actions)
     }
 
     // MARK: - filtering and selection

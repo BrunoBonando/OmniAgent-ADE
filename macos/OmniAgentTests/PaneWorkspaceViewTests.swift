@@ -125,7 +125,6 @@ final class PaneWorkspaceViewTests: XCTestCase {
                 !workspace.filmstripHeroIDs.contains(id),
                 "\(id) on screen exactly when it is a hero"
             )
-            XCTAssertFalse(container.isChipped, "the rail is cards, not shrunken panes")
         }
     }
 
@@ -255,9 +254,6 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertEqual(workspace.grid?.cols, 4)
         XCTAssertEqual(workspace.grid?.rows, 2)
         XCTAssertNil(workspace.filmstripLayout)
-        for id in workspace.paneIDs {
-            XCTAssertFalse(workspace.container(for: id)?.isChipped ?? true, "\(id) is live again")
-        }
 
         workspace.frame = CGRect(x: 0, y: 0, width: 1200, height: 800)
         XCTAssertTrue(workspace.isFilmstrip, "and back")
