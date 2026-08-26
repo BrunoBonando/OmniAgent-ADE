@@ -1617,10 +1617,31 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// been told about yet.
     @objc func openWorkspaceFolder(_ sender: Any?) {
         guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return }
-        let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         chooseSessionDirectory(startingAt: workspaceRoot()) { [weak self] chosen in
             guard let self, let chosen else { return }
-            startSession(inDirectory: chosen, project: current?.project ?? "")
+            // The chosen folder *is* the workspace. This used to hand the new
+            // session `current?.project` — the focused pane's workspace — so
+            // picking a folder the app had never seen filed the session under
+            // whatever was already on screen, which is the one thing this flow
+            // exists not to do.
+            //
+            // The id is the folder's basename, the brain's own rule
+            // (`roots::project_id_for`), and it is *passed* to `addProject`
+            // rather than re-derived from its answer: that keeps the session
+            // start synchronous (no round trip before the terminal appears)
+            // with both sides agreeing by construction. A folder already
+            // known keeps its recorded id, so re-picking it re-enters the
+            // same workspace instead of minting a rename-losing twin.
+            let project = workspaces.first { $0.path == chosen }?.id
+                ?? (chosen as NSString).lastPathComponent
+            connection.addProject(path: chosen, name: project) { [weak self] _ in
+                // Whatever the brain now knows — the recorded path, the label,
+                // the ingest it kicked off — reaches the sidebar the same way
+                // every other project list change does.
+                self?.refreshProjectLabels()
+            }
+            selectWorkspace(id: project, animated: false)
+            startSession(inDirectory: chosen, project: project)
         }
     }
 

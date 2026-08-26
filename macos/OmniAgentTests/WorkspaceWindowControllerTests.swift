@@ -1116,6 +1116,16 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 .compactMap { controller.workspaceView.descriptor(for: $0)?.cwd }
                 .contains("/chosen")
         )
+        // And it belongs to the folder that was chosen, not to the workspace
+        // that happened to be on screen when the "+" was clicked.
+        XCTAssertEqual(
+            controller.workspaceView.allPaneIDs
+                .compactMap { controller.workspaceView.descriptor(for: $0) }
+                .first { $0.cwd == "/chosen" }?
+                .project,
+            "chosen"
+        )
+        XCTAssertEqual(controller.selectedProjectID, "chosen", "and it is the open workspace now")
 
         // Cancelling the chooser starts nothing.
         controller.directoryChooser = { _, completion in completion(nil) }
