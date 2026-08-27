@@ -503,7 +503,13 @@ final class HomeSurfaceView: NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(column)
 
-        let scroll = ShellScrollView(documentView: content, topFade: 28)
+        // Runs up under the title strip so content dissolves as it slides
+        // under the toolbar, from the window's top edge down.
+        let scroll = ShellScrollView(
+            documentView: content,
+            topFade: ShellScrollView.pageFade,
+            topInset: WorkspaceTitleBarView.height
+        )
         addSubview(scroll)
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),

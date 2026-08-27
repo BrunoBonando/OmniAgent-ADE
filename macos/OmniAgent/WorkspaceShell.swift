@@ -687,16 +687,26 @@ final class ShellDotsView: NSView {
 /// when the content genuinely does not fit.
 ///
 /// `topFade` is for a page: content scrolled under the top edge thins to
-/// nothing across that many points instead of being cut off flat against
-/// the title strip. A gradient mask on the view's own layer, re-fitted in
-/// `layout` since a mask does not follow its layer's size.
+/// nothing across that many points instead of being cut off flat. A
+/// gradient mask on the view's own layer, re-fitted in `layout` since a
+/// mask does not follow its layer's size. `topInset` lets a page run up
+/// under the window's title strip — the fade then starts at the window's
+/// very top edge — while its content still rests below the strip.
 final class ShellScrollView: NSScrollView {
+    /// The strip a page's fade should cover, plus the room past it in which
+    /// content finishes dissolving.
+    static let pageFade = WorkspaceTitleBarView.height + 26
+
     private let topFade: CGFloat
     private var fadeMask: CAGradientLayer?
 
-    init(documentView content: NSView, topFade: CGFloat = 0) {
+    init(documentView content: NSView, topFade: CGFloat = 0, topInset: CGFloat = 0) {
         self.topFade = topFade
         super.init(frame: .zero)
+        if topInset > 0 {
+            automaticallyAdjustsContentInsets = false
+            contentInsets = NSEdgeInsets(top: topInset, left: 0, bottom: 0, right: 0)
+        }
         if topFade > 0 {
             wantsLayer = true
             let mask = CAGradientLayer()

@@ -166,7 +166,11 @@ final class SettingsSurfaceView: NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(column)
 
-        let scroll = ShellScrollView(documentView: content, topFade: 28)
+        let scroll = ShellScrollView(
+            documentView: content,
+            topFade: ShellScrollView.pageFade,
+            topInset: WorkspaceTitleBarView.height
+        )
         addSubview(scroll)
         // The panel floats over the scroll's leading edge: added after it, so
         // it is above, and the content column keeps clear of it by its own
@@ -174,7 +178,7 @@ final class SettingsSurfaceView: NSView {
         addSubview(sidebar)
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
-            sidebar.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            sidebar.topAnchor.constraint(equalTo: topAnchor, constant: WorkspaceTitleBarView.height + 10),
             sidebar.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Self.inset),
 
             scroll.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: Self.inset),
@@ -182,7 +186,8 @@ final class SettingsSurfaceView: NSView {
             scroll.topAnchor.constraint(equalTo: topAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            column.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
+            // Past the fade band, so the heading is whole at rest.
+            column.topAnchor.constraint(equalTo: content.topAnchor, constant: 40),
             column.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -36),
             column.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 24),

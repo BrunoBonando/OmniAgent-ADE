@@ -804,11 +804,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         contentContainer.addSubview(placeholder)
         contentContainer.addSubview(homeView)
         contentContainer.addSubview(settingsView)
+        // The pages (Home, Settings) reach the window's top edge and inset
+        // their own scrolling under the title strip, so their content
+        // dissolves under the toolbar; the Desk and the placeholder stop
+        // below it.
         for view in [workspace, placeholder, homeView, settingsView] as [NSView] {
+            let isPage = view === homeView || view === settingsView
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-                view.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: WorkspaceTitleBarView.height),
+                view.topAnchor.constraint(
+                    equalTo: contentContainer.topAnchor,
+                    constant: isPage ? 0 : WorkspaceTitleBarView.height
+                ),
                 view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
             ])
         }
@@ -3972,9 +3980,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             [HomeDropdown.Section(header: "Settings", rows: rows)],
             searchPlaceholder: "Search settings…",
             from: shellSidebar.accountRow.gear,
-            // Off to the right of the gear, out of the sidebar, not stacked
-            // over its own footer.
-            preferredEdge: .maxX
+            // Upward from the gear: it sits at the window's foot, and a menu
+            // hung to its right or below runs off the app. (`.maxY`: the gear
+            // is a plain, unflipped view, so that edge is its top.)
+            preferredEdge: .maxY
         )
     }
 
