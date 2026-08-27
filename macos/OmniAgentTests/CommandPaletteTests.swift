@@ -33,6 +33,8 @@ final class CommandPaletteTests: XCTestCase {
             [
                 "session:alpha/g1", "enter:g1", "focus:a",
                 "destination:home", "destination:todo", "destination:terminals", "destination:settings",
+                "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
+                "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
                 "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
             ]
         )
@@ -48,6 +50,8 @@ final class CommandPaletteTests: XCTestCase {
             [
                 "session:alpha/g1", "enter:g1", "focus:a",
                 "destination:home", "destination:todo", "destination:terminals", "destination:settings",
+                "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
+                "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
                 "new-pane", "new-browser", "new-editor", "new-session",
                 "close-pane", "interrupt", "reattach", "toggle-sidebar",
             ]
@@ -120,6 +124,8 @@ final class CommandPaletteTests: XCTestCase {
                 .map(\.id),
             [
                 "destination:home", "destination:todo", "destination:terminals", "destination:settings",
+                "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
+                "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
                 "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
             ]
         )
@@ -342,6 +348,19 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(sessions.map(\.subtitle), ["Alpha Project", "beta"])
         XCTAssertEqual(sessions.map(\.detail), ["2 panes", "1 pane"])
         XCTAssertEqual(sessions.first?.action, .focusPane(sessionID: "a"), "the session opens on its first pane")
+    }
+
+    /// Every Settings section is a spotlight row: found by its own name or
+    /// by "settings", opening the page on itself.
+    func testTheSettingsSectionsAreSpotlightRows() {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0
+        )
+        let rows = commands.filter { if case .showSettingsSection = $0.action { return true } else { return false } }
+        XCTAssertEqual(rows.map(\.title), SettingsSection.allCases.map(\.title))
+        XCTAssertEqual(rows.map(\.symbol), SettingsSection.allCases.map(\.symbol))
+        XCTAssertTrue(rows.allSatisfy { $0.subtitle == "Settings" && $0.keywords == "settings" })
+        XCTAssertEqual(rows.first?.action, .showSettingsSection(.general))
     }
 
     func testTheSidebarsThreeDestinationsAreRowsWithTheirOwnIcons() {

@@ -20,6 +20,9 @@ enum PaletteAction: Equatable {
     /// One of Level 2's three destinations — Dashboard, Board, Desk — the
     /// sidebar's own buttons, reachable by typing their names.
     case showDestination(WorkspaceDestination)
+    /// One Settings section, straight from the spotlight — the page opens
+    /// on it, the way the gear's panel would.
+    case showSettingsSection(SettingsSection)
     /// A file open in some editor pane, chosen from the spotlight — reveals
     /// the pane holding it and brings that tab forward.
     case openFile(path: String)
@@ -401,6 +404,21 @@ struct CommandPaletteModel: Equatable {
                     section: .actions,
                     subtitle: destination.subtitle,
                     symbol: destination.paletteSymbol
+                )
+            )
+        }
+        // Every Settings section, findable by its own name or by "settings".
+        for section in SettingsSection.allCases {
+            commands.append(
+                PaletteCommand(
+                    id: "settings:\(section.rawValue)",
+                    title: section.title,
+                    detail: nil,
+                    action: .showSettingsSection(section),
+                    keywords: "settings",
+                    section: .actions,
+                    subtitle: "Settings",
+                    symbol: section.symbol
                 )
             )
         }

@@ -2632,6 +2632,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             openDiffInEditor(URL(fileURLWithPath: path))
         case let .showDestination(destination):
             applyDestination(destination)
+        case let .showSettingsSection(section):
+            showSettings(section: section)
         case let .openFile(path):
             openFileInEditor(URL(fileURLWithPath: path), pinned: true)
             // `openFileInEditor` focuses the pane it landed in but knows
