@@ -426,7 +426,10 @@ final class HomeSurfaceView: NSView {
     private(set) var suggestionCards: [HomeCardView] = []
     let viewAllPill = HomePillView("View all")
     let markImageView = NSImageView()
-    let workspaceChipTile = ShellTileView(size: 16, radius: 5, fontSize: 7)
+    /// The sidebar's own folder glyph — open, since the chip *is* the chosen
+    /// workspace — in the sidebar's colour for it, so the two surfaces
+    /// agree on what a workspace looks like.
+    let workspaceChipFolder = ShellGlyphView(.folderOpen, color: ShellPalette.folderGlyph, size: 17, lineWidth: 1.1)
     /// Stands in for the tile when the Chat scratch workspace is picked.
     let workspaceChipIcon: NSImageView = {
         let view = NSImageView()
@@ -551,21 +554,20 @@ final class HomeSurfaceView: NSView {
     /// and `branch` are the owner's freshly computed default (first session,
     /// or "New session" when the workspace has none) — Home never derives
     /// them itself, the same split as the workspace name/id it already took.
-    func refresh(workspaceID: String?, workspaceName: String?, sessionLabel: String = "New session", branch: String? = nil) {
-        let name = workspaceName ?? "Select workspace"
-        workspaceChipName.stringValue = name
-        // The Chat scratch workspace wears a speech bubble, not initials —
-        // it is not a project, and "CH" on a gradient would claim it was.
-        // No workspace at all wears neither: "SW" would be a lie too.
+    func refresh(
+        workspaceID: String?,
+        workspaceName: String?,
+        tint: NSColor? = nil,
+        sessionLabel: String = "New session",
+        branch: String? = nil
+    ) {
+        workspaceChipName.stringValue = workspaceName ?? "Select workspace"
+        // The Chat scratch workspace wears a speech bubble, not a folder —
+        // it is not a project. No workspace at all wears neither.
         let isChat = workspaceID == HomeChatWorkspace.id
-        workspaceChipTile.isHidden = isChat || workspaceID == nil
+        workspaceChipFolder.isHidden = isChat || workspaceID == nil
         workspaceChipIcon.isHidden = !isChat
-        if !isChat {
-            workspaceChipTile.apply(
-                initials: ShellPalette.initials(name),
-                gradient: ShellPalette.avatarGradient(forID: workspaceID ?? name)
-            )
-        }
+        workspaceChipFolder.color = tint ?? ShellPalette.folderGlyph
         sessionChipLabel.stringValue = sessionLabel
         updateBranchChip(existing: branch)
         // Chat is not a project: no branch, and nothing to set up either.
@@ -906,7 +908,7 @@ final class HomeSurfaceView: NSView {
 
         let rule = ShellSeparator()
 
-        let projectStack = NSStackView(views: [workspaceChipTile, workspaceChipIcon, workspaceChipName])
+        let projectStack = NSStackView(views: [workspaceChipFolder, workspaceChipIcon, workspaceChipName])
         projectStack.orientation = .horizontal
         projectStack.spacing = 7
         let project = HomeHotspotView(wrapping: projectStack, accessibilityLabel: "Project")

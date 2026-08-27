@@ -637,8 +637,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let chatRow = HomeDropdown.Row(
                 icon: chatIcon, title: HomeChatWorkspace.label, isCurrent: current == HomeChatWorkspace.id
             ) { [weak self] in self?.selectHomeWorkspace(HomeChatWorkspace.id) }
+            // Each row wears the sidebar's name and folder colour for the
+            // workspace — closed folders, the chosen one open, as the tree.
             let workspaceRows = Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs).map { entry in
-                HomeDropdown.Row(title: entry.label, isCurrent: entry.id == current) { [weak self] in
+                let isCurrent = entry.id == current
+                let folder = (isCurrent ? ShellGlyph.folderOpen : .folder)
+                    .image(color: self.sidebarTint(for: entry.id) ?? ShellPalette.folderGlyph, size: 17)
+                return HomeDropdown.Row(icon: folder, title: self.sidebarDisplayLabel(for: entry.id), isCurrent: isCurrent) { [weak self] in
                     self?.selectHomeWorkspace(entry.id)
                 }
             }
@@ -963,7 +968,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let branchDirectory = sessions.first?.cwd ?? workspaceDirectory(for: homeSelectedProjectID)
             homeView.refresh(
                 workspaceID: homeSelectedProjectID,
-                workspaceName: workspaces.first { $0.id == homeSelectedProjectID }?.label,
+                workspaceName: homeSelectedProjectID.map(homeWorkspaceLabel),
+                tint: homeSelectedProjectID.flatMap(sidebarTint),
                 sessionLabel: sessions.first?.label ?? "New session",
                 branch: branchDirectory.flatMap(GitBranch.forDirectory)
             )
@@ -2865,6 +2871,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspaceCustomizations[customizationKey(for: id)]?.displayName
             ?? workspaces.first { $0.id == id }?.label
             ?? SessionOutline.projectLabel(id, labels: projectLabels)
+    }
+
+    /// The sidebar's folder colour for this workspace, `nil` for the default.
+    private func sidebarTint(for id: String) -> NSColor? {
+        workspaceCustomizations[customizationKey(for: id)]?.color?.tint
     }
 
     /// The project directory every project-label-aware surface
@@ -4941,6 +4952,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         return open.count == 1 ? open[0].id : nil
     }
 
+    /// What Home's chip calls a workspace: the sidebar's name for it, or
+    /// "Chat" for the scratch one the sidebar does not list.
+    private func homeWorkspaceLabel(_ id: String) -> String {
+        id == HomeChatWorkspace.id ? HomeChatWorkspace.label : sidebarDisplayLabel(for: id)
+    }
+
     /// A pick from Home's own project menu — updates the chips and the
     /// session/branch that go with the new workspace, and nothing else: no
     /// `startSession`, no touching `selectedProjectID`, no leaving Home.
@@ -4948,12 +4965,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         homeSelectedProjectID = id
         let sessions = homeSessions(for: id)
         let branchDirectory = sessions.first?.cwd ?? workspaceDirectory(for: id)
-        let name = id == HomeChatWorkspace.id
-            ? HomeChatWorkspace.label
-            : workspaces.first { $0.id == id }?.label
         homeView.refresh(
             workspaceID: id,
-            workspaceName: name,
+            workspaceName: homeWorkspaceLabel(id),
+            tint: sidebarTint(for: id),
             sessionLabel: sessions.first?.label ?? "New session",
             branch: branchDirectory.flatMap(GitBranch.forDirectory)
         )

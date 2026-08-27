@@ -58,11 +58,11 @@ final class HomeViewTests: XCTestCase {
         let home = makeHome()
         XCTAssertEqual(home.suggestionCards.count, 3)
         XCTAssertEqual(home.workspaceChipName.stringValue, "OmniAgent-ADE")
-        XCTAssertFalse(home.workspaceChipTile.isHidden)
+        XCTAssertFalse(home.workspaceChipFolder.isHidden)
 
         home.refresh(workspaceID: nil, workspaceName: nil)
         XCTAssertEqual(home.workspaceChipName.stringValue, "Select workspace")
-        XCTAssertTrue(home.workspaceChipTile.isHidden, "no initials for a workspace that is not there")
+        XCTAssertTrue(home.workspaceChipFolder.isHidden, "no folder for a workspace that is not there")
     }
 
     /// A suggestion card and a pill wear the brighter fill under the pointer
@@ -163,20 +163,25 @@ final class HomeViewTests: XCTestCase {
     }
 
     /// The Chat scratch workspace wears a speech bubble where a project
-    /// wears its initials tile — never "CH" on a gradient.
-    func testTheChatWorkspaceWearsABubbleNotInitials() {
+    /// wears the sidebar's open folder, in the sidebar's colour for it.
+    func testTheChatWorkspaceWearsABubbleNotAFolder() {
         let home = makeHome()
-        XCTAssertFalse(home.workspaceChipTile.isHidden)
+        XCTAssertFalse(home.workspaceChipFolder.isHidden)
         XCTAssertTrue(home.workspaceChipIcon.isHidden)
 
         home.refresh(workspaceID: HomeChatWorkspace.id, workspaceName: HomeChatWorkspace.label)
-        XCTAssertTrue(home.workspaceChipTile.isHidden)
+        XCTAssertTrue(home.workspaceChipFolder.isHidden)
         XCTAssertFalse(home.workspaceChipIcon.isHidden)
         XCTAssertEqual(home.workspaceChipName.stringValue, "Chat")
 
-        home.refresh(workspaceID: "omniagent-ade", workspaceName: "OmniAgent-ADE")
-        XCTAssertFalse(home.workspaceChipTile.isHidden, "back to a project, back to the tile")
+        home.refresh(workspaceID: "omniagent-ade", workspaceName: "OmniAgent-ADE", tint: WorkspaceColor.pink.tint)
+        XCTAssertFalse(home.workspaceChipFolder.isHidden, "back to a project, back to the folder")
         XCTAssertTrue(home.workspaceChipIcon.isHidden)
+        XCTAssertEqual(home.workspaceChipFolder.glyph, .folderOpen)
+        XCTAssertEqual(home.workspaceChipFolder.color, WorkspaceColor.pink.tint)
+
+        home.refresh(workspaceID: "omniagent-ade", workspaceName: "OmniAgent-ADE")
+        XCTAssertEqual(home.workspaceChipFolder.color, ShellPalette.folderGlyph, "no colour picked, the sidebar's default")
     }
 
     /// The pool carries every kind in equal measure, so no kind ever runs

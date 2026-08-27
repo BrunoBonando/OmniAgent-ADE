@@ -489,6 +489,19 @@ enum ShellGlyph {
 }
 
 /// A glyph as a view, so it can sit in a stack next to labels.
+extension ShellGlyph {
+    /// The glyph as a fixed-colour image, for surfaces that take an
+    /// `NSImage` rather than a view (`HomeDropdown.Row`). Not a template:
+    /// the colour *is* the point (a workspace's folder tint), so a row's
+    /// tint must not override it.
+    func image(color: NSColor, size: CGFloat, lineWidth: CGFloat = 1.1) -> NSImage {
+        NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+            self.draw(in: rect, color: color, lineWidth: lineWidth)
+            return true
+        }
+    }
+}
+
 final class ShellGlyphView: NSView {
     var glyph: ShellGlyph { didSet { needsDisplay = true } }
     var color: NSColor { didSet { needsDisplay = true } }
