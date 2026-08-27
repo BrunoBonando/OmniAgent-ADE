@@ -1949,15 +1949,29 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let menu = NSMenu()
         for color in Self.claudeColors {
             let item = NSMenuItem(
-                title: color.capitalized,
+                title: "",
                 action: #selector(changeClaudeColor(_:)),
                 keyEquivalent: ""
             )
             item.representedObject = color
-            item.image = Self.swatch(for: color)
+            // `item.image` (the icon slot) never actually renders here, on
+            // either a lazy or an eagerly-rasterized NSImage — so the dot
+            // rides in the title itself, as an inline text attachment, a
+            // rendering path AppKit can't silently drop the way it drops
+            // the icon slot.
+            item.attributedTitle = Self.swatchedTitle(for: color)
             menu.addItem(item)
         }
         return menu
+    }
+
+    static func swatchedTitle(for color: String) -> NSAttributedString {
+        let attachment = NSTextAttachment()
+        attachment.image = swatch(for: color)
+        attachment.bounds = CGRect(x: 0, y: -2, width: 12, height: 12)
+        let result = NSMutableAttributedString(attachment: attachment)
+        result.append(NSAttributedString(string: "  \(color.capitalized)"))
+        return result
     }
 
     /// The dot beside each name. The submenu is a list of colour *words*, and a
@@ -1977,11 +1991,36 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         case "cyan": fill = .systemTeal
         default: fill = .secondaryLabelColor
         }
-        return NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
-            fill.setFill()
-            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
-            return true
-        }
+        // Rasterized into its own bitmap context up front — not a lazy
+        // drawingHandler image (NSMenuItem's own image compositing never
+        // calls it) and not lockFocus() either (it draws into whatever
+        // context happens to be current, which is unset/inconsistent here
+        // since this runs outside any view's draw pass — flaky: it drew once
+        // and then came back blank). A dedicated NSBitmapImageRep has no
+        // ambient context to depend on, so it renders the same every time.
+        let size = NSSize(width: 12, height: 12)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(size.width * scale),
+            pixelsHigh: Int(size.height * scale),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return NSImage(size: size) }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        fill.setFill()
+        NSBezierPath(ovalIn: NSRect(origin: .zero, size: size).insetBy(dx: 1, dy: 1)).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        let image = NSImage(size: size)
+        image.addRepresentation(rep)
+        return image
     }
 
     /// One name off that submenu, typed at the terminal.
