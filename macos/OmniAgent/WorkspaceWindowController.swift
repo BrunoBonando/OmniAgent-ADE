@@ -3138,15 +3138,37 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     /// Delete session: confirm — naming the session and how many panes end
-    /// with it — then destroy every pane in the group and prune its meta.
+    /// with it — then destroy every pane in the group (and in every session
+    /// nested under it) and prune its meta.
     func deleteSession(_ session: SessionGroupNode) {
         confirmSessionDeletion(
             label: session.label,
-            paneCount: session.paneIDs.count
+            paneCount: paneIDsToDelete(with: session.id).count
         ) { [weak self] confirmed in
             guard confirmed else { return }
-            self?.performDeleteSession(session)
+            self?.performDeleteSession(session.id)
         }
+    }
+
+    /// Every pane a deletion takes: the session's own plus those of every
+    /// session nested under it, transitively — a child created under the
+    /// deleted session has no parent to live under. Read live from the
+    /// workspace rather than the row's `paneIDs` snapshot, so a pane opened
+    /// while the confirmation was up dies with the rest instead of keeping
+    /// the "deleted" session alive in the sidebar.
+    private func paneIDsToDelete(with root: String) -> [String] {
+        var groups: Set<String> = [root]
+        var grew = true
+        while grew {
+            grew = false
+            for (group, entry) in sessionMeta where !groups.contains(group) {
+                if let parent = entry.parent, groups.contains(parent) {
+                    groups.insert(group)
+                    grew = true
+                }
+            }
+        }
+        return workspace.allPaneIDs.filter { groups.contains(workspace.descriptor(for: $0)?.group ?? "") }
     }
 
     private func confirmSessionDeletion(
@@ -3174,17 +3196,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         )
     }
 
-    private func performDeleteSession(_ session: SessionGroupNode) {
+    private func performDeleteSession(_ root: String) {
+        let paneIDs = paneIDsToDelete(with: root)
         // ⌘W's gate before ⌘W's destroy: an editor pane in the group can be
         // holding the only copy of unsaved work, so every buffer is drained
         // with save prompts first, and a cancel there aborts the whole
         // deletion with the panes intact.
-        drainEditorPanes(in: session.paneIDs) { [weak self] proceed in
+        drainEditorPanes(in: paneIDs) { [weak self] proceed in
             guard proceed, let self else { return }
             // `destroyPane` is the one close path — daemon kills and per-pane
             // bookkeeping included, exactly as ⌘W's proceed branch and
             // Remove-workspace's.
-            for paneID in session.paneIDs {
+            for paneID in paneIDs {
                 destroyPane(paneID)
             }
             // Prune rather than a single removal: the group's own entry goes,

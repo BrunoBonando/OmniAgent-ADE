@@ -301,6 +301,28 @@ fn kill_returns_only_after_exit_is_observable() {
     ));
 }
 
+/// The polite SIGHUP is not the end of the story: a process that ignores it
+/// keeps the PTY open, and a kill that waits on the PTY would then never
+/// return — the app's next request queues behind it, and the "deleted"
+/// terminal lives on. Kill must end the session anyway, and promptly.
+#[test]
+fn kill_ends_a_session_whose_process_ignores_sighup() {
+    let registry = SessionRegistry::new();
+    let session = create(&registry, "hup", "trap '' HUP; sleep 30", None);
+    let subscription = session.subscribe(4);
+    std::thread::sleep(Duration::from_millis(300));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(registry.kill("hup")).unwrap());
+    assert!(rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("kill returned within the bound"));
+    assert!(matches!(
+        subscription.recv_timeout(Duration::from_secs(2)).unwrap(),
+        SessionEvent::Exited { .. }
+    ));
+}
+
 #[test]
 fn transcript_redacts_secrets_before_persisting_them() {
     let temp = tempfile::tempdir().unwrap();

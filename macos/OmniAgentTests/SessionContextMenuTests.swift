@@ -380,6 +380,40 @@ final class SessionContextMenuTests: XCTestCase {
         )
     }
 
+    /// A session nested under the deleted one goes with it: every pane in
+    /// the parent *and* its children dies, the confirmation counts them all,
+    /// and only unrelated sessions survive.
+    func testDeleteSessionTakesNestedChildrenWithIt() throws {
+        let controller = makeController(panes: [
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-1", group: "g-1"),
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-2", group: "g-2"),
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-3", group: "g-3"),
+        ])
+        defer { controller.close() }
+        controller.appLocator = { _ in nil }
+        var killed: [String] = []
+        controller.sessionKiller = { killed.append($0) }
+        controller.settingsWriter = { _, _ in }
+        controller.applyRestoredSessionMeta(
+            SessionMetaCodec.serialize(["g-2": SessionMeta(parent: "g-1")])
+        )
+        var askedPanes: [Int] = []
+        controller.sessionDeletionConfirmer = { _, panes, completion in
+            askedPanes.append(panes)
+            completion(true)
+        }
+        let tree = controller.shellSidebar.workspacesTree
+        let session = try XCTUnwrap(sessionRow(in: tree, group: "g-1")).session
+
+        controller.deleteSession(session)
+
+        XCTAssertEqual(askedPanes, [2], "the child's pane is counted too")
+        XCTAssertEqual(Set(killed), ["s-1", "s-2"])
+        XCTAssertNil(controller.workspaceView.descriptor(for: "s-2"), "the nested child died with its parent")
+        XCTAssertNotNil(controller.workspaceView.descriptor(for: "s-3"))
+        XCTAssertEqual(tree.renderedSessionIDs, ["g-3"])
+    }
+
     /// Declining the confirmation changes nothing.
     func testDecliningDeletionChangesNothing() throws {
         let controller = makeController(panes: [
