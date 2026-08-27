@@ -2535,6 +2535,31 @@ final class PaneWorkspaceViewTests: XCTestCase {
     /// A control that cannot act greys out where it stands — if a disabled disc
     /// were ever hidden instead, the two survivors would slide into new places
     /// and the position you learned would stop meaning anything.
+    /// The cluster is glass until its pane has focus — and even then only the
+    /// discs that can act take their colour. A background window puts every
+    /// disc back to glass, focus or not, the way macOS does its own.
+    func testTheClusterLightsOnlyForAFocusedPaneAndOnlyWhereItCanAct() throws {
+        let header = PaneHeaderView(title: "token rotation")
+        header.isZoomAvailable = true
+        let restore = try XCTUnwrap(button(labelled: Self.restoreText, in: header))
+        let zoom = try XCTUnwrap(button(labelled: "Zoom this pane", in: header))
+        let close = try XCTUnwrap(button(labelled: "Close this pane", in: header))
+
+        XCTAssertFalse(zoom.isLit, "unfocused: glass")
+        header.isFocused = true
+        XCTAssertTrue(zoom.isLit)
+        XCTAssertTrue(close.isLit)
+        XCTAssertFalse(restore.isLit, "yellow has no zoom to undo, so it stays glass")
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 200),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.contentView?.addSubview(header)
+        XCTAssertFalse(window.isKeyWindow)
+        XCTAssertFalse(zoom.isLit, "a background window's cluster is glass")
+    }
+
     func testTheHeaderCarriesAYellowGreenRedClusterThatNeverReorders() throws {
         let header = PaneHeaderView(title: "token rotation")
         header.isZoomAvailable = true

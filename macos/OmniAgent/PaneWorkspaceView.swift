@@ -4107,6 +4107,9 @@ final class PaneHeaderView: NSView {
     override var isFlipped: Bool { true }
 
     private func applyEmphasis() {
+        // The cluster lights up with the pane, the way a window's does with the
+        // window; unfocused it is three glass beads.
+        for disc in [restoreButton, zoomButton, closeButton] { disc.isActive = isFocused }
         // `600 15.5px` / `#f0f0f4` zoomed against `500 14.5px` in the grid: the
         // focused card's name is the only terminal name on screen, so it stops
         // being one label among eight and carries the card.
@@ -5015,21 +5018,45 @@ final class PaneHeaderButton: NSView {
     /// The grid header's controls, `width:20px;height:20px`.
     static let iconSize: CGFloat = 20
 
-    /// A disc that cannot act right now: grey, with its glyph still faintly on
-    /// it. It keeps its place in the cluster rather than vanishing, so the three
-    /// positions never shuffle and you can still see *which* control is off.
-    private static let disabledFill = NSColor(srgbRed: 72 / 255, green: 72 / 255, blue: 80 / 255, alpha: 1)
-    private static let disabledGlyph = NSColor(white: 1, alpha: 0.26)
+    /// The disc when it is not lit — inactive, or unable to act right now: a
+    /// clear glass bead, no colour, no glyph. It keeps its place in the cluster
+    /// rather than vanishing, so the three positions never shuffle.
+    private static let glassFill = NSColor(white: 1, alpha: 0.10)
+    private static let glassRim = NSColor(white: 1, alpha: 0.18)
 
     var onClick: (() -> Void)?
     var hoverTint = NSColor(srgbRed: 223 / 255, green: 226 / 255, blue: 255 / 255, alpha: 1)
     var hoverFill = NSColor(srgbRed: 139 / 255, green: 149 / 255, blue: 255 / 255, alpha: 0.22)
 
-    /// macOS's traffic-light treatment: a filled disc of this colour. Unlike a
-    /// window's own, the glyph is drawn at rest rather than only under the
-    /// pointer — a pane's cluster is one small thing in a busy bar, and it has
-    /// to say what it does without being hunted for first.
+    /// macOS's traffic-light treatment, the way the system (and GitHub Copilot)
+    /// draws it: glass while inactive, colour while active, and the glyph only
+    /// under the pointer. A disc that cannot act stays glass whatever else is
+    /// true.
     var trafficLight: TrafficLight? { didSet { needsDisplay = true } }
+
+    /// Whether the thing this control belongs to has focus — the pane, for a
+    /// header cluster. The window's own key state is folded in by the button
+    /// itself (see `isLit`), so a window bar leaves this at its default.
+    var isActive = true { didSet { needsDisplay = true } }
+
+    /// Whether the disc shows its colour at rest.
+    var isLit: Bool { isEnabled && isActive && (window?.isKeyWindow ?? true) }
+
+    private var windowObservers: [NSObjectProtocol] = []
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        windowObservers.forEach(NotificationCenter.default.removeObserver)
+        windowObservers = []
+        guard let window else { return }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            windowObservers.append(NotificationCenter.default.addObserver(
+                forName: name, object: window, queue: .main
+            ) { [weak self] _ in self?.needsDisplay = true })
+        }
+    }
+
+    deinit { windowObservers.forEach(NotificationCenter.default.removeObserver) }
 
     /// Whether pressing it means anything right now. A disabled control still
     /// draws and still reserves its slot; it just goes grey, stops answering the
@@ -5092,9 +5119,13 @@ final class PaneHeaderButton: NSView {
     /// icon, and inside the disc for a traffic light. Three abutting 20pt
     /// squares put 20pt between disc centres, which is macOS's own spacing.
     private var glyphBox: NSRect {
-        // The disc is 12pt inside the 20pt square, and the glyph sits inside it.
-        trafficLight == nil ? bounds : bounds.insetBy(dx: 6, dy: 6)
+        // The disc is 14pt inside the 20pt square, and the glyph sits inside it.
+        trafficLight == nil ? bounds : bounds.insetBy(dx: 5, dy: 5)
     }
+
+    /// 14pt, a touch over macOS's own 12pt — the cluster reads at a glance
+    /// without the glyphs, now that it no longer wears them at rest.
+    private var discRect: NSRect { bounds.insetBy(dx: 3, dy: 3) }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -5121,19 +5152,31 @@ final class PaneHeaderButton: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         if let trafficLight {
-            (isEnabled
-                ? trafficLight.fill.withAlphaComponent(isHovered ? 1 : 0.92)
-                : Self.disabledFill).setFill()
-            NSBezierPath(ovalIn: bounds.insetBy(dx: 4, dy: 4)).fill()
+            // Hovering lights an inactive disc the way it does a background
+            // window's; a disabled one stays glass no matter what.
+            if isLit || isHovered {
+                trafficLight.fill.setFill()
+                NSBezierPath(ovalIn: discRect).fill()
+            } else {
+                Self.glassFill.setFill()
+                NSBezierPath(ovalIn: discRect).fill()
+                Self.glassRim.setStroke()
+                let rim = NSBezierPath(ovalIn: discRect.insetBy(dx: 0.5, dy: 0.5))
+                rim.lineWidth = 1
+                rim.stroke()
+            }
+            // The glyph is only ever under the pointer: a lit disc says "on"
+            // by its colour, and what it does is what its position says.
+            guard isHovered else { return }
         } else if isHovered {
             hoverFill.setFill()
             NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
         }
-        // A disc's glyph is a dark tint of the disc and is always on it; the
-        // bare ⋯ icon is the one that lights up under the pointer instead.
+        // A disc's glyph is a dark tint of the disc; the bare ⋯ icon lights up
+        // under the pointer instead.
         let color: NSColor
         if let trafficLight {
-            color = isEnabled ? trafficLight.glyphColor : Self.disabledGlyph
+            color = trafficLight.glyphColor
         } else {
             color = isHovered
                 ? hoverTint
