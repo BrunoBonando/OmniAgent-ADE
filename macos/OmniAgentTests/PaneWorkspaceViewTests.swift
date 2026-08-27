@@ -2560,6 +2560,30 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertFalse(zoom.isLit, "a background window's cluster is glass")
     }
 
+    /// The pointer on any one disc hovers the whole cluster — every disc that
+    /// can act lights and shows its glyph, the way macOS's own do — and leaving
+    /// it clears all three. A disc that cannot act stays out of it.
+    func testHoveringOneDiscHoversTheWholeCluster() throws {
+        let header = PaneHeaderView(title: "token rotation")
+        header.isZoomAvailable = true
+        let restore = try XCTUnwrap(button(labelled: Self.restoreText, in: header))
+        let zoom = try XCTUnwrap(button(labelled: "Zoom this pane", in: header))
+        let close = try XCTUnwrap(button(labelled: "Close this pane", in: header))
+        let enter = try XCTUnwrap(NSEvent.enterExitEvent(
+            with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil
+        ))
+
+        zoom.mouseEntered(with: enter)
+        XCTAssertTrue(zoom.isHovered)
+        XCTAssertTrue(close.isHovered, "the red disc hovers with the green one")
+        XCTAssertFalse(restore.isHovered, "but the disabled yellow one stays glass")
+
+        zoom.mouseExited(with: enter)
+        XCTAssertFalse(zoom.isHovered)
+        XCTAssertFalse(close.isHovered, "and leaving clears the cluster")
+    }
+
     func testTheHeaderCarriesAYellowGreenRedClusterThatNeverReorders() throws {
         let header = PaneHeaderView(title: "token rotation")
         header.isZoomAvailable = true

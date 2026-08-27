@@ -5073,7 +5073,7 @@ final class PaneHeaderButton: NSView {
     }
 
     private let glyph: Glyph
-    private var isHovered = false { didSet { needsDisplay = true } }
+    private(set) var isHovered = false { didSet { needsDisplay = true } }
     private var tracking: NSTrackingArea?
 
     init(glyph: Glyph) {
@@ -5139,8 +5139,21 @@ final class PaneHeaderButton: NSView {
         tracking = area
     }
 
-    override func mouseEntered(with event: NSEvent) { isHovered = isEnabled }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
+    /// The discs this one hovers with: macOS lights all three and shows all
+    /// three glyphs when the pointer reaches any one, so the cluster reads as
+    /// one control. The bare ⋯ icon hovers alone.
+    private var cluster: [PaneHeaderButton] {
+        guard trafficLight != nil, let superview else { return [self] }
+        return superview.subviews.compactMap { $0 as? PaneHeaderButton }.filter { $0.trafficLight != nil }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        for disc in cluster { disc.isHovered = disc.isEnabled }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        for disc in cluster { disc.isHovered = false }
+    }
 
     override func mouseDown(with event: NSEvent) {}
 
