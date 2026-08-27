@@ -802,11 +802,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         contentContainer.addSubview(placeholder)
         contentContainer.addSubview(homeView)
         contentContainer.addSubview(settingsView)
+        // Settings alone reaches the window's top edge: its sections column
+        // runs under the title bar like the left menu does, and it puts the
+        // section's name in the title strip itself.
         for view in [workspace, placeholder, homeView, settingsView] as [NSView] {
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-                view.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: WorkspaceTitleBarView.height),
+                view.topAnchor.constraint(
+                    equalTo: contentContainer.topAnchor,
+                    constant: view === settingsView ? 0 : WorkspaceTitleBarView.height
+                ),
                 view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
             ])
         }

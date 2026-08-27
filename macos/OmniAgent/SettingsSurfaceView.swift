@@ -1,10 +1,13 @@
 import AppKit
 
 // The Settings destination (2026-08-27): a second sidebar column inside the
-// content area — the left menu's own glass and nav rows, one level in — and
-// beside it a centred column that, for now, says "Under development" for
-// every section. The list is the design's; the sections' screens come one
-// by one, on top of this.
+// content area — the left menu's nav rows on a sheet of *plain* glass, so
+// the app's grey-to-black ground shows through and the column reads as a
+// different thing from the blue left menu — running edge to edge under the
+// window chrome, and beside it the picked section's name up in the title
+// strip (where the Desk puts the session's name) over a centred column
+// that, for now, says "Under development". The list is the design's; the
+// sections' screens come one by one, on top of this.
 
 /// The Settings page's sections, in the design's order. `startsGroup` marks
 /// the gaps in the list: General…Accessibility, Customize/Model providers,
@@ -49,17 +52,16 @@ enum SettingsSection: String, CaseIterable {
     var startsGroup: Bool { self == .customize || self == .experimental }
 }
 
-/// The column of sections: the left menu's glass, edge and nav rows, so the
-/// two sidebars read as one family.
+/// The column of sections: the left menu's edge and nav rows on untinted
+/// glass — same family, different colour, on purpose.
 final class SettingsSidebarView: NSView {
     static let width: CGFloat = 220
 
     private(set) var rows: [SidebarNavRowView] = []
     var onSelect: ((SettingsSection) -> Void)?
-    /// The Liquid Glass sheet on macOS 26, `nil` below — the exact treatment
-    /// `NavigationSidebarView.glassHost` gives the left menu.
+    /// The Liquid Glass sheet on macOS 26, `nil` below — the left menu's
+    /// sheet without its blue wash.
     private(set) var glassHost: NSView?
-    private var glassTint: NSView?
     let trailingEdge = NSView()
 
     override init(frame frameRect: NSRect) {
@@ -67,10 +69,8 @@ final class SettingsSidebarView: NSView {
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
 
-        let tint = ShellGlassTintView()
-        if let glass = WorkspaceGlass.sheet(content: tint) {
+        if let glass = WorkspaceGlass.sheet() {
             glassHost = glass
-            glassTint = tint
             addSubview(glass)
         }
 
@@ -83,7 +83,9 @@ final class SettingsSidebarView: NSView {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 2
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: 8, bottom: 0, right: 8)
+        // The column runs under the window chrome; the rows clear it, exactly
+        // as the left menu's do.
+        stack.edgeInsets = NSEdgeInsets(top: WorkspaceTitleBarView.height + 6, left: 8, bottom: 0, right: 8)
         stack.translatesAutoresizingMaskIntoConstraints = false
         for (index, section) in SettingsSection.allCases.enumerated() {
             rows[index].widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -16).isActive = true
@@ -114,13 +116,14 @@ final class SettingsSidebarView: NSView {
     override func layout() {
         super.layout()
         glassHost?.frame = bounds
-        glassTint?.frame = NSRect(origin: .zero, size: bounds.size)
     }
 
-    /// Below macOS 26 only — with glass, a sheet covers these bounds already.
+    /// Below macOS 26 only — a whisper of white, so the column still reads
+    /// as a column on the bare ground.
     override func draw(_ dirtyRect: NSRect) {
         guard glassHost == nil else { return }
-        ShellPalette.sidebarGlass.draw(in: bounds, angle: -90)
+        ShellPalette.cardFill.setFill()
+        bounds.fill()
     }
 
     func apply(selected: SettingsSection) {
@@ -130,13 +133,17 @@ final class SettingsSidebarView: NSView {
     }
 }
 
-/// The whole Settings screen: the sections column on the left, and the
-/// picked section's content in Home's centred 880pt column on the right —
-/// from the top, though, not from a share of the height. Transparent, like
-/// Home: `PaneGroundView` behind it is the ground.
+/// The whole Settings screen: the sections column on the left, the picked
+/// section's name in the title strip, and its content in Home's centred
+/// 880pt column — from the top, though, not from a share of the height.
+/// Mounted at the window's top edge, not under the title bar, so the column
+/// reaches it. Transparent, like Home: `PaneGroundView` behind it is the
+/// ground.
 final class SettingsSurfaceView: NSView {
     let sidebar = SettingsSidebarView()
-    let titleField = ShellFont.label(font: ShellFont.ui(22, .semibold), color: ShellPalette.ink)
+    /// The section's name, in the strip the title bar leaves clear — the
+    /// exact place and face `sessionTitleField` gives a session's name.
+    let titleField = ShellFont.label(font: ShellFont.ui(13, .medium), color: ShellPalette.inkSecondary)
     let subtitleField = ShellFont.label(
         "Under development",
         font: ShellFont.ui(13),
@@ -151,7 +158,7 @@ final class SettingsSurfaceView: NSView {
         translatesAutoresizingMaskIntoConstraints = false
         addSubview(sidebar)
 
-        let column = NSStackView(views: [titleField, subtitleField])
+        let column = NSStackView(views: [subtitleField])
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 6
@@ -163,17 +170,22 @@ final class SettingsSurfaceView: NSView {
 
         let scroll = ShellScrollView(documentView: content)
         addSubview(scroll)
+        titleField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(titleField)
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: bottomAnchor),
 
+            titleField.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: 12),
+            titleField.centerYAnchor.constraint(equalTo: topAnchor, constant: WorkspaceTitleBarView.height / 2),
+
             scroll.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.topAnchor.constraint(equalTo: topAnchor, constant: WorkspaceTitleBarView.height),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            column.topAnchor.constraint(equalTo: content.topAnchor, constant: 48),
+            column.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
             column.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -36),
             column.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 40),
