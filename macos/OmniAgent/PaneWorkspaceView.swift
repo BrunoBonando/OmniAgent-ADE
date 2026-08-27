@@ -618,6 +618,15 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         updateLayout()
         focusPane(descriptor.sessionID)
         notifyPanesChanged()
+        // A new pane opened while ⌘ is held gets focus automatically — just
+        // as much a jump to a specific pane as ⌘N picking one explicitly, so
+        // it gets the same "you're here" pulse, only the chord was ⌘T.
+        if isCommandHintShown,
+            let index = paneIDs.firstIndex(of: descriptor.sessionID),
+            let key = Self.shortcutKey(atFillOrderIndex: index)
+        {
+            containers[descriptor.sessionID]?.pulseChosenShortcut(key: key)
+        }
         return true
     }
 
