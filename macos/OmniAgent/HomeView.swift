@@ -503,7 +503,7 @@ final class HomeSurfaceView: NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(column)
 
-        let scroll = ShellScrollView(documentView: content)
+        let scroll = ShellScrollView(documentView: content, topFade: 28)
         addSubview(scroll)
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),

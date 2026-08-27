@@ -685,9 +685,28 @@ final class ShellDotsView: NSView {
 
 /// A scroll view for a sidebar region. Top-anchored content, scrollers only
 /// when the content genuinely does not fit.
+///
+/// `topFade` is for a page: content scrolled under the top edge thins to
+/// nothing across that many points instead of being cut off flat against
+/// the title strip. A gradient mask on the view's own layer, re-fitted in
+/// `layout` since a mask does not follow its layer's size.
 final class ShellScrollView: NSScrollView {
-    init(documentView content: NSView) {
+    private let topFade: CGFloat
+    private var fadeMask: CAGradientLayer?
+
+    init(documentView content: NSView, topFade: CGFloat = 0) {
+        self.topFade = topFade
         super.init(frame: .zero)
+        if topFade > 0 {
+            wantsLayer = true
+            let mask = CAGradientLayer()
+            mask.colors = [NSColor.clear.cgColor, NSColor.black.cgColor]
+            // (0.5, 1) is the top of a layer's y-up unit space.
+            mask.startPoint = CGPoint(x: 0.5, y: 1)
+            mask.endPoint = CGPoint(x: 0.5, y: 0)
+            layer?.mask = mask
+            fadeMask = mask
+        }
         translatesAutoresizingMaskIntoConstraints = false
         drawsBackground = false
         hasVerticalScroller = true
@@ -707,6 +726,19 @@ final class ShellScrollView: NSScrollView {
             // vertically and never sideways.
             content.widthAnchor.constraint(equalTo: contentView.widthAnchor),
         ])
+    }
+
+    override func layout() {
+        super.layout()
+        guard let fadeMask, let layer else { return }
+        fadeMask.frame = layer.bounds
+        fadeMask.locations = [0, NSNumber(value: Double(topFade / max(bounds.height, 1)))]
+    }
+
+    /// Where the fade ends, in points from the top — for the tests.
+    var topFadeForTesting: CGFloat {
+        guard let fadeMask, let end = fadeMask.locations?.last else { return 0 }
+        return CGFloat(truncating: end) * bounds.height
     }
 
     @available(*, unavailable)

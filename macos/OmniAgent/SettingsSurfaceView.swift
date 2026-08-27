@@ -166,7 +166,7 @@ final class SettingsSurfaceView: NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(column)
 
-        let scroll = ShellScrollView(documentView: content)
+        let scroll = ShellScrollView(documentView: content, topFade: 28)
         addSubview(scroll)
         // The panel floats over the scroll's leading edge: added after it, so
         // it is above, and the content column keeps clear of it by its own

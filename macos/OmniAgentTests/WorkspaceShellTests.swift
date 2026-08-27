@@ -65,6 +65,19 @@ final class WorkspaceShellTests: XCTestCase {
         )
     }
 
+    /// A page's scroll view fades its top edge over the asked-for points,
+    /// whatever height it is laid out at — a sidebar region's does not.
+    func testAPageScrollViewFadesItsTopEdge() {
+        let page = ShellScrollView(documentView: NSView(), topFade: 28)
+        page.frame = NSRect(x: 0, y: 0, width: 300, height: 700)
+        page.layoutSubtreeIfNeeded()
+        XCTAssertEqual(page.topFadeForTesting, 28, accuracy: 0.01)
+        page.frame = NSRect(x: 0, y: 0, width: 300, height: 350)
+        page.layoutSubtreeIfNeeded()
+        XCTAssertEqual(page.topFadeForTesting, 28, accuracy: 0.01)
+        XCTAssertEqual(ShellScrollView(documentView: NSView()).topFadeForTesting, 0)
+    }
+
     /// Paths read the way the design writes them — `~` for home, an em dash
     /// for nothing (the hover card leans on this).
     func testShellPathAbbreviatesTheHomeDirectory() {
