@@ -2182,6 +2182,20 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(C.homeWorkspace(keeping: "b", open: [a]), "a", "a closed pick falls back like a fresh visit")
     }
 
+    /// A folder picked on Home joins the picker's list without touching
+    /// the sidebar's — unless the sidebar already lists it, in which case
+    /// it is that workspace, not a twin.
+    func testHomeListsThePendingFolderOnceAndOnlyWhenNew() {
+        let a = BrainProjectSummary(id: "a", label: "A", path: "/a")
+        let pending = BrainProjectSummary(id: "p", label: "p", path: "/p")
+        typealias C = WorkspaceWindowController
+
+        XCTAssertEqual(C.homeWorkspaces(open: [a], pending: nil).map(\.id), ["a"])
+        XCTAssertEqual(C.homeWorkspaces(open: [a], pending: pending).map(\.id), ["a", "p"])
+        XCTAssertEqual(C.homeWorkspaces(open: [a], pending: a).map(\.id), ["a"], "already listed: no twin")
+        XCTAssertEqual(C.homeWorkspaces(open: [], pending: pending).map(\.id), ["p"])
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(

@@ -158,6 +158,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// *would* start with, not for jumping to one — see
     /// `onRequestProjectMenu`'s own comment.
     private var homeSelectedProjectID: String?
+    /// A folder picked from Home's own "Local folder or repository…" —
+    /// pointed at, not added: no daemon root, no sidebar row, no session.
+    /// The workspace becomes real only when Send creates a session in it
+    /// (not wired yet — that step must call `addProject` + `startSession`
+    /// and clear this). Until then it lists in Home's picker like any
+    /// other workspace, and lives as long as the app does.
+    private var homePendingFolder: BrainProjectSummary?
     let palette = CommandPaletteController()
     private var readySessions: Set<String> = []
     /// The `layout` read has been sent — a later reconnect must re-attach the
@@ -637,7 +644,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             ) { [weak self] in self?.selectHomeWorkspace(HomeChatWorkspace.id) }
             // Each row wears the sidebar's name and folder colour for the
             // workspace — closed folders, the chosen one open, as the tree.
-            let workspaceRows = Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs).map { entry in
+            let workspaceRows = homeOpenWorkspaces().map { entry in
                 let isCurrent = entry.id == current
                 let folder = (isCurrent ? ShellGlyph.folderOpen : .folder)
                     .image(color: self.sidebarTint(for: entry.id) ?? ShellPalette.folderGlyph, size: 17)
@@ -650,7 +657,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 HomeDropdown.Section(header: "Repositories", rows: workspaceRows),
                 HomeDropdown.Section(header: "Add project from", rows: [
                     HomeDropdown.Row(icon: HomeDropdown.symbol("desktopcomputer"), title: "Local folder or repository…") { [weak self] in
-                        self?.openWorkspaceFolder(nil)
+                        self?.pickHomeFolder()
                     },
                     HomeDropdown.Row(icon: HomeDropdown.symbol("cloud"), title: "Resume remote session…", isEnabled: false) {},
                 ]),
@@ -667,8 +674,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             }
             let newSessionRow = HomeDropdown.Row(icon: HomeDropdown.symbol("plus"), title: "Create new session") { [weak self] in
                 guard let self else { return }
-                let branch = workspaceDirectory(for: project).flatMap(GitBranch.forDirectory)
-                homeView.updateSessionChip(label: "New session", branch: branch)
+                homeView.updateSessionChip(label: "New session", branch: homeDirectory().flatMap(GitBranch.forDirectory))
             }
             HomeDropdown.show(
                 [HomeDropdown.Section(rows: sessionRows + [newSessionRow])],
@@ -692,7 +698,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // plain dismiss until then.
                 HomeDropdown.Row(icon: HomeDropdown.symbol("link"), title: "\(HomeSurfaceView.setUpGitHubTitle)…") {},
             ])
-            guard let directory = workspaceDirectory(for: homeSelectedProjectID),
+            guard let directory = homeDirectory(),
                   let root = GitStatus.repoRoot(for: URL(fileURLWithPath: directory, isDirectory: true))
             else {
                 HomeDropdown.show([gitHub], searchPlaceholder: "Search branches…", from: anchor)
@@ -4910,6 +4916,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         if let path = workspaces.first(where: { $0.id == id })?.path, !path.isEmpty {
             return path
         }
+        if let pending = homePendingFolder, pending.id == id, let path = pending.path { return path }
         // Nothing recorded — fall back to a live pane in the same project.
         return workspace.allPaneIDs
             .compactMap { workspace.descriptor(for: $0) }
@@ -4941,12 +4948,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// whenever the sidebar's name or colour for that workspace changes
     /// while Home is on screen, so the chip never lags the tree.
     private func refreshHomeChips() {
-        homeSelectedProjectID = Self.homeWorkspace(
-            keeping: homeSelectedProjectID,
-            open: Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs)
-        )
+        homeSelectedProjectID = Self.homeWorkspace(keeping: homeSelectedProjectID, open: homeOpenWorkspaces())
         let sessions = homeSessions(for: homeSelectedProjectID)
-        let branchDirectory = sessions.first?.cwd ?? workspaceDirectory(for: homeSelectedProjectID)
+        let branchDirectory = sessions.first?.cwd ?? homeDirectory()
         homeView.refresh(
             workspaceID: homeSelectedProjectID,
             workspaceName: homeSelectedProjectID.map(homeWorkspaceLabel),
@@ -4960,6 +4964,38 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// "Chat" for the scratch one the sidebar does not list.
     private func homeWorkspaceLabel(_ id: String) -> String {
         id == HomeChatWorkspace.id ? HomeChatWorkspace.label : sidebarDisplayLabel(for: id)
+    }
+
+    /// What Home's picker offers: the open workspaces plus the pending
+    /// folder, when there is one the sidebar does not already list.
+    static func homeWorkspaces(open: [BrainProjectSummary], pending: BrainProjectSummary?) -> [BrainProjectSummary] {
+        guard let pending, !open.contains(where: { $0.id == pending.id }) else { return open }
+        return open + [pending]
+    }
+
+    private func homeOpenWorkspaces() -> [BrainProjectSummary] {
+        Self.homeWorkspaces(open: Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs), pending: homePendingFolder)
+    }
+
+    /// Where Home's chosen workspace lives — `nil` when none is chosen.
+    /// Never `workspaceDirectory(for: nil)`, which answers for the Desk's
+    /// workspace: "Select workspace" must not borrow the Desk's branch.
+    private func homeDirectory() -> String? {
+        homeSelectedProjectID.flatMap { workspaceDirectory(for: $0) }
+    }
+
+    /// Home's "Local folder or repository…": point the chip at the folder
+    /// and nothing else — no root added, no session started. A folder the
+    /// brain already knows keeps its recorded id, so it is the same
+    /// workspace, not a twin; an unknown one takes the id the brain would
+    /// mint for it (`roots::project_id_for`: the basename).
+    private func pickHomeFolder() {
+        chooseSessionDirectory(startingAt: homeDirectory() ?? workspaceRoot()) { [weak self] chosen in
+            guard let self, let chosen else { return }
+            let id = workspaces.first { $0.path == chosen }?.id ?? (chosen as NSString).lastPathComponent
+            homePendingFolder = BrainProjectSummary(id: id, label: id, path: chosen)
+            selectHomeWorkspace(id)
+        }
     }
 
     /// A pick from Home's own project menu — updates the chips and the
