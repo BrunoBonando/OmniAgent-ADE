@@ -959,21 +959,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.isHidden = !isTerminals
         // Home has a real screen now; the placeholder covers To Do List only.
         homeView.isHidden = destination != .home
-        if destination == .home {
-            homeSelectedProjectID = Self.homeWorkspace(
-                keeping: homeSelectedProjectID,
-                open: Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs)
-            )
-            let sessions = homeSessions(for: homeSelectedProjectID)
-            let branchDirectory = sessions.first?.cwd ?? workspaceDirectory(for: homeSelectedProjectID)
-            homeView.refresh(
-                workspaceID: homeSelectedProjectID,
-                workspaceName: homeSelectedProjectID.map(homeWorkspaceLabel),
-                tint: homeSelectedProjectID.flatMap(sidebarTint),
-                sessionLabel: sessions.first?.label ?? "New session",
-                branch: branchDirectory.flatMap(GitBranch.forDirectory)
-            )
-        }
+        if destination == .home { refreshHomeChips() }
         placeholder.isHidden = destination != .todo
         if destination == .todo { placeholder.show(destination) }
         // Home and To Do List name no session, so the bar goes blank and its
@@ -3051,6 +3037,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         persistWorkspaceCustomizations()
         reloadOutline()
+        if destination == .home { refreshHomeChips() }
     }
 
     /// Remove workspace: confirm — naming the workspace and how many
@@ -4950,6 +4937,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return current
         }
         return open.count == 1 ? open[0].id : nil
+    }
+
+    /// Home's chips for its current workspace — on every visit, and again
+    /// whenever the sidebar's name or colour for that workspace changes
+    /// while Home is on screen, so the chip never lags the tree.
+    private func refreshHomeChips() {
+        homeSelectedProjectID = Self.homeWorkspace(
+            keeping: homeSelectedProjectID,
+            open: Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs)
+        )
+        let sessions = homeSessions(for: homeSelectedProjectID)
+        let branchDirectory = sessions.first?.cwd ?? workspaceDirectory(for: homeSelectedProjectID)
+        homeView.refresh(
+            workspaceID: homeSelectedProjectID,
+            workspaceName: homeSelectedProjectID.map(homeWorkspaceLabel),
+            tint: homeSelectedProjectID.flatMap(sidebarTint),
+            sessionLabel: sessions.first?.label ?? "New session",
+            branch: branchDirectory.flatMap(GitBranch.forDirectory)
+        )
     }
 
     /// What Home's chip calls a workspace: the sidebar's name for it, or

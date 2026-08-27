@@ -512,14 +512,14 @@ final class HomeSurfaceView: NSView {
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             // The design's centred 880pt column, giving way on thin windows.
-            // 200pt of top air (up from the design's original 120) is what
-            // actually reads as "higher than middle" — tying it to the
-            // scroll view's own visible height instead read fine in an
-            // offscreen render, but in the real window it left everything
-            // below the composer sitting in a near-empty stretch down to
-            // the fold. A fixed number can't perfectly centre on every
-            // window height, but it can't produce that dead zone either.
-            column.topAnchor.constraint(equalTo: content.topAnchor, constant: 200),
+            // The top air is a share of the visible height — 22.5%, which
+            // is where GitHub Copilot's mark sits on the same screen
+            // (measured 2026-08-27: ~400pt on a 1774pt-tall window, where
+            // a fixed 200pt read as "stuck to the top"). A share, not a
+            // centring, so a small laptop window still gets the composer
+            // well above the fold. (A spacer view carries it: a top anchor
+            // cannot be tied to a height with a multiplier directly.)
+            column.topAnchor.constraint(equalTo: content.topAnchor),
             column.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -36),
             column.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 40),
@@ -527,6 +527,11 @@ final class HomeSurfaceView: NSView {
         let width = column.widthAnchor.constraint(equalToConstant: 880)
         width.priority = .defaultHigh
         width.isActive = true
+
+        let topAir = NSView()
+        topAir.translatesAutoresizingMaskIntoConstraints = false
+        column.addArrangedSubview(topAir)
+        topAir.heightAnchor.constraint(equalTo: scroll.heightAnchor, multiplier: 0.225).isActive = true
 
         let heroIcon = buildHeroIcon()
         column.addArrangedSubview(heroIcon)
@@ -741,7 +746,7 @@ final class HomeSurfaceView: NSView {
         // the glyph's own alpha (no `shadowPath`, so it hugs the mark's
         // shape rather than a box), and a rainbow beam drifts through the
         // same silhouette every 9 seconds via `HomeMarkShimmerView`.
-        let size: CGFloat = 44
+        let size: CGFloat = 56
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
 
