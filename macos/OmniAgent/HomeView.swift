@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 
 // The Home destination's real screen — the 2026-08-22 home design: the
 // OmniAgent mark over a composer, three suggestion cards, an "Up next" empty
@@ -10,6 +11,8 @@ import AppKit
 // design-only rule): every control hovers, focuses and presses like the real
 // thing — the composer takes typing — but every press lands in a deliberately
 // empty `onPress`. The behavior comes as its own step, on top of this screen.
+// First exception (2026-08-27): the suggestion cards now type their prompt
+// into the composer on press — everything else on the screen is still inert.
 //
 // Deliberately all AppKit, on the same `ShellPalette`/`ShellFont` tokens the
 // sidebar wears, and transparent throughout — `PaneGroundView` behind it is
@@ -21,7 +24,7 @@ import AppKit
 /// The hover, cursor, key and press machinery every interactive Home element
 /// shares — `ShellRowView`'s idiom, without the row. A view with no `onPress`
 /// is scenery: no hover paint, no hand cursor, no key handling. Presses fire,
-/// and every press on this screen is wired to an empty closure on purpose —
+/// and most presses on this screen are wired to an empty closure on purpose —
 /// the feel ships now, the behavior later.
 class HomeInteractiveView: NSView {
     var onPress: (() -> Void)?
@@ -257,12 +260,147 @@ final class HomePillView: HomeInteractiveView {
     }
 }
 
+/// A tilted rainbow beam, masked to the OmniAgent mark's own silhouette, that
+/// drifts through it once every 9 seconds — stack this directly over the
+/// glyph at the same size. One looping `CAKeyframeAnimation` drives the
+/// whole thing; nothing to schedule or invalidate.
+final class HomeMarkShimmerView: NSView {
+    /// `size` must match the glyph view this sits over, pixel for pixel —
+    /// the mask is built once, at this size, not re-derived from layout.
+    init(size: CGFloat) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        guard let layer else { return }
+
+        let mask = CALayer()
+        mask.frame = CGRect(x: 0, y: 0, width: size, height: size)
+        mask.contentsGravity = .resizeAspect
+        mask.contents = OmniAgentMark.image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        layer.mask = mask
+
+        // A soft, blurred rainbow glint — light catching glass and
+        // refracting, not a flag. Pastel and feathered at both ends (clear
+        // -> hue -> clear), then gaussian-blurred so the hues bleed into one
+        // another instead of banding.
+        let band = CAGradientLayer()
+        band.type = .axial
+        band.startPoint = CGPoint(x: 0.5, y: 0)
+        band.endPoint = CGPoint(x: 0.5, y: 1)
+        band.colors = HomeMarkShimmerView.spectrum
+        band.bounds = CGRect(x: 0, y: 0, width: size * 0.55, height: size * 2.4)
+        band.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        band.transform = CATransform3DMakeRotation(-0.45, 0, 0, 1)
+        // Blurring the band, not the mask above it: the icon's own silhouette
+        // stays crisp, only the light inside it goes soft. Only `position`
+        // animates below, never a filter input, so Core Animation rasterises
+        // the blur once and moves the cached result — one offscreen pass,
+        // not one per frame.
+        if let blur = CIFilter(name: "CIGaussianBlur") {
+            blur.setValue(size * 0.22, forKey: kCIInputRadiusKey)
+            band.filters = [blur]
+        }
+        layer.addSublayer(band)
+
+        let travel = size * 2.2
+        let parkedLeft = -travel / 2
+        let parkedRight = size + travel / 2
+        band.position = CGPoint(x: parkedLeft, y: size / 2)
+
+        // One loop, nine seconds: parked off-glyph (invisible, since the mask
+        // has no coverage outside `size`) for a bit over half of it, then a
+        // slow, eased four-second drift across. Repeats forever.
+        let ease = CAMediaTimingFunction(name: .easeInEaseOut)
+        let sweep = CAKeyframeAnimation(keyPath: "position.x")
+        sweep.keyTimes = [0, 0.55, 1.0]
+        sweep.values = [parkedLeft, parkedLeft, parkedRight]
+        sweep.timingFunctions = [ease, ease]
+        sweep.duration = 9
+        sweep.repeatCount = .infinity
+        band.add(sweep, forKey: "sweep")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// Feathered pastel spectrum: clear, eight hues at low saturation and
+    /// high brightness — a glassy reflection, not a rainbow flag — back to
+    /// clear.
+    private static let spectrum: [CGColor] = {
+        let hues: [CGFloat] = [0, 1 / 7, 2 / 7, 3 / 7, 4 / 7, 5 / 7, 6 / 7, 1]
+        let vivid = hues.map { NSColor(hue: $0, saturation: 0.45, brightness: 1, alpha: 0.85).cgColor }
+        let clear = NSColor(hue: 0, saturation: 0, brightness: 1, alpha: 0).cgColor
+        return [clear] + vivid + [clear]
+    }()
+}
+
+/// One entry in `home-suggestions.json`: the card's icon and short title, and
+/// the full prompt a click types into the composer.
+struct HomeSuggestion: Decodable {
+    /// Which of the three things a suggestion is for. The daily pick takes
+    /// one of each, in this order, so the three cards always cover the
+    /// three reasons someone opens Home rather than three variations on one.
+    enum Kind: String, Decodable, CaseIterable {
+        /// Work on the codebase that is open — the current project.
+        case project
+        /// Build something that does not exist yet: a new project, a
+        /// watcher agent, a research report, a news dashboard.
+        case create
+        /// Just talk — a thinking partner, no code. ponytail: these are
+        /// meant to run in a scratch session under
+        /// `~/Documents/OmniAgent/Chats/` rather than a code workspace;
+        /// that lands with Send, which is not wired yet.
+        case chat
+    }
+
+    let kind: Kind
+    let icon: String
+    let title: String
+    let prompt: String
+}
+
+/// A tiny xorshift64 PRNG — deterministic from a seed, unlike
+/// `SystemRandomNumberGenerator`, which is what lets the same day pick the
+/// same three suggestions on every launch.
+private struct SeededGenerator: RandomNumberGenerator {
+    private var state: UInt64
+    init(seed: Int) {
+        state = UInt64(bitPattern: Int64(seed)) &+ 0x9E37_79B9_7F4A_7C15
+        if state == 0 { state = 0x9E37_79B9_7F4A_7C15 }
+    }
+
+    mutating func next() -> UInt64 {
+        state ^= state << 13
+        state ^= state >> 7
+        state ^= state << 17
+        return state
+    }
+}
+
+/// The scratch "workspace" a plain chat runs in — not a project, just a
+/// folder under Documents so a conversation has somewhere to keep its
+/// transcript without landing inside someone's repo. Listed first in Home's
+/// project dropdown (the design's "Chat" row); never in the sidebar, which
+/// only shows the brain's real projects.
+enum HomeChatWorkspace {
+    static let id = "omniagent-home-chat"
+    static let label = "Chat"
+    static var directory: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/OmniAgent/Chats", isDirectory: true).path
+    }
+}
+
 // MARK: - Home
 
 final class HomeSurfaceView: NSView {
+    /// Shared by the card's own corner and the focus glow wrapped around it
+    /// — one number, so the glow's band always sits flush.
+    private static let composerCornerRadius: CGFloat = 14
+
     // Exposed for the tests, which assert the design's words without walking
     // the whole tree.
-    let composerCard = HomeCardView(cornerRadius: 14, fill: ShellPalette.fieldFill)
+    let composerCard = HomeCardView(cornerRadius: HomeSurfaceView.composerCornerRadius, fill: ShellPalette.fieldFill)
     let composerPrompt: HomeComposerField = {
         let field = HomeComposerField()
         field.isBordered = false
@@ -278,29 +416,74 @@ final class HomeSurfaceView: NSView {
                 .font: ShellFont.ui(14),
             ]
         )
-        field.lineBreakMode = .byTruncatingTail
-        field.usesSingleLineMode = true
+        field.allowMultipleLines()
         field.translatesAutoresizingMaskIntoConstraints = false
         return field
     }()
+    /// The composer's own focus ring — `PaneFocusGlowView` is the exact
+    /// class a focused terminal pane uses, reused rather than reimplemented.
+    private let composerGlow = PaneFocusGlowView()
     private(set) var suggestionCards: [HomeCardView] = []
     let viewAllPill = HomePillView("View all")
-    let addWorkspaceLabel = ShellFont.label(
-        "Add workspace",
-        font: ShellFont.ui(12.5),
-        color: ShellPalette.inkTertiary
-    )
     let markImageView = NSImageView()
     let workspaceChipTile = ShellTileView(size: 16, radius: 5, fontSize: 7)
+    /// Stands in for the tile when the Chat scratch workspace is picked.
+    let workspaceChipIcon: NSImageView = {
+        let view = NSImageView()
+        view.image = NSImage(systemSymbolName: "bubble.left", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        view.contentTintColor = ShellPalette.accentBright
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.isHidden = true
+        return view
+    }()
     let workspaceChipName = ShellFont.label(
         font: ShellFont.ui(12.5, .medium),
         color: ShellPalette.inkSecondary
     )
+    /// The session picked (or "New session") for whatever the composer would
+    /// start — updated by whoever owns `onRequestSessionMenu`, same as the
+    /// workspace chip is updated by `refresh`.
+    let sessionChipLabel = ShellFont.label(
+        "New session",
+        font: ShellFont.ui(12.5, .medium),
+        color: ShellPalette.inkSecondary
+    )
+    /// The branch that session would run on — "main", or "main → new-name"
+    /// for a branch to be created off it. With no git repo behind the
+    /// workspace it reads "Set up GitHub" instead of hiding: not every
+    /// OmniAgent user has git, and the chip is where they learn the app can
+    /// connect for them.
+    let branchLabel = ShellFont.label(font: ShellFont.ui(12.5, .medium), color: ShellPalette.inkSecondary)
+    private(set) var branchChip: HomeHotspotView?
+    /// The existing branch the session would use — or, when `newBranchName`
+    /// is set, the one it would branch *from*.
+    private(set) var selectedBranch: String?
+    private(set) var newBranchName: String?
     let versionLabel = ShellFont.label(
         font: ShellFont.ui(13.5, .semibold),
         color: ShellPalette.ink
     )
     private(set) var sendControl: HomeHotspotView?
+    /// Local to the composer, not yet wired to Send — the same "feel now,
+    /// behavior later" position the whole screen started from. Defaults
+    /// match what a fresh terminal pane defaults to.
+    private var selectedEngine = EngineLauncher.defaultEngine()
+    private var selectedModel: ModelChoice?
+    private let engineIconView = NSImageView()
+    private let engineNameLabel = ShellFont.label(font: ShellFont.ui(12.5, .medium), color: ShellPalette.inkSecondary)
+    private let modelLabel = ShellFont.label(font: ShellFont.ui(12.5), color: ShellPalette.inkTertiary)
+    /// Fired with the anchor to pop a menu from — the owner builds it, since
+    /// only it holds the live workspace/session lists (the exact split
+    /// `onRequestEngineMenu`/`onRequestModelMenu` already draw on a pane).
+    var onRequestProjectMenu: ((NSView) -> Void)?
+    var onRequestSessionMenu: ((NSView) -> Void)?
+    var onRequestBranchMenu: ((NSView) -> Void)?
+    /// The suggestion cards' reveal-loop timer — one at a time; pressing a
+    /// second card mid-type invalidates and restarts it.
+    private var typingTimer: Timer?
+    /// Test seam only, same convention as `PaneFocusGlowView.gradientForTesting`.
+    var typingTimerForTesting: Timer? { typingTimer }
 
     private let column = NSStackView()
 
@@ -326,7 +509,14 @@ final class HomeSurfaceView: NSView {
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             // The design's centred 880pt column, giving way on thin windows.
-            column.topAnchor.constraint(equalTo: content.topAnchor, constant: 120),
+            // 200pt of top air (up from the design's original 120) is what
+            // actually reads as "higher than middle" — tying it to the
+            // scroll view's own visible height instead read fine in an
+            // offscreen render, but in the real window it left everything
+            // below the composer sitting in a near-empty stretch down to
+            // the fold. A fixed number can't perfectly centre on every
+            // window height, but it can't produce that dead zone either.
+            column.topAnchor.constraint(equalTo: content.topAnchor, constant: 200),
             column.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -36),
             column.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 40),
@@ -335,8 +525,15 @@ final class HomeSurfaceView: NSView {
         width.priority = .defaultHigh
         width.isActive = true
 
-        buildHero()
-        buildComposer()
+        let heroIcon = buildHeroIcon()
+        column.addArrangedSubview(heroIcon)
+        column.setCustomSpacing(48, after: heroIcon)
+
+        let composer = buildComposer()
+        column.addArrangedSubview(composer)
+        composer.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        column.addSubview(composerGlow, positioned: .above, relativeTo: composer)
+        column.setCustomSpacing(40, after: composer)
         buildSuggestions()
         buildUpNext()
         buildExtend()
@@ -347,80 +544,274 @@ final class HomeSurfaceView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+    deinit { typingTimer?.invalidate() }
+
     /// What the meta strip says a new session lands in. Called on every visit
-    /// so a workspace switch shows up without any observing.
-    func refresh(workspaceID: String?, workspaceName: String?) {
-        let name = workspaceName ?? "No workspace"
+    /// so a workspace switch shows up without any observing. `sessionLabel`
+    /// and `branch` are the owner's freshly computed default (first session,
+    /// or "New session" when the workspace has none) — Home never derives
+    /// them itself, the same split as the workspace name/id it already took.
+    func refresh(workspaceID: String?, workspaceName: String?, sessionLabel: String = "New session", branch: String? = nil) {
+        let name = workspaceName ?? "Select workspace"
         workspaceChipName.stringValue = name
-        workspaceChipTile.apply(
-            initials: ShellPalette.initials(name),
-            gradient: ShellPalette.avatarGradient(forID: workspaceID ?? name)
+        // The Chat scratch workspace wears a speech bubble, not initials —
+        // it is not a project, and "CH" on a gradient would claim it was.
+        // No workspace at all wears neither: "SW" would be a lie too.
+        let isChat = workspaceID == HomeChatWorkspace.id
+        workspaceChipTile.isHidden = isChat || workspaceID == nil
+        workspaceChipIcon.isHidden = !isChat
+        if !isChat {
+            workspaceChipTile.apply(
+                initials: ShellPalette.initials(name),
+                gradient: ShellPalette.avatarGradient(forID: workspaceID ?? name)
+            )
+        }
+        sessionChipLabel.stringValue = sessionLabel
+        updateBranchChip(existing: branch)
+        // Chat is not a project: no branch, and nothing to set up either.
+        branchChip?.isHidden = isChat
+    }
+
+    /// The session chip after a pick from `onRequestSessionMenu`'s menu — the
+    /// owner calls this directly rather than routing back through `refresh`,
+    /// which would also re-derive the workspace chip for no reason.
+    func updateSessionChip(label: String, branch: String?) {
+        sessionChipLabel.stringValue = label
+        updateBranchChip(existing: branch)
+    }
+
+    /// An existing branch picked (or the workspace's current one on
+    /// refresh) — clears any pending new-branch name. `nil` means no git:
+    /// the chip offers to set up GitHub instead.
+    func updateBranchChip(existing branch: String?) {
+        selectedBranch = branch
+        newBranchName = nil
+        branchLabel.stringValue = branch ?? Self.setUpGitHubTitle
+        branchChip?.isHidden = false
+    }
+
+    static let setUpGitHubTitle = "Set up GitHub"
+
+    /// A branch to be created off `base` when the session starts — shown as
+    /// "base → name", the arrow being the whole point: it says "this does
+    /// not exist yet" without a word of explanation.
+    func updateBranchChip(new name: String, from base: String) {
+        selectedBranch = base
+        newBranchName = name
+        branchLabel.stringValue = "\(base) → \(name)"
+        branchChip?.isHidden = false
+    }
+
+    /// Every selectable engine, icon and all, greying the ones not on
+    /// `PATH` and checking the current one — a `HomeDropdown`, not a stock
+    /// `NSMenu`. No paneID, unlike a terminal pane's `engineMenu(for:)`:
+    /// Home has no conversation to lose by switching, so there is nothing
+    /// to ask about first.
+    private func presentEngineMenu(from anchor: NSView) {
+        let rows = EngineLauncher.selectable.map { engine -> HomeDropdown.Row in
+            let installed = EngineLauncher.isInstalled(engine)
+            return HomeDropdown.Row(
+                icon: engine.iconImage,
+                title: installed ? engine.badgeTitle : "\(engine.badgeTitle) — not installed",
+                isCurrent: engine == selectedEngine,
+                isEnabled: installed
+            ) { [weak self] in self?.applyEngine(engine) }
+        }
+        HomeDropdown.show([HomeDropdown.Section(rows: rows)], searchPlaceholder: "Search engines…", from: anchor)
+    }
+
+    private func applyEngine(_ engine: Engine) {
+        selectedEngine = engine
+        engineIconView.image = engine.iconImage
+        engineNameLabel.stringValue = engine.displayName
+        // A new engine invalidates whatever model was picked for the old
+        // one — back to "Auto" rather than carrying over a choice that may
+        // not even exist on the new engine's list.
+        selectedModel = nil
+        modelLabel.stringValue = "Auto"
+    }
+
+    /// `EngineModelList.cached(for:)`, or a "Loading models…" row that
+    /// re-shows itself filled in once the (async, first-run-only) fetch
+    /// lands — identical data source to a pane's `modelMenu(for:)`, just a
+    /// `HomeDropdown` instead of an `NSMenu`.
+    private func presentModelMenu(from anchor: NSView) {
+        let engine = selectedEngine
+        let placeholder = "Search models…"
+        guard engine != .shell else {
+            HomeDropdown.show(
+                [HomeDropdown.Section(rows: [HomeDropdown.Row(title: "Shell has no model", isEnabled: false) {}])],
+                searchPlaceholder: placeholder,
+                from: anchor
+            )
+            return
+        }
+        if let choices = EngineModelList.cached(for: engine) {
+            HomeDropdown.show([modelSection(choices)], searchPlaceholder: placeholder, from: anchor)
+            return
+        }
+        let dropdown = HomeDropdown.show(
+            [HomeDropdown.Section(rows: [HomeDropdown.Row(title: "Loading models…", isEnabled: false) {}])],
+            searchPlaceholder: placeholder,
+            from: anchor
         )
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak dropdown] in
+            let choices = EngineModelList.fetch(for: engine)
+            DispatchQueue.main.async {
+                // The user may have switched engines, or closed the
+                // dropdown (`dropdown` gone), while this was in flight — a
+                // stale answer must not land anywhere. Swapped in place,
+                // never re-presented: no flicker.
+                guard let self, let dropdown, self.selectedEngine == engine else { return }
+                dropdown.sections = choices.isEmpty
+                    ? [HomeDropdown.Section(rows: [
+                        HomeDropdown.Row(title: "Could not reach \(engine.displayName)", isEnabled: false) {},
+                    ])]
+                    : [self.modelSection(choices)]
+            }
+        }
+    }
+
+    private func modelSection(_ choices: [ModelChoice]) -> HomeDropdown.Section {
+        HomeDropdown.Section(rows: choices.map { choice in
+            HomeDropdown.Row(title: choice.label, isCurrent: choice.id == selectedModel?.id) { [weak self] in
+                self?.selectedModel = choice
+                self?.modelLabel.stringValue = choice.label
+            }
+        })
+    }
+
+    /// Clears the composer and reveals `text` one character at a time — the
+    /// suggestion cards' "this is what I'd ask" gesture. One `Timer`;
+    /// pressing another card mid-type invalidates and restarts it rather
+    /// than layering two reveals.
+    private func typeIntoComposer(_ text: String) {
+        typingTimer?.invalidate()
+        composerPrompt.stringValue = ""
+        guard !text.isEmpty else { return }
+        let characters = Array(text)
+        var length = 0
+        let timer = Timer(timeInterval: 0.006, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            length += 1
+            self.composerPrompt.stringValue = String(characters[0..<length])
+            if length == characters.count {
+                timer.invalidate()
+                self.typingTimer = nil
+            }
+        }
+        timer.tolerance = 0.002
+        RunLoop.main.add(timer, forMode: .common)
+        typingTimer = timer
+    }
+
+    /// `home-suggestions.json`, bundled with the app — the pool the daily
+    /// three suggestion cards are drawn from. Empty (not a crash) if the
+    /// resource is somehow missing or malformed.
+    static func loadSuggestionPool() -> [HomeSuggestion] {
+        guard
+            let url = Bundle.main.url(forResource: "home-suggestions", withExtension: "json"),
+            let data = try? Data(contentsOf: url),
+            let pool = try? JSONDecoder().decode([HomeSuggestion].self, from: data)
+        else { return [] }
+        return pool
+    }
+
+    /// One suggestion per `Kind`, in `Kind.allCases` order (project, create,
+    /// chat), deterministic for a given `seed` — the call site seeds with
+    /// today's date so the same three show all day and a fresh three appear
+    /// tomorrow, with no state to persist. A kind with nothing in the pool
+    /// is simply skipped rather than padded from another.
+    static func dailySuggestions(
+        from pool: [HomeSuggestion],
+        seed: Int = Calendar.current.ordinality(of: .day, in: .era, for: Date()) ?? 0
+    ) -> [HomeSuggestion] {
+        var rng = SeededGenerator(seed: seed)
+        return HomeSuggestion.Kind.allCases.compactMap { kind in
+            pool.filter { $0.kind == kind }.randomElement(using: &rng)
+        }
     }
 
     // MARK: Sections
 
-    private func buildHero() {
-        // The OmniAgent mark on the design's indigo 150° tile — the brand
-        // pair, not a workspace's hashed colour.
-        let tile = NSView()
-        tile.translatesAutoresizingMaskIntoConstraints = false
-        tile.wantsLayer = true
-        let gradient = CAGradientLayer()
-        gradient.colors = [ShellPalette.avatarGradients[0].0, ShellPalette.avatarGradients[0].1]
-            .map(\.cgColor)
-        gradient.startPoint = CGPoint(x: 0.25, y: 1)
-        gradient.endPoint = CGPoint(x: 0.75, y: 0)
-        gradient.cornerRadius = 16
-        gradient.cornerCurve = .continuous
-        tile.layer = gradient
-        tile.layer?.shadowColor = ShellPalette.accent.cgColor
-        tile.layer?.shadowOpacity = 0.18
-        tile.layer?.shadowRadius = 30
-        tile.layer?.shadowOffset = .zero
-        tile.layer?.masksToBounds = false
+    private func buildHeroIcon() -> NSView {
+        // The OmniAgent mark alone — no tile, no fill. The glow comes from
+        // the glyph's own alpha (no `shadowPath`, so it hugs the mark's
+        // shape rather than a box), and a rainbow beam drifts through the
+        // same silhouette every 9 seconds via `HomeMarkShimmerView`.
+        let size: CGFloat = 44
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
 
         markImageView.image = OmniAgentMark.image
         markImageView.contentTintColor = .white
         markImageView.imageScaling = .scaleProportionallyUpOrDown
         markImageView.translatesAutoresizingMaskIntoConstraints = false
-        tile.addSubview(markImageView)
+        markImageView.wantsLayer = true
+        markImageView.layer?.shadowColor = ShellPalette.accent.cgColor
+        markImageView.layer?.shadowOpacity = 0.55
+        markImageView.layer?.shadowRadius = 22
+        markImageView.layer?.shadowOffset = .zero
+
+        let shimmer = HomeMarkShimmerView(size: size)
+
+        container.addSubview(markImageView)
+        container.addSubview(shimmer)
         NSLayoutConstraint.activate([
-            tile.widthAnchor.constraint(equalToConstant: 64),
-            tile.heightAnchor.constraint(equalToConstant: 64),
-            markImageView.widthAnchor.constraint(equalToConstant: 34),
-            markImageView.heightAnchor.constraint(equalToConstant: 34),
-            markImageView.centerXAnchor.constraint(equalTo: tile.centerXAnchor),
-            markImageView.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+            container.widthAnchor.constraint(equalToConstant: size),
+            container.heightAnchor.constraint(equalToConstant: size),
+            markImageView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            markImageView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            markImageView.topAnchor.constraint(equalTo: container.topAnchor),
+            markImageView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            shimmer.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            shimmer.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            shimmer.topAnchor.constraint(equalTo: container.topAnchor),
+            shimmer.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
-        column.addArrangedSubview(tile)
-        column.setCustomSpacing(48, after: tile)
+        return container
     }
 
-    private func buildComposer() {
+    private func buildComposer() -> NSView {
         composerPrompt.onFocusChange = { [weak self] focused in
-            self?.composerCard.setFocused(focused)
+            guard let self else { return }
+            self.composerCard.setFocused(focused)
+            // The same glow a focused terminal pane wears in the workspace
+            // grid (`PaneFocusGlowView`) — not a lookalike, the identical
+            // class and animation, so the composer reads as the same kind
+            // of "this is the live one" focus the rest of the app uses.
+            if focused {
+                self.composerGlow.apply(
+                    around: self.composerCard.frame,
+                    cornerRadius: Self.composerCornerRadius,
+                    edge: ShellPalette.accent,
+                    peak: ShellPalette.accentPurple,
+                    paneID: "home-composer"
+                )
+            } else {
+                self.composerGlow.apply(around: nil, cornerRadius: 0, edge: nil, peak: nil, paneID: nil)
+            }
         }
 
-        let engine = EngineLauncher.defaultEngine()
-        let engineIcon = NSImageView()
-        engineIcon.image = engine.iconImage
-        engineIcon.contentTintColor = ShellPalette.inkSecondary
-        engineIcon.imageScaling = .scaleProportionallyDown
-        engineIcon.translatesAutoresizingMaskIntoConstraints = false
-        let engineName = ShellFont.label(
-            engine.displayName,
-            font: ShellFont.ui(12.5, .medium),
-            color: ShellPalette.inkSecondary
-        )
-        let chipStack = NSStackView(views: [engineIcon, engineName])
+        engineIconView.image = selectedEngine.iconImage
+        // Full ink, never a muted grey: brand marks ignore the tint anyway,
+        // and the template ones (Shell, Copilot) should read as vividly as
+        // the coloured ones beside them.
+        engineIconView.contentTintColor = ShellPalette.ink
+        engineIconView.imageScaling = .scaleProportionallyDown
+        engineIconView.translatesAutoresizingMaskIntoConstraints = false
+        engineNameLabel.stringValue = selectedEngine.displayName
+        let chipStack = NSStackView(views: [engineIconView, engineNameLabel])
         chipStack.orientation = .horizontal
         chipStack.spacing = 7
         let engineChip = HomeHotspotView(
             wrapping: chipStack,
-            accessibilityLabel: "Engine: \(engine.displayName)"
+            accessibilityLabel: "Engine: \(selectedEngine.displayName)"
         )
-        engineChip.onPress = {}
+        engineChip.onPress = { [weak self, weak engineChip] in
+            guard let self, let engineChip else { return }
+            self.presentEngineMenu(from: engineChip)
+        }
 
         let plus = HomeHotspotView(
             wrapping: symbol("plus", pointSize: 13, weight: .medium, color: ShellPalette.inkTertiary),
@@ -428,11 +819,15 @@ final class HomeSurfaceView: NSView {
         )
         plus.onPress = {}
 
+        modelLabel.stringValue = "Auto"
         let auto = HomeHotspotView(
-            wrapping: ShellFont.label("Auto", font: ShellFont.ui(12.5), color: ShellPalette.inkTertiary),
+            wrapping: modelLabel,
             accessibilityLabel: "Model: Auto"
         )
-        auto.onPress = {}
+        auto.onPress = { [weak self, weak auto] in
+            guard let self, let auto else { return }
+            self.presentModelMenu(from: auto)
+        }
 
         let sendBox = NSView()
         sendBox.translatesAutoresizingMaskIntoConstraints = false
@@ -466,9 +861,13 @@ final class HomeSurfaceView: NSView {
         composerCard.addSubview(controls)
         composerCard.addSubview(meta)
         composerPrompt.translatesAutoresizingMaskIntoConstraints = false
+        // Three lines tall at rest, scrolling internally past that — see
+        // `allowMultipleLines()`'s own comment on why a fixed height is what
+        // makes the field editor scroll instead of the field growing.
+        let promptLineHeight = (composerPrompt.font ?? ShellFont.ui(14)).boundingRectForFont.height.rounded(.up)
         NSLayoutConstraint.activate([
-            engineIcon.widthAnchor.constraint(equalToConstant: 16),
-            engineIcon.heightAnchor.constraint(equalToConstant: 16),
+            engineIconView.widthAnchor.constraint(equalToConstant: 16),
+            engineIconView.heightAnchor.constraint(equalToConstant: 16),
             separator.widthAnchor.constraint(equalToConstant: 1),
             separator.heightAnchor.constraint(equalToConstant: 16),
             sendBox.widthAnchor.constraint(equalToConstant: 32),
@@ -479,6 +878,7 @@ final class HomeSurfaceView: NSView {
             composerPrompt.topAnchor.constraint(equalTo: composerCard.topAnchor, constant: 20),
             composerPrompt.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 20),
             composerPrompt.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -20),
+            composerPrompt.heightAnchor.constraint(equalToConstant: promptLineHeight * 3),
             controls.topAnchor.constraint(equalTo: composerPrompt.bottomAnchor, constant: 18),
             controls.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 16),
             controls.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -14),
@@ -488,14 +888,16 @@ final class HomeSurfaceView: NSView {
             meta.bottomAnchor.constraint(equalTo: composerCard.bottomAnchor),
         ])
 
-        column.addArrangedSubview(composerCard)
-        composerCard.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-        column.setCustomSpacing(40, after: composerCard)
+        return composerCard
     }
 
     /// The strip under the composer: where a session would land. ponytail:
     /// the design's worktree and branch chips wait until Home can actually
     /// make worktrees / read the branch.
+    /// The strip under the composer: the workspace a new session would land
+    /// in, which of its sessions (or a new one), and the branch that implies
+    /// — "Add workspace" is gone, folded into the project dropdown's own
+    /// "Local folder or repository…" entry.
     private func buildComposerMeta() -> NSView {
         let strip = NSView()
         strip.translatesAutoresizingMaskIntoConstraints = false
@@ -503,19 +905,50 @@ final class HomeSurfaceView: NSView {
         strip.layer?.backgroundColor = ShellPalette.backRowFill.cgColor
 
         let rule = ShellSeparator()
-        let addIcon = symbol("plus", pointSize: 10, weight: .medium, color: ShellPalette.inkMuted)
-        let addStack = NSStackView(views: [addIcon, addWorkspaceLabel])
-        addStack.orientation = .horizontal
-        addStack.spacing = 6
-        let add = HomeHotspotView(wrapping: addStack, accessibilityLabel: "Add workspace")
-        add.onPress = {}
-        let chip = NSStackView(views: [workspaceChipTile, workspaceChipName])
-        chip.orientation = .horizontal
-        chip.spacing = 7
 
-        let row = NSStackView(views: [chip, NSView(), add])
+        let projectStack = NSStackView(views: [workspaceChipTile, workspaceChipIcon, workspaceChipName])
+        projectStack.orientation = .horizontal
+        projectStack.spacing = 7
+        let project = HomeHotspotView(wrapping: projectStack, accessibilityLabel: "Project")
+        project.onPress = { [weak self, weak project] in
+            guard let self, let project else { return }
+            self.onRequestProjectMenu?(project)
+        }
+
+        let divider = NSView()
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = ShellPalette.cardStroke.cgColor
+
+        let chevron = symbol("chevron.up.chevron.down", pointSize: 8.5, weight: .semibold, color: ShellPalette.inkMuted)
+        let sessionStack = NSStackView(views: [sessionChipLabel, chevron])
+        sessionStack.orientation = .horizontal
+        sessionStack.spacing = 5
+        let session = HomeHotspotView(wrapping: sessionStack, accessibilityLabel: "Session")
+        session.onPress = { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.onRequestSessionMenu?(session)
+        }
+
+        // The branch chip — same button treatment as the session chip, with
+        // the design's branch glyph in front. Hidden until a git repo says
+        // otherwise (`updateBranchChip`).
+        let branchIcon = symbol("arrow.triangle.branch", pointSize: 11, weight: .medium, color: ShellPalette.inkTertiary)
+        let branchStack = NSStackView(views: [branchIcon, branchLabel])
+        branchStack.orientation = .horizontal
+        branchStack.spacing = 6
+        let branch = HomeHotspotView(wrapping: branchStack, accessibilityLabel: "Branch")
+        branch.onPress = { [weak self, weak branch] in
+            guard let self, let branch else { return }
+            self.onRequestBranchMenu?(branch)
+        }
+        branch.isHidden = true
+        branchChip = branch
+
+        let row = NSStackView(views: [project, divider, session, branch, NSView()])
         row.orientation = .horizontal
         row.alignment = .centerY
+        row.spacing = 10
         row.translatesAutoresizingMaskIntoConstraints = false
         strip.addSubview(rule)
         strip.addSubview(row)
@@ -523,6 +956,8 @@ final class HomeSurfaceView: NSView {
             rule.topAnchor.constraint(equalTo: strip.topAnchor),
             rule.leadingAnchor.constraint(equalTo: strip.leadingAnchor),
             rule.trailingAnchor.constraint(equalTo: strip.trailingAnchor),
+            divider.widthAnchor.constraint(equalToConstant: 1),
+            divider.heightAnchor.constraint(equalToConstant: 14),
             row.topAnchor.constraint(equalTo: strip.topAnchor, constant: 9),
             row.bottomAnchor.constraint(equalTo: strip.bottomAnchor, constant: -9),
             row.leadingAnchor.constraint(equalTo: strip.leadingAnchor, constant: 16),
@@ -533,16 +968,12 @@ final class HomeSurfaceView: NSView {
     }
 
     private func buildSuggestions() {
-        let suggestions: [(String, String)] = [
-            ("chevron.left.forwardslash.chevron.right", "Review recent changes and suggest improvements."),
-            ("book", "Update or generate documentation from the source."),
-            ("checkmark.shield", "Scan for security vulnerabilities and fix them."),
-        ]
-        let cards = suggestions.map { name, text in
+        let suggestions = HomeSurfaceView.dailySuggestions(from: HomeSurfaceView.loadSuggestionPool())
+        let cards = suggestions.map { suggestion in
             let card = HomeCardView()
-            card.onPress = {}
-            let icon = symbol(name, pointSize: 15, weight: .regular, color: ShellPalette.inkTertiary)
-            let body = wrapping(text, font: ShellFont.ui(13), color: ShellPalette.inkSecondary)
+            card.onPress = { [weak self] in self?.typeIntoComposer(suggestion.prompt) }
+            let icon = symbol(suggestion.icon, pointSize: 15, weight: .regular, color: ShellPalette.inkTertiary)
+            let body = wrapping(suggestion.title, font: ShellFont.ui(13), color: ShellPalette.inkSecondary)
             card.addSubview(icon)
             card.addSubview(body)
             NSLayoutConstraint.activate([
@@ -562,6 +993,14 @@ final class HomeSurfaceView: NSView {
         row.spacing = 16
         column.addArrangedSubview(row)
         row.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        // Equal height, not just equal width — `NSStackView.alignment` has
+        // no AppKit "fill the cross axis" case (that's a UIKit-only value),
+        // so a two-line title must be kept from leaving its neighbours
+        // shorter by pinning every card's height to the first one's. Only
+        // legal now that every card shares `row`'s hierarchy.
+        for card in cards.dropFirst() {
+            card.heightAnchor.constraint(equalTo: cards[0].heightAnchor).isActive = true
+        }
         column.setCustomSpacing(72, after: row)
     }
 
@@ -639,6 +1078,12 @@ final class HomeSurfaceView: NSView {
         row.spacing = 16
         column.addArrangedSubview(row)
         row.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        // Same reasoning as `buildSuggestions()`'s cards: equal height, pinned
+        // card-to-card since `NSStackView.alignment` has no AppKit fill case.
+        // Only legal now that every card shares `row`'s hierarchy.
+        for card in cards.dropFirst() {
+            card.heightAnchor.constraint(equalTo: cards[0].heightAnchor).isActive = true
+        }
         column.setCustomSpacing(72, after: row)
     }
 

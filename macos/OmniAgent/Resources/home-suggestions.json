@@ -1,0 +1,130 @@
+[
+  {
+    "kind": "project",
+    "icon": "doc.text.magnifyingglass",
+    "title": "Summarize this project for someone new to the team",
+    "prompt": "Summarize this project's purpose, architecture, and key components for someone joining the team. Include the tech stack, how modules connect, and where to start reading the code."
+  },
+  {
+    "kind": "project",
+    "icon": "ladybug",
+    "title": "Find and fix the most impactful bug",
+    "prompt": "Look for the bug in this codebase most likely to cause real user-facing problems — a crash, a data-loss path, a race condition, or a broken core flow. Fix it, add a regression test, and explain the root cause."
+  },
+  {
+    "kind": "project",
+    "icon": "testtube.2",
+    "title": "Add tests for the most critical untested paths",
+    "prompt": "Find the most critical code paths without test coverage and write comprehensive tests for them. Prioritize business logic, auth, and data mutation paths. Use the project's existing test framework and conventions."
+  },
+  {
+    "kind": "project",
+    "icon": "doc.badge.clock",
+    "title": "Generate a changelog from recent commits grouped by type",
+    "prompt": "Generate a changelog from recent git commits. Group entries by type (features, bug fixes, chores, breaking changes) and write each entry in user-facing language. Format it as a markdown CHANGELOG.md entry with the current date."
+  },
+  {
+    "kind": "project",
+    "icon": "chevron.left.forwardslash.chevron.right",
+    "title": "Review my recent changes and suggest improvements",
+    "prompt": "Review the changes on this branch and suggest concrete improvements — correctness issues, missed edge cases, and opportunities to simplify. Point to specific files and lines, and explain the reasoning behind each suggestion."
+  },
+  {
+    "kind": "project",
+    "icon": "checkmark.shield",
+    "title": "Scan for security vulnerabilities and fix them",
+    "prompt": "Scan the codebase for security vulnerabilities — injection risks, exposed secrets, unsafe deserialization, missing input validation, and outdated dependencies with known CVEs. Fix what you find and explain each fix."
+  },
+  {
+    "kind": "project",
+    "icon": "signpost.right",
+    "title": "Tell me what to work on next in this project",
+    "prompt": "Look at this project's recent commits, open TODOs, failing or missing tests, and rough edges, then propose the three most valuable things to do next — ranked, with the reasoning and a rough size for each. Then start on the first one with me."
+  },
+
+  {
+    "kind": "create",
+    "icon": "eye",
+    "title": "Build an agent that watches something for me",
+    "prompt": "Build a small agent that monitors something for me and tells me when it changes — a web page, an API, a price, a repository, a status page. Ask me what to watch and how I want to be told (macOS notification, email, a log), then set up the project, the check loop, and schedule it to run on its own."
+  },
+  {
+    "kind": "create",
+    "icon": "newspaper",
+    "title": "Latest news on a topic, as an interactive dashboard",
+    "prompt": "Research the latest news on a topic I care about and build an interactive HTML dashboard I can open locally — headlines with sources, a timeline, and filters by source and date. Ask me the topic first, then gather the news, build the page, and open it for me."
+  },
+  {
+    "kind": "create",
+    "icon": "book.pages",
+    "title": "Research a topic deeply and write me a report",
+    "prompt": "Research a topic deeply — compare multiple sources, note where they disagree, and separate established facts from speculation. Ask me the topic, then produce a well-structured markdown report with citations and a short executive summary at the top."
+  },
+  {
+    "kind": "create",
+    "icon": "plus.square.on.square",
+    "title": "Start a brand new project from an idea",
+    "prompt": "Start a brand new project from an idea. Ask me what I want to build, recommend a stack with your reasoning, scaffold it with a working first version, tests, and a README, and make the first commit. Then tell me what the natural next step is."
+  },
+  {
+    "kind": "create",
+    "icon": "terminal",
+    "title": "Build a CLI tool for a task I keep repeating",
+    "prompt": "Build a small command-line tool that automates a repetitive task for me. Ask me what the task is and what the input and output look like, then write the tool with a --help, tests, and install instructions, and run it on a real example."
+  },
+  {
+    "kind": "create",
+    "icon": "sun.horizon",
+    "title": "Set up a daily briefing agent",
+    "prompt": "Create a daily briefing agent that gathers what I care about each morning — top news on my topics, weather, anything on my calendar — into one clean HTML page I can open. Ask me which sources matter and where to save it, then build it and schedule it to run every morning."
+  },
+  {
+    "kind": "create",
+    "icon": "bolt.square",
+    "title": "Turn an idea into a working prototype today",
+    "prompt": "Turn an idea into a working prototype I can try today — a single-page web app I can open in the browser, no backend unless it truly needs one. Ask me what it should do, build the smallest version that actually works, open it, and iterate with me from there."
+  },
+
+  {
+    "kind": "chat",
+    "icon": "bubble.left.and.bubble.right",
+    "title": "I just want to talk something through",
+    "prompt": "I have something on my mind and want a thinking partner, not a coder. Ask me what it is, listen, and help me think it through — questions first, opinions when I ask for them."
+  },
+  {
+    "kind": "chat",
+    "icon": "arrow.triangle.branch",
+    "title": "Help me make a decision",
+    "prompt": "Help me make a decision. I'll describe the options and what matters to me. Push back on my assumptions, surface what I might be missing, and then help me pick — and tell me what would change your mind."
+  },
+  {
+    "kind": "chat",
+    "icon": "graduationcap",
+    "title": "Teach me something I should understand better",
+    "prompt": "Teach me something. Ask me what I want to understand better — or pick a concept you think I'd benefit from — explain it clearly with concrete examples, check my understanding as we go, and quiz me at the end."
+  },
+  {
+    "kind": "chat",
+    "icon": "lightbulb",
+    "title": "Brainstorm with me",
+    "prompt": "Brainstorm with me. I'll give you a rough idea; generate ten different directions it could go, including a couple of unexpected ones, then help me narrow to the two strongest and say why."
+  },
+  {
+    "kind": "chat",
+    "icon": "questionmark.bubble",
+    "title": "Rubber-duck a problem I'm stuck on",
+    "prompt": "I'm stuck on a problem. Ask me questions until the problem is genuinely clear to both of us — don't propose solutions yet — then suggest a few angles I haven't tried."
+  },
+  {
+    "kind": "chat",
+    "icon": "calendar",
+    "title": "Plan my day with me",
+    "prompt": "Plan my day with me. Ask what I need to get done and what's fixed on the calendar, help me prioritize honestly, and lay out a realistic plan with breaks — then check in on what I'll do first."
+  },
+  {
+    "kind": "chat",
+    "icon": "pencil.line",
+    "title": "Write something with me",
+    "prompt": "Help me write something — an email, a post, a doc, a message I'm unsure how to phrase. Ask what it's for and who's reading it, draft it, and then refine it with me until it sounds like me."
+  }
+]

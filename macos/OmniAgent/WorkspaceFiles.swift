@@ -471,6 +471,20 @@ enum GitBranch {
         guard let root = GitStatus.repoRoot(for: url) else { return nil }
         return current(repoRoot: root)
     }
+
+    /// Every local branch, most recently committed-to first — the order a
+    /// picker wants, since the branch you touched last is the one you most
+    /// likely want again. Asks `git` rather than walking `.git/refs/heads`
+    /// by hand: packed refs and worktree-checked-out branches both live
+    /// elsewhere, and `git` already knows. Empty for any failure, same rule
+    /// as `GitStatus.runGit`.
+    static func all(repoRoot: URL) -> [String] {
+        guard let output = GitStatus.runGit(
+            ["branch", "--sort=-committerdate", "--format=%(refname:short)"],
+            in: repoRoot
+        ) else { return [] }
+        return output.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+    }
 }
 
 /// One commit, as the hover card's git tab lists it.

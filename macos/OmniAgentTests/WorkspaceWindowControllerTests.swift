@@ -2166,6 +2166,22 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         }
     }
 
+    /// Home pre-selects a workspace only when there is exactly one to
+    /// choose from; with several it asks, and a pick the user made stays
+    /// put across visits until that workspace is closed.
+    func testHomePreselectsOnlyTheSoleOpenWorkspaceAndKeepsAPick() {
+        let a = BrainProjectSummary(id: "a", label: "A", path: nil)
+        let b = BrainProjectSummary(id: "b", label: "B", path: nil)
+        typealias C = WorkspaceWindowController
+
+        XCTAssertEqual(C.homeWorkspace(keeping: nil, open: [a]), "a", "one open: it is the pick")
+        XCTAssertNil(C.homeWorkspace(keeping: nil, open: [a, b]), "several: ask, never guess")
+        XCTAssertNil(C.homeWorkspace(keeping: nil, open: []))
+        XCTAssertEqual(C.homeWorkspace(keeping: "b", open: [a, b]), "b", "the user's pick sticks")
+        XCTAssertEqual(C.homeWorkspace(keeping: HomeChatWorkspace.id, open: [a, b]), HomeChatWorkspace.id)
+        XCTAssertEqual(C.homeWorkspace(keeping: "b", open: [a]), "a", "a closed pick falls back like a fresh visit")
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(

@@ -149,6 +149,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The open workspace — what the sidebar's sessions tree is scoped to.
     /// `nil` means "none open".
     private(set) var selectedProjectID: String?
+    /// What Home's own project/session dropdowns are pointed at. Starts
+    /// empty on every launch — "Select workspace", nothing pre-picked —
+    /// unless exactly one workspace is open, the only case where a default
+    /// cannot be wrong. A pick from Home's own menu then sticks for as long
+    /// as the app lives, and only ever touches this, never
+    /// `selectedProjectID` itself: Home is for choosing what a session
+    /// *would* start with, not for jumping to one — see
+    /// `onRequestProjectMenu`'s own comment.
+    private var homeSelectedProjectID: String?
     let palette = CommandPaletteController()
     private var readySessions: Set<String> = []
     /// The `layout` read has been sent — a later reconnect must re-attach the
@@ -612,6 +621,101 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             )
         }
         shellSidebar.onAddLocalFolder = { [weak self] in self?.openWorkspaceFolder(nil) }
+        // Home's project/session dropdowns — `HomeDropdown`, the same
+        // glass-and-icons look every other Home chip uses, not the
+        // sidebar's stock `NSMenu`. Home only ever picks *what a session
+        // would start with*, never starts one: clicking a workspace here
+        // must not jump you off Home the way the sidebar's identically-
+        // shaped "+" menu does, so this targets `homeSelectedProjectID`,
+        // never `selectedProjectID`/`startSession` — see `homeSessions(for:)`
+        // for the session list's source.
+        homeView.onRequestProjectMenu = { [weak self] anchor in
+            guard let self else { return }
+            let current = homeSelectedProjectID
+            let chatIcon = NSImage(systemSymbolName: "bubble.left", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+            let chatRow = HomeDropdown.Row(
+                icon: chatIcon, title: HomeChatWorkspace.label, isCurrent: current == HomeChatWorkspace.id
+            ) { [weak self] in self?.selectHomeWorkspace(HomeChatWorkspace.id) }
+            let workspaceRows = Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs).map { entry in
+                HomeDropdown.Row(title: entry.label, isCurrent: entry.id == current) { [weak self] in
+                    self?.selectHomeWorkspace(entry.id)
+                }
+            }
+            HomeDropdown.show([
+                HomeDropdown.Section(rows: [chatRow]),
+                HomeDropdown.Section(header: "Repositories", rows: workspaceRows),
+                HomeDropdown.Section(header: "Add project from", rows: [
+                    HomeDropdown.Row(title: "Local folder or repository…") { [weak self] in
+                        self?.openWorkspaceFolder(nil)
+                    },
+                    HomeDropdown.Row(title: "Resume remote session…", isEnabled: false) {},
+                ]),
+            ], searchPlaceholder: "Search repositories…", from: anchor)
+        }
+        homeView.onRequestSessionMenu = { [weak self] anchor in
+            guard let self else { return }
+            let project = homeSelectedProjectID
+            let sessions = homeSessions(for: project)
+            let sessionRows = sessions.map { session in
+                HomeDropdown.Row(title: session.label) { [weak self] in
+                    self?.homeView.updateSessionChip(label: session.label, branch: GitBranch.forDirectory(session.cwd))
+                }
+            }
+            let newSessionRow = HomeDropdown.Row(title: "Create new session") { [weak self] in
+                guard let self else { return }
+                let branch = workspaceDirectory(for: project).flatMap(GitBranch.forDirectory)
+                homeView.updateSessionChip(label: "New session", branch: branch)
+            }
+            HomeDropdown.show(
+                [HomeDropdown.Section(rows: sessionRows + [newSessionRow])],
+                searchPlaceholder: "Search sessions…",
+                from: anchor
+            )
+        }
+        // Every local branch, current one checked; typing a name no branch
+        // has offers to create it off the one currently picked — so "from
+        // any other branch" is: pick that branch first, then type the new
+        // name. Creation itself is deferred to Send (nothing starts a
+        // session from Home yet); the chip's "base → name" is the promise.
+        //
+        // Above the local branches: GitHub. Until the user connects — an
+        // existing `gh` login or our GitHub App — the section says so and
+        // offers "Set up GitHub…", the one thing a user without git can do.
+        homeView.onRequestBranchMenu = { [weak self] anchor in
+            guard let self else { return }
+            let gitHub = HomeDropdown.Section(header: "GitHub · Not connected", rows: [
+                // ponytail: opens the GitHub settings page once it exists; a
+                // plain dismiss until then.
+                HomeDropdown.Row(title: "\(HomeSurfaceView.setUpGitHubTitle)…") {},
+            ])
+            guard let directory = workspaceDirectory(for: homeSelectedProjectID),
+                  let root = GitStatus.repoRoot(for: URL(fileURLWithPath: directory, isDirectory: true))
+            else {
+                HomeDropdown.show([gitHub], searchPlaceholder: "Search branches…", from: anchor)
+                return
+            }
+            let base = homeView.selectedBranch ?? GitBranch.current(repoRoot: root) ?? "main"
+            let branches = GitBranch.all(repoRoot: root)
+            let isPendingNew = homeView.newBranchName != nil
+            let rows = branches.map { name in
+                HomeDropdown.Row(title: name, isCurrent: name == base && !isPendingNew) { [weak self] in
+                    self?.homeView.updateBranchChip(existing: name)
+                }
+            }
+            let dropdown = HomeDropdown.show(
+                [gitHub, HomeDropdown.Section(header: "Local branches", rows: rows)],
+                searchPlaceholder: "Search branches…", from: anchor
+            )
+            let plus = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+            dropdown.extraRows = { [weak self] query in
+                guard !branches.contains(query) else { return [] }
+                return [HomeDropdown.Row(icon: plus, title: "Create “\(query)” from \(base)") {
+                    self?.homeView.updateBranchChip(new: query, from: base)
+                }]
+            }
+        }
         // A workspace row's right-click: the controller builds the menu
         // because only it can resolve the row to a directory, a GitHub
         // remote and a stored customization.
@@ -851,9 +955,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Home has a real screen now; the placeholder covers To Do List only.
         homeView.isHidden = destination != .home
         if destination == .home {
+            homeSelectedProjectID = Self.homeWorkspace(
+                keeping: homeSelectedProjectID,
+                open: Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs)
+            )
+            let sessions = homeSessions(for: homeSelectedProjectID)
+            let branchDirectory = sessions.first?.cwd ?? workspaceDirectory(for: homeSelectedProjectID)
             homeView.refresh(
-                workspaceID: selectedProjectID,
-                workspaceName: workspaces.first { $0.id == selectedProjectID }?.label
+                workspaceID: homeSelectedProjectID,
+                workspaceName: workspaces.first { $0.id == homeSelectedProjectID }?.label,
+                sessionLabel: sessions.first?.label ?? "New session",
+                branch: branchDirectory.flatMap(GitBranch.forDirectory)
             )
         }
         placeholder.isHidden = destination != .todo
@@ -4795,6 +4907,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     func workspaceDirectory(for project: String?) -> String? {
         let id = (project?.isEmpty == false) ? project : selectedProjectID
         guard let id else { return nil }
+        // Home's Chat scratch workspace is not in the brain — it is a fixed
+        // folder under Documents, resolved here so anything asking "where
+        // would this run?" gets a real answer for it too.
+        if id == HomeChatWorkspace.id { return HomeChatWorkspace.directory }
         if let path = workspaces.first(where: { $0.id == id })?.path, !path.isEmpty {
             return path
         }
@@ -4803,6 +4919,44 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             .compactMap { workspace.descriptor(for: $0) }
             .first { $0.project == id && !$0.cwd.isEmpty }?
             .cwd
+    }
+
+    /// A workspace's sessions, first-created-first — Home's session picker
+    /// and its default ("the first session") both read this, and it is
+    /// deliberately the same grouping `reloadOutline()` feeds the sidebar,
+    /// so the two never disagree about what a workspace's sessions are.
+    func homeSessions(for project: String?) -> [SessionGroupNode] {
+        guard let project else { return [] }
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        return SessionOutline.group(panes, focusedPaneID: nil).first { $0.project == project }?.sessions ?? []
+    }
+
+    /// Home's workspace on a visit: the user's own pick, as long as it is
+    /// still open (Chat always is); otherwise the sole open workspace, or
+    /// nothing at all — never a guess between several.
+    static func homeWorkspace(keeping current: String?, open: [BrainProjectSummary]) -> String? {
+        if let current, current == HomeChatWorkspace.id || open.contains(where: { $0.id == current }) {
+            return current
+        }
+        return open.count == 1 ? open[0].id : nil
+    }
+
+    /// A pick from Home's own project menu — updates the chips and the
+    /// session/branch that go with the new workspace, and nothing else: no
+    /// `startSession`, no touching `selectedProjectID`, no leaving Home.
+    private func selectHomeWorkspace(_ id: String) {
+        homeSelectedProjectID = id
+        let sessions = homeSessions(for: id)
+        let branchDirectory = sessions.first?.cwd ?? workspaceDirectory(for: id)
+        let name = id == HomeChatWorkspace.id
+            ? HomeChatWorkspace.label
+            : workspaces.first { $0.id == id }?.label
+        homeView.refresh(
+            workspaceID: id,
+            workspaceName: name,
+            sessionLabel: sessions.first?.label ?? "New session",
+            branch: branchDirectory.flatMap(GitBranch.forDirectory)
+        )
     }
 
     private func attach(_ sessionID: String) {

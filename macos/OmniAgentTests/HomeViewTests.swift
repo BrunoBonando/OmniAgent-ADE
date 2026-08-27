@@ -52,20 +52,22 @@ final class HomeViewTests: XCTestCase {
     }
 
     /// The design's three suggestion cards are all present, and the workspace
-    /// chip follows the selected workspace — with a calm fallback when none
-    /// is selected.
+    /// chip follows the selected workspace — asking for one, tile-less, when
+    /// none is selected.
     func testTheSuggestionsAndTheWorkspaceChip() {
         let home = makeHome()
         XCTAssertEqual(home.suggestionCards.count, 3)
         XCTAssertEqual(home.workspaceChipName.stringValue, "OmniAgent-ADE")
+        XCTAssertFalse(home.workspaceChipTile.isHidden)
 
         home.refresh(workspaceID: nil, workspaceName: nil)
-        XCTAssertEqual(home.workspaceChipName.stringValue, "No workspace")
+        XCTAssertEqual(home.workspaceChipName.stringValue, "Select workspace")
+        XCTAssertTrue(home.workspaceChipTile.isHidden, "no initials for a workspace that is not there")
     }
 
     /// A suggestion card and a pill wear the brighter fill under the pointer
-    /// and put it back when it leaves; the pointer's paint never fires an
-    /// effect because every press on this screen is an empty closure.
+    /// and put it back when it leaves — hover painting is independent of
+    /// what a press does, wired or (still, for these two) inert.
     func testHoverPaintsAndUnpaintsTheInteractiveFills() throws {
         let home = makeHome()
         let card = try XCTUnwrap(home.suggestionCards.first)
@@ -82,10 +84,108 @@ final class HomeViewTests: XCTestCase {
         home.viewAllPill.setHovered(false)
         XCTAssertEqual(home.viewAllPill.layer?.backgroundColor, ShellPalette.iconTile.cgColor)
 
-        // Inert by decision: pressing must be possible and must do nothing.
-        card.onPress?()
+        // Still inert by decision: pressing must be possible and must do
+        // nothing. The suggestion card's own press is wired now — see
+        // `testASuggestionCardTypesItsPromptIntoTheComposer`.
         home.viewAllPill.onPress?()
         home.sendControl?.onPress?()
+    }
+
+    /// A suggestion card fills the composer with its full prompt, one
+    /// character at a time, replacing whatever draft was already there —
+    /// proven by running the reveal loop to completion by hand instead of
+    /// waiting on the real clock.
+    func testASuggestionCardTypesItsPromptIntoTheComposer() throws {
+        let home = makeHome()
+        home.composerPrompt.stringValue = "leftover draft"
+        let card = try XCTUnwrap(home.suggestionCards.first)
+
+        card.onPress?()
+        XCTAssertEqual(home.composerPrompt.stringValue, "", "the old draft is cleared immediately")
+        XCTAssertNotNil(home.typingTimerForTesting, "typing starts a timer")
+
+        var guardCount = 0
+        while let timer = home.typingTimerForTesting, guardCount < 500 {
+            timer.fire()
+            guardCount += 1
+        }
+        XCTAssertNil(home.typingTimerForTesting, "the reveal loop ran to completion")
+        XCTAssertFalse(home.composerPrompt.stringValue.isEmpty)
+    }
+
+    /// The pool `buildSuggestions()` draws from bundles cleanly and holds
+    /// every entry — a JSON typo or a bundling mistake fails loudly here
+    /// instead of silently emptying the Home screen's suggestion cards.
+    func testTheSuggestionPoolBundlesAllTwentyOneEntries() {
+        XCTAssertEqual(HomeSurfaceView.loadSuggestionPool().count, 21)
+    }
+
+    /// The daily pick is deterministic for a given day (same seed twice
+    /// matches), and always one of each kind in project/create/chat order —
+    /// never three codebase chores and nothing to just talk about.
+    func testDailySuggestionsAreStableAndCoverEveryKind() {
+        let pool = HomeSurfaceView.loadSuggestionPool()
+        let a = HomeSurfaceView.dailySuggestions(from: pool, seed: 42)
+        let b = HomeSurfaceView.dailySuggestions(from: pool, seed: 42)
+        XCTAssertEqual(a.map(\.title), b.map(\.title))
+        XCTAssertEqual(a.map(\.kind), [.project, .create, .chat])
+    }
+
+    /// The branch chip: "Set up GitHub" with no git, "main" for an existing
+    /// branch, "main → name" for one to be created — and picking an existing
+    /// branch again clears the pending new one rather than keeping both.
+    /// Only the Chat scratch workspace hides it: nothing to branch, nothing
+    /// to set up.
+    func testTheBranchChipShowsExistingNewAndNothing() throws {
+        let home = makeHome()
+        let chip = try XCTUnwrap(home.branchChip)
+
+        home.refresh(workspaceID: HomeChatWorkspace.id, workspaceName: "Chat", branch: nil)
+        XCTAssertTrue(chip.isHidden, "Chat is not a project")
+
+        home.refresh(workspaceID: "x", workspaceName: "X", branch: nil)
+        XCTAssertFalse(chip.isHidden, "no git still gets a chip")
+        XCTAssertEqual(home.branchLabel.stringValue, "Set up GitHub")
+
+        home.refresh(workspaceID: "x", workspaceName: "X", branch: "main")
+        XCTAssertFalse(chip.isHidden)
+        XCTAssertEqual(home.branchLabel.stringValue, "main")
+        XCTAssertNil(home.newBranchName)
+
+        home.updateBranchChip(new: "feature-x", from: "main")
+        XCTAssertEqual(home.branchLabel.stringValue, "main → feature-x")
+        XCTAssertEqual(home.selectedBranch, "main")
+        XCTAssertEqual(home.newBranchName, "feature-x")
+
+        home.updateBranchChip(existing: "develop")
+        XCTAssertEqual(home.branchLabel.stringValue, "develop")
+        XCTAssertNil(home.newBranchName, "an existing pick drops the pending new branch")
+    }
+
+    /// The Chat scratch workspace wears a speech bubble where a project
+    /// wears its initials tile — never "CH" on a gradient.
+    func testTheChatWorkspaceWearsABubbleNotInitials() {
+        let home = makeHome()
+        XCTAssertFalse(home.workspaceChipTile.isHidden)
+        XCTAssertTrue(home.workspaceChipIcon.isHidden)
+
+        home.refresh(workspaceID: HomeChatWorkspace.id, workspaceName: HomeChatWorkspace.label)
+        XCTAssertTrue(home.workspaceChipTile.isHidden)
+        XCTAssertFalse(home.workspaceChipIcon.isHidden)
+        XCTAssertEqual(home.workspaceChipName.stringValue, "Chat")
+
+        home.refresh(workspaceID: "omniagent-ade", workspaceName: "OmniAgent-ADE")
+        XCTAssertFalse(home.workspaceChipTile.isHidden, "back to a project, back to the tile")
+        XCTAssertTrue(home.workspaceChipIcon.isHidden)
+    }
+
+    /// The pool carries every kind in equal measure, so no kind ever runs
+    /// out of variety before the others.
+    func testTheSuggestionPoolHasSevenOfEachKind() {
+        let pool = HomeSurfaceView.loadSuggestionPool()
+        for kind in HomeSuggestion.Kind.allCases {
+            XCTAssertEqual(pool.filter { $0.kind == kind }.count, 7, "\(kind)")
+        }
     }
 
     /// The composer takes typing, and editing wears the design's focus
