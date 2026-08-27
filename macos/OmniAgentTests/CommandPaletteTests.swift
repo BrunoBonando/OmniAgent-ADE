@@ -178,6 +178,35 @@ final class CommandPaletteTests: XCTestCase {
 
     /// Every Settings section is a spotlight row: found by its own name or
     /// by "settings", opening the page on itself.
+    /// In the All view a category shows seven rows and a "Show all N" row;
+    /// running that row expands the category in place, a new query folds it
+    /// back, and a chosen tag shows its category whole.
+    func testACategoryShowsSevenThenAShowAllRowThatExpandsIt() {
+        let rows = (0..<10).map {
+            PaletteCommand(id: "w\($0)", title: "Workspace \($0)", detail: nil, action: .noop, section: .places)
+        } + [PaletteCommand(id: "s", title: "Workspace session", detail: nil, action: .noop, section: .sessions)]
+        var model = CommandPaletteModel(commands: rows)
+        model.update(query: "workspace")
+
+        XCTAssertEqual(model.matches.first?.section, .sessions, "the short category is whole")
+        let places = model.matches.filter { $0.section == .places }
+        XCTAssertEqual(places.count, CommandPaletteModel.sectionPreview + 1)
+        let button = model.matches.last
+        XCTAssertEqual(button?.id, "show-all:Places")
+        XCTAssertEqual(button?.title, "Show all 10")
+        XCTAssertEqual(button?.detail, "3 more")
+        XCTAssertEqual(button?.action, .showAll(.places))
+
+        model.expand(section: .places)
+        XCTAssertEqual(model.matches.filter { $0.section == .places }.map(\.id), (0..<10).map { "w\($0)" })
+
+        model.update(query: "workspac")
+        XCTAssertEqual(model.matches.last?.id, "show-all:Places", "typing folds it back")
+
+        model.select(section: .places)
+        XCTAssertEqual(model.matches.count, 10, "a tag shows the category whole")
+    }
+
     func testTheSettingsSectionsAreSpotlightRows() {
         let commands = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil
@@ -461,13 +490,16 @@ final class CommandPaletteTests: XCTestCase {
         model.update(query: "pane")
 
         let files = model.matches.filter { $0.section == .files }
-        XCTAssertEqual(files.count, CommandPaletteModel.fileMatchLimit, "a loose query is a query to narrow, not a directory listing")
+        XCTAssertEqual(files.count, CommandPaletteModel.sectionPreview + 1, "seven and the Show all row in the All view")
+        var narrowed = model
+        narrowed.select(section: .files)
+        XCTAssertEqual(narrowed.matches.count, CommandPaletteModel.fileMatchLimit, "a loose query is a query to narrow, not a directory listing")
         XCTAssertEqual(
             model.matches.map(\.section).reduce(into: [PaletteSection]()) { runs, section in
                 if runs.last != section { runs.append(section) }
             },
-            [.files, .places],
-            "one run per section, in the palette's own section order — Files before Places"
+            [.places, .files],
+            "one run per section, in the palette's own section order — Files last"
         )
     }
 
@@ -552,7 +584,7 @@ final class CommandPaletteTests: XCTestCase {
         for command in commands where runs.last != command.section {
             runs.append(command.section)
         }
-        XCTAssertEqual(runs, [.sessions, .terminals, .browsers, .files, .places])
+        XCTAssertEqual(runs, [.sessions, .terminals, .browsers, .places, .files])
 
         // Panes keep the outline's own order inside their section.
         XCTAssertEqual(

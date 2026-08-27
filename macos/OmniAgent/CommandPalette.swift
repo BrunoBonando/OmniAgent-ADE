@@ -11,6 +11,10 @@ enum PaletteAction: Equatable {
     case enterSession(group: String)
     /// A workspace from the sidebar, by name — opened, and the Desk shown.
     case selectWorkspace(id: String)
+    /// The "Show all N" row under a capped category: expands that category
+    /// in place. The panel handles it itself and stays open — it is a button
+    /// on the list, not a place to go.
+    case showAll(PaletteSection)
     /// One of the sidebar's destinations — Home, To Do List, Desk, Settings
     /// — reachable by typing its name.
     case showDestination(WorkspaceDestination)
@@ -40,13 +44,15 @@ enum PaletteSection: String, CaseIterable, Equatable {
     case sessions = "Sessions"
     case terminals = "Terminals"
     case browsers = "Browsers"
-    case files = "Files"
     /// Where things are — workspaces, the destinations, the Settings
     /// sections. The spotlight is for *finding*; the verbs (new pane, close,
     /// interrupt…) left it on 2026-08-28, since a search that lists commands
     /// is a menu.
     case places = "Places"
     case brain = "Brain"
+    /// Last: a loose query fits half a repository, and the files it fits
+    /// must not stand between the user and the categories that fit better.
+    case files = "Files"
 
     /// The SF Symbol every row in the section wears.
     var symbol: String {
@@ -241,6 +247,12 @@ struct CommandPaletteModel: Equatable {
     /// listing.
     /// ponytail: a flat scan over the path list; an index if a repo outgrows it.
     static let fileMatchLimit = 12
+    /// How many rows a category shows in the All view before its "Show all"
+    /// row — enough to see it is there, few enough to reach the next one
+    /// without scrolling.
+    static let sectionPreview = 7
+    /// Categories the user has clicked open. A new query folds them back.
+    private(set) var expandedSections: Set<PaletteSection> = []
 
     /// Rebuilt from the live workspace every time the palette opens, so it
     /// can never offer a pane that closed while it was shut.
@@ -435,7 +447,9 @@ struct CommandPaletteModel: Equatable {
                 )
             )
         }
-        return commands
+        // In section order whatever the order above emitted them in, so a
+        // heading is a walk over consecutive rows — and Files really is last.
+        return PaletteSection.allCases.flatMap { section in commands.filter { $0.section == section } }
     }
 
     /// The rows the query found, narrowed to the selected tag.
@@ -451,7 +465,10 @@ struct CommandPaletteModel: Equatable {
     /// simply not there — no synthetic trailing row offering to search
     /// something else.
     var matches: [PaletteCommand] {
-        let rows = selectedSection.map { section in found.filter { $0.section == section } } ?? found
+        // A tag shows its category whole: the cap exists to skip past a long
+        // category to the next one, and under a tag there is no next.
+        let rows = selectedSection.map { section in found.filter { $0.section == section } }
+            ?? Self.previewed(found, expanded: expandedSections)
         guard rows.isEmpty, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return rows }
         // Something rather than a bar that silently refuses to grow: a query
         // that finds nothing should say so.
@@ -537,6 +554,36 @@ struct CommandPaletteModel: Equatable {
             }
     }
 
+    /// The All view's cap: `sectionPreview` rows per category, then one
+    /// "Show all N" row standing for the rest until that category is
+    /// expanded.
+    static func previewed(_ rows: [PaletteCommand], expanded: Set<PaletteSection>) -> [PaletteCommand] {
+        var out: [PaletteCommand] = []
+        for section in PaletteSection.allCases {
+            let run = rows.filter { $0.section == section }
+            guard run.count > sectionPreview, !expanded.contains(section) else {
+                out += run
+                continue
+            }
+            out += run.prefix(sectionPreview)
+            out.append(
+                PaletteCommand(
+                    id: "show-all:\(section.rawValue)",
+                    title: "Show all \(run.count)",
+                    detail: "\(run.count - sectionPreview) more",
+                    action: .showAll(section),
+                    section: section,
+                    symbol: "ellipsis"
+                )
+            )
+        }
+        return out
+    }
+
+    mutating func expand(section: PaletteSection) {
+        expandedSections.insert(section)
+    }
+
     /// The tags under the field: `nil` — "All" — first, then every section
     /// the query actually found, in the palette's own section order.
     var sectionTags: [PaletteSection?] {
@@ -557,6 +604,7 @@ struct CommandPaletteModel: Equatable {
         query = ""
         selectedIndex = 0
         selectedSection = nil
+        expandedSections = []
     }
 
     /// Typing always returns the highlight to the top: the best match for a
@@ -564,6 +612,7 @@ struct CommandPaletteModel: Equatable {
     mutating func update(query: String) {
         self.query = query
         selectedIndex = 0
+        expandedSections = []
         // A tag the new query no longer finds would filter the list down to
         // nothing with no way back except noticing why.
         if let section = selectedSection, !sectionTags.contains(section) {

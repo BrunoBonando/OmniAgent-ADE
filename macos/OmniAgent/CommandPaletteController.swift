@@ -383,6 +383,15 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
     /// workspace, and it should land with focus already back there.
     func runSelected() {
         guard let action = model.selected?.action else { return }
+        if case let .showAll(section) = action {
+            // The one row that is the panel's own: it opens the category in
+            // place and the panel stays up.
+            model.expand(section: section)
+            rebuildDisplay()
+            syncSelection()
+            setHeight(preferredHeight())
+            return
+        }
         dismiss()
         onRun?(action)
     }
