@@ -2255,9 +2255,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         case #selector(previousSession(_:)):
             return destination == .terminals && stepTarget(by: -1) != nil
         case #selector(cycleNextSession(_:)), #selector(cyclePreviousSession(_:)):
-            // Wrapping only means something with 2+ sessions to cycle through —
-            // exactly the condition under which stepping *some* direction works.
-            return destination == .terminals && (stepTarget(by: 1) != nil || stepTarget(by: -1) != nil)
+            // Cycling only means something with 2+ terminals to move between —
+            // pane-granular, matching `wrappingStepTarget`, not `stepTarget`'s
+            // session count.
+            return destination == .terminals
+                && selectedProjectID.map { projectTerminals($0).count > 1 } == true
         case #selector(selectSession(_:)):
             // Nine menu items, rarely nine sessions: the ones past the end are
             // greyed out rather than silently doing nothing.
@@ -2583,26 +2585,48 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         )
     }
 
-    /// `stepTarget`, wrapped: past either end, lands on the opposite end
-    /// instead of nil. Only ever called with `offset` ±1, so a single modulo
-    /// step is all this needs.
+    /// Every terminal pane in `project`, in fill order — the flat list
+    /// `⌃⇥`/`⌃⇧⇥` cycle over.
+    private func projectTerminals(_ project: String) -> [PaneDescriptor] {
+        workspace.allPaneIDs
+            .compactMap { workspace.descriptor(for: $0) }
+            .filter { $0.project == project && $0.kind == .terminal }
+    }
+
+    /// `stepTarget`'s wrapping cousin — but pane-granular, not session-granular.
+    /// `adjacentSessionTab` (what `stepTarget` walks) only ever answers with a
+    /// session's *first* pane, so a session holding more than one terminal
+    /// (⌘T, "New Terminal Pane", joins the *current* session rather than
+    /// minting a new one) left every terminal past the first unreachable by
+    /// this chord. Walking `projectTerminals` directly instead visits every
+    /// terminal that exists, including ones added after launch. Only ever
+    /// called with `offset` ±1, so a single modulo step is all this needs.
     private func wrappingStepTarget(by offset: Int) -> PaneDescriptor? {
         guard let project = selectedProjectID else { return nil }
-        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
-        let sessions = SessionOutline.group(panes, focusedPaneID: workspace.focusedPaneID)
-            .first { $0.project == project }?.sessions ?? []
-        guard !sessions.isEmpty else { return nil }
-        let currentIndex = sessions.firstIndex { $0.isCurrent } ?? -1
+        let terminals = projectTerminals(project)
+        guard !terminals.isEmpty else { return nil }
+        let currentIndex = terminals.firstIndex { $0.sessionID == workspace.focusedPaneID } ?? -1
         let base = currentIndex == -1 ? 0 : currentIndex
-        let wrapped = ((base + offset) % sessions.count + sessions.count) % sessions.count
-        guard let firstPaneID = sessions[wrapped].paneIDs.first else { return nil }
-        return panes.first { $0.sessionID == firstPaneID }
+        let wrapped = ((base + offset) % terminals.count + terminals.count) % terminals.count
+        return terminals[wrapped]
     }
 
     /// ⇧⌘] / ⇧⌘[, and (wrapping) ⌃⇥ / ⌃⇧⇥.
+    ///
+    /// The two diverge past `wrappingStepTarget`/`stepTarget` themselves: the
+    /// non-wrapping walk lands on a *session*, so entering it is enough — the
+    /// wrapping walk can land on a second terminal *inside the already-active*
+    /// session, where `enterDeskSession` would see no group change and leave
+    /// focus exactly where it was. `focusPane` moves focus to that specific
+    /// pane regardless of which session it is in.
     private func stepSession(by offset: Int, wrapping: Bool = false) {
-        let target = wrapping ? wrappingStepTarget(by: offset) : stepTarget(by: offset)
-        guard let target else { return }
+        if wrapping {
+            guard let target = wrappingStepTarget(by: offset) else { return }
+            workspace.focusPane(target.sessionID)
+            reloadOutline()
+            return
+        }
+        guard let target = stepTarget(by: offset) else { return }
         enterDeskSession(target.group)
     }
 

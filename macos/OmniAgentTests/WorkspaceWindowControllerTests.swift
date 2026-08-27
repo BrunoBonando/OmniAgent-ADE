@@ -1163,6 +1163,44 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.workspaceView.allPaneIDs.count, full + 1)
     }
 
+    /// ⌃⇥/⌃⇧⇥ must reach every terminal, including a second one added to a
+    /// session that already existed — the bug report this pins down. ⌘T joins
+    /// the *current* session rather than minting a new one, so a walk that
+    /// only ever lands on a session's first pane (the old `wrappingStepTarget`)
+    /// silently skipped every terminal added after the first in each session.
+    func testCyclingWithControlTabVisitsEveryTerminalIncludingOnesAddedToAnExistingSession() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let workspace = controller.workspaceView
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "alpha-1", group: "g1"),
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "alpha-2", group: "g2"),
+                ])
+            )
+        )
+        controller.selectWorkspace(id: "alpha", animated: false)
+        workspace.focusPane("alpha-1")
+        controller.newTerminalPane(nil)
+        let addedToG1 = try XCTUnwrap(workspace.focusedPaneID, "the new terminal takes focus")
+        XCTAssertEqual(workspace.descriptor(for: addedToG1)?.group, "g1", "it joined g1, not a fresh session")
+
+        workspace.focusPane("alpha-1")
+        controller.cycleNextSession(nil)
+        XCTAssertEqual(workspace.focusedPaneID, addedToG1, "steps to the second terminal in the same session first")
+
+        controller.cycleNextSession(nil)
+        XCTAssertEqual(workspace.focusedPaneID, "alpha-2", "then on to the next session")
+
+        controller.cycleNextSession(nil)
+        XCTAssertEqual(workspace.focusedPaneID, "alpha-1", "past the end, wraps back to the first")
+
+        controller.cyclePreviousSession(nil)
+        XCTAssertEqual(workspace.focusedPaneID, "alpha-2", "and the reverse chord wraps the other way")
+    }
+
     func testTheOutlinePlusButtonAddsToItsOwnRowNotToWhateverHasFocus() throws {
         let controller = makeEmptyController()
         defer { controller.close() }
