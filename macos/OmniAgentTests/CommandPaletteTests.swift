@@ -794,6 +794,10 @@ final class CommandPaletteTests: XCTestCase {
 
         controller.setQuery("")
         XCTAssertEqual(controller.window?.frame.height, CommandPaletteController.barHeight, "and fold away again")
+        XCTAssertFalse(
+            controller.isClosing,
+            "folding back to the bar is not closing — the bar and its cursor stay, the way Spotlight's do"
+        )
         controller.dismiss()
     }
 
@@ -853,6 +857,19 @@ final class CommandPaletteTests: XCTestCase {
         let scrim = try XCTUnwrap(spotlight.contentView)
         XCTAssertTrue(scrim.subviews.isEmpty, "no sheet inside the scrim")
         XCTAssertNotEqual(String(describing: type(of: scrim)), String(describing: type(of: focusGlass)))
+    }
+
+    /// The fallback host is behind-window material, which only `maskImage`
+    /// can shape — `layer.cornerRadius` leaves the blur and the window
+    /// shadow square behind the rounded tint.
+    func testTheFallbackGlassHostIsMaskedToItsCorners() throws {
+        let host = CommandPaletteController.glassHost(NSView(), size: NSSize(width: 100, height: 50))
+        guard let effect = host as? NSVisualEffectView else {
+            throw XCTSkip("Liquid Glass shapes itself")
+        }
+        let mask = try XCTUnwrap(effect.maskImage, "behind-window material needs a mask to be rounded")
+        XCTAssertEqual(mask.capInsets.top, CommandPaletteController.cornerRadius, "the corners keep their radius")
+        XCTAssertEqual(mask.resizingMode, .stretch, "and only the middle stretches to the panel's height")
     }
 
     // MARK: - fixtures

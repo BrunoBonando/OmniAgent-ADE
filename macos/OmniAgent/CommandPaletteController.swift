@@ -213,8 +213,30 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         effect.wantsLayer = true
         effect.layer?.cornerRadius = cornerRadius
         effect.layer?.masksToBounds = true
+        // `.behindWindow` material is composited by the window server from
+        // the window's own shape; `layer.cornerRadius` above clips only this
+        // view's sublayers, so the blur — and the window shadow cut from it —
+        // stayed a full square behind the rounded tint, showing as a faint
+        // square outline at every corner. `maskImage` is what shapes
+        // behind-window material.
+        effect.maskImage = roundedMask(cornerRadius: cornerRadius)
         effect.addSubview(content)
         return effect
+    }
+
+    /// A stretchable rounded rectangle for `NSVisualEffectView.maskImage`:
+    /// the corners stay `cornerRadius` and only the middle stretches, so one
+    /// image fits the bar and the full results list alike.
+    private static func roundedMask(cornerRadius radius: CGFloat) -> NSImage {
+        let side = radius * 2 + 1
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
     }
 
     /// Opens over `parent`, rebuilt from scratch so the list can never offer a
@@ -461,12 +483,31 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
     private func setHeight(_ height: CGFloat) {
         guard let window else { return }
         let frame = window.frame
+        // The window first, the content second — and not the other way
+        // round, which is how it was. `content` autoresizes with its host,
+        // and with Auto Layout live in this window (the tag pills and the
+        // rows are constraint-laid) that mask is a real constraint that
+        // encodes the *current* offset: sizing `content` to the target
+        // height while the host still had the old one wrote their
+        // difference in as a constant, and shrinking the host past it would
+        // have driven `content` negative — so the window refused to go
+        // lower than that difference. Every collapse landed on
+        // `max(target, old - target)`: 516→74 at 442, 442→74 at 368,
+        // 516→210 at 306, and the same frame re-applied any time later hit
+        // the same wall. Host at the target height first, and there is no
+        // offset to encode. Growing never tripped it — a negative constant
+        // is harmless — which is why only the collapse back to the bar ever
+        // misbehaved.
+        if abs(frame.height - height) > 0.5 {
+            // `display: false`: the content is laid out for the new height
+            // right after, and drawing once, then, beats drawing twice with
+            // a mis-laid frame in between.
+            window.setFrame(
+                NSRect(x: frame.minX, y: frame.maxY - height, width: frame.width, height: height),
+                display: false
+            )
+        }
         layoutContent(height: height)
-        guard abs(frame.height - height) > 0.5 else { return }
-        window.setFrame(
-            NSRect(x: frame.minX, y: frame.maxY - height, width: frame.width, height: height),
-            display: true
-        )
     }
 
     /// Hand-laid rather than constrained: the panel's height changes on every
