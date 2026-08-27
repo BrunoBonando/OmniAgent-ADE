@@ -7,9 +7,13 @@ import AppKit
 // session, and the picked section's content in a centred column beside it.
 // Every section still says "Under development"; the screens come one by one.
 //
-// Reached three ways: the sidebar gear pops a menu of the sections and lands
-// on the one picked; ⌘, and the palette open the page on whatever section it
-// was last on.
+// The panel is one object in two roles (2026-08-28): the sidebar gear
+// *offers* it beside itself, tip on the gear, as the menu; a pick slides it
+// up to *dock* under the title as the page's sidebar; the gear again brings
+// it back down to pick anew. `WorkspaceWindowController` owns it and places
+// it — it floats over the content area, not inside this page — so the same
+// glass travels between the two places instead of a popup standing in for
+// it. ⌘, and the palette open the page on whatever section it was last on.
 
 /// The Settings page's sections, in the design's order. `startsGroup` marks
 /// the gaps in the list: General…Accessibility, Customize/Model providers,
@@ -57,7 +61,8 @@ enum SettingsSection: String, CaseIterable {
 /// The floating panel of sections: the left menu's nav rows on a rounded
 /// sheet of untinted glass, hugging its rows rather than the window's
 /// height. The picked row wears the app's accent — the blue the left menu's
-/// gradient is made of — solidly enough to read as "you are here".
+/// gradient is made of — solidly enough to read as "you are here". Placed by
+/// frame (its owner slides it about), sized `width` × `fittingSize.height`.
 final class SettingsSidebarView: NSView {
     static let width: CGFloat = 220
     static let cornerRadius: CGFloat = 16
@@ -71,7 +76,6 @@ final class SettingsSidebarView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        translatesAutoresizingMaskIntoConstraints = false
 
         if let glass = WorkspaceGlass.sheet(cornerRadius: Self.cornerRadius) {
             glassHost = glass
@@ -106,12 +110,15 @@ final class SettingsSidebarView: NSView {
         addSubview(stack)
 
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: Self.width),
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
+        // Frame-placed: start at the size the rows need, or the zero frame
+        // stands as a required `height == 0` against the rows until the
+        // owner's first placement ("Unable to simultaneously satisfy").
+        frame.size = NSSize(width: Self.width, height: fittingSize.height)
     }
 
     @available(*, unavailable)
@@ -129,18 +136,46 @@ final class SettingsSidebarView: NSView {
     }
 }
 
-/// The whole Settings screen: the floating panel at the top-left, and the
-/// picked section's content in Home's centred 880pt column beside it — from
-/// the top, though, not from a share of the height. Transparent, like Home:
-/// `PaneGroundView` behind it is the ground. The "Settings" title above the
-/// panel is the window's own session-title field, which the controller
-/// points at this page — see `refreshTitle`.
-final class SettingsSurfaceView: NSView {
-    /// The panel's inset from the content area's edges — off the edge, "a
-    /// bit more inside", as the Apple TV sidebar sits.
-    static let inset: CGFloat = 16
+/// The tip the offered panel wears on the gear: a rounded square turned 45°
+/// in a box of its bounding span, half tucked under the panel (the owner
+/// stacks the panel above it), so the half that shows is a point. The box is
+/// what gets moved — setting `frame` on a rotated view resizes its bounds to
+/// keep the bounding box.
+final class SettingsPanelTipView: NSView {
+    static let side: CGFloat = 12
+    static var span: CGFloat { side * 2.squareRoot() }
 
-    let sidebar = SettingsSidebarView()
+    override init(frame frameRect: NSRect) {
+        super.init(frame: NSRect(origin: frameRect.origin, size: NSSize(width: Self.span, height: Self.span)))
+        let square = NSView(frame: NSRect(
+            x: (Self.span - Self.side) / 2,
+            y: (Self.span - Self.side) / 2,
+            width: Self.side,
+            height: Self.side
+        ))
+        square.wantsLayer = true
+        square.layer?.cornerRadius = 2
+        // The hover card's bead colour — the dark a glass card settles on.
+        square.layer?.backgroundColor = NSColor(srgbRed: 0.12, green: 0.13, blue: 0.20, alpha: 0.92).cgColor
+        square.frameCenterRotation = 45
+        addSubview(square)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
+/// The Settings page's content: the picked section's name and body in
+/// Home's centred 880pt column, clear of the docked panel on the left —
+/// from the top, though, not from a share of the height. Transparent, like
+/// Home: `PaneGroundView` behind it is the ground. The panel itself and the
+/// "Settings" title above it are the controller's — see `settingsPanel` and
+/// `refreshTitle`.
+final class SettingsSurfaceView: NSView {
+    /// The room the docked panel takes on the left: the title's 12pt inset,
+    /// the panel, and a gutter.
+    static let panelRoom = 12 + SettingsSidebarView.width + 16
+
     /// The picked section's name, heading its content.
     let titleField = ShellFont.label(font: ShellFont.ui(22, .semibold), color: ShellPalette.ink)
     let subtitleField = ShellFont.label(
@@ -172,20 +207,8 @@ final class SettingsSurfaceView: NSView {
             topInset: WorkspaceTitleBarView.height
         )
         addSubview(scroll)
-        // The panel floats over the scroll's leading edge: added after it, so
-        // it is above, and the content column keeps clear of it by its own
-        // leading constraint.
-        addSubview(sidebar)
-        // The panel's own idea of where it sits; the controller outranks it
-        // with the "Settings" title's leading edge, so the two line up.
-        let panelLeading = sidebar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset)
-        panelLeading.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            panelLeading,
-            sidebar.topAnchor.constraint(equalTo: topAnchor, constant: WorkspaceTitleBarView.height + 10),
-            sidebar.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Self.inset),
-
-            scroll.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: Self.inset),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.panelRoom),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.topAnchor.constraint(equalTo: topAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -203,7 +226,6 @@ final class SettingsSurfaceView: NSView {
         width.priority = .defaultHigh
         width.isActive = true
 
-        sidebar.onSelect = { [weak self] section in self?.select(section) }
         select(.general)
     }
 
@@ -212,7 +234,6 @@ final class SettingsSurfaceView: NSView {
 
     func select(_ section: SettingsSection) {
         self.section = section
-        sidebar.apply(selected: section)
         titleField.stringValue = section.title
     }
 }

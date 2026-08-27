@@ -205,20 +205,21 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertTrue(controller.workspaceView.isHidden)
         XCTAssertTrue(controller.shellSidebar.navRows.allSatisfy { !$0.isSelected }, "no left-menu row lights up")
 
+        let panel = controller.settingsPanel
         XCTAssertEqual(
-            settings.sidebar.rows.map(\.titleText),
+            panel.rows.map(\.titleText),
             ["General", "Accounts", "Sessions", "Themes", "Accessibility", "Customize", "Model providers", "Experimental"]
         )
         XCTAssertEqual(settings.section, .general)
         XCTAssertEqual(settings.titleField.stringValue, "General")
         XCTAssertEqual(settings.subtitleField.stringValue, "Under development")
-        XCTAssertTrue(settings.sidebar.rows[0].isSelected)
+        XCTAssertTrue(panel.rows[0].isSelected)
 
-        settings.sidebar.rows[1].onPress?()
+        panel.rows[1].onPress?()
         XCTAssertEqual(settings.section, .accounts)
         XCTAssertEqual(settings.titleField.stringValue, "Accounts")
-        XCTAssertFalse(settings.sidebar.rows[0].isSelected)
-        XCTAssertTrue(settings.sidebar.rows[1].isSelected)
+        XCTAssertFalse(panel.rows[0].isSelected)
+        XCTAssertTrue(panel.rows[1].isSelected)
 
         // Away and back keeps the section; opening on a named section moves it.
         controller.applyDestination(.home)
@@ -229,6 +230,50 @@ final class NavigationSidebarTests: XCTestCase {
         controller.showSettings(section: .experimental)
         XCTAssertEqual(settings.section, .experimental)
         XCTAssertEqual(controller.destination, .settings)
+    }
+
+    /// The gear offers the panel beside itself, tip on the gear, inside the
+    /// content area; a pick docks it under the "Settings" title; the gear
+    /// again offers it back; leaving the page hides it.
+    func testTheGearOffersTheSettingsPanelAndAPickDocksIt() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.window?.layoutIfNeeded()
+        let sidebar = controller.shellSidebar
+        let gear = sidebar.accountRow.gear
+        let panel = controller.settingsPanel
+        XCTAssertEqual(controller.settingsPanelPlace, .hidden)
+        XCTAssertTrue(panel.isHidden)
+
+        try XCTUnwrap(gear.onPress)()
+        XCTAssertEqual(controller.settingsPanelPlace, .offered)
+        XCTAssertEqual(controller.destination, .home, "offered, not opened")
+        XCTAssertFalse(panel.isHidden)
+        let room = controller.settingsPanelRoomForTesting
+        let offered = controller.settingsPanelTarget
+        XCTAssertGreaterThanOrEqual(offered.panel.minX, room.minX, "beside the sidebar, inside the content area")
+        XCTAssertGreaterThanOrEqual(offered.panel.minY, room.minY, "inside the app")
+        let gearMidY = controller.settingsPanelRoomConvert(gear.bounds, from: gear).midY
+        XCTAssertEqual(offered.tip.midY, gearMidY, accuracy: 1, "the tip is on the gear")
+        XCTAssertEqual(offered.tip.midX, offered.panel.minX, accuracy: 0.5, "half under the panel")
+
+        try XCTUnwrap(panel.rows[1].onPress)()
+        XCTAssertEqual(controller.destination, .settings)
+        XCTAssertEqual(controller.settingsView.section, .accounts)
+        XCTAssertEqual(controller.settingsPanelPlace, .docked)
+        let docked = controller.settingsPanelTarget.panel
+        XCTAssertEqual(docked.minX, controller.sessionTitleField.frame.minX, accuracy: 0.5, "under the title's left edge")
+        XCTAssertEqual(docked.maxY, room.maxY - WorkspaceTitleBarView.height - 10, accuracy: 0.5, "just below the strip")
+
+        try XCTUnwrap(gear.onPress)()
+        XCTAssertEqual(controller.settingsPanelPlace, .offered)
+        XCTAssertEqual(controller.destination, .settings, "still on the page")
+        try XCTUnwrap(gear.onPress)()
+        XCTAssertEqual(controller.settingsPanelPlace, .docked, "the gear again puts it back")
+
+        controller.applyDestination(.home)
+        XCTAssertEqual(controller.settingsPanelPlace, .hidden)
     }
 
     func testHomeShowsItsScreenAndToDoThePlaceholder() throws {

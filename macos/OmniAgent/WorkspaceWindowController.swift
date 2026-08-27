@@ -117,6 +117,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     let homeView = HomeSurfaceView()
     /// The in-window Settings page — the gear, ⌘, and the palette land here.
     let settingsView = SettingsSurfaceView()
+    /// Settings' floating panel of sections, one object in two roles: the
+    /// gear *offers* it beside itself, tip on the gear, as the menu; a pick
+    /// slides it up to *dock* under the "Settings" title as the page's
+    /// sidebar; the gear again brings it back down. Floats over the content
+    /// area, placed by frame — see `placeSettingsPanel`.
+    let settingsPanel = SettingsSidebarView()
+    private let settingsPanelTip = SettingsPanelTipView()
+    enum SettingsPanelPlace { case hidden, docked, offered }
+    private(set) var settingsPanelPlace: SettingsPanelPlace = .hidden
+    /// Where the panel and its tip are headed, in the content area's
+    /// coordinates — an animated `frame` reads mid-flight, so the tests read
+    /// this.
+    private(set) var settingsPanelTarget: (panel: NSRect, tip: NSRect) = (.zero, .zero)
+    /// While offered: a click anywhere but the panel or the gear, or Esc,
+    /// puts it back.
+    private var settingsPanelMonitor: Any?
     /// The window's drawn title bar — window buttons, the sidebar toggle, the
     /// review toggle. Replaced the `NSToolbar`, and paints nothing: it is a
     /// transparent overlay across the top of the split, so each column's own
@@ -618,9 +634,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Search fires the spotlight and is deliberately not a selection —
         // the same panel ⌃Space and ⌘K raise.
         shellSidebar.onSearch = { [weak self] in self?.showCommandPalette(nil) }
-        // The gear is a menu of the Settings sections, not a jump to the
-        // page: the pick is what opens it.
-        shellSidebar.onOpenSettings = { [weak self] in self?.showSettingsMenu() }
+        // The gear offers the Settings panel (or puts it back): the pick is
+        // what opens the page.
+        shellSidebar.onOpenSettings = { [weak self] in self?.toggleSettingsPanel() }
         // The header's plus menu: a session in any listed workspace, or a
         // brand new workspace from a folder (the one flow where a chooser is
         // the whole point).
@@ -804,6 +820,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         contentContainer.addSubview(placeholder)
         contentContainer.addSubview(homeView)
         contentContainer.addSubview(settingsView)
+        // The floating panel rides above every destination; its tip below
+        // it, so the panel covers the tip's inner half.
+        settingsPanelTip.alphaValue = 0
+        settingsPanel.isHidden = true
+        contentContainer.addSubview(settingsPanelTip)
+        contentContainer.addSubview(settingsPanel)
+        settingsPanel.onSelect = { [weak self] section in self?.showSettings(section: section) }
+        settingsPanel.apply(selected: settingsView.section)
+        contentContainer.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: contentContainer,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, settingsPanelPlace != .hidden else { return }
+            placeSettingsPanel(settingsPanelPlace, animated: false)
+        }
         // The pages (Home, Settings) reach the window's top edge and inset
         // their own scrolling under the title strip, so their content
         // dissolves under the toolbar; the Desk and the placeholder stop
@@ -920,9 +953,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 equalTo: contentContainer.topAnchor,
                 constant: WorkspaceTitleBarView.height / 2
             ),
-            // Settings' floating panel lines up under its title's left edge,
-            // wherever the clearance puts that.
-            settingsView.sidebar.leadingAnchor.constraint(equalTo: sessionTitleField.leadingAnchor),
         ])
 
         // The window's own bar, above the split as an overlay: pinned to top,
@@ -982,6 +1012,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         homeView.isHidden = destination != .home
         if destination == .home { refreshHomeChips() }
         settingsView.isHidden = destination != .settings
+        // The panel docks with the page and goes with it.
+        placeSettingsPanel(destination == .settings ? .docked : .hidden, animated: true)
         placeholder.isHidden = destination != .todo
         if destination == .todo { placeholder.show(destination) }
         // Home and To Do List name no session, so the bar goes blank and its
@@ -3965,35 +3997,129 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Settings, opened on a particular section.
     func showSettings(section: SettingsSection) {
         settingsView.select(section)
+        settingsPanel.apply(selected: section)
         applyDestination(.settings)
     }
 
-    /// The gear's menu: every section, the one on screen ticked, each
-    /// opening Settings on itself.
-    func showSettingsMenu() {
-        let onSettings = destination == .settings
-        let rows = SettingsSection.allCases.map { section in
-            HomeDropdown.Row(
-                icon: HomeDropdown.symbol(section.symbol),
-                title: section.title,
-                isCurrent: onSettings && settingsView.section == section
-            ) { [weak self] in self?.showSettings(section: section) }
+    /// The gear: offers the panel beside itself, or — offered already —
+    /// puts it back where it came from (docked on Settings, gone elsewhere).
+    func toggleSettingsPanel() {
+        if settingsPanelPlace == .offered {
+            collapseSettingsPanel()
+        } else {
+            placeSettingsPanel(.offered, animated: true)
         }
-        // To the right of the column, rising from its bottom-left: the
-        // gear sits at the window's foot, and a popover centred on it ran
-        // off the app. A popover centres on its rect, so a rect as tall as
-        // the menu standing on the gear's foot puts the menu's bottom there.
-        let sidebar = shellSidebar
-        let gear = sidebar.accountRow.gear
-        HomeDropdown.show(
-            [HomeDropdown.Section(header: "Settings", rows: rows)],
-            searchPlaceholder: "Search settings…",
-            from: sidebar,
-            preferredEdge: .maxX
-        ) { size in
-            let foot = gear.convert(gear.bounds, to: sidebar).minY
-            return NSRect(x: 0, y: foot, width: sidebar.bounds.width, height: size.height)
+    }
+
+    private func collapseSettingsPanel() {
+        placeSettingsPanel(destination == .settings ? .docked : .hidden, animated: true)
+    }
+
+    /// Slides the panel to `place`. Docked: under the "Settings" title's
+    /// left edge, just below the strip. Offered: beside the gear, tip on
+    /// it, the body rising from the gear's foot — clamped to the content
+    /// area, so it never leaves the app. Hidden: fades where it is.
+    private func placeSettingsPanel(_ place: SettingsPanelPlace, animated: Bool) {
+        let wasHidden = settingsPanelPlace == .hidden
+        settingsPanelPlace = place
+        if place == .offered { startSettingsPanelMonitor() } else { stopSettingsPanelMonitor() }
+
+        contentContainer.layoutSubtreeIfNeeded()
+        let room = contentContainer.bounds
+        let size = NSSize(width: SettingsSidebarView.width, height: settingsPanel.fittingSize.height)
+        let corner = SettingsSidebarView.cornerRadius
+        let span = SettingsPanelTipView.span
+
+        let docked = NSRect(
+            x: sessionTitleField.frame.minX,
+            y: room.maxY - WorkspaceTitleBarView.height - 10 - size.height,
+            width: size.width,
+            height: size.height
+        )
+        let gear = shellSidebar.accountRow.gear
+        let gearMidY = contentContainer.convert(gear.bounds, from: gear).midY
+        var offered = NSRect(
+            x: 6 + span / 2,
+            y: gearMidY - corner - span / 2,
+            width: size.width,
+            height: size.height
+        )
+        offered.origin.y = max(offered.origin.y, room.minY + 8)
+        offered.origin.y = min(offered.origin.y, room.maxY - WorkspaceTitleBarView.height - 8 - size.height)
+        let tipY = min(max(gearMidY, offered.minY + corner + span / 2), offered.maxY - corner - span / 2)
+        let tip = NSRect(x: offered.minX - span / 2, y: tipY - span / 2, width: span, height: span)
+
+        let frame: NSRect
+        let alpha: CGFloat
+        switch place {
+        case .docked: frame = docked; alpha = 1
+        case .offered: frame = offered; alpha = 1
+        case .hidden: frame = settingsPanel.isHidden ? offered : settingsPanel.frame; alpha = 0
         }
+        settingsPanelTarget = (frame, tip)
+        settingsPanelTip.frame = tip
+
+        if place != .hidden, wasHidden {
+            // Arrives from just below its place, fading in.
+            settingsPanel.frame = frame.offsetBy(dx: 0, dy: -12)
+            settingsPanel.alphaValue = 0
+            settingsPanel.isHidden = false
+        }
+        let panel = settingsPanel
+        let tipView = settingsPanelTip
+        let tipAlpha: CGFloat = place == .offered ? 1 : 0
+        guard animated, !ShellMotion.reduced, !panel.isHidden else {
+            panel.frame = frame
+            panel.alphaValue = alpha
+            panel.isHidden = place == .hidden
+            tipView.alphaValue = tipAlpha
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.32
+            context.timingFunction = ShellMotion.timing
+            context.allowsImplicitAnimation = true
+            panel.animator().frame = frame
+            panel.animator().alphaValue = alpha
+            tipView.animator().alphaValue = tipAlpha
+        }, completionHandler: { [weak self] in
+            guard let self, settingsPanelPlace == .hidden else { return }
+            panel.isHidden = true
+        })
+    }
+
+    private func startSettingsPanelMonitor() {
+        guard settingsPanelMonitor == nil else { return }
+        settingsPanelMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .keyDown]
+        ) { [weak self] event in
+            guard let self, settingsPanelPlace == .offered else { return event }
+            if event.type == .keyDown {
+                guard event.keyCode == 53 else { return event }  // Esc
+                collapseSettingsPanel()
+                return nil
+            }
+            if event.window === window {
+                let gear = shellSidebar.accountRow.gear
+                let onPanel = settingsPanel.bounds.contains(settingsPanel.convert(event.locationInWindow, from: nil))
+                let onGear = gear.bounds.contains(gear.convert(event.locationInWindow, from: nil))
+                if onPanel || onGear { return event }
+            }
+            collapseSettingsPanel()
+            return event
+        }
+    }
+
+    /// The content area's bounds and coordinate space — for the tests,
+    /// since the container itself is private.
+    var settingsPanelRoomForTesting: NSRect { contentContainer.bounds }
+    func settingsPanelRoomConvert(_ rect: NSRect, from view: NSView) -> NSRect {
+        contentContainer.convert(rect, from: view)
+    }
+
+    private func stopSettingsPanelMonitor() {
+        if let settingsPanelMonitor { NSEvent.removeMonitor(settingsPanelMonitor) }
+        settingsPanelMonitor = nil
     }
 
     // MARK: - Inspector (Task 6b-2)
