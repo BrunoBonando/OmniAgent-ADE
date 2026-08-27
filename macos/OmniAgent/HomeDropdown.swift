@@ -41,6 +41,13 @@ enum HomeDropdown {
         }
     }
 
+    /// An SF Symbol at the size every row icon shares — every row wears
+    /// one, so the titles line up and nothing reads as a missing image.
+    static func symbol(_ name: String) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+    }
+
     /// One `NSPopover` retained for as long as it is on screen — otherwise
     /// nothing would hold it alive between `show` returning and a row being
     /// pressed.
@@ -192,7 +199,7 @@ final class HomeDropdownView: NSView, NSTextFieldDelegate {
                 wrap.translatesAutoresizingMaskIntoConstraints = false
                 wrap.addSubview(label)
                 NSLayoutConstraint.activate([
-                    label.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 12),
+                    label.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 10),
                     label.trailingAnchor.constraint(lessThanOrEqualTo: wrap.trailingAnchor, constant: -12),
                     label.topAnchor.constraint(equalTo: wrap.topAnchor, constant: index == 0 ? 4 : 10),
                     label.bottomAnchor.constraint(equalTo: wrap.bottomAnchor, constant: -4),
@@ -247,8 +254,9 @@ final class HomeDropdownView: NSView, NSTextFieldDelegate {
     }
 }
 
-/// One row: a checkmark column (always reserved, so titles line up whether
-/// or not a row is current), an optional icon, and a title. Built on
+/// One row: an icon, a title, and — on the current row only — a checkmark
+/// at the trailing edge, so every title starts at the same left edge with
+/// no reserved column in front of it. Built on
 /// `ShellRowView` for its hover tracking rather than reimplementing
 /// mouse-entered/exited handling. Icons are never dimmed — a greyed-out
 /// title says "unavailable" on its own; a washed-out brand mark just looks
@@ -266,16 +274,7 @@ final class HomeDropdownRowView: ShellRowView {
         hoverFill = ShellPalette.hover
         hoverEnabled = isEnabled
 
-        let check = NSImageView()
-        if isCurrent {
-            check.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
-            check.contentTintColor = ShellPalette.ink
-        }
-        check.translatesAutoresizingMaskIntoConstraints = false
-        check.widthAnchor.constraint(equalToConstant: 16).isActive = true
-
-        var views: [NSView] = [check]
+        var views: [NSView] = []
         if let icon {
             let imageView = NSImageView()
             imageView.image = icon
@@ -294,7 +293,18 @@ final class HomeDropdownRowView: ShellRowView {
             color: isEnabled ? ShellPalette.ink : ShellPalette.inkFaint
         )
         label.lineBreakMode = .byTruncatingMiddle
+        // The title takes the slack, which is what pushes the check to the
+        // trailing edge.
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
         views.append(label)
+        if isCurrent {
+            let check = NSImageView()
+            check.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+            check.contentTintColor = ShellPalette.ink
+            check.translatesAutoresizingMaskIntoConstraints = false
+            views.append(check)
+        }
 
         let stack = NSStackView(views: views)
         stack.orientation = .horizontal

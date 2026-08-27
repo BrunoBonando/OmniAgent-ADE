@@ -647,7 +647,7 @@ final class HomeSurfaceView: NSView {
         let placeholder = "Search models…"
         guard engine != .shell else {
             HomeDropdown.show(
-                [HomeDropdown.Section(rows: [HomeDropdown.Row(title: "Shell has no model", isEnabled: false) {}])],
+                [HomeDropdown.Section(rows: [HomeDropdown.Row(icon: HomeDropdown.symbol("minus.circle"), title: "Shell has no model", isEnabled: false) {}])],
                 searchPlaceholder: placeholder,
                 from: anchor
             )
@@ -658,7 +658,7 @@ final class HomeSurfaceView: NSView {
             return
         }
         let dropdown = HomeDropdown.show(
-            [HomeDropdown.Section(rows: [HomeDropdown.Row(title: "Loading models…", isEnabled: false) {}])],
+            [HomeDropdown.Section(rows: [HomeDropdown.Row(icon: HomeDropdown.symbol("hourglass"), title: "Loading models…", isEnabled: false) {}])],
             searchPlaceholder: placeholder,
             from: anchor
         )
@@ -672,7 +672,11 @@ final class HomeSurfaceView: NSView {
                 guard let self, let dropdown, self.selectedEngine == engine else { return }
                 dropdown.sections = choices.isEmpty
                     ? [HomeDropdown.Section(rows: [
-                        HomeDropdown.Row(title: "Could not reach \(engine.displayName)", isEnabled: false) {},
+                        HomeDropdown.Row(
+                            icon: HomeDropdown.symbol("exclamationmark.triangle"),
+                            title: "Could not reach \(engine.displayName)",
+                            isEnabled: false
+                        ) {},
                     ])]
                     : [self.modelSection(choices)]
             }
@@ -681,7 +685,9 @@ final class HomeSurfaceView: NSView {
 
     private func modelSection(_ choices: [ModelChoice]) -> HomeDropdown.Section {
         HomeDropdown.Section(rows: choices.map { choice in
-            HomeDropdown.Row(title: choice.label, isCurrent: choice.id == selectedModel?.id) { [weak self] in
+            HomeDropdown.Row(
+                icon: HomeDropdown.symbol("sparkles"), title: choice.label, isCurrent: choice.id == selectedModel?.id
+            ) { [weak self] in
                 self?.selectedModel = choice
                 self?.modelLabel.stringValue = choice.label
             }

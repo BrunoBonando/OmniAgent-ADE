@@ -632,10 +632,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         homeView.onRequestProjectMenu = { [weak self] anchor in
             guard let self else { return }
             let current = homeSelectedProjectID
-            let chatIcon = NSImage(systemSymbolName: "bubble.left", accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
             let chatRow = HomeDropdown.Row(
-                icon: chatIcon, title: HomeChatWorkspace.label, isCurrent: current == HomeChatWorkspace.id
+                icon: HomeDropdown.symbol("bubble.left"), title: HomeChatWorkspace.label, isCurrent: current == HomeChatWorkspace.id
             ) { [weak self] in self?.selectHomeWorkspace(HomeChatWorkspace.id) }
             // Each row wears the sidebar's name and folder colour for the
             // workspace — closed folders, the chosen one open, as the tree.
@@ -651,10 +649,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 HomeDropdown.Section(rows: [chatRow]),
                 HomeDropdown.Section(header: "Repositories", rows: workspaceRows),
                 HomeDropdown.Section(header: "Add project from", rows: [
-                    HomeDropdown.Row(title: "Local folder or repository…") { [weak self] in
+                    HomeDropdown.Row(icon: HomeDropdown.symbol("desktopcomputer"), title: "Local folder or repository…") { [weak self] in
                         self?.openWorkspaceFolder(nil)
                     },
-                    HomeDropdown.Row(title: "Resume remote session…", isEnabled: false) {},
+                    HomeDropdown.Row(icon: HomeDropdown.symbol("cloud"), title: "Resume remote session…", isEnabled: false) {},
                 ]),
             ], searchPlaceholder: "Search repositories…", from: anchor)
         }
@@ -663,11 +661,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let project = homeSelectedProjectID
             let sessions = homeSessions(for: project)
             let sessionRows = sessions.map { session in
-                HomeDropdown.Row(title: session.label) { [weak self] in
+                HomeDropdown.Row(icon: HomeDropdown.symbol("terminal"), title: session.label) { [weak self] in
                     self?.homeView.updateSessionChip(label: session.label, branch: GitBranch.forDirectory(session.cwd))
                 }
             }
-            let newSessionRow = HomeDropdown.Row(title: "Create new session") { [weak self] in
+            let newSessionRow = HomeDropdown.Row(icon: HomeDropdown.symbol("plus"), title: "Create new session") { [weak self] in
                 guard let self else { return }
                 let branch = workspaceDirectory(for: project).flatMap(GitBranch.forDirectory)
                 homeView.updateSessionChip(label: "New session", branch: branch)
@@ -692,7 +690,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let gitHub = HomeDropdown.Section(header: "GitHub · Not connected", rows: [
                 // ponytail: opens the GitHub settings page once it exists; a
                 // plain dismiss until then.
-                HomeDropdown.Row(title: "\(HomeSurfaceView.setUpGitHubTitle)…") {},
+                HomeDropdown.Row(icon: HomeDropdown.symbol("link"), title: "\(HomeSurfaceView.setUpGitHubTitle)…") {},
             ])
             guard let directory = workspaceDirectory(for: homeSelectedProjectID),
                   let root = GitStatus.repoRoot(for: URL(fileURLWithPath: directory, isDirectory: true))
@@ -704,7 +702,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let branches = GitBranch.all(repoRoot: root)
             let isPendingNew = homeView.newBranchName != nil
             let rows = branches.map { name in
-                HomeDropdown.Row(title: name, isCurrent: name == base && !isPendingNew) { [weak self] in
+                HomeDropdown.Row(
+                    icon: HomeDropdown.symbol("arrow.triangle.branch"), title: name, isCurrent: name == base && !isPendingNew
+                ) { [weak self] in
                     self?.homeView.updateBranchChip(existing: name)
                 }
             }
@@ -712,11 +712,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 [gitHub, HomeDropdown.Section(header: "Local branches", rows: rows)],
                 searchPlaceholder: "Search branches…", from: anchor
             )
-            let plus = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
             dropdown.extraRows = { [weak self] query in
                 guard !branches.contains(query) else { return [] }
-                return [HomeDropdown.Row(icon: plus, title: "Create “\(query)” from \(base)") {
+                return [HomeDropdown.Row(icon: HomeDropdown.symbol("plus"), title: "Create “\(query)” from \(base)") {
                     self?.homeView.updateBranchChip(new: query, from: base)
                 }]
             }
