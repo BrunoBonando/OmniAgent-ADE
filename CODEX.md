@@ -83,6 +83,7 @@ See `docs/DESIGN.md` and `docs/PLAN.md` for architecture and product principles.
 ## 3) Key repository conventions and patterns
 
 - Cargo workspace: root `Cargo.toml` lists members; prefer workspace-level builds/tests for cross-crate changes.
+- **Spotlight finds everything** (standing rule, 2026-08-28): every navigable thing in the native app — destinations (Home, To Do List, Desk, Settings), workspaces, sessions, panes, editor files, Settings sections and, as they are built, the items *inside* them — must be a row in the spotlight (`macos/OmniAgent/CommandPalette.swift`, `CommandPaletteModel.build`) the day it lands, with its own symbol, a subtitle naming where it lives, `keywords` for what a user would type, an action `WorkspaceWindowController.run(_:)` dispatches, and a `CommandPaletteTests` test that the rows exist. Build rows off `allCases`/live lists so later additions appear without anyone remembering this.
 - Packaging rule: changes that affect releases should end with a packaged app build (`target/release/bundle/*.app` or `.dmg`).
 - MCP contract: the MCP server protocol is frozen for v1. Changing public MCP shapes (tools/requests) requires updating integrations and running `crates/mcp-server` contract tests.
 - Commit trailer: When creating commits for repository changes, include this trailer unless explicitly requested not to:

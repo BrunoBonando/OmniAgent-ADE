@@ -188,23 +188,13 @@ final class EditorPaneIntegrationTests: XCTestCase {
 
     // MARK: - Entry points
 
-    func testPaletteOffersNewEditorPaneAndTheControllerRunsIt() throws {
-        let commands = CommandPaletteModel.build(
-            panes: [],
-            paneOrder: [],
-            focusedPaneID: nil,
-            unreadNotifications: 0
-        )
-        let row = try XCTUnwrap(commands.first { $0.action == .newEditorPane })
-        XCTAssertEqual(row.id, "new-editor")
-        XCTAssertEqual(row.title, "New editor pane")
-        XCTAssertEqual(row.detail, "⇧⌘E")
-
+    /// ⇧⌘E — the menu item's action. (The spotlight no longer lists verbs.)
+    func testNewEditorPaneOpensOneEditorPane() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
 
-        controller.run(.newEditorPane)
+        controller.newEditorPane(nil)
 
         let workspace = controller.workspaceView
         XCTAssertEqual(
@@ -465,14 +455,14 @@ final class EditorPaneIntegrationTests: XCTestCase {
         XCTAssertEqual(workspace.focusedPaneID, first)
     }
 
-    /// The palette row runs the same method the toggle does.
-    func testThePaletteOpensTheDiffForTheFocusedEditorsFile() throws {
+    /// The method the tab strip's ± toggle runs opens a diff tab for the file.
+    func testOpenDiffOpensADiffTabForTheFile() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
         let file = try makeTempFile("a.swift", "x")
 
-        controller.run(.openDiffForCurrentFile(path: file.path))
+        controller.openDiffInEditor(URL(fileURLWithPath: file.path))
 
         let pane = try XCTUnwrap(firstEditorPane(in: controller))
         XCTAssertEqual(pane.model.tabs.map(\.path), [file.path])
@@ -536,25 +526,16 @@ final class EditorPaneIntegrationTests: XCTestCase {
         )
     }
 
-    /// The palette row exists only where there is a repository to describe,
-    /// and running it opens the same tab the header does.
-    func testThePaletteOffersAllChangesOnlyOnceTheWorkspaceIsARepo() throws {
+    /// The header's "all changes" opens the Changes tab in an editor pane.
+    func testShowAllChangesOpensTheChangesTab() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
-
-        controller.showCommandPalette(nil)
-        XCTAssertFalse(controller.palette.model.commands.contains { $0.action == .showAllChanges })
-        controller.palette.dismiss()
-
         controller.applyGitStatus(
             GitStatus(root: URL(fileURLWithPath: "/w"), badges: ["a.swift": .modified])
         )
-        controller.showCommandPalette(nil)
-        XCTAssertTrue(controller.palette.model.commands.contains { $0.action == .showAllChanges })
-        controller.palette.dismiss()
 
-        controller.run(.showAllChanges)
+        controller.openChangesOverview()
 
         let pane = try XCTUnwrap(firstEditorPane(in: controller))
         XCTAssertEqual(pane.model.tabs.map(\.kind), [.changes])

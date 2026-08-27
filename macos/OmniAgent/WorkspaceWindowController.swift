@@ -2597,14 +2597,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 panes: workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
                 paneOrder: workspace.allPaneIDs,
                 focusedPaneID: workspace.focusedPaneID,
-                unreadNotifications: notifier.unreadCount,
-                nextSessionName: SessionOutline.nextSessionName(
-                    workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
-                    project: workspace.focusedPaneID
-                        .flatMap { workspace.descriptor(for: $0)?.project } ?? ""
-                ),
                 projectLabels: projectLabels,
-                hasGitRepo: latestGitStatus != nil
+                workspaces: homeOpenWorkspaces().map {
+                    PaletteWorkspace(id: $0.id, label: sidebarDisplayLabel(for: $0.id), path: $0.path)
+                }
             ),
             files: repoFiles,
             filesRoot: latestGitStatus?.root,
@@ -2619,17 +2615,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         switch action {
         case let .focusPane(sessionID):
             revealPane(sessionID)
-        case let .closePane(sessionID):
-            workspace.focusPane(sessionID)
-            closePane(nil)
-        case .newPane:
-            newTerminalPane(nil)
-        case .newBrowserPane:
-            newBrowserPane(nil)
-        case .newEditorPane:
-            newEditorPane(nil)
-        case let .openDiffForCurrentFile(path):
-            openDiffInEditor(URL(fileURLWithPath: path))
+        case let .selectWorkspace(id):
+            selectWorkspace(id: id)
+            applyDestination(.terminals)
         case let .showDestination(destination):
             applyDestination(destination)
         case let .showSettingsSection(section):
@@ -2640,24 +2628,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // nothing about focus mode; without this a file in a second pane
             // of the *same* session opens behind the zoomed card.
             if let focused = workspace.focusedPaneID { _ = revealPane(focused) }
-        case .showAllChanges:
-            openChangesOverview()
-        case .newSession:
-            newSession(nil)
         case let .enterSession(group):
             enterDeskSession(group)
-        // Interrupt and reattach are the focused terminal's own responder
-        // actions (`TerminalSurfaceView`), reached here directly rather than
-        // re-implemented, so the palette runs the identical code the ⌘. and
-        // ⌘R menu items do.
-        case .interruptFocusedPane:
-            workspace.focusedPaneID.flatMap { workspace.terminalSurface(for: $0) }?.interruptSession(nil)
-        case .reattachFocusedPane:
-            workspace.focusedPaneID.flatMap { workspace.terminalSurface(for: $0) }?.reattachSession(nil)
-        case .toggleSidebar:
-            toggleWorkspaceSidebar(nil)
-        case .clearNotifications:
-            notifier.clear()
         case let .searchBrain(query):
             connection.search(query: query, scope: nil) { [weak self] result in
                 guard let self else { return }

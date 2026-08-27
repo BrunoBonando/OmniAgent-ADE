@@ -11,8 +11,7 @@ final class CommandPaletteTests: XCTestCase {
                 pane("b", project: "beta", group: "g2"),
             ],
             paneOrder: ["a", "b"],
-            focusedPaneID: "a",
-            unreadNotifications: 0
+            focusedPaneID: "a"
         )
 
         let switches = commands.filter { $0.id.hasPrefix("focus:") }
@@ -21,134 +20,59 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(switches.map(\.detail), ["shell", "shell"])
     }
 
-    func testFocusedPaneCommandsAppearOnlyWhenSomethingIsFocused() {
-        let unfocused = CommandPaletteModel.build(
-            panes: [pane("a", project: "alpha", group: "g1")],
-            paneOrder: ["a"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
-        )
+    func testAnEmptyWorkspaceStillOffersThePlaces() {
         XCTAssertEqual(
-            unfocused.map(\.id),
-            [
-                "session:alpha/g1", "enter:g1", "focus:a",
-                "destination:home", "destination:todo", "destination:terminals", "destination:settings",
-                "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
-                "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
-                "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
-            ]
-        )
-
-        let focused = CommandPaletteModel.build(
-            panes: [pane("a", project: "alpha", group: "g1")],
-            paneOrder: ["a"],
-            focusedPaneID: "a",
-            unreadNotifications: 0
-        )
-        XCTAssertEqual(
-            focused.map(\.id),
-            [
-                "session:alpha/g1", "enter:g1", "focus:a",
-                "destination:home", "destination:todo", "destination:terminals", "destination:settings",
-                "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
-                "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
-                "new-pane", "new-browser", "new-editor", "new-session",
-                "close-pane", "interrupt", "reattach", "toggle-sidebar",
-            ]
-        )
-        XCTAssertEqual(focused.first { $0.id == "close-pane" }?.action, .closePane(sessionID: "a"))
-    }
-
-    /// Interrupt and reattach are PTY verbs. A focused browser pane still
-    /// offers close — the pane exists — but never the two session actions.
-    func testAFocusedBrowserPaneOffersCloseButNoSessionActions() {
-        let browserFocused = CommandPaletteModel.build(
-            panes: [
-                pane("a", project: "alpha", group: "g1"),
-                pane("web", project: "alpha", group: "g1", kind: .browser),
-            ],
-            paneOrder: ["a", "web"],
-            focusedPaneID: "web",
-            unreadNotifications: 0
-        )
-        XCTAssertNotNil(browserFocused.first { $0.id == "close-pane" })
-        XCTAssertNil(browserFocused.first { $0.id == "interrupt" })
-        XCTAssertNil(browserFocused.first { $0.id == "reattach" })
-
-        let terminalFocused = CommandPaletteModel.build(
-            panes: [
-                pane("a", project: "alpha", group: "g1"),
-                pane("web", project: "alpha", group: "g1", kind: .browser),
-            ],
-            paneOrder: ["a", "web"],
-            focusedPaneID: "a",
-            unreadNotifications: 0
-        )
-        XCTAssertNotNil(terminalFocused.first { $0.id == "close-pane" })
-        XCTAssertNotNil(terminalFocused.first { $0.id == "interrupt" })
-        XCTAssertNotNil(terminalFocused.first { $0.id == "reattach" })
-    }
-
-    func testTheNewSessionRowNamesTheSessionItWouldCreate() {
-        let named = CommandPaletteModel.build(
-            panes: [pane("a", project: "alpha", group: "g1", groupLabel: "Session 1")],
-            paneOrder: ["a"],
-            focusedPaneID: nil,
-            unreadNotifications: 0,
-            nextSessionName: "Session 2"
-        ).first { $0.id == "new-session" }
-        XCTAssertEqual(named?.title, "New session — Session 2")
-        XCTAssertEqual(named?.detail, "⌘N")
-        XCTAssertEqual(named?.action, .newSession)
-
-        let unnamed = CommandPaletteModel.build(
-            panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0
-        ).first { $0.id == "new-session" }
-        XCTAssertEqual(unnamed?.title, "New session", "no name to offer, no dangling dash")
-    }
-
-    func testTheClearNotificationsRowExistsOnlyWhenThereIsSomethingToClear() {
-        XCTAssertNil(
-            CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0)
-                .first { $0.id == "clear-notifications" }
-        )
-        let row = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 3)
-            .first { $0.id == "clear-notifications" }
-        XCTAssertEqual(row?.detail, "3 unread")
-        XCTAssertEqual(row?.action, .clearNotifications)
-    }
-
-    func testAnEmptyWorkspaceStillOffersTheCommandsThatDoNotNeedAPane() {
-        XCTAssertEqual(
-            CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0)
+            CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
                 .map(\.id),
             [
                 "destination:home", "destination:todo", "destination:terminals", "destination:settings",
                 "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
-                "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
             ]
         )
     }
 
-    /// ⇧⌘T's palette twin sits beside "New terminal pane", and a browser
-    /// pane's switch-to row says what it is rather than naming an engine it
-    /// does not have.
-    func testTheNewBrowserRowSitsBesideNewPaneAndBrowserRowsSayBrowser() {
+    /// Every open workspace is a row — renamed as the sidebar shows it, found
+    /// by its path too — that opens it and shows the Desk. A workspace with
+    /// nothing running is findable all the same.
+    func testEveryWorkspaceIsASpotlightRow() {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil,
+            workspaces: [
+                PaletteWorkspace(id: "alpha", label: "Alpha (renamed)", path: "/Users/me/code/alpha"),
+                PaletteWorkspace(id: "beta", label: "beta", path: nil),
+            ]
+        )
+        let rows = commands.filter { if case .selectWorkspace = $0.action { return true } else { return false } }
+        XCTAssertEqual(rows.map(\.id), ["workspace:alpha", "workspace:beta"])
+        XCTAssertEqual(rows.map(\.title), ["Alpha (renamed)", "beta"])
+        XCTAssertEqual(rows.first?.keywords, "/Users/me/code/alpha")
+        XCTAssertTrue(rows.allSatisfy { $0.section == .places && $0.subtitle == "Workspace" && $0.symbol == "folder" })
+        XCTAssertEqual(rows.first?.action, .selectWorkspace(id: "alpha"))
+        XCTAssertEqual(commands.first?.id, "workspace:alpha", "workspaces lead the places")
+    }
+
+    /// The verbs are gone: the spotlight finds things, it does not list
+    /// commands.
+    func testTheSpotlightListsNoCommands() {
+        let commands = CommandPaletteModel.build(
+            panes: [pane("a", project: "alpha", group: "g1")], paneOrder: ["a"], focusedPaneID: "a"
+        )
+        XCTAssertFalse(commands.contains { $0.id.hasPrefix("new-") || ["close-pane", "interrupt", "reattach", "toggle-sidebar", "clear-notifications", "show-all-changes", "open-diff"].contains($0.id) })
+        XCTAssertFalse(commands.contains { $0.detail?.hasPrefix("⌘") == true })
+    }
+
+    /// A browser pane's switch-to row says what it is rather than naming an
+    /// engine it does not have.
+    func testBrowserRowsSayBrowser() {
         let commands = CommandPaletteModel.build(
             panes: [
                 pane("a", project: "alpha", group: "g1"),
                 pane("web", project: "alpha", group: "g1", kind: .browser),
             ],
             paneOrder: ["a", "web"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
+            focusedPaneID: nil
         )
-
-        let row = commands.first { $0.id == "new-browser" }
-        XCTAssertEqual(row?.title, "New browser pane")
-        XCTAssertEqual(row?.detail, "⇧⌘T")
-        XCTAssertEqual(row?.action, .newBrowserPane)
 
         XCTAssertEqual(commands.first { $0.id == "focus:web" }?.detail, "browser", "a browser is not an engine")
         XCTAssertEqual(commands.first { $0.id == "focus:a" }?.detail, "shell")
@@ -162,8 +86,7 @@ final class CommandPaletteTests: XCTestCase {
         let noLabels = CommandPaletteModel.build(
             panes: [pane("a", project: "alpha", group: "g1")],
             paneOrder: ["a"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
+            focusedPaneID: nil
         )
         XCTAssertEqual(noLabels.first { $0.id == "focus:a" }?.subtitle, "alpha · Session 1")
 
@@ -171,104 +94,9 @@ final class CommandPaletteTests: XCTestCase {
             panes: [pane("a", project: "alpha", group: "g1")],
             paneOrder: ["a"],
             focusedPaneID: nil,
-            unreadNotifications: 0,
             projectLabels: ["alpha": "Alpha Project"]
         )
         XCTAssertEqual(withLabels.first { $0.id == "focus:a" }?.subtitle, "Alpha Project · Session 1")
-    }
-
-    /// Task 12: the focused editor's active *file* tab can be diffed from the
-    /// palette. Nothing else offers the row — there is no file to diff.
-    func testTheOpenDiffRowFollowsTheFocusedEditorsActiveFileTab() {
-        let rows = CommandPaletteModel.build(
-            panes: [
-                pane(
-                    "ed",
-                    project: "alpha",
-                    group: "g1",
-                    kind: .editor,
-                    editorTabs: [PersistedEditorTab(path: "/w/src/token.swift", kind: "file", pinned: true)]
-                )
-            ],
-            paneOrder: ["ed"],
-            focusedPaneID: "ed",
-            unreadNotifications: 0,
-            hasGitRepo: true
-        )
-
-        let row = rows.first { $0.id == "open-diff" }
-        XCTAssertEqual(row?.title, "Open diff for token.swift")
-        XCTAssertEqual(row?.detail, "vs HEAD")
-        XCTAssertEqual(row?.action, .openDiffForCurrentFile(path: "/w/src/token.swift"))
-    }
-
-    func testNothingElseOffersTheOpenDiffRow() {
-        let terminal = CommandPaletteModel.build(
-            panes: [pane("a", project: "alpha", group: "g1")],
-            paneOrder: ["a"],
-            focusedPaneID: "a",
-            unreadNotifications: 0
-        )
-        XCTAssertNil(terminal.first { $0.id == "open-diff" }, "a terminal has no file to diff")
-
-        let alreadyADiff = CommandPaletteModel.build(
-            panes: [
-                pane(
-                    "ed",
-                    project: "alpha",
-                    group: "g1",
-                    kind: .editor,
-                    editorTabs: [PersistedEditorTab(path: "/w/src/token.swift", kind: "diff", pinned: true)]
-                )
-            ],
-            paneOrder: ["ed"],
-            focusedPaneID: "ed",
-            unreadNotifications: 0
-        )
-        XCTAssertNil(alreadyADiff.first { $0.id == "open-diff" }, "the active tab is already the diff")
-
-        let empty = CommandPaletteModel.build(
-            panes: [pane("ed", project: "alpha", group: "g1", kind: .editor)],
-            paneOrder: ["ed"],
-            focusedPaneID: "ed",
-            unreadNotifications: 0
-        )
-        XCTAssertNil(empty.first { $0.id == "open-diff" }, "an editor with no tabs has nothing to diff")
-
-        let noRepo = CommandPaletteModel.build(
-            panes: [
-                pane(
-                    "ed",
-                    project: "alpha",
-                    group: "g1",
-                    kind: .editor,
-                    editorTabs: [PersistedEditorTab(path: "/w/src/token.swift", kind: "file", pinned: true)]
-                )
-            ],
-            paneOrder: ["ed"],
-            focusedPaneID: "ed",
-            unreadNotifications: 0
-        )
-        XCTAssertNil(
-            noRepo.first { $0.id == "open-diff" },
-            "outside a repository the row is absent, not a row that lands on an error"
-        )
-    }
-
-    /// Task 13: "Show all changes" needs a repository to describe. The
-    /// caller knows whether there is one; the model never runs git itself.
-    func testShowAllChangesOnlyInARepo() {
-        let without = CommandPaletteModel.build(
-            panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0
-        )
-        XCTAssertFalse(without.contains { $0.action == .showAllChanges })
-
-        let with = CommandPaletteModel.build(
-            panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0, hasGitRepo: true
-        )
-        XCTAssertTrue(with.contains { $0.action == .showAllChanges })
-        XCTAssertEqual(with.first { $0.action == .showAllChanges }?.id, "show-all-changes")
-        XCTAssertEqual(with.first { $0.action == .showAllChanges }?.title, "Show all changes")
     }
 
     func testNoSyntheticRowIsAppendedToWhatTheQueryFound() {
@@ -294,8 +122,7 @@ final class CommandPaletteTests: XCTestCase {
                 pane("c", project: "beta", group: "g3"),
             ],
             paneOrder: ["a", "b", "c"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
+            focusedPaneID: nil
         )
 
         let enters = commands.filter { if case .enterSession = $0.action { return true } else { return false } }
@@ -339,7 +166,6 @@ final class CommandPaletteTests: XCTestCase {
             ],
             paneOrder: ["a", "b", "c"],
             focusedPaneID: nil,
-            unreadNotifications: 0,
             projectLabels: ["alpha": "Alpha Project"]
         )
 
@@ -354,7 +180,7 @@ final class CommandPaletteTests: XCTestCase {
     /// by "settings", opening the page on itself.
     func testTheSettingsSectionsAreSpotlightRows() {
         let commands = CommandPaletteModel.build(
-            panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0
+            panes: [], paneOrder: [], focusedPaneID: nil
         )
         let rows = commands.filter { if case .showSettingsSection = $0.action { return true } else { return false } }
         XCTAssertEqual(rows.map(\.title), SettingsSection.allCases.map(\.title))
@@ -365,7 +191,7 @@ final class CommandPaletteTests: XCTestCase {
 
     func testTheSidebarsThreeDestinationsAreRowsWithTheirOwnIcons() {
         let commands = CommandPaletteModel.build(
-            panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0
+            panes: [], paneOrder: [], focusedPaneID: nil
         )
         let destinations = commands.filter {
             if case .showDestination = $0.action { return true } else { return false }
@@ -391,8 +217,7 @@ final class CommandPaletteTests: XCTestCase {
                 return pane
             }()],
             paneOrder: ["a"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
+            focusedPaneID: nil
         )
         let row = named.first { $0.id == "focus:a" }
         XCTAssertEqual(row?.title, "claude")
@@ -414,8 +239,7 @@ final class CommandPaletteTests: XCTestCase {
                 return pane
             }()],
             paneOrder: ["a"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
+            focusedPaneID: nil
         )
         XCTAssertEqual(unnamed.first { $0.id == "focus:a" }?.subtitle, "alpha · Build")
     }
@@ -429,8 +253,7 @@ final class CommandPaletteTests: XCTestCase {
                 pane("w", project: "spot", group: "g1", label: "spotlight browser", kind: .browser),
             ],
             paneOrder: ["t", "w"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
+            focusedPaneID: nil
         ))
         model.update(query: "spotlight")
 
@@ -446,8 +269,7 @@ final class CommandPaletteTests: XCTestCase {
                 pane("w", project: "spot", group: "g1", label: "spotlight browser", kind: .browser),
             ],
             paneOrder: ["t", "w"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
+            focusedPaneID: nil
         ))
         model.update(query: "spotlight")
         model.select(section: .browsers)
@@ -463,8 +285,7 @@ final class CommandPaletteTests: XCTestCase {
         var model = CommandPaletteModel(commands: CommandPaletteModel.build(
             panes: [pane("w", project: "spot", group: "g1", label: "spotlight browser", kind: .browser)],
             paneOrder: ["w"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
+            focusedPaneID: nil
         ))
         model.update(query: "spotlight")
         XCTAssertEqual(model.sectionTags, [nil, .browsers])
@@ -526,8 +347,7 @@ final class CommandPaletteTests: XCTestCase {
                 pane("w", project: "spot", group: "g1", label: "spotlight browser", kind: .browser),
             ],
             paneOrder: ["t", "w"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
+            focusedPaneID: nil
         ))
         model.update(query: "spotlight")
         model.select(section: .files)
@@ -616,8 +436,7 @@ final class CommandPaletteTests: XCTestCase {
                 )
             ],
             paneOrder: ["ed"],
-            focusedPaneID: "ed",
-            unreadNotifications: 0
+            focusedPaneID: "ed"
         )
         var model = CommandPaletteModel(
             commands: open,
@@ -647,8 +466,8 @@ final class CommandPaletteTests: XCTestCase {
             model.matches.map(\.section).reduce(into: [PaletteSection]()) { runs, section in
                 if runs.last != section { runs.append(section) }
             },
-            [.files, .actions],
-            "one run per section, in the palette's own section order — Files before Actions"
+            [.files, .places],
+            "one run per section, in the palette's own section order — Files before Places"
         )
     }
 
@@ -683,8 +502,7 @@ final class CommandPaletteTests: XCTestCase {
                 pane("e2", project: "alpha", group: "g1", kind: .editor, editorTabs: [tabs[0]]),
             ],
             paneOrder: ["e1", "e2"],
-            focusedPaneID: nil,
-            unreadNotifications: 0
+            focusedPaneID: nil
         )
 
         let files = commands.filter { if case .openFile = $0.action { return true } else { return false } }
@@ -703,8 +521,7 @@ final class CommandPaletteTests: XCTestCase {
                     ]),
                 ],
                 paneOrder: ["b", "e"],
-                focusedPaneID: nil,
-                unreadNotifications: 0
+                focusedPaneID: nil
             )
         )
 
@@ -726,8 +543,7 @@ final class CommandPaletteTests: XCTestCase {
                     pane("t2", project: "beta", group: "g2"),
                 ],
                 paneOrder: ["web", "t1", "ed", "t2"],
-                focusedPaneID: nil,
-                unreadNotifications: 0
+                focusedPaneID: nil
             )
 
         // Consecutive runs, never interleaved: the table can insert one
@@ -736,7 +552,7 @@ final class CommandPaletteTests: XCTestCase {
         for command in commands where runs.last != command.section {
             runs.append(command.section)
         }
-        XCTAssertEqual(runs, [.sessions, .terminals, .browsers, .files, .actions])
+        XCTAssertEqual(runs, [.sessions, .terminals, .browsers, .files, .places])
 
         // Panes keep the outline's own order inside their section.
         XCTAssertEqual(
@@ -896,9 +712,10 @@ final class CommandPaletteTests: XCTestCase {
 
     private let sample: [PaletteCommand] = [
         PaletteCommand(id: "focus:a", title: "Switch to alpha — Session 1 — pane", detail: "shell", action: .focusPane(sessionID: "a")),
-        PaletteCommand(id: "new-pane", title: "New terminal pane", detail: "⌘T", action: .newPane),
-        PaletteCommand(id: "close-pane", title: "Close pane shell", detail: "⌘W", action: .closePane(sessionID: "a")),
-        PaletteCommand(id: "toggle-sidebar", title: "Toggle sidebar", detail: "⌃⌘S", action: .toggleSidebar),
+        // Rows to filter and order — what they *do* is not under test.
+        PaletteCommand(id: "new-pane", title: "New terminal pane", detail: "⌘T", action: .noop),
+        PaletteCommand(id: "close-pane", title: "Close pane shell", detail: "⌘W", action: .noop),
+        PaletteCommand(id: "toggle-sidebar", title: "Toggle sidebar", detail: "⌃⌘S", action: .noop),
     ]
 
     private func pane(

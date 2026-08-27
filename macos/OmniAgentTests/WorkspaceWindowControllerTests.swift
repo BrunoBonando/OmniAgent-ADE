@@ -1625,16 +1625,16 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.run(.focusPane(sessionID: "sess-a"))
         XCTAssertEqual(controller.workspaceView.focusedPaneID, "sess-a")
 
-        controller.run(.newPane)
-        XCTAssertEqual(controller.workspaceView.paneIDs.count, 3)
+        controller.run(.showDestination(.home))
+        XCTAssertEqual(controller.destination, .home)
 
-        controller.run(.closePane(sessionID: "sess-b"))
-        XCTAssertFalse(controller.workspaceView.paneIDs.contains("sess-b"))
+        controller.run(.showSettingsSection(.accounts))
+        XCTAssertEqual(controller.destination, .settings)
+        XCTAssertEqual(controller.settingsView.section, .accounts)
 
-        let split = try XCTUnwrap(controller.splitController)
-        let collapsed = split.splitViewItems[0].isCollapsed
-        controller.run(.toggleSidebar)
-        XCTAssertNotEqual(split.splitViewItems[0].isCollapsed, collapsed)
+        controller.run(.selectWorkspace(id: "alpha"))
+        XCTAssertEqual(controller.selectedProjectID, "alpha")
+        XCTAssertEqual(controller.destination, .terminals, "a workspace opens on the Desk")
     }
 
     /// Dragging the sidebar divider has to hold. It did not: the split view

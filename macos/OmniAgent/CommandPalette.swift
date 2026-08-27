@@ -5,20 +5,14 @@ import Foundation
 /// thing that knows how to perform any of it.
 enum PaletteAction: Equatable {
     case focusPane(sessionID: String)
-    case closePane(sessionID: String)
-    case newPane
-    case newBrowserPane
-    case newEditorPane
-    case newSession
     /// Fly the Desk's camera onto one session's card. The palette twin of
     /// ⌃1…⌃9 and of the sidebar's session row — all three land in
     /// `WorkspaceWindowController.enterDeskSession`.
     case enterSession(group: String)
-    /// The focused editor's active file, diffed against HEAD — the palette's
-    /// twin of the tab strip's ± toggle.
-    case openDiffForCurrentFile(path: String)
-    /// One of Level 2's three destinations — Dashboard, Board, Desk — the
-    /// sidebar's own buttons, reachable by typing their names.
+    /// A workspace from the sidebar, by name — opened, and the Desk shown.
+    case selectWorkspace(id: String)
+    /// One of the sidebar's destinations — Home, To Do List, Desk, Settings
+    /// — reachable by typing its name.
     case showDestination(WorkspaceDestination)
     /// One Settings section, straight from the spotlight — the page opens
     /// on it, the way the gear's panel would.
@@ -26,12 +20,6 @@ enum PaletteAction: Equatable {
     /// A file open in some editor pane, chosen from the spotlight — reveals
     /// the pane holding it and brings that tab forward.
     case openFile(path: String)
-    /// The repo-wide Changes overview.
-    case showAllChanges
-    case interruptFocusedPane
-    case reattachFocusedPane
-    case toggleSidebar
-    case clearNotifications
     /// Runs `SessionConnection.search` for the current query (Task 6a-2 —
     /// the row Task 6b-1 promised would "come back when the query does").
     case searchBrain(query: String)
@@ -53,7 +41,11 @@ enum PaletteSection: String, CaseIterable, Equatable {
     case terminals = "Terminals"
     case browsers = "Browsers"
     case files = "Files"
-    case actions = "Actions"
+    /// Where things are — workspaces, the destinations, the Settings
+    /// sections. The spotlight is for *finding*; the verbs (new pane, close,
+    /// interrupt…) left it on 2026-08-28, since a search that lists commands
+    /// is a menu.
+    case places = "Places"
     case brain = "Brain"
 
     /// The SF Symbol every row in the section wears.
@@ -63,7 +55,7 @@ enum PaletteSection: String, CaseIterable, Equatable {
         case .terminals: return "apple.terminal"
         case .browsers: return "globe"
         case .files: return "doc.text"
-        case .actions: return "command"
+        case .places: return "location"
         case .brain: return "sparkle.magnifyingglass"
         }
     }
@@ -152,6 +144,15 @@ enum FuzzyMatch {
 }
 
 /// One row.
+/// A sidebar workspace as the palette sees it: the id it selects by, the
+/// name the sidebar shows (renames included), and the path the query may
+/// match.
+struct PaletteWorkspace: Equatable {
+    let id: String
+    let label: String
+    let path: String?
+}
+
 struct PaletteCommand: Equatable {
     let id: String
     let title: String
@@ -177,7 +178,7 @@ struct PaletteCommand: Equatable {
         detail: String?,
         action: PaletteAction,
         keywords: String? = nil,
-        section: PaletteSection = .actions,
+        section: PaletteSection = .places,
         subtitle: String? = nil,
         symbol: String? = nil
     ) {
@@ -247,12 +248,10 @@ struct CommandPaletteModel: Equatable {
         panes: [PaneDescriptor],
         paneOrder: [String],
         focusedPaneID: String?,
-        unreadNotifications: Int,
-        nextSessionName: String? = nil,
         projectLabels: [String: String] = [:],
-        /// Whether the open workspace is a git repository. Passed in rather
-        /// than discovered: this model never runs a subprocess.
-        hasGitRepo: Bool = false
+        /// The sidebar's open workspaces, in its order, with their display
+        /// names — so a workspace with nothing running is still findable.
+        workspaces: [PaletteWorkspace] = []
     ) -> [PaletteCommand] {
         // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
         // the already-fixed call site in `WorkspaceWindowController`'s
@@ -391,6 +390,20 @@ struct CommandPaletteModel: Equatable {
                 )
             }
         }
+        for workspace in workspaces {
+            commands.append(
+                PaletteCommand(
+                    id: "workspace:\(workspace.id)",
+                    title: workspace.label,
+                    detail: nil,
+                    action: .selectWorkspace(id: workspace.id),
+                    keywords: workspace.path,
+                    section: .places,
+                    subtitle: "Workspace",
+                    symbol: "folder"
+                )
+            )
+        }
         // The sidebar's own three buttons, by name. `allCases` rather than a
         // hand-written list: a fourth destination should appear here the day
         // it appears in the sidebar, not the day someone remembers this.
@@ -401,7 +414,7 @@ struct CommandPaletteModel: Equatable {
                     title: destination.title,
                     detail: nil,
                     action: .showDestination(destination),
-                    section: .actions,
+                    section: .places,
                     subtitle: destination.subtitle,
                     symbol: destination.paletteSymbol
                 )
@@ -416,92 +429,9 @@ struct CommandPaletteModel: Equatable {
                     detail: nil,
                     action: .showSettingsSection(section),
                     keywords: "settings",
-                    section: .actions,
+                    section: .places,
                     subtitle: "Settings",
                     symbol: section.symbol
-                )
-            )
-        }
-        commands.append(
-            PaletteCommand(id: "new-pane", title: "New terminal pane", detail: "⌘T", action: .newPane)
-        )
-        commands.append(
-            PaletteCommand(id: "new-browser", title: "New browser pane", detail: "⇧⌘T", action: .newBrowserPane)
-        )
-        commands.append(
-            PaletteCommand(id: "new-editor", title: "New editor pane", detail: "⇧⌘E", action: .newEditorPane)
-        )
-        if hasGitRepo {
-            commands.append(
-                PaletteCommand(
-                    id: "show-all-changes",
-                    title: "Show all changes",
-                    detail: "git",
-                    action: .showAllChanges
-                )
-            )
-        }
-        commands.append(
-            PaletteCommand(
-                id: "new-session",
-                title: "New session\(nextSessionName.map { " — \($0)" } ?? "")",
-                detail: "⌘N",
-                action: .newSession
-            )
-        )
-        if let focusedPaneID, let pane = byID[focusedPaneID] {
-            let name = SessionOutline.paneLabel(pane)
-            commands.append(
-                PaletteCommand(
-                    id: "close-pane",
-                    title: "Close pane \(name)",
-                    detail: "⌘W",
-                    action: .closePane(sessionID: focusedPaneID)
-                )
-            )
-            // Interrupt and reattach are PTY verbs; a non-terminal pane can
-            // be closed but has no session to signal or reattach.
-            if pane.kind == .terminal {
-                commands.append(
-                    PaletteCommand(id: "interrupt", title: "Interrupt \(name)", detail: "⌘.", action: .interruptFocusedPane)
-                )
-                commands.append(
-                    PaletteCommand(id: "reattach", title: "Reattach \(name)", detail: "⌘R", action: .reattachFocusedPane)
-                )
-            }
-            // Only a *file* tab has something to diff: a media tab is not
-            // text, and a diff tab is already the answer. The descriptor's
-            // persisted tab list is the palette's only view of the pane —
-            // it never reaches into `EditorPaneView` itself.
-            // Gated on `hasGitRepo` like "Show all changes" above: outside a
-            // repository the row is *absent*, rather than a row that runs and
-            // lands on an inline "is this file in a git repository?" message.
-            if hasGitRepo,
-               pane.kind == .editor,
-               pane.editorTabs.indices.contains(pane.editorActiveIndex) {
-                let active = pane.editorTabs[pane.editorActiveIndex]
-                if active.kind == EditorTabKind.file.rawValue {
-                    commands.append(
-                        PaletteCommand(
-                            id: "open-diff",
-                            title: "Open diff for \((active.path as NSString).lastPathComponent)",
-                            detail: "vs HEAD",
-                            action: .openDiffForCurrentFile(path: active.path)
-                        )
-                    )
-                }
-            }
-        }
-        commands.append(
-            PaletteCommand(id: "toggle-sidebar", title: "Toggle sidebar", detail: "⌃⌘S", action: .toggleSidebar)
-        )
-        if unreadNotifications > 0 {
-            commands.append(
-                PaletteCommand(
-                    id: "clear-notifications",
-                    title: "Clear notifications",
-                    detail: "\(unreadNotifications) unread",
-                    action: .clearNotifications
                 )
             )
         }
