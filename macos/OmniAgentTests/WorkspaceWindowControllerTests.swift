@@ -1838,8 +1838,16 @@ final class WorkspaceWindowControllerTests: XCTestCase {
     func testTheColorMenuIsClaudeOnlyAndHasAllColors() {
         let controller = makeController()
         let menu = controller.claudeColorMenu()
+        // The dot rides in the title as a text attachment — the icon slot
+        // never renders in this menu, see `claudeColorMenu` — so the word is
+        // what is left of the attributed title once the attachment's
+        // placeholder character is dropped.
         XCTAssertEqual(
-            menu.items.map(\.title),
+            menu.items.map { item in
+                (item.attributedTitle?.string ?? item.title)
+                    .replacingOccurrences(of: "\u{FFFC}", with: "")
+                    .trimmingCharacters(in: .whitespaces)
+            },
             ["Red", "Blue", "Green", "Yellow", "Purple", "Orange", "Pink", "Cyan", "Default"],
             "/color takes these names and rejects everything else, hex included"
         )
@@ -1849,7 +1857,14 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             "the lowercase name is what gets typed at the terminal"
         )
         XCTAssertTrue(
-            menu.items.allSatisfy { $0.image != nil },
+            menu.items.allSatisfy { item in
+                guard let title = item.attributedTitle else { return false }
+                var swatched = false
+                title.enumerateAttribute(.attachment, in: NSRange(location: 0, length: title.length)) { value, _, _ in
+                    if let attachment = value as? NSTextAttachment, attachment.image != nil { swatched = true }
+                }
+                return swatched
+            },
             "the swatch is what makes a list of colour words pickable at a glance"
         )
     }

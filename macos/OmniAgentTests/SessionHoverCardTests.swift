@@ -676,11 +676,18 @@ final class SessionHoverCardTests: XCTestCase {
         XCTAssertEqual(field.typedText, "Editing Session", "only the divergent tail is erased")
         XCTAssertTrue(field.isTyping)
 
-        // And it gets there: 600 chars/s finishes a 23-character line well
-        // inside a fifth of a second.
-        RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        // And it gets there. Waited for, not slept for: at 600 chars/s the
+        // line is done in a couple of 60Hz ticks, and `isTyping` drops on the
+        // tick after the last character lands — but the timer that types it
+        // is a main-run-loop timer, and a busy machine (the full suite next
+        // to a Release build) can hold a tick back for longer than any fixed
+        // sleep short enough to still be a unit test.
+        let deadline = Date().addingTimeInterval(2)
+        while field.isTyping, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
         XCTAssertEqual(field.typedText, "Editing SessionOutline…")
-        XCTAssertFalse(field.isTyping)
+        XCTAssertFalse(field.isTyping, "typed out and stopped, well inside two seconds")
     }
 
     func testAnUnchangedLineIsNotRetyped() {
