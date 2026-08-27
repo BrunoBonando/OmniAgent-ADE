@@ -221,15 +221,19 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertFalse(panel.rows[0].isSelected)
         XCTAssertTrue(panel.rows[1].isSelected)
 
-        // Away and back keeps the section; opening on a named section moves it.
+        // Away forgets the section — off the page nothing is "here" — so
+        // ⌘, comes back on General; opening on a named section moves it.
         controller.applyDestination(.home)
         XCTAssertTrue(settings.isHidden)
         XCTAssertEqual(controller.sessionTitleField.stringValue, "")
+        XCTAssertTrue(panel.rows.allSatisfy { !$0.isSelected })
         controller.showSettings(nil)
-        XCTAssertEqual(settings.section, .accounts)
+        XCTAssertEqual(settings.section, .general)
         controller.showSettings(section: .experimental)
         XCTAssertEqual(settings.section, .experimental)
         XCTAssertEqual(controller.destination, .settings)
+        controller.showSettings(nil)
+        XCTAssertEqual(settings.section, .experimental, "⌘, on the page changes nothing")
     }
 
     /// The gear offers the panel beside itself, tip on the gear, inside the
@@ -250,30 +254,48 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(controller.settingsPanelPlace, .offered)
         XCTAssertEqual(controller.destination, .home, "offered, not opened")
         XCTAssertFalse(panel.isHidden)
+        XCTAssertTrue(panel.rows.allSatisfy { !$0.isSelected }, "off the page, nothing is lit")
+        XCTAssertTrue(panel.isTipVisible)
         let room = controller.settingsPanelRoomForTesting
         let offered = controller.settingsPanelTarget
-        XCTAssertGreaterThanOrEqual(offered.panel.minX, room.minX, "beside the sidebar, inside the content area")
-        XCTAssertGreaterThanOrEqual(offered.panel.minY, room.minY, "inside the app")
+        XCTAssertGreaterThanOrEqual(offered.minX, room.minX, "beside the sidebar, inside the content area")
+        XCTAssertGreaterThanOrEqual(offered.minY, room.minY, "inside the app")
         let gearMidY = controller.settingsPanelRoomConvert(gear.bounds, from: gear).midY
-        XCTAssertEqual(offered.tip.midY, gearMidY, accuracy: 1, "the tip is on the gear")
-        XCTAssertEqual(offered.tip.midX, offered.panel.minX, accuracy: 0.5, "half under the panel")
+        XCTAssertEqual(offered.minY + panel.tipCenterYForTesting, gearMidY, accuracy: 1, "the drop is on the gear")
+
+        // Typing narrows the rows; the panel keeps its foot.
+        panel.setQueryForTesting("acc")
+        XCTAssertEqual(panel.visibleTitlesForTesting, ["Accounts", "Accessibility"])
+        XCTAssertEqual(controller.settingsPanelTarget.minY, offered.minY, accuracy: 0.5)
+        XCTAssertLessThan(controller.settingsPanelTarget.height, offered.height)
 
         try XCTUnwrap(panel.rows[1].onPress)()
         XCTAssertEqual(controller.destination, .settings)
         XCTAssertEqual(controller.settingsView.section, .accounts)
         XCTAssertEqual(controller.settingsPanelPlace, .docked)
-        let docked = controller.settingsPanelTarget.panel
-        XCTAssertEqual(docked.minX, controller.sessionTitleField.frame.minX, accuracy: 0.5, "under the title's left edge")
+        XCTAssertTrue(panel.rows[1].isSelected)
+        XCTAssertEqual(panel.search.stringValue, "", "the query is spent")
+        XCTAssertEqual(panel.visibleTitlesForTesting.count, SettingsSection.allCases.count)
+        XCTAssertFalse(panel.isTipVisible)
+        let docked = controller.settingsPanelTarget
+        XCTAssertEqual(
+            docked.minX + SettingsSidebarView.lane,
+            controller.sessionTitleField.frame.minX,
+            accuracy: 0.5,
+            "the card under the title's left edge"
+        )
         XCTAssertEqual(docked.maxY, room.maxY - WorkspaceTitleBarView.height - 10, accuracy: 0.5, "just below the strip")
 
         try XCTUnwrap(gear.onPress)()
         XCTAssertEqual(controller.settingsPanelPlace, .offered)
         XCTAssertEqual(controller.destination, .settings, "still on the page")
+        XCTAssertTrue(panel.rows[1].isSelected, "on the page, the section is lit")
         try XCTUnwrap(gear.onPress)()
         XCTAssertEqual(controller.settingsPanelPlace, .docked, "the gear again puts it back")
 
         controller.applyDestination(.home)
         XCTAssertEqual(controller.settingsPanelPlace, .hidden)
+        XCTAssertEqual(controller.settingsView.section, .general, "forgotten off the page")
     }
 
     func testHomeShowsItsScreenAndToDoThePlaceholder() throws {

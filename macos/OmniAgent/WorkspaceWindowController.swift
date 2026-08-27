@@ -123,13 +123,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// sidebar; the gear again brings it back down. Floats over the content
     /// area, placed by frame — see `placeSettingsPanel`.
     let settingsPanel = SettingsSidebarView()
-    private let settingsPanelTip = SettingsPanelTipView()
     enum SettingsPanelPlace { case hidden, docked, offered }
     private(set) var settingsPanelPlace: SettingsPanelPlace = .hidden
-    /// Where the panel and its tip are headed, in the content area's
-    /// coordinates — an animated `frame` reads mid-flight, so the tests read
-    /// this.
-    private(set) var settingsPanelTarget: (panel: NSRect, tip: NSRect) = (.zero, .zero)
+    /// Where the panel is headed, in the content area's coordinates — an
+    /// animated `frame` reads mid-flight, so the tests read this.
+    private(set) var settingsPanelTarget: NSRect = .zero
     /// While offered: a click anywhere but the panel or the gear, or Esc,
     /// puts it back.
     private var settingsPanelMonitor: Any?
@@ -820,14 +818,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         contentContainer.addSubview(placeholder)
         contentContainer.addSubview(homeView)
         contentContainer.addSubview(settingsView)
-        // The floating panel rides above every destination; its tip below
-        // it, so the panel covers the tip's inner half.
-        settingsPanelTip.alphaValue = 0
+        // The floating panel rides above every destination.
         settingsPanel.isHidden = true
-        contentContainer.addSubview(settingsPanelTip)
         contentContainer.addSubview(settingsPanel)
         settingsPanel.onSelect = { [weak self] section in self?.showSettings(section: section) }
-        settingsPanel.apply(selected: settingsView.section)
+        settingsPanel.onHeightChange = { [weak self] in
+            guard let self, settingsPanelPlace != .hidden else { return }
+            placeSettingsPanel(settingsPanelPlace, animated: true)
+        }
         contentContainer.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(
             forName: NSView.frameDidChangeNotification,
@@ -1012,7 +1010,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         homeView.isHidden = destination != .home
         if destination == .home { refreshHomeChips() }
         settingsView.isHidden = destination != .settings
-        // The panel docks with the page and goes with it.
+        // The panel docks with the page and goes with it — and off the page
+        // nothing is "here": the pick is forgotten, so ⌘, and the gear's
+        // offer both start clean.
+        if destination == .settings {
+            settingsPanel.apply(selected: settingsView.section)
+        } else {
+            settingsView.select(.general)
+            settingsPanel.apply(selected: nil)
+        }
         placeSettingsPanel(destination == .settings ? .docked : .hidden, animated: true)
         placeholder.isHidden = destination != .todo
         if destination == .todo { placeholder.show(destination) }
@@ -3987,17 +3993,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
-    /// ⌘, — the in-window Settings page, on whatever section it was last
-    /// on. (`settingsWindowController`'s SwiftUI window is no longer reached
-    /// from the UI; its content is what the sections will grow into.)
+    /// ⌘, — the in-window Settings page, on General; already on the page,
+    /// nothing happens. (`settingsWindowController`'s SwiftUI window is no
+    /// longer reached from the UI; its content is what the sections will
+    /// grow into.)
     @objc func showSettings(_ sender: Any?) {
-        applyDestination(.settings)
+        guard destination != .settings else { return }
+        showSettings(section: .general)
     }
 
     /// Settings, opened on a particular section.
     func showSettings(section: SettingsSection) {
         settingsView.select(section)
-        settingsPanel.apply(selected: section)
+        settingsPanel.clearSearch()
         applyDestination(.settings)
     }
 
@@ -4007,85 +4015,107 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         if settingsPanelPlace == .offered {
             collapseSettingsPanel()
         } else {
+            // Lit only on the page, where a section really is on screen.
+            settingsPanel.apply(selected: destination == .settings ? settingsView.section : nil)
+            settingsPanel.clearSearch()
             placeSettingsPanel(.offered, animated: true)
+            settingsPanel.focusSearch()
         }
     }
 
     private func collapseSettingsPanel() {
+        settingsPanel.clearSearch()
         placeSettingsPanel(destination == .settings ? .docked : .hidden, animated: true)
     }
 
     /// Slides the panel to `place`. Docked: under the "Settings" title's
-    /// left edge, just below the strip. Offered: beside the gear, tip on
-    /// it, the body rising from the gear's foot — clamped to the content
-    /// area, so it never leaves the app. Hidden: fades where it is.
+    /// left edge, just below the strip. Offered: beside the gear, the drop
+    /// on it, the body rising from the gear's foot — clamped to the content
+    /// area, so it never leaves the app. Hidden: fades where it is, and
+    /// measures nothing — the first call comes from `installSplitView`,
+    /// before there is a window to measure in.
     private func placeSettingsPanel(_ place: SettingsPanelPlace, animated: Bool) {
         let wasHidden = settingsPanelPlace == .hidden
         settingsPanelPlace = place
         if place == .offered { startSettingsPanelMonitor() } else { stopSettingsPanelMonitor() }
+        let panel = settingsPanel
+        let duration = 0.32
+
+        if place == .hidden {
+            panel.isTipVisible = false
+            settingsPanelTarget = panel.frame
+            guard animated, !ShellMotion.reduced, !panel.isHidden else {
+                panel.isHidden = true
+                panel.alphaValue = 0
+                return
+            }
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = duration
+                context.timingFunction = ShellMotion.timing
+                panel.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                guard let self, settingsPanelPlace == .hidden else { return }
+                panel.isHidden = true
+            })
+            return
+        }
 
         contentContainer.layoutSubtreeIfNeeded()
         let room = contentContainer.bounds
-        let size = NSSize(width: SettingsSidebarView.width, height: settingsPanel.fittingSize.height)
+        let size = NSSize(width: SettingsSidebarView.frameWidth, height: panel.contentHeight)
         let corner = SettingsSidebarView.cornerRadius
-        let span = SettingsPanelTipView.span
-
-        let docked = NSRect(
-            x: sessionTitleField.frame.minX,
-            y: room.maxY - WorkspaceTitleBarView.height - 10 - size.height,
-            width: size.width,
-            height: size.height
-        )
-        let gear = shellSidebar.accountRow.gear
-        let gearMidY = contentContainer.convert(gear.bounds, from: gear).midY
-        var offered = NSRect(
-            x: 6 + span / 2,
-            y: gearMidY - corner - span / 2,
-            width: size.width,
-            height: size.height
-        )
-        offered.origin.y = max(offered.origin.y, room.minY + 8)
-        offered.origin.y = min(offered.origin.y, room.maxY - WorkspaceTitleBarView.height - 8 - size.height)
-        let tipY = min(max(gearMidY, offered.minY + corner + span / 2), offered.maxY - corner - span / 2)
-        let tip = NSRect(x: offered.minX - span / 2, y: tipY - span / 2, width: span, height: span)
+        let span = SettingsSidebarView.tipSpan
+        let lane = SettingsSidebarView.lane
 
         let frame: NSRect
-        let alpha: CGFloat
-        switch place {
-        case .docked: frame = docked; alpha = 1
-        case .offered: frame = offered; alpha = 1
-        case .hidden: frame = settingsPanel.isHidden ? offered : settingsPanel.frame; alpha = 0
+        if place == .docked {
+            // The card's left edge under the title's; the lane hangs left of it.
+            frame = NSRect(
+                x: sessionTitleField.frame.minX - lane,
+                y: room.maxY - WorkspaceTitleBarView.height - 10 - size.height,
+                width: size.width,
+                height: size.height
+            )
+            panel.isTipVisible = false
+        } else {
+            // The drop's tip 6pt off the sidebar's edge, on the gear's centre.
+            let gear = shellSidebar.accountRow.gear
+            let gearMidY = contentContainer.convert(gear.bounds, from: gear).midY
+            var offered = NSRect(
+                x: 6,
+                y: gearMidY - corner - span / 2,
+                width: size.width,
+                height: size.height
+            )
+            // 6, not 8: the gear's centre sits 32pt up, and the panel's foot
+            // lands at 6.8 — a bigger margin lifts it and, through the corner
+            // clamp, drags the drop off the gear.
+            offered.origin.y = max(offered.origin.y, room.minY + 6)
+            offered.origin.y = min(offered.origin.y, room.maxY - WorkspaceTitleBarView.height - 8 - size.height)
+            frame = offered
+            panel.pointTip(at: gearMidY - offered.minY)
+            panel.isTipVisible = true
         }
-        settingsPanelTarget = (frame, tip)
-        settingsPanelTip.frame = tip
+        settingsPanelTarget = frame
 
-        if place != .hidden, wasHidden {
+        if wasHidden {
             // Arrives from just below its place, fading in.
-            settingsPanel.frame = frame.offsetBy(dx: 0, dy: -12)
-            settingsPanel.alphaValue = 0
-            settingsPanel.isHidden = false
+            panel.frame = frame.offsetBy(dx: 0, dy: -12)
+            panel.alphaValue = 0
+            panel.isHidden = false
         }
-        let panel = settingsPanel
-        let tipView = settingsPanelTip
-        let tipAlpha: CGFloat = place == .offered ? 1 : 0
-        guard animated, !ShellMotion.reduced, !panel.isHidden else {
+        guard animated, !ShellMotion.reduced else {
             panel.frame = frame
-            panel.alphaValue = alpha
-            panel.isHidden = place == .hidden
-            tipView.alphaValue = tipAlpha
+            panel.alphaValue = 1
             return
         }
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.32
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
             context.timingFunction = ShellMotion.timing
             context.allowsImplicitAnimation = true
             panel.animator().frame = frame
-            panel.animator().alphaValue = alpha
-            tipView.animator().alphaValue = tipAlpha
-        }, completionHandler: { [weak self] in
-            guard let self, settingsPanelPlace == .hidden else { return }
-            panel.isHidden = true
-        })
+            panel.animator().alphaValue = 1
+        }
     }
 
     private func startSettingsPanelMonitor() {
