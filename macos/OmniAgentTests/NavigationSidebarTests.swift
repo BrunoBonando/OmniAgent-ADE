@@ -199,6 +199,7 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertTrue(settings.isHidden, "Home first")
         controller.showSettings(nil)
         XCTAssertEqual(controller.destination, .settings)
+        XCTAssertEqual(controller.sessionTitleField.stringValue, "Settings", "named where a session is")
         XCTAssertFalse(settings.isHiddenOrHasHiddenAncestor)
         XCTAssertTrue(controller.homeView.isHidden)
         XCTAssertTrue(controller.workspaceView.isHidden)
@@ -222,6 +223,7 @@ final class NavigationSidebarTests: XCTestCase {
         // Away and back keeps the section; opening on a named section moves it.
         controller.applyDestination(.home)
         XCTAssertTrue(settings.isHidden)
+        XCTAssertEqual(controller.sessionTitleField.stringValue, "")
         controller.showSettings(nil)
         XCTAssertEqual(settings.section, .accounts)
         controller.showSettings(section: .experimental)

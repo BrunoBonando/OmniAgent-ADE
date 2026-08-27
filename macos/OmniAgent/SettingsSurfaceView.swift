@@ -1,13 +1,15 @@
 import AppKit
 
-// The Settings destination (2026-08-27): a second sidebar column inside the
-// content area — the left menu's nav rows on a sheet of *plain* glass, so
-// the app's grey-to-black ground shows through and the column reads as a
-// different thing from the blue left menu — running edge to edge under the
-// window chrome, and beside it the picked section's name up in the title
-// strip (where the Desk puts the session's name) over a centred column
-// that, for now, says "Under development". The list is the design's; the
-// sections' screens come one by one, on top of this.
+// The Settings destination (2026-08-27), in the Apple TV idiom: a floating
+// rounded panel of sections at the top-left of the content area — inset from
+// every edge, on plain glass so the app's grey-to-black ground shows through
+// — with "Settings" in the title strip above it, the way the Desk names its
+// session, and the picked section's content in a centred column beside it.
+// Every section still says "Under development"; the screens come one by one.
+//
+// Reached three ways: the sidebar gear pops a menu of the sections and lands
+// on the one picked; ⌘, and the palette open the page on whatever section it
+// was last on.
 
 /// The Settings page's sections, in the design's order. `startsGroup` marks
 /// the gaps in the list: General…Accessibility, Customize/Model providers,
@@ -52,30 +54,42 @@ enum SettingsSection: String, CaseIterable {
     var startsGroup: Bool { self == .customize || self == .experimental }
 }
 
-/// The column of sections: the left menu's edge and nav rows on untinted
-/// glass — same family, different colour, on purpose.
+/// The floating panel of sections: the left menu's nav rows on a rounded
+/// sheet of untinted glass, hugging its rows rather than the window's
+/// height. The picked row wears the app's accent — the blue the left menu's
+/// gradient is made of — solidly enough to read as "you are here".
 final class SettingsSidebarView: NSView {
     static let width: CGFloat = 220
+    static let cornerRadius: CGFloat = 16
 
     private(set) var rows: [SidebarNavRowView] = []
     var onSelect: ((SettingsSection) -> Void)?
     /// The Liquid Glass sheet on macOS 26, `nil` below — the left menu's
-    /// sheet without its blue wash.
+    /// sheet without its blue wash, and with corners.
     private(set) var glassHost: NSView?
-    let trailingEdge = NSView()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
 
-        if let glass = WorkspaceGlass.sheet() {
+        if let glass = WorkspaceGlass.sheet(cornerRadius: Self.cornerRadius) {
             glassHost = glass
             addSubview(glass)
+        } else {
+            layer?.cornerRadius = Self.cornerRadius
+            layer?.cornerCurve = .continuous
+            layer?.backgroundColor = ShellPalette.cardFill.cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = ShellPalette.hairlineStrong.cgColor
         }
 
         rows = SettingsSection.allCases.map { section in
-            let row = SidebarNavRowView(title: section.title, symbol: section.symbol)
+            let row = SidebarNavRowView(
+                title: section.title,
+                symbol: section.symbol,
+                selectedFill: ShellPalette.accentFill
+            )
             row.onPress = { [weak self] in self?.onSelect?(section) }
             return row
         }
@@ -83,30 +97,20 @@ final class SettingsSidebarView: NSView {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 2
-        // The column runs under the window chrome; the rows clear it, exactly
-        // as the left menu's do.
-        stack.edgeInsets = NSEdgeInsets(top: WorkspaceTitleBarView.height + 6, left: 8, bottom: 0, right: 8)
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         stack.translatesAutoresizingMaskIntoConstraints = false
         for (index, section) in SettingsSection.allCases.enumerated() {
-            rows[index].widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -16).isActive = true
+            rows[index].widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20).isActive = true
             if section.startsGroup, index > 0 { stack.setCustomSpacing(18, after: rows[index - 1]) }
         }
         addSubview(stack)
 
-        trailingEdge.wantsLayer = true
-        trailingEdge.layer?.backgroundColor = ShellPalette.sidebarEdge.cgColor
-        trailingEdge.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(trailingEdge)
-
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: Self.width),
             stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            trailingEdge.trailingAnchor.constraint(equalTo: trailingAnchor),
-            trailingEdge.topAnchor.constraint(equalTo: topAnchor),
-            trailingEdge.bottomAnchor.constraint(equalTo: bottomAnchor),
-            trailingEdge.widthAnchor.constraint(equalToConstant: 1),
         ])
     }
 
@@ -118,14 +122,6 @@ final class SettingsSidebarView: NSView {
         glassHost?.frame = bounds
     }
 
-    /// Below macOS 26 only — a whisper of white, so the column still reads
-    /// as a column on the bare ground.
-    override func draw(_ dirtyRect: NSRect) {
-        guard glassHost == nil else { return }
-        ShellPalette.cardFill.setFill()
-        bounds.fill()
-    }
-
     func apply(selected: SettingsSection) {
         for (row, section) in zip(rows, SettingsSection.allCases) {
             row.apply(selected: section == selected)
@@ -133,17 +129,20 @@ final class SettingsSidebarView: NSView {
     }
 }
 
-/// The whole Settings screen: the sections column on the left, the picked
-/// section's name in the title strip, and its content in Home's centred
-/// 880pt column — from the top, though, not from a share of the height.
-/// Mounted at the window's top edge, not under the title bar, so the column
-/// reaches it. Transparent, like Home: `PaneGroundView` behind it is the
-/// ground.
+/// The whole Settings screen: the floating panel at the top-left, and the
+/// picked section's content in Home's centred 880pt column beside it — from
+/// the top, though, not from a share of the height. Transparent, like Home:
+/// `PaneGroundView` behind it is the ground. The "Settings" title above the
+/// panel is the window's own session-title field, which the controller
+/// points at this page — see `refreshTitle`.
 final class SettingsSurfaceView: NSView {
+    /// The panel's inset from the content area's edges — off the edge, "a
+    /// bit more inside", as the Apple TV sidebar sits.
+    static let inset: CGFloat = 16
+
     let sidebar = SettingsSidebarView()
-    /// The section's name, in the strip the title bar leaves clear — the
-    /// exact place and face `sessionTitleField` gives a session's name.
-    let titleField = ShellFont.label(font: ShellFont.ui(13, .medium), color: ShellPalette.inkSecondary)
+    /// The picked section's name, heading its content.
+    let titleField = ShellFont.label(font: ShellFont.ui(22, .semibold), color: ShellPalette.ink)
     let subtitleField = ShellFont.label(
         "Under development",
         font: ShellFont.ui(13),
@@ -156,9 +155,8 @@ final class SettingsSurfaceView: NSView {
     init() {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        addSubview(sidebar)
 
-        let column = NSStackView(views: [subtitleField])
+        let column = NSStackView(views: [titleField, subtitleField])
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 6
@@ -170,25 +168,24 @@ final class SettingsSurfaceView: NSView {
 
         let scroll = ShellScrollView(documentView: content)
         addSubview(scroll)
-        titleField.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(titleField)
+        // The panel floats over the scroll's leading edge: added after it, so
+        // it is above, and the content column keeps clear of it by its own
+        // leading constraint.
+        addSubview(sidebar)
         NSLayoutConstraint.activate([
-            sidebar.leadingAnchor.constraint(equalTo: leadingAnchor),
-            sidebar.topAnchor.constraint(equalTo: topAnchor),
-            sidebar.bottomAnchor.constraint(equalTo: bottomAnchor),
+            sidebar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
+            sidebar.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            sidebar.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Self.inset),
 
-            titleField.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: 12),
-            titleField.centerYAnchor.constraint(equalTo: topAnchor, constant: WorkspaceTitleBarView.height / 2),
-
-            scroll.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            scroll.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: Self.inset),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: topAnchor, constant: WorkspaceTitleBarView.height),
+            scroll.topAnchor.constraint(equalTo: topAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            column.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+            column.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
             column.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -36),
             column.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 40),
+            column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 24),
         ])
         let width = column.widthAnchor.constraint(equalToConstant: 880)
         width.priority = .defaultHigh

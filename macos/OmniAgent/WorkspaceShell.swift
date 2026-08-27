@@ -130,6 +130,9 @@ enum ShellPalette {
     static let accent = srgb(139, 149, 255)
     static let accentBright = srgb(167, 175, 255)
     static let accentSoft = srgb(139, 149, 255, 0.16)
+    /// The accent as a fill that reads as *the* selection, not a hint —
+    /// the Settings panel's picked row.
+    static let accentFill = srgb(139, 149, 255, 0.32)
     static let accentSelection = srgb(139, 149, 255, 0.14)
     static let accentIconTile = srgb(139, 149, 255, 0.28)
     static let accentRail = srgb(139, 149, 255, 0.35)

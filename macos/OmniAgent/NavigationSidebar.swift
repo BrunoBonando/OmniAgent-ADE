@@ -53,14 +53,21 @@ final class SidebarNavRowView: ShellRowView {
 
     private let icon = NSImageView()
     private let titleField: NSTextField
+    private let selectedFill: NSColor
     private(set) var isSelected = false
 
     convenience init(item: SidebarNavItem) {
         self.init(title: item.title, symbol: item.symbol, item: item)
     }
 
-    init(title: String, symbol: String, item: SidebarNavItem? = nil) {
+    init(
+        title: String,
+        symbol: String,
+        item: SidebarNavItem? = nil,
+        selectedFill: NSColor = ShellPalette.accentSoft
+    ) {
         self.item = item
+        self.selectedFill = selectedFill
         titleField = ShellFont.label(
             title,
             font: ShellFont.ui(13.5, .medium),
@@ -114,7 +121,7 @@ final class SidebarNavRowView: ShellRowView {
     override func refreshBackground() {
         let fill: NSColor
         if isSelected {
-            fill = ShellPalette.accentSoft
+            fill = selectedFill
         } else if isHovered {
             fill = ShellPalette.hover
         } else {

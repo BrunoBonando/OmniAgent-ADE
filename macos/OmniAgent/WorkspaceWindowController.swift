@@ -618,7 +618,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Search fires the spotlight and is deliberately not a selection —
         // the same panel ⌃Space and ⌘K raise.
         shellSidebar.onSearch = { [weak self] in self?.showCommandPalette(nil) }
-        shellSidebar.onOpenSettings = { [weak self] in self?.showSettings(nil) }
+        // The gear is a menu of the Settings sections, not a jump to the
+        // page: the pick is what opens it.
+        shellSidebar.onOpenSettings = { [weak self] in self?.showSettingsMenu() }
         // The header's plus menu: a session in any listed workspace, or a
         // brand new workspace from a folder (the one flow where a chooser is
         // the whole point).
@@ -802,17 +804,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         contentContainer.addSubview(placeholder)
         contentContainer.addSubview(homeView)
         contentContainer.addSubview(settingsView)
-        // Settings alone reaches the window's top edge: its sections column
-        // runs under the title bar like the left menu does, and it puts the
-        // section's name in the title strip itself.
         for view in [workspace, placeholder, homeView, settingsView] as [NSView] {
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-                view.topAnchor.constraint(
-                    equalTo: contentContainer.topAnchor,
-                    constant: view === settingsView ? 0 : WorkspaceTitleBarView.height
-                ),
+                view.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: WorkspaceTitleBarView.height),
                 view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
             ])
         }
@@ -3961,6 +3957,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         applyDestination(.settings)
     }
 
+    /// The gear's menu: every section, the one on screen ticked, each
+    /// opening Settings on itself.
+    func showSettingsMenu() {
+        let onSettings = destination == .settings
+        let rows = SettingsSection.allCases.map { section in
+            HomeDropdown.Row(
+                icon: HomeDropdown.symbol(section.symbol),
+                title: section.title,
+                isCurrent: onSettings && settingsView.section == section
+            ) { [weak self] in self?.showSettings(section: section) }
+        }
+        HomeDropdown.show(
+            [HomeDropdown.Section(header: "Settings", rows: rows)],
+            searchPlaceholder: "Search settings…",
+            from: shellSidebar.accountRow.gear
+        )
+    }
+
     // MARK: - Inspector (Task 6b-2)
 
     /// ⌘I — the per-project brain-context panel, scoped to the focused
@@ -5065,7 +5079,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// and "OmniAgent — Reconnecting" identifies a window in those lists where
     /// a bare "Session 1" would not.
     func refreshTitle() {
-        sessionTitleField.stringValue = currentSessionName()
+        // Settings names itself where a session's name goes.
+        sessionTitleField.stringValue = destination == .settings ? "Settings" : currentSessionName()
         titleBar.isReviewToggleVisible = destination == .terminals && workspace.activeGroup != nil
 
         if let connectionStatus {
