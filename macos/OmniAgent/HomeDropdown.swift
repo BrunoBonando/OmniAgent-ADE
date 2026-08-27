@@ -61,7 +61,11 @@ enum HomeDropdown {
         _ sections: [Section],
         searchPlaceholder: String,
         from anchor: NSView,
-        preferredEdge: NSRectEdge = .minY
+        preferredEdge: NSRectEdge = .minY,
+        /// Where in `anchor` the popover hangs off, given the menu's own
+        /// size — for a caller that wants it bottom- or top-aligned rather
+        /// than centred on the anchor. `nil`: the anchor's bounds.
+        positioning: ((NSSize) -> NSRect)? = nil
     ) -> HomeDropdownView {
         current?.performClose(nil)
         let popover = NSPopover()
@@ -84,7 +88,8 @@ enum HomeDropdown {
         // `.minY` is the anchor's *bottom* edge — these chips are plain,
         // unflipped `NSView`s — which is what puts the dropdown under the
         // chip rather than over it.
-        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: preferredEdge)
+        let rect = positioning?(content.fittingSize) ?? anchor.bounds
+        popover.show(relativeTo: rect, of: anchor, preferredEdge: preferredEdge)
         content.focusSearch()
         return content
     }

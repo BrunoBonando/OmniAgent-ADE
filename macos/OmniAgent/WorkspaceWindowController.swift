@@ -920,6 +920,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 equalTo: contentContainer.topAnchor,
                 constant: WorkspaceTitleBarView.height / 2
             ),
+            // Settings' floating panel lines up under its title's left edge,
+            // wherever the clearance puts that.
+            settingsView.sidebar.leadingAnchor.constraint(equalTo: sessionTitleField.leadingAnchor),
         ])
 
         // The window's own bar, above the split as an overlay: pinned to top,
@@ -3976,15 +3979,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 isCurrent: onSettings && settingsView.section == section
             ) { [weak self] in self?.showSettings(section: section) }
         }
+        // To the right of the column, rising from its bottom-left: the
+        // gear sits at the window's foot, and a popover centred on it ran
+        // off the app. A popover centres on its rect, so a rect as tall as
+        // the menu standing on the gear's foot puts the menu's bottom there.
+        let sidebar = shellSidebar
+        let gear = sidebar.accountRow.gear
         HomeDropdown.show(
             [HomeDropdown.Section(header: "Settings", rows: rows)],
             searchPlaceholder: "Search settings…",
-            from: shellSidebar.accountRow.gear,
-            // Upward from the gear: it sits at the window's foot, and a menu
-            // hung to its right or below runs off the app. (`.maxY`: the gear
-            // is a plain, unflipped view, so that edge is its top.)
-            preferredEdge: .maxY
-        )
+            from: sidebar,
+            preferredEdge: .maxX
+        ) { size in
+            let foot = gear.convert(gear.bounds, to: sidebar).minY
+            return NSRect(x: 0, y: foot, width: sidebar.bounds.width, height: size.height)
+        }
     }
 
     // MARK: - Inspector (Task 6b-2)

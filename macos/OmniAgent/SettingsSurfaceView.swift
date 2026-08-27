@@ -176,8 +176,12 @@ final class SettingsSurfaceView: NSView {
         // it is above, and the content column keeps clear of it by its own
         // leading constraint.
         addSubview(sidebar)
+        // The panel's own idea of where it sits; the controller outranks it
+        // with the "Settings" title's leading edge, so the two line up.
+        let panelLeading = sidebar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset)
+        panelLeading.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            sidebar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
+            panelLeading,
             sidebar.topAnchor.constraint(equalTo: topAnchor, constant: WorkspaceTitleBarView.height + 10),
             sidebar.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Self.inset),
 
@@ -187,7 +191,10 @@ final class SettingsSurfaceView: NSView {
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             // Past the fade band, so the heading is whole at rest.
-            column.topAnchor.constraint(equalTo: content.topAnchor, constant: 40),
+            column.topAnchor.constraint(
+                equalTo: content.topAnchor,
+                constant: ShellScrollView.pageFade - WorkspaceTitleBarView.height + 8
+            ),
             column.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -36),
             column.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 24),

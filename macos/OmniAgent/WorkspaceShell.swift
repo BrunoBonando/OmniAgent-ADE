@@ -694,14 +694,17 @@ final class ShellDotsView: NSView {
 /// very top edge — while its content still rests below the strip.
 final class ShellScrollView: NSScrollView {
     /// The strip a page's fade should cover, plus the room past it in which
-    /// content finishes dissolving.
-    static let pageFade = WorkspaceTitleBarView.height + 26
+    /// content finishes dissolving — generous, so the dissolve is a thing
+    /// you see, not a hairline (2026-08-28: 26pt read as nothing).
+    static let pageFade = WorkspaceTitleBarView.height + 96
 
     private let topFade: CGFloat
+    private let topInset: CGFloat
     private var fadeMask: CAGradientLayer?
 
     init(documentView content: NSView, topFade: CGFloat = 0, topInset: CGFloat = 0) {
         self.topFade = topFade
+        self.topInset = topInset
         super.init(frame: .zero)
         if topInset > 0 {
             automaticallyAdjustsContentInsets = false
@@ -710,7 +713,14 @@ final class ShellScrollView: NSScrollView {
         if topFade > 0 {
             wantsLayer = true
             let mask = CAGradientLayer()
-            mask.colors = [NSColor.clear.cgColor, NSColor.black.cgColor]
+            // Three stops, front-loaded: gone under the strip, 12% at its
+            // foot, and only then the climb to solid — a straight ramp
+            // spent most of its run hidden under the toolbar.
+            mask.colors = [
+                NSColor.clear.cgColor,
+                NSColor.black.withAlphaComponent(0.12).cgColor,
+                NSColor.black.cgColor,
+            ]
             // A scroll view is a flipped view, so its backing layer is
             // geometry-flipped and (0.5, 0) is the TOP of its unit space —
             // the opposite of `ShellGlassTintView`'s y-up layer. Getting
@@ -745,7 +755,12 @@ final class ShellScrollView: NSScrollView {
         super.layout()
         guard let fadeMask, let layer else { return }
         fadeMask.frame = layer.bounds
-        fadeMask.locations = [0, NSNumber(value: Double(topFade / max(bounds.height, 1)))]
+        let height = max(bounds.height, 1)
+        fadeMask.locations = [
+            0,
+            NSNumber(value: Double(min(topInset, topFade) / height)),
+            NSNumber(value: Double(topFade / height)),
+        ]
     }
 
     /// Where the fade ends, in points from the top — for the tests.
