@@ -3971,7 +3971,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         HomeDropdown.show(
             [HomeDropdown.Section(header: "Settings", rows: rows)],
             searchPlaceholder: "Search settings…",
-            from: shellSidebar.accountRow.gear
+            from: shellSidebar.accountRow.gear,
+            // Off to the right of the gear, out of the sidebar, not stacked
+            // over its own footer.
+            preferredEdge: .maxX
         )
     }
 

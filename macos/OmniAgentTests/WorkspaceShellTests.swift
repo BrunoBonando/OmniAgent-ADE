@@ -67,11 +67,18 @@ final class WorkspaceShellTests: XCTestCase {
 
     /// A page's scroll view fades its top edge over the asked-for points,
     /// whatever height it is laid out at — a sidebar region's does not.
-    func testAPageScrollViewFadesItsTopEdge() {
+    func testAPageScrollViewFadesItsTopEdge() throws {
         let page = ShellScrollView(documentView: NSView(), topFade: 28)
         page.frame = NSRect(x: 0, y: 0, width: 300, height: 700)
         page.layoutSubtreeIfNeeded()
         XCTAssertEqual(page.topFadeForTesting, 28, accuracy: 0.01)
+        // The fade must sit at the TOP: a scroll view's layer is flipped, so
+        // the gradient has to start at y = 0 — this is the bug that shipped
+        // the fade on the bottom edge (2026-08-28).
+        let mask = try XCTUnwrap(page.layer?.mask as? CAGradientLayer)
+        XCTAssertTrue(try XCTUnwrap(page.layer).isGeometryFlipped)
+        XCTAssertEqual(mask.startPoint, CGPoint(x: 0.5, y: 0))
+        XCTAssertEqual(mask.endPoint, CGPoint(x: 0.5, y: 1))
         page.frame = NSRect(x: 0, y: 0, width: 300, height: 350)
         page.layoutSubtreeIfNeeded()
         XCTAssertEqual(page.topFadeForTesting, 28, accuracy: 0.01)

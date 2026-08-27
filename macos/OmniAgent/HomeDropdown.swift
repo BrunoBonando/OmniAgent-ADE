@@ -60,7 +60,8 @@ enum HomeDropdown {
     static func show(
         _ sections: [Section],
         searchPlaceholder: String,
-        from anchor: NSView
+        from anchor: NSView,
+        preferredEdge: NSRectEdge = .minY
     ) -> HomeDropdownView {
         current?.performClose(nil)
         let popover = NSPopover()
@@ -83,7 +84,7 @@ enum HomeDropdown {
         // `.minY` is the anchor's *bottom* edge — these chips are plain,
         // unflipped `NSView`s — which is what puts the dropdown under the
         // chip rather than over it.
-        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: preferredEdge)
         content.focusSearch()
         return content
     }

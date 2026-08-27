@@ -701,9 +701,12 @@ final class ShellScrollView: NSScrollView {
             wantsLayer = true
             let mask = CAGradientLayer()
             mask.colors = [NSColor.clear.cgColor, NSColor.black.cgColor]
-            // (0.5, 1) is the top of a layer's y-up unit space.
-            mask.startPoint = CGPoint(x: 0.5, y: 1)
-            mask.endPoint = CGPoint(x: 0.5, y: 0)
+            // A scroll view is a flipped view, so its backing layer is
+            // geometry-flipped and (0.5, 0) is the TOP of its unit space —
+            // the opposite of `ShellGlassTintView`'s y-up layer. Getting
+            // this backwards fades the bottom edge and leaves the top cut.
+            mask.startPoint = CGPoint(x: 0.5, y: 0)
+            mask.endPoint = CGPoint(x: 0.5, y: 1)
             layer?.mask = mask
             fadeMask = mask
         }
