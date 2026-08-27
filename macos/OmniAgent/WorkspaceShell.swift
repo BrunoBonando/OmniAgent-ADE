@@ -30,19 +30,23 @@ enum WorkspaceDestination: String, CaseIterable {
     case home
     case todo
     case terminals
+    /// The in-window Settings page (2026-08-27) — reached by the gear, ⌘,
+    /// and the palette, not by a sidebar row.
+    case settings
 
     var title: String {
         switch self {
         case .home: return "Home"
         case .todo: return "To Do List"
         case .terminals: return "Desk"
+        case .settings: return "Settings"
         }
     }
 
     /// The palette row's second line.
     var subtitle: String {
         switch self {
-        case .home, .todo: return "under development"
+        case .home, .todo, .settings: return "under development"
         case .terminals: return "no session"
         }
     }
@@ -54,6 +58,7 @@ enum WorkspaceDestination: String, CaseIterable {
         case .home: return "house"
         case .todo: return "checklist"
         case .terminals: return "rectangle.split.2x2"
+        case .settings: return "gearshape"
         }
     }
 }

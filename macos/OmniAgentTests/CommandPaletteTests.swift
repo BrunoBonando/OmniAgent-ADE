@@ -32,7 +32,7 @@ final class CommandPaletteTests: XCTestCase {
             unfocused.map(\.id),
             [
                 "session:alpha/g1", "enter:g1", "focus:a",
-                "destination:home", "destination:todo", "destination:terminals",
+                "destination:home", "destination:todo", "destination:terminals", "destination:settings",
                 "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
             ]
         )
@@ -47,7 +47,7 @@ final class CommandPaletteTests: XCTestCase {
             focused.map(\.id),
             [
                 "session:alpha/g1", "enter:g1", "focus:a",
-                "destination:home", "destination:todo", "destination:terminals",
+                "destination:home", "destination:todo", "destination:terminals", "destination:settings",
                 "new-pane", "new-browser", "new-editor", "new-session",
                 "close-pane", "interrupt", "reattach", "toggle-sidebar",
             ]
@@ -119,7 +119,7 @@ final class CommandPaletteTests: XCTestCase {
             CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil, unreadNotifications: 0)
                 .map(\.id),
             [
-                "destination:home", "destination:todo", "destination:terminals",
+                "destination:home", "destination:todo", "destination:terminals", "destination:settings",
                 "new-pane", "new-browser", "new-editor", "new-session", "toggle-sidebar",
             ]
         )
@@ -352,15 +352,16 @@ final class CommandPaletteTests: XCTestCase {
             if case .showDestination = $0.action { return true } else { return false }
         }
 
-        XCTAssertEqual(destinations.map(\.title), ["Home", "To Do List", "Desk"])
+        XCTAssertEqual(destinations.map(\.title), ["Home", "To Do List", "Desk", "Settings"])
         XCTAssertEqual(destinations.map(\.subtitle), [
             "under development",
             "under development",
             "no session",
+            "under development",
         ])
         XCTAssertEqual(destinations.first?.action, .showDestination(.home))
         // Their own icons, not the Actions section's ⌘.
-        XCTAssertEqual(destinations.map(\.icon), ["house", "checklist", "rectangle.split.2x2"])
+        XCTAssertEqual(destinations.map(\.icon), ["house", "checklist", "rectangle.split.2x2", "gearshape"])
     }
 
     func testATerminalsLiveTitleIsSearchableAndShownWhenTheNameHidesIt() {

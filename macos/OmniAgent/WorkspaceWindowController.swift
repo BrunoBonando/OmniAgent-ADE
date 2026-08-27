@@ -115,6 +115,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Home's real screen — the placeholder now only covers To Do List.
     /// Internal, not private: the tests assert its routing.
     let homeView = HomeSurfaceView()
+    /// The in-window Settings page — the gear, ⌘, and the palette land here.
+    let settingsView = SettingsSurfaceView()
     /// The window's drawn title bar — window buttons, the sidebar toggle, the
     /// review toggle. Replaced the `NSToolbar`, and paints nothing: it is a
     /// transparent overlay across the top of the split, so each column's own
@@ -694,9 +696,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         homeView.onRequestBranchMenu = { [weak self] anchor in
             guard let self else { return }
             let gitHub = HomeDropdown.Section(header: "GitHub · Not connected", rows: [
-                // ponytail: opens the GitHub settings page once it exists; a
-                // plain dismiss until then.
-                HomeDropdown.Row(icon: HomeDropdown.symbol("link"), title: "\(HomeSurfaceView.setUpGitHubTitle)…") {},
+                // GitHub lives under Accounts; the page itself is still to come.
+                HomeDropdown.Row(icon: HomeDropdown.symbol("link"), title: "\(HomeSurfaceView.setUpGitHubTitle)…") { [weak self] in
+                    self?.showSettings(section: .accounts)
+                },
             ])
             guard let directory = homeDirectory(),
                   let root = GitStatus.repoRoot(for: URL(fileURLWithPath: directory, isDirectory: true))
@@ -798,7 +801,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         contentContainer.addSubview(workspace)
         contentContainer.addSubview(placeholder)
         contentContainer.addSubview(homeView)
-        for view in [workspace, placeholder, homeView] as [NSView] {
+        contentContainer.addSubview(settingsView)
+        for view in [workspace, placeholder, homeView, settingsView] as [NSView] {
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
@@ -964,6 +968,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Home has a real screen now; the placeholder covers To Do List only.
         homeView.isHidden = destination != .home
         if destination == .home { refreshHomeChips() }
+        settingsView.isHidden = destination != .settings
         placeholder.isHidden = destination != .todo
         if destination == .todo { placeholder.show(destination) }
         // Home and To Do List name no session, so the bar goes blank and its
@@ -3937,9 +3942,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
-    /// ⌘, — the Settings screen, hosted fresh every time it opens.
+    /// ⌘, — the in-window Settings page, on whatever section it was last
+    /// on. (`settingsWindowController`'s SwiftUI window is no longer reached
+    /// from the UI; its content is what the sections will grow into.)
     @objc func showSettings(_ sender: Any?) {
-        settingsWindowController.present(over: window, usageRecorder: usageRecorder)
+        applyDestination(.settings)
+    }
+
+    /// Settings, opened on a particular section.
+    func showSettings(section: SettingsSection) {
+        settingsView.select(section)
+        applyDestination(.settings)
     }
 
     // MARK: - Inspector (Task 6b-2)

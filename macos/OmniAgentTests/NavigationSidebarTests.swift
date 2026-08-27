@@ -21,11 +21,11 @@ final class NavigationSidebarTests: XCTestCase {
         let sidebar = makeSidebar()
         XCTAssertEqual(sidebar.navRows.map(\.item), [.home, .todo, .search])
         XCTAssertEqual(
-            sidebar.navRows.map(\.item.title),
+            sidebar.navRows.map(\.item?.title),
             ["Home", "To Do List", "Search"]
         )
         XCTAssertEqual(
-            sidebar.navRows.map(\.item.symbol),
+            sidebar.navRows.map(\.item?.symbol),
             ["house", "checklist", "magnifyingglass"]
         )
     }
@@ -187,6 +187,48 @@ final class NavigationSidebarTests: XCTestCase {
     /// Home shows its real screen, To Do List still lands on the "Under
     /// development" placeholder, and the pane workspace hides and comes back
     /// with the Desk.
+    /// Settings is its own screen: the gear/⌘, land on it, it opens on the
+    /// section it was last on, and every section still says "Under
+    /// development" — the design's eight, in its order.
+    func testSettingsIsItsOwnScreenWithItsOwnColumn() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        let settings = controller.settingsView
+        XCTAssertTrue(settings.isHidden, "Home first")
+        controller.showSettings(nil)
+        XCTAssertEqual(controller.destination, .settings)
+        XCTAssertFalse(settings.isHiddenOrHasHiddenAncestor)
+        XCTAssertTrue(controller.homeView.isHidden)
+        XCTAssertTrue(controller.workspaceView.isHidden)
+        XCTAssertTrue(controller.shellSidebar.navRows.allSatisfy { !$0.isSelected }, "no left-menu row lights up")
+
+        XCTAssertEqual(
+            settings.sidebar.rows.map(\.titleText),
+            ["General", "Accounts", "Sessions", "Themes", "Accessibility", "Customize", "Model providers", "Experimental"]
+        )
+        XCTAssertEqual(settings.section, .general)
+        XCTAssertEqual(settings.titleField.stringValue, "General")
+        XCTAssertEqual(settings.subtitleField.stringValue, "Under development")
+        XCTAssertTrue(settings.sidebar.rows[0].isSelected)
+
+        settings.sidebar.rows[1].onPress?()
+        XCTAssertEqual(settings.section, .accounts)
+        XCTAssertEqual(settings.titleField.stringValue, "Accounts")
+        XCTAssertFalse(settings.sidebar.rows[0].isSelected)
+        XCTAssertTrue(settings.sidebar.rows[1].isSelected)
+
+        // Away and back keeps the section; opening on a named section moves it.
+        controller.applyDestination(.home)
+        XCTAssertTrue(settings.isHidden)
+        controller.showSettings(nil)
+        XCTAssertEqual(settings.section, .accounts)
+        controller.showSettings(section: .experimental)
+        XCTAssertEqual(settings.section, .experimental)
+        XCTAssertEqual(controller.destination, .settings)
+    }
+
     func testHomeShowsItsScreenAndToDoThePlaceholder() throws {
         let controller = makeController()
         defer { controller.close() }
@@ -443,7 +485,7 @@ final class NavigationSidebarTests: XCTestCase {
             // lower-contrast combination than an unselected row's flat
             // background under `inkNav`, so it clears a lower bar.
             let threshold: CGFloat = row.isSelected ? 0.05 : 0.1
-            XCTAssertGreaterThan(spread(row), threshold, "the \(row.item.title) row rendered nothing")
+            XCTAssertGreaterThan(spread(row), threshold, "the \(row.titleText) row rendered nothing")
         }
         XCTAssertGreaterThan(
             spread(sidebar.workspacesHeader), 0.1, "the Workspaces header rendered nothing"

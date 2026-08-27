@@ -61,7 +61,7 @@ final class WorkspaceShellTests: XCTestCase {
     func testTheDestinationsAreTheRedesigns() {
         XCTAssertEqual(
             WorkspaceDestination.allCases.map(\.rawValue),
-            ["home", "todo", "terminals"]
+            ["home", "todo", "terminals", "settings"]
         )
     }
 

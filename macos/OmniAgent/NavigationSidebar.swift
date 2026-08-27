@@ -47,16 +47,22 @@ enum SidebarNavItem: CaseIterable {
 
 /// One fixed nav row: symbol and label, flat and squared.
 final class SidebarNavRowView: ShellRowView {
-    let item: SidebarNavItem
+    /// The fixed sidebar row this stands for — `nil` for a row built from a
+    /// bare title and symbol, which is what the Settings page's column does.
+    let item: SidebarNavItem?
 
     private let icon = NSImageView()
     private let titleField: NSTextField
     private(set) var isSelected = false
 
-    init(item: SidebarNavItem) {
+    convenience init(item: SidebarNavItem) {
+        self.init(title: item.title, symbol: item.symbol, item: item)
+    }
+
+    init(title: String, symbol: String, item: SidebarNavItem? = nil) {
         self.item = item
         titleField = ShellFont.label(
-            item.title,
+            title,
             font: ShellFont.ui(13.5, .medium),
             color: ShellPalette.inkNav
         )
@@ -68,8 +74,8 @@ final class SidebarNavRowView: ShellRowView {
         hoverEnabled = false
 
         icon.image = NSImage(
-            systemSymbolName: item.symbol,
-            accessibilityDescription: item.title
+            systemSymbolName: symbol,
+            accessibilityDescription: title
         )?.withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
         icon.contentTintColor = ShellPalette.inkNav
         icon.translatesAutoresizingMaskIntoConstraints = false
@@ -89,11 +95,13 @@ final class SidebarNavRowView: ShellRowView {
         ])
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         refreshBackground()
-        setAccessibilityLabel(item.title)
+        setAccessibilityLabel(title)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    var titleText: String { titleField.stringValue }
 
     func apply(selected: Bool) {
         isSelected = selected
@@ -998,7 +1006,7 @@ final class NavigationSidebarView: NSView {
     /// tree, the menu and the palette.
     func applyDestination(_ destination: WorkspaceDestination) {
         self.destination = destination
-        for row in navRows { row.apply(selected: row.item.destination == destination) }
+        for row in navRows { row.apply(selected: row.item?.destination == destination) }
     }
 
     /// Everything the Workspaces section renders: EVERY workspace, its
