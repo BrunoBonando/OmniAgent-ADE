@@ -246,11 +246,19 @@ enum ApplicationMenus {
         session.addItem(item("Focus Terminal", Selector(("focusTerminal:")), "l"))
         // Focus *mode* — the pane blown up over the others on a blurred
         // backdrop — not the item above, which only moves keyboard focus
-        // into the terminal. ⌘↩ is Bruno's own binding, chosen over the
-        // design hint text's ⌃⌘F: that chord is the View menu's own Toggle
-        // Full Screen above, the system-standard one AppKit expects, so it
-        // was never actually free.
+        // into the terminal. ⌘↩ is Bruno's own binding; the design hint
+        // text's ⌃⌘F is the View menu's own Toggle Full Screen above and was
+        // never free. Plain ⌘F is Bruno's second pick for this same action —
+        // this app has no Find/Search feature to collide with, overriding
+        // the system convention deliberately (2026-08-27) — kept as a
+        // second, hidden chord rather than a replacement:
+        // `allowsKeyEquivalentWhenHidden` is what keeps a hidden item's own
+        // chord live (macOS 12+).
         session.addItem(item("Focus This Terminal", Selector(("toggleFocusMode:")), "\r"))
+        let focusModeAltChord = item("Focus This Terminal", Selector(("toggleFocusMode:")), "f")
+        focusModeAltChord.isHidden = true
+        focusModeAltChord.allowsKeyEquivalentWhenHidden = true
+        session.addItem(focusModeAltChord)
 
         // Pane commands travel the responder chain (target nil): directional
         // focus and swap land on PaneWorkspaceView, pane lifecycle on
