@@ -169,6 +169,21 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         fatalError("init(coder:) is unavailable")
     }
 
+    /// ponytail (2026-08-26): temporary kill-switch. `NSGlassEffectView.layout()`
+    /// was caught live (lldb, stop-hook on the crash) producing "Invalid view
+    /// geometry: y is NaN" from two different AppKit call paths in the same
+    /// build — one via the plain window layout cycle, one via
+    /// `NSAnimationContext.runAnimationGroup` — with no app frame anywhere in
+    /// either trace. That plus the OS/toolchain (macOS 27.0 26A5416b, Xcode
+    /// 27.0 27A5237l — both early "A"-train betas) points at an AppKit bug
+    /// in this Liquid Glass API, not something fixable by changing how we
+    /// call it. Forces both glass construction sites below and in
+    /// `HoverCardShellView.init` onto their pre-macOS-26 fallback until a
+    /// fixed OS/Xcode seed lands (filed as Apple Feedback). Flip back to
+    /// `true` then — search doesn't need touching, both sites read this one
+    /// flag.
+    static let glassEnabled = false
+
     /// Wraps a view in glass: the real Liquid Glass on macOS 26, and the
     /// `.behindWindow` blur that stood in for it before.
     static func glassHost(
@@ -177,7 +192,7 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         cornerRadius: CGFloat = CommandPaletteController.cornerRadius
     ) -> NSView {
         let frame = NSRect(origin: .zero, size: size)
-        if #available(macOS 26.0, *) {
+        if #available(macOS 26.0, *), glassEnabled {
             let glass = NSGlassEffectView(frame: frame)
             glass.autoresizingMask = [.width, .height]
             glass.cornerRadius = cornerRadius

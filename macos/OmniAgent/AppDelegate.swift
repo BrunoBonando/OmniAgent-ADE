@@ -308,6 +308,14 @@ enum ApplicationMenus {
         desk.addItem(item("Previous Session", Selector(("previousSession:")), "[", [.command, .shift]))
         desk.addItem(item("Next Session", Selector(("nextSession:")), "]", [.command, .shift]))
         desk.addItem(.separator())
+        // ⌃⇥ / ⌃⇧⇥ — the same step as above, but cyclical: past the last
+        // session it wraps to the first (and back), Terminal.app's own
+        // tab-cycling shape. Unbound elsewhere in this app.
+        desk.addItem(item("Next Session (Cycle)", Selector(("cycleNextSession:")), "\t", [.control]))
+        desk.addItem(
+            item("Previous Session (Cycle)", Selector(("cyclePreviousSession:")), "\t", [.control, .shift])
+        )
+        desk.addItem(.separator())
         // ⌃1…⌃9, the `selectPane:` loop's shape with Control instead of
         // Command: no plain-Control chord but ⌃Space (Spotlight) is bound
         // anywhere in this app. macOS ships "Switch to Desktop N" on the same

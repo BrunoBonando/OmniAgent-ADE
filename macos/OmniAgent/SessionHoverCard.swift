@@ -1932,6 +1932,21 @@ final class HoverCardBodyView: NSView {
     /// is NaN"). Lifting the pin for the one measurement that exists to
     /// answer it, then restoring it, removes the contradiction rather than
     /// surviving it.
+    ///
+    /// ponytail (2026-08-26): `layoutSubtreeIfNeeded()` was removed from here
+    /// for one build, suspecting it as the reentrant trigger of the
+    /// "Invalid view geometry: y is NaN" crash inside `NSGlassEffectView.layout()`
+    /// — it wasn't: the crash recurred anyway via a second, unrelated path
+    /// (an active `NSAnimationContext.runAnimationGroup` elsewhere), and
+    /// removing it silently broke this card's actual content instead:
+    /// `fittingSize` alone computes the *ideal* size without applying it back
+    /// through the stack view's constraints, so every descendant stayed
+    /// zero-framed (confirmed live: `_subtreeDescription` showed the whole
+    /// content tree at `f=(0,0,0,0)`) while this view's own frame looked
+    /// fine. Restored now that `CommandPaletteController.glassEnabled` is
+    /// `false` — `NSGlassEffectView.layout()` (the actual crash site) no
+    /// longer runs at all, so the forced relayout this call performs is back
+    /// to being ordinary, safe AppKit usage.
     var cardSize: NSSize {
         translatesAutoresizingMaskIntoConstraints = false
         layoutSubtreeIfNeeded()
@@ -2001,7 +2016,7 @@ final class HoverCardShellView: NSView {
         // the view that resizes — see `HoverCardBodyView.tint`.
         body.autoresizingMask = [.width, .height]
 
-        if #available(macOS 26.0, *) {
+        if #available(macOS 26.0, *), CommandPaletteController.glassEnabled {
             // Framed, not the parameterless initializer: `NSGlassEffectView`
             // defaults to `.zero` like any other view, and — since nothing
             // here ever turns off `translatesAutoresizingMaskIntoConstraints`

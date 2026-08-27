@@ -2215,6 +2215,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return destination == .terminals && stepTarget(by: 1) != nil
         case #selector(previousSession(_:)):
             return destination == .terminals && stepTarget(by: -1) != nil
+        case #selector(cycleNextSession(_:)), #selector(cyclePreviousSession(_:)):
+            // Wrapping only means something with 2+ sessions to cycle through —
+            // exactly the condition under which stepping *some* direction works.
+            return destination == .terminals && (stepTarget(by: 1) != nil || stepTarget(by: -1) != nil)
         case #selector(selectSession(_:)):
             // Nine menu items, rarely nine sessions: the ones past the end are
             // greyed out rather than silently doing nothing.
@@ -2372,7 +2376,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     /// ⌘K. The list is rebuilt from the live workspace on every open, so it
     /// can never offer a pane that closed while the palette was shut.
+    ///
+    /// experiment (2026-08-26): dismisses any open hover card first. Hovering
+    /// a session then opening search left the card's tick timer/resize
+    /// machinery running while the palette's own presentation animated in —
+    /// two windows animating at once, no guard between them — matching an
+    /// "Invalid view geometry: y is NaN" crash in SessionHoverCard. Instant
+    /// (fade: 0), not the card's usual 0.09s goodbye: this is a defensive
+    /// clear-the-deck, not a UX-driven dismiss.
     @objc func showCommandPalette(_ sender: Any?) {
+        hoverCard.dismiss(fade: 0)
         palette.onRun = { [weak self] action in self?.run(action) }
         palette.present(
             commands: CommandPaletteModel.build(
@@ -2506,6 +2519,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     @objc func previousSession(_ sender: Any?) { stepSession(by: -1) }
 
+    /// ⌃⇥ / ⌃⇧⇥ — same step, but wraps past either end, the shape Terminal.app
+    /// and every tabbed browser use for tab-cycling chords. `⇧⌘]`/`⇧⌘[` stay
+    /// non-wrapping on purpose (see `stepTarget`); this pair exists because a
+    /// *cyclical* Tab chord is its own, separate ask.
+    @objc func cycleNextSession(_ sender: Any?) { stepSession(by: 1, wrapping: true) }
+
+    @objc func cyclePreviousSession(_ sender: Any?) { stepSession(by: -1, wrapping: true) }
+
     /// What `stepSession` would land on — split out so `validateMenuItem` greys
     /// the item out on exactly the condition the command refuses on.
     ///
@@ -2523,9 +2544,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         )
     }
 
-    /// ⇧⌘] / ⇧⌘[.
-    private func stepSession(by offset: Int) {
-        guard let target = stepTarget(by: offset) else { return }
+    /// `stepTarget`, wrapped: past either end, lands on the opposite end
+    /// instead of nil. Only ever called with `offset` ±1, so a single modulo
+    /// step is all this needs.
+    private func wrappingStepTarget(by offset: Int) -> PaneDescriptor? {
+        guard let project = selectedProjectID else { return nil }
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        let sessions = SessionOutline.group(panes, focusedPaneID: workspace.focusedPaneID)
+            .first { $0.project == project }?.sessions ?? []
+        guard !sessions.isEmpty else { return nil }
+        let currentIndex = sessions.firstIndex { $0.isCurrent } ?? -1
+        let base = currentIndex == -1 ? 0 : currentIndex
+        let wrapped = ((base + offset) % sessions.count + sessions.count) % sessions.count
+        guard let firstPaneID = sessions[wrapped].paneIDs.first else { return nil }
+        return panes.first { $0.sessionID == firstPaneID }
+    }
+
+    /// ⇧⌘] / ⇧⌘[, and (wrapping) ⌃⇥ / ⌃⇧⇥.
+    private func stepSession(by offset: Int, wrapping: Bool = false) {
+        let target = wrapping ? wrappingStepTarget(by: offset) : stepTarget(by: offset)
+        guard let target else { return }
         enterDeskSession(target.group)
     }
 
