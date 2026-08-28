@@ -54,7 +54,7 @@ final class AuthGateCoordinatorTests: XCTestCase {
         return defaults
     }
 
-    func testResolvingASignedInOutcomeWritesAllSixKeys() {
+    func testResolvingASignedInOutcomeWritesAllSevenKeys() {
         let client = FakeSettingsClient()
         let coordinator = AuthGateCoordinator(settings: SettingsStore(client: client))
 
@@ -64,7 +64,8 @@ final class AuthGateCoordinatorTests: XCTestCase {
             persona: "research",
             accountEmail: "bruno@bonando.com",
             accountName: "Bruno Bonando",
-            githubLogin: "brunobonando"
+            githubLogin: "brunobonando",
+            accountPicture: "https://cdn.test.invalid/bruno.png"
         )) {
             expectation.fulfill()
         }
@@ -76,6 +77,7 @@ final class AuthGateCoordinatorTests: XCTestCase {
         XCTAssertEqual(client.rows["auth_account_email"], "bruno@bonando.com")
         XCTAssertEqual(client.rows["auth_account_name"], "Bruno Bonando")
         XCTAssertEqual(client.rows["auth_github_login"], "brunobonando")
+        XCTAssertEqual(client.rows["auth_account_picture"], "https://cdn.test.invalid/bruno.png")
     }
 
     func testResolvingASkipWritesEmptyStringsForPersonaAndAccount() {
@@ -93,13 +95,14 @@ final class AuthGateCoordinatorTests: XCTestCase {
         XCTAssertEqual(client.rows["auth_account_email"], "")
         XCTAssertEqual(client.rows["auth_account_name"], "")
         XCTAssertEqual(client.rows["auth_github_login"], "")
+        XCTAssertEqual(client.rows["auth_account_picture"], "", "an outcome with no picture writes no picture")
     }
 
-    func testResetClearsAllSixKeysToTheSignedOutUnresolvedShape() {
+    func testResetClearsAllSevenKeysToTheSignedOutUnresolvedShape() {
         let client = FakeSettingsClient(rows: [
             "auth_gate_resolved": "true", "auth_signed_in": "true", "auth_persona": "student",
             "auth_account_email": "bruno@bonando.com", "auth_account_name": "Bruno Bonando",
-            "auth_github_login": "brunobonando",
+            "auth_github_login": "brunobonando", "auth_account_picture": "https://cdn.test.invalid/bruno.png",
         ])
         let coordinator = AuthGateCoordinator(settings: SettingsStore(client: client))
 
@@ -113,6 +116,7 @@ final class AuthGateCoordinatorTests: XCTestCase {
         XCTAssertEqual(client.rows["auth_account_email"], "")
         XCTAssertEqual(client.rows["auth_account_name"], "")
         XCTAssertEqual(client.rows["auth_github_login"], "", "a log-out unlinks GitHub locally too")
+        XCTAssertEqual(client.rows["auth_account_picture"], "", "and takes the avatar with it")
     }
 
     func testSummaryPrefersTheRealAccountRows() {
@@ -239,7 +243,8 @@ final class AuthGateViewModelTests: XCTestCase {
         firstName: String? = nil,
         lastName: String? = nil,
         name: String? = "Bruno Bonando",
-        githubLogin: String? = nil
+        githubLogin: String? = nil,
+        picture: String? = nil
     ) -> AuthUser {
         AuthUser(
             id: "user-1",
@@ -247,6 +252,7 @@ final class AuthGateViewModelTests: XCTestCase {
             firstName: firstName,
             lastName: lastName,
             name: name,
+            picture: picture,
             role: "user",
             authProvider: "password",
             emailVerified: true,

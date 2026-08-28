@@ -37,6 +37,11 @@ struct AuthGateOutcome: Equatable {
     /// outcome and every test that predates it — stay about what they are
     /// testing; `AuthGateState.accountEmail` below sets the same precedent.
     var githubLogin: String? = nil
+    /// The account's profile-picture URL, or `nil` when it has none (and on
+    /// the skip path). Defaulted for `githubLogin`'s reason: the
+    /// constructions that have nothing to say about a picture stay about
+    /// what they are testing.
+    var accountPicture: String? = nil
 }
 
 struct AuthGateState: Equatable {
@@ -44,11 +49,12 @@ struct AuthGateState: Equatable {
     /// Non-nil exactly when `phase == .resolved`.
     var outcome: AuthGateOutcome?
     /// The signed-in identity, carried from `.signedIn` through the
-    /// personalize phase into the outcome. All three stay `nil` on the skip
+    /// personalize phase into the outcome. All four stay `nil` on the skip
     /// path.
     var accountEmail: String? = nil
     var accountName: String? = nil
     var githubLogin: String? = nil
+    var accountPicture: String? = nil
 }
 
 enum AuthGateAction: Equatable {
@@ -56,7 +62,7 @@ enum AuthGateAction: Equatable {
     /// A *successful* real login — `AuthGateViewModel` dispatches this only
     /// after `AuthClient` returned a user; the reducer never sees a failed
     /// attempt (that stays view-model state as `errorMessage`).
-    case signedIn(email: String, displayName: String?, githubLogin: String?)
+    case signedIn(email: String, displayName: String?, githubLogin: String?, picture: String?)
     case answerSelected(persona: String)
     case skipPersonalize
 }
@@ -73,14 +79,15 @@ enum AuthGateReducer {
                 outcome: AuthGateOutcome(signedIn: false, persona: nil, accountEmail: nil, accountName: nil)
             )
 
-        case let .signedIn(email, displayName, githubLogin):
+        case let .signedIn(email, displayName, githubLogin, picture):
             guard state.phase == .login else { return state }
             return AuthGateState(
                 phase: .personalize,
                 outcome: nil,
                 accountEmail: email,
                 accountName: displayName,
-                githubLogin: githubLogin
+                githubLogin: githubLogin,
+                accountPicture: picture
             )
 
         case let .answerSelected(persona):
@@ -92,11 +99,13 @@ enum AuthGateReducer {
                     persona: persona,
                     accountEmail: state.accountEmail,
                     accountName: state.accountName,
-                    githubLogin: state.githubLogin
+                    githubLogin: state.githubLogin,
+                    accountPicture: state.accountPicture
                 ),
                 accountEmail: state.accountEmail,
                 accountName: state.accountName,
-                githubLogin: state.githubLogin
+                githubLogin: state.githubLogin,
+                accountPicture: state.accountPicture
             )
 
         case .skipPersonalize:
@@ -108,11 +117,13 @@ enum AuthGateReducer {
                     persona: nil,
                     accountEmail: state.accountEmail,
                     accountName: state.accountName,
-                    githubLogin: state.githubLogin
+                    githubLogin: state.githubLogin,
+                    accountPicture: state.accountPicture
                 ),
                 accountEmail: state.accountEmail,
                 accountName: state.accountName,
-                githubLogin: state.githubLogin
+                githubLogin: state.githubLogin,
+                accountPicture: state.accountPicture
             )
         }
     }

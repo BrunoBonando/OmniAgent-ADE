@@ -1835,6 +1835,64 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.palette.dismiss()
     }
 
+    // MARK: - The sidebar's account chip
+
+    /// The chip is a button, and it opens the one page that manages the
+    /// account it shows.
+    func testPressingTheAccountChipOpensSettingsAccounts() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        try XCTUnwrap(controller.shellSidebar.accountRow.accountButton.onPress)()
+
+        XCTAssertEqual(controller.destination, .settings)
+        XCTAssertEqual(controller.settingsView.section, .accounts)
+    }
+
+    /// Who the chip says is signed in comes from the `auth_*` rows: the
+    /// display name when there is one, and its initials on the avatar.
+    func testTheAccountChipShowsTheNameAndInitialsFromTheRows() {
+        let controller = makeController(settingsClient: FakeSettingsClient(rows: [
+            "auth_signed_in": "true",
+            "auth_account_email": "bruno@bonando.com",
+            "auth_account_name": "Bruno Bonando",
+            "auth_github_login": "",
+            "auth_account_picture": "",
+        ]))
+        defer { controller.close() }
+
+        controller.refreshAccountSection()
+
+        XCTAssertEqual(controller.shellSidebar.accountRow.accountLabel, "Bruno Bonando")
+        XCTAssertEqual(controller.shellSidebar.accountRow.avatarModeForTesting, .initials("BB"))
+    }
+
+    /// No name on the account: the email stands in — and no account at all
+    /// puts the chip back to its placeholder, whatever the stale rows say.
+    func testTheAccountChipFallsBackToTheEmailAndToNotSignedIn() {
+        let rows = [
+            "auth_signed_in": "true",
+            "auth_account_email": "bruno@bonando.com",
+            "auth_account_name": "",
+            "auth_github_login": "",
+            "auth_account_picture": "",
+        ]
+        let controller = makeController(settingsClient: FakeSettingsClient(rows: rows))
+        defer { controller.close() }
+        controller.refreshAccountSection()
+        XCTAssertEqual(controller.shellSidebar.accountRow.accountLabel, "bruno@bonando.com")
+
+        var signedOut = rows
+        signedOut["auth_signed_in"] = "false"
+        signedOut["auth_account_name"] = "Bruno Bonando"
+        let out = makeController(settingsClient: FakeSettingsClient(rows: signedOut))
+        defer { out.close() }
+        out.refreshAccountSection()
+        XCTAssertEqual(out.shellSidebar.accountRow.accountLabel, "Not signed in")
+        XCTAssertEqual(out.shellSidebar.accountRow.avatarModeForTesting, .glyph)
+    }
+
     // MARK: - Session outline
 
     func testTheOutlineFollowsThePanesAndTheFocusedOne() throws {
@@ -2347,6 +2405,18 @@ final class WorkspaceWindowControllerTests: XCTestCase {
                 socketURL: URL(fileURLWithPath: "/tmp/omniagent-controller-test.sock")
             ),
             sessionID: "native-terminal"
+        )
+    }
+
+    /// The same window, with its settings rows answered from memory rather
+    /// than from a socket this test has no daemon behind.
+    private func makeController(settingsClient: SettingsClient) -> WorkspaceWindowController {
+        WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-controller-test.sock")
+            ),
+            panes: [WorkspaceRestoration.bootstrapPane(sessionID: "native-terminal")],
+            settingsClient: settingsClient
         )
     }
 

@@ -5,7 +5,8 @@ final class AuthGateStateTests: XCTestCase {
     private let signedIn = AuthGateAction.signedIn(
         email: "bruno@bonando.com",
         displayName: "Bruno Bonando",
-        githubLogin: "brunobonando"
+        githubLogin: "brunobonando",
+        picture: "https://cdn.test.invalid/bruno.png"
     )
 
     func testSkippingLoginResolvesSignedOutWithNoPersonaAndNoAccount() {
@@ -23,18 +24,20 @@ final class AuthGateStateTests: XCTestCase {
             outcome: nil,
             accountEmail: "bruno@bonando.com",
             accountName: "Bruno Bonando",
-            githubLogin: "brunobonando"
+            githubLogin: "brunobonando",
+            accountPicture: "https://cdn.test.invalid/bruno.png"
         ))
     }
 
     func testANilDisplayNameSurvivesIntoThePersonalizePhase() {
         let state = AuthGateReducer.reduce(
             AuthGateReducer.initial,
-            .signedIn(email: "a@b.com", displayName: nil, githubLogin: nil)
+            .signedIn(email: "a@b.com", displayName: nil, githubLogin: nil, picture: nil)
         )
         XCTAssertEqual(state.accountEmail, "a@b.com")
         XCTAssertNil(state.accountName)
         XCTAssertNil(state.githubLogin, "an account with nothing linked carries nothing")
+        XCTAssertNil(state.accountPicture, "nor a picture it does not have")
     }
 
     func testAnsweringThePersonaQuestionResolvesSignedInWithThatPersonaAndTheAccount() {
@@ -46,7 +49,8 @@ final class AuthGateStateTests: XCTestCase {
             persona: "student",
             accountEmail: "bruno@bonando.com",
             accountName: "Bruno Bonando",
-            githubLogin: "brunobonando"
+            githubLogin: "brunobonando",
+            accountPicture: "https://cdn.test.invalid/bruno.png"
         ))
     }
 
@@ -59,7 +63,8 @@ final class AuthGateStateTests: XCTestCase {
             persona: nil,
             accountEmail: "bruno@bonando.com",
             accountName: "Bruno Bonando",
-            githubLogin: "brunobonando"
+            githubLogin: "brunobonando",
+            accountPicture: "https://cdn.test.invalid/bruno.png"
         ))
     }
 

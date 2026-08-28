@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The I/O half of the auth gate: whether it needs showing, and persisting
 /// whichever way it resolves — the three keys the web build's
-/// `App.tsx`/`handleAuthGateResolved` established plus the three native-first
+/// `App.tsx`/`handleAuthGateResolved` established plus the four native-first
 /// account rows real login added, behind `SettingsStore` so it is testable
 /// without a socket. `AuthGateState.swift` owns the phase transitions;
 /// `AuthGateWindowController` below owns turning this into a sheet on
@@ -21,7 +21,7 @@ final class AuthGateCoordinator {
         self.defaults = defaults
     }
 
-    /// Persists all six keys the gate cares about and completes once every
+    /// Persists all seven keys the gate cares about and completes once every
     /// write has landed (or failed — a write failing here still dismisses
     /// the gate rather than trapping the user behind a broken settings row;
     /// the same "fail open" posture `App.tsx`'s own boot check documents).
@@ -33,6 +33,7 @@ final class AuthGateCoordinator {
             accountEmail: outcome.accountEmail ?? "",
             accountName: outcome.accountName ?? "",
             githubLogin: outcome.githubLogin ?? "",
+            accountPicture: outcome.accountPicture ?? "",
             completion: completion
         )
     }
@@ -49,6 +50,7 @@ final class AuthGateCoordinator {
             accountEmail: "",
             accountName: "",
             githubLogin: "",
+            accountPicture: "",
             completion: completion
         )
     }
@@ -85,7 +87,7 @@ final class AuthGateCoordinator {
     /// the same reason `summary` chains its reads: `DispatchGroup.notify`
     /// always hops a queue turn, even against a synchronous fake client,
     /// which would make `completion` land a run-loop turn later than every
-    /// write actually finished. Six tiny writes in sequence costs nothing
+    /// write actually finished. Seven tiny writes in sequence costs nothing
     /// a user would notice.
     private func persist(
         resolved: String,
@@ -94,6 +96,7 @@ final class AuthGateCoordinator {
         accountEmail: String,
         accountName: String,
         githubLogin: String,
+        accountPicture: String,
         completion: @escaping () -> Void
     ) {
         // Written first and synchronously: this is the only copy the launch
@@ -107,7 +110,9 @@ final class AuthGateCoordinator {
                     settings.set(SettingsKey.authAccountEmail, accountEmail) { _ in
                         settings.set(SettingsKey.authAccountName, accountName) { _ in
                             settings.set(SettingsKey.authGithubLogin, githubLogin) { _ in
-                                completion()
+                                settings.set(SettingsKey.authAccountPicture, accountPicture) { _ in
+                                    completion()
+                                }
                             }
                         }
                     }
@@ -410,7 +415,8 @@ final class AuthGateViewModel: ObservableObject {
                 send(.signedIn(
                     email: user.email,
                     displayName: Self.displayName(of: user),
-                    githubLogin: user.githubLogin
+                    githubLogin: user.githubLogin,
+                    picture: user.picture
                 ))
             case .linkGitHub:
                 onLinkOutcome?(.linked(githubLogin: user.githubLogin))

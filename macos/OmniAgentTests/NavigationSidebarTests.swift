@@ -128,6 +128,61 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(opened, 1)
     }
 
+    /// A real account: its name in the primary ink, and — until a picture
+    /// arrives — its own initials in the circle.
+    func testTheAccountRowShowsTheNameAndItsInitials() {
+        let sidebar = makeSidebar()
+        sidebar.accountRow.apply(name: "Bruno Bonando", picture: nil)
+        XCTAssertEqual(sidebar.accountRow.accountLabel, "Bruno Bonando")
+        XCTAssertEqual(sidebar.accountRow.avatarModeForTesting, .initials("BB"))
+    }
+
+    /// And back again: no name is the signed-out state, glyph and all — the
+    /// row must never keep the last account it was shown.
+    func testNoNameReturnsTheRowToThePlaceholderAndTheGenericGlyph() {
+        let sidebar = makeSidebar()
+        sidebar.accountRow.apply(name: "Bruno Bonando", picture: nil)
+        sidebar.accountRow.apply(name: nil, picture: nil)
+        XCTAssertEqual(sidebar.accountRow.accountLabel, "Not signed in")
+        XCTAssertEqual(sidebar.accountRow.avatarModeForTesting, .glyph)
+    }
+
+    func testAPictureTakesTheCircleOverTheInitials() {
+        let sidebar = makeSidebar()
+        let picture = NSImage(size: NSSize(width: 44, height: 44))
+        sidebar.accountRow.apply(name: "Bruno Bonando", picture: picture)
+        XCTAssertEqual(sidebar.accountRow.avatarModeForTesting, .picture)
+    }
+
+    /// Two buttons in one chip: the account half routes to the account, the
+    /// gear still offers the Settings panel.
+    func testTheAccountHalfAndTheGearReportSeparately() throws {
+        let sidebar = makeSidebar()
+        var account = 0
+        var settings = 0
+        sidebar.onOpenAccount = { account += 1 }
+        sidebar.onOpenSettings = { settings += 1 }
+
+        try XCTUnwrap(sidebar.accountRow.accountButton.onPress)()
+        XCTAssertEqual([account, settings], [1, 0])
+
+        try XCTUnwrap(sidebar.accountRow.gear.onPress)()
+        XCTAssertEqual([account, settings], [1, 1])
+    }
+
+    /// The hand cursor is drawn over exactly these two frames, so they have
+    /// to be real, disjoint and inside the chip — an empty rect would take
+    /// the pointer feedback with it and nothing else would notice.
+    func testTheAccountRowsTwoPressableHalvesAreRealAndDisjoint() {
+        let row = makeSidebar().accountRow
+        XCTAssertGreaterThan(row.accountButton.frame.width, 0)
+        XCTAssertGreaterThan(row.accountButton.frame.height, 0)
+        XCTAssertGreaterThan(row.gear.frame.width, 0)
+        XCTAssertFalse(row.accountButton.frame.intersects(row.gear.frame))
+        XCTAssertTrue(row.bounds.contains(row.accountButton.frame))
+        XCTAssertTrue(row.bounds.contains(row.gear.frame))
+    }
+
     // MARK: - System stats
 
     /// The machine card sits directly above the account chip, on the same

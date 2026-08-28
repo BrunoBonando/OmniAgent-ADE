@@ -118,6 +118,10 @@ struct AuthUser: Decodable, Equatable {
     let firstName: String?
     let lastName: String?
     let name: String?
+    /// The account's profile picture (`picture` on the wire) as an absolute
+    /// URL string, or `nil` when the account has none — an email/password
+    /// account that never signed in with a provider that carries one.
+    let picture: String?
     let role: String
     let authProvider: String
     let emailVerified: Bool

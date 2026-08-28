@@ -60,6 +60,14 @@ enum SettingsKey {
     static let authAccountName = "auth_account_name"
 
     /// **No TypeScript twin yet — this is a native-first row**, for the same
+    /// reason as `authAccountEmail` above. The URL of the account's profile
+    /// picture as Core reports it (`picture` on `UserResponse`), or `""` when
+    /// the account has none or sign-in was skipped. The URL rather than the
+    /// image bytes: the row is a settings string, and the sidebar fetches
+    /// and caches what it points at itself.
+    static let authAccountPicture = "auth_account_picture"
+
+    /// **No TypeScript twin yet — this is a native-first row**, for the same
     /// reason as `authAccountEmail` above. The GitHub handle linked to the
     /// account ("brunobonando"), written without the `@` the Accounts
     /// section prints, or `""` when GitHub is not connected. Written by

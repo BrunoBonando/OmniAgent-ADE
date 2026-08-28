@@ -415,16 +415,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// socket is up, and `start()` fills it from the `layout` row once the
     /// connection lands. A non-empty seed is for callers that already know
     /// their panes (tests, and the single-pane convenience below).
+    /// `settingsClient` is a test seam, `settingsWriter`'s pattern applied
+    /// to reads: `nil` means the daemon on the other end of `connection`,
+    /// and a test substitutes a fake so the rows this window renders — the
+    /// account chip's name and picture among them — can be asserted without
+    /// a socket, and without touching the developer's real `brain.db`.
     init(
         connection: SessionConnection,
         panes: [RestoredPane],
         notifier: SessionNotifier = SessionNotifier(delivery: UserNotificationDelivery()),
-        daemonPersistence: DaemonPersistenceController = DaemonPersistenceController()
+        daemonPersistence: DaemonPersistenceController = DaemonPersistenceController(),
+        settingsClient: SettingsClient? = nil
     ) {
         self.connection = connection
         self.notifier = notifier
         self.daemonPersistence = daemonPersistence
-        let settingsStore = SettingsStore(client: connection)
+        let settingsStore = SettingsStore(client: settingsClient ?? connection)
         self.settingsStore = settingsStore
         let authGateCoordinator = AuthGateCoordinator(settings: settingsStore)
         self.authGateCoordinator = authGateCoordinator
@@ -663,6 +669,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // The gear offers the Settings panel (or puts it back): the pick is
         // what opens the page.
         shellSidebar.onOpenSettings = { [weak self] in self?.toggleSettingsPanel() }
+        shellSidebar.onOpenAccount = { [weak self] in self?.showSettings(section: .accounts) }
         // The header's plus menu: a session in any listed workspace, or a
         // brand new workspace from a folder (the one flow where a chooser is
         // the whole point).
@@ -4039,11 +4046,58 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             email: nil,
             signedIn: !AuthGate.needsSignIn(authGateCoordinator.defaults)
         )
+        // The mirror knows *whether* there is an account, never *who* it is
+        // — so the chip goes back to its nameless state here and waits for
+        // `refreshAccountSection`. That is the point on the log-out path: a
+        // name left standing over a signed-out account is worse than a
+        // moment of "Not signed in" over a signed-in one.
+        applyAccountRow(name: nil, pictureURL: "")
     }
 
-    /// Re-reads the three `auth_*` rows the Accounts section shows and hands
-    /// them to the page, which decides what it says (see
-    /// `SettingsSurfaceView.applyAccount`). Runs whenever the answer can
+    /// The account chip's fetched pictures, keyed by the URL row they came
+    /// from: a re-read must not blink the picture away and fetch it again.
+    private var avatarCache: [String: NSImage] = [:]
+    /// URLs whose fetch is already running, so a burst of re-reads makes one
+    /// request rather than one each.
+    private var avatarFetchesInFlight: Set<String> = []
+    /// Who the chip is currently for — what a picture arriving late is
+    /// checked against before it is allowed on screen.
+    private var accountRowName: String?
+    private var accountRowPictureURL = ""
+
+    /// Hands the sidebar's account chip its identity, and fetches the
+    /// picture behind `pictureURL` when there is one and it is not cached.
+    /// An empty URL, an unparseable one, or bytes that are not an image all
+    /// leave the chip on its initials-or-glyph avatar — a complete state
+    /// rather than a placeholder, so nothing here needs to fail loudly.
+    private func applyAccountRow(name: String?, pictureURL: String) {
+        let url = pictureURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        accountRowName = name
+        accountRowPictureURL = url
+        shellSidebar.accountRow.apply(name: name, picture: avatarCache[url])
+        guard avatarCache[url] == nil, !url.isEmpty, !avatarFetchesInFlight.contains(url),
+              let parsed = URL(string: url)
+        else { return }
+        avatarFetchesInFlight.insert(url)
+        URLSession.shared.dataTask(with: parsed) { [weak self] data, _, _ in
+            let image = data.flatMap(NSImage.init(data:))
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.avatarFetchesInFlight.remove(url)
+                guard let image else { return }
+                self.avatarCache[url] = image
+                // The chip may have moved on while the bytes were in flight
+                // — a log-out, or a different account signed in behind it.
+                guard self.accountRowPictureURL == url else { return }
+                self.shellSidebar.accountRow.apply(name: self.accountRowName, picture: image)
+            }
+        }.resume()
+    }
+
+    /// Re-reads the `auth_*` rows the account is shown from: three for the
+    /// Accounts section, which decides what it says (see
+    /// `SettingsSurfaceView.applyAccount`), and two more — name and picture
+    /// — for the sidebar's account chip. Runs whenever the answer can
     /// have changed: the launch gate resolving, the socket coming up (the
     /// launch read happens before the daemon is up and fails), the Settings
     /// page being shown, the gate this section itself puts up, and either
@@ -4069,6 +4123,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 settingsStore.get(SettingsKey.authGithubLogin) { [weak self] githubResult in
                     guard let self, let githubLogin = try? githubResult.get() else { return }
                     settingsView.applyAccount(email: email, signedIn: signedIn, githubLogin: githubLogin)
+                    settingsStore.get(SettingsKey.authAccountName) { [weak self] nameResult in
+                        guard let self, let name = try? nameResult.get() else { return }
+                        settingsStore.get(SettingsKey.authAccountPicture) { [weak self] pictureResult in
+                            guard let self, let picture = try? pictureResult.get() else { return }
+                            // The name if there is one, the email if not —
+                            // and neither when nobody is signed in, which is
+                            // the chip's "Not signed in" state.
+                            let display = [name, email]
+                                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                                .first { !$0.isEmpty }
+                            applyAccountRow(
+                                name: signedIn ? display : nil,
+                                pictureURL: signedIn ? (picture ?? "") : ""
+                            )
+                        }
+                    }
                 }
             }
         }

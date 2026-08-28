@@ -120,6 +120,7 @@ final class AuthClientTests: XCTestCase {
             firstName: "Ada",
             lastName: "Lovelace",
             name: "Ada Lovelace",
+            picture: nil,
             role: "user",
             authProvider: "password",
             emailVerified: true,
@@ -323,6 +324,28 @@ final class AuthClientTests: XCTestCase {
         AuthClientStubProtocol.handler = { _ in (200, self.loginResponse(token: "tok")) }
         let unlinked = try await makeClient().login(with: .apple, code: "c", codeVerifier: "v", nonce: "n")
         XCTAssertNil(unlinked.githubLogin)
+    }
+
+    /// The wire field the sidebar's account chip draws its avatar from.
+    /// Null (an email/password account, or a provider that carries none)
+    /// decodes as `nil` rather than failing the envelope.
+    func testTheUserDecodesItsProfilePictureAndToleratesItsAbsence() async throws {
+        let withPicture = """
+        {"id":"usr-1","email":"ada@example.com","first_name":null,"last_name":null,"name":null,\
+        "picture":"https://cdn.example.com/ada.png",\
+        "role":"user","auth_provider":"apple","email_verified":true,"github_login":null}
+        """
+        AuthClientStubProtocol.handler = { _ in
+            (200, Data("""
+            {"access_token":"tok","user":\(withPicture)}
+            """.utf8))
+        }
+        let user = try await makeClient().login(with: .apple, code: "c", codeVerifier: "v", nonce: "n")
+        XCTAssertEqual(user.picture, "https://cdn.example.com/ada.png")
+
+        AuthClientStubProtocol.handler = { _ in (200, self.loginResponse(token: "tok")) }
+        let none = try await makeClient().login(with: .apple, code: "c", codeVerifier: "v", nonce: "n")
+        XCTAssertNil(none.picture, "an explicit null is no picture")
     }
 
     /// Linking is the signed-in half of GitHub: it must present the bearer
