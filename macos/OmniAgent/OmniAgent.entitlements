@@ -53,7 +53,7 @@
 
   What the app does instead: Apple's *web* sign-in flow, opened in an
   `ASWebAuthenticationSession` browser sheet against the
-  `digital.bruno.omniagent.signin` Services ID, with Core taking Apple's
+  `ai.omni-agent.signin` Services ID, with Core taking Apple's
   form_post callback and bouncing the browser back into this app's
   `omniagent://` URL scheme (registered in macos/OmniAgent/Info.plist).
   See AuthGateView.swift's `signInWithApple`/`handleAppleCallback` and

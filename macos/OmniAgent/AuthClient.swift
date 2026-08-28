@@ -214,7 +214,7 @@ final class AuthClient {
     /// distribution cannot carry (see `OmniAgent.entitlements`). The web
     /// flow authenticates as a Services ID instead, and Core's verifier is
     /// configured for this one.
-    static let appleServicesID = "digital.bruno.omniagent.signin"
+    static let appleServicesID = "ai.omni-agent.signin"
 
     /// The URL `ASWebAuthenticationSession` opens to start Apple's web
     /// sign-in. `redirect_uri` points at *Core*, not at the app: Apple only

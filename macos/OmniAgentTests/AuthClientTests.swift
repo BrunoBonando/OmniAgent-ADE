@@ -196,7 +196,7 @@ final class AuthClientTests: XCTestCase {
         // The web flow authenticates as the Services ID, never as the app's
         // bundle id — that is the whole difference from the native flow
         // Developer ID builds cannot run.
-        XCTAssertEqual(query["client_id"], "digital.bruno.omniagent.signin")
+        XCTAssertEqual(query["client_id"], "ai.omni-agent.signin")
         XCTAssertEqual(query["client_id"], AuthClient.appleServicesID)
         // Apple posts the result to Core, not to the app: a custom URL
         // scheme cannot receive a form_post.
