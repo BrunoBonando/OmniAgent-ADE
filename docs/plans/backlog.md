@@ -141,13 +141,16 @@ assertion, and what makes this entry a diagnosis rather than a shrug.
 **Done when:** either event-synthesising tests stop depending on ambient
 key-window state, or the ordering hypothesis above is confirmed and fixed.
 
-## 6. Browser-PKCE login
+## 6. Browser-PKCE login — done (2026-08-28)
 
-The agreed follow-up to the unmerged ADE+Core login branches, which are
-blocked on an Apple entitlement. Its own project, not a backlog line — worth a
-spec before any code.
-
-**Done when:** it has a spec.
+Shipped as the Sign in with Apple web flow: native Sign in with Apple is
+unsupported in Developer ID apps (Apple DTS), so `ASWebAuthenticationSession`
+opens Apple's page, Core's `POST /v1/auth/apple/callback` mints a one-time
+code, `omniagent://auth/apple` hands it back, and `POST /v1/auth/apple/exchange`
+redeems it with PKCE S256 + nonce. Plan: `~/.claude/plans/peaceful-humming-charm.md`
+(session 016ErTyKfE762JDBskXnEF69). Left for later: an app-level
+`omniagent://` handler for callbacks that arrive with no live session, and
+wiring `AuthClient.restoreSession()` once the bearer token authorises anything.
 
 ---
 
