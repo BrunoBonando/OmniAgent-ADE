@@ -28,7 +28,50 @@ final class CommandPaletteTests: XCTestCase {
                 "destination:home", "destination:todo", "destination:terminals", "destination:settings",
                 "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
+                "settings:accounts:signin",
             ]
+        )
+    }
+
+    /// Settings › Accounts' one button is a spotlight row of its own — the
+    /// standing rule reaching *inside* a section — and it is whichever
+    /// button the page is showing, never both.
+    func testTheAccountButtonIsASpotlightRowInWhicheverStateItIsIn() {
+        let whenSignedOut = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
+        let signInRow = whenSignedOut.filter { $0.id.hasPrefix("settings:accounts:") }
+        XCTAssertEqual(signInRow.map(\.id), ["settings:accounts:signin"], "one row, not both halves of a toggle")
+        XCTAssertEqual(signInRow.first?.title, "Sign in with Apple…")
+        XCTAssertEqual(signInRow.first?.action, .signIn)
+        XCTAssertEqual(signInRow.first?.symbol, "person.crop.circle.badge.checkmark")
+        XCTAssertEqual(signInRow.first?.subtitle, "Settings › Accounts", "the row says where it lives")
+        XCTAssertEqual(signInRow.first?.section, .places)
+
+        let whenSignedIn = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil, signedIn: true
+        )
+        let logOutRow = whenSignedIn.filter { $0.id.hasPrefix("settings:accounts:") }
+        XCTAssertEqual(logOutRow.map(\.id), ["settings:accounts:logout"])
+        XCTAssertEqual(logOutRow.first?.title, "Log out")
+        XCTAssertEqual(logOutRow.first?.action, .signOut)
+        XCTAssertEqual(logOutRow.first?.symbol, "person.crop.circle.badge.xmark")
+        XCTAssertEqual(logOutRow.first?.subtitle, "Settings › Accounts")
+        XCTAssertEqual(logOutRow.first?.section, .places)
+
+        // Found by what a user would type for it, which is rarely the words
+        // the button happens to print.
+        var model = CommandPaletteModel(commands: whenSignedIn)
+        model.update(query: "log out")
+        XCTAssertEqual(model.matches.first?.id, "settings:accounts:logout")
+        model.update(query: "sign out")
+        XCTAssertEqual(model.matches.first?.id, "settings:accounts:logout")
+
+        model = CommandPaletteModel(commands: whenSignedOut)
+        model.update(query: "sign in")
+        XCTAssertEqual(model.matches.first?.id, "settings:accounts:signin")
+        model.update(query: "account")
+        XCTAssertTrue(
+            model.matches.contains { $0.id == "settings:accounts:signin" },
+            "and by 'account', beside the section it lives in"
         )
     }
 

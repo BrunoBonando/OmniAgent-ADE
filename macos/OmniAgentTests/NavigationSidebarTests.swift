@@ -236,6 +236,61 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(settings.section, .experimental, "⌘, on the page changes nothing")
     }
 
+    /// Accounts is the first section with a screen: who is signed in, and
+    /// the one button that changes it. Every other section keeps the
+    /// "Under development" line.
+    func testTheAccountsSectionNamesTheAccountAndOffersOneButton() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let settings = controller.settingsView
+
+        controller.showSettings(section: .general)
+        XCTAssertFalse(settings.subtitleField.isHidden)
+        XCTAssertTrue(settings.accountField.isHidden, "the account block is Accounts' alone")
+        XCTAssertTrue(settings.accountButton.isHidden)
+
+        controller.showSettings(section: .accounts)
+        XCTAssertTrue(settings.subtitleField.isHidden, "a screen, not a promise")
+        XCTAssertFalse(settings.accountField.isHidden)
+        XCTAssertFalse(settings.accountButton.isHidden)
+
+        settings.applyAccount(email: "bruno@bonando.com", signedIn: true)
+        XCTAssertEqual(settings.accountField.stringValue, "Signed in as bruno@bonando.com")
+        XCTAssertEqual(settings.accountButton.title, "Log out")
+        XCTAssertTrue(settings.accountSignedIn)
+
+        settings.applyAccount(email: "", signedIn: false)
+        XCTAssertEqual(settings.accountField.stringValue, "Not signed in")
+        XCTAssertEqual(settings.accountButton.title, "Sign in…")
+        XCTAssertFalse(settings.accountSignedIn)
+
+        // A signed-in row with no address is the fake-login era's leftover,
+        // not an account there is anything to log out of.
+        settings.applyAccount(email: nil, signedIn: true)
+        XCTAssertEqual(settings.accountField.stringValue, "Not signed in")
+        XCTAssertEqual(settings.accountButton.title, "Sign in…")
+
+        // And the button really is wired to the controller's own paths.
+        var presented = 0
+        controller.authGatePresenter = { _ in presented += 1 }
+        settings.accountButton.performClick(nil)
+        XCTAssertEqual(presented, 1, "signed out, the button offers the login screen")
+
+        // Which of the two a press is, is the view's own decision — taken on
+        // a bare view here, so logging out for real (which clears the launch
+        // gate's `UserDefaults` mirror) stays out of this test.
+        let bare = SettingsSurfaceView()
+        var signIns = 0
+        var logOuts = 0
+        bare.onSignIn = { signIns += 1 }
+        bare.onLogOut = { logOuts += 1 }
+        bare.accountButton.performClick(nil)
+        bare.applyAccount(email: "bruno@bonando.com", signedIn: true)
+        bare.accountButton.performClick(nil)
+        XCTAssertEqual([signIns, logOuts], [1, 1], "one button, both jobs, by state")
+    }
+
     /// The gear offers the panel beside itself, tip on the gear, inside the
     /// content area; a pick docks it under the "Settings" title; the gear
     /// again offers it back; leaving the page hides it.

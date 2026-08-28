@@ -1635,6 +1635,48 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.run(.selectWorkspace(id: "alpha"))
         XCTAssertEqual(controller.selectedProjectID, "alpha")
         XCTAssertEqual(controller.destination, .terminals, "a workspace opens on the Desk")
+
+        // Settings › Accounts' button, from the spotlight: the same two
+        // methods the page's own button calls. Both external effects are
+        // stubbed — a test must reach neither the network nor a login sheet
+        // it cannot answer.
+        var presented = 0
+        var revoked = 0
+        controller.authGatePresenter = { completion in
+            presented += 1
+            completion()
+        }
+        controller.serverSessionRevoker = { revoked += 1 }
+        controller.run(.signIn)
+        XCTAssertEqual(presented, 1, "signing in is the launch gate, over the workspace window")
+
+        // `AuthGateCoordinator` mirrors the flag into the *app's* defaults,
+        // so the suite must put back whatever the developer's install had.
+        let defaults = UserDefaults.standard
+        let mirrored = defaults.object(forKey: AuthGate.signedInDefaultsKey)
+        defer {
+            if let mirrored {
+                defaults.set(mirrored, forKey: AuthGate.signedInDefaultsKey)
+            } else {
+                defaults.removeObject(forKey: AuthGate.signedInDefaultsKey)
+            }
+        }
+        defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
+
+        let gateCameBack = expectation(description: "the login screen is offered after logging out")
+        controller.authGatePresenter = { completion in
+            presented += 1
+            gateCameBack.fulfill()
+            completion()
+        }
+        controller.run(.signOut)
+        XCTAssertEqual(revoked, 1, "the server session is revoked, not only the local rows")
+        XCTAssertFalse(
+            defaults.bool(forKey: AuthGate.signedInDefaultsKey),
+            "the launch gate's mirror is cleared, so the next launch asks again"
+        )
+        wait(for: [gateCameBack], timeout: 5)
+        XCTAssertEqual(presented, 2)
     }
 
     /// Dragging the sidebar divider has to hold. It did not: the split view

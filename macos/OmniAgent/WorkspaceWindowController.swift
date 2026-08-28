@@ -364,6 +364,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private(set) var windowAskOverlay: PaneAskOverlayView?
     let authGateCoordinator: AuthGateCoordinator
     private let authGateWindow: AuthGateWindowController
+    /// Test seams, `settingsWriter`'s pattern: `nil` means the real thing.
+    ///
+    /// `authGatePresenter` puts the login screen on screen and calls back
+    /// once it resolves; `serverSessionRevoker` is the server-side half of
+    /// "Log out" (`AuthClient.logout()` revokes the refresh token, receives
+    /// the cookie-clearing `Set-Cookie` and drops the access token). Both
+    /// exist for the reason `SettingsViewModel.revokeServerSession` does: a
+    /// test must reach neither the network nor a real sheet it cannot
+    /// answer.
+    var authGatePresenter: ((@escaping () -> Void) -> Void)?
+    var serverSessionRevoker: (() -> Void)?
     private let firstRunWindow: FirstRunWindowController
     private let settingsWindowController: SettingsWindowController
     let inspector: InspectorWindowController
@@ -822,6 +833,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         settingsPanel.isHidden = true
         contentContainer.addSubview(settingsPanel)
         settingsPanel.onSelect = { [weak self] section in self?.showSettings(section: section) }
+        settingsView.onSignIn = { [weak self] in self?.signInToAccount() }
+        settingsView.onLogOut = { [weak self] in self?.logOutOfAccount() }
         settingsPanel.onHeightChange = { [weak self] in
             guard let self, settingsPanelPlace != .hidden else { return }
             placeSettingsPanel(settingsPanelPlace, animated: true)
@@ -1015,6 +1028,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // offer both start clean.
         if destination == .settings {
             settingsPanel.apply(selected: settingsView.section)
+            // Whatever the section, the page is about to be looked at: the
+            // account may have changed in another window or another launch.
+            refreshAccountSection()
         } else {
             settingsView.select(.general)
             settingsPanel.apply(selected: nil)
@@ -1146,6 +1162,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 restoreWorkspaceCustomizationsIfNeeded()
                 restoreClosedWorkspacesIfNeeded()
                 refreshProjectLabels()
+                // The launch read ran before the daemon was up and failed;
+                // this is the first time the rows can actually be read.
+                refreshAccountSection()
                 didConnect = true
                 presentOnboardingIfNeeded()
             case .connecting:
@@ -2600,7 +2619,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 projectLabels: projectLabels,
                 workspaces: homeOpenWorkspaces().map {
                     PaletteWorkspace(id: $0.id, label: sidebarDisplayLabel(for: $0.id), path: $0.path)
-                }
+                },
+                // The page's own reading of the account rows, so the row the
+                // spotlight offers is the button the page shows.
+                signedIn: settingsView.accountSignedIn
             ),
             files: repoFiles,
             filesRoot: latestGitStatus?.root,
@@ -2624,6 +2646,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             applyDestination(destination)
         case let .showSettingsSection(section):
             showSettings(section: section)
+        case .signIn:
+            signInToAccount()
+        case .signOut:
+            logOutOfAccount()
         case let .openFile(path):
             openFileInEditor(URL(fileURLWithPath: path), pinned: true)
             // `openFileInEditor` focuses the pane it landed in but knows
@@ -3944,7 +3970,71 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The gate is answered — signed in, or "continue without signing in".
     private func authGateDidResolve() {
         authGateResolved = true
+        refreshAccountSection()
         presentOnboardingIfNeeded()
+    }
+
+    // MARK: - Settings › Accounts
+
+    /// Re-reads the two `auth_*` rows the Accounts section shows and hands
+    /// them to the page, which decides what it says (see
+    /// `SettingsSurfaceView.applyAccount`). Runs whenever the answer can
+    /// have changed: the launch gate resolving, the socket coming up (the
+    /// launch read happens before the daemon is up and fails), the Settings
+    /// page being shown, and the gate this section itself puts up.
+    ///
+    /// Chained reads rather than `SettingsStore`'s batched `get`, for the
+    /// reason `AuthGateCoordinator.summary` chains its own: two keys are
+    /// cheaper than a `DispatchGroup.notify` queue hop. **A failed read is
+    /// not an empty row** — the house rule `layoutReadFailed` and
+    /// `SettingsStore.getBool` both keep: a daemon that could not answer
+    /// leaves the section saying whatever it last knew rather than being
+    /// told the user is signed out.
+    func refreshAccountSection() {
+        settingsStore.get(SettingsKey.authSignedIn) { [weak self] signedInResult in
+            guard let self, let signedInRaw = try? signedInResult.get() else { return }
+            // Strictly `"true"`, unlike `AuthGate.resolveSignedIn`'s "unset
+            // means signed in" default: that default exists for installs
+            // predating the gate, and this section must never offer "Log
+            // out" for an account nobody has signed into.
+            let signedIn = signedInRaw == "true"
+            settingsStore.get(SettingsKey.authAccountEmail) { [weak self] emailResult in
+                guard let self, let email = try? emailResult.get() else { return }
+                settingsView.applyAccount(email: email, signedIn: signedIn)
+            }
+        }
+    }
+
+    /// "Sign in…" on the Accounts section, and the spotlight's row for it:
+    /// the same login screen the launch gate shows, over the workspace
+    /// window this time rather than alone on the desktop.
+    func signInToAccount() {
+        presentAccountGate()
+    }
+
+    /// "Log out": revoke the session server-side, clear the persisted
+    /// outcome (the account rows included, so the launch gate latches off
+    /// again), then offer the login screen right away — the exact sequence
+    /// `SettingsViewModel.signOut` performs, since there is only one right
+    /// order to do these in.
+    func logOutOfAccount() {
+        if let serverSessionRevoker {
+            serverSessionRevoker()
+        } else {
+            Task { await AuthClient.shared.logout() }
+        }
+        authGateCoordinator.reset { [weak self] in self?.presentAccountGate() }
+    }
+
+    /// The login screen over the workspace window; the section is re-read
+    /// whichever way it resolves, so it is current the moment it comes back.
+    private func presentAccountGate() {
+        let resolved: () -> Void = { [weak self] in self?.refreshAccountSection() }
+        if let authGatePresenter {
+            authGatePresenter(resolved)
+        } else {
+            authGateWindow.present(over: window, completion: resolved)
+        }
     }
 
     /// FirstRun (if no project root has ever been picked), once *both* the

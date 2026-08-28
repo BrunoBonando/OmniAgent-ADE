@@ -21,6 +21,11 @@ enum PaletteAction: Equatable {
     /// One Settings section, straight from the spotlight — the page opens
     /// on it, the way the gear's panel would.
     case showSettingsSection(SettingsSection)
+    /// Settings › Accounts' one button, in its two states. Only ever one of
+    /// these is a row — whichever the account makes true — because the
+    /// spotlight offers what you can do now, not both halves of a toggle.
+    case signIn
+    case signOut
     /// A file open in some editor pane, chosen from the spotlight — reveals
     /// the pane holding it and brings that tab forward.
     case openFile(path: String)
@@ -258,6 +263,12 @@ struct CommandPaletteModel: Equatable {
     /// open. A new query folds them back.
     private(set) var revealed: [PaletteSection: Int] = [:]
 
+    /// What the account row answers to in either state. Its title says half
+    /// of what it is — "Log out" is not found by typing "sign out", and
+    /// "Sign in with Apple…" is not found by typing "account" — so both
+    /// states carry both vocabularies.
+    static let accountKeywords = "log out sign out sign in account apple settings"
+
     /// Rebuilt from the live workspace every time the palette opens, so it
     /// can never offer a pane that closed while it was shut.
     static func build(
@@ -267,7 +278,10 @@ struct CommandPaletteModel: Equatable {
         projectLabels: [String: String] = [:],
         /// The sidebar's open workspaces, in its order, with their display
         /// names — so a workspace with nothing running is still findable.
-        workspaces: [PaletteWorkspace] = []
+        workspaces: [PaletteWorkspace] = [],
+        /// What Settings › Accounts currently shows, which decides whether
+        /// the account row logs out or signs in.
+        signedIn: Bool = false
     ) -> [PaletteCommand] {
         // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
         // the already-fixed call site in `WorkspaceWindowController`'s
@@ -451,6 +465,34 @@ struct CommandPaletteModel: Equatable {
                 )
             )
         }
+        // The one thing *inside* a Settings section that is a row of its own
+        // (the standing rule: the spotlight finds the items in the sections
+        // as they are built). One row, not two: signing out and signing in
+        // are the same button in two states, and offering the one you cannot
+        // do is offering a dead end.
+        commands.append(
+            signedIn
+                ? PaletteCommand(
+                    id: "settings:accounts:logout",
+                    title: "Log out",
+                    detail: nil,
+                    action: .signOut,
+                    keywords: accountKeywords,
+                    section: .places,
+                    subtitle: "Settings › Accounts",
+                    symbol: "person.crop.circle.badge.xmark"
+                )
+                : PaletteCommand(
+                    id: "settings:accounts:signin",
+                    title: "Sign in with Apple…",
+                    detail: nil,
+                    action: .signIn,
+                    keywords: accountKeywords,
+                    section: .places,
+                    subtitle: "Settings › Accounts",
+                    symbol: "person.crop.circle.badge.checkmark"
+                )
+        )
         // In section order whatever the order above emitted them in, so a
         // heading is a walk over consecutive rows — and Files really is last.
         return PaletteSection.allCases.flatMap { section in commands.filter { $0.section == section } }

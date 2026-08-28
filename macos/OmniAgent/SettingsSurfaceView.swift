@@ -5,7 +5,9 @@ import AppKit
 // every edge, on plain glass so the app's grey-to-black ground shows through
 // — with "Settings" in the title strip above it, the way the Desk names its
 // session, and the picked section's content in a centred column beside it.
-// Every section still says "Under development"; the screens come one by one.
+// The screens come one by one: Accounts has one (who is signed in, and the
+// button that changes it); every other section still says "Under
+// development".
 //
 // The panel is one object in two roles (2026-08-28): the sidebar gear
 // *offers* it beside itself, tip on the gear, as the menu; a pick slides it
@@ -308,6 +310,21 @@ final class SettingsSurfaceView: NSView {
         font: ShellFont.ui(13),
         color: ShellPalette.inkMuted
     )
+    /// Accounts, and only Accounts: who is signed in, and the one button
+    /// that changes it. The first section with a screen instead of a
+    /// promise — the rest keep `subtitleField`.
+    let accountField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
+    let accountButton = NSButton(title: "", target: nil, action: nil)
+    /// What the block currently says about the account — the one reading of
+    /// the two rows, so the label and the button can never disagree, and so
+    /// the spotlight's row (which offers "Log out" or "Sign in with Apple…"
+    /// off exactly this) says what the page says. See `applyAccount`.
+    private(set) var accountSignedIn = false
+    /// The account block's two buttons, as one press each. `onLogOut` is
+    /// the destructive half; both are the controller's to perform — this
+    /// view knows nothing about auth.
+    var onSignIn: (() -> Void)?
+    var onLogOut: (() -> Void)?
     /// The section on screen. Sticks for as long as the app lives, like
     /// Home's own picks.
     private(set) var section: SettingsSection = .general
@@ -316,10 +333,19 @@ final class SettingsSurfaceView: NSView {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
-        let column = NSStackView(views: [titleField, subtitleField])
+        accountButton.bezelStyle = .rounded
+        accountButton.controlSize = .regular
+        accountButton.font = ShellFont.ui(13)
+        accountButton.target = self
+        accountButton.action = #selector(accountButtonPressed)
+        accountButton.translatesAutoresizingMaskIntoConstraints = false
+        applyAccount(email: nil, signedIn: false)
+
+        let column = NSStackView(views: [titleField, subtitleField, accountField, accountButton])
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 6
+        column.setCustomSpacing(14, after: accountField)
         column.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
@@ -360,5 +386,30 @@ final class SettingsSurfaceView: NSView {
     func select(_ section: SettingsSection) {
         self.section = section
         titleField.stringValue = section.title
+        // Accounts has a screen; everything else still says so.
+        let isAccounts = section == .accounts
+        subtitleField.isHidden = isAccounts
+        accountField.isHidden = !isAccounts
+        accountButton.isHidden = !isAccounts
+    }
+
+    /// The two `auth_*` rows as the page shows them, handed in by the
+    /// controller — this view never reads settings itself.
+    ///
+    /// Signed in means both: the row says `"true"` *and* there is an address
+    /// to name. A `auth_signed_in = "true"` row with no `auth_account_email`
+    /// beside it is the fake-login era's leftover (see
+    /// `AuthGate.describeAuthSummary`), and "Not signed in" over a "Log out"
+    /// button would be a page contradicting itself — so one state drives
+    /// both.
+    func applyAccount(email: String?, signedIn: Bool) {
+        let address = (email ?? "").trimmingCharacters(in: .whitespaces)
+        accountSignedIn = signedIn && !address.isEmpty
+        accountField.stringValue = accountSignedIn ? "Signed in as \(address)" : "Not signed in"
+        accountButton.title = accountSignedIn ? "Log out" : "Sign in…"
+    }
+
+    @objc private func accountButtonPressed() {
+        if accountSignedIn { onLogOut?() } else { onSignIn?() }
     }
 }
