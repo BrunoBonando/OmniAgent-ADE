@@ -866,6 +866,7 @@
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = OmniAgent/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = OmniAgent;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "OmniAgent opens your projects as workspaces and reads their files to build the brain index.";
@@ -896,6 +897,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = OmniAgent/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = OmniAgent;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "OmniAgent opens your projects as workspaces and reads their files to build the brain index.";
@@ -966,6 +968,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = OmniAgent/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "OmniAgent Preview";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "OmniAgent opens your projects as workspaces and reads their files to build the brain index.";

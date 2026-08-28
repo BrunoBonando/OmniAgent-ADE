@@ -38,20 +38,27 @@
   "what specifically needs it" justification — not preemptively.
 -->
 <!--
-  Sign in with Apple (future, deliberately NOT enabled): the native login
-  screen wires the full ASAuthorization flow, but the entitlement below is
-  a *restricted* one — signing with it while the embedded provisioning
-  profile doesn't grant it makes the app fail to launch outright
-  (taskgated kills it at exec). Until a Developer ID provisioning profile
-  carrying it exists, the flow surfaces "Sign in with Apple isn't enabled
-  in this build yet" (ASAuthorizationError 1000) and the key stays out:
+  Sign in with Apple — `com.apple.developer.applesignin` must NEVER be
+  added to this file. Not "not yet": never, for as long as OmniAgent ships
+  as a Developer ID (direct download) app.
 
-    <key>com.apple.developer.applesignin</key>
-    <array>
-      <string>Default</string>
-    </array>
+  Native Sign in with Apple — the `ASAuthorizationController` flow — is not
+  a supported capability for Developer ID distribution (confirmed by Apple
+  DTS; Developer Account Help › Supported capabilities (macOS) lists Sign
+  in with Apple for Mac App Store distribution only). No Developer ID
+  provisioning profile can grant the entitlement, so signing with it means
+  signing with an entitlement the profile does not carry, which taskgated
+  answers by killing the app at exec. Waiting for the profile was the
+  previous plan here; there is no profile to wait for.
 
-  Add it only together with that provisioning profile — never on its own.
+  What the app does instead: Apple's *web* sign-in flow, opened in an
+  `ASWebAuthenticationSession` browser sheet against the
+  `digital.bruno.omniagent.signin` Services ID, with Core taking Apple's
+  form_post callback and bouncing the browser back into this app's
+  `omniagent://` URL scheme (registered in macos/OmniAgent/Info.plist).
+  See AuthGateView.swift's `signInWithApple`/`handleAppleCallback` and
+  AuthClient.swift's `appleAuthorizeURL`/`loginWithApple`. That path needs
+  no entitlement at all — which is the entire point of it.
 -->
 <plist version="1.0">
 <dict/>

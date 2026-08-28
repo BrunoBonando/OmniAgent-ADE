@@ -5,9 +5,10 @@ import Foundation
 /// reducer so the phase transitions are unit-testable without
 /// `AuthGateView`/`NSHostingController`/a socket/a network.
 ///
-/// The login itself is real now: `AuthGateViewModel` calls Core's
-/// `/v1/auth/login` (or `/v1/auth/login/apple`) through `AuthClient` and only
-/// dispatches `.signedIn` after the server said yes. What survives from the
+/// The login itself is real now: `AuthGateViewModel` runs Apple's web
+/// sign-in and redeems the result at Core's `/v1/auth/apple/exchange`
+/// through `AuthClient`, and only dispatches `.signedIn` after the server
+/// said yes. What survives from the
 /// fake era, by founder direction, is the escape hatch: "Continue without
 /// signing in" (`.skipLogin`) stays a first-class exit while the product is
 /// in development, because the API may be unreachable and the app is

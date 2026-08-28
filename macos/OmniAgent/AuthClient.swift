@@ -1,27 +1,62 @@
+import CryptoKit
 import Foundation
 import Security
 
-/// Whether this build can actually run the Sign in with Apple flow.
+/// The one-attempt secrets of Apple's web sign-in flow, generated fresh for
+/// every press of "Continue with Apple" and carried from the authorize URL
+/// through to the exchange call.
 ///
-/// `com.apple.developer.applesignin` is a *restricted* entitlement that is
-/// deliberately absent until a Developer ID provisioning profile carrying it
-/// exists (see `OmniAgent.entitlements`). In a build without it, every click
-/// on the Apple button dies with `ASAuthorizationError` 1000 — a guaranteed
-/// dead end. Asking the running code signature itself
-/// (`SecTaskCopyValueForEntitlement`) instead of hardcoding a flag means the
-/// login screen's Apple button reappears automatically in the exact build
-/// that finally signs with the entitlement, and can never show in one where
-/// pressing it cannot work.
-enum AppleSignInCapability {
-    static let isEnabled: Bool = probeEntitlement()
+/// Why PKCE at all when the app has no client secret to protect: the
+/// browser's redirect back into `omniagent://` is the weakest hop in the
+/// flow — any process on the Mac could, in principle, register the same URL
+/// scheme and catch the one-time code. `state` is the SHA256 of a verifier
+/// only this launch of the app knows, so a stolen code is worthless without
+/// the verifier the exchange call also has to present, and a callback that
+/// wasn't produced by *this* attempt fails the comparison in
+/// `AuthGateViewModel.handleAppleCallback`.
+///
+/// - `verifier`: 32 random bytes, base64url, unpadded (43 characters) — the
+///   RFC 7636 shape, which is also what Core validates against.
+/// - `state`: base64url(SHA256(verifier)), unpadded. Doubles as the OAuth
+///   `state` parameter *and* the PKCE challenge — Apple echoes it back
+///   verbatim through Core's callback.
+/// - `nonce`: 16 random bytes as 32 hex characters; Core checks it against
+///   the `nonce` claim of the id_token Apple returns to the exchange.
+struct PKCE {
+    let verifier: String
+    let state: String
+    let nonce: String
 
-    /// Split out so tests can call the probe directly: the test host is not
-    /// signed with the entitlement, which pins down the "hidden" branch.
-    static func probeEntitlement() -> Bool {
-        guard let task = SecTaskCreateFromSelf(nil) else { return false }
-        return SecTaskCopyValueForEntitlement(
-            task, "com.apple.developer.applesignin" as CFString, nil
-        ) != nil
+    init() {
+        let verifier = Self.base64URL(Self.randomBytes(32))
+        self.verifier = verifier
+        state = Self.challenge(for: verifier)
+        nonce = Self.randomBytes(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The PKCE S256 challenge for a verifier: base64url(SHA256(ascii)), no
+    /// padding. Exposed so a test can pin it to RFC 7636's published vector
+    /// rather than to whatever this implementation happens to produce.
+    static func challenge(for verifier: String) -> String {
+        base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
+    }
+
+    private static func randomBytes(_ count: Int) -> Data {
+        var bytes = [UInt8](repeating: 0, count: count)
+        guard SecRandomCopyBytes(kSecRandomDefault, count, &bytes) == errSecSuccess else {
+            // The system CSPRNG failing is not a real-world state, but
+            // silently continuing with a buffer of zeroes would be a
+            // predictable verifier — the one outcome worse than failing.
+            preconditionFailure("SecRandomCopyBytes failed")
+        }
+        return Data(bytes)
+    }
+
+    private static func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
 
@@ -50,15 +85,19 @@ struct AuthUser: Decodable, Equatable {
 /// actually branches on — so the view layer switches on cases instead of
 /// re-parsing status codes or FastAPI `{"detail": …}` bodies.
 enum AuthError: Error, LocalizedError, Equatable {
-    /// 401 from login — wrong email/password, or an Apple identity token the
-    /// server rejected (invalid, expired, or missing an email claim). Carries
-    /// the server's `detail` string.
+    /// 401 from login — wrong email/password, or an Apple sign-in Core
+    /// rejected outright. Carries the server's `detail` string.
     case invalidCredentials(String)
     /// 403 from login — the Turnstile bot check failed, or the account is
     /// disabled. Carries the server's `detail` string; `errorDescription`
     /// translates the bot-check case into plain words (see below).
     case forbidden(String)
-    /// Any other non-2xx: (status code, server detail or raw body).
+    /// Any other non-2xx: (status code, server detail or raw body). This is
+    /// where the Apple exchange's own failures land — 400 (the one-time code
+    /// expired, was replayed, or the verifier/nonce didn't match), 409 (the
+    /// email already belongs to another sign-in method) and 429 (rate
+    /// limited) — and `errorDescription` shows Core's `detail` verbatim,
+    /// because Core is the only side that knows which of those happened.
     case server(Int, String)
     /// The request never got an HTTP response — offline, DNS, TLS, timeout.
     case network(String)
@@ -80,13 +119,10 @@ enum AuthError: Error, LocalizedError, Equatable {
             // Turnstile is configured server-side.) Do NOT suggest signing in
             // from the web app: a browser session shares nothing with this
             // app's cookie jar and cannot exempt the next native attempt.
-            // And only builds whose signature carries the Sign in with Apple
-            // entitlement have a Turnstile-free route to offer.
             if detail == "Bot verification failed." {
-                let remedy = AppleSignInCapability.isEnabled
-                    ? "Use Sign in with Apple instead — it doesn't go through that check."
-                    : "Password sign-in isn't available from this build against this server yet — continue without signing in for now."
-                return "The server's bot check (Cloudflare Turnstile) blocked this sign-in — the native app can't show the verification widget. \(remedy)"
+                return "The server's bot check (Cloudflare Turnstile) blocked this sign-in — the native app "
+                    + "can't show the verification widget. Password sign-in isn't available from this build "
+                    + "against this server yet — continue without signing in for now."
             }
             return detail.isEmpty ? "This account is not allowed to sign in." : detail
         case let .server(status, detail):
@@ -169,19 +205,60 @@ final class AuthClient {
         ])
     }
 
-    /// `POST /v1/auth/login/apple` with the ASAuthorization identity token.
-    /// Core verifies it against Apple's JWKS (issuer appleid.apple.com,
-    /// audience = the app's bundle id, `digital.bruno.omniagent`) and creates
-    /// the account on first sign-in — which is why the given/family name ride
-    /// along: Apple only hands them to the client on that very first
-    /// authorization, so this is the one chance to store them. Nil on later
-    /// sign-ins is normal and encodes as JSON null. No Turnstile on this
-    /// route; rate-limited server-side like login/google (5 per 15 min).
-    func loginWithApple(identityToken: String, givenName: String?, familyName: String?) async throws -> AuthUser {
-        try await authenticate(path: "v1/auth/login/apple", body: [
-            "identity_token": identityToken,
-            "given_name": givenName ?? NSNull(),
-            "family_name": familyName ?? NSNull(),
+    /// The Services ID Apple's *web* sign-in flow authenticates against —
+    /// the `client_id` of the authorize URL, and therefore the `aud` claim of
+    /// the id_token Core verifies. Deliberately not the app's bundle id
+    /// (`digital.bruno.omniagent`): a native `ASAuthorizationController`
+    /// flow would use the bundle id, but that flow needs the restricted
+    /// `com.apple.developer.applesignin` entitlement, which Developer ID
+    /// distribution cannot carry (see `OmniAgent.entitlements`). The web
+    /// flow authenticates as a Services ID instead, and Core's verifier is
+    /// configured for this one.
+    static let appleServicesID = "digital.bruno.omniagent.signin"
+
+    /// The URL `ASWebAuthenticationSession` opens to start Apple's web
+    /// sign-in. `redirect_uri` points at *Core*, not at the app: Apple only
+    /// redirects to https endpoints registered on the Services ID, and
+    /// `response_mode=form_post` (mandatory once `scope` asks for name or
+    /// email) POSTs the result, which a custom URL scheme cannot receive.
+    /// Core takes the POST and bounces the browser on to
+    /// `omniagent://auth/apple?code=…&state=…`.
+    ///
+    /// Built with `URLComponents` so the space-separated `response_type` and
+    /// `scope` values percent-encode themselves rather than being hand-glued
+    /// into a query string.
+    func appleAuthorizeURL(state: String, nonce: String) -> URL {
+        var components = URLComponents(string: "https://appleid.apple.com/auth/authorize")!
+        components.queryItems = [
+            URLQueryItem(name: "client_id", value: Self.appleServicesID),
+            URLQueryItem(
+                name: "redirect_uri",
+                value: baseURL.appendingPathComponent("v1/auth/apple/callback").absoluteString
+            ),
+            URLQueryItem(name: "response_type", value: "code id_token"),
+            URLQueryItem(name: "response_mode", value: "form_post"),
+            URLQueryItem(name: "scope", value: "name email"),
+            URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "nonce", value: nonce),
+        ]
+        // Only fails for a query no `URLQueryItem` can produce.
+        return components.url!
+    }
+
+    /// `POST /v1/auth/apple/exchange` — the second half of the web flow.
+    /// `code` is the **one-time code Core minted** for this app (not Apple's
+    /// authorization code, which Core already redeemed server-side), and it
+    /// is redeemed exactly once: `code_verifier` proves this is the same app
+    /// launch that opened the authorize URL, and `nonce` is matched against
+    /// the id_token claim Apple returned. Core creates the account on first
+    /// sign-in from the name/email Apple posted to its callback, so unlike
+    /// the old native flow there is nothing name-shaped for the client to
+    /// pass along. No Turnstile on this route; rate-limited server-side.
+    func loginWithApple(code: String, codeVerifier: String, nonce: String) async throws -> AuthUser {
+        try await authenticate(path: "v1/auth/apple/exchange", body: [
+            "code": code,
+            "code_verifier": codeVerifier,
+            "nonce": nonce,
         ])
     }
 
@@ -237,7 +314,9 @@ final class AuthClient {
 
     /// The login-shaped call: POST a JSON body, map the shared status-code
     /// contract (200 stores the session, 401 credentials, 403 forbidden,
-    /// anything else `.server`).
+    /// anything else `.server`). The Apple exchange's 400/409/429 all fall
+    /// into that last bucket on purpose — each one's `detail` is a distinct
+    /// sentence only Core can write, and `.server` shows it verbatim.
     private func authenticate(path: String, body: [String: Any]) async throws -> AuthUser {
         let (data, http) = try await perform(request(path: path, body: body))
         switch http.statusCode {

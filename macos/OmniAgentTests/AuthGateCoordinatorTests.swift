@@ -140,17 +140,32 @@ final class AuthGateCoordinatorTests: XCTestCase {
 
 // MARK: - View model
 
-/// Answers every sign-in with a canned result — the `AuthSigning` seam's
-/// test double, so no view-model test ever touches URLSession.
-private struct StubAuthSigning: AuthSigning {
-    var result: Result<AuthUser, AuthError>
-
-    func login(email: String, password: String) async throws -> AuthUser {
-        try result.get()
+/// Answers every exchange with a canned result and records what it was
+/// asked to redeem — the `AuthSigning` seam's test double, so no view-model
+/// test ever touches URLSession or opens a browser.
+private final class StubAuthSigning: AuthSigning {
+    struct Exchange: Equatable {
+        let code: String
+        let codeVerifier: String
+        let nonce: String
     }
 
-    func loginWithApple(identityToken: String, givenName: String?, familyName: String?) async throws -> AuthUser {
-        try result.get()
+    let result: Result<AuthUser, AuthError>
+    private(set) var exchanges: [Exchange] = []
+
+    init(result: Result<AuthUser, AuthError>) {
+        self.result = result
+    }
+
+    /// Never opened by a test — `signInWithApple` (the one method that would
+    /// hand this to a browser) is exactly the part these tests do not drive.
+    func appleAuthorizeURL(state: String, nonce: String) -> URL {
+        URL(string: "https://appleid.apple.com/auth/authorize?state=\(state)&nonce=\(nonce)")!
+    }
+
+    func loginWithApple(code: String, codeVerifier: String, nonce: String) async throws -> AuthUser {
+        exchanges.append(Exchange(code: code, codeVerifier: codeVerifier, nonce: nonce))
+        return try result.get()
     }
 }
 
@@ -158,20 +173,20 @@ private struct StubAuthSigning: AuthSigning {
 /// flight — the only way to observe the flag's rising edge from outside.
 private final class BusyProbeAuthSigning: AuthSigning {
     var model: AuthGateViewModel?
-    private(set) var busyDuringLogin: Bool?
+    private(set) var busyDuringExchange: Bool?
     private let user: AuthUser
 
     init(user: AuthUser) {
         self.user = user
     }
 
-    func login(email: String, password: String) async throws -> AuthUser {
-        busyDuringLogin = await MainActor.run { [model] in model?.isBusy }
-        return user
+    func appleAuthorizeURL(state: String, nonce: String) -> URL {
+        URL(string: "https://appleid.apple.com/auth/authorize")!
     }
 
-    func loginWithApple(identityToken: String, givenName: String?, familyName: String?) async throws -> AuthUser {
-        user
+    func loginWithApple(code: String, codeVerifier: String, nonce: String) async throws -> AuthUser {
+        busyDuringExchange = await MainActor.run { [model] in model?.isBusy }
+        return user
     }
 }
 
@@ -194,6 +209,17 @@ final class AuthGateViewModelTests: XCTestCase {
         )
     }
 
+    /// The `omniagent://auth/apple?…` URL Core bounces the browser into.
+    private func callback(code: String? = nil, state: String? = nil, error: String? = nil) -> URL {
+        var components = URLComponents(string: "omniagent://auth/apple")!
+        components.queryItems = [
+            code.map { URLQueryItem(name: "code", value: $0) },
+            error.map { URLQueryItem(name: "error", value: $0) },
+            state.map { URLQueryItem(name: "state", value: $0) },
+        ].compactMap { $0 }
+        return components.url!
+    }
+
     func testSendingSkipLoginResolvesAndInvokesOnResolvedExactlyOnce() {
         let model = AuthGateViewModel(signer: StubAuthSigning(result: .failure(.sessionExpired)))
         var outcomes: [AuthGateOutcome] = []
@@ -205,14 +231,44 @@ final class AuthGateViewModelTests: XCTestCase {
         XCTAssertEqual(outcomes, [AuthGateOutcome(signedIn: false, persona: nil, accountEmail: nil, accountName: nil)])
     }
 
+    /// PKCE's whole job is that the exchange call can prove it belongs to
+    /// the same attempt that opened the browser — so the challenge has to be
+    /// the real S256 one Core will recompute, pinned here to RFC 7636's
+    /// published vector rather than to whatever this implementation emits.
+    func testThePKCEChallengeIsRFC7636sS256Vector() {
+        XCTAssertEqual(
+            PKCE.challenge(for: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        )
+
+        let pkce = PKCE()
+        XCTAssertEqual(pkce.verifier.count, 43, "32 random bytes, base64url, unpadded")
+        XCTAssertEqual(pkce.state, PKCE.challenge(for: pkce.verifier), "state is the verifier's challenge")
+        XCTAssertEqual(pkce.nonce.count, 32, "16 random bytes as hex")
+        XCTAssertNil(pkce.nonce.rangeOfCharacter(from: CharacterSet(charactersIn: "0123456789abcdef").inverted))
+        // base64url, so nothing that would need re-encoding in a query.
+        let base64URL = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+        XCTAssertNil(pkce.verifier.rangeOfCharacter(from: base64URL.inverted), "got: \(pkce.verifier)")
+        XCTAssertNil(pkce.state.rangeOfCharacter(from: base64URL.inverted), "got: \(pkce.state)")
+        // And a secret per attempt, never a constant.
+        XCTAssertNotEqual(PKCE().verifier, pkce.verifier)
+    }
+
     @MainActor
-    func testSuccessfulSignInDispatchesSignedInAndLandsInPersonalize() async {
-        let model = AuthGateViewModel(signer: StubAuthSigning(result: .success(user())))
+    func testAMatchingCallbackRedeemsTheCodeWithThisAttemptsVerifierAndNonce() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub)
+        let pkce = model.pkce
         var outcomes: [AuthGateOutcome] = []
         model.onResolved = { outcomes.append($0) }
 
-        await model.signIn(email: "bruno@bonando.com", password: "hunter2")
+        await model.handleAppleCallback(callback(code: "one-time-code", state: pkce.state))
 
+        XCTAssertEqual(stub.exchanges, [StubAuthSigning.Exchange(
+            code: "one-time-code",
+            codeVerifier: pkce.verifier,
+            nonce: pkce.nonce
+        )])
         XCTAssertEqual(model.state.phase, .personalize)
         XCTAssertEqual(model.state.accountEmail, "bruno@bonando.com")
         XCTAssertEqual(model.state.accountName, "Bruno Bonando")
@@ -234,22 +290,56 @@ final class AuthGateViewModelTests: XCTestCase {
         let stub = StubAuthSigning(result: .success(user(firstName: "Ada", lastName: "Lovelace", name: nil)))
         let model = AuthGateViewModel(signer: stub)
 
-        await model.signIn(email: "bruno@bonando.com", password: "hunter2")
+        await model.handleAppleCallback(callback(code: "c", state: model.pkce.state))
 
         XCTAssertEqual(model.state.accountName, "Ada Lovelace")
     }
 
+    /// A callback whose `state` is not this attempt's — a leftover from an
+    /// abandoned attempt, or something another process on the Mac
+    /// fabricated. The code must never be redeemed.
     @MainActor
-    func testFailedSignInSurfacesTheErrorMessageAndStaysInLogin() async {
-        let stub = StubAuthSigning(result: .failure(.invalidCredentials("Incorrect email or password")))
+    func testACallbackWithTheWrongStateIsRefusedWithoutTouchingTheServer() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub)
+
+        await model.handleAppleCallback(callback(code: "stolen-code", state: "someone-elses-state"))
+
+        XCTAssertTrue(stub.exchanges.isEmpty, "a mismatched state must never reach the exchange")
+        XCTAssertEqual(model.errorMessage, "Sign-in response didn't match this app — try again.")
+        XCTAssertEqual(model.state.phase, .login)
+        XCTAssertFalse(model.isBusy)
+    }
+
+    /// Core's callback says `error=…` when Apple (or its own verification)
+    /// refused. Core is the only side that knows what happened, so its words
+    /// are shown as they arrived.
+    @MainActor
+    func testACallbackCarryingAnErrorShowsItAndSkipsTheExchange() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub)
+
+        await model.handleAppleCallback(
+            callback(state: model.pkce.state, error: "Apple did not return an email address.")
+        )
+
+        XCTAssertTrue(stub.exchanges.isEmpty)
+        XCTAssertEqual(model.errorMessage, "Apple did not return an email address.")
+        XCTAssertEqual(model.state.phase, .login)
+        XCTAssertFalse(model.isBusy)
+    }
+
+    @MainActor
+    func testAFailedExchangeSurfacesTheErrorMessageAndStaysInLogin() async {
+        let stub = StubAuthSigning(result: .failure(.server(400, "That sign-in link has already been used.")))
         let model = AuthGateViewModel(signer: stub)
         var outcomes: [AuthGateOutcome] = []
         model.onResolved = { outcomes.append($0) }
 
-        await model.signIn(email: "bruno@bonando.com", password: "wrong")
+        await model.handleAppleCallback(callback(code: "c", state: model.pkce.state))
 
         XCTAssertEqual(model.state.phase, .login)
-        XCTAssertEqual(model.errorMessage, "Incorrect email or password")
+        XCTAssertEqual(model.errorMessage, "That sign-in link has already been used.")
         XCTAssertFalse(model.isBusy)
         XCTAssertTrue(outcomes.isEmpty)
     }
@@ -259,7 +349,7 @@ final class AuthGateViewModelTests: XCTestCase {
         let stub = StubAuthSigning(result: .failure(.network("")))
         let model = AuthGateViewModel(signer: stub)
 
-        await model.signIn(email: "bruno@bonando.com", password: "pw")
+        await model.handleAppleCallback(callback(code: "c", state: model.pkce.state))
 
         XCTAssertEqual(model.errorMessage, "Could not reach the OmniAgent API.")
         XCTAssertEqual(model.state.phase, .login)
@@ -272,41 +362,23 @@ final class AuthGateViewModelTests: XCTestCase {
         probe.model = model
         XCTAssertFalse(model.isBusy)
 
-        await model.signIn(email: "bruno@bonando.com", password: "hunter2")
+        await model.handleAppleCallback(callback(code: "c", state: model.pkce.state))
 
-        XCTAssertEqual(probe.busyDuringLogin, true, "isBusy must be raised while the request is in flight")
+        XCTAssertEqual(probe.busyDuringExchange, true, "isBusy must be raised while the request is in flight")
         XCTAssertFalse(model.isBusy, "and lowered once it lands")
     }
 
     @MainActor
     func testANewAttemptClearsThePreviousErrorMessage() async {
-        let model = AuthGateViewModel(signer: StubAuthSigning(result: .failure(.invalidCredentials("nope"))))
-        await model.signIn(email: "a@b.com", password: "x")
-        XCTAssertEqual(model.errorMessage, "nope")
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub)
 
-        let retry = AuthGateViewModel(signer: StubAuthSigning(result: .success(user())))
-        await retry.signIn(email: "a@b.com", password: "x")
-        XCTAssertNil(retry.errorMessage)
-    }
+        await model.handleAppleCallback(callback(code: "c", state: "wrong"))
+        XCTAssertNotNil(model.errorMessage)
 
-    func testAppleSignInAvailabilityTracksTheCodeSignaturesEntitlement() {
-        // The test host is not signed with `com.apple.developer.applesignin`
-        // — the exact state every current app build ships in — so the probe
-        // must say no, and the default-constructed view model must hide the
-        // Apple button (its only working outcome was ASAuthorizationError
-        // 1000).
-        XCTAssertFalse(AppleSignInCapability.probeEntitlement())
-        let model = AuthGateViewModel(signer: StubAuthSigning(result: .failure(.sessionExpired)))
-        XCTAssertFalse(model.appleSignInAvailable)
-
-        // An entitled build (injected here; real once the Developer ID
-        // provisioning profile carrying the entitlement lands) shows the
-        // button again with no further code change.
-        let entitled = AuthGateViewModel(
-            signer: StubAuthSigning(result: .failure(.sessionExpired)),
-            appleSignInAvailable: true
-        )
-        XCTAssertTrue(entitled.appleSignInAvailable)
+        await model.handleAppleCallback(callback(code: "c", state: model.pkce.state))
+        XCTAssertNil(model.errorMessage, "the retry's own attempt must clear the last one's message")
+        XCTAssertEqual(model.state.phase, .personalize)
     }
 }
 

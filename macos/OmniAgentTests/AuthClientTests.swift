@@ -172,41 +172,93 @@ final class AuthClientTests: XCTestCase {
             XCTAssertTrue(message.contains("Turnstile"), "got: \(message)")
             // And it must not recommend non-remedies: a web-app session
             // shares nothing with this app's cookie jar and cannot exempt
-            // the next native attempt, and in a build without the Sign in
-            // with Apple entitlement (this test host, like every current
-            // build) the Apple button is a guaranteed dead end and is not
-            // even shown.
+            // the next native attempt, and pointing at the Apple button is
+            // no use either — this is the *password* route's bot check, and
+            // Apple's own web flow never reaches it.
             XCTAssertFalse(message.localizedCaseInsensitiveContains("web app"), "got: \(message)")
-            XCTAssertFalse(AppleSignInCapability.isEnabled, "test host must not carry the entitlement")
             XCTAssertFalse(message.contains("Apple"), "got: \(message)")
         } catch {
             XCTFail("expected AuthError, got \(error)")
         }
     }
 
-    // MARK: - loginWithApple
+    // MARK: - Sign in with Apple (web flow)
 
-    func testLoginWithApplePostsIdentityTokenAndNames() async throws {
+    func testAppleAuthorizeURLCarriesTheServicesIDAndCoresCallback() throws {
+        let url = makeClient().appleAuthorizeURL(state: "the-state", nonce: "the-nonce")
+
+        XCTAssertEqual(url.host, "appleid.apple.com")
+        XCTAssertEqual(url.path, "/auth/authorize")
+
+        let items = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        let query = Dictionary(items.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
+
+        // The web flow authenticates as the Services ID, never as the app's
+        // bundle id — that is the whole difference from the native flow
+        // Developer ID builds cannot run.
+        XCTAssertEqual(query["client_id"], "digital.bruno.omniagent.signin")
+        XCTAssertEqual(query["client_id"], AuthClient.appleServicesID)
+        // Apple posts the result to Core, not to the app: a custom URL
+        // scheme cannot receive a form_post.
+        XCTAssertEqual(query["redirect_uri"], "https://api.test.invalid/v1/auth/apple/callback")
+        XCTAssertEqual(query["response_type"], "code id_token")
+        XCTAssertEqual(query["response_mode"], "form_post")
+        XCTAssertEqual(query["scope"], "name email")
+        XCTAssertEqual(query["state"], "the-state")
+        XCTAssertEqual(query["nonce"], "the-nonce")
+
+        // The space-separated values have to survive as percent-encoding,
+        // not as raw spaces or "+".
+        let raw = try XCTUnwrap(url.absoluteString.split(separator: "?").last).description
+        XCTAssertTrue(raw.contains("response_type=code%20id_token"), "got: \(raw)")
+        XCTAssertTrue(raw.contains("scope=name%20email"), "got: \(raw)")
+    }
+
+    func testLoginWithApplePostsTheOneTimeCodeVerifierAndNonce() async throws {
         AuthClientStubProtocol.handler = { _ in (200, self.loginResponse(token: "tok-apple")) }
         let client = makeClient()
 
-        // familyName nil on purpose: Apple only supplies names on the first
-        // authorization, so nil-encoded-as-null is the steady-state shape.
-        _ = try await client.loginWithApple(identityToken: "jwt.identity.token", givenName: "Ada", familyName: nil)
+        _ = try await client.loginWithApple(
+            code: "one-time-code",
+            codeVerifier: "the-verifier",
+            nonce: "the-nonce"
+        )
 
         let request = try XCTUnwrap(AuthClientStubProtocol.recorded.last?.request)
-        XCTAssertEqual(request.url?.path, "/v1/auth/login/apple")
+        XCTAssertEqual(request.url?.path, "/v1/auth/apple/exchange")
         XCTAssertEqual(request.httpMethod, "POST")
 
         let body = try lastBodyJSON()
-        XCTAssertEqual(body["identity_token"] as? String, "jwt.identity.token")
-        XCTAssertEqual(body["given_name"] as? String, "Ada")
-        XCTAssertTrue(body.keys.contains("family_name"))
-        XCTAssertTrue(body["family_name"] is NSNull)
+        XCTAssertEqual(body["code"] as? String, "one-time-code")
+        XCTAssertEqual(body["code_verifier"] as? String, "the-verifier")
+        XCTAssertEqual(body["nonce"] as? String, "the-nonce")
         // No Turnstile on the Apple route.
         XCTAssertFalse(body.keys.contains("turnstile_token"))
 
         XCTAssertEqual(client.accessToken, "tok-apple")
+    }
+
+    /// 400 (expired/replayed code, verifier or nonce mismatch), 409 (the
+    /// email already belongs to another sign-in method) and 429 all carry a
+    /// sentence only Core can write — the client must quote it, not
+    /// translate it into a status code the user cannot act on.
+    func testAnExchangeConflictSurfacesTheServersDetailVerbatim() async {
+        let detail = "That email already signs in with a password. Sign in that way, then link Apple."
+        AuthClientStubProtocol.handler = { _ in
+            (409, Data(#"{"detail":"\#(detail)"}"#.utf8))
+        }
+        let client = makeClient()
+
+        do {
+            _ = try await client.loginWithApple(code: "c", codeVerifier: "v", nonce: "n")
+            XCTFail("expected AuthError.server")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .server(409, detail))
+            XCTAssertEqual(error.errorDescription, detail)
+        } catch {
+            XCTFail("expected AuthError, got \(error)")
+        }
+        XCTAssertNil(client.accessToken)
     }
 
     // MARK: - restoreSession
