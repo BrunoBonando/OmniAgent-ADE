@@ -2618,7 +2618,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         case let .selectWorkspace(id):
             selectWorkspace(id: id)
             applyDestination(.terminals)
-        case .showAll:
+        case .showMore:
             break  // the panel's own, handled in `CommandPaletteController.runSelected`
         case let .showDestination(destination):
             applyDestination(destination)

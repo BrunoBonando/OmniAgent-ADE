@@ -178,33 +178,43 @@ final class CommandPaletteTests: XCTestCase {
 
     /// Every Settings section is a spotlight row: found by its own name or
     /// by "settings", opening the page on itself.
-    /// In the All view a category shows seven rows and a "Show all N" row;
-    /// running that row expands the category in place, a new query folds it
-    /// back, and a chosen tag shows its category whole.
-    func testACategoryShowsSevenThenAShowAllRowThatExpandsIt() {
-        let rows = (0..<10).map {
+    /// In the All view a category shows five rows, then a row that reveals
+    /// ten more per press — "Show all" once no more than ten are left — in
+    /// place; a new query folds it back, and a chosen tag shows the category
+    /// whole.
+    func testACategoryShowsFiveThenTenMorePerPressUntilShowAll() {
+        let rows = (0..<27).map {
             PaletteCommand(id: "w\($0)", title: "Workspace \($0)", detail: nil, action: .noop, section: .places)
         } + [PaletteCommand(id: "s", title: "Workspace session", detail: nil, action: .noop, section: .sessions)]
         var model = CommandPaletteModel(commands: rows)
         model.update(query: "workspace")
+        func places() -> [PaletteCommand] { model.matches.filter { $0.section == .places } }
 
         XCTAssertEqual(model.matches.first?.section, .sessions, "the short category is whole")
-        let places = model.matches.filter { $0.section == .places }
-        XCTAssertEqual(places.count, CommandPaletteModel.sectionPreview + 1)
-        let button = model.matches.last
-        XCTAssertEqual(button?.id, "show-all:Places")
-        XCTAssertEqual(button?.title, "Show all 10")
-        XCTAssertEqual(button?.detail, "3 more")
-        XCTAssertEqual(button?.action, .showAll(.places))
+        XCTAssertEqual(places().count, 5 + 1)
+        XCTAssertEqual(model.matches.last?.id, "show-more:Places")
+        XCTAssertEqual(model.matches.last?.title, "Show 10 more")
+        XCTAssertEqual(model.matches.last?.detail, "22 more")
+        XCTAssertEqual(model.matches.last?.action, .showMore(.places))
 
-        model.expand(section: .places)
-        XCTAssertEqual(model.matches.filter { $0.section == .places }.map(\.id), (0..<10).map { "w\($0)" })
+        model.reveal(section: .places)
+        XCTAssertEqual(places().count, 15 + 1)
+        XCTAssertEqual(model.matches.last?.title, "Show 10 more")
+        XCTAssertEqual(model.matches.last?.detail, "12 more")
+
+        model.reveal(section: .places)
+        XCTAssertEqual(places().count, 25 + 1)
+        XCTAssertEqual(model.matches.last?.title, "Show all", "no more than a step left")
+        XCTAssertEqual(model.matches.last?.detail, "2 more")
+
+        model.reveal(section: .places)
+        XCTAssertEqual(places().map(\.id), (0..<27).map { "w\($0)" }, "everything, and no row after")
 
         model.update(query: "workspac")
-        XCTAssertEqual(model.matches.last?.id, "show-all:Places", "typing folds it back")
+        XCTAssertEqual(places().count, 5 + 1, "typing folds it back")
 
         model.select(section: .places)
-        XCTAssertEqual(model.matches.count, 10, "a tag shows the category whole")
+        XCTAssertEqual(model.matches.count, 27, "a tag shows the category whole")
     }
 
     func testTheSettingsSectionsAreSpotlightRows() {
@@ -490,7 +500,7 @@ final class CommandPaletteTests: XCTestCase {
         model.update(query: "pane")
 
         let files = model.matches.filter { $0.section == .files }
-        XCTAssertEqual(files.count, CommandPaletteModel.sectionPreview + 1, "seven and the Show all row in the All view")
+        XCTAssertEqual(files.count, CommandPaletteModel.sectionPreview + 1, "five and the Show more row in the All view")
         var narrowed = model
         narrowed.select(section: .files)
         XCTAssertEqual(narrowed.matches.count, CommandPaletteModel.fileMatchLimit, "a loose query is a query to narrow, not a directory listing")
