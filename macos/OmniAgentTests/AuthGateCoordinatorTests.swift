@@ -330,6 +330,44 @@ final class AuthGateViewModelTests: XCTestCase {
         XCTAssertFalse(model.isBusy)
     }
 
+    /// Pressing Cancel on Apple's own authorize page arrives as an `error`
+    /// like any refusal, but it is the user's own decision — and Apple's
+    /// word for it is a protocol identifier, not a sentence. Showing
+    /// `user_cancelled_authorize` in the error label would read as this
+    /// app's copy, blaming the user for backing out.
+    @MainActor
+    func testBackingOutOnApplesPageLeavesTheLoginScreenWithNothingToRead() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub)
+
+        await model.handleAppleCallback(
+            callback(state: model.pkce.state, error: "user_cancelled_authorize")
+        )
+
+        XCTAssertNil(model.errorMessage, "a cancel is not a failure to report")
+        XCTAssertFalse(model.isBusy, "the button has to come back")
+        XCTAssertEqual(model.state.phase, .login)
+        XCTAssertTrue(stub.exchanges.isEmpty, "there is no code to redeem")
+    }
+
+    /// A forged cancel is still a forgery: the state guard runs first, so
+    /// even the one `error` value the app treats specially cannot reach that
+    /// branch without proving it belongs to this attempt.
+    @MainActor
+    func testAForgedCancelIsRefusedByTheStateGuardLikeAnyOtherCallback() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub)
+
+        await model.handleAppleCallback(
+            callback(state: "someone-elses-state", error: "user_cancelled_authorize")
+        )
+
+        XCTAssertEqual(model.errorMessage, "Sign-in response didn't match this app — try again.")
+        XCTAssertFalse(model.isBusy)
+        XCTAssertEqual(model.state.phase, .login)
+        XCTAssertTrue(stub.exchanges.isEmpty)
+    }
+
     /// `error` is attacker-reachable text: the web-auth session intercepts
     /// *any* `omniagent://` navigation its browser makes, so a page reached
     /// from inside the authorize flow can try to write its own sentence into

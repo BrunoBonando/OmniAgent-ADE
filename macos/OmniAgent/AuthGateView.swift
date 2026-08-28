@@ -160,6 +160,12 @@ final class AuthGateViewModel: ObservableObject {
     /// and not its `error` text either.
     static let stateMismatchMessage = "Sign-in response didn't match this app — try again."
 
+    /// What Apple form-posts when the user presses Cancel on its authorize
+    /// page, which Core bounces back verbatim. It is a protocol identifier,
+    /// not a sentence, so it must never reach the error label — backing out
+    /// is a decision, not a failure to report.
+    static let appleCancelError = "user_cancelled_authorize"
+
     private let signer: AuthSigning
     /// Retains the running web-auth session and its presentation anchor —
     /// `ASWebAuthenticationSession` keeps neither itself nor its
@@ -259,8 +265,19 @@ final class AuthGateViewModel: ObservableObject {
             return
         }
         if let failure = value("error") {
-            // Core's own words for what Apple (or its own callback) refused
-            // — it is the only side that knows.
+            // Backing out on Apple's page is the one `error` that is not an
+            // error: Apple form-posts its own identifier for it and Core
+            // relays that verbatim, so quoting it would put
+            // `user_cancelled_authorize` on screen as this app's copy. The
+            // state guard above has already run, so a forged cancel never
+            // reaches here — it gets the mismatch message like any other
+            // callback that cannot prove it belongs to this attempt.
+            guard failure != Self.appleCancelError else {
+                cancelAppleSignIn()
+                return
+            }
+            // Otherwise: Core's own words for what Apple (or its own
+            // callback) refused — it is the only side that knows.
             isBusy = false
             errorMessage = failure
             return
@@ -295,11 +312,25 @@ final class AuthGateViewModel: ObservableObject {
 
     @MainActor
     private func failAppleSignIn(_ error: Error?) {
-        isBusy = false
         if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin {
-            return // the user closed the browser — not an error to report
+            cancelAppleSignIn() // the user closed the browser
+            return
         }
+        isBusy = false
         errorMessage = error.map { Self.message(for: $0) } ?? Self.incompleteMessage
+    }
+
+    /// The user backed out. There are two ways to do it — closing the
+    /// browser window, and Cancel on Apple's page — and they arrive on
+    /// opposite paths (a session error, a callback URL) for one intent, so
+    /// they end the same way: the screen as they left it, ready to try
+    /// again, with nothing to read. Routing both through here is also what
+    /// lets a `handleAppleCallback` test cover the browser-close branch,
+    /// which no test can reach directly.
+    @MainActor
+    private func cancelAppleSignIn() {
+        isBusy = false
+        errorMessage = nil
     }
 
     /// What the gate calls this account: the server's `name` when set, else
