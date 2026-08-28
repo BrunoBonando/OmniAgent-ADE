@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The I/O half of the auth gate: whether it needs showing, and persisting
 /// whichever way it resolves — the three keys the web build's
-/// `App.tsx`/`handleAuthGateResolved` established plus the two native-first
+/// `App.tsx`/`handleAuthGateResolved` established plus the three native-first
 /// account rows real login added, behind `SettingsStore` so it is testable
 /// without a socket. `AuthGateState.swift` owns the phase transitions;
 /// `AuthGateWindowController` below owns turning this into a sheet on
@@ -21,7 +21,7 @@ final class AuthGateCoordinator {
         self.defaults = defaults
     }
 
-    /// Persists all five keys the gate cares about and completes once every
+    /// Persists all six keys the gate cares about and completes once every
     /// write has landed (or failed — a write failing here still dismisses
     /// the gate rather than trapping the user behind a broken settings row;
     /// the same "fail open" posture `App.tsx`'s own boot check documents).
@@ -32,6 +32,7 @@ final class AuthGateCoordinator {
             persona: outcome.persona ?? "",
             accountEmail: outcome.accountEmail ?? "",
             accountName: outcome.accountName ?? "",
+            githubLogin: outcome.githubLogin ?? "",
             completion: completion
         )
     }
@@ -41,7 +42,15 @@ final class AuthGateCoordinator {
     /// shows again at the next launch, and offers the same view as a sheet
     /// right now without needing one.
     func reset(completion: @escaping () -> Void) {
-        persist(resolved: "false", signedIn: "false", persona: "", accountEmail: "", accountName: "", completion: completion)
+        persist(
+            resolved: "false",
+            signedIn: "false",
+            persona: "",
+            accountEmail: "",
+            accountName: "",
+            githubLogin: "",
+            completion: completion
+        )
     }
 
     /// The Settings screen's Account section summary line. Chained
@@ -76,7 +85,7 @@ final class AuthGateCoordinator {
     /// the same reason `summary` chains its reads: `DispatchGroup.notify`
     /// always hops a queue turn, even against a synchronous fake client,
     /// which would make `completion` land a run-loop turn later than every
-    /// write actually finished. Five tiny writes in sequence costs nothing
+    /// write actually finished. Six tiny writes in sequence costs nothing
     /// a user would notice.
     private func persist(
         resolved: String,
@@ -84,6 +93,7 @@ final class AuthGateCoordinator {
         persona: String,
         accountEmail: String,
         accountName: String,
+        githubLogin: String,
         completion: @escaping () -> Void
     ) {
         // Written first and synchronously: this is the only copy the launch
@@ -96,7 +106,9 @@ final class AuthGateCoordinator {
                 settings.set(SettingsKey.authPersona, persona) { _ in
                     settings.set(SettingsKey.authAccountEmail, accountEmail) { _ in
                         settings.set(SettingsKey.authAccountName, accountName) { _ in
-                            completion()
+                            settings.set(SettingsKey.authGithubLogin, githubLogin) { _ in
+                                completion()
+                            }
                         }
                     }
                 }
@@ -109,38 +121,96 @@ final class AuthGateCoordinator {
 /// signs in through this, production wires `AuthClient.shared`, and tests
 /// wire a stub — nothing else about the view model needs a server.
 ///
-/// Both halves of Apple's web flow are here because both depend on the
-/// server the app is pointed at: the authorize URL carries Core's own
-/// `redirect_uri`, so a stub can answer with a URL no test will ever open.
+/// Both halves of a web flow are here because both depend on the server the
+/// app is pointed at: the authorize URL carries Core's own `redirect_uri`
+/// (or, for GitHub, *is* a Core route), so a stub can answer with a URL no
+/// test will ever open. The link/unlink pair and `restoreSession` come along
+/// because "Connect GitHub…" needs a bearer token before it needs a browser.
 protocol AuthSigning {
-    func appleAuthorizeURL(state: String, nonce: String) -> URL
-    func loginWithApple(code: String, codeVerifier: String, nonce: String) async throws -> AuthUser
+    /// `nil` until a login or a refresh lands. Read — never written —
+    /// by the view model, to decide whether a link call needs a
+    /// `restoreSession()` in front of it.
+    var accessToken: String? { get }
+    func authorizeURL(for provider: AuthProvider, state: String, nonce: String) -> URL
+    func login(with provider: AuthProvider, code: String, codeVerifier: String, nonce: String) async throws -> AuthUser
+    func linkGitHub(state: String, nonce: String) async throws
+    func disconnectGitHub() async throws
+    func restoreSession() async throws -> AuthUser
 }
 
 extension AuthClient: AuthSigning {}
+
+/// How one Settings › Accounts GitHub operation ended. Exactly one of these
+/// is reported on every path — including the ones that never reach the
+/// network — so the caller's in-flight flag can never be left up, which is
+/// the failure that blocks the button for the rest of the launch.
+enum AuthLinkOutcome: Equatable {
+    /// Done, with the account's GitHub handle as it now stands. A connect
+    /// reports what it linked; a **disconnect reports `nil`** — linked to
+    /// nothing is exactly what it leaves behind, and it lets both buttons
+    /// end in the same one-line "write the row and re-read the section".
+    case linked(githubLogin: String?)
+    /// The user backed out on GitHub's page, or closed the browser. Nothing
+    /// to write and nothing to read.
+    case cancelled
+    /// It failed, with the sentence to show for it.
+    case failed(String)
+}
 
 /// Dispatches `AuthGateAction`s against the pure reducer, republishes the
 /// result for SwiftUI, and owns the async sign-in work: the reducer only
 /// ever sees a *successful* login (as `.signedIn`), while in-flight and
 /// failed attempts live here as `isBusy`/`errorMessage`.
+///
+/// Two jobs, one object — see `intent`. The login screen's own model signs
+/// in; Settings › Accounts builds a second one to connect or disconnect
+/// GitHub on an account that is *already* signed in. The browser round trip
+/// is the same one either way; only where the result goes differs (the gate
+/// reducer, or `onLinkOutcome`).
 final class AuthGateViewModel: ObservableObject {
+    /// What this model is for. `.signIn` resolves the gate; `.linkGitHub`
+    /// serves Settings › Accounts' GitHub pair and never touches the
+    /// reducer — there is no gate to resolve, the account is signed in
+    /// already.
+    enum Intent: Equatable {
+        case signIn
+        case linkGitHub
+    }
+
     @Published private(set) var state = AuthGateReducer.initial
-    /// The Apple sign-in round trip is in flight — from the moment the
-    /// browser opens until the exchange lands. The screen disables its
-    /// controls off this instead of racing double-submits.
+    /// The sign-in round trip is in flight — from the moment the browser
+    /// opens until the exchange lands. The screen disables its controls off
+    /// this instead of racing double-submits.
     @Published private(set) var isBusy = false
     /// The last failed attempt's human-readable reason, cleared on the next
     /// attempt. `nil` while nothing has failed.
     @Published private(set) var errorMessage: String?
     var onResolved: ((AuthGateOutcome) -> Void)?
-    /// The window Apple's web sign-in anchors its browser sheet to — set by
-    /// `AuthGateWindowController` to the login window itself.
+    /// Where a `.linkGitHub` model reports instead of the reducer — exactly
+    /// once per `connectGitHub()`/`disconnectGitHub()`, on every path.
+    var onLinkOutcome: ((AuthLinkOutcome) -> Void)?
+    /// The window the web sign-in anchors its browser sheet to — the login
+    /// window for the gate (set by `AuthGateWindowController`), the
+    /// workspace window for a link (set by `WorkspaceWindowController`).
     var presentationWindow: (() -> NSWindow?)?
+    /// How the browser sheet is opened, answering whether it could be put on
+    /// screen. `nil` is the real `ASWebAuthenticationSession`; a test wires
+    /// this to see *which* URL the flow reached — which is half of what
+    /// "connect GitHub" means — without a browser ever appearing.
+    var webAuthOpener: ((URL) -> Bool)?
 
-    /// This attempt's PKCE secrets. Regenerated by every press of the Apple
+    let intent: Intent
+
+    /// This attempt's PKCE secrets. Regenerated by every press of a provider
     /// button, so a callback left over from an abandoned attempt fails the
-    /// `state` comparison in `handleAppleCallback` instead of being redeemed.
+    /// `state` comparison in `handleCallback` instead of being redeemed.
     private(set) var pkce = PKCE()
+
+    /// Whose flow is running: written just before the browser opens, and
+    /// what `handleCallback` requires an arriving callback to be from.
+    /// Internal rather than private because a test drives `handleCallback`
+    /// directly — standing in for the browser, and so for this write too.
+    var attemptProvider: AuthProvider = .apple
 
     /// The URL scheme Core bounces the browser back into. Registered in
     /// `macos/OmniAgent/Info.plist`; `ASWebAuthenticationSession` matches the
@@ -153,18 +223,19 @@ final class AuthGateViewModel: ObservableObject {
     /// one useful thing rather than inventing a cause.
     static let incompleteMessage = "Sign-in didn't complete — try again."
 
-    /// Shown for any callback whose `state` isn't this attempt's PKCE state:
-    /// a stale callback from an abandoned attempt, a URL some other process
-    /// fabricated, or a page inside the authorize flow trying to put its own
-    /// words on this screen. Nothing in such a URL is read — not the code,
-    /// and not its `error` text either.
+    /// Shown for any callback that cannot prove it belongs to the running
+    /// attempt: the wrong provider's path, or a `state` that isn't this
+    /// attempt's PKCE state — a stale callback from an abandoned attempt, a
+    /// URL some other process fabricated, or a page inside the authorize
+    /// flow trying to put its own words on this screen. Nothing in such a
+    /// URL is read — not the code, and not its `error` text either.
     static let stateMismatchMessage = "Sign-in response didn't match this app — try again."
 
-    /// What Apple form-posts when the user presses Cancel on its authorize
-    /// page, which Core bounces back verbatim. It is a protocol identifier,
-    /// not a sentence, so it must never reach the error label — backing out
-    /// is a decision, not a failure to report.
-    static let appleCancelError = "user_cancelled_authorize"
+    /// Shown when a GitHub connect or disconnect has no session behind it.
+    /// GitHub is linked *onto* an OmniAgent account rather than being an
+    /// account of its own here, so with no session there is nothing to link
+    /// it to — and telling the user to sign in is the only move that helps.
+    static let signInFirstMessage = "Sign in first — GitHub connects to your OmniAgent account."
 
     private let signer: AuthSigning
     /// Retains the running web-auth session and its presentation anchor —
@@ -174,8 +245,12 @@ final class AuthGateViewModel: ObservableObject {
     private var webAuthSession: ASWebAuthenticationSession?
     private var anchorProvider: AuthPresentationAnchor?
 
-    init(signer: AuthSigning = AuthClient.shared) {
+    init(signer: AuthSigning = AuthClient.shared, intent: Intent = .signIn) {
         self.signer = signer
+        self.intent = intent
+        // A link model only ever runs GitHub's flow, so its attempt is armed
+        // from the start rather than at the browser.
+        if intent == .linkGitHub { attemptProvider = .github }
     }
 
     func send(_ action: AuthGateAction) {
@@ -185,26 +260,215 @@ final class AuthGateViewModel: ObservableObject {
         }
     }
 
-    /// Opens Apple's web sign-in in a `ASWebAuthenticationSession` browser
-    /// sheet anchored to the login window. The session watches for the
-    /// `omniagent://` callback Core bounces the browser into and hands the
-    /// URL to `handleAppleCallback`; a cancel closes it silently.
+    /// Opens `provider`'s web sign-in in a `ASWebAuthenticationSession`
+    /// browser sheet anchored to the login window. The session watches for
+    /// the `omniagent://` callback Core bounces the browser into and hands
+    /// the URL to `handleCallback`; a cancel closes it silently.
     ///
-    /// Not the native `ASAuthorizationController` flow, and it cannot be:
-    /// that needs the restricted `com.apple.developer.applesignin`
+    /// Apple's is not the native `ASAuthorizationController` flow, and it
+    /// cannot be: that needs the restricted `com.apple.developer.applesignin`
     /// entitlement, which Developer ID distribution cannot carry (Apple DTS
-    /// — see `OmniAgent.entitlements`).
+    /// — see `OmniAgent.entitlements`). GitHub's has no native flow to want.
     @MainActor
-    func signInWithApple() {
+    func signIn(with provider: AuthProvider) {
         guard !isBusy else { return }
         isBusy = true
         errorMessage = nil
         // A fresh verifier per attempt: the previous one's callback must not
         // be redeemable after the user backs out and starts again.
         pkce = PKCE()
+        openBrowser(for: provider)
+    }
+
+    /// "Connect GitHub…" on Settings › Accounts. Two steps, in this order and
+    /// no other: Core is told to expect this attempt's `state`/`nonce` **on
+    /// the signed-in account** — a bearer call — before the browser is sent
+    /// anywhere. Start the browser first and the callback comes back as a
+    /// second identity rather than a link.
+    @MainActor
+    func connectGitHub() {
+        guard !isBusy else { return }
+        isBusy = true
+        errorMessage = nil
+        pkce = PKCE()
+        let attempt = pkce
+        Task { @MainActor in
+            do {
+                try await authorized { try await $0.linkGitHub(state: attempt.state, nonce: attempt.nonce) }
+            } catch {
+                fail(Self.gitHubMessage(for: error))
+                return
+            }
+            openBrowser(for: .github)
+        }
+    }
+
+    /// "Disconnect" on Settings › Accounts. No browser and no callback: one
+    /// bearer `DELETE`, reported through `onLinkOutcome` exactly as a
+    /// connect is, so the caller has one ending to handle rather than two.
+    @MainActor
+    func disconnectGitHub() {
+        guard !isBusy else { return }
+        isBusy = true
+        errorMessage = nil
+        Task { @MainActor in
+            do {
+                try await authorized { try await $0.disconnectGitHub() }
+                isBusy = false
+                onLinkOutcome?(.linked(githubLogin: nil))
+            } catch {
+                fail(Self.gitHubMessage(for: error))
+            }
+        }
+    }
+
+    /// Runs a bearer-authorized call, refreshing the session first when
+    /// there is no token in hand. The access token is in memory only, so a
+    /// launch that has not refreshed yet has none while the refresh cookie
+    /// in URLSession's jar is still perfectly good — that gap is exactly
+    /// what this closes.
+    private func authorized(_ body: (AuthSigning) async throws -> Void) async throws {
+        if signer.accessToken == nil { _ = try await signer.restoreSession() }
+        try await body(signer)
+    }
+
+    /// The `omniagent://auth/<provider>?…` URL Core bounces the browser into,
+    /// turned into either a signed-in state, a link, or a message. Internal
+    /// (not private) because this — not the browser sheet — is where every
+    /// decision in the flow lives, and a test can drive it directly.
+    @MainActor
+    func handleCallback(_ url: URL) async {
+        // The callback means a request is under way even when the attempt
+        // that opened the browser belongs to an earlier run loop turn.
+        isBusy = true
+        errorMessage = nil
+        // Whose callback is this? The session intercepts *any* `omniagent://`
+        // navigation its browser makes, so a GitHub attempt can be handed an
+        // `/auth/apple` URL — by an abandoned attempt, or by a page inside
+        // the flow. A callback from a provider this attempt never went to
+        // proves nothing about it, so it is refused before anything in it is
+        // read, in the app's own words.
+        guard AuthProvider.callbackPath(of: url) == attemptProvider.callbackPath else {
+            fail(Self.stateMismatchMessage)
+            return
+        }
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func value(_ name: String) -> String? {
+            query.first { $0.name == name }?.value.flatMap { $0.isEmpty ? nil : $0 }
+        }
+        // `state` next, before a single field of this URL is believed —
+        // including `error`, which is shown to the user verbatim. A page
+        // reached from inside the authorize flow (an open redirect, an
+        // injected page) could otherwise write its own sentence into this
+        // app's error label as first-party copy. Core sends `state` on its
+        // error callbacks too, so nothing legitimate is lost.
+        guard value("state") == pkce.state else {
+            fail(Self.stateMismatchMessage)
+            return
+        }
+        if let failure = value("error") {
+            // Backing out on the provider's page is the one `error` that is
+            // not an error: Apple and GitHub each form-post their own
+            // identifier for it (`user_cancelled_authorize`,
+            // `access_denied`) and Core relays that verbatim, so quoting it
+            // would put a protocol token on screen as this app's copy. The
+            // guards above have already run, so a forged cancel never
+            // reaches here — it gets the mismatch message like any other
+            // callback that cannot prove it belongs to this attempt.
+            guard failure != attemptProvider.cancelError else {
+                cancel()
+                return
+            }
+            // Otherwise: Core's own words for what the provider (or its own
+            // callback) refused — it is the only side that knows.
+            fail(failure)
+            return
+        }
+        guard let code = value("code") else {
+            fail(Self.incompleteMessage)
+            return
+        }
+        await complete(code: code)
+    }
+
+    /// Redeems the one-time code at `/v1/auth/<provider>/exchange` and hands
+    /// the account on: to the reducer as `.signedIn` for the gate, or to
+    /// `onLinkOutcome` for a link, which has no gate to resolve.
+    @MainActor
+    private func complete(code: String) async {
+        let attempt = pkce
+        do {
+            let user = try await signer.login(
+                with: attemptProvider,
+                code: code,
+                codeVerifier: attempt.verifier,
+                nonce: attempt.nonce
+            )
+            isBusy = false
+            switch intent {
+            case .signIn:
+                send(.signedIn(
+                    email: user.email,
+                    displayName: Self.displayName(of: user),
+                    githubLogin: user.githubLogin
+                ))
+            case .linkGitHub:
+                onLinkOutcome?(.linked(githubLogin: user.githubLogin))
+            }
+        } catch {
+            fail(Self.message(for: error))
+        }
+    }
+
+    @MainActor
+    private func failWebAuth(_ error: Error?) {
+        if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin {
+            cancel() // the user closed the browser
+            return
+        }
+        fail(error.map { Self.message(for: $0) } ?? Self.incompleteMessage)
+    }
+
+    /// Every dead end in one place: the screen comes back with something to
+    /// read, and a link model — which has no screen of its own — reports the
+    /// same sentence to whoever asked for the link.
+    @MainActor
+    private func fail(_ message: String) {
+        isBusy = false
+        errorMessage = message
+        if intent == .linkGitHub { onLinkOutcome?(.failed(message)) }
+    }
+
+    /// The user backed out. There are two ways to do it — closing the
+    /// browser window, and Cancel on the provider's page — and they arrive on
+    /// opposite paths (a session error, a callback URL) for one intent, so
+    /// they end the same way: the screen as they left it, ready to try
+    /// again, with nothing to read. Routing both through here is also what
+    /// lets a `handleCallback` test cover the browser-close branch, which no
+    /// test can reach directly.
+    @MainActor
+    private func cancel() {
+        isBusy = false
+        errorMessage = nil
+        if intent == .linkGitHub { onLinkOutcome?(.cancelled) }
+    }
+
+    /// Builds and starts the browser sheet for `provider`, arming this
+    /// attempt with it.
+    @MainActor
+    private func openBrowser(for provider: AuthProvider) {
+        attemptProvider = provider
+        let url = signer.authorizeURL(for: provider, state: pkce.state, nonce: pkce.nonce)
+        if let webAuthOpener {
+            // The same contract `start()` has below: false means nothing
+            // could be put on screen, which must lower `isBusy` rather than
+            // leave a disabled button with nothing to press.
+            if !webAuthOpener(url) { fail(Self.incompleteMessage) }
+            return
+        }
         let anchor = AuthPresentationAnchor { [weak self] in self?.presentationWindow?() }
         let session = ASWebAuthenticationSession(
-            url: signer.appleAuthorizeURL(state: pkce.state, nonce: pkce.nonce),
+            url: url,
             callbackURLScheme: Self.callbackScheme
         ) { [weak self] url, error in
             Task { @MainActor in
@@ -212,16 +476,16 @@ final class AuthGateViewModel: ObservableObject {
                 self.webAuthSession = nil
                 self.anchorProvider = nil
                 if let url {
-                    await self.handleAppleCallback(url)
+                    await self.handleCallback(url)
                 } else {
-                    self.failAppleSignIn(error)
+                    self.failWebAuth(error)
                 }
             }
         }
         session.presentationContextProvider = anchor
         // Deliberately not ephemeral: reusing Safari's cookies is what makes
-        // the second sign-in a single click instead of a full Apple ID
-        // password + 2FA round trip.
+        // the second sign-in a single click instead of a full password + 2FA
+        // round trip.
         session.prefersEphemeralWebBrowserSession = false
         anchorProvider = anchor
         webAuthSession = session
@@ -232,105 +496,9 @@ final class AuthGateViewModel: ObservableObject {
         guard session.start() else {
             webAuthSession = nil
             anchorProvider = nil
-            isBusy = false
-            errorMessage = Self.incompleteMessage
+            fail(Self.incompleteMessage)
             return
         }
-    }
-
-    /// The `omniagent://auth/apple?…` URL Core bounces the browser into,
-    /// turned into either a signed-in state or a message. Internal (not
-    /// private) because this — not the browser sheet — is where every
-    /// decision in the flow lives, and a test can drive it directly.
-    @MainActor
-    func handleAppleCallback(_ url: URL) async {
-        // The callback means a request is under way even when the attempt
-        // that opened the browser belongs to an earlier run loop turn.
-        isBusy = true
-        errorMessage = nil
-        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        func value(_ name: String) -> String? {
-            query.first { $0.name == name }?.value.flatMap { $0.isEmpty ? nil : $0 }
-        }
-        // `state` first, before a single field of this URL is believed —
-        // including `error`, which is shown to the user verbatim. The
-        // session intercepts *any* `omniagent://` navigation its browser
-        // makes, so a page reached from inside the authorize flow (an open
-        // redirect, an injected page) could otherwise write its own sentence
-        // into this app's error label as first-party copy. Core sends
-        // `state` on its error callbacks too, so nothing legitimate is lost.
-        guard value("state") == pkce.state else {
-            isBusy = false
-            errorMessage = Self.stateMismatchMessage
-            return
-        }
-        if let failure = value("error") {
-            // Backing out on Apple's page is the one `error` that is not an
-            // error: Apple form-posts its own identifier for it and Core
-            // relays that verbatim, so quoting it would put
-            // `user_cancelled_authorize` on screen as this app's copy. The
-            // state guard above has already run, so a forged cancel never
-            // reaches here — it gets the mismatch message like any other
-            // callback that cannot prove it belongs to this attempt.
-            guard failure != Self.appleCancelError else {
-                cancelAppleSignIn()
-                return
-            }
-            // Otherwise: Core's own words for what Apple (or its own
-            // callback) refused — it is the only side that knows.
-            isBusy = false
-            errorMessage = failure
-            return
-        }
-        guard let code = value("code") else {
-            isBusy = false
-            errorMessage = Self.incompleteMessage
-            return
-        }
-        await completeAppleSignIn(code: code)
-    }
-
-    /// Redeems the one-time code at `/v1/auth/apple/exchange` and, on
-    /// success, hands the account to the reducer — the same `.signedIn`
-    /// transition the whole gate has always resolved through.
-    @MainActor
-    private func completeAppleSignIn(code: String) async {
-        let attempt = pkce
-        do {
-            let user = try await signer.loginWithApple(
-                code: code,
-                codeVerifier: attempt.verifier,
-                nonce: attempt.nonce
-            )
-            isBusy = false
-            send(.signedIn(email: user.email, displayName: Self.displayName(of: user)))
-        } catch {
-            isBusy = false
-            errorMessage = Self.message(for: error)
-        }
-    }
-
-    @MainActor
-    private func failAppleSignIn(_ error: Error?) {
-        if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin {
-            cancelAppleSignIn() // the user closed the browser
-            return
-        }
-        isBusy = false
-        errorMessage = error.map { Self.message(for: $0) } ?? Self.incompleteMessage
-    }
-
-    /// The user backed out. There are two ways to do it — closing the
-    /// browser window, and Cancel on Apple's page — and they arrive on
-    /// opposite paths (a session error, a callback URL) for one intent, so
-    /// they end the same way: the screen as they left it, ready to try
-    /// again, with nothing to read. Routing both through here is also what
-    /// lets a `handleAppleCallback` test cover the browser-close branch,
-    /// which no test can reach directly.
-    @MainActor
-    private func cancelAppleSignIn() {
-        isBusy = false
-        errorMessage = nil
     }
 
     /// What the gate calls this account: the server's `name` when set, else
@@ -348,6 +516,13 @@ final class AuthGateViewModel: ObservableObject {
 
     private static func message(for error: Error) -> String {
         (error as? AuthError)?.errorDescription ?? error.localizedDescription
+    }
+
+    /// `message(for:)`, except that "your session expired" is the wrong
+    /// thing to tell someone whose GitHub button needs an account: on these
+    /// two paths a dead session means *sign in*, which is what to say.
+    private static func gitHubMessage(for error: Error) -> String {
+        (error as? AuthError) == .sessionExpired ? signInFirstMessage : message(for: error)
     }
 }
 
@@ -369,8 +544,9 @@ private final class AuthPresentationAnchor: NSObject, ASWebAuthenticationPresent
 
 /// The gate's two screens: the real sign-in screen from
 /// `design/OmniAgent ADE.dc.html`'s `data-screen-label="Sign in"` (story
-/// panel + 452px auth card), and the personalize question carried over
-/// unchanged from the previous build.
+/// panel + 452px auth card, now with a provider button each for Apple and
+/// GitHub), and the personalize question carried over unchanged from the
+/// previous build.
 ///
 /// Animation policy (hard-won): at most one one-shot opacity/offset on
 /// appear, driven by a single `withAnimation` — nested animation groups have
@@ -383,6 +559,7 @@ struct AuthGateContentView: View {
     @State private var selectedPersona: String?
     @State private var appeared = false
     @State private var hoveredApple = false
+    @State private var hoveredGitHub = false
 
     /// The whole two-panel screen; the story panel gets whatever is left.
     /// Internal because `AuthGateWindowController` sizes the gate's window
@@ -615,15 +792,18 @@ struct AuthGateContentView: View {
                     .font(.system(size: 27, weight: .semibold))
                     .foregroundStyle(SignInPalette.titleText)
                     .padding(.bottom, 6)
-                Text("Sign in with your Apple ID to sync your settings and license.")
+                Text("Sign in to sync your settings and license.")
                     .font(.system(size: 15))
                     .foregroundStyle(SignInPalette.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.bottom, 22)
 
-                // The only way in. Password sign-in left with the web
-                // build; Apple's web flow is the whole login screen now.
+                // The two ways in. Password sign-in left with the web
+                // build; the provider web flows are the whole login screen
+                // now.
                 appleButton
+                githubButton
+                    .padding(.top, 10)
 
                 if let message = model.errorMessage {
                     Text(message)
@@ -656,12 +836,37 @@ struct AuthGateContentView: View {
     }
 
     private var appleButton: some View {
-        Button { model.signInWithApple() } label: {
+        providerButton(title: "Continue with Apple", symbol: "applelogo", hovered: $hoveredApple) {
+            model.signIn(with: .apple)
+        }
+    }
+
+    /// No mark beside the label: SF Symbols has no GitHub glyph, and a
+    /// bundled logo would be the one image on this screen that is somebody
+    /// else's trademark. The word is the mark.
+    private var githubButton: some View {
+        providerButton(title: "Continue with GitHub", symbol: nil, hovered: $hoveredGitHub) {
+            model.signIn(with: .github)
+        }
+    }
+
+    /// One provider row, drawn the same for every provider — both buttons go
+    /// dead together while an attempt is in flight, since a second browser
+    /// sheet over the first is not a thing this screen can recover from.
+    private func providerButton(
+        title: String,
+        symbol: String?,
+        hovered: Binding<Bool>,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
             HStack(spacing: 10) {
-                Image(systemName: "applelogo")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(Color.omniRGB(245, 245, 247))
-                Text("Continue with Apple")
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(Color.omniRGB(245, 245, 247))
+                }
+                Text(title)
                     .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(SignInPalette.primaryText)
                 Spacer(minLength: 0)
@@ -671,15 +876,18 @@ struct AuthGateContentView: View {
             }
             .padding(.horizontal, 13)
             .frame(height: 42)
-            .background(RoundedRectangle(cornerRadius: 9).fill(Color.white.opacity(hoveredApple ? 0.1 : 0.055)))
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(Color.white.opacity(hovered.wrappedValue ? 0.1 : 0.055))
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: 9)
-                    .stroke(Color.white.opacity(hoveredApple ? 0.22 : 0.12), lineWidth: 0.5)
+                    .stroke(Color.white.opacity(hovered.wrappedValue ? 0.22 : 0.12), lineWidth: 0.5)
             )
             .contentShape(RoundedRectangle(cornerRadius: 9))
         }
         .buttonStyle(.plain)
-        .onHover { hoveredApple = $0 }
+        .onHover { hovered.wrappedValue = $0 }
         .disabled(model.isBusy)
     }
 

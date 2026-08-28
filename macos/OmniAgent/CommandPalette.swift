@@ -26,6 +26,10 @@ enum PaletteAction: Equatable {
     /// spotlight offers what you can do now, not both halves of a toggle.
     case signIn
     case signOut
+    /// Settings › Accounts' GitHub button, in its two states — the same
+    /// one-row-not-both rule as the pair above.
+    case connectGitHub
+    case disconnectGitHub
     /// A file open in some editor pane, chosen from the spotlight — reveals
     /// the pane holding it and brings that tab forward.
     case openFile(path: String)
@@ -269,6 +273,12 @@ struct CommandPaletteModel: Equatable {
     /// states carry both vocabularies.
     static let accountKeywords = "log out sign out sign in account apple settings"
 
+    /// The GitHub row's vocabulary, both states again: "connect" does not
+    /// find "Disconnect GitHub" and "disconnect" does not find "Connect
+    /// GitHub…", and neither title contains the word "account" it lives
+    /// under.
+    static let githubKeywords = "github connect disconnect account settings"
+
     /// Rebuilt from the live workspace every time the palette opens, so it
     /// can never offer a pane that closed while it was shut.
     static func build(
@@ -281,7 +291,9 @@ struct CommandPaletteModel: Equatable {
         workspaces: [PaletteWorkspace] = [],
         /// What Settings › Accounts currently shows, which decides whether
         /// the account row logs out or signs in.
-        signedIn: Bool = false
+        signedIn: Bool = false,
+        /// The same, for the GitHub row: connected offers Disconnect.
+        githubConnected: Bool = false
     ) -> [PaletteCommand] {
         // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
         // the already-fixed call site in `WorkspaceWindowController`'s
@@ -465,11 +477,12 @@ struct CommandPaletteModel: Equatable {
                 )
             )
         }
-        // The one thing *inside* a Settings section that is a row of its own
+        // The things *inside* a Settings section that are rows of their own
         // (the standing rule: the spotlight finds the items in the sections
-        // as they are built). One row, not two: signing out and signing in
-        // are the same button in two states, and offering the one you cannot
-        // do is offering a dead end.
+        // as they are built). One row per button, not two: signing out and
+        // signing in are the same button in two states — as are connecting
+        // and disconnecting GitHub — and offering the one you cannot do is
+        // offering a dead end.
         commands.append(
             signedIn
                 ? PaletteCommand(
@@ -491,6 +504,32 @@ struct CommandPaletteModel: Equatable {
                     section: .places,
                     subtitle: "Settings › Accounts",
                     symbol: "person.crop.circle.badge.checkmark"
+                )
+        )
+        commands.append(
+            githubConnected
+                ? PaletteCommand(
+                    id: "settings:accounts:github:disconnect",
+                    title: "Disconnect GitHub",
+                    detail: nil,
+                    action: .disconnectGitHub,
+                    keywords: githubKeywords,
+                    section: .places,
+                    subtitle: "Settings › Accounts",
+                    // Not `link.slash`, which reads better and does not
+                    // exist: no macOS SF Symbols release ships it, so it
+                    // would draw as nothing at all.
+                    symbol: "personalhotspot.slash"
+                )
+                : PaletteCommand(
+                    id: "settings:accounts:github:connect",
+                    title: "Connect GitHub…",
+                    detail: nil,
+                    action: .connectGitHub,
+                    keywords: githubKeywords,
+                    section: .places,
+                    subtitle: "Settings › Accounts",
+                    symbol: "link.badge.plus"
                 )
         )
         // In section order whatever the order above emitted them in, so a

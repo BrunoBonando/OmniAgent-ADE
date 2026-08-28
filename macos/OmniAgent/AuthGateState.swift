@@ -5,10 +5,10 @@ import Foundation
 /// reducer so the phase transitions are unit-testable without
 /// `AuthGateView`/`NSHostingController`/a socket/a network.
 ///
-/// The login itself is real now: `AuthGateViewModel` runs Apple's web
-/// sign-in and redeems the result at Core's `/v1/auth/apple/exchange`
-/// through `AuthClient`, and only dispatches `.signedIn` after the server
-/// said yes. What survives from the
+/// The login itself is real now: `AuthGateViewModel` runs Apple's or
+/// GitHub's web sign-in and redeems the result at Core's
+/// `/v1/auth/<provider>/exchange` through `AuthClient`, and only dispatches
+/// `.signedIn` after the server said yes. What survives from the
 /// fake era, by founder direction, is the escape hatch: "Continue without
 /// signing in" (`.skipLogin`) stays a first-class exit while the product is
 /// in development, because the API may be unreachable and the app is
@@ -31,6 +31,12 @@ struct AuthGateOutcome: Equatable {
     /// The account's display name ("Bruno Bonando"), or `nil` when the
     /// server has none for it — or when sign-in was skipped.
     let accountName: String?
+    /// The GitHub handle linked to the account, or `nil` when none is (and
+    /// on the skip path). Defaulted, and the one `var` here, so the three
+    /// constructions that have nothing to say about GitHub — the skip
+    /// outcome and every test that predates it — stay about what they are
+    /// testing; `AuthGateState.accountEmail` below sets the same precedent.
+    var githubLogin: String? = nil
 }
 
 struct AuthGateState: Equatable {
@@ -38,9 +44,11 @@ struct AuthGateState: Equatable {
     /// Non-nil exactly when `phase == .resolved`.
     var outcome: AuthGateOutcome?
     /// The signed-in identity, carried from `.signedIn` through the
-    /// personalize phase into the outcome. Both stay `nil` on the skip path.
+    /// personalize phase into the outcome. All three stay `nil` on the skip
+    /// path.
     var accountEmail: String? = nil
     var accountName: String? = nil
+    var githubLogin: String? = nil
 }
 
 enum AuthGateAction: Equatable {
@@ -48,7 +56,7 @@ enum AuthGateAction: Equatable {
     /// A *successful* real login — `AuthGateViewModel` dispatches this only
     /// after `AuthClient` returned a user; the reducer never sees a failed
     /// attempt (that stays view-model state as `errorMessage`).
-    case signedIn(email: String, displayName: String?)
+    case signedIn(email: String, displayName: String?, githubLogin: String?)
     case answerSelected(persona: String)
     case skipPersonalize
 }
@@ -65,9 +73,15 @@ enum AuthGateReducer {
                 outcome: AuthGateOutcome(signedIn: false, persona: nil, accountEmail: nil, accountName: nil)
             )
 
-        case let .signedIn(email, displayName):
+        case let .signedIn(email, displayName, githubLogin):
             guard state.phase == .login else { return state }
-            return AuthGateState(phase: .personalize, outcome: nil, accountEmail: email, accountName: displayName)
+            return AuthGateState(
+                phase: .personalize,
+                outcome: nil,
+                accountEmail: email,
+                accountName: displayName,
+                githubLogin: githubLogin
+            )
 
         case let .answerSelected(persona):
             guard state.phase == .personalize else { return state }
@@ -77,10 +91,12 @@ enum AuthGateReducer {
                     signedIn: true,
                     persona: persona,
                     accountEmail: state.accountEmail,
-                    accountName: state.accountName
+                    accountName: state.accountName,
+                    githubLogin: state.githubLogin
                 ),
                 accountEmail: state.accountEmail,
-                accountName: state.accountName
+                accountName: state.accountName,
+                githubLogin: state.githubLogin
             )
 
         case .skipPersonalize:
@@ -91,10 +107,12 @@ enum AuthGateReducer {
                     signedIn: true,
                     persona: nil,
                     accountEmail: state.accountEmail,
-                    accountName: state.accountName
+                    accountName: state.accountName,
+                    githubLogin: state.githubLogin
                 ),
                 accountEmail: state.accountEmail,
-                accountName: state.accountName
+                accountName: state.accountName,
+                githubLogin: state.githubLogin
             )
         }
     }

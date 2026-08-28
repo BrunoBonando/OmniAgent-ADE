@@ -2,7 +2,11 @@ import XCTest
 @testable import OmniAgent
 
 final class AuthGateStateTests: XCTestCase {
-    private let signedIn = AuthGateAction.signedIn(email: "bruno@bonando.com", displayName: "Bruno Bonando")
+    private let signedIn = AuthGateAction.signedIn(
+        email: "bruno@bonando.com",
+        displayName: "Bruno Bonando",
+        githubLogin: "brunobonando"
+    )
 
     func testSkippingLoginResolvesSignedOutWithNoPersonaAndNoAccount() {
         let resolved = AuthGateReducer.reduce(AuthGateReducer.initial, .skipLogin)
@@ -18,14 +22,19 @@ final class AuthGateStateTests: XCTestCase {
             phase: .personalize,
             outcome: nil,
             accountEmail: "bruno@bonando.com",
-            accountName: "Bruno Bonando"
+            accountName: "Bruno Bonando",
+            githubLogin: "brunobonando"
         ))
     }
 
     func testANilDisplayNameSurvivesIntoThePersonalizePhase() {
-        let state = AuthGateReducer.reduce(AuthGateReducer.initial, .signedIn(email: "a@b.com", displayName: nil))
+        let state = AuthGateReducer.reduce(
+            AuthGateReducer.initial,
+            .signedIn(email: "a@b.com", displayName: nil, githubLogin: nil)
+        )
         XCTAssertEqual(state.accountEmail, "a@b.com")
         XCTAssertNil(state.accountName)
+        XCTAssertNil(state.githubLogin, "an account with nothing linked carries nothing")
     }
 
     func testAnsweringThePersonaQuestionResolvesSignedInWithThatPersonaAndTheAccount() {
@@ -36,7 +45,8 @@ final class AuthGateStateTests: XCTestCase {
             signedIn: true,
             persona: "student",
             accountEmail: "bruno@bonando.com",
-            accountName: "Bruno Bonando"
+            accountName: "Bruno Bonando",
+            githubLogin: "brunobonando"
         ))
     }
 
@@ -48,7 +58,8 @@ final class AuthGateStateTests: XCTestCase {
             signedIn: true,
             persona: nil,
             accountEmail: "bruno@bonando.com",
-            accountName: "Bruno Bonando"
+            accountName: "Bruno Bonando",
+            githubLogin: "brunobonando"
         ))
     }
 

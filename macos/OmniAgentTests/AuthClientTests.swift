@@ -90,6 +90,7 @@ final class AuthClientTests: XCTestCase {
     {"id":"usr-1","email":"ada@example.com","first_name":"Ada","last_name":"Lovelace",\
     "name":"Ada Lovelace","picture":null,"role":"user","auth_provider":"password",\
     "email_verified":true,"enabled":true,"company_id":null,"onboarding_completed":true,\
+    "github_login":null,\
     "last_login_at":"2026-08-17T10:00:00Z","created_at":"2026-01-01T00:00:00Z",\
     "updated_at":"2026-08-17T10:00:00Z"}
     """
@@ -121,7 +122,8 @@ final class AuthClientTests: XCTestCase {
             name: "Ada Lovelace",
             role: "user",
             authProvider: "password",
-            emailVerified: true
+            emailVerified: true,
+            githubLogin: nil
         ))
         XCTAssertEqual(client.accessToken, "tok-123")
 
@@ -185,7 +187,7 @@ final class AuthClientTests: XCTestCase {
     // MARK: - Sign in with Apple (web flow)
 
     func testAppleAuthorizeURLCarriesTheServicesIDAndCoresCallback() throws {
-        let url = makeClient().appleAuthorizeURL(state: "the-state", nonce: "the-nonce")
+        let url = makeClient().authorizeURL(for: .apple, state: "the-state", nonce: "the-nonce")
 
         XCTAssertEqual(url.host, "appleid.apple.com")
         XCTAssertEqual(url.path, "/auth/authorize")
@@ -218,7 +220,8 @@ final class AuthClientTests: XCTestCase {
         AuthClientStubProtocol.handler = { _ in (200, self.loginResponse(token: "tok-apple")) }
         let client = makeClient()
 
-        _ = try await client.loginWithApple(
+        _ = try await client.login(
+            with: .apple,
             code: "one-time-code",
             codeVerifier: "the-verifier",
             nonce: "the-nonce"
@@ -250,7 +253,7 @@ final class AuthClientTests: XCTestCase {
         let client = makeClient()
 
         do {
-            _ = try await client.loginWithApple(code: "c", codeVerifier: "v", nonce: "n")
+            _ = try await client.login(with: .apple, code: "c", codeVerifier: "v", nonce: "n")
             XCTFail("expected AuthError.server")
         } catch let error as AuthError {
             XCTAssertEqual(error, .server(409, detail))
@@ -259,6 +262,120 @@ final class AuthClientTests: XCTestCase {
             XCTFail("expected AuthError, got \(error)")
         }
         XCTAssertNil(client.accessToken)
+    }
+
+    // MARK: - Sign in with GitHub, and linking it
+
+    /// GitHub's start URL is *Core's* route, not GitHub's: only Core knows
+    /// the OAuth client id and the scopes to ask for, so the app opens
+    /// Core and Core redirects on. All the app contributes is this
+    /// attempt's PKCE state and nonce.
+    func testGitHubAuthorizeURLIsCoresStartRouteCarryingStateAndNonce() throws {
+        let url = makeClient().authorizeURL(for: .github, state: "the-state", nonce: "the-nonce")
+
+        XCTAssertEqual(url.host, "api.test.invalid", "the app's own API base, not github.com")
+        XCTAssertEqual(url.path, "/v1/auth/github/start")
+
+        let items = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        let query = Dictionary(items.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
+        XCTAssertEqual(query["state"], "the-state")
+        XCTAssertEqual(query["nonce"], "the-nonce")
+    }
+
+    func testLoginWithGitHubRedeemsTheCodeAtGitHubsOwnExchangeRoute() async throws {
+        AuthClientStubProtocol.handler = { _ in (200, self.loginResponse(token: "tok-github")) }
+        let client = makeClient()
+
+        _ = try await client.login(
+            with: .github,
+            code: "one-time-code",
+            codeVerifier: "the-verifier",
+            nonce: "the-nonce"
+        )
+
+        let request = try XCTUnwrap(AuthClientStubProtocol.recorded.last?.request)
+        XCTAssertEqual(request.url?.path, "/v1/auth/github/exchange", "not Apple's route")
+        XCTAssertEqual(request.httpMethod, "POST")
+
+        let body = try lastBodyJSON()
+        XCTAssertEqual(body["code"] as? String, "one-time-code")
+        XCTAssertEqual(body["code_verifier"] as? String, "the-verifier")
+        XCTAssertEqual(body["nonce"] as? String, "the-nonce")
+        XCTAssertEqual(client.accessToken, "tok-github")
+    }
+
+    /// The wire field Settings › Accounts is built on. Absent (Apple's
+    /// exchange, an account with nothing linked) decodes as `nil` rather
+    /// than failing the whole envelope.
+    func testTheUserDecodesItsGitHubLoginAndToleratesItsAbsence() async throws {
+        let linked = """
+        {"id":"usr-1","email":"ada@example.com","first_name":null,"last_name":null,"name":null,\
+        "role":"user","auth_provider":"apple","email_verified":true,"github_login":"adalovelace"}
+        """
+        AuthClientStubProtocol.handler = { _ in
+            (200, Data("""
+            {"access_token":"tok","user":\(linked)}
+            """.utf8))
+        }
+        let user = try await makeClient().login(with: .github, code: "c", codeVerifier: "v", nonce: "n")
+        XCTAssertEqual(user.githubLogin, "adalovelace")
+
+        AuthClientStubProtocol.handler = { _ in (200, self.loginResponse(token: "tok")) }
+        let unlinked = try await makeClient().login(with: .apple, code: "c", codeVerifier: "v", nonce: "n")
+        XCTAssertNil(unlinked.githubLogin)
+    }
+
+    /// Linking is the signed-in half of GitHub: it must present the bearer
+    /// token, or Core has no account to link the callback onto.
+    func testLinkGitHubPostsTheStateAndNonceWithTheBearerToken() async throws {
+        AuthClientStubProtocol.handler = { request in
+            request.url?.path == "/v1/auth/github/link" ? (204, Data()) : (200, self.loginResponse(token: "tok-123"))
+        }
+        let client = makeClient()
+        _ = try await client.login(email: "ada@example.com", password: "hunter2")
+
+        try await client.linkGitHub(state: "the-state", nonce: "the-nonce")
+
+        let request = try XCTUnwrap(AuthClientStubProtocol.recorded.last?.request)
+        XCTAssertEqual(request.url?.path, "/v1/auth/github/link")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer tok-123")
+
+        let body = try lastBodyJSON()
+        XCTAssertEqual(body["state"] as? String, "the-state")
+        XCTAssertEqual(body["nonce"] as? String, "the-nonce")
+        XCTAssertFalse(body.keys.contains("code"), "nothing to redeem yet — the browser has not run")
+    }
+
+    func testDisconnectGitHubSendsADeleteWithTheBearerToken() async throws {
+        AuthClientStubProtocol.handler = { request in
+            request.httpMethod == "DELETE" ? (204, Data()) : (200, self.loginResponse(token: "tok-123"))
+        }
+        let client = makeClient()
+        _ = try await client.login(email: "ada@example.com", password: "hunter2")
+
+        try await client.disconnectGitHub()
+
+        let request = try XCTUnwrap(AuthClientStubProtocol.recorded.last?.request)
+        XCTAssertEqual(request.url?.path, "/v1/auth/github")
+        XCTAssertEqual(request.httpMethod, "DELETE")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer tok-123")
+    }
+
+    /// No token in hand is `.sessionExpired` without a request: the caller's
+    /// answer to that is to refresh and try again, and a request that cannot
+    /// possibly succeed is a round trip spent proving it.
+    func testABearerCallWithNoTokenFailsAsSessionExpiredWithoutReachingTheServer() async {
+        AuthClientStubProtocol.handler = { _ in (204, Data()) }
+        let client = makeClient()
+
+        do {
+            try await client.linkGitHub(state: "s", nonce: "n")
+            XCTFail("expected AuthError.sessionExpired")
+        } catch {
+            XCTAssertEqual(error as? AuthError, .sessionExpired)
+        }
+        XCTAssertTrue(AuthClientStubProtocol.recorded.isEmpty, "nothing was sent")
     }
 
     // MARK: - restoreSession

@@ -249,16 +249,36 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertFalse(settings.subtitleField.isHidden)
         XCTAssertTrue(settings.accountField.isHidden, "the account block is Accounts' alone")
         XCTAssertTrue(settings.accountButton.isHidden)
+        XCTAssertTrue(settings.githubField.isHidden)
+        XCTAssertTrue(settings.githubButton.isHidden)
 
         controller.showSettings(section: .accounts)
         XCTAssertTrue(settings.subtitleField.isHidden, "a screen, not a promise")
         XCTAssertFalse(settings.accountField.isHidden)
         XCTAssertFalse(settings.accountButton.isHidden)
+        XCTAssertFalse(settings.githubField.isHidden)
+        XCTAssertFalse(settings.githubButton.isHidden)
 
         settings.applyAccount(email: "bruno@bonando.com", signedIn: true)
         XCTAssertEqual(settings.accountField.stringValue, "Signed in as bruno@bonando.com")
         XCTAssertEqual(settings.accountButton.title, "Log out")
         XCTAssertTrue(settings.accountSignedIn)
+
+        // The GitHub line under it, in both states.
+        XCTAssertEqual(settings.githubField.stringValue, "GitHub: not connected")
+        XCTAssertEqual(settings.githubButton.title, "Connect GitHub…")
+        XCTAssertFalse(settings.accountGitHubConnected)
+
+        settings.applyAccount(email: "bruno@bonando.com", signedIn: true, githubLogin: "brunobonando")
+        XCTAssertEqual(settings.githubField.stringValue, "GitHub: @brunobonando")
+        XCTAssertEqual(settings.githubButton.title, "Disconnect")
+        XCTAssertTrue(settings.accountGitHubConnected)
+
+        // An empty row is not a handle: `auth_github_login` is cleared to
+        // `""`, never removed, so "" has to read as "not connected".
+        settings.applyAccount(email: "bruno@bonando.com", signedIn: true, githubLogin: "")
+        XCTAssertEqual(settings.githubField.stringValue, "GitHub: not connected")
+        XCTAssertFalse(settings.accountGitHubConnected)
 
         // Signed in with no address yet — how the page is seeded before the
         // daemon answers — is signed in all the same. Offering "Sign in…"
@@ -285,12 +305,19 @@ final class NavigationSidebarTests: XCTestCase {
         let bare = SettingsSurfaceView()
         var signIns = 0
         var logOuts = 0
+        var connects = 0
+        var disconnects = 0
         bare.onSignIn = { signIns += 1 }
         bare.onLogOut = { logOuts += 1 }
+        bare.onConnectGitHub = { connects += 1 }
+        bare.onDisconnectGitHub = { disconnects += 1 }
         bare.accountButton.performClick(nil)
-        bare.applyAccount(email: "bruno@bonando.com", signedIn: true)
+        bare.githubButton.performClick(nil)
+        bare.applyAccount(email: "bruno@bonando.com", signedIn: true, githubLogin: "brunobonando")
         bare.accountButton.performClick(nil)
+        bare.githubButton.performClick(nil)
         XCTAssertEqual([signIns, logOuts], [1, 1], "one button, both jobs, by state")
+        XCTAssertEqual([connects, disconnects], [1, 1], "and the same for the GitHub pair")
     }
 
     /// The gear offers the panel beside itself, tip on the gear, inside the

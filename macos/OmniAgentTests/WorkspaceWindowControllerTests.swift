@@ -1466,7 +1466,10 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let waiting = makeController()
         defer { waiting.close() }
         var revealed = false
+        var restoredWhileSignedOut = 0
+        waiting.sessionRestorer = { restoredWhileSignedOut += 1 }
         waiting.presentLaunchGate(defaults: try throwawayDefaults()) { revealed = true }
+        XCTAssertEqual(restoredWhileSignedOut, 0, "nothing signed in, so there is no session to restore")
         XCTAssertFalse(revealed, "nothing signed in, so the workspace waits on the gate")
         XCTAssertFalse(try XCTUnwrap(waiting.window).isVisible, "and stays off screen while it does")
 
@@ -1475,8 +1478,13 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let straightIn = makeController()
         defer { straightIn.close() }
         var openedImmediately = false
+        // The bearer token the GitHub buttons need is refreshed on the way
+        // past — stubbed, since a test must not reach the real API.
+        var restored = 0
+        straightIn.sessionRestorer = { restored += 1 }
         straightIn.presentLaunchGate(defaults: signedIn) { openedImmediately = true }
         XCTAssertTrue(openedImmediately, "signed in already: nothing to ask, so the workspace opens")
+        XCTAssertEqual(restored, 1, "and the server session is restored behind it, for the bearer calls")
     }
 
     /// A suite of its own, torn down after — never the real app's defaults,
@@ -1683,6 +1691,31 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             "Not signed in",
             "the page stops naming an account the moment the clearing lands, not when the gate closes"
         )
+
+        // And the GitHub pair beside it, from the same spotlight rows.
+        var connected = 0
+        var disconnected = 0
+        controller.gitHubConnector = { report in
+            connected += 1
+            report(.linked(githubLogin: "brunobonando"))
+        }
+        controller.gitHubDisconnector = { report in
+            disconnected += 1
+            report(.linked(githubLogin: nil))
+        }
+        controller.run(.connectGitHub)
+        controller.run(.disconnectGitHub)
+        XCTAssertEqual([connected, disconnected], [1, 1], "each row runs the button's own work")
+
+        // Both share the account section's one in-flight flag: a connect
+        // still running is a browser sheet, and a second one over it is the
+        // state nothing can close.
+        controller.gitHubConnector = { _ in connected += 1 }
+        controller.run(.connectGitHub)
+        controller.run(.connectGitHub)
+        controller.run(.disconnectGitHub)
+        XCTAssertEqual(connected, 2, "the second press does nothing while the first is up")
+        XCTAssertEqual(disconnected, 1)
     }
 
     /// The page and the spotlight must never offer "Sign in…" to someone

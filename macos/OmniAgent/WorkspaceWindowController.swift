@@ -375,9 +375,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// answer.
     var authGatePresenter: ((@escaping () -> Void) -> Void)?
     var serverSessionRevoker: (() -> Void)?
-    /// A log-out or a login screen is already running: the Accounts button
-    /// and its spotlight row do nothing until it finishes — see
-    /// `presentAccountGate` for what a second one costs.
+    /// Settings › Accounts' GitHub pair, same reasoning: `gitHubConnector`
+    /// is the browser round trip that links a GitHub account,
+    /// `gitHubDisconnector` the bearer `DELETE` that unlinks it, and each
+    /// reports how it ended so the caller has one place to finish.
+    var gitHubConnector: ((@escaping (AuthLinkOutcome) -> Void) -> Void)?
+    var gitHubDisconnector: ((@escaping (AuthLinkOutcome) -> Void) -> Void)?
+    /// The cold-start `POST /v1/auth/refresh` — see `restoreServerSession`.
+    var sessionRestorer: (() -> Void)?
+    /// Holds the link view model while its browser sheet is up: nothing else
+    /// references it, and `ASWebAuthenticationSession` does not retain the
+    /// object that started it.
+    private var gitHubActionModel: AuthGateViewModel?
+    /// A log-out, a login screen or a GitHub connect/disconnect is already
+    /// running: the Accounts buttons and their spotlight rows do nothing
+    /// until it finishes — see `presentAccountGate` for what a second one
+    /// costs.
     private var accountActionInFlight = false
     private let firstRunWindow: FirstRunWindowController
     private let settingsWindowController: SettingsWindowController
@@ -839,6 +852,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         settingsPanel.onSelect = { [weak self] section in self?.showSettings(section: section) }
         settingsView.onSignIn = { [weak self] in self?.signInToAccount() }
         settingsView.onLogOut = { [weak self] in self?.logOutOfAccount() }
+        settingsView.onConnectGitHub = { [weak self] in self?.connectGitHub() }
+        settingsView.onDisconnectGitHub = { [weak self] in self?.disconnectGitHub() }
         seedAccountFromMirror()
         settingsPanel.onHeightChange = { [weak self] in
             guard let self, settingsPanelPlace != .hidden else { return }
@@ -2625,9 +2640,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 workspaces: homeOpenWorkspaces().map {
                     PaletteWorkspace(id: $0.id, label: sidebarDisplayLabel(for: $0.id), path: $0.path)
                 },
-                // The page's own reading of the account rows, so the row the
-                // spotlight offers is the button the page shows.
-                signedIn: settingsView.accountSignedIn
+                // The page's own reading of the account rows, so the rows
+                // the spotlight offers are the buttons the page shows.
+                signedIn: settingsView.accountSignedIn,
+                githubConnected: settingsView.accountGitHubConnected
             ),
             files: repoFiles,
             filesRoot: latestGitStatus?.root,
@@ -2655,6 +2671,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             signInToAccount()
         case .signOut:
             logOutOfAccount()
+        case .connectGitHub:
+            connectGitHub()
+        case .disconnectGitHub:
+            disconnectGitHub()
         case let .openFile(path):
             openFileInEditor(URL(fileURLWithPath: path), pinned: true)
             // `openFileInEditor` focuses the pane it landed in but knows
@@ -3959,6 +3979,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// every path, including the one where nothing is shown.
     func presentLaunchGate(defaults: UserDefaults = .standard, completion: @escaping () -> Void) {
         guard AuthGate.needsSignIn(defaults) else {
+            restoreServerSession()
             authGateDidResolve()
             completion()
             return
@@ -3970,6 +3991,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.authGateDidResolve()
             completion()
         }
+    }
+
+    /// Trades the persisted refresh cookie for an access token, once, at
+    /// launch — for a mirror that says signed in, so there is a bearer in
+    /// hand before Settings › Accounts' GitHub buttons need one. (They can
+    /// refresh for themselves, but doing it here means the first press is
+    /// one round trip rather than two.)
+    ///
+    /// Deliberately silent either way: a 401 means the server session is
+    /// gone, and that changes nothing on screen. The launch gate latches on
+    /// the local mirror, not on the server's opinion — a signed-in user who
+    /// is offline must not be shown a login screen — and the GitHub buttons
+    /// say "sign in first" themselves when they find no session.
+    private func restoreServerSession() {
+        if let sessionRestorer {
+            sessionRestorer()
+            return
+        }
+        Task { _ = try? await AuthClient.shared.restoreSession() }
     }
 
     /// The gate is answered — signed in, or "continue without signing in".
@@ -4001,15 +4041,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         )
     }
 
-    /// Re-reads the two `auth_*` rows the Accounts section shows and hands
+    /// Re-reads the three `auth_*` rows the Accounts section shows and hands
     /// them to the page, which decides what it says (see
     /// `SettingsSurfaceView.applyAccount`). Runs whenever the answer can
     /// have changed: the launch gate resolving, the socket coming up (the
     /// launch read happens before the daemon is up and fails), the Settings
-    /// page being shown, and the gate this section itself puts up.
+    /// page being shown, the gate this section itself puts up, and either
+    /// GitHub button landing.
     ///
     /// Chained reads rather than `SettingsStore`'s batched `get`, for the
-    /// reason `AuthGateCoordinator.summary` chains its own: two keys are
+    /// reason `AuthGateCoordinator.summary` chains its own: three keys are
     /// cheaper than a `DispatchGroup.notify` queue hop. **A failed read is
     /// not an empty row** — the house rule `layoutReadFailed` and
     /// `SettingsStore.getBool` both keep: a daemon that could not answer
@@ -4025,7 +4066,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let signedIn = signedInRaw == "true"
             settingsStore.get(SettingsKey.authAccountEmail) { [weak self] emailResult in
                 guard let self, let email = try? emailResult.get() else { return }
-                settingsView.applyAccount(email: email, signedIn: signedIn)
+                settingsStore.get(SettingsKey.authGithubLogin) { [weak self] githubResult in
+                    guard let self, let githubLogin = try? githubResult.get() else { return }
+                    settingsView.applyAccount(email: email, signedIn: signedIn, githubLogin: githubLogin)
+                }
             }
         }
     }
@@ -4064,6 +4108,75 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             refreshAccountSection()
             accountActionInFlight = false
             presentAccountGate()
+        }
+    }
+
+    /// "Connect GitHub…" on the Accounts section, and the spotlight's row
+    /// for it: the browser round trip that links a GitHub account onto the
+    /// signed-in one, anchored to this window rather than to a login screen
+    /// — there is no gate to show, the account is already signed in.
+    func connectGitHub() {
+        runGitHubAction(gitHubConnector) { $0.connectGitHub() }
+    }
+
+    /// "Disconnect", and its spotlight row: one bearer `DELETE`, no browser.
+    func disconnectGitHub() {
+        runGitHubAction(gitHubDisconnector) { $0.disconnectGitHub() }
+    }
+
+    /// Both GitHub buttons, which differ only in the call they make: guard
+    /// the same in-flight flag the login screen and "Log out" share (a
+    /// second browser sheet over the first is the same unrecoverable state
+    /// `presentAccountGate` guards against), run the work, finish once.
+    private func runGitHubAction(
+        _ seam: ((@escaping (AuthLinkOutcome) -> Void) -> Void)?,
+        _ work: (AuthGateViewModel) -> Void
+    ) {
+        guard !accountActionInFlight else { return }
+        accountActionInFlight = true
+        if let seam {
+            seam { [weak self] outcome in self?.finishGitHubAction(outcome) }
+            return
+        }
+        let model = AuthGateViewModel(intent: .linkGitHub)
+        model.presentationWindow = { [weak self] in self?.window }
+        model.onLinkOutcome = { [weak self] outcome in
+            guard let self else { return }
+            gitHubActionModel = nil
+            finishGitHubAction(outcome)
+        }
+        gitHubActionModel = model
+        work(model)
+    }
+
+    /// How every GitHub connect and disconnect ends. `.linked` covers both:
+    /// a connect carries the handle it linked, a disconnect carries `nil`,
+    /// and either way the row is written and the section re-read from it —
+    /// re-read *after* the write lands, so the page can never show the value
+    /// it just replaced.
+    private func finishGitHubAction(_ outcome: AuthLinkOutcome) {
+        accountActionInFlight = false
+        switch outcome {
+        case let .linked(login):
+            settingsStore.set(SettingsKey.authGithubLogin, login ?? "") { [weak self] _ in
+                self?.refreshAccountSection()
+            }
+        case .cancelled:
+            // Backing out changes nothing, and says nothing.
+            break
+        case let .failed(message):
+            // The house modal, not an `NSAlert` — and `.critical`, since
+            // this is a report of something that went wrong rather than a
+            // question. One button: there is nothing to decide. The title
+            // is the bare subject because the message is the only side that
+            // knows what happened — "couldn't connect" would be a lie over
+            // a failed *dis*connect, and over "sign in first" either way.
+            presentWindowAsk(
+                title: "GitHub",
+                message: message,
+                severity: .critical,
+                options: [PaneAskOption("OK", isPrimary: true) { _ in }]
+            )
         }
     }
 

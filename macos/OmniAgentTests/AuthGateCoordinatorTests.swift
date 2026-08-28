@@ -54,7 +54,7 @@ final class AuthGateCoordinatorTests: XCTestCase {
         return defaults
     }
 
-    func testResolvingASignedInOutcomeWritesAllFiveKeys() {
+    func testResolvingASignedInOutcomeWritesAllSixKeys() {
         let client = FakeSettingsClient()
         let coordinator = AuthGateCoordinator(settings: SettingsStore(client: client))
 
@@ -63,7 +63,8 @@ final class AuthGateCoordinatorTests: XCTestCase {
             signedIn: true,
             persona: "research",
             accountEmail: "bruno@bonando.com",
-            accountName: "Bruno Bonando"
+            accountName: "Bruno Bonando",
+            githubLogin: "brunobonando"
         )) {
             expectation.fulfill()
         }
@@ -74,6 +75,7 @@ final class AuthGateCoordinatorTests: XCTestCase {
         XCTAssertEqual(client.rows["auth_persona"], "research")
         XCTAssertEqual(client.rows["auth_account_email"], "bruno@bonando.com")
         XCTAssertEqual(client.rows["auth_account_name"], "Bruno Bonando")
+        XCTAssertEqual(client.rows["auth_github_login"], "brunobonando")
     }
 
     func testResolvingASkipWritesEmptyStringsForPersonaAndAccount() {
@@ -90,12 +92,14 @@ final class AuthGateCoordinatorTests: XCTestCase {
         XCTAssertEqual(client.rows["auth_persona"], "")
         XCTAssertEqual(client.rows["auth_account_email"], "")
         XCTAssertEqual(client.rows["auth_account_name"], "")
+        XCTAssertEqual(client.rows["auth_github_login"], "")
     }
 
-    func testResetClearsAllFiveKeysToTheSignedOutUnresolvedShape() {
+    func testResetClearsAllSixKeysToTheSignedOutUnresolvedShape() {
         let client = FakeSettingsClient(rows: [
             "auth_gate_resolved": "true", "auth_signed_in": "true", "auth_persona": "student",
             "auth_account_email": "bruno@bonando.com", "auth_account_name": "Bruno Bonando",
+            "auth_github_login": "brunobonando",
         ])
         let coordinator = AuthGateCoordinator(settings: SettingsStore(client: client))
 
@@ -108,6 +112,7 @@ final class AuthGateCoordinatorTests: XCTestCase {
         XCTAssertEqual(client.rows["auth_persona"], "")
         XCTAssertEqual(client.rows["auth_account_email"], "")
         XCTAssertEqual(client.rows["auth_account_name"], "")
+        XCTAssertEqual(client.rows["auth_github_login"], "", "a log-out unlinks GitHub locally too")
     }
 
     func testSummaryPrefersTheRealAccountRows() {
@@ -145,26 +150,59 @@ final class AuthGateCoordinatorTests: XCTestCase {
 /// test ever touches URLSession or opens a browser.
 private final class StubAuthSigning: AuthSigning {
     struct Exchange: Equatable {
+        let provider: AuthProvider
         let code: String
         let codeVerifier: String
         let nonce: String
     }
 
+    struct Link: Equatable {
+        let state: String
+        let nonce: String
+    }
+
     let result: Result<AuthUser, AuthError>
     private(set) var exchanges: [Exchange] = []
+    private(set) var links: [Link] = []
+    private(set) var disconnects = 0
+    private(set) var restores = 0
+    /// What the link/unlink calls answer with; `nil` is success.
+    var linkFailure: AuthError?
+    /// What `restoreSession()` answers with; `nil` is success, and a success
+    /// also mints the token a bearer call needs.
+    var restoreFailure: AuthError?
+    var accessToken: String?
 
-    init(result: Result<AuthUser, AuthError>) {
+    init(result: Result<AuthUser, AuthError>, accessToken: String? = "tok") {
         self.result = result
+        self.accessToken = accessToken
     }
 
-    /// Never opened by a test — `signInWithApple` (the one method that would
+    /// Never opened by a test — `signIn(with:)` (the one method that would
     /// hand this to a browser) is exactly the part these tests do not drive.
-    func appleAuthorizeURL(state: String, nonce: String) -> URL {
-        URL(string: "https://appleid.apple.com/auth/authorize?state=\(state)&nonce=\(nonce)")!
+    func authorizeURL(for provider: AuthProvider, state: String, nonce: String) -> URL {
+        URL(string: "https://example.invalid/\(provider.rawValue)?state=\(state)&nonce=\(nonce)")!
     }
 
-    func loginWithApple(code: String, codeVerifier: String, nonce: String) async throws -> AuthUser {
-        exchanges.append(Exchange(code: code, codeVerifier: codeVerifier, nonce: nonce))
+    func login(with provider: AuthProvider, code: String, codeVerifier: String, nonce: String) async throws -> AuthUser {
+        exchanges.append(Exchange(provider: provider, code: code, codeVerifier: codeVerifier, nonce: nonce))
+        return try result.get()
+    }
+
+    func linkGitHub(state: String, nonce: String) async throws {
+        if let linkFailure { throw linkFailure }
+        links.append(Link(state: state, nonce: nonce))
+    }
+
+    func disconnectGitHub() async throws {
+        if let linkFailure { throw linkFailure }
+        disconnects += 1
+    }
+
+    func restoreSession() async throws -> AuthUser {
+        restores += 1
+        if let restoreFailure { throw restoreFailure }
+        accessToken = "refreshed"
         return try result.get()
     }
 }
@@ -175,19 +213,24 @@ private final class BusyProbeAuthSigning: AuthSigning {
     var model: AuthGateViewModel?
     private(set) var busyDuringExchange: Bool?
     private let user: AuthUser
+    var accessToken: String? = "tok"
 
     init(user: AuthUser) {
         self.user = user
     }
 
-    func appleAuthorizeURL(state: String, nonce: String) -> URL {
-        URL(string: "https://appleid.apple.com/auth/authorize")!
+    func authorizeURL(for provider: AuthProvider, state: String, nonce: String) -> URL {
+        URL(string: "https://example.invalid/\(provider.rawValue)")!
     }
 
-    func loginWithApple(code: String, codeVerifier: String, nonce: String) async throws -> AuthUser {
+    func login(with provider: AuthProvider, code: String, codeVerifier: String, nonce: String) async throws -> AuthUser {
         busyDuringExchange = await MainActor.run { [model] in model?.isBusy }
         return user
     }
+
+    func linkGitHub(state: String, nonce: String) async throws {}
+    func disconnectGitHub() async throws {}
+    func restoreSession() async throws -> AuthUser { user }
 }
 
 final class AuthGateViewModelTests: XCTestCase {
@@ -195,7 +238,8 @@ final class AuthGateViewModelTests: XCTestCase {
         email: String = "bruno@bonando.com",
         firstName: String? = nil,
         lastName: String? = nil,
-        name: String? = "Bruno Bonando"
+        name: String? = "Bruno Bonando",
+        githubLogin: String? = nil
     ) -> AuthUser {
         AuthUser(
             id: "user-1",
@@ -205,13 +249,19 @@ final class AuthGateViewModelTests: XCTestCase {
             name: name,
             role: "user",
             authProvider: "password",
-            emailVerified: true
+            emailVerified: true,
+            githubLogin: githubLogin
         )
     }
 
-    /// The `omniagent://auth/apple?…` URL Core bounces the browser into.
-    private func callback(code: String? = nil, state: String? = nil, error: String? = nil) -> URL {
-        var components = URLComponents(string: "omniagent://auth/apple")!
+    /// The `omniagent://auth/<provider>?…` URL Core bounces the browser into.
+    private func callback(
+        code: String? = nil,
+        state: String? = nil,
+        error: String? = nil,
+        provider: AuthProvider = .apple
+    ) -> URL {
+        var components = URLComponents(string: "omniagent://auth/\(provider.rawValue)")!
         components.queryItems = [
             code.map { URLQueryItem(name: "code", value: $0) },
             error.map { URLQueryItem(name: "error", value: $0) },
@@ -262,9 +312,10 @@ final class AuthGateViewModelTests: XCTestCase {
         var outcomes: [AuthGateOutcome] = []
         model.onResolved = { outcomes.append($0) }
 
-        await model.handleAppleCallback(callback(code: "one-time-code", state: pkce.state))
+        await model.handleCallback(callback(code: "one-time-code", state: pkce.state))
 
         XCTAssertEqual(stub.exchanges, [StubAuthSigning.Exchange(
+            provider: .apple,
             code: "one-time-code",
             codeVerifier: pkce.verifier,
             nonce: pkce.nonce
@@ -290,7 +341,7 @@ final class AuthGateViewModelTests: XCTestCase {
         let stub = StubAuthSigning(result: .success(user(firstName: "Ada", lastName: "Lovelace", name: nil)))
         let model = AuthGateViewModel(signer: stub)
 
-        await model.handleAppleCallback(callback(code: "c", state: model.pkce.state))
+        await model.handleCallback(callback(code: "c", state: model.pkce.state))
 
         XCTAssertEqual(model.state.accountName, "Ada Lovelace")
     }
@@ -303,7 +354,7 @@ final class AuthGateViewModelTests: XCTestCase {
         let stub = StubAuthSigning(result: .success(user()))
         let model = AuthGateViewModel(signer: stub)
 
-        await model.handleAppleCallback(callback(code: "stolen-code", state: "someone-elses-state"))
+        await model.handleCallback(callback(code: "stolen-code", state: "someone-elses-state"))
 
         XCTAssertTrue(stub.exchanges.isEmpty, "a mismatched state must never reach the exchange")
         XCTAssertEqual(model.errorMessage, "Sign-in response didn't match this app — try again.")
@@ -320,7 +371,7 @@ final class AuthGateViewModelTests: XCTestCase {
         let stub = StubAuthSigning(result: .success(user()))
         let model = AuthGateViewModel(signer: stub)
 
-        await model.handleAppleCallback(
+        await model.handleCallback(
             callback(state: model.pkce.state, error: "Apple did not return an email address.")
         )
 
@@ -340,7 +391,7 @@ final class AuthGateViewModelTests: XCTestCase {
         let stub = StubAuthSigning(result: .success(user()))
         let model = AuthGateViewModel(signer: stub)
 
-        await model.handleAppleCallback(
+        await model.handleCallback(
             callback(state: model.pkce.state, error: "user_cancelled_authorize")
         )
 
@@ -358,7 +409,7 @@ final class AuthGateViewModelTests: XCTestCase {
         let stub = StubAuthSigning(result: .success(user()))
         let model = AuthGateViewModel(signer: stub)
 
-        await model.handleAppleCallback(
+        await model.handleCallback(
             callback(state: "someone-elses-state", error: "user_cancelled_authorize")
         )
 
@@ -382,7 +433,7 @@ final class AuthGateViewModelTests: XCTestCase {
             let stub = StubAuthSigning(result: .success(user()))
             let model = AuthGateViewModel(signer: stub)
 
-            await model.handleAppleCallback(forged)
+            await model.handleCallback(forged)
 
             XCTAssertEqual(model.errorMessage, "Sign-in response didn't match this app — try again.", "\(forged)")
             XCTAssertFalse(model.errorMessage?.contains("555-0100") ?? false, "injected text was quoted: \(forged)")
@@ -399,7 +450,7 @@ final class AuthGateViewModelTests: XCTestCase {
         var outcomes: [AuthGateOutcome] = []
         model.onResolved = { outcomes.append($0) }
 
-        await model.handleAppleCallback(callback(code: "c", state: model.pkce.state))
+        await model.handleCallback(callback(code: "c", state: model.pkce.state))
 
         XCTAssertEqual(model.state.phase, .login)
         XCTAssertEqual(model.errorMessage, "That sign-in link has already been used.")
@@ -412,7 +463,7 @@ final class AuthGateViewModelTests: XCTestCase {
         let stub = StubAuthSigning(result: .failure(.network("")))
         let model = AuthGateViewModel(signer: stub)
 
-        await model.handleAppleCallback(callback(code: "c", state: model.pkce.state))
+        await model.handleCallback(callback(code: "c", state: model.pkce.state))
 
         XCTAssertEqual(model.errorMessage, "Could not reach the OmniAgent API.")
         XCTAssertEqual(model.state.phase, .login)
@@ -425,10 +476,223 @@ final class AuthGateViewModelTests: XCTestCase {
         probe.model = model
         XCTAssertFalse(model.isBusy)
 
-        await model.handleAppleCallback(callback(code: "c", state: model.pkce.state))
+        await model.handleCallback(callback(code: "c", state: model.pkce.state))
 
         XCTAssertEqual(probe.busyDuringExchange, true, "isBusy must be raised while the request is in flight")
         XCTAssertFalse(model.isBusy, "and lowered once it lands")
+    }
+
+    // MARK: - GitHub
+
+    /// GitHub's callback is redeemed at GitHub's own exchange route, with
+    /// this attempt's verifier and nonce — the same proof Apple's half
+    /// presents, against a different provider.
+    @MainActor
+    func testAGitHubCallbackRedeemsTheCodeAtGitHubsExchange() async {
+        let stub = StubAuthSigning(result: .success(user(githubLogin: "brunobonando")))
+        let model = AuthGateViewModel(signer: stub)
+        model.attemptProvider = .github
+        let pkce = model.pkce
+
+        await model.handleCallback(callback(code: "gh-code", state: pkce.state, provider: .github))
+
+        XCTAssertEqual(stub.exchanges, [StubAuthSigning.Exchange(
+            provider: .github,
+            code: "gh-code",
+            codeVerifier: pkce.verifier,
+            nonce: pkce.nonce
+        )])
+        XCTAssertEqual(model.state.phase, .personalize)
+        XCTAssertEqual(model.state.githubLogin, "brunobonando", "the handle rides into the outcome")
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.isBusy)
+    }
+
+    /// GitHub spells "the user pressed Cancel" `access_denied`, not Apple's
+    /// `user_cancelled_authorize`. Both are protocol identifiers, and
+    /// neither is a sentence to show anyone.
+    @MainActor
+    func testBackingOutOnGitHubsPageLeavesTheScreenWithNothingToRead() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub)
+        model.attemptProvider = .github
+
+        await model.handleCallback(
+            callback(state: model.pkce.state, error: "access_denied", provider: .github)
+        )
+
+        XCTAssertNil(model.errorMessage, "a cancel is not a failure to report")
+        XCTAssertFalse(model.isBusy)
+        XCTAssertEqual(model.state.phase, .login)
+        XCTAssertTrue(stub.exchanges.isEmpty)
+
+        // And the other provider's word for it is not this provider's: an
+        // Apple cancel arriving in a GitHub attempt is just an error.
+        await model.handleCallback(
+            callback(state: model.pkce.state, error: "user_cancelled_authorize", provider: .github)
+        )
+        XCTAssertEqual(model.errorMessage, "user_cancelled_authorize")
+    }
+
+    /// The session intercepts *any* `omniagent://` navigation its browser
+    /// makes, so a GitHub attempt can be handed an `/auth/apple` callback.
+    /// It proves nothing about this attempt, so nothing in it is read — not
+    /// even a `state` that happens to match.
+    @MainActor
+    func testACallbackFromTheOtherProviderIsRefusedBeforeAnythingInItIsRead() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub)
+        model.attemptProvider = .github
+
+        await model.handleCallback(callback(code: "code", state: model.pkce.state, provider: .apple))
+
+        XCTAssertEqual(model.errorMessage, "Sign-in response didn't match this app — try again.")
+        XCTAssertTrue(stub.exchanges.isEmpty, "the wrong provider's code must never be redeemed")
+        XCTAssertEqual(model.state.phase, .login)
+        XCTAssertFalse(model.isBusy)
+    }
+
+    /// "Connect GitHub…" arms Core with this attempt *on the signed-in
+    /// account* before the browser goes anywhere, sends the browser to
+    /// Core's start URL, and reports the linked handle to its caller instead
+    /// of resolving a gate there is none of.
+    @MainActor
+    func testConnectGitHubLinksFirstThenOpensTheStartURLAndReportsTheHandle() async {
+        let stub = StubAuthSigning(result: .success(user(githubLogin: "brunobonando")))
+        let model = AuthGateViewModel(signer: stub, intent: .linkGitHub)
+        var outcomes: [AuthLinkOutcome] = []
+        model.onLinkOutcome = { outcomes.append($0) }
+        var opened: URL?
+        let browser = expectation(description: "the browser is sent somewhere")
+        model.webAuthOpener = { url in
+            opened = url
+            browser.fulfill()
+            return true
+        }
+
+        model.connectGitHub()
+        await fulfillment(of: [browser], timeout: 2)
+
+        XCTAssertEqual(
+            stub.links,
+            [StubAuthSigning.Link(state: model.pkce.state, nonce: model.pkce.nonce)],
+            "Core has to be told to expect this attempt before the browser runs"
+        )
+        XCTAssertEqual(model.attemptProvider, .github)
+        XCTAssertEqual(
+            opened,
+            stub.authorizeURL(for: .github, state: model.pkce.state, nonce: model.pkce.nonce),
+            "and the browser goes to the provider's start URL for this attempt"
+        )
+        XCTAssertTrue(outcomes.isEmpty, "the browser has not answered yet")
+
+        await model.handleCallback(callback(code: "gh-code", state: model.pkce.state, provider: .github))
+
+        XCTAssertEqual(outcomes, [.linked(githubLogin: "brunobonando")])
+        XCTAssertEqual(model.state.phase, .login, "a link never drives the gate reducer")
+    }
+
+    /// The access token lives in memory only, so a launch that has not
+    /// refreshed has none while the refresh cookie is still good. The link
+    /// call refreshes first rather than failing on a session that is fine.
+    @MainActor
+    func testConnectGitHubRefreshesTheSessionWhenThereIsNoTokenInHand() async {
+        let stub = StubAuthSigning(result: .success(user()), accessToken: nil)
+        let model = AuthGateViewModel(signer: stub, intent: .linkGitHub)
+        let browser = expectation(description: "the browser is sent somewhere")
+        model.webAuthOpener = { _ in
+            browser.fulfill()
+            return true
+        }
+
+        model.connectGitHub()
+        await fulfillment(of: [browser], timeout: 2)
+
+        XCTAssertEqual(stub.restores, 1)
+        XCTAssertEqual(stub.links.count, 1, "and the link went out after the refresh, not instead of it")
+    }
+
+    /// No session at all: the honest answer is to sign in, not "your session
+    /// expired" — and it has to reach the caller, or the button stays dead.
+    @MainActor
+    func testConnectGitHubWithNoSessionSaysToSignInFirstAndReportsIt() async {
+        let stub = StubAuthSigning(result: .success(user()), accessToken: nil)
+        stub.restoreFailure = .sessionExpired
+        let model = AuthGateViewModel(signer: stub, intent: .linkGitHub)
+        model.webAuthOpener = { _ in
+            XCTFail("no browser may open without an account to link onto")
+            return false
+        }
+        let outcomes = await collect(from: model) { model.connectGitHub() }
+
+        XCTAssertEqual(outcomes, [.failed(AuthGateViewModel.signInFirstMessage)])
+        XCTAssertTrue(AuthGateViewModel.signInFirstMessage.hasPrefix("Sign in first"))
+        XCTAssertTrue(stub.links.isEmpty, "nothing to link onto")
+        XCTAssertFalse(model.isBusy, "the button has to come back")
+    }
+
+    /// Disconnect has no browser and no callback: one bearer call, reported
+    /// through the same one ending a connect uses — `nil`, since linked to
+    /// nothing is exactly what it leaves behind.
+    @MainActor
+    func testDisconnectGitHubReportsTheAccountAsLinkedToNothing() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub, intent: .linkGitHub)
+
+        let outcomes = await collect(from: model) { model.disconnectGitHub() }
+
+        XCTAssertEqual(stub.disconnects, 1)
+        XCTAssertEqual(outcomes, [.linked(githubLogin: nil)])
+        XCTAssertFalse(model.isBusy)
+    }
+
+    /// A failed disconnect must report too — an in-flight flag left up is a
+    /// button that does nothing for the rest of the launch.
+    @MainActor
+    func testAFailedDisconnectReportsTheServersOwnWords() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        stub.linkFailure = .server(409, "GitHub is the only sign-in method on this account.")
+        let model = AuthGateViewModel(signer: stub, intent: .linkGitHub)
+
+        let outcomes = await collect(from: model) { model.disconnectGitHub() }
+
+        XCTAssertEqual(outcomes, [.failed("GitHub is the only sign-in method on this account.")])
+    }
+
+    /// Runs `work` and waits for the one `onLinkOutcome` it must produce —
+    /// these paths report from inside a `Task`, so nothing about them is
+    /// observable on the line after the call.
+    @MainActor
+    private func collect(
+        from model: AuthGateViewModel,
+        _ work: () -> Void
+    ) async -> [AuthLinkOutcome] {
+        var outcomes: [AuthLinkOutcome] = []
+        let reported = expectation(description: "the link outcome is reported")
+        model.onLinkOutcome = { outcome in
+            outcomes.append(outcome)
+            reported.fulfill()
+        }
+        work()
+        await fulfillment(of: [reported], timeout: 2)
+        return outcomes
+    }
+
+    /// Backing out of a link is not a failure either — and the caller has to
+    /// hear about it all the same.
+    @MainActor
+    func testBackingOutOfALinkReportsACancelAndWritesNothing() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub, intent: .linkGitHub)
+        var outcomes: [AuthLinkOutcome] = []
+        model.onLinkOutcome = { outcomes.append($0) }
+
+        await model.handleCallback(
+            callback(state: model.pkce.state, error: "access_denied", provider: .github)
+        )
+
+        XCTAssertEqual(outcomes, [.cancelled])
+        XCTAssertTrue(stub.exchanges.isEmpty)
     }
 
     @MainActor
@@ -436,10 +700,10 @@ final class AuthGateViewModelTests: XCTestCase {
         let stub = StubAuthSigning(result: .success(user()))
         let model = AuthGateViewModel(signer: stub)
 
-        await model.handleAppleCallback(callback(code: "c", state: "wrong"))
+        await model.handleCallback(callback(code: "c", state: "wrong"))
         XCTAssertNotNil(model.errorMessage)
 
-        await model.handleAppleCallback(callback(code: "c", state: model.pkce.state))
+        await model.handleCallback(callback(code: "c", state: model.pkce.state))
         XCTAssertNil(model.errorMessage, "the retry's own attempt must clear the last one's message")
         XCTAssertEqual(model.state.phase, .personalize)
     }

@@ -5,9 +5,9 @@ import AppKit
 // every edge, on plain glass so the app's grey-to-black ground shows through
 // — with "Settings" in the title strip above it, the way the Desk names its
 // session, and the picked section's content in a centred column beside it.
-// The screens come one by one: Accounts has one (who is signed in, and the
-// button that changes it); every other section still says "Under
-// development".
+// The screens come one by one: Accounts has one (who is signed in, whether
+// GitHub is connected, and the button that changes each); every other
+// section still says "Under development".
 //
 // The panel is one object in two roles (2026-08-28): the sidebar gear
 // *offers* it beside itself, tip on the gear, as the menu; a pick slides it
@@ -311,20 +311,29 @@ final class SettingsSurfaceView: NSView {
         color: ShellPalette.inkMuted
     )
     /// Accounts, and only Accounts: who is signed in, and the one button
-    /// that changes it. The first section with a screen instead of a
-    /// promise — the rest keep `subtitleField`.
+    /// that changes it — with the GitHub pair below it. The first section
+    /// with a screen instead of a promise — the rest keep `subtitleField`.
     let accountField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
     let accountButton = NSButton(title: "", target: nil, action: nil)
+    /// The GitHub connection, under the account it belongs to: which handle
+    /// is linked, and the one button that links or unlinks it.
+    let githubField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
+    let githubButton = NSButton(title: "", target: nil, action: nil)
     /// What the block currently says about the account — the one reading of
     /// it, so the label and the button can never disagree, and so the
     /// spotlight's row (which offers "Log out" or "Sign in with Apple…" off
     /// exactly this) says what the page says. See `applyAccount`.
     private(set) var accountSignedIn = false
-    /// The account block's two buttons, as one press each. `onLogOut` is
-    /// the destructive half; both are the controller's to perform — this
-    /// view knows nothing about auth.
+    /// The same, for the GitHub pair: the spotlight offers "Disconnect
+    /// GitHub" or "Connect GitHub…" off this one reading.
+    private(set) var accountGitHubConnected = false
+    /// The account block's buttons, as one press each. `onLogOut` and
+    /// `onDisconnectGitHub` are the destructive halves; all four are the
+    /// controller's to perform — this view knows nothing about auth.
     var onSignIn: (() -> Void)?
     var onLogOut: (() -> Void)?
+    var onConnectGitHub: (() -> Void)?
+    var onDisconnectGitHub: (() -> Void)?
     /// The section on screen. Sticks for as long as the app lives, like
     /// Home's own picks.
     private(set) var section: SettingsSection = .general
@@ -339,13 +348,25 @@ final class SettingsSurfaceView: NSView {
         accountButton.target = self
         accountButton.action = #selector(accountButtonPressed)
         accountButton.translatesAutoresizingMaskIntoConstraints = false
+        githubButton.bezelStyle = .rounded
+        githubButton.controlSize = .regular
+        githubButton.font = ShellFont.ui(13)
+        githubButton.target = self
+        githubButton.action = #selector(githubButtonPressed)
+        githubButton.translatesAutoresizingMaskIntoConstraints = false
         applyAccount(email: nil, signedIn: false)
 
-        let column = NSStackView(views: [titleField, subtitleField, accountField, accountButton])
+        let column = NSStackView(views: [
+            titleField, subtitleField, accountField, accountButton, githubField, githubButton,
+        ])
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 6
         column.setCustomSpacing(14, after: accountField)
+        // A gap between the two blocks, so the GitHub line reads as a fact
+        // about the account above it rather than a second caption on it.
+        column.setCustomSpacing(22, after: accountButton)
+        column.setCustomSpacing(14, after: githubField)
         column.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
@@ -391,6 +412,8 @@ final class SettingsSurfaceView: NSView {
         subtitleField.isHidden = isAccounts
         accountField.isHidden = !isAccounts
         accountButton.isHidden = !isAccounts
+        githubField.isHidden = !isAccounts
+        githubButton.isHidden = !isAccounts
     }
 
     /// The account as the page shows it, handed in by the controller — this
@@ -407,7 +430,15 @@ final class SettingsSurfaceView: NSView {
     /// revoked. So a signed-in account with no address yet (and the
     /// fake-login era's row, which never had one — see
     /// `AuthGate.describeAuthSummary`) says plain "Signed in".
-    func applyAccount(email: String?, signedIn: Bool) {
+    ///
+    /// **The GitHub line is shown whether or not the account is signed in**,
+    /// and offers Connect either way — the same one row the spotlight offers,
+    /// in the same two states. Hiding it while signed out would make the
+    /// spotlight and the page disagree, and the honest answer to pressing
+    /// Connect with no session ("sign in first", from
+    /// `AuthGateViewModel.signInFirstMessage`) is more use than a row that
+    /// silently is not there.
+    func applyAccount(email: String?, signedIn: Bool, githubLogin: String? = nil) {
         let address = (email ?? "").trimmingCharacters(in: .whitespaces)
         accountSignedIn = signedIn
         accountField.stringValue = switch (signedIn, address.isEmpty) {
@@ -416,9 +447,18 @@ final class SettingsSurfaceView: NSView {
         case (true, false): "Signed in as \(address)"
         }
         accountButton.title = signedIn ? "Log out" : "Sign in…"
+
+        let login = (githubLogin ?? "").trimmingCharacters(in: .whitespaces)
+        accountGitHubConnected = !login.isEmpty
+        githubField.stringValue = login.isEmpty ? "GitHub: not connected" : "GitHub: @\(login)"
+        githubButton.title = login.isEmpty ? "Connect GitHub…" : "Disconnect"
     }
 
     @objc private func accountButtonPressed() {
         if accountSignedIn { onLogOut?() } else { onSignIn?() }
+    }
+
+    @objc private func githubButtonPressed() {
+        if accountGitHubConnected { onDisconnectGitHub?() } else { onConnectGitHub?() }
     }
 }

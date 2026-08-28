@@ -59,6 +59,14 @@ enum SettingsKey {
     /// skipped.
     static let authAccountName = "auth_account_name"
 
+    /// **No TypeScript twin yet — this is a native-first row**, for the same
+    /// reason as `authAccountEmail` above. The GitHub handle linked to the
+    /// account ("brunobonando"), written without the `@` the Accounts
+    /// section prints, or `""` when GitHub is not connected. Written by
+    /// `AuthGateCoordinator.persist` from `AuthUser.githubLogin` and by
+    /// Settings › Accounts' own Connect/Disconnect pair.
+    static let authGithubLogin = "auth_github_login"
+
     /// `ui/src/state/closedWorkspaces.ts`'s `CLOSED_WORKSPACES_SETTING_KEY`.
     /// One JSON array of workspace ids — see `ClosedWorkspacesCodec`, which
     /// matches the web codec's shape exactly because the row is shared.

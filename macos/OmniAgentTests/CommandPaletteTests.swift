@@ -28,7 +28,7 @@ final class CommandPaletteTests: XCTestCase {
                 "destination:home", "destination:todo", "destination:terminals", "destination:settings",
                 "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
-                "settings:accounts:signin",
+                "settings:accounts:signin", "settings:accounts:github:connect",
             ]
         )
     }
@@ -38,7 +38,9 @@ final class CommandPaletteTests: XCTestCase {
     /// button the page is showing, never both.
     func testTheAccountButtonIsASpotlightRowInWhicheverStateItIsIn() {
         let whenSignedOut = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
-        let signInRow = whenSignedOut.filter { $0.id.hasPrefix("settings:accounts:") }
+        // By action, not by id prefix: the GitHub pair lives under
+        // `settings:accounts:` too, and this test is about the other button.
+        let signInRow = whenSignedOut.filter { $0.action == .signIn || $0.action == .signOut }
         XCTAssertEqual(signInRow.map(\.id), ["settings:accounts:signin"], "one row, not both halves of a toggle")
         XCTAssertEqual(signInRow.first?.title, "Sign in with Apple…")
         XCTAssertEqual(signInRow.first?.action, .signIn)
@@ -49,7 +51,7 @@ final class CommandPaletteTests: XCTestCase {
         let whenSignedIn = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil, signedIn: true
         )
-        let logOutRow = whenSignedIn.filter { $0.id.hasPrefix("settings:accounts:") }
+        let logOutRow = whenSignedIn.filter { $0.action == .signIn || $0.action == .signOut }
         XCTAssertEqual(logOutRow.map(\.id), ["settings:accounts:logout"])
         XCTAssertEqual(logOutRow.first?.title, "Log out")
         XCTAssertEqual(logOutRow.first?.action, .signOut)
@@ -73,6 +75,40 @@ final class CommandPaletteTests: XCTestCase {
             model.matches.contains { $0.id == "settings:accounts:signin" },
             "and by 'account', beside the section it lives in"
         )
+    }
+
+    /// Settings › Accounts' GitHub button is a row of its own too, and the
+    /// same rule applies: whichever half the account makes true, never both.
+    func testTheGitHubButtonIsASpotlightRowInWhicheverStateItIsIn() {
+        let whenDisconnected = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
+        let connectRow = whenDisconnected.filter { $0.action == .connectGitHub || $0.action == .disconnectGitHub }
+        XCTAssertEqual(connectRow.map(\.id), ["settings:accounts:github:connect"], "one row, not both halves")
+        XCTAssertEqual(connectRow.first?.title, "Connect GitHub…")
+        XCTAssertEqual(connectRow.first?.action, .connectGitHub)
+        XCTAssertEqual(connectRow.first?.symbol, "link.badge.plus")
+        XCTAssertEqual(connectRow.first?.subtitle, "Settings › Accounts", "the row says where it lives")
+        XCTAssertEqual(connectRow.first?.section, .places)
+
+        let whenConnected = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil, githubConnected: true
+        )
+        let disconnectRow = whenConnected.filter { $0.action == .connectGitHub || $0.action == .disconnectGitHub }
+        XCTAssertEqual(disconnectRow.map(\.id), ["settings:accounts:github:disconnect"])
+        XCTAssertEqual(disconnectRow.first?.title, "Disconnect GitHub")
+        XCTAssertEqual(disconnectRow.first?.action, .disconnectGitHub)
+        XCTAssertEqual(disconnectRow.first?.symbol, "personalhotspot.slash")
+        XCTAssertEqual(disconnectRow.first?.subtitle, "Settings › Accounts")
+        XCTAssertEqual(disconnectRow.first?.section, .places)
+
+        // Whichever state it is in, "github" is what a user types for it.
+        var model = CommandPaletteModel(commands: whenDisconnected)
+        model.update(query: "github")
+        XCTAssertEqual(model.matches.first?.id, "settings:accounts:github:connect")
+        model = CommandPaletteModel(commands: whenConnected)
+        model.update(query: "github")
+        XCTAssertEqual(model.matches.first?.id, "settings:accounts:github:disconnect")
+        model.update(query: "disconnect")
+        XCTAssertEqual(model.matches.first?.id, "settings:accounts:github:disconnect")
     }
 
     /// Every open workspace is a row — renamed as the sidebar shows it, found

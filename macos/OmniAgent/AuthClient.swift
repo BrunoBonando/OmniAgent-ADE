@@ -2,9 +2,10 @@ import CryptoKit
 import Foundation
 import Security
 
-/// The one-attempt secrets of Apple's web sign-in flow, generated fresh for
-/// every press of "Continue with Apple" and carried from the authorize URL
-/// through to the exchange call.
+/// The one-attempt secrets of a web sign-in flow, generated fresh for every
+/// press of "Continue with Apple"/"Continue with GitHub" (and every
+/// "Connect GitHub…") and carried from the authorize URL through to the
+/// exchange call.
 ///
 /// Why PKCE at all when the app has no client secret to protect: the
 /// browser's redirect back into `omniagent://` is the weakest hop in the
@@ -13,13 +14,13 @@ import Security
 /// only this launch of the app knows, so a stolen code is worthless without
 /// the verifier the exchange call also has to present, and a callback that
 /// wasn't produced by *this* attempt fails the comparison in
-/// `AuthGateViewModel.handleAppleCallback`.
+/// `AuthGateViewModel.handleCallback`.
 ///
 /// - `verifier`: 32 random bytes, base64url, unpadded (43 characters) — the
 ///   RFC 7636 shape, which is also what Core validates against.
 /// - `state`: base64url(SHA256(verifier)), unpadded. Doubles as the OAuth
-///   `state` parameter *and* the PKCE challenge — Apple echoes it back
-///   verbatim through Core's callback.
+///   `state` parameter *and* the PKCE challenge — the provider echoes it
+///   back verbatim through Core's callback.
 /// - `nonce`: 16 random bytes as 32 hex characters; Core checks it against
 ///   the `nonce` claim of the id_token Apple returns to the exchange.
 struct PKCE {
@@ -60,6 +61,47 @@ struct PKCE {
     }
 }
 
+/// The identity providers Core's web sign-in flows speak for. Everything
+/// that differs between them is here, so the view model, the login screen
+/// and `AuthClient` all branch on one value instead of three copies of the
+/// same `if apple`.
+///
+/// Both flows have the same shape: open a browser at an authorize URL, get
+/// bounced back into `omniagent://auth/<provider>?code&state`, redeem the
+/// one-time code at Core. Only the three facts below differ.
+enum AuthProvider: String, CaseIterable, Equatable {
+    case apple
+    case github
+
+    /// The path half of the `omniagent://` URL Core bounces the browser
+    /// into — `/auth/apple`, `/auth/github`. The running attempt's own
+    /// value is what an arriving callback has to match before a single
+    /// field of it is believed; see `AuthGateViewModel.handleCallback`.
+    var callbackPath: String { "/auth/\(rawValue)" }
+
+    /// What the provider form-posts as `error` when the user presses Cancel
+    /// on its own authorize page, which Core relays verbatim. A protocol
+    /// identifier, not a sentence — so it must never reach the error label.
+    var cancelError: String {
+        switch self {
+        case .apple: return "user_cancelled_authorize"
+        case .github: return "access_denied"
+        }
+    }
+
+    /// Core's route that redeems this provider's one-time code.
+    var exchangePath: String { "v1/auth/\(rawValue)/exchange" }
+
+    /// A callback URL's path in the same spelling `callbackPath` uses.
+    /// `omniagent://auth/github` parses as host `auth` and path `/github` —
+    /// the scheme is followed by an authority — so the two halves have to be
+    /// joined back before they can be compared.
+    static func callbackPath(of url: URL) -> String {
+        let joined = "/\(url.host ?? "")\(url.path)"
+        return joined.count > 1 && joined.hasSuffix("/") ? String(joined.dropLast()) : joined
+    }
+}
+
 /// The signed-in identity the Core API's `POST /v1/auth/*` endpoints return —
 /// the subset of Core's `UserResponse` the native app actually renders (auth
 /// gate greeting, settings account row). Core sends more fields
@@ -79,6 +121,12 @@ struct AuthUser: Decodable, Equatable {
     let role: String
     let authProvider: String
     let emailVerified: Bool
+    /// The GitHub handle linked to this account (`github_login` on the
+    /// wire), or `nil` when none is. Note this is *not* `authProvider`: an
+    /// account that signs in with Apple can still have GitHub connected
+    /// from Settings › Accounts, and that is the pair the Accounts section
+    /// shows.
+    let githubLogin: String?
 }
 
 /// Every way an auth call fails, pre-sorted into the buckets the login UI
@@ -136,8 +184,9 @@ enum AuthError: Error, LocalizedError, Equatable {
 }
 
 /// The native app's client for Core's `/v1/auth` endpoints
-/// (`OmniAgent-Core`, `api.omni-agent.ai`) — login, Sign in with Apple,
-/// refresh, logout. URLSession only, no dependencies.
+/// (`OmniAgent-Core`, `api.omni-agent.ai`) — login, the Apple and GitHub web
+/// flows, linking/unlinking GitHub, refresh, logout. URLSession only, no
+/// dependencies.
 ///
 /// Token model, and why there is no manual cookie code here:
 /// - The short-lived **access token** arrives in the JSON body
@@ -216,18 +265,42 @@ final class AuthClient {
     /// configured for this one.
     static let appleServicesID = "ai.omni-agent.signin"
 
-    /// The URL `ASWebAuthenticationSession` opens to start Apple's web
-    /// sign-in. `redirect_uri` points at *Core*, not at the app: Apple only
-    /// redirects to https endpoints registered on the Services ID, and
-    /// `response_mode=form_post` (mandatory once `scope` asks for name or
-    /// email) POSTs the result, which a custom URL scheme cannot receive.
-    /// Core takes the POST and bounces the browser on to
-    /// `omniagent://auth/apple?code=…&state=…`.
+    /// The URL `ASWebAuthenticationSession` opens to start `provider`'s web
+    /// sign-in. The two are not the same kind of URL and deliberately are
+    /// not made to look alike: Apple's is Apple's own authorize endpoint,
+    /// carrying Core's callback as `redirect_uri`; GitHub's is *Core's*
+    /// start route, which redirects on to GitHub with the client id and
+    /// scopes only Core knows. Both carry this attempt's `state` and
+    /// `nonce`, and both end at `omniagent://auth/<provider>`.
+    func authorizeURL(for provider: AuthProvider, state: String, nonce: String) -> URL {
+        switch provider {
+        case .apple:
+            return appleAuthorizeURL(state: state, nonce: nonce)
+        case .github:
+            var components = URLComponents(
+                url: baseURL.appendingPathComponent("v1/auth/github/start"),
+                resolvingAgainstBaseURL: false
+            )!
+            components.queryItems = [
+                URLQueryItem(name: "state", value: state),
+                URLQueryItem(name: "nonce", value: nonce),
+            ]
+            // Only fails for a query no `URLQueryItem` can produce.
+            return components.url!
+        }
+    }
+
+    /// Apple's half of `authorizeURL(for:state:nonce:)`. `redirect_uri`
+    /// points at *Core*, not at the app: Apple only redirects to https
+    /// endpoints registered on the Services ID, and `response_mode=form_post`
+    /// (mandatory once `scope` asks for name or email) POSTs the result,
+    /// which a custom URL scheme cannot receive. Core takes the POST and
+    /// bounces the browser on to `omniagent://auth/apple?code=…&state=…`.
     ///
     /// Built with `URLComponents` so the space-separated `response_type` and
     /// `scope` values percent-encode themselves rather than being hand-glued
     /// into a query string.
-    func appleAuthorizeURL(state: String, nonce: String) -> URL {
+    private func appleAuthorizeURL(state: String, nonce: String) -> URL {
         var components = URLComponents(string: "https://appleid.apple.com/auth/authorize")!
         components.queryItems = [
             URLQueryItem(name: "client_id", value: Self.appleServicesID),
@@ -245,21 +318,43 @@ final class AuthClient {
         return components.url!
     }
 
-    /// `POST /v1/auth/apple/exchange` — the second half of the web flow.
-    /// `code` is the **one-time code Core minted** for this app (not Apple's
-    /// authorization code, which Core already redeemed server-side), and it
-    /// is redeemed exactly once: `code_verifier` proves this is the same app
-    /// launch that opened the authorize URL, and `nonce` is matched against
-    /// the id_token claim Apple returned. Core creates the account on first
-    /// sign-in from the name/email Apple posted to its callback, so unlike
-    /// the old native flow there is nothing name-shaped for the client to
-    /// pass along. No Turnstile on this route; rate-limited server-side.
-    func loginWithApple(code: String, codeVerifier: String, nonce: String) async throws -> AuthUser {
-        try await authenticate(path: "v1/auth/apple/exchange", body: [
+    /// `POST /v1/auth/<provider>/exchange` — the second half of a web flow.
+    /// `code` is the **one-time code Core minted** for this app (not the
+    /// provider's authorization code, which Core already redeemed
+    /// server-side), and it is redeemed exactly once: `code_verifier` proves
+    /// this is the same app launch that opened the authorize URL, and
+    /// `nonce` is matched against what the provider returned (Apple's
+    /// id_token claim). Core creates the account on first sign-in from the
+    /// name/email the provider posted to its callback, so unlike the old
+    /// native flow there is nothing name-shaped for the client to pass
+    /// along. No Turnstile on these routes; rate-limited server-side.
+    func login(with provider: AuthProvider, code: String, codeVerifier: String, nonce: String) async throws -> AuthUser {
+        try await authenticate(path: provider.exchangePath, body: [
             "code": code,
             "code_verifier": codeVerifier,
             "nonce": nonce,
         ])
+    }
+
+    /// `POST /v1/auth/github/link` — GitHub's *other* entry point: not a way
+    /// in, but a link onto the account already signed in, so Settings ›
+    /// Accounts can connect GitHub without a second identity. Core arms the
+    /// attempt with this `state`/`nonce` and answers 204; the browser is
+    /// then sent to the same start URL a sign-in uses, and the callback is
+    /// redeemed at the same exchange route.
+    ///
+    /// Bearer-authorized, which is the whole reason `restoreSession()` runs
+    /// at launch for a signed-in mirror: without a token there is no
+    /// account to link *to*.
+    func linkGitHub(state: String, nonce: String) async throws {
+        try await authorized(path: "v1/auth/github/link", method: "POST", body: ["state": state, "nonce": nonce])
+    }
+
+    /// `DELETE /v1/auth/github` — unlinks GitHub from the signed-in account.
+    /// Bearer-authorized, 204 on success. Nothing local to clean up beyond
+    /// the `auth_github_login` row the caller clears.
+    func disconnectGitHub() async throws {
+        try await authorized(path: "v1/auth/github", method: "DELETE", body: nil)
     }
 
     /// `POST /v1/auth/refresh` — the cold-start "am I still signed in?"
@@ -326,6 +421,28 @@ final class AuthClient {
             throw AuthError.invalidCredentials(detail(from: data))
         case 403:
             throw AuthError.forbidden(detail(from: data))
+        default:
+            throw AuthError.server(http.statusCode, detail(from: data))
+        }
+    }
+
+    /// The bearer-authorized, nothing-to-decode call: the GitHub link and
+    /// unlink routes both answer 204. A missing access token is
+    /// `.sessionExpired` rather than an unauthenticated request, so the
+    /// caller's "restore the session and try again" path is reached without
+    /// a pointless round trip — and a 401 says the same thing, since the
+    /// token in hand has expired.
+    private func authorized(path: String, method: String, body: [String: Any]?) async throws {
+        guard let token = accessToken else { throw AuthError.sessionExpired }
+        var request = request(path: path, body: body)
+        request.httpMethod = method
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, http) = try await perform(request)
+        switch http.statusCode {
+        case 200...299:
+            return
+        case 401:
+            throw AuthError.sessionExpired
         default:
             throw AuthError.server(http.statusCode, detail(from: data))
         }
