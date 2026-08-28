@@ -1677,6 +1677,76 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
         wait(for: [gateCameBack], timeout: 5)
         XCTAssertEqual(presented, 2)
+        XCTAssertFalse(controller.settingsView.accountSignedIn)
+        XCTAssertEqual(
+            controller.settingsView.accountField.stringValue,
+            "Not signed in",
+            "the page stops naming an account the moment the clearing lands, not when the gate closes"
+        )
+    }
+
+    /// The page and the spotlight must never offer "Sign in…" to someone
+    /// already signed in: taking that offer opens the gate, and "continue
+    /// without signing in" resolves it as signed *out* — a local sign-out
+    /// with the server session never revoked. The rows are a daemon round
+    /// trip away (and the socket may never come up), so the answer is
+    /// seeded from the synchronous `UserDefaults` mirror the launch gate
+    /// itself is decided by.
+    func testTheAccountIsSeededFromTheLaunchGatesMirrorBeforeAnySettingsRead() throws {
+        let defaults = UserDefaults.standard
+        let mirrored = defaults.object(forKey: AuthGate.signedInDefaultsKey)
+        defer {
+            if let mirrored {
+                defaults.set(mirrored, forKey: AuthGate.signedInDefaultsKey)
+            } else {
+                defaults.removeObject(forKey: AuthGate.signedInDefaultsKey)
+            }
+        }
+        defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
+
+        // No socket, so no settings read can ever complete here — whatever
+        // this controller says about the account, it says from the mirror.
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        XCTAssertTrue(controller.settingsView.accountSignedIn)
+        XCTAssertEqual(controller.settingsView.accountButton.title, "Log out")
+        XCTAssertEqual(
+            controller.settingsView.accountField.stringValue,
+            "Signed in",
+            "the address is a row away; being signed in is not"
+        )
+
+        controller.showCommandPalette(nil)
+        XCTAssertTrue(
+            controller.palette.model.commands.contains { $0.id == "settings:accounts:logout" },
+            "the spotlight offers what the page offers"
+        )
+        XCTAssertFalse(controller.palette.model.commands.contains { $0.id == "settings:accounts:signin" })
+        controller.palette.dismiss()
+    }
+
+    /// One login screen at a time. `AuthGateWindowController.present` builds
+    /// a new window and overwrites its only reference on every call, so a
+    /// second press would leave the first sheet up with nothing able to
+    /// close it — the workspace window blocked for good.
+    func testASecondLoginGateIsNeverPresentedWhileOneIsUp() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        var presented = 0
+        // Signed out, so the page's button is the sign-in one whatever the
+        // developer's own mirror says.
+        controller.settingsView.applyAccount(email: nil, signedIn: false)
+        // Never resolves: the gate stays up, exactly as it is while the user
+        // is looking at it.
+        controller.authGatePresenter = { _ in presented += 1 }
+        controller.run(.signIn)
+        controller.run(.signIn)
+        controller.settingsView.accountButton.performClick(nil)
+        XCTAssertEqual(presented, 1, "the second and third presses do nothing")
     }
 
     /// Dragging the sidebar divider has to hold. It did not: the split view

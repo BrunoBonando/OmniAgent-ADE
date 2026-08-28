@@ -316,9 +316,9 @@ final class SettingsSurfaceView: NSView {
     let accountField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
     let accountButton = NSButton(title: "", target: nil, action: nil)
     /// What the block currently says about the account — the one reading of
-    /// the two rows, so the label and the button can never disagree, and so
-    /// the spotlight's row (which offers "Log out" or "Sign in with Apple…"
-    /// off exactly this) says what the page says. See `applyAccount`.
+    /// it, so the label and the button can never disagree, and so the
+    /// spotlight's row (which offers "Log out" or "Sign in with Apple…" off
+    /// exactly this) says what the page says. See `applyAccount`.
     private(set) var accountSignedIn = false
     /// The account block's two buttons, as one press each. `onLogOut` is
     /// the destructive half; both are the controller's to perform — this
@@ -393,20 +393,29 @@ final class SettingsSurfaceView: NSView {
         accountButton.isHidden = !isAccounts
     }
 
-    /// The two `auth_*` rows as the page shows them, handed in by the
-    /// controller — this view never reads settings itself.
+    /// The account as the page shows it, handed in by the controller — this
+    /// view never reads settings itself.
     ///
-    /// Signed in means both: the row says `"true"` *and* there is an address
-    /// to name. A `auth_signed_in = "true"` row with no `auth_account_email`
-    /// beside it is the fake-login era's leftover (see
-    /// `AuthGate.describeAuthSummary`), and "Not signed in" over a "Log out"
-    /// button would be a page contradicting itself — so one state drives
-    /// both.
+    /// **Signed in is `signedIn` alone; the address is only what it is
+    /// called.** The controller seeds this from the `UserDefaults` mirror
+    /// the launch gate is decided by, which is current and synchronous but
+    /// carries no email, and only then fills the address in from the
+    /// `auth_account_email` row a daemon round trip later. Deriving
+    /// signed-in from the address too would make that first moment read
+    /// "Not signed in" to a signed-in user — and taking the "Sign in…" it
+    /// offered would end in a local sign-out with the server session never
+    /// revoked. So a signed-in account with no address yet (and the
+    /// fake-login era's row, which never had one — see
+    /// `AuthGate.describeAuthSummary`) says plain "Signed in".
     func applyAccount(email: String?, signedIn: Bool) {
         let address = (email ?? "").trimmingCharacters(in: .whitespaces)
-        accountSignedIn = signedIn && !address.isEmpty
-        accountField.stringValue = accountSignedIn ? "Signed in as \(address)" : "Not signed in"
-        accountButton.title = accountSignedIn ? "Log out" : "Sign in…"
+        accountSignedIn = signedIn
+        accountField.stringValue = switch (signedIn, address.isEmpty) {
+        case (false, _): "Not signed in"
+        case (true, true): "Signed in"
+        case (true, false): "Signed in as \(address)"
+        }
+        accountButton.title = signedIn ? "Log out" : "Sign in…"
     }
 
     @objc private func accountButtonPressed() {

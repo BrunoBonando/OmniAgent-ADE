@@ -260,16 +260,18 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(settings.accountButton.title, "Log out")
         XCTAssertTrue(settings.accountSignedIn)
 
+        // Signed in with no address yet — how the page is seeded before the
+        // daemon answers — is signed in all the same. Offering "Sign in…"
+        // here would be offering a signed-in user a local sign-out.
+        settings.applyAccount(email: nil, signedIn: true)
+        XCTAssertEqual(settings.accountField.stringValue, "Signed in")
+        XCTAssertEqual(settings.accountButton.title, "Log out")
+        XCTAssertTrue(settings.accountSignedIn)
+
         settings.applyAccount(email: "", signedIn: false)
         XCTAssertEqual(settings.accountField.stringValue, "Not signed in")
         XCTAssertEqual(settings.accountButton.title, "Sign in…")
         XCTAssertFalse(settings.accountSignedIn)
-
-        // A signed-in row with no address is the fake-login era's leftover,
-        // not an account there is anything to log out of.
-        settings.applyAccount(email: nil, signedIn: true)
-        XCTAssertEqual(settings.accountField.stringValue, "Not signed in")
-        XCTAssertEqual(settings.accountButton.title, "Sign in…")
 
         // And the button really is wired to the controller's own paths.
         var presented = 0

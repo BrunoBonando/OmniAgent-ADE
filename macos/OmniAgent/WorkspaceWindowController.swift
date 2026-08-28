@@ -375,6 +375,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// answer.
     var authGatePresenter: ((@escaping () -> Void) -> Void)?
     var serverSessionRevoker: (() -> Void)?
+    /// A log-out or a login screen is already running: the Accounts button
+    /// and its spotlight row do nothing until it finishes — see
+    /// `presentAccountGate` for what a second one costs.
+    private var accountActionInFlight = false
     private let firstRunWindow: FirstRunWindowController
     private let settingsWindowController: SettingsWindowController
     let inspector: InspectorWindowController
@@ -835,6 +839,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         settingsPanel.onSelect = { [weak self] section in self?.showSettings(section: section) }
         settingsView.onSignIn = { [weak self] in self?.signInToAccount() }
         settingsView.onLogOut = { [weak self] in self?.logOutOfAccount() }
+        seedAccountFromMirror()
         settingsPanel.onHeightChange = { [weak self] in
             guard let self, settingsPanelPlace != .hidden else { return }
             placeSettingsPanel(settingsPanelPlace, animated: true)
@@ -3970,11 +3975,31 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// The gate is answered — signed in, or "continue without signing in".
     private func authGateDidResolve() {
         authGateResolved = true
+        seedAccountFromMirror()
         refreshAccountSection()
         presentOnboardingIfNeeded()
     }
 
     // MARK: - Settings › Accounts
+
+    /// Whether the account is signed in, as the *launch gate* knows it: the
+    /// `UserDefaults` mirror `AuthGateCoordinator` writes synchronously on
+    /// every resolve. It is readable with no socket at all and is current
+    /// the instant the gate closes — only the address it belongs to needs
+    /// the daemon.
+    ///
+    /// Which is why the page starts here rather than at "not signed in" and
+    /// waits: the rows are a round trip away and the socket may not be up
+    /// yet, or ever. A signed-in user shown "Sign in…" — on the page or in
+    /// the spotlight — who takes the offer resolves the gate as *not*
+    /// signed in, which is a local sign-out with the server session never
+    /// revoked.
+    private func seedAccountFromMirror() {
+        settingsView.applyAccount(
+            email: nil,
+            signedIn: !AuthGate.needsSignIn(authGateCoordinator.defaults)
+        )
+    }
 
     /// Re-reads the two `auth_*` rows the Accounts section shows and hands
     /// them to the page, which decides what it says (see
@@ -4017,19 +4042,52 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// again), then offer the login screen right away — the exact sequence
     /// `SettingsViewModel.signOut` performs, since there is only one right
     /// order to do these in.
+    ///
+    /// The rows are re-read before the gate goes up, so the page stops
+    /// saying "Signed in as …" over a "Log out" button the moment the
+    /// clearing lands rather than at the end of whatever the user does with
+    /// the login screen.
     func logOutOfAccount() {
+        guard !accountActionInFlight else { return }
+        accountActionInFlight = true
         if let serverSessionRevoker {
             serverSessionRevoker()
         } else {
             Task { await AuthClient.shared.logout() }
         }
-        authGateCoordinator.reset { [weak self] in self?.presentAccountGate() }
+        authGateCoordinator.reset { [weak self] in
+            guard let self else { return }
+            // Straight off the mirror `reset` has just cleared, so the page
+            // stops saying "Signed in as …" even when the rows cannot be
+            // read back.
+            seedAccountFromMirror()
+            refreshAccountSection()
+            accountActionInFlight = false
+            presentAccountGate()
+        }
     }
 
     /// The login screen over the workspace window; the section is re-read
     /// whichever way it resolves, so it is current the moment it comes back.
+    ///
+    /// **One at a time.** `AuthGateWindowController.present` builds a new
+    /// window and overwrites its only reference to it on every call, and
+    /// `dismiss` ends whatever that reference now points at — so a second
+    /// press (the button, or the spotlight row, during the whole async
+    /// `reset` or while a sheet is already up) leaves the first sheet on
+    /// screen with nothing able to close it, blocking the window for good.
     private func presentAccountGate() {
-        let resolved: () -> Void = { [weak self] in self?.refreshAccountSection() }
+        guard !accountActionInFlight, authGateWindow.sheetWindow == nil else { return }
+        accountActionInFlight = true
+        let resolved: () -> Void = { [weak self] in
+            guard let self else { return }
+            accountActionInFlight = false
+            // The mirror is already right — `AuthGateCoordinator.resolve`
+            // wrote it before this ran — while the rows are a round trip
+            // behind it, and may not be readable at all.
+            seedAccountFromMirror()
+            refreshAccountSection()
+        }
         if let authGatePresenter {
             authGatePresenter(resolved)
         } else {
