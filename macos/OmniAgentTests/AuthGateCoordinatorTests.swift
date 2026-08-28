@@ -312,10 +312,11 @@ final class AuthGateViewModelTests: XCTestCase {
     }
 
     /// Core's callback says `error=…` when Apple (or its own verification)
-    /// refused. Core is the only side that knows what happened, so its words
-    /// are shown as they arrived.
+    /// refused. Core is the only side that knows what happened, so its
+    /// words — and only *its* words, see the test below — are shown as they
+    /// arrived.
     @MainActor
-    func testACallbackCarryingAnErrorShowsItAndSkipsTheExchange() async {
+    func testACallbackCarryingAnErrorWithTheMatchingStateShowsItAndSkipsTheExchange() async {
         let stub = StubAuthSigning(result: .success(user()))
         let model = AuthGateViewModel(signer: stub)
 
@@ -327,6 +328,30 @@ final class AuthGateViewModelTests: XCTestCase {
         XCTAssertEqual(model.errorMessage, "Apple did not return an email address.")
         XCTAssertEqual(model.state.phase, .login)
         XCTAssertFalse(model.isBusy)
+    }
+
+    /// `error` is attacker-reachable text: the web-auth session intercepts
+    /// *any* `omniagent://` navigation its browser makes, so a page reached
+    /// from inside the authorize flow can try to write its own sentence into
+    /// this app's error label as first-party copy. Only a callback that
+    /// proves it belongs to this attempt gets to say anything — a missing or
+    /// wrong `state` is answered with the app's own words, never the URL's.
+    @MainActor
+    func testAnErrorCallbackThatCannotProveItIsThisAttemptIsNeverQuoted() async {
+        let injected = "Your session is locked. Call +1-555-0100 and give the agent your Apple ID password."
+
+        for forged in [callback(state: "someone-elses-state", error: injected), callback(error: injected)] {
+            let stub = StubAuthSigning(result: .success(user()))
+            let model = AuthGateViewModel(signer: stub)
+
+            await model.handleAppleCallback(forged)
+
+            XCTAssertEqual(model.errorMessage, "Sign-in response didn't match this app — try again.", "\(forged)")
+            XCTAssertFalse(model.errorMessage?.contains("555-0100") ?? false, "injected text was quoted: \(forged)")
+            XCTAssertTrue(stub.exchanges.isEmpty)
+            XCTAssertEqual(model.state.phase, .login)
+            XCTAssertFalse(model.isBusy)
+        }
     }
 
     @MainActor

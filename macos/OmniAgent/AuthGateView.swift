@@ -153,9 +153,11 @@ final class AuthGateViewModel: ObservableObject {
     /// one useful thing rather than inventing a cause.
     static let incompleteMessage = "Sign-in didn't complete — try again."
 
-    /// Shown when the callback's `state` isn't this attempt's PKCE state:
-    /// either a stale callback from an abandoned attempt, or a URL some
-    /// other process fabricated. Never a reason to redeem the code.
+    /// Shown for any callback whose `state` isn't this attempt's PKCE state:
+    /// a stale callback from an abandoned attempt, a URL some other process
+    /// fabricated, or a page inside the authorize flow trying to put its own
+    /// words on this screen. Nothing in such a URL is read — not the code,
+    /// and not its `error` text either.
     static let stateMismatchMessage = "Sign-in response didn't match this app — try again."
 
     private let signer: AuthSigning
@@ -244,16 +246,23 @@ final class AuthGateViewModel: ObservableObject {
         func value(_ name: String) -> String? {
             query.first { $0.name == name }?.value.flatMap { $0.isEmpty ? nil : $0 }
         }
+        // `state` first, before a single field of this URL is believed —
+        // including `error`, which is shown to the user verbatim. The
+        // session intercepts *any* `omniagent://` navigation its browser
+        // makes, so a page reached from inside the authorize flow (an open
+        // redirect, an injected page) could otherwise write its own sentence
+        // into this app's error label as first-party copy. Core sends
+        // `state` on its error callbacks too, so nothing legitimate is lost.
+        guard value("state") == pkce.state else {
+            isBusy = false
+            errorMessage = Self.stateMismatchMessage
+            return
+        }
         if let failure = value("error") {
             // Core's own words for what Apple (or its own callback) refused
             // — it is the only side that knows.
             isBusy = false
             errorMessage = failure
-            return
-        }
-        guard value("state") == pkce.state else {
-            isBusy = false
-            errorMessage = Self.stateMismatchMessage
             return
         }
         guard let code = value("code") else {
@@ -590,6 +599,10 @@ struct AuthGateContentView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(SignInPalette.errorText)
                         .fixedSize(horizontal: false, vertical: true)
+                        // Wraps, but only so far: the card is a fixed 640pt,
+                        // and a long server `detail` left unbounded pushes
+                        // the skip link and the footer off the bottom of it.
+                        .lineLimit(3)
                         .padding(.top, 12)
                 }
 
