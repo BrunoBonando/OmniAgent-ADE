@@ -39,6 +39,25 @@ final class AuthGateCoordinatorTests: XCTestCase {
         XCTAssertTrue(AuthGate.needsSignIn(defaults), "logging out brings the gate back next launch")
     }
 
+    /// `AuthGateWindowController` calls this the moment `AuthGateViewModel`
+    /// reports a successful sign-in — before the persona step, unlike
+    /// `resolve`. A user who quits between "Continue with GitHub" and
+    /// picking a persona must not be asked to sign in again next launch.
+    func testMarkSignedInPutsTheGateAwayBeforeTheFlowFinishes() throws {
+        let defaults = try throwawayDefaults()
+        let coordinator = AuthGateCoordinator(
+            settings: SettingsStore(client: FakeSettingsClient()),
+            defaults: defaults
+        )
+        XCTAssertTrue(AuthGate.needsSignIn(defaults))
+
+        coordinator.markSignedIn()
+        XCTAssertFalse(
+            AuthGate.needsSignIn(defaults),
+            "a successful sign-in must not wait for the persona step to put the gate away"
+        )
+    }
+
     private func resolve(_ coordinator: AuthGateCoordinator, _ outcome: AuthGateOutcome) {
         let done = expectation(description: "resolve")
         coordinator.resolve(outcome) { done.fulfill() }
@@ -378,6 +397,43 @@ final class AuthGateViewModelTests: XCTestCase {
             accountEmail: "bruno@bonando.com",
             accountName: "Bruno Bonando"
         )])
+    }
+
+    /// The bug this guards: quitting between a successful sign-in and the
+    /// persona step used to leave the launch gate's own "am I signed in"
+    /// mirror unset, so the *next* launch asked the user to sign in again
+    /// despite the account already being connected. `onSignedIn` — which
+    /// `AuthGateWindowController` wires straight to
+    /// `AuthGateCoordinator.markSignedIn()` — must fire the moment sign-in
+    /// succeeds, not wait for the persona step, and must not fire again on
+    /// the persona answer or on "Continue without signing in".
+    @MainActor
+    func testOnSignedInFiresOnceRightAwayNotAfterThePersonaStep() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub)
+        let pkce = model.pkce
+        var signedInFired = 0
+        var outcomes: [AuthGateOutcome] = []
+        model.onSignedIn = { signedInFired += 1 }
+        model.onResolved = { outcomes.append($0) }
+
+        await model.handleCallback(callback(code: "one-time-code", state: pkce.state))
+        XCTAssertEqual(signedInFired, 1, "the gate must be marked signed-in right away")
+        XCTAssertTrue(outcomes.isEmpty, "onResolved still waits for the persona step")
+
+        model.send(.answerSelected(persona: "research"))
+        XCTAssertEqual(signedInFired, 1, "answering the persona question does not fire it a second time")
+        XCTAssertEqual(outcomes.count, 1)
+    }
+
+    @MainActor
+    func testOnSignedInNeverFiresForSkipLogin() {
+        let model = AuthGateViewModel(signer: StubAuthSigning(result: .failure(.sessionExpired)))
+        var signedInFired = 0
+        model.onSignedIn = { signedInFired += 1 }
+
+        model.send(.skipLogin)
+        XCTAssertEqual(signedInFired, 0, "\"Continue without signing in\" is not a sign-in")
     }
 
     @MainActor
