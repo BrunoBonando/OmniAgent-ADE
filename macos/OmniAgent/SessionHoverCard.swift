@@ -2286,8 +2286,17 @@ final class SessionHoverCardController {
     func hover(_ next: Target?, in parent: NSWindow?) {
         self.parent = parent
         guard let next else {
-            openTimer?.invalidate()
-            openTimer = nil
+            // A pending open is not cancelled by a leave either. The sidebar
+            // rebuilds every row on every status event, and the rebuilt row
+            // under a still pointer reports a leave and an enter of its own —
+            // with a few working terminals that is more often than the delay,
+            // and a delay restarted on each one never elapses. So the leave
+            // is only noted, and `present()` asks where the pointer actually
+            // is before it opens.
+            if openTimer != nil {
+                leftAt = Date().timeIntervalSince1970
+                return
+            }
             // An open card is not dismissed here any more: the pointer may be
             // on its way *onto* it, and the row it came from reports that as
             // having left. The tick, which can see where the pointer actually
@@ -2296,6 +2305,13 @@ final class SessionHoverCardController {
             return
         }
         guard next != target || !isOpen else { return }
+        // The same row entered again while its open is pending is a rebuilt
+        // row, not a pointer that moved: the delay it has already served
+        // stands.
+        if next == target, openTimer != nil {
+            leftAt = nil
+            return
+        }
         // A different row: that is the pointer having moved on, not a pointer
         // in transit, and the old card goes now rather than in three seconds.
         leftAt = nil
@@ -2378,6 +2394,16 @@ final class SessionHoverCardController {
         else {
             dismiss()
             return
+        }
+        // The row reported a leave while this open was pending: a rebuilt
+        // row's phantom leave if the pointer is still on the row, a real one
+        // if it is not — and a real one opens nothing.
+        if !panel.isVisible, leftAt != nil {
+            guard row.contains(NSEvent.mouseLocation) else {
+                dismiss()
+                return
+            }
+            leftAt = nil
         }
 
         let wasOpen = panel.isVisible
