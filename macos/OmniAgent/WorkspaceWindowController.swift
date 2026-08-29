@@ -735,11 +735,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 from: anchor
             )
         }
-        // Every local branch, current one checked; typing a name no branch
-        // has offers to create it off the one currently picked — so "from
-        // any other branch" is: pick that branch first, then type the new
-        // name. Creation itself is deferred to Send (nothing starts a
-        // session from Home yet); the chip's "base → name" is the promise.
+        // Every branch this clone knows about — local ones and the remote's
+        // own (`GitBranch.all`, `git branch --all` under the hood) — current
+        // one checked; typing a name no branch has offers to create it off
+        // the one currently picked — so "from any other branch" is: pick
+        // that branch first, then type the new name. Creation itself is
+        // deferred to Send (nothing starts a session from Home yet); the
+        // chip's "base → name" is the promise.
         //
         // Above the local branches: GitHub, reading the same connection
         // state `showCommandPalette` already trusts (Settings › Accounts'
@@ -775,7 +777,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 }
             }
             let dropdown = HomeDropdown.show(
-                [gitHub, HomeDropdown.Section(header: "Local branches", rows: rows)],
+                [gitHub, HomeDropdown.Section(header: "Branches", rows: rows)],
                 searchPlaceholder: "Search branches…", from: anchor
             )
             dropdown.extraRows = { [weak self] query in

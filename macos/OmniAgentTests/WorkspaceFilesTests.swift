@@ -414,6 +414,44 @@ final class WorkspaceFilesTests: XCTestCase {
         XCTAssertNil(GitBranch.forDirectory(""))
     }
 
+    /// The branch dropdown must show what is really on the remote, not just
+    /// what happens to have a local ref — a branch pushed from elsewhere
+    /// (another machine, the GitHub web UI) and never checked out here used
+    /// to be invisible. A local "bare" repository stands in for GitHub: no
+    /// network, same `refs/remotes/origin/*` shape a real push leaves.
+    func testAllListsLocalAndRemoteTrackingBranchesDeduped() throws {
+        try makeGitRepository()
+        let root = try XCTUnwrap(tempDirectory)
+        try makeFile("README.md")
+        XCTAssertEqual(runGit(["-C", root.path, "config", "user.email", "t@t"]), 0)
+        XCTAssertEqual(runGit(["-C", root.path, "config", "user.name", "t"]), 0)
+        XCTAssertEqual(runGit(["-C", root.path, "add", "README.md"]), 0)
+        XCTAssertEqual(runGit(["-C", root.path, "commit", "-qm", "initial"]), 0)
+
+        // A local-only branch, never pushed anywhere.
+        XCTAssertEqual(runGit(["-C", root.path, "branch", "feature-local"]), 0)
+
+        // A bare repo standing in for GitHub, with a branch pushed to it and
+        // then deleted locally — so the only trace left in this clone is the
+        // remote-tracking ref, exactly what a branch someone else pushed
+        // looks like.
+        let origin = root.deletingLastPathComponent().appendingPathComponent("origin-\(UUID().uuidString).git")
+        addTeardownBlock { try? FileManager.default.removeItem(at: origin) }
+        XCTAssertEqual(runGit(["init", "-q", "--bare", origin.path]), 0)
+        XCTAssertEqual(runGit(["-C", root.path, "remote", "add", "origin", origin.path]), 0)
+        XCTAssertEqual(runGit(["-C", root.path, "push", "-q", "origin", "main"]), 0)
+        XCTAssertEqual(runGit(["-C", root.path, "checkout", "-q", "-b", "remote-only"]), 0)
+        XCTAssertEqual(runGit(["-C", root.path, "push", "-q", "origin", "remote-only"]), 0)
+        XCTAssertEqual(runGit(["-C", root.path, "checkout", "-q", "main"]), 0)
+        XCTAssertEqual(runGit(["-C", root.path, "branch", "-q", "-D", "remote-only"]), 0)
+        XCTAssertEqual(runGit(["-C", root.path, "fetch", "-q", "origin"]), 0)
+
+        let branches = GitBranch.all(repoRoot: root)
+        XCTAssertEqual(Set(branches), ["main", "feature-local", "remote-only"])
+        XCTAssertEqual(branches.filter { $0 == "main" }.count, 1, "the local and remote-tracking refs for main must not double up")
+        XCTAssertFalse(branches.contains("origin"), "the remote's own symbolic HEAD pointer is not a branch")
+    }
+
     private func makeGitRepository() throws {
         try skipUnlessGitIsAvailable()
         XCTAssertEqual(runGit(["init", "-q", tempDirectory.path]), 0, "git init failed")

@@ -472,18 +472,41 @@ enum GitBranch {
         return current(repoRoot: root)
     }
 
-    /// Every local branch, most recently committed-to first — the order a
-    /// picker wants, since the branch you touched last is the one you most
-    /// likely want again. Asks `git` rather than walking `.git/refs/heads`
-    /// by hand: packed refs and worktree-checked-out branches both live
-    /// elsewhere, and `git` already knows. Empty for any failure, same rule
-    /// as `GitStatus.runGit`.
+    /// Every branch this clone knows about, local and the remote's own —
+    /// most recently committed-to first (the order a picker wants, since the
+    /// branch you touched last is the one you most likely want again) — so a
+    /// branch pushed from elsewhere and never checked out here still shows,
+    /// not just what happens to have a local ref.
+    ///
+    /// `--all` reads local git's own cached remote-tracking refs
+    /// (`refs/remotes/origin/*`), not a live call to GitHub: freshness rides
+    /// on whatever last talked to the remote (a fetch, a pull, a push), so
+    /// opening this dropdown never blocks on the network. A branch with both
+    /// a local and a remote-tracking ref lists once, under its bare name —
+    /// `origin/` is the one remote this app assumes anywhere (see
+    /// `WorkspaceContextMenu`'s "Open on GitHub").
+    ///
+    /// Asks `git` rather than walking refs by hand: packed refs and
+    /// worktree-checked-out branches both live elsewhere, and `git` already
+    /// knows. Empty for any failure, same rule as `GitStatus.runGit`.
     static func all(repoRoot: URL) -> [String] {
         guard let output = GitStatus.runGit(
-            ["branch", "--sort=-committerdate", "--format=%(refname:short)"],
+            ["branch", "--all", "--sort=-committerdate", "--format=%(refname:short)"],
             in: repoRoot
         ) else { return [] }
-        return output.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        var seen = Set<String>()
+        var names: [String] = []
+        for line in output.split(separator: "\n") {
+            let raw = String(line)
+            // `refname:short` collapses the remote's own symbolic HEAD
+            // pointer (`refs/remotes/origin/HEAD`) to the bare string
+            // "origin" — it names no branch, so it is dropped here.
+            guard !raw.isEmpty, raw != "origin" else { continue }
+            let name = raw.hasPrefix("origin/") ? String(raw.dropFirst("origin/".count)) : raw
+            guard seen.insert(name).inserted else { continue }
+            names.append(name)
+        }
+        return names
     }
 }
 
