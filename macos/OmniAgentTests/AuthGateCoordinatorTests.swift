@@ -145,6 +145,21 @@ final class AuthGateCoordinatorTests: XCTestCase {
         }
         wait(for: [expectation], timeout: 1)
     }
+
+    /// The GitHub row's mark: bundled as a base64 PNG (no bundle resource,
+    /// no new Swift file) rather than an SF Symbol — SF Symbols has none for
+    /// GitHub. `isTemplate` is what makes it tint like `applelogo` does, and
+    /// a roughly square mark keeps it visually balanced beside the SF
+    /// Symbol on the Apple row above it.
+    func testGitHubMarkDecodesAsASquareTemplateImage() throws {
+        let image = try XCTUnwrap(GitHubMark.image, "the bundled GitHub mark must decode")
+        XCTAssertTrue(image.isTemplate, "isTemplate is what lets it tint like applelogo")
+
+        let size = image.size
+        XCTAssertGreaterThan(size.width, 0)
+        XCTAssertGreaterThan(size.height, 0)
+        XCTAssertEqual(size.width / size.height, 1, accuracy: 0.1, "the mark should be roughly square")
+    }
 }
 
 // MARK: - View model

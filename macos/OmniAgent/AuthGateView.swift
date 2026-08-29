@@ -559,6 +559,22 @@ private final class AuthPresentationAnchor: NSObject, ASWebAuthenticationPresent
 /// SIGSEGV'd the test host before — and even that is skipped under
 /// Reduce Motion. The design's drifting blobs, typing loop and blinking
 /// carets are all deliberately static here.
+
+/// GitHub's official mark, bundled as a base64-encoded PNG rather than a
+/// bundle resource — SF Symbols has no GitHub glyph to reach for the way
+/// `applelogo` does. `isTemplate` is what lets it tint the same way an SF
+/// Symbol image does.
+enum GitHubMark {
+    static let image: NSImage? = {
+        guard let d = Data(base64Encoded: base64) else { return nil }
+        let i = NSImage(data: d)
+        i?.isTemplate = true
+        return i
+    }()
+
+    private static let base64 = "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"
+}
+
 struct AuthGateContentView: View {
     @ObservedObject var model: AuthGateViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -847,9 +863,10 @@ struct AuthGateContentView: View {
         }
     }
 
-    /// No mark beside the label: SF Symbols has no GitHub glyph, and a
-    /// bundled logo would be the one image on this screen that is somebody
-    /// else's trademark. The word is the mark.
+    /// GitHub's mark comes from `GitHubMark.image` (a bundled bitmap, since
+    /// SF Symbols has no GitHub glyph) — `providerButton` reaches for it
+    /// whenever `symbol` is nil. If it fails to decode, the row falls back
+    /// to the word alone, same as before.
     private var githubButton: some View {
         providerButton(title: "Continue with GitHub", symbol: nil, hovered: $hoveredGitHub) {
             model.signIn(with: .github)
@@ -870,6 +887,13 @@ struct AuthGateContentView: View {
                 if let symbol {
                     Image(systemName: symbol)
                         .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(Color.omniRGB(245, 245, 247))
+                } else if let mark = GitHubMark.image {
+                    Image(nsImage: mark)
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 16, height: 16)
                         .foregroundStyle(Color.omniRGB(245, 245, 247))
                 }
                 Text(title)
