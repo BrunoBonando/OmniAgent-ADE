@@ -159,6 +159,29 @@ final class AuthGateCoordinatorTests: XCTestCase {
         XCTAssertGreaterThan(size.width, 0)
         XCTAssertGreaterThan(size.height, 0)
         XCTAssertEqual(size.width / size.height, 1, accuracy: 0.1, "the mark should be roughly square")
+
+        // Guards the actual regression: an earlier source PNG was
+        // black-on-white with no alpha channel, so the template render (which
+        // is alpha-driven) filled in as a solid white square. Reading the
+        // decoded bitmap's own alpha catches that without needing to draw
+        // the image into a context (and its flip-vs-not ambiguity).
+        let bitmap = try XCTUnwrap(
+            image.representations.compactMap { $0 as? NSBitmapImageRep }.first,
+            "expected a bitmap representation from the decoded PNG"
+        )
+        func alpha(_ x: Int, _ y: Int) -> CGFloat {
+            bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0
+        }
+        XCTAssertLessThan(alpha(1, 1), 0.1, "corner must be transparent background, not a filled square")
+
+        // Not literally pixel (width/2, height/2): the octocat glyph's own
+        // negative space (between its two arms) sits at the image's exact
+        // geometric centre, so that pixel is transparent by design — sampled
+        // and confirmed against the decoded asset. The head just above it is
+        // the nearest solid, unambiguously "middle" part of the mark.
+        let midX = bitmap.pixelsWide / 2
+        let headY = bitmap.pixelsHigh / 2 - (bitmap.pixelsHigh / 4)
+        XCTAssertGreaterThan(alpha(midX, headY), 0.5, "the glyph itself must be opaque, not just the background")
     }
 }
 
