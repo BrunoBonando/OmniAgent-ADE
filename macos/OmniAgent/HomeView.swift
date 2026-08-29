@@ -605,6 +605,17 @@ final class HomeSurfaceView: NSView {
 
     static let setUpGitHubTitle = "Set up GitHub"
 
+    /// The branch dropdown's GitHub section, header and action title
+    /// together — real connection state (`SettingsSurfaceView`'s own
+    /// `accountGitHubConnected`/`githubLogin` reading) deciding which pair
+    /// shows, rather than a hardcoded "not connected" that never re-checked
+    /// itself once the account actually connected.
+    static func gitHubSectionText(connected: Bool, login: String) -> (header: String, action: String) {
+        connected
+            ? ("GitHub · Connected as @\(login)", "Manage GitHub…")
+            : ("GitHub · Not connected", "\(setUpGitHubTitle)…")
+    }
+
     /// A branch to be created off `base` when the session starts — shown as
     /// "base → name", the arrow being the whole point: it says "this does
     /// not exist yet" without a word of explanation.

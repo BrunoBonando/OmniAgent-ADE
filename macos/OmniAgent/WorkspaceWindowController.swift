@@ -741,14 +741,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // name. Creation itself is deferred to Send (nothing starts a
         // session from Home yet); the chip's "base → name" is the promise.
         //
-        // Above the local branches: GitHub. Until the user connects — an
-        // existing `gh` login or our GitHub App — the section says so and
-        // offers "Set up GitHub…", the one thing a user without git can do.
+        // Above the local branches: GitHub, reading the same connection
+        // state `showCommandPalette` already trusts (Settings › Accounts'
+        // own `accountGitHubConnected`/`githubLogin`) rather than always
+        // saying "not connected" — a user who already connected should
+        // never be told to set it up again.
         homeView.onRequestBranchMenu = { [weak self] anchor in
             guard let self else { return }
-            let gitHub = HomeDropdown.Section(header: "GitHub · Not connected", rows: [
+            let (header, action) = HomeSurfaceView.gitHubSectionText(
+                connected: settingsView.accountGitHubConnected,
+                login: settingsView.githubLogin
+            )
+            let gitHub = HomeDropdown.Section(header: header, rows: [
                 // GitHub lives under Accounts; the page itself is still to come.
-                HomeDropdown.Row(icon: HomeDropdown.symbol("link"), title: "\(HomeSurfaceView.setUpGitHubTitle)…") { [weak self] in
+                HomeDropdown.Row(icon: HomeDropdown.symbol("link"), title: action) { [weak self] in
                     self?.showSettings(section: .accounts)
                 },
             ])
