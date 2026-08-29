@@ -1413,4 +1413,187 @@ final class SessionHoverCardTests: XCTestCase {
             assertNoNaNGeometry(shell, "shrink tick \(step)")
         }
     }
+
+    // MARK: - End to end
+
+    /// The whole road from a row's hover to a panel on screen: the open delay
+    /// elapses, the provider and row frame answer, and the panel is ordered
+    /// in at a finite frame beside the row. Regression guard for "hovering a
+    /// session shows nothing at all".
+    func testHoveringASessionRowOpensTheCard() throws {
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1200, height: 800),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+
+        var ledger = PaneActivityLedger()
+        ledger.record(paneID: "a", status: .thinking, at: t0)
+        let panes = ["a", "b"].reduce(into: [String: PaneDescriptor]()) { out, id in
+            out[id] = PaneDescriptor(sessionID: id, group: "s", engine: .claude, cwd: "/Users/x/Code")
+        }
+        let node = sessionNode(paneIDs: ["a", "b"])
+        let model = HoverCardModel.session(
+            node,
+            panes: panes,
+            statuses: ["a": .thinking, "b": .ready],
+            ledger: ledger,
+            tails: { _ in "Editing SessionOutline.swift" },
+            now: t0 + 60_000
+        )
+
+        let controller = SessionHoverCardController()
+        controller.provider = { _ in model }
+        controller.rowFrame = { _ in NSRect(x: 120, y: 600, width: 220, height: 30) }
+        controller.hover(.session("s"), in: window)
+        defer { controller.dismiss(fade: 0) }
+
+        let deadline = Date().addingTimeInterval(2)
+        while !controller.isOpen, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(controller.isOpen, "the card opens once the open delay has elapsed")
+        XCTAssertEqual(controller.shownModel, model)
+
+        let panel = try XCTUnwrap(Mirror(reflecting: controller).children
+            .first { $0.label == "panel" }?.value as? NSPanel)
+        XCTAssertTrue(panel.isVisible)
+        XCTAssertTrue(panel.frame.origin.x.isFinite && panel.frame.origin.y.isFinite, "\(panel.frame)")
+        XCTAssertGreaterThan(panel.frame.width, 300, "\(panel.frame)")
+        XCTAssertGreaterThan(panel.frame.height, 60, "\(panel.frame)")
+        XCTAssertTrue(window.frame.contains(panel.frame), "\(panel.frame) inside \(window.frame)")
+        // The drop lane and the slide-in both start left of the row's edge.
+        XCTAssertGreaterThan(
+            panel.frame.minX,
+            340 - HoverCardShellView.lane - SessionHoverCardController.slide - 1,
+            "beside the row, not over it: \(panel.frame)"
+        )
+    }
+
+    /// The real wiring: a sidebar row's hover reaches the window, whose
+    /// provider finds the session behind the row and whose sidebar answers
+    /// the row's frame — and the card opens.
+    func testHoveringASidebarSessionRowRaisesTheCard() throws {
+        UserDefaults.standard.removeObject(forKey: WorkspacesTreeView.collapsedDefaultsKey)
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-hover-test.sock")
+            ),
+            panes: []
+        )
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1", groupLabel: "Build"),
+                ])
+            )
+        )
+
+        let target = SessionHoverCardController.Target.session("g1")
+        XCTAssertNotNil(controller.hoverCardModel(for: target), "the window finds the session behind the row")
+        // The rows have no width until the window has laid out once.
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertNotNil(controller.shellSidebar.rowFrameOnScreen(for: target), "the sidebar knows where the row is")
+
+        let row = try XCTUnwrap(controller.shellSidebar.workspacesTree.rowView(for: target) as? SessionRowView)
+        try XCTUnwrap(row.onHover)(true)
+        defer { controller.hoverCard.dismiss(fade: 0) }
+        let deadline = Date().addingTimeInterval(2)
+        while !controller.hoverCard.isOpen, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(controller.hoverCard.isOpen, "the card opens from the row's own hover")
+    }
+
+    // MARK: - Rows rebuilt under the pointer
+
+    /// A controller wired to a row the pointer is not on (the rect is far off
+    /// any screen), so only a phantom leave — one followed by a re-entry —
+    /// may open it.
+    private func makeWiredController(window: NSWindow) -> SessionHoverCardController {
+        var ledger = PaneActivityLedger()
+        ledger.record(paneID: "a", status: .thinking, at: t0)
+        let panes = ["a"].reduce(into: [String: PaneDescriptor]()) { out, id in
+            out[id] = PaneDescriptor(sessionID: id, group: "s", engine: .claude, cwd: "/Users/x/Code")
+        }
+        let model = HoverCardModel.session(
+            sessionNode(paneIDs: ["a"]),
+            panes: panes,
+            statuses: ["a": .thinking],
+            ledger: ledger,
+            now: t0 + 60_000
+        )
+        let controller = SessionHoverCardController()
+        controller.provider = { _ in model }
+        controller.rowFrame = { _ in NSRect(x: -20_000, y: -20_000, width: 220, height: 30) }
+        return controller
+    }
+
+    private func pump(_ seconds: TimeInterval) {
+        RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+    }
+
+    /// The sidebar rebuilds every row on every status event, and the rebuilt
+    /// row under a still pointer reports an enter of its own. With working
+    /// terminals those come more often than the open delay, and a delay
+    /// restarted on each one never elapsed: hovering a busy session showed
+    /// nothing at all.
+    func testARowRebuiltUnderThePointerDoesNotRestartThePendingOpen() {
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        let controller = makeWiredController(window: window)
+        defer { controller.dismiss(fade: 0) }
+
+        controller.hover(.session("s"), in: window)
+        // Re-enters every 40ms for half a second — four times the delay.
+        let end = Date().addingTimeInterval(0.5)
+        while Date() < end, !controller.isOpen {
+            pump(0.04)
+            controller.hover(.session("s"), in: window)
+        }
+        XCTAssertTrue(controller.isOpen, "the delay elapsed once, not never")
+    }
+
+    /// The rebuilt row may report the leave too — the old row's, before the
+    /// new one's enter. Same pointer, same row, same answer.
+    func testAPhantomLeaveAndReEntryKeepThePendingOpen() {
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        let controller = makeWiredController(window: window)
+        defer { controller.dismiss(fade: 0) }
+
+        controller.hover(.session("s"), in: window)
+        let end = Date().addingTimeInterval(0.5)
+        while Date() < end, !controller.isOpen {
+            pump(0.04)
+            controller.hover(nil, in: window)
+            controller.hover(.session("s"), in: window)
+        }
+        XCTAssertTrue(controller.isOpen)
+    }
+
+    /// A real leave — no re-entry, and the pointer is nowhere near the row —
+    /// still opens nothing: the pending open is not cancelled, but it asks
+    /// where the pointer is before it shows anything.
+    func testARealLeaveBeforeTheDelayShowsNothing() {
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        let controller = makeWiredController(window: window)
+        defer { controller.dismiss(fade: 0) }
+
+        controller.hover(.session("s"), in: window)
+        controller.hover(nil, in: window)
+        pump(0.4)
+        XCTAssertFalse(controller.isOpen)
+        XCTAssertNil(controller.target)
+    }
 }
