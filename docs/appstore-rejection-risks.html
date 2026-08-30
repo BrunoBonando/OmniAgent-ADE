@@ -489,7 +489,8 @@
           "Create a separate MAS target/configuration; do not mutate the direct-download target blindly.",
           "Add com.apple.security.app-sandbox and only the smallest required entitlements.",
           "Run a full MAS-style smoke test with a clean container and no developer shell environment."
-        ]
+        ],
+        status: "decision D1 — cannot sandbox without breaking terminals"
       },
       {
         title: "Arbitrary PTY, terminal, and shell execution",
@@ -502,7 +503,8 @@
           "Ship a reduced MAS edition without generic terminal panes, or make terminal execution an external companion-app feature.",
           "If keeping it, require explicit user initiation, clear warnings, no hidden automation, and sandbox-compatible execution boundaries.",
           "Document exactly what can run and what cannot in App Review notes."
-        ]
+        ],
+        status: "decision D1 — same root as App Sandbox"
       },
       {
         title: "Persistent bundled PTY daemon / LaunchAgent behavior",
@@ -515,46 +517,50 @@
           "Move from degraded ad-hoc Process spawning to a MAS-safe helper/login-item design.",
           "Expose a Settings toggle, status, explanation, and disable/remove flow for persistence.",
           "Ensure the helper exits or idles safely when not needed and never performs surprise work."
-        ]
+        ],
+        status: "re-scored: high → medium (SMAppService.agent is the Apple-approved pattern; user toggle already lives in System Settings › Login Items); fixed: Task A4 (binary locator) · decision D1 for the rest"
       },
       {
         title: "Helper binaries are packaged as resources",
-        severity: "high",
+        severity: "low",
         category: "Packaging",
-        summary: "The current Tauri bundle copies helper executables into Resources; MAS helper executables usually need helper locations, inherited sandboxing, and strict signing.",
-        evidence: ["src-tauri/tauri.conf.json:38-40", "src-tauri/src/daemon.rs:425-435,921-932", "README.md:53"],
+        summary: "Stale: this evidence pointed at Tauri's Resources-copy config. The native app's daemon binary lives at the expected Contents/MacOS/omniagent-pty-daemon location, signed with the same identity as the app — not a bare Resources helper.",
+        evidence: ["macos/OmniAgent/DaemonServiceRegistrar.swift:106-124 (Contents/MacOS/omniagent-pty-daemon is the primary candidate)"],
         appleAsk: "Place helper executables in the expected app-bundle location, sign them correctly, and give them compatible sandbox entitlements.",
         solve: [
           "Package helpers under Contents/Helpers or an approved login-item helper bundle.",
           "Sign every helper with the same Team ID and MAS distribution identity.",
           "Use com.apple.security.inherit where appropriate and verify with codesign/spctl plus sandbox runtime tests."
-        ]
+        ],
+        status: "stale: native app passes (Task A5 preflight verifies)"
       },
       {
         title: "In-app installation of external executable code",
-        severity: "critical",
+        severity: "low",
         category: "Code execution",
-        summary: "Agent installation commands download and execute third-party installers such as curl | bash and npm -g.",
-        evidence: ["src-tauri/src/commands/agents.rs:54-65", "src-tauri/src/commands/agents.rs:179-184"],
+        summary: "Native app has no installer code (Tauri-only, gated by cutover.sh). EngineLauncher.isInstalled only greys a menu row for a CLI that isn't on PATH; nothing in macos/ downloads or executes an installer.",
+        evidence: ["macos/OmniAgent/EngineLauncher.swift:609-615 (isInstalled only greys the menu row)", "scripts/cutover.sh:13-15 (retires legacy src-tauri/ code only once the release gate opens, 0/2 CLOSED)"],
         appleAsk: "Remove executable installers from the app; do not download or install code that changes capabilities after review.",
         solve: [
           "Replace install buttons with links to official provider pages or documentation.",
           "Let users install CLIs outside the MAS app, then detect availability without running installers.",
           "For any bundled executable capability, include it in the reviewed binary submitted to Apple."
-        ]
+        ],
+        status: "stale: native app passes"
       },
       {
         title: "Broad project file access, indexing, editing, and watching",
         severity: "high",
         category: "Files",
         summary: "OmniAgent walks project roots, watches folders recursively, opens local files in browser/editor panes, and writes transcripts/memory.",
-        evidence: ["README.md:21,25", "crates/brain-ingest/src/watch.rs:32-46", "macos/OmniAgent/BrowserPaneView.swift:135-144,159-179", "macos/OmniAgent/EditorPaneView.swift:530,594,643"],
+        evidence: ["README.md:21,25", "crates/brain-ingest/src/watch.rs:32-46", "macos/OmniAgent/BrowserPaneView.swift:135-144,159-179", "macos/OmniAgent/EditorPaneView.swift:831"],
         appleAsk: "Use user-selected file access, security-scoped bookmarks, and clear disclosure for indexing/persistence.",
         solve: [
           "Require NSOpenPanel folder selection for every project root.",
           "Persist security-scoped bookmarks and expose revoke/remove controls.",
           "Show onboarding copy explaining indexed files, transcripts, local memory, and rebuild/delete options."
-        ]
+        ],
+        status: "re-scored: high → medium (only matters under sandbox); fixed: Task A2 (usage strings) · decision D1"
       },
       {
         title: "Browser panes load arbitrary sites, local files, and downloads",
@@ -567,20 +573,22 @@
           "Add com.apple.security.network.client for MAS if web browsing remains.",
           "Remove arbitrary file:// loading or scope it to bookmarked project folders.",
           "Route downloads through user-selected destinations or sandbox-safe save panels."
-        ]
+        ],
+        status: "re-scored: high → medium; decision D2"
       },
       {
         title: "Release WebViews are inspectable",
         severity: "medium",
         category: "Security",
-        summary: "Both browser and editor WKWebViews enable isInspectable, which can look like a debug surface shipped in production.",
-        evidence: ["macos/OmniAgent/BrowserPaneView.swift:45", "macos/OmniAgent/EditorWebView.swift:63"],
+        summary: "Three WKWebViews enable isInspectable — browser, editor, and the review-panel browser — which can look like a debug surface shipped in production.",
+        evidence: ["macos/OmniAgent/BrowserPaneView.swift:45", "macos/OmniAgent/EditorWebView.swift:63", "macos/OmniAgent/ReviewPanelBrowserView.swift:326"],
         appleAsk: "Disable debug inspection in release or provide a clear developer-tool justification.",
         solve: [
           "Gate isInspectable behind DEBUG or an internal defaults flag unavailable in App Store builds.",
           "If retained, document why a developer tool needs it and how user data is protected.",
           "Verify release builds do not expose inspector unless deliberately enabled."
-        ]
+        ],
+        status: "fixed: Task A3"
       },
       {
         title: "Privacy disclosures may not match data behavior",
@@ -593,7 +601,8 @@
           "Add Privacy Policy and Settings links that explain local transcripts, memory, analytics, cookies, and API calls.",
           "Provide clear delete/export controls for local data and transcripts.",
           "Use opt-in or explicit disclosure for analytics, even if local-only, and document redaction limits."
-        ]
+        ],
+        status: "fixed: Task A1, B1"
       },
       {
         title: "External AI/service dependency disclosures",
@@ -606,7 +615,8 @@
           "Add first-run consent before sending prompts/files to any third-party AI service or CLI.",
           "Provide review notes with test accounts, disabled-feature behavior, and screenshots of consent screens.",
           "Make offline/local-only behavior clear if the user has no provider CLIs installed."
-        ]
+        ],
+        status: "re-scored: high → medium; fixed: Task B1 (policy text) + B2 (these review notes) · decision D3"
       },
       {
         title: "Third-party trademarks and icons",
@@ -619,7 +629,8 @@
           "Replace unlicensed logos with neutral icons unless licenses explicitly permit use.",
           "Add not-affiliated/not-endorsed disclaimers in app metadata, settings, and review notes.",
           "Avoid implying bundled official integrations unless contractually true."
-        ]
+        ],
+        status: "fixed: Task B1 (notices + disclaimer) · decision D4 for logo replacement"
       },
       {
         title: "Account deletion and reviewer access gaps",
@@ -632,7 +643,8 @@
           "Add a Settings > Account > Delete Account flow that initiates real server-side deletion.",
           "Provide App Review with a working demo account or a bypass path.",
           "Ensure Sign in with Apple/GitHub flows are testable and cancellation/error states are clear."
-        ]
+        ],
+        status: "fixed: Task C1 (Core + app)"
       },
       {
         title: "Current release pipeline targets Developer ID DMG, not MAS",
@@ -645,7 +657,8 @@
           "Add a MAS build lane that archives with Mac App Store distribution signing and provisioning.",
           "Keep Developer ID notarization separate from App Store export.",
           "Add a preflight script that checks entitlements, helper signatures, privacy manifests, and App Store metadata readiness."
-        ]
+        ],
+        status: "fixed: Task A5 (preflight) · decision D1 for the MAS lane"
       }
     ];
 
@@ -721,6 +734,10 @@
             <div class="detail">
               <h3>Project evidence</h3>
               <ul>${risk.evidence.map(item => `<li><code>${escapeHtml(item)}</code></li>`).join("")}</ul>
+            </div>
+            <div class="detail">
+              <h3>Status</h3>
+              <p>${escapeHtml(risk.status)}</p>
             </div>
           </div>
         </details>
