@@ -365,11 +365,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// `persistRemoteControlProjection`.
     private(set) var remoteControlWorkspaceIDs: Set<String> = []
     private var remoteControlReadDispatched = false
-    /// Whether `relay_device_token` already exists. Registration is a
-    /// once-per-Mac thing, and the token is unreadable after the one response
-    /// that carried it, so this tracks only its *presence* — never its value,
-    /// which belongs to the daemon alone.
-    private(set) var hasRelayDeviceToken = false
+    /// Whether Remote Control has ever been on for this Mac — the restore
+    /// read found enabled ids, or the user has toggled since launch.
+    ///
+    /// `lastPersisted` cannot answer this and must not be asked to: it is a
+    /// write-only cache of what *this window has written*, never seeded from
+    /// a read, so on a launch that has written nothing yet it says "no row"
+    /// about a `remote_control` row that is sitting on disk sharing
+    /// workspaces. Guarding the projection write on it meant a disable could
+    /// return early and leave that stale row in place — the checkmark off
+    /// and the daemon still authorizing `Attach`/`Input` on the old ids.
+    private var remoteControlEverEnabled = false
+    /// What is known about `relay_device_token`. Three states, not a bool,
+    /// because "we have not looked yet" and "there is none" are different
+    /// answers and only one of them may register: guessing `absent` while
+    /// the read is outstanding (or failed) buys a duplicate `relay_devices`
+    /// row and a token row overwritten by whichever registration lands last.
+    /// `registering` is the same guard against two enables inside one
+    /// network round trip.
+    enum RelayTokenState { case unknown, absent, present, registering }
+    private(set) var relayTokenState: RelayTokenState = .unknown
     /// The registration call. `nil` means the real `RelayClient`; a test
     /// substitutes an answer — `workspaceRemovalConfirmer`'s pattern, and
     /// what lets the first-enable path be asserted without a network.
@@ -3788,23 +3803,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let self else { return }
             switch result {
             case let .success(raw):
-                remoteControlWorkspaceIDs = RemoteControlProjection.decodeEnabled(raw)
-                reloadOutline()
-                // The row may land after the layout did, in which case
-                // nothing else would rewrite the projection until the next
-                // pane mutation.
-                persistRemoteControlProjection()
+                applyRestoredRemoteControlWorkspaces(raw)
                 connection.getSetting(key: SettingsKey.relayDeviceToken) { [weak self] tokenResult in
                     guard let self else { return }
                     switch tokenResult {
                     case let .success(raw):
-                        hasRelayDeviceToken = !(raw ?? "").isEmpty
+                        applyRestoredRelayDeviceToken(raw)
                     case .failure:
-                        // A row that could not be read is not an absent one.
-                        // Believing it absent would register this Mac a
-                        // *second* time on the next enable — a duplicate
-                        // `relay_devices` row, and the token row overwritten
-                        // with the new one. Re-arm the pair instead.
+                        // A row that could not be read is not an absent one,
+                        // and `unknown` is exactly that distinction: the
+                        // toggle will re-read rather than register blind.
+                        // Re-arm the pair for the next connect.
                         remoteControlReadDispatched = false
                     }
                 }
@@ -3812,6 +3821,28 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 remoteControlReadDispatched = false
             }
         }
+    }
+
+    /// Applies the `remote_control_workspaces` row — split out of the read so
+    /// a test can restore without a socket, `applyRestoredWorkspaceCustomizations`'s
+    /// pattern.
+    func applyRestoredRemoteControlWorkspaces(_ raw: String?) {
+        remoteControlWorkspaceIDs = RemoteControlProjection.decodeEnabled(raw)
+        // A row with ids in it is proof this Mac has shared before, whatever
+        // this window has written so far — which is what lets a disable
+        // rewrite the projection on a launch that has written nothing.
+        remoteControlEverEnabled = remoteControlEverEnabled || !remoteControlWorkspaceIDs.isEmpty
+        reloadOutline()
+        // The row may land after the layout did, in which case nothing else
+        // would rewrite the projection until the next pane mutation.
+        persistRemoteControlProjection()
+    }
+
+    /// `applyRestoredRemoteControlWorkspaces`'s twin for `relay_device_token`.
+    /// Only the row's presence is kept — never its value, which belongs to
+    /// the daemon alone.
+    func applyRestoredRelayDeviceToken(_ raw: String?) {
+        relayTokenState = (raw ?? "").isEmpty ? .absent : .present
     }
 
     /// The workspace context menu's Enable Remote Control. Flips the id,
@@ -3830,9 +3861,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         } else {
             remoteControlWorkspaceIDs.insert(workspaceID)
         }
+        remoteControlEverEnabled = true
         write(RemoteControlProjection.encodeEnabled(remoteControlWorkspaceIDs), to: SettingsKey.remoteControlWorkspaces)
-        persistRemoteControlProjection()
-        if !remoteControlWorkspaceIDs.isEmpty, !hasRelayDeviceToken { registerThisMachine() }
+        // Unconditional, unlike the layout-derived path: the user just said
+        // what this Mac shares, and a disable that does not reach disk leaves
+        // the daemon authorizing sessions the checkmark says are private.
+        writeRemoteControlProjection()
+        if !remoteControlWorkspaceIDs.isEmpty { ensureRelayRegistration() }
         reloadOutline()
     }
 
@@ -3843,19 +3878,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// attachable in the same instant. `write(_:to:)` swallows the no-change
     /// case, so the layout path costs one string comparison.
     func persistRemoteControlProjection() {
-        // A Mac that has never enabled Remote Control writes no row at all:
-        // an absent `remote_control` and an empty one say the same thing to
-        // the daemon (nothing is shared), and this runs on every layout
-        // persist — which is often. The `lastPersisted` half is what keeps
-        // the *disable* path honest: once the row exists it must be updated
-        // to the empty projection, since that is the value the daemon closes
-        // its control channel on.
-        guard !remoteControlWorkspaceIDs.isEmpty || lastPersisted[SettingsKey.remoteControl] != nil else { return }
+        // A Mac that has never had Remote Control on writes no row at all: an
+        // absent `remote_control` and an empty one say the same thing to the
+        // daemon (nothing is shared), and this runs on every layout persist —
+        // which is often.
+        guard remoteControlEverEnabled else { return }
         // Derived from the layout, so gated on the layout the same way
         // `persistLayout` is: a projection built from panes nobody has
-        // restored yet would tell the daemon this Mac is sharing nothing and
-        // drop every remote viewer for the length of a launch.
+        // restored yet would list every enabled workspace with no sessions in
+        // it, and remote viewers would watch their sessions vanish for the
+        // length of a launch. The toggle path deliberately skips this gate —
+        // there the user's intent, not the layout, is the thing being written.
         guard layoutReadCompleted else { return }
+        writeRemoteControlProjection()
+    }
+
+    /// The write itself, with no gates: what the toggle calls, because what
+    /// the user just asked for has to reach disk whatever else has or has not
+    /// loaded.
+    private func writeRemoteControlProjection() {
         let descriptors = localPaneDescriptors()
         let payload = RemoteControlProjection.build(
             tabs: WorkspaceRestoration.persistedTabs(from: descriptors),
@@ -3879,14 +3920,40 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         return labels
     }
 
+    /// Makes sure this Mac has a device token, registering for one only from
+    /// the single state where that is known to be the right thing to do.
+    private func ensureRelayRegistration() {
+        switch relayTokenState {
+        case .present, .registering:
+            // Already registered, or a registration is in flight — a second
+            // enable inside the same round trip must not start another one.
+            return
+        case .absent:
+            registerThisMachine()
+        case .unknown:
+            // The token row has not been read yet, or its read failed.
+            // Registering on a guess costs a duplicate device row, so ask
+            // first and decide on the answer; if that read fails too, nothing
+            // happens here and the next connect re-arms the pair.
+            connection.getSetting(key: SettingsKey.relayDeviceToken) { [weak self] result in
+                guard let self, case let .success(raw) = result, relayTokenState == .unknown else { return }
+                applyRestoredRelayDeviceToken(raw)
+                if relayTokenState == .absent, !remoteControlWorkspaceIDs.isEmpty { registerThisMachine() }
+            }
+        }
+    }
+
     /// The first Enable Remote Control on a Mac with no device token:
     /// registers with the relay and hands the token straight to the daemon.
     /// The app never stores it — the relay keeps only its hash, the daemon
-    /// keeps the only copy, and this method keeps nothing but the fact that
+    /// keeps the only copy, and this window keeps nothing but the fact that
     /// one exists.
     private func registerThisMachine() {
         let name = Host.current().localizedName ?? "Mac"
         let register = relayDeviceRegistrar ?? { try await RelayClient.shared.registerDevice(name: $0) }
+        // Claimed before the `await`, so a second enable arriving while this
+        // is in flight sees `registering` and stands down.
+        relayTokenState = .registering
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -3896,11 +3963,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // watch this land without a socket, and without touching the
                 // developer's real `brain.db`.
                 write(RelayClient.shared.deviceTokenRow(registration, name: name), to: SettingsKey.relayDeviceToken)
-                hasRelayDeviceToken = true
+                relayTokenState = .present
             } catch {
+                // Back to `absent`, not `unknown`: the read succeeded, the
+                // registration is what failed, so the retry the card promises
+                // has to be able to start another one.
+                relayTokenState = .absent
                 presentWindowAsk(
-                    title: "Could not enable Remote Control",
-                    message: error.localizedDescription,
+                    title: "Could not register this Mac",
+                    message: "Remote Control stays on for this workspace, but this Mac is not registered with "
+                        + "the relay yet, so no other computer can reach it. Turn Remote Control off and on "
+                        + "again to retry.\n\n\(error.localizedDescription)",
                     icon: NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil),
                     // The overlay's two severities: `.critical` is the tinted
                     // card a failure gets (`Could not create branch session`'s

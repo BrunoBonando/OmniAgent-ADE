@@ -81,7 +81,9 @@ final class RelayClient {
     /// are read: `OMNIAGENT_RELAY_BASE_URL` (this file's own, matching
     /// `OMNIAGENT_API_BASE_URL`) and `OMNIAGENT_RELAY_URL` (the name the
     /// daemon's env var carries in the spec, so one `defaults write` can set
-    /// both sides while debugging).
+    /// both sides while debugging). Both go through `origin(from:)`, which
+    /// is what makes a hand-written bare hostname work instead of silently
+    /// breaking every call.
     let baseURL: URL
 
     private let session: URLSession
@@ -96,11 +98,31 @@ final class RelayClient {
         accessToken: @escaping () -> String? = { AuthClient.shared.accessToken }
     ) {
         self.baseURL = baseURL
-            ?? UserDefaults.standard.string(forKey: "OMNIAGENT_RELAY_BASE_URL").flatMap(URL.init(string:))
-            ?? UserDefaults.standard.string(forKey: "OMNIAGENT_RELAY_URL").flatMap(URL.init(string:))
+            ?? UserDefaults.standard.string(forKey: "OMNIAGENT_RELAY_BASE_URL").flatMap(Self.origin(from:))
+            ?? UserDefaults.standard.string(forKey: "OMNIAGENT_RELAY_URL").flatMap(Self.origin(from:))
             ?? URL(string: "https://relay.omni-agent.ai")!
         self.session = session
         self.accessToken = accessToken
+    }
+
+    /// A defaults override, as a usable origin.
+    ///
+    /// `URL(string:)` is not a validator: `URL(string: "relay.omni-agent.dev")`
+    /// is *non-nil*, with no scheme and no host — a base URL every REST call
+    /// then fails against and whose `viewerSocketURL` comes out as
+    /// `wss:/v1/viewer/d1`. And a bare hostname is exactly what someone
+    /// writes by hand (`defaults write digital.bruno.omniagent
+    /// OMNIAGENT_RELAY_URL relay.omni-agent.dev`), doubly so for the second
+    /// key, which is named after the daemon's env var and gets set from the
+    /// same note. So a scheme-less value is completed to `https://` rather
+    /// than accepted, and anything still without a host is refused outright,
+    /// falling through to the next key and finally to the production origin.
+    static func origin(from raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let candidate = trimmed.contains("://") ? trimmed : "https://\(trimmed)"
+        guard let url = URL(string: candidate), url.scheme != nil, url.host != nil else { return nil }
+        return url
     }
 
     // MARK: - Public API

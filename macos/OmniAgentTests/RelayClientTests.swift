@@ -173,6 +173,30 @@ final class RelayClientTests: XCTestCase {
         }
     }
 
+    /// The defaults overrides are written by hand, and `URL(string:)` is not
+    /// a validator: a bare hostname parses into a non-nil URL with no scheme
+    /// and no host, which breaks every REST call and turns `viewerSocketURL`
+    /// into `wss:/v1/viewer/d1`. A scheme-less value is completed to
+    /// `https://` instead; anything still hostless is refused so the caller
+    /// falls through to the production origin.
+    func testASchemelessDefaultsOverrideIsCompletedToHTTPS() {
+        XCTAssertEqual(
+            RelayClient.origin(from: "relay.omni-agent.dev")?.absoluteString,
+            "https://relay.omni-agent.dev"
+        )
+        XCTAssertEqual(
+            RelayClient.origin(from: "  relay.omni-agent.dev  ")?.absoluteString,
+            "https://relay.omni-agent.dev"
+        )
+        XCTAssertEqual(
+            RelayClient.origin(from: "http://127.0.0.1:8080")?.absoluteString,
+            "http://127.0.0.1:8080"
+        )
+        XCTAssertNil(RelayClient.origin(from: ""))
+        XCTAssertNil(RelayClient.origin(from: "   "))
+        XCTAssertNil(RelayClient.origin(from: "https://"), "no host is not an origin")
+    }
+
     /// A local relay (`http://`) gets `ws://`, not `wss://`.
     func testViewerSocketURLFollowsTheBaseSchemeForPlainHTTP() {
         let client = RelayClient(

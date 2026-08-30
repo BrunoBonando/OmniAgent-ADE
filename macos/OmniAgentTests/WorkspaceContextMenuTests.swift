@@ -151,6 +151,9 @@ final class WorkspaceContextMenuTests: XCTestCase {
             registrations.append(name)
             return RelayClient.Registration(deviceID: "d1", token: "secret")
         }
+        // The token row read as absent — the one state an enable may register
+        // from.
+        controller.applyRestoredRelayDeviceToken(nil)
 
         controller.toggleRemoteControl(workspaceID: "alpha")
 
@@ -208,6 +211,131 @@ final class WorkspaceContextMenuTests: XCTestCase {
         XCTAssertTrue(controller.remoteControlWorkspaceIDs.isEmpty)
         let row = try XCTUnwrap(firstWorkspaceRow(in: controller.shellSidebar.workspacesTree))
         XCTAssertTrue(row.remoteGlyph.isHidden)
+    }
+
+    /// A disable must reach disk even on a launch that has written nothing.
+    ///
+    /// The row survives restarts, so a Mac that shared `alpha` yesterday
+    /// starts today with a non-empty `remote_control` on disk. If the layout
+    /// read has not landed when the user turns the workspace off, the
+    /// layout-derived path is (rightly) still quiet — but the toggle is not
+    /// derived from the layout, it *is* the user's answer, and skipping it
+    /// would leave the daemon authorizing Attach/Input on ids whose checkmark
+    /// is now off. (The window's `lastPersisted` cache cannot stand in for
+    /// "a row exists": it only ever records what this window has written.)
+    func testDisablingWritesAnEmptyProjectionEvenBeforeTheLayoutLands() throws {
+        let controller = makeUnrestoredController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var written: [String: String] = [:]
+        controller.settingsWriter = { key, value in written[key] = value }
+        controller.relayDeviceRegistrar = { _ in
+            XCTFail("a disable never registers")
+            return RelayClient.Registration(deviceID: "d1", token: "secret")
+        }
+
+        // Yesterday's row comes back; the layout has not been read yet.
+        controller.applyRestoredRemoteControlWorkspaces(#"["alpha"]"#)
+        XCTAssertNil(
+            written[SettingsKey.remoteControl],
+            "the layout-derived path stays quiet until the layout is read"
+        )
+
+        controller.toggleRemoteControl(workspaceID: "alpha")
+
+        XCTAssertEqual(
+            RemoteControlProjection.decode(written[SettingsKey.remoteControl]),
+            .init(workspaces: []),
+            "the stale row on disk has to be overwritten, not left behind"
+        )
+        XCTAssertEqual(written[SettingsKey.remoteControlWorkspaces], "[]")
+    }
+
+    /// Two enables inside one network round trip are one registration.
+    /// `registerThisMachine` claims the state before it awaits, so the second
+    /// toggle sees a registration in flight and stands down — otherwise the
+    /// relay gets two device rows and the token row keeps whichever landed
+    /// last, orphaning the other.
+    func testTwoEnablesInsideOneRoundTripRegisterOnce() throws {
+        let controller = makeController(panes: [
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-1", group: "g-1"),
+            PersistedTab(project: "beta", engine: .shell, cwd: "/tmp/beta", id: "s-2", group: "g-2"),
+        ])
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let registered = expectation(description: "the device token row is written")
+        controller.settingsWriter = { key, _ in
+            if key == SettingsKey.relayDeviceToken { registered.fulfill() }
+        }
+        var registrations: [String] = []
+        controller.relayDeviceRegistrar = { name in
+            registrations.append(name)
+            return RelayClient.Registration(deviceID: "d1", token: "secret")
+        }
+        controller.applyRestoredRelayDeviceToken(nil)
+
+        // Both toggles land before the registration task can run — the exact
+        // window the state machine exists to close.
+        controller.toggleRemoteControl(workspaceID: "alpha")
+        controller.toggleRemoteControl(workspaceID: "beta")
+
+        wait(for: [registered], timeout: 5)
+        XCTAssertEqual(registrations.count, 1)
+        XCTAssertEqual(controller.relayTokenState, .present)
+    }
+
+    /// Until the token row has actually been read, "no token" is a guess —
+    /// and acting on it costs a duplicate device row. Nothing registers from
+    /// `unknown`.
+    func testAnEnableBeforeTheTokenRowIsReadDoesNotRegisterOnAGuess() throws {
+        let controller = makeController(panes: [
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-1", group: "g-1"),
+        ])
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.settingsWriter = { _, _ in }
+        var registrations = 0
+        controller.relayDeviceRegistrar = { _ in
+            registrations += 1
+            return RelayClient.Registration(deviceID: "d1", token: "secret")
+        }
+
+        controller.toggleRemoteControl(workspaceID: "alpha")
+
+        XCTAssertEqual(controller.relayTokenState, .unknown)
+        XCTAssertEqual(registrations, 0, "the row has not been read; nothing may register on a guess")
+    }
+
+    /// The projection follows the layout: a session started in an enabled
+    /// workspace is remotely reachable without anyone touching the toggle
+    /// again — that is what wiring it into `persistLayout` buys.
+    func testASessionStartedInAnEnabledWorkspaceJoinsTheProjection() throws {
+        let controller = makeController(panes: [
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-1", group: "g-1"),
+        ])
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var written: [String: String] = [:]
+        controller.settingsWriter = { key, value in written[key] = value }
+        // Already registered, so nothing here reaches for the network.
+        controller.applyRestoredRelayDeviceToken(#"{"device_id":"d1","token":"t"}"#)
+
+        controller.toggleRemoteControl(workspaceID: "alpha")
+        XCTAssertEqual(
+            RemoteControlProjection.decode(written[SettingsKey.remoteControl]).workspaces.first?.sessions.map(\.id),
+            ["s-1"]
+        )
+
+        // `startSession` answers with the session *group* id; the projection
+        // carries daemon session ids, one per pane.
+        XCTAssertNotNil(controller.startSession(inDirectory: "/tmp/alpha", project: "alpha"))
+        let added = try XCTUnwrap(controller.workspaceView.paneIDs.first { $0 != "s-1" })
+
+        XCTAssertEqual(
+            RemoteControlProjection.decode(written[SettingsKey.remoteControl]).workspaces.first?.sessions.map(\.id),
+            ["s-1", added],
+            "the layout persist re-derived the projection"
+        )
     }
 
     /// A workspace is called the same thing on both machines: the projection
@@ -632,6 +760,21 @@ final class WorkspaceContextMenuTests: XCTestCase {
         controller.applyRestoredPanes(
             WorkspaceRestoration.plan(fromLayout: PersistedLayoutCodec.serialize(panes))
         )
+        return controller
+    }
+
+    /// `makeController`'s twin for the pre-restore window: the layout row has
+    /// not been read, so `layoutReadCompleted` is false and every
+    /// layout-derived write is still gated shut.
+    private func makeUnrestoredController() -> WorkspaceWindowController {
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-workspace-menu-test.sock")
+            ),
+            panes: []
+        )
+        controller.sessionEnsurer = { _ in }
+        controller.sessionKiller = { _ in }
         return controller
     }
 

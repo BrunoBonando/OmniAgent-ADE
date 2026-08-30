@@ -124,6 +124,32 @@ final class RemoteControlProjectionTests: XCTestCase {
         XCTAssertEqual(payload.workspaces[0].sessions.map(\.id), ["s1"])
     }
 
+    /// An enabled workspace with nothing running is listed with an empty
+    /// `sessions` array, not dropped. The daemon keeps its control channel
+    /// open iff the projection lists >= 1 workspace, so dropping it would
+    /// close the tunnel the instant a user enabled Remote Control on an idle
+    /// workspace — the Mac would read as offline seconds after being turned
+    /// on.
+    func testAnEnabledWorkspaceWithNoSessionsIsStillProjected() {
+        let payload = RemoteControlProjection.build(
+            tabs: [tab("s1", project: "/a")],
+            enabledWorkspaceIDs: ["/a", "/b", "/c"],
+            workspaceLabels: ["/b": "Beta"]
+        )
+        // Sessions first in layout order, then the idle ones sorted — `Set`
+        // has no order of its own and the row must be stable across runs.
+        XCTAssertEqual(payload.workspaces.map(\.id), ["/a", "/b", "/c"])
+        XCTAssertEqual(payload.workspaces[1].name, "Beta")
+        XCTAssertEqual(payload.workspaces[1].sessions, [])
+        XCTAssertEqual(payload.workspaces[2].sessions, [])
+        XCTAssertEqual(
+            RemoteControlProjection.encode(
+                RemoteControlProjection.build(tabs: [], enabledWorkspaceIDs: ["/a"], workspaceLabels: [:])
+            ),
+            #"{"workspaces":[{"id":"/a","name":"/a","sessions":[]}]}"#
+        )
+    }
+
     /// Nothing enabled is an empty projection, not an absent row: the daemon
     /// closes its control channel on exactly this value.
     func testNothingEnabledProjectsNoWorkspaces() {

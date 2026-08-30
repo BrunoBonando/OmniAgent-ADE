@@ -46,11 +46,17 @@ enum RemoteControlProjection {
         let workspaces: [Workspace]
     }
 
-    /// Enabled workspaces only, in the order their first session appears in
-    /// `tabs` — the sidebar's order. An enabled workspace with nothing
-    /// running does not appear at all: there is nothing to attach to, and
-    /// the daemon's "keep the control channel open iff ≥ 1 workspace" rule
-    /// then costs nothing while the Mac is idle.
+    /// Enabled workspaces only — every one of them, in the order their first
+    /// session appears in `tabs` (the sidebar's order), with the enabled ones
+    /// that have nothing running after them, sorted so the row is stable.
+    ///
+    /// An enabled workspace with no sessions is listed with an empty
+    /// `sessions` array rather than dropped. That is load-bearing: the daemon
+    /// keeps its control channel open *iff* the projection lists ≥ 1
+    /// workspace, so dropping the empty ones would close the tunnel the
+    /// instant a user enabled Remote Control on a workspace that happens to
+    /// have nothing running — the machine would go OFFLINE seconds after
+    /// being turned on, which is the opposite of what the toggle says.
     static func build(
         tabs: [PersistedTab],
         enabledWorkspaceIDs: Set<String>,
@@ -75,6 +81,11 @@ enum RemoteControlProjection {
                     group: tab.group
                 )
             )
+        }
+        // Enabled but with nothing running: appended in sorted order, so the
+        // list is stable across runs (`Set` has no order of its own).
+        for project in enabledWorkspaceIDs.sorted() where sessions[project] == nil {
+            order.append(project)
         }
         return Payload(
             workspaces: order.map { project in
