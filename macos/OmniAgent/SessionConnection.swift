@@ -92,9 +92,16 @@ enum SessionConnectionError: Error, LocalizedError {
     case disconnected
     case invalidResponse(MessageKind)
     case daemon(String)
+    /// The relay answered the WebSocket upgrade with 401/403: this device's
+    /// bearer is signed out, expired or revoked. Retrying with the same
+    /// credentials cannot succeed, so the connection stops reconnecting
+    /// until an explicit `connect()` supplies a fresh bearer.
+    case unauthorized
 
     var errorDescription: String? {
         switch self {
+        case .unauthorized:
+            return "The relay rejected this device's credentials. Sign in again to reconnect."
         case .socketPathTooLong:
             return "The daemon socket path is too long."
         case let .posix(operation, code):
@@ -120,8 +127,10 @@ enum SessionTransport {
     /// `wss://relay.omni-agent.ai/v1/viewer/<device_id>` and one WebSocket
     /// binary message carries protocol bytes. The bearer is read at every
     /// (re)connect so a refreshed token is picked up without a new
-    /// `SessionConnection`.
-    case webSocket(URL, bearer: () -> String?)
+    /// `SessionConnection`. It is invoked on the connection's private
+    /// `ioQueue`, never the main thread, so it must read the token store
+    /// without touching UI state.
+    case webSocket(URL, bearer: @Sendable () -> String?)
 }
 
 final class SessionConnection {
@@ -192,6 +201,16 @@ final class SessionConnection {
     var pendingReattachCount: Int { ioQueue.sync { pendingReattachSessions.count } }
     private var shouldReconnect = false
     private var reconnectScheduled = false
+    /// The delay the *next* remote reconnect waits. Doubles per failed
+    /// attempt up to `maximumRemoteReconnectDelay` and resets to
+    /// `reconnectDelay` once a HelloAck lands or an explicit `connect()`
+    /// starts over. Only `.webSocket` reads it: the unix socket keeps its
+    /// fixed `reconnectDelay`, a local daemon comes back in milliseconds.
+    private var nextReconnectDelay: TimeInterval
+    /// Backoff ceiling for a relay that stays unreachable — a machine that
+    /// is offline for an hour dials Cloudflare twice a minute, not four
+    /// times a second.
+    private static let maximumRemoteReconnectDelay: TimeInterval = 30
     private var state: ConnectionState = .disconnected
     private var connectSignpost: OSSignpostID?
 
@@ -202,6 +221,7 @@ final class SessionConnection {
     ) {
         self.transport = transport
         self.reconnectDelay = reconnectDelay
+        self.nextReconnectDelay = reconnectDelay
         self.callbackQueue = callbackQueue
     }
 
@@ -229,6 +249,10 @@ final class SessionConnection {
     func connect() {
         ioQueue.async {
             self.shouldReconnect = true
+            // An explicit connect is a fresh start — after `.unauthorized`
+            // (B4 calls this with a new bearer) or a long outage, the first
+            // retry must not inherit the old backoff.
+            self.nextReconnectDelay = self.reconnectDelay
             self.openConnection()
         }
     }
@@ -715,7 +739,7 @@ final class SessionConnection {
                 case .success:
                     break
                 case let .failure(error):
-                    self.closeConnection(error: error)
+                    self.webSocketFailed(task, error: error)
                     return
                 }
                 self.receiveNextMessage(task)
@@ -752,10 +776,34 @@ final class SessionConnection {
     private func scheduleReconnect() {
         guard shouldReconnect, !reconnectScheduled else { return }
         reconnectScheduled = true
-        ioQueue.asyncAfter(deadline: .now() + reconnectDelay) {
+        let delay: TimeInterval
+        if isRemote {
+            delay = nextReconnectDelay
+            nextReconnectDelay = min(nextReconnectDelay * 2, Self.maximumRemoteReconnectDelay)
+        } else {
+            delay = reconnectDelay
+        }
+        ioQueue.asyncAfter(deadline: .now() + delay) {
             self.reconnectScheduled = false
             self.openConnection()
         }
+    }
+
+    /// Every WebSocket-side failure (the receive loop's and `send`'s) lands
+    /// here. A 401/403 on the upgrade is not an outage: the relay looked at
+    /// the bearer and refused it, so reconnecting with the same one would
+    /// dial `relay.omni-agent.ai` four times a second for nothing. Report
+    /// `.unauthorized` once and stop until an explicit `connect()`.
+    private func webSocketFailed(_ task: URLSessionWebSocketTask, error: Error) {
+        guard webSocketTask === task else { return }
+        if let status = (task.response as? HTTPURLResponse)?.statusCode,
+           status == 401 || status == 403 {
+            shouldReconnect = false
+            nextReconnectDelay = reconnectDelay
+            closeConnection(error: SessionConnectionError.unauthorized)
+            return
+        }
+        closeConnection(error: error)
     }
 
     private func readAvailable() {
@@ -781,6 +829,9 @@ final class SessionConnection {
             helloRequest = nil
             finishConnectSignpost()
             transition(to: .connected)
+            // The relay is reachable again: the next outage starts its
+            // backoff from the seed, not from wherever the last one ended.
+            nextReconnectDelay = reconnectDelay
             // A new round: anything left from the previous connection's
             // round can never be answered now.
             pendingReattachSessions.removeAll()
@@ -966,10 +1017,9 @@ final class SessionConnection {
             task.send(.data(data)) { [weak self] error in
                 guard let self, let error else { return }
                 self.ioQueue.async {
-                    // A stale task's late failure must not close its
-                    // successor (the receive loop applies the same check).
-                    guard self.webSocketTask === task else { return }
-                    self.closeConnection(error: error)
+                    // `webSocketFailed` drops a stale task's late failure
+                    // so it can never close its successor.
+                    self.webSocketFailed(task, error: error)
                 }
             }
         } else {
