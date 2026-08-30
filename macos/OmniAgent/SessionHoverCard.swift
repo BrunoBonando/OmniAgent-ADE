@@ -2119,6 +2119,8 @@ final class HoverCardShellView: NSView {
             width: max(max(0, bounds.width - Self.lane), minimumCardSize.width),
             height: max(bounds.height, minimumCardSize.height)
         )
+        // See `cardSize`: harmless under the glass pin, essential without it.
+        body.frame = card.bounds
         dropBox.frame = dropFrame(centerY: dropCenterY)
     }
 
@@ -2139,6 +2141,13 @@ final class HoverCardShellView: NSView {
         card.frame.size.height = 10_000
         let size = body.cardSize
         card.frame = previous
+        // Below 26 (and behind `glassEnabled`) nothing pins `body` to `card`:
+        // it is a plain autoresizing subview of the blur host, and the trip
+        // to 10 000 and back reaches it as a delta of −9 000-odd points —
+        // a body of height 0 under a card of full height, every label in it
+        // laid out into nothing. The mask is for the animated ticks between
+        // two frames; the two endpoints are set here and in `layout()`.
+        body.frame = card.bounds
         minimumCardSize = size
         return size
     }

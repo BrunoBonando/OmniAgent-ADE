@@ -1414,6 +1414,39 @@ final class SessionHoverCardTests: XCTestCase {
         }
     }
 
+    /// What the live app's view tree showed on 2026-08-30 behind an empty
+    /// card: the panel and the blur host at full height, `body` at
+    /// `(0,0,404,0)`. Without the glass pin, `cardSize`'s trip to 10 000
+    /// points and back reached the autoresizing body as a delta and left it
+    /// at zero — and the tick re-measures with the shell already at its
+    /// final size, so the frame that follows changed nothing.
+    func testTheBodyFillsTheCardAfterAMeasurementAtFinalSize() {
+        let shell = HoverCardShellView(frame: NSRect(x: 0, y: 0, width: 280, height: 90))
+        shell.body.tailField.animates = false
+        var panes: [String: PaneDescriptor] = [:]
+        for id in ["a", "b"] {
+            panes[id] = PaneDescriptor(sessionID: id, group: "s", engine: .claude, label: "pane \(id)")
+        }
+        shell.body.apply(HoverCardModel.session(
+            sessionNode(paneIDs: ["a", "b"]),
+            panes: panes,
+            statuses: ["a": .thinking, "b": .ready],
+            ledger: PaneActivityLedger(),
+            tails: { "working on \($0)" },
+            now: t0
+        ))
+        let target = shell.cardSize
+        shell.frame = NSRect(origin: .zero, size: SessionHoverCardController.panelSize(card: target))
+        shell.layoutSubtreeIfNeeded()
+        XCTAssertEqual(shell.body.frame.height, target.height, accuracy: 0.5, "after the open")
+
+        // The tick: measured again, nothing else changes.
+        _ = shell.cardSize
+        shell.layoutSubtreeIfNeeded()
+        XCTAssertEqual(shell.body.frame.height, target.height, accuracy: 0.5, "after a tick")
+        XCTAssertEqual(shell.body.frame.width, target.width, accuracy: 0.5)
+    }
+
     // MARK: - End to end
 
     /// The whole road from a row's hover to a panel on screen: the open delay
