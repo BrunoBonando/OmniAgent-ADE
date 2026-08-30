@@ -40,6 +40,12 @@ final class AccountDirectoryTests: XCTestCase {
 
         try "../../etc".write(to: AccountDirectory.currentAccountFile(root: root), atomically: true, encoding: .utf8)
         XCTAssertNil(AccountDirectory.readCurrentAccount(root: root), "only hex ids are ever joined onto the root")
+
+        // U+FF26 "Ｆ" is a fullwidth hex digit Swift's `Character.isHexDigit`
+        // accepts but Rust's `is_ascii_hexdigit()` does not — must read as absent
+        // so the app and daemon never disagree about a hand-edited pointer.
+        try "ＦC44B18D5588B1D6".write(to: AccountDirectory.currentAccountFile(root: root), atomically: true, encoding: .utf8)
+        XCTAssertNil(AccountDirectory.readCurrentAccount(root: root), "only ASCII hex digits are accepted")
     }
 
     func testWriteThenReadThenClearRoundTrips() throws {

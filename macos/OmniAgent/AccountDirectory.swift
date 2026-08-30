@@ -39,7 +39,7 @@ enum AccountDirectory {
             return nil
         }
         let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !id.isEmpty, id.allSatisfy(\.isHexDigit) else { return nil }
+        guard !id.isEmpty, id.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
         return id
     }
 
