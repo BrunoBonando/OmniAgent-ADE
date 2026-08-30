@@ -358,7 +358,10 @@ impl Store {
         use sha2::{Digest, Sha256};
         let normalized = email.trim().to_lowercase();
         let digest = Sha256::digest(normalized.as_bytes());
-        digest[..8].iter().map(|byte| format!("{byte:02x}")).collect()
+        digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 
     /// The id the pointer names, or `None` when signed out (no file, or a
@@ -394,42 +397,56 @@ impl Store {
 
     /// One-time migration of a pre-account install: moves `root/brain.db`
     /// (+ `-wal`, `-shm`), `root/brain/` and `root/transcripts/` into
+    /// `account_dir`, but only the very first time an account directory is
+    /// created (`root/accounts` did not exist yet) and only when there is a
+    /// `root/brain.db` to move. Every later account starts empty.
+    ///
+    /// Stages the move under `root/accounts.partial/<id>` first and commits
+    /// with a single final `rename` onto `root/accounts`, so a crash or kill
+    /// mid-migration never leaves `root/accounts` half-populated; any
+    /// leftover `accounts.partial` from an interrupted prior run is removed
+    /// before staging begins, so a retry always starts clean.
     pub fn adopt_legacy_data(root: &Path, account_dir: &Path) -> std::io::Result<bool> {
         if account_dir == root {
             return Ok(false);
         }
-        
+
         // Clean up any leftover staging directory from a prior interrupted run
         let partial_accounts = root.join("accounts.partial");
         if partial_accounts.exists() {
             std::fs::remove_dir_all(&partial_accounts)?;
         }
-        
+
         if root.join(ACCOUNTS_DIR).exists() {
             return Ok(false);
         }
         if !root.join("brain.db").is_file() {
             return Ok(false);
         }
-        
+
         // Stage the migration: move artifacts into accounts.partial/<id> first
         let Some(dir_name) = account_dir.file_name() else {
             return Ok(false);
         };
         let partial_account_dir = partial_accounts.join(dir_name);
         std::fs::create_dir_all(&partial_account_dir)?;
-        
-        for name in ["brain.db", "brain.db-wal", "brain.db-shm", "brain", "transcripts"] {
+
+        for name in [
+            "brain.db",
+            "brain.db-wal",
+            "brain.db-shm",
+            "brain",
+            "transcripts",
+        ] {
             let from = root.join(name);
             if from.exists() {
                 std::fs::rename(&from, partial_account_dir.join(name))?;
             }
         }
-        
+
         // All renames succeeded; commit the migration by promoting the staging dir
         std::fs::rename(&partial_accounts, root.join(ACCOUNTS_DIR))?;
         Ok(true)
-    }
     }
 
     /// Opens (creating if absent) the brain database under `data_dir/brain.db`.
@@ -1114,7 +1131,9 @@ mod replacement_tests {
 
         // The other process (the native app or the Tauri app) rebuilds.
         let other = rebuild_like_the_other_process(dir.path());
-        other.set_setting("notifications", "written-by-the-rebuilder").unwrap();
+        other
+            .set_setting("notifications", "written-by-the-rebuilder")
+            .unwrap();
         drop(other);
 
         assert!(store.was_replaced(), "the inode at brain.db changed");
@@ -1127,7 +1146,10 @@ mod replacement_tests {
         // write landed in the file that actually lives at the path, not in a
         // nameless inode only this handle can see.
         let verify = Store::open(dir.path()).unwrap();
-        assert_eq!(verify.get_setting("layout").unwrap().as_deref(), Some("after"));
+        assert_eq!(
+            verify.get_setting("layout").unwrap().as_deref(),
+            Some("after")
+        );
         assert_eq!(
             verify.get_setting("notifications").unwrap().as_deref(),
             Some("written-by-the-rebuilder"),
@@ -1261,7 +1283,9 @@ mod account_scope_tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_env_root<T>(root: &Path, body: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::env::set_var("OMNIAGENT_ADE_DATA_DIR", root);
         let out = body();
         std::env::remove_var("OMNIAGENT_ADE_DATA_DIR");
@@ -1273,10 +1297,19 @@ mod account_scope_tests {
         // The same vector is pinned in AccountDirectoryTests.swift — the two
         // sides must agree byte for byte or the app and the daemon would
         // pick different directories for one account.
-        assert_eq!(Store::account_dir_id("Bruno@Bonando.com "), "fc44b18d5588b1d6");
-        assert_eq!(Store::account_dir_id("bruno@bonando.com"), "fc44b18d5588b1d6");
+        assert_eq!(
+            Store::account_dir_id("Bruno@Bonando.com "),
+            "fc44b18d5588b1d6"
+        );
+        assert_eq!(
+            Store::account_dir_id("bruno@bonando.com"),
+            "fc44b18d5588b1d6"
+        );
         assert_eq!(Store::account_dir_id("bruno@bonando.com").len(), 16);
-        assert_ne!(Store::account_dir_id("other@bonando.com"), "fc44b18d5588b1d6");
+        assert_ne!(
+            Store::account_dir_id("other@bonando.com"),
+            "fc44b18d5588b1d6"
+        );
     }
 
     #[test]
@@ -1292,11 +1325,22 @@ mod account_scope_tests {
         let dir = tempdir().unwrap();
         assert_eq!(Store::read_current_account(dir.path()), None, "no file");
 
-        std::fs::write(Store::current_account_file(dir.path()), "  fc44b18d5588b1d6\n").unwrap();
-        assert_eq!(Store::read_current_account(dir.path()).as_deref(), Some("fc44b18d5588b1d6"));
+        std::fs::write(
+            Store::current_account_file(dir.path()),
+            "  fc44b18d5588b1d6\n",
+        )
+        .unwrap();
+        assert_eq!(
+            Store::read_current_account(dir.path()).as_deref(),
+            Some("fc44b18d5588b1d6")
+        );
 
         std::fs::write(Store::current_account_file(dir.path()), "   \n").unwrap();
-        assert_eq!(Store::read_current_account(dir.path()), None, "blank means signed out");
+        assert_eq!(
+            Store::read_current_account(dir.path()),
+            None,
+            "blank means signed out"
+        );
 
         std::fs::write(Store::current_account_file(dir.path()), "../../etc").unwrap();
         assert_eq!(
@@ -1323,30 +1367,51 @@ mod account_scope_tests {
         let dir = tempdir().unwrap();
         with_env_root(dir.path(), || {
             assert_eq!(Store::data_root(), dir.path());
-            assert_eq!(Store::default_data_dir(), dir.path(), "no pointer: the root, as before");
+            assert_eq!(
+                Store::default_data_dir(),
+                dir.path(),
+                "no pointer: the root, as before"
+            );
 
-            std::fs::write(Store::current_account_file(dir.path()), "fc44b18d5588b1d6\n").unwrap();
+            std::fs::write(
+                Store::current_account_file(dir.path()),
+                "fc44b18d5588b1d6\n",
+            )
+            .unwrap();
             assert_eq!(
                 Store::default_data_dir(),
                 dir.path().join("accounts").join("fc44b18d5588b1d6")
             );
-            assert_eq!(Store::data_root(), dir.path(), "the env override is the root, never the account dir");
+            assert_eq!(
+                Store::data_root(),
+                dir.path(),
+                "the env override is the root, never the account dir"
+            );
 
             std::fs::write(Store::current_account_file(dir.path()), "\n").unwrap();
-            assert_eq!(Store::default_data_dir(), dir.path(), "a blank pointer is signed out");
+            assert_eq!(
+                Store::default_data_dir(),
+                dir.path(),
+                "a blank pointer is signed out"
+            );
         });
     }
 
     #[test]
     fn default_data_dir_without_the_env_override_is_under_home() {
         let dir = tempdir().unwrap();
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::env::remove_var("OMNIAGENT_ADE_DATA_DIR");
         let previous_home = std::env::var_os("HOME");
         std::env::set_var("HOME", dir.path());
 
         let root = Store::data_root();
-        assert_eq!(root, dir.path().join("Library/Application Support/OmniAgent-ADE"));
+        assert_eq!(
+            root,
+            dir.path().join("Library/Application Support/OmniAgent-ADE")
+        );
         assert_eq!(Store::default_data_dir(), root);
 
         match previous_home {
@@ -1358,7 +1423,10 @@ mod account_scope_tests {
     /// Every legacy artefact the migration is responsible for, plus one
     /// bystander it must leave alone.
     fn seed_legacy_root(root: &Path) {
-        Store::open(root).unwrap().set_setting("layout", "legacy-layout").unwrap();
+        Store::open(root)
+            .unwrap()
+            .set_setting("layout", "legacy-layout")
+            .unwrap();
         std::fs::write(root.join("brain.db-wal"), b"wal").unwrap();
         std::fs::write(root.join("brain.db-shm"), b"shm").unwrap();
         std::fs::create_dir_all(root.join("brain").join("proj")).unwrap();
@@ -1377,17 +1445,32 @@ mod account_scope_tests {
 
         assert!(Store::adopt_legacy_data(root, &account).unwrap());
 
-        for name in ["brain.db", "brain.db-wal", "brain.db-shm", "brain", "transcripts"] {
+        for name in [
+            "brain.db",
+            "brain.db-wal",
+            "brain.db-shm",
+            "brain",
+            "transcripts",
+        ] {
             assert!(!root.join(name).exists(), "{name} left the root");
-            assert!(account.join(name).exists(), "{name} arrived in the account dir");
+            assert!(
+                account.join(name).exists(),
+                "{name} arrived in the account dir"
+            );
         }
         assert_eq!(
             std::fs::read_to_string(account.join("brain").join("proj").join("note.md")).unwrap(),
             "# note"
         );
-        assert!(root.join("unrelated.txt").exists(), "only the three artefacts move");
+        assert!(
+            root.join("unrelated.txt").exists(),
+            "only the three artefacts move"
+        );
         let moved = Store::open(&account).unwrap();
-        assert_eq!(moved.get_setting("layout").unwrap().as_deref(), Some("legacy-layout"));
+        assert_eq!(
+            moved.get_setting("layout").unwrap().as_deref(),
+            Some("legacy-layout")
+        );
     }
 
     #[test]
@@ -1397,10 +1480,16 @@ mod account_scope_tests {
         seed_legacy_root(root);
         let first = root.join("accounts").join("fc44b18d5588b1d6");
         assert!(Store::adopt_legacy_data(root, &first).unwrap());
-        assert!(!Store::adopt_legacy_data(root, &first).unwrap(), "idempotent");
+        assert!(
+            !Store::adopt_legacy_data(root, &first).unwrap(),
+            "idempotent"
+        );
 
         // A later account starts empty: the legacy data belongs to the first.
-        Store::open(root).unwrap().set_setting("layout", "written-later-at-root").unwrap();
+        Store::open(root)
+            .unwrap()
+            .set_setting("layout", "written-later-at-root")
+            .unwrap();
         let second = root.join("accounts").join("0123456789abcdef");
         assert!(!Store::adopt_legacy_data(root, &second).unwrap());
         assert!(root.join("brain.db").exists(), "nothing moved");
@@ -1413,12 +1502,21 @@ mod account_scope_tests {
         let root = dir.path();
         std::fs::create_dir_all(root.join("transcripts")).unwrap();
         let account = root.join("accounts").join("fc44b18d5588b1d6");
-        assert!(!Store::adopt_legacy_data(root, &account).unwrap(), "no brain.db: a fresh install");
-        assert!(!root.join("accounts").exists(), "and nothing was created either");
+        assert!(
+            !Store::adopt_legacy_data(root, &account).unwrap(),
+            "no brain.db: a fresh install"
+        );
+        assert!(
+            !root.join("accounts").exists(),
+            "and nothing was created either"
+        );
         assert!(root.join("transcripts").exists());
 
         seed_legacy_root(root);
-        assert!(!Store::adopt_legacy_data(root, root).unwrap(), "signed out: the root serves itself");
+        assert!(
+            !Store::adopt_legacy_data(root, root).unwrap(),
+            "signed out: the root serves itself"
+        );
         assert!(root.join("brain.db").exists());
     }
 
@@ -1440,9 +1538,18 @@ mod account_scope_tests {
         assert!(!partial.exists(), "accounts.partial was cleaned up");
 
         // Verify the full migration completed
-        for name in ["brain.db", "brain.db-wal", "brain.db-shm", "brain", "transcripts"] {
+        for name in [
+            "brain.db",
+            "brain.db-wal",
+            "brain.db-shm",
+            "brain",
+            "transcripts",
+        ] {
             assert!(!root.join(name).exists(), "{name} left the root");
-            assert!(account.join(name).exists(), "{name} arrived in the account dir");
+            assert!(
+                account.join(name).exists(),
+                "{name} arrived in the account dir"
+            );
         }
     }
 }
