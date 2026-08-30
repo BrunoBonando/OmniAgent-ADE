@@ -36,6 +36,8 @@ enum PaletteAction: Equatable {
     /// One Settings section, straight from the spotlight — the page opens
     /// on it, the way the gear's panel would.
     case showSettingsSection(SettingsSection)
+    /// Opens the focused branch/session setup flow for the current workspace.
+    case startBranchSession
     /// Settings › Accounts' one button, in its two states. Only ever one of
     /// these is a row — whichever the account makes true — because the
     /// spotlight offers what you can do now, not both halves of a toggle.
@@ -468,6 +470,18 @@ struct CommandPaletteModel: Equatable {
                 )
             )
         }
+        commands.append(
+            PaletteCommand(
+                id: "session:new-branch",
+                title: "New Branch Session…",
+                detail: nil,
+                action: .startBranchSession,
+                keywords: "new session branch worktree terminal create",
+                section: .places,
+                subtitle: "Sessions",
+                symbol: "arrow.triangle.branch"
+            )
+        )
         // The sidebar's own three buttons, by name. `allCases` rather than a
         // hand-written list: a fourth destination should appear here the day
         // it appears in the sidebar, not the day someone remembers this.

@@ -15,7 +15,19 @@ final class SessionMetaTests: XCTestCase {
         let meta: [String: SessionMeta] = [
             "g-1": SessionMeta(pinned: true),
             "g-2": SessionMeta(pinned: false, parent: "g-1"),
-            "g-3": SessionMeta(pinned: true, parent: "g-1"),
+            "g-3": SessionMeta(
+                pinned: true,
+                parent: "g-1",
+                branch: SessionBranch(
+                    repositoryRoot: "/repo",
+                    branch: "feature/a",
+                    worktreePath: "/repo/.omniagent/worktrees/feature-a",
+                    sourceRef: "main",
+                    sourceCommit: "abc123",
+                    engine: .claude,
+                    model: "opus"
+                )
+            ),
         ]
         XCTAssertEqual(SessionMetaCodec.deserialize(SessionMetaCodec.serialize(meta)), meta)
     }
@@ -66,6 +78,46 @@ final class SessionMetaTests: XCTestCase {
     func testSerializeDropsEmptyEntries() {
         let meta = ["g-1": SessionMeta(pinned: false, parent: nil)]
         XCTAssertEqual(SessionMetaCodec.deserialize(SessionMetaCodec.serialize(meta)), [:])
+    }
+
+    func testBranchMetadataRepairRules() {
+        let raw = """
+        {"sessions":{
+            "g-branch":{"branch":{
+                "repositoryRoot":"/repo",
+                "branch":"feat/x",
+                "worktreePath":"/repo/.omniagent/worktrees/feat-x",
+                "sourceRef":"main",
+                "sourceCommit":"abc",
+                "engine":"codex",
+                "model":"gpt"
+            }},
+            "g-bad-engine":{"branch":{
+                "repositoryRoot":"/repo",
+                "branch":"feat/y",
+                "worktreePath":"/repo/.omniagent/worktrees/feat-y",
+                "engine":"unknown"
+            }},
+            "g-empty-branch":{"branch":{"repositoryRoot":"","branch":"","worktreePath":""}}
+        }}
+        """
+
+        let meta = SessionMetaCodec.deserialize(raw)
+
+        XCTAssertEqual(
+            meta["g-branch"]?.branch,
+            SessionBranch(
+                repositoryRoot: "/repo",
+                branch: "feat/x",
+                worktreePath: "/repo/.omniagent/worktrees/feat-x",
+                sourceRef: "main",
+                sourceCommit: "abc",
+                engine: .codex,
+                model: "gpt"
+            )
+        )
+        XCTAssertEqual(meta["g-bad-engine"]?.branch?.engine, nil)
+        XCTAssertNil(meta["g-empty-branch"])
     }
 
     func testSettingsKey() {

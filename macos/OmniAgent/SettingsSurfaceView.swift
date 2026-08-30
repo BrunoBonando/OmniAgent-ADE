@@ -331,6 +331,10 @@ final class SettingsSurfaceView: NSView {
     /// The same, for the GitHub pair: the spotlight offers "Disconnect
     /// GitHub" or "Connect GitHub…" off this one reading.
     private(set) var accountGitHubConnected = false
+    /// The linked handle, without the `@` — `""` when not connected. Home's
+    /// branch dropdown reads this to show who is actually connected instead
+    /// of repeating the account bool as bare text.
+    private(set) var githubLogin = ""
     /// The account block's buttons, as one press each. `onLogOut` and
     /// `onDisconnectGitHub` are the destructive halves; all four are the
     /// controller's to perform — this view knows nothing about auth.
@@ -466,6 +470,7 @@ final class SettingsSurfaceView: NSView {
 
         let login = (githubLogin ?? "").trimmingCharacters(in: .whitespaces)
         accountGitHubConnected = !login.isEmpty
+        self.githubLogin = login
         githubField.stringValue = login.isEmpty ? "GitHub: not connected" : "GitHub: @\(login)"
         githubButton.title = login.isEmpty ? "Connect GitHub…" : "Disconnect"
         deleteAccountButton.isHidden = !(section == .accounts && signedIn)

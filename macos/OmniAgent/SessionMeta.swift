@@ -16,8 +16,31 @@ struct SessionMeta: Equatable {
     /// The session this one was created nested under — `Create nested
     /// session` records the right-clicked group here.
     var parent: String?
+    /// The Git branch/worktree this session owns. Native-only metadata, kept
+    /// off `layout` because the web codec would strip it on rewrite.
+    var branch: SessionBranch?
 
-    var isEmpty: Bool { !pinned && parent == nil }
+    var isEmpty: Bool { !pinned && parent == nil && branch == nil }
+}
+
+/// The branch-bound identity of one session group.
+///
+/// A session can contain many terminal panes, but they all share one group id
+/// and therefore one worktree. `sourceRef` is the user-selected branch/ref a
+/// newly-created branch was based on; `sourceCommit` is the resolved commit
+/// when it was known at creation time.
+struct SessionBranch: Equatable {
+    var repositoryRoot: String
+    var branch: String
+    var worktreePath: String
+    var sourceRef: String?
+    var sourceCommit: String?
+    var engine: Engine?
+    var model: String?
+
+    var isEmpty: Bool {
+        repositoryRoot.isEmpty || branch.isEmpty || worktreePath.isEmpty
+    }
 }
 
 extension SessionMeta {
@@ -125,6 +148,9 @@ enum SessionMetaCodec {
             if let parent = entry.parent, SessionIdentifier.isValid(parent), parent != group {
                 dict["parent"] = parent
             }
+            if let branch = entry.branch, let encoded = encode(branch) {
+                dict["branch"] = encoded
+            }
             if !dict.isEmpty { entries[group] = dict }
         }
         let payload: [String: Any] = ["sessions": entries]
@@ -163,9 +189,48 @@ enum SessionMetaCodec {
             if let raw = dict["parent"] as? String, SessionIdentifier.isValid(raw), raw != group {
                 parent = raw
             }
-            let entry = SessionMeta(pinned: (dict["pinned"] as? Bool) ?? false, parent: parent)
+            let entry = SessionMeta(
+                pinned: (dict["pinned"] as? Bool) ?? false,
+                parent: parent,
+                branch: decodeBranch(dict["branch"])
+            )
             if !entry.isEmpty { meta[group] = entry }
         }
         return meta
+    }
+
+    private static func encode(_ branch: SessionBranch) -> [String: Any]? {
+        guard !branch.isEmpty else { return nil }
+        var dict: [String: Any] = [
+            "repositoryRoot": branch.repositoryRoot,
+            "branch": branch.branch,
+            "worktreePath": branch.worktreePath,
+        ]
+        if let value = branch.sourceRef, !value.isEmpty { dict["sourceRef"] = value }
+        if let value = branch.sourceCommit, !value.isEmpty { dict["sourceCommit"] = value }
+        if let engine = branch.engine { dict["engine"] = engine.rawValue }
+        if let model = branch.model, !model.isEmpty { dict["model"] = model }
+        return dict
+    }
+
+    private static func decodeBranch(_ value: Any?) -> SessionBranch? {
+        guard
+            let dict = value as? [String: Any],
+            let repositoryRoot = dict["repositoryRoot"] as? String,
+            let branch = dict["branch"] as? String,
+            let worktreePath = dict["worktreePath"] as? String
+        else {
+            return nil
+        }
+        let decoded = SessionBranch(
+            repositoryRoot: repositoryRoot,
+            branch: branch,
+            worktreePath: worktreePath,
+            sourceRef: dict["sourceRef"] as? String,
+            sourceCommit: dict["sourceCommit"] as? String,
+            engine: (dict["engine"] as? String).flatMap(Engine.init(rawValue:)),
+            model: dict["model"] as? String
+        )
+        return decoded.isEmpty ? nil : decoded
     }
 }

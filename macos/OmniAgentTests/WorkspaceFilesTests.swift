@@ -452,6 +452,39 @@ final class WorkspaceFilesTests: XCTestCase {
         XCTAssertFalse(branches.contains("origin"), "the remote's own symbolic HEAD pointer is not a branch")
     }
 
+    func testBranchReadsLinkedWorktreeHead() throws {
+        let gitdir = try makeDirectory("real-git")
+        try makeDirectory("real-git/info")
+        try "ref: refs/heads/worktree-branch\n".write(
+            to: gitdir.appendingPathComponent("HEAD"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "gitdir: real-git\n".write(
+            to: tempDirectory.appendingPathComponent(".git"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(GitBranch.current(repoRoot: tempDirectory), "worktree-branch")
+    }
+
+    func testWorktreePathSanitizesBranchNamesUnderRepoLocalDirectory() {
+        XCTAssertEqual(GitWorktree.sanitizedBranchPathComponent("feature/voice latency"), "feature-voice-latency")
+        XCTAssertEqual(
+            GitWorktree.defaultPath(for: "feature/voice latency", repoRoot: tempDirectory).path,
+            tempDirectory.appendingPathComponent(".omniagent/worktrees/feature-voice-latency").path
+        )
+    }
+
+    func testWorktreePlanRejectsNonGitFolders() throws {
+        XCTAssertThrowsError(
+            try GitWorktree.plan(directory: tempDirectory.path, branch: "feature/x", sourceRef: "main", createsBranch: true)
+        ) { error in
+            XCTAssertEqual(error as? GitWorktreeError, .notRepository)
+        }
+    }
+
     private func makeGitRepository() throws {
         try skipUnlessGitIsAvailable()
         XCTAssertEqual(runGit(["init", "-q", tempDirectory.path]), 0, "git init failed")

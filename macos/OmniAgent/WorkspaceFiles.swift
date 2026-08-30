@@ -456,7 +456,8 @@ struct GitStatus {
 /// branch and so reports `nil` — the badge simply does not appear.
 enum GitBranch {
     static func current(repoRoot: URL) -> String? {
-        let head = repoRoot.appendingPathComponent(".git/HEAD")
+        let head = gitDirectory(for: repoRoot)?.appendingPathComponent("HEAD")
+            ?? repoRoot.appendingPathComponent(".git/HEAD")
         guard let contents = try? String(contentsOf: head, encoding: .utf8) else { return nil }
         let line = contents.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let ref = line.split(separator: " ").last, line.hasPrefix("ref:") else { return nil }
@@ -507,6 +508,186 @@ enum GitBranch {
             names.append(name)
         }
         return names
+    }
+
+    private static func gitDirectory(for repoRoot: URL) -> URL? {
+        let marker = repoRoot.appendingPathComponent(".git")
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: marker.path, isDirectory: &isDirectory) else {
+            return nil
+        }
+        if isDirectory.boolValue { return marker }
+        guard
+            let contents = try? String(contentsOf: marker, encoding: .utf8),
+            let path = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(separator: " ", maxSplits: 1)
+                .last,
+            contents.hasPrefix("gitdir:")
+        else {
+            return nil
+        }
+        let raw = String(path)
+        if raw.hasPrefix("/") { return URL(fileURLWithPath: raw, isDirectory: true) }
+        return repoRoot.appendingPathComponent(raw).standardizedFileURL
+    }
+}
+
+enum GitWorktreeError: LocalizedError, Equatable {
+    case notRepository
+    case invalidBranchName
+    case branchAlreadyCheckedOut(String)
+    case gitFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .notRepository:
+            return "This folder is not a Git repository."
+        case .invalidBranchName:
+            return "Choose a branch name that Git can use."
+        case let .branchAlreadyCheckedOut(branch):
+            return "Branch \(branch) is already checked out in another worktree."
+        case let .gitFailed(message):
+            return message
+        }
+    }
+}
+
+struct GitWorktreePlan: Equatable {
+    var repositoryRoot: URL
+    var branch: String
+    var sourceRef: String?
+    var worktreePath: URL
+    var createsBranch: Bool
+}
+
+enum GitWorktree {
+    static let worktreesDirectory = ".omniagent/worktrees"
+
+    static func sanitizedBranchPathComponent(_ branch: String) -> String {
+        var out = ""
+        var previousDash = false
+        for scalar in branch.unicodeScalars {
+            let allowed = CharacterSet.alphanumerics.contains(scalar)
+                || scalar == "-" || scalar == "_" || scalar == "."
+            if allowed {
+                out.unicodeScalars.append(scalar)
+                previousDash = false
+            } else if !previousDash {
+                out.append("-")
+                previousDash = true
+            }
+        }
+        let trimmed = out.trimmingCharacters(in: CharacterSet(charactersIn: "-."))
+        return trimmed.isEmpty ? "branch" : trimmed
+    }
+
+    static func defaultPath(for branch: String, repoRoot: URL) -> URL {
+        repoRoot.appendingPathComponent(worktreesDirectory, isDirectory: true)
+            .appendingPathComponent(sanitizedBranchPathComponent(branch), isDirectory: true)
+    }
+
+    static func commit(of ref: String, repoRoot: URL) -> String? {
+        GitStatus.runGit(["rev-parse", "--verify", "\(ref)^{commit}"], in: repoRoot)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func checkedOutBranches(repoRoot: URL) -> [String: URL] {
+        guard let output = GitStatus.runGit(["worktree", "list", "--porcelain"], in: repoRoot) else {
+            return [:]
+        }
+        var currentPath: URL?
+        var branches: [String: URL] = [:]
+        for line in output.split(separator: "\n").map(String.init) {
+            if let path = line.stripPrefix("worktree ") {
+                currentPath = URL(fileURLWithPath: path, isDirectory: true)
+            } else if let branch = line.stripPrefix("branch refs/heads/"), let currentPath {
+                branches[branch] = currentPath
+            }
+        }
+        return branches
+    }
+
+    static func plan(
+        directory: String,
+        branch: String,
+        sourceRef: String?,
+        createsBranch: Bool
+    ) throws -> GitWorktreePlan {
+        guard
+            let repoRoot = GitStatus.repoRoot(for: URL(fileURLWithPath: directory, isDirectory: true))
+        else {
+            throw GitWorktreeError.notRepository
+        }
+        let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, GitStatus.runGit(["check-ref-format", "--branch", trimmed], in: repoRoot) != nil else {
+            throw GitWorktreeError.invalidBranchName
+        }
+        let path = defaultPath(for: trimmed, repoRoot: repoRoot)
+        return GitWorktreePlan(
+            repositoryRoot: repoRoot,
+            branch: trimmed,
+            sourceRef: sourceRef?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            worktreePath: path,
+            createsBranch: createsBranch
+        )
+    }
+
+    static func ensure(_ plan: GitWorktreePlan) throws -> URL {
+        let checkedOut = checkedOutBranches(repoRoot: plan.repositoryRoot)[plan.branch]
+        if !plan.createsBranch, let checkedOut {
+            return checkedOut
+        }
+        if FileManager.default.fileExists(atPath: plan.worktreePath.path) {
+            return plan.worktreePath
+        }
+        try ensureExcluded(repoRoot: plan.repositoryRoot)
+        try FileManager.default.createDirectory(
+            at: plan.worktreePath.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if let checkedOut,
+           GitStatus.canonicalPath(checkedOut) != GitStatus.canonicalPath(plan.worktreePath) {
+            throw GitWorktreeError.branchAlreadyCheckedOut(plan.branch)
+        }
+        var args = ["worktree", "add"]
+        if plan.createsBranch {
+            args += ["-b", plan.branch, plan.worktreePath.path]
+            if let source = plan.sourceRef { args.append(source) }
+        } else {
+            args += [plan.worktreePath.path, plan.branch]
+        }
+        guard GitStatus.runGit(args, in: plan.repositoryRoot) != nil else {
+            throw GitWorktreeError.gitFailed("Could not create Git worktree for \(plan.branch).")
+        }
+        return plan.worktreePath
+    }
+
+    static func ensureExcluded(repoRoot: URL) throws {
+        let gitCommonDir = GitStatus.runGit(["rev-parse", "--git-common-dir"], in: repoRoot)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let gitDirectory = gitCommonDir.map { path in
+            path.hasPrefix("/")
+                ? URL(fileURLWithPath: path, isDirectory: true)
+                : repoRoot.appendingPathComponent(path, isDirectory: true)
+        } ?? repoRoot.appendingPathComponent(".git", isDirectory: true)
+        let info = gitDirectory.appendingPathComponent("info", isDirectory: true)
+        try FileManager.default.createDirectory(at: info, withIntermediateDirectories: true)
+        let exclude = info.appendingPathComponent("exclude")
+        let line = "/.omniagent/worktrees/\n"
+        let existing = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
+        guard !existing.contains("/.omniagent/worktrees/") else { return }
+        try (existing + (existing.hasSuffix("\n") || existing.isEmpty ? "" : "\n") + line)
+            .write(to: exclude, atomically: true, encoding: .utf8)
+    }
+}
+
+private extension String {
+    func stripPrefix(_ prefix: String) -> String? {
+        hasPrefix(prefix) ? String(dropFirst(prefix.count)) : nil
+    }
+
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }
 

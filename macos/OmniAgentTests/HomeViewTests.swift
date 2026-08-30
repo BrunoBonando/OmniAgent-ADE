@@ -3,8 +3,8 @@ import XCTest
 
 /// The Home screen: the design's words, the interactive feel, and a layout
 /// pass that must not throw the constraint engine. The controls hover, focus
-/// and press like the real thing, and every press is deliberately inert
-/// (2026-08-24) — so these tests assert the feel, never an effect.
+/// and press like the real thing; Home now reports Send so the controller can
+/// run the branch/session setup flow.
 final class HomeViewTests: XCTestCase {
     private func makeHome() -> HomeSurfaceView {
         let home = HomeSurfaceView()
@@ -144,8 +144,7 @@ final class HomeViewTests: XCTestCase {
         XCTAssertTrue(chip.isHidden, "Chat is not a project")
 
         home.refresh(workspaceID: "x", workspaceName: "X", branch: nil)
-        XCTAssertFalse(chip.isHidden, "no git still gets a chip")
-        XCTAssertEqual(home.branchLabel.stringValue, "Set up GitHub")
+        XCTAssertTrue(chip.isHidden, "no git, no branch to pick — no chip")
 
         home.refresh(workspaceID: "x", workspaceName: "X", branch: "main")
         XCTAssertFalse(chip.isHidden)
@@ -160,6 +159,149 @@ final class HomeViewTests: XCTestCase {
         home.updateBranchChip(existing: "develop")
         XCTAssertEqual(home.branchLabel.stringValue, "develop")
         XCTAssertNil(home.newBranchName, "an existing pick drops the pending new branch")
+    }
+
+    /// Nothing to pick a session or branch *for* until a workspace is
+    /// picked; an existing session's branch is shown but not pickable; a
+    /// new session in a folder with no git has no branch chip at all.
+    func testTheSessionAndBranchChipsFollowTheWorkspaceAndSessionPicks() throws {
+        let home = HomeSurfaceView()
+        let session = try XCTUnwrap(home.sessionChip)
+        let branch = try XCTUnwrap(home.branchChip)
+
+        home.refresh(workspaceID: nil, workspaceName: nil, branch: "main")
+        XCTAssertTrue(session.isHidden, "no workspace: no session chip")
+        XCTAssertTrue(branch.isHidden, "no workspace: no branch chip")
+
+        home.refresh(workspaceID: "x", workspaceName: "X", sessionLabel: "Session 1", branch: "main", sessionLocked: true)
+        XCTAssertFalse(session.isHidden)
+        XCTAssertFalse(branch.isHidden)
+        XCTAssertTrue(home.isBranchLocked)
+        XCTAssertNil(branch.onPress, "an existing session's branch is a fact, not a choice")
+        XCTAssertEqual(home.branchLabel.stringValue, "main")
+
+        home.updateSessionChip(label: "New session", branch: "main")
+        XCTAssertFalse(home.isBranchLocked)
+        XCTAssertNotNil(branch.onPress, "a new session picks its branch")
+
+        home.updateSessionChip(label: "New session", branch: nil)
+        XCTAssertTrue(branch.isHidden, "no git: no branch chip")
+    }
+
+    /// Return in the composer is Send; Option-Return is left to the field
+    /// editor, which breaks the line.
+    func testReturnInTheComposerSends() {
+        let home = makeHome()
+        var sends = 0
+        home.onSend = { sends += 1 }
+        let textView = NSTextView()
+
+        XCTAssertTrue(home.control(home.composerPrompt, textView: textView, doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        XCTAssertFalse(home.control(
+            home.composerPrompt, textView: textView, doCommandBy: #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))
+        ))
+        XCTAssertEqual(sends, 1)
+    }
+
+    /// The launch runs its steps off the pane's own output: the first byte
+    /// is "engine loading", quiet after it sets the model, quiet after
+    /// *that* sends the message, a beat later the glass lifts. No model
+    /// picked skips the model step; an exit cancels without sending.
+    func testTheLaunchSetsTheModelThenSendsTheMessageOnQuiet() {
+        var shown: [HomeLaunch.Step] = []
+        var sent: [String] = []
+        var finished = false
+        let launch = HomeLaunch(
+            modelCommand: "/model opus", message: "hello", quiet: 0.02,
+            show: { shown.append($0) }, send: { sent.append($0) }, finish: { finished = true }
+        )
+        XCTAssertEqual(shown, [.preparing])
+        launch.noteOutput()
+        XCTAssertEqual(shown, [.preparing, .loading])
+        XCTAssertEqual(sent, [], "nothing goes in while the engine is still drawing")
+        spin(0.08)
+        XCTAssertEqual(sent, ["/model opus"])
+        XCTAssertEqual(shown.last, .model)
+        launch.noteOutput()
+        spin(0.08)
+        XCTAssertEqual(sent, ["/model opus", "hello"])
+        XCTAssertEqual(shown.last, .conversation)
+        XCTAssertFalse(finished, "a beat for the last line to type before the glass lifts")
+        spin(1.0)
+        XCTAssertTrue(finished)
+
+        sent = []
+        shown = []
+        let plain = HomeLaunch(
+            modelCommand: nil, message: "hi", quiet: 0.02,
+            show: { shown.append($0) }, send: { sent.append($0) }, finish: {}
+        )
+        plain.noteOutput()
+        spin(0.08)
+        XCTAssertEqual(sent, ["hi"], "no model picked: straight to the conversation")
+        XCTAssertEqual(shown, [.preparing, .loading, .conversation])
+
+        sent = []
+        var cancelled = false
+        let dead = HomeLaunch(
+            modelCommand: "/model opus", message: "hi", quiet: 0.02,
+            show: { _ in }, send: { sent.append($0) }, finish: { cancelled = true }
+        )
+        dead.cancel()
+        dead.noteOutput()
+        spin(0.08)
+        XCTAssertTrue(cancelled)
+        XCTAssertEqual(sent, [], "a pane that exited gets nothing typed into it")
+    }
+
+    /// Each step is its own line; earlier ones stay, ticked. And the whole
+    /// card renders offscreen.
+    func testTheLaunchOverlayTypesEachStepOnItsOwnLine() throws {
+        let overlay = HomeLaunchOverlayView()
+        overlay.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+        overlay.type(HomeLaunch.Step.preparing.rawValue)
+        overlay.type(HomeLaunch.Step.loading.rawValue)
+        XCTAssertEqual(overlay.lines, ["Preparing terminal", "Loading engine"])
+
+        let window = NSWindow(contentRect: overlay.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = overlay
+        spin(0.5)
+        overlay.layoutSubtreeIfNeeded()
+        let bitmap = try XCTUnwrap(overlay.bitmapImageRepForCachingDisplay(in: overlay.bounds))
+        overlay.cacheDisplay(in: overlay.bounds, to: bitmap)
+        XCTAssertGreaterThan(bitmap.size.width, 0)
+        saveRenderForInspection(bitmap, named: "home-launch")
+    }
+
+    private func spin(_ seconds: TimeInterval) {
+        RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+    }
+
+    /// The branch dropdown's GitHub section must not keep saying "not
+    /// connected" once Settings › Accounts says otherwise — that was the bug:
+    /// a hardcoded string that never re-checked the real account state.
+    func testGitHubSectionTextReflectsConnectionState() throws {
+        let disconnected = HomeSurfaceView.gitHubSectionText(connected: false, login: "")
+        XCTAssertEqual(disconnected.header, "GitHub · Not connected")
+        XCTAssertEqual(disconnected.action, "Set up GitHub…")
+
+        let connected = HomeSurfaceView.gitHubSectionText(connected: true, login: "brunobonando")
+        XCTAssertEqual(connected.header, "GitHub · Connected as @brunobonando")
+        XCTAssertEqual(connected.action, "Manage GitHub…")
+    }
+
+    func testSendControlReportsPressToOwner() throws {
+        let home = makeHome()
+        var sends = 0
+        home.onSend = { sends += 1 }
+
+        let send = try XCTUnwrap(home.sendControl)
+        send.performPressForTesting()
+
+        XCTAssertEqual(sends, 1)
     }
 
     /// The Chat scratch workspace wears a speech bubble where a project
