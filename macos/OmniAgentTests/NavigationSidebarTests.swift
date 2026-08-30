@@ -375,6 +375,36 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual([connects, disconnects], [1, 1], "and the same for the GitHub pair")
     }
 
+    /// The Accounts section's third button, "Delete account…", exists only
+    /// where deleting is possible: on Accounts, and only while signed in.
+    /// Unlike Connect GitHub — which is honest to offer signed out, because
+    /// the answer is "sign in first" — a delete with no account is nothing
+    /// but a dead end.
+    func testTheDeleteAccountButtonShowsOnlyOnAccountsWhileSignedIn() {
+        let view = SettingsSurfaceView()
+        view.select(.accounts)
+
+        view.applyAccount(email: "bruno@bonando.com", signedIn: true)
+        XCTAssertEqual(view.deleteAccountButton.title, "Delete account…")
+        XCTAssertFalse(view.deleteAccountButton.isHidden)
+
+        view.applyAccount(email: nil, signedIn: false)
+        XCTAssertTrue(view.deleteAccountButton.isHidden, "no account, nothing to delete")
+
+        // Signed in again, but on another section: the block is Accounts' alone.
+        view.applyAccount(email: "bruno@bonando.com", signedIn: true)
+        view.select(.general)
+        XCTAssertTrue(view.deleteAccountButton.isHidden)
+        view.select(.accounts)
+        XCTAssertFalse(view.deleteAccountButton.isHidden, "and back when Accounts returns")
+
+        // And the press is the controller's to perform, like the other two.
+        var deletes = 0
+        view.onDeleteAccount = { deletes += 1 }
+        view.deleteAccountButton.performClick(nil)
+        XCTAssertEqual(deletes, 1)
+    }
+
     /// The gear offers the panel beside itself, tip on the gear, inside the
     /// content area; a pick docks it under the "Settings" title; the gear
     /// again offers it back; leaving the page hides it.
