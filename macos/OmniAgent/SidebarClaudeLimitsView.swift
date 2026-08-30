@@ -572,6 +572,10 @@ final class SidebarLimitColumnView: NSView {
     /// line is almost exactly as tall as `bar` + its gap + `timeBar` — so
     /// turning the card over costs no height and nothing below it moves.
     let timeLabel: NSTextField
+    /// What each bar measures, at a glance: a bolt for quota spent, a clock
+    /// for the window elapsing. Tinted with the bar beside it.
+    let barIcon = SidebarLimitColumnView.icon("bolt.fill")
+    let timeIcon = SidebarLimitColumnView.icon("clock")
     private let barsBox = NSView()
     private let valueField: NSTextField
     private let captionField: NSTextField
@@ -641,11 +645,13 @@ final class SidebarLimitColumnView: NSView {
             let reached = value / 100
             self.valueField.textColor = SidebarPercentBarView.colour(for: reached)
             self.bar.setFillColour(for: reached)
+            self.barIcon.contentTintColor = SidebarPercentBarView.colour(for: reached)
         }
         timeCounter = SidebarCountingLabel(range: 0...1) { [weak self] value in
             guard let self else { return }
             self.timeBar.setFillColour(for: value)
             self.timeLabel.textColor = SidebarPercentBarView.colour(for: value)
+            self.timeIcon.contentTintColor = SidebarPercentBarView.colour(for: value)
         }
         translatesAutoresizingMaskIntoConstraints = false
         for field in [valueField, captionField, timeLabel] { field.alignment = .center }
@@ -653,7 +659,9 @@ final class SidebarLimitColumnView: NSView {
 
         // The two bars and the countdown share one band: the bars stacked in
         // it, the words laid over them, one visible at a time.
-        let bars = NSStackView(views: [bar, timeBar])
+        // Each bar wears its icon on the left; the icons share one fixed
+        // width so the two bars still start at the same x.
+        let bars = NSStackView(views: [Self.row(barIcon, bar), Self.row(timeIcon, timeBar)])
         bars.orientation = .vertical
         bars.alignment = .centerX
         bars.spacing = 3
@@ -687,8 +695,8 @@ final class SidebarLimitColumnView: NSView {
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             barsBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            bar.widthAnchor.constraint(equalTo: barsBox.widthAnchor),
-            timeBar.widthAnchor.constraint(equalTo: barsBox.widthAnchor),
+            bar.superview!.widthAnchor.constraint(equalTo: barsBox.widthAnchor),
+            timeBar.superview!.widthAnchor.constraint(equalTo: barsBox.widthAnchor),
         ])
         setAccessibilityElement(true)
         setAccessibilityRole(.progressIndicator)
@@ -697,6 +705,30 @@ final class SidebarLimitColumnView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    static let iconWidth: CGFloat = 10
+
+    private static func icon(_ name: String) -> NSImageView {
+        let view = NSImageView()
+        view.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 8, weight: .semibold))
+        view.contentTintColor = SidebarPercentBarView.colour(for: nil)
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.widthAnchor.constraint(equalToConstant: iconWidth).isActive = true
+        return view
+    }
+
+    /// `[icon] [bar────────]`: the icon keeps its width, the bar takes the rest.
+    private static func row(_ icon: NSImageView, _ bar: NSView) -> NSStackView {
+        let row = NSStackView(views: [icon, bar])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 4
+        row.translatesAutoresizingMaskIntoConstraints = false
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        bar.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return row
+    }
 
     /// `percent` is what `/usage` reported; `resetsAt` is when the window
     /// rolls over. Either may be absent and the column still reads sensibly.
@@ -713,6 +745,7 @@ final class SidebarLimitColumnView: NSView {
             // The count paints the number while it travels; with no reading to
             // travel to, the colour has to be set here instead.
             valueField.textColor = SidebarPercentBarView.colour(for: nil)
+            barIcon.contentTintColor = SidebarPercentBarView.colour(for: nil)
         }
         let elapsed = Self.elapsedFraction(until: resetsAt, windowLength: windowLength, now: now)
         let projected = Self.projectedUsage(usage: fraction, elapsed: elapsed)
@@ -725,6 +758,7 @@ final class SidebarLimitColumnView: NSView {
             timeCounter.settle(at: 0)
             timeBar.setFillColour(for: nil)
             timeLabel.textColor = SidebarPercentBarView.colour(for: nil)
+            timeIcon.contentTintColor = SidebarPercentBarView.colour(for: nil)
         }
         // The countdown wears its own bar's colour rather than the usage
         // bar's — it reads the same thing the blocks beneath it read — and
