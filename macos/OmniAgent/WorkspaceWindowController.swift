@@ -743,27 +743,27 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // deferred to Send (nothing starts a session from Home yet); the
         // chip's "base → name" is the promise.
         //
-        // Above the local branches: GitHub, reading the same connection
-        // state `showCommandPalette` already trusts (Settings › Accounts'
-        // own `accountGitHubConnected`/`githubLogin`) rather than always
-        // saying "not connected" — a user who already connected should
-        // never be told to set it up again.
+        // This menu is for picking a branch — GitHub only earns a place in
+        // it while there is a real setup step to offer (Bruno, 2026-08-30):
+        // once Settings › Accounts is connected, the section disappears
+        // entirely rather than turning into a "Connected as @login" banner
+        // nobody asked to see in a branch picker. Disconnected, it is the
+        // one useful thing a repo-less/GitHub-less user can do here.
         homeView.onRequestBranchMenu = { [weak self] anchor in
             guard let self else { return }
-            let (header, action) = HomeSurfaceView.gitHubSectionText(
-                connected: settingsView.accountGitHubConnected,
-                login: settingsView.githubLogin
-            )
-            let gitHub = HomeDropdown.Section(header: header, rows: [
+            let connected = settingsView.accountGitHubConnected
+            let setUpGitHub = HomeDropdown.Section(header: "GitHub · Not connected", rows: [
                 // GitHub lives under Accounts; the page itself is still to come.
-                HomeDropdown.Row(icon: HomeDropdown.symbol("link"), title: action) { [weak self] in
+                HomeDropdown.Row(icon: HomeDropdown.symbol("link"), title: "\(HomeSurfaceView.setUpGitHubTitle)…") { [weak self] in
                     self?.showSettings(section: .accounts)
                 },
             ])
             guard let directory = homeDirectory(),
                   let root = GitStatus.repoRoot(for: URL(fileURLWithPath: directory, isDirectory: true))
             else {
-                HomeDropdown.show([gitHub], searchPlaceholder: "Search branches…", from: anchor)
+                // Connected and no repo here has nothing left to offer —
+                // an empty dropdown, not a section about an already-done step.
+                HomeDropdown.show(connected ? [] : [setUpGitHub], searchPlaceholder: "Search branches…", from: anchor)
                 return
             }
             let base = homeView.selectedBranch ?? GitBranch.current(repoRoot: root) ?? "main"
@@ -776,8 +776,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     self?.homeView.updateBranchChip(existing: name)
                 }
             }
+            let branchesSection = HomeDropdown.Section(header: "Branches", rows: rows)
             let dropdown = HomeDropdown.show(
-                [gitHub, HomeDropdown.Section(header: "Branches", rows: rows)],
+                connected ? [branchesSection] : [setUpGitHub, branchesSection],
                 searchPlaceholder: "Search branches…", from: anchor
             )
             dropdown.extraRows = { [weak self] query in

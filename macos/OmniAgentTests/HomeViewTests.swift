@@ -162,19 +162,6 @@ final class HomeViewTests: XCTestCase {
         XCTAssertNil(home.newBranchName, "an existing pick drops the pending new branch")
     }
 
-    /// The branch dropdown's GitHub section must not keep saying "not
-    /// connected" once Settings › Accounts says otherwise — that was the bug:
-    /// a hardcoded string that never re-checked the real account state.
-    func testGitHubSectionTextReflectsConnectionState() throws {
-        let disconnected = HomeSurfaceView.gitHubSectionText(connected: false, login: "")
-        XCTAssertEqual(disconnected.header, "GitHub · Not connected")
-        XCTAssertEqual(disconnected.action, "Set up GitHub…")
-
-        let connected = HomeSurfaceView.gitHubSectionText(connected: true, login: "brunobonando")
-        XCTAssertEqual(connected.header, "GitHub · Connected as @brunobonando")
-        XCTAssertEqual(connected.action, "Manage GitHub…")
-    }
-
     /// The Chat scratch workspace wears a speech bubble where a project
     /// wears the sidebar's open folder, in the sidebar's colour for it.
     func testTheChatWorkspaceWearsABubbleNotAFolder() {
