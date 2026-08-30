@@ -183,12 +183,25 @@ fn default_data_dir_honors_env_override_and_falls_back() {
         std::path::PathBuf::from("/tmp/ade-test-xyz-123")
     );
 
+    // Harden the fallback branch: temporarily set HOME to a fresh temp dir
+    // so the test doesn't break if a real current-account pointer exists
+    // under the real $HOME.
     std::env::remove_var("OMNIAGENT_ADE_DATA_DIR");
+    let home_dir = tempdir().unwrap();
+    let previous_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", home_dir.path());
+
     let fallback = brain_core::Store::default_data_dir();
     assert!(
         fallback.ends_with("Library/Application Support/OmniAgent-ADE"),
         "{fallback:?}"
     );
+
+    // Restore HOME
+    match previous_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
 }
 
 #[test]
