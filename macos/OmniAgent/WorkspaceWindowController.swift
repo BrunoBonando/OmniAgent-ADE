@@ -3246,7 +3246,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         palette.onRun = { [weak self] action in self?.run(action) }
         palette.present(
             commands: CommandPaletteModel.build(
-                panes: workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
+                // Local panes only: a remote pane already has its own row,
+                // built from the relay's projection, and listing it here as
+                // well would offer the same session twice — once named by
+                // its machine, once subtitled with the raw `remote:<uuid>`
+                // project string that is not a place a user can go.
+                panes: localPaneDescriptors(),
                 paneOrder: workspace.allPaneIDs,
                 focusedPaneID: workspace.focusedPaneID,
                 projectLabels: projectLabels,

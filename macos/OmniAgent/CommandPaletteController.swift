@@ -285,6 +285,14 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(field)
+        // Focusing a text field selects all of it, so the first keystroke
+        // would wipe a pre-filled query instead of narrowing it. Collapse the
+        // selection to the end: "Resume remote session…" opens on "remote"
+        // and typing continues the phrase, the way Spotlight behaves.
+        field.currentEditor()?.selectedRange = NSRange(
+            location: (field.stringValue as NSString).length,
+            length: 0
+        )
         animateOpen()
     }
 

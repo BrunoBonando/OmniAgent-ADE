@@ -3,7 +3,7 @@
 //! §1 Topology, §3 Daemon changes, §6 Failure modes).
 //!
 //! While the `relay_device_token` row parses **and** the `remote_control`
-//! projection shares at least one session, [`run_relay`] holds one outbound
+//! projection lists at least one workspace, [`run_relay`] holds one outbound
 //! **control** WebSocket to the relay (`/v1/device`, `Authorization: Bearer
 //! <token>`). Every `{"open": "<conn_id>"}` the relay sends down it dials a
 //! **data** WebSocket (`/v1/device/conn/{conn_id}`) and runs the ordinary
@@ -35,7 +35,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
-use crate::server::{remote_session_ids, serve_client, ClientContext, ClientTrust};
+use crate::server::{remote_control_active, serve_client, ClientContext, ClientTrust};
 
 /// The settings row holding the device credential the relay issued at pairing.
 pub const DEVICE_TOKEN_KEY: &str = "relay_device_token";
@@ -62,12 +62,15 @@ pub struct DeviceCredential {
 }
 
 /// `Some` iff the token row parses **and** the `remote_control` projection
-/// shares at least one session — the two conditions under which the daemon
-/// keeps a control socket open.
+/// shares at least one **workspace** (spec §2) — the two conditions under
+/// which the daemon keeps a control socket open. A workspace, not a session:
+/// an enabled workspace with nothing running is emitted with an empty
+/// `sessions` array, and that machine must still be reachable, or a Mac
+/// would only ever appear on the other Mac while it happened to be busy.
 pub fn relay_config(store: &Store) -> Option<DeviceCredential> {
     let raw = store.get_setting(DEVICE_TOKEN_KEY).ok().flatten()?;
     let cred: DeviceCredential = serde_json::from_str(&raw).ok()?;
-    (!remote_session_ids(store).is_empty()).then_some(cred)
+    remote_control_active(store).then_some(cred)
 }
 
 fn ws_url(cred: &DeviceCredential, path: &str) -> String {
@@ -372,5 +375,31 @@ mod tests {
         assert_eq!(relay_config(&store), None, "empty projection turns it off");
         store.set_setting(DEVICE_TOKEN_KEY, "not json").unwrap();
         assert_eq!(relay_config(&store), None, "unparsable token row is off");
+    }
+
+    /// An enabled workspace with nothing running in it is emitted with an
+    /// empty `sessions` array, and that is a machine to keep reachable: it is
+    /// exactly the idle Mac a viewer wants to open a session *on*. Gating the
+    /// tunnel on shared sessions instead of shared workspaces meant such a
+    /// machine never appeared on the other Mac at all.
+    #[test]
+    fn an_enabled_workspace_with_no_sessions_still_opens_the_tunnel() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .set_setting(
+                DEVICE_TOKEN_KEY,
+                r#"{"device_id":"dev","token":"tok","name":"Mac","relay_url":"https://r"}"#,
+            )
+            .unwrap();
+        store
+            .set_setting(
+                crate::server::REMOTE_CONTROL_KEY,
+                r#"{"workspaces":[{"id":"/a","name":"Alpha","sessions":[]}]}"#,
+            )
+            .unwrap();
+        assert_eq!(relay_config(&store), Some(cred("https://r")));
+        // …and it stays an authorization boundary of its own: sharing a
+        // workspace with no sessions shares no sessions.
+        assert!(crate::server::remote_session_ids(&store).is_empty());
     }
 }

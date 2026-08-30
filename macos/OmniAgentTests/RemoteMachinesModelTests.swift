@@ -792,6 +792,65 @@ final class RemotePanesTests: XCTestCase {
         }
     }
 
+    /// A remote pane is reachable from the spotlight exactly once — through
+    /// the row the relay's projection builds, which says which machine and
+    /// workspace it lives on. The palette is built from local panes only, so
+    /// the same session can never also appear as an ordinary pane row
+    /// subtitled with the raw `remote:<device>` project string.
+    @MainActor
+    func testARemotePaneIsNotAlsoAnOrdinaryPaletteRow() async throws {
+        let machines = await makeMachines()
+        let controller = makeController(remoteMachines: machines)
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes([])
+        controller.openRemoteSession(deviceID: "d1", sessionID: "s1", title: "Build")
+        XCTAssertNotNil(controller.workspaceView.descriptor(for: "s1"))
+
+        controller.presentCommandPalette()
+        defer { controller.palette.dismiss() }
+
+        let ids = controller.palette.model.commands.map(\.id)
+        XCTAssertTrue(ids.contains("remote:d1/s1"), "the projection's row is how you get there")
+        XCTAssertFalse(ids.contains("focus:s1"), "and it is not also a local pane row: \(ids)")
+        XCTAssertFalse(
+            ids.contains { $0.hasPrefix("session:remote:") },
+            "nor a session row named by the raw remote project string: \(ids)"
+        )
+    }
+
+    /// Session › Kill Session (⌃⌘K) belongs to the machine that owns the
+    /// session. `Kill` is off the remote allowlist in the daemon, so the item
+    /// would only ever fail — spec §4 says remote panes hide it, so the
+    /// surface both greys it out and refuses the action. Interrupt is *not*
+    /// gated: it is allowlisted by design.
+    @MainActor
+    func testARemotePaneHidesKillSession() async throws {
+        let machines = await makeMachines()
+        let controller = makeController(remoteMachines: machines)
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes([])
+        controller.openRemoteSession(deviceID: "d1", sessionID: "s1", title: "Build")
+
+        let remote = try XCTUnwrap(controller.workspaceView.terminalSurface(for: "s1"))
+        let kill = NSMenuItem(title: "", action: Selector(("killSession:")), keyEquivalent: "")
+        XCTAssertFalse(remote.validateMenuItem(kill), "Kill Session must be greyed out on a remote pane")
+        // The same `connection.isRemote` the action's own guard reads.
+        XCTAssertTrue(remote.predictiveEchoEnabled, "the pane really is bound to the remote connection")
+        remote.killSession(nil)  // refused rather than sent; nothing to observe but a crash
+
+        let interrupt = NSMenuItem(title: "", action: Selector(("interruptSession:")), keyEquivalent: "")
+        XCTAssertTrue(remote.validateMenuItem(interrupt), "Interrupt stays: it is on the remote allowlist")
+
+        // The bootstrap pane `applyRestoredPanes([])` planted is this Mac's own.
+        let localID = try XCTUnwrap(controller.workspaceView.allPaneIDs.first { $0 != "s1" })
+        let local = try XCTUnwrap(controller.workspaceView.terminalSurface(for: localID))
+        XCTAssertTrue(local.validateMenuItem(kill), "a local pane keeps Kill Session")
+    }
+
     func testLocalPanesHaveNoRemoteDevice() {
         XCTAssertNil(PaneDescriptor(sessionID: "local", group: "g").remoteDeviceID)
     }

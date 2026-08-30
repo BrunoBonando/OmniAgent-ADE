@@ -845,6 +845,28 @@ final class CommandPaletteTests: XCTestCase {
         controller.dismiss()
     }
 
+    /// "Resume remote session…" opens the spotlight with "remote" already
+    /// typed. Making a text field the first responder selects all of it, so
+    /// without collapsing that selection the very next keystroke would
+    /// *replace* the pre-filled word instead of continuing it — the caret
+    /// belongs at the end, the way it does when you type into Spotlight.
+    func testAPreFilledQueryLeavesTheCaretAfterItRatherThanSelectingIt() throws {
+        let controller = CommandPaletteController()
+        controller.present(commands: sample, initialQuery: "remote", over: nil)
+        defer { controller.dismiss() }
+
+        XCTAssertEqual(controller.model.query, "remote", "the query is applied, not just displayed")
+        let editor = try XCTUnwrap(
+            controller.window?.firstResponder as? NSTextView,
+            "the query field takes the keyboard on open"
+        )
+        XCTAssertEqual(editor.string, "remote")
+        XCTAssertEqual(
+            editor.selectedRange(), NSRange(location: 6, length: 0),
+            "select-all would have the first keystroke wipe the pre-filled query"
+        )
+    }
+
     func testTheBarStaysPutWhileTheResultsGrowBeneathIt() {
         let controller = CommandPaletteController()
         controller.present(commands: sample, over: nil)
