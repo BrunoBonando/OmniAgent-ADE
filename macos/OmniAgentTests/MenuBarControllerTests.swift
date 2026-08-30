@@ -160,11 +160,12 @@ final class MenuBarControllerTests: XCTestCase {
     /// The status item exists only between the gate resolving signed in and
     /// a log-out: `AppDelegate` creates and releases the controller on the
     /// window's `onSignedInStateChanged`.
-    func testTheStatusItemExistsOnlyWhileSignedIn() {
+    func testTheStatusItemExistsOnlyWhileSignedIn() throws {
         let delegate = AppDelegate()
         let workspace = WorkspaceWindowController(
             connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-menubar-test.sock")),
-            panes: []
+            panes: [],
+            authDefaults: try throwawayDefaults()
         )
         defer { workspace.close() }
         XCTAssertNil(delegate.menuBar, "nothing in the menu bar before anyone signs in")
@@ -177,5 +178,18 @@ final class MenuBarControllerTests: XCTestCase {
 
         delegate.signedInStateChanged(false, workspace: workspace)
         XCTAssertNil(delegate.menuBar, "logging out takes the item down")
+
+        delegate.signedInStateChanged(true, workspace: workspace)
+        XCTAssertNotNil(delegate.menuBar, "signing back in puts the item back up")
+        XCTAssertFalse(delegate.menuBar === first, "a fresh controller, not the released one")
+    }
+
+    /// A suite of its own, torn down after — never the real app's defaults,
+    /// which is where the real launch decision lives (`RealPreferencesGuard`).
+    private func throwawayDefaults() throws -> UserDefaults {
+        let name = "digital.bruno.omniagent.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
+        return defaults
     }
 }
