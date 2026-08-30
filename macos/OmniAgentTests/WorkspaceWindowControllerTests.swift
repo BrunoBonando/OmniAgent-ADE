@@ -1526,6 +1526,252 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(restored, 1, "and the server session is restored behind it, for the bearer calls")
     }
 
+    // MARK: - Account switch (2026-08-30 account-scoped workspace spec)
+
+    func testRunningSessionsPhrasePluralizes() {
+        XCTAssertEqual(WorkspaceWindowController.runningSessionsPhrase(1), "1 running session")
+        XCTAssertEqual(WorkspaceWindowController.runningSessionsPhrase(3), "3 running sessions")
+    }
+
+    /// Nothing running: the pointer is written and the daemon restarted with
+    /// no question asked — the ordinary post-logout sign-in.
+    func testSwitchAccountWritesThePointerAndRestartsTheDaemonWhenNothingIsRunning() throws {
+        let controller = makeEmptyController(settingsClient: FakeSettingsClient(), defaults: try throwawayDefaults())
+        defer { controller.close() }
+        let root = try temporaryAccountRoot()
+        controller.accountRoot = root
+        XCTAssertNil(controller.currentAccountID)
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done()
+        }
+
+        var completed = 0
+        controller.switchAccount(toEmail: "Bruno@Bonando.com ") { completed += 1 }
+
+        XCTAssertNil(controller.windowAskOverlay, "no sessions to end, nothing to ask")
+        XCTAssertEqual(AccountDirectory.readCurrentAccount(root: root), "fc44b18d5588b1d6")
+        XCTAssertEqual(controller.currentAccountID, "fc44b18d5588b1d6")
+        XCTAssertEqual(terminated, 1)
+        XCTAssertEqual(completed, 1)
+    }
+
+    /// The pointer already names this account: the running daemon is already
+    /// serving it, so there is nothing to restart.
+    func testSwitchAccountLeavesTheDaemonAloneWhenThePointerAlreadyNamesTheAccount() throws {
+        let controller = makeEmptyController(settingsClient: FakeSettingsClient(), defaults: try throwawayDefaults())
+        defer { controller.close() }
+        let root = try temporaryAccountRoot()
+        try AccountDirectory.writeCurrentAccount("fc44b18d5588b1d6", root: root)
+        controller.accountRoot = root
+        XCTAssertEqual(controller.currentAccountID, "fc44b18d5588b1d6", "read when the root is set")
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done()
+        }
+
+        var completed = 0
+        controller.switchAccount(toEmail: "bruno@bonando.com") { completed += 1 }
+
+        XCTAssertEqual(terminated, 0, "same account: the daemon is already on its directory")
+        XCTAssertEqual(completed, 1)
+        XCTAssertEqual(AccountDirectory.readCurrentAccount(root: root), "fc44b18d5588b1d6")
+    }
+
+    /// Sessions are running (the legacy daemon on first upgrade): the house
+    /// modal asks first, and "Not now" leaves no pointer behind, keeps the
+    /// panes, and still completes — signed in on the current daemon.
+    func testSwitchAccountAsksWhenSessionsAreRunningAndNotNowLeavesEverythingAsItWas() throws {
+        let controller = makeController(settingsClient: FakeSettingsClient())
+        defer { controller.close() }
+        XCTAssertEqual(controller.menuBarSummary().sessionCount, 1)
+        let root = try temporaryAccountRoot()
+        controller.accountRoot = root
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done()
+        }
+
+        var completed = 0
+        controller.switchAccount(toEmail: "bruno@bonando.com") { completed += 1 }
+
+        let ask = try XCTUnwrap(controller.windowAskOverlay, "a running session means asking first")
+        XCTAssertEqual(ask.options.map(\.title), ["Not now", "Restart now"])
+        XCTAssertEqual(completed, 0, "nothing decided yet")
+        XCTAssertEqual(terminated, 0, "and the daemon is untouched while the question is up")
+
+        press("Not now", on: ask)
+
+        XCTAssertNil(controller.windowAskOverlay)
+        XCTAssertNil(AccountDirectory.readCurrentAccount(root: root), "no pointer: asked again next launch")
+        XCTAssertNil(controller.currentAccountID)
+        XCTAssertEqual(terminated, 0)
+        XCTAssertEqual(controller.workspaceView.allPaneIDs.count, 1, "the workspace keeps working on the current daemon")
+        XCTAssertEqual(completed, 1, "and the sign-in completes anyway")
+    }
+
+    func testSwitchAccountRestartNowWritesThePointerEndsTheDaemonAndDropsThePanes() throws {
+        let client = FakeSettingsClient()
+        let controller = makeController(settingsClient: client)
+        defer { controller.close() }
+        let root = try temporaryAccountRoot()
+        controller.accountRoot = root
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done()
+        }
+
+        var completed = 0
+        controller.switchAccount(toEmail: "bruno@bonando.com") { completed += 1 }
+        press("Restart now", on: try XCTUnwrap(controller.windowAskOverlay))
+
+        XCTAssertEqual(AccountDirectory.readCurrentAccount(root: root), "fc44b18d5588b1d6")
+        XCTAssertEqual(controller.currentAccountID, "fc44b18d5588b1d6")
+        XCTAssertEqual(terminated, 1)
+        XCTAssertEqual(completed, 1)
+        XCTAssertEqual(controller.workspaceView.allPaneIDs, [], "the old daemon's panes are gone")
+        XCTAssertEqual(controller.menuBarSummary().sessionCount, 0)
+        XCTAssertFalse(
+            client.setCalls.contains { $0.key == SettingsKey.layout },
+            "dropped without persisting: the account's own layout row must not be overwritten with an empty one"
+        )
+    }
+
+    /// The first launch of this build over data written before accounts
+    /// existed: the mirror says signed in but no pointer is on disk. The
+    /// adoption waits until the layout is back on screen — so the running
+    /// sessions it would end can be counted — then asks.
+    func testALaunchWithTheMirrorTrueButNoPointerOffersTheAdoptionOnceTheLayoutIsRestored() throws {
+        let defaults = try throwawayDefaults()
+        defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
+        let client = FakeSettingsClient(rows: [
+            "auth_signed_in": "true", "auth_account_email": "bruno@bonando.com", "auth_account_name": "Bruno Bonando",
+        ])
+        let controller = makeEmptyController(settingsClient: client, defaults: defaults)
+        defer { controller.close() }
+        let root = try temporaryAccountRoot()
+        controller.accountRoot = root
+        controller.sessionRestorer = {}
+        controller.sessionEnsurer = { _ in }
+        controller.daemonTerminator = { $0() }
+
+        var revealed = 0
+        controller.presentLaunchGate(defaults: defaults) { revealed += 1 }
+        XCTAssertEqual(revealed, 1, "signed in: straight in, as before")
+        XCTAssertNil(controller.windowAskOverlay, "nothing to count yet")
+
+        controller.applyRestoredPanes([WorkspaceRestoration.bootstrapPane(sessionID: "legacy-1")])
+
+        let ask = try XCTUnwrap(controller.windowAskOverlay, "the layout is on screen: now the sessions can be counted")
+        XCTAssertEqual(ask.options.map(\.title), ["Not now", "Restart now"])
+        press("Not now", on: ask)
+        XCTAssertNil(AccountDirectory.readCurrentAccount(root: root))
+    }
+
+    func testALaunchWithThePointerAlreadyOnDiskNeverAsks() throws {
+        let defaults = try throwawayDefaults()
+        defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
+        let client = FakeSettingsClient(rows: ["auth_signed_in": "true", "auth_account_email": "bruno@bonando.com"])
+        let controller = makeEmptyController(settingsClient: client, defaults: defaults)
+        defer { controller.close() }
+        let root = try temporaryAccountRoot()
+        try AccountDirectory.writeCurrentAccount("fc44b18d5588b1d6", root: root)
+        controller.accountRoot = root
+        controller.sessionRestorer = {}
+        controller.sessionEnsurer = { _ in }
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done()
+        }
+
+        controller.presentLaunchGate(defaults: defaults) {}
+        controller.applyRestoredPanes([WorkspaceRestoration.bootstrapPane(sessionID: "s1")])
+
+        XCTAssertNil(controller.windowAskOverlay)
+        XCTAssertEqual(terminated, 0, "the daemon is already on the account's directory")
+    }
+
+    /// Signing in end to end without a browser: the gate hands the email to
+    /// the switch, the switch restarts the daemon, the account's persona is
+    /// read once the new daemon is up, and the gate resolves on it without
+    /// asking the persona question.
+    func testSigningInRunsTheSwitchAndSkipsThePersonaQuestionTheAccountAlreadyAnswered() throws {
+        let strangers = Set(NSApp.windows.map(ObjectIdentifier.init))
+        addTeardownBlock {
+            for window in NSApp.windows where !strangers.contains(ObjectIdentifier(window)) {
+                window.orderOut(nil)
+            }
+        }
+        let defaults = try throwawayDefaults()
+        let client = FakeSettingsClient(rows: ["auth_persona": "research"])
+        let controller = makeEmptyController(settingsClient: client, defaults: defaults)
+        defer { controller.close() }
+        let root = try temporaryAccountRoot()
+        controller.accountRoot = root
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done()
+        }
+        var signedInStates: [Bool] = []
+        controller.onSignedInStateChanged = { signedInStates.append($0) }
+
+        controller.start()
+        var revealed = 0
+        controller.presentLaunchGate(defaults: defaults) { revealed += 1 }
+        let model = try XCTUnwrap(controller.launchGateModel, "the login window is up")
+
+        model.send(.signedIn(email: "bruno@bonando.com", displayName: "Bruno Bonando", githubLogin: nil, picture: nil))
+
+        XCTAssertEqual(AccountDirectory.readCurrentAccount(root: root), "fc44b18d5588b1d6")
+        XCTAssertEqual(terminated, 1)
+        XCTAssertEqual(model.state.phase, .switching, "the persona is read from the *new* daemon, so the card waits for it")
+        XCTAssertEqual(revealed, 0)
+
+        // The restarted daemon comes up.
+        controller.connection.onStateChange?(.connected)
+
+        XCTAssertEqual(revealed, 1, "resolved without a persona question: the account answered it before")
+        XCTAssertNil(controller.launchGateModel, "and the login window is gone")
+        XCTAssertEqual(client.rows["auth_signed_in"], "true")
+        XCTAssertEqual(client.rows["auth_persona"], "research")
+        XCTAssertEqual(signedInStates, [true])
+        XCTAssertFalse(controller.awaitingSignIn)
+    }
+
+    func testTheAccountLabelIsTheNameFallingBackToTheEmail() throws {
+        let named = makeEmptyController(
+            settingsClient: FakeSettingsClient(rows: [
+                "auth_signed_in": "true", "auth_account_email": "bruno@bonando.com", "auth_account_name": "Bruno Bonando",
+            ]),
+            defaults: try throwawayDefaults()
+        )
+        defer { named.close() }
+        named.refreshAccountSection()
+        XCTAssertEqual(named.accountDisplayLabel, "Bruno Bonando")
+
+        let nameless = makeEmptyController(
+            settingsClient: FakeSettingsClient(rows: ["auth_signed_in": "true", "auth_account_email": "bruno@bonando.com"]),
+            defaults: try throwawayDefaults()
+        )
+        defer { nameless.close() }
+        nameless.refreshAccountSection()
+        XCTAssertEqual(nameless.accountDisplayLabel, "bruno@bonando.com")
+
+        let signedOut = makeEmptyController(
+            settingsClient: FakeSettingsClient(rows: ["auth_signed_in": "false", "auth_account_email": "bruno@bonando.com"]),
+            defaults: try throwawayDefaults()
+        )
+        defer { signedOut.close() }
+        signedOut.refreshAccountSection()
+        XCTAssertEqual(signedOut.accountDisplayLabel, "")
+    }
+
     /// A suite of its own, torn down after — never the real app's defaults,
     /// which is where the real launch decision lives.
     private func throwawayDefaults() throws -> UserDefaults {
@@ -2530,6 +2776,42 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             ),
             panes: []
         )
+    }
+
+    /// An empty window whose settings rows and launch mirror are both
+    /// throwaway — the shape every account-switch test wants: nothing on
+    /// screen to end, nothing of the developer's touched.
+    private func makeEmptyController(
+        settingsClient: SettingsClient,
+        defaults: UserDefaults
+    ) -> WorkspaceWindowController {
+        WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-controller-test.sock")
+            ),
+            panes: [],
+            settingsClient: settingsClient,
+            authDefaults: defaults
+        )
+    }
+
+    /// A data root of this test's own, removed after: the pointer file the
+    /// switch writes must never land in the developer's real
+    /// `~/Library/Application Support/OmniAgent-ADE`.
+    private func temporaryAccountRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omniagent-account-root-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return root
+    }
+
+    /// The ask's button by title, pressed — `PaneAskOverlayView` draws its
+    /// options as `PaneApprovalButton`s.
+    private func press(_ title: String, on overlay: PaneAskOverlayView) {
+        let button = overlay.subviews.compactMap { $0 as? PaneApprovalButton }.first { $0.title == title }
+        XCTAssertNotNil(button, "no \"\(title)\" button on the ask")
+        button?.onClick?()
     }
 
     private func makeTemporaryGitRepository() throws -> URL {

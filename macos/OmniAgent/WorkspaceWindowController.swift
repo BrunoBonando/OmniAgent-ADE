@@ -437,6 +437,44 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// answer.
     var authGatePresenter: ((@escaping () -> Void) -> Void)?
     var serverSessionRevoker: (() -> Void)?
+    /// Ends the running daemon for an account switch — `nil` is the real
+    /// thing, `daemonPersistence.terminateDaemon` with the pid off the
+    /// connected socket. A test substitutes a recorder: no test may signal
+    /// the developer's live daemon.
+    var daemonTerminator: ((@escaping () -> Void) -> Void)?
+    /// Fires `true` when the gate resolves signed in and `false` when the
+    /// account logs out — `AppDelegate` creates and releases the menu bar
+    /// item on it (2026-08-30 spec, "Menu bar").
+    var onSignedInStateChanged: ((Bool) -> Void)?
+    /// The data root the account pointer lives in — `DaemonPaths.dataDir`,
+    /// the same directory the LaunchAgent plist hands the daemon. Settable so
+    /// a test points it at a scratch directory; reading the pointer back is
+    /// what `currentAccountID` starts from.
+    var accountRoot: URL {
+        didSet { currentAccountID = AccountDirectory.readCurrentAccount(root: accountRoot) }
+    }
+    /// What the pointer named when the root was read, kept current after
+    /// every write — `switchAccount`'s "already serving this account" test.
+    private(set) var currentAccountID: String?
+    /// The mirror said signed in but no pointer was on disk: the first launch
+    /// of this build over pre-account data. Consumed by
+    /// `adoptLegacyAccountIfNeeded` once the layout is restored.
+    private var legacyAdoptionPending = false
+    /// Between the login window going up and the gate resolving — nothing
+    /// is restored from a signed-out daemon, and `showWindow` raises the
+    /// login window instead of the workspace.
+    private(set) var awaitingSignIn = false
+    /// Work that needs the daemon: run at once when connected, else the
+    /// moment the next `.connected` lands (`runWhenConnected`).
+    private var pendingConnectedWork: [() -> Void] = []
+    /// "Bruno Bonando", or the email when the account has no name, or `""`
+    /// while signed out — the menu bar's "Logged in as …" line. Kept from
+    /// `refreshAccountSection`'s reads so the menu can be built without a
+    /// round trip.
+    private(set) var accountDisplayLabel = ""
+    /// The login window's model while it is up — for tests that drive a
+    /// sign-in without a browser.
+    var launchGateModel: AuthGateViewModel? { authGateWindow.activeModel }
     /// Settings › Accounts' GitHub pair, same reasoning: `gitHubConnector`
     /// is the browser round trip that links a GitHub account,
     /// `gitHubDisconnector` the bearer `DELETE` that unlinks it, and each
@@ -495,15 +533,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         notifier: SessionNotifier = SessionNotifier(delivery: UserNotificationDelivery()),
         daemonPersistence: DaemonPersistenceController = DaemonPersistenceController(),
         remoteMachines: RemoteMachinesModel = RemoteMachinesModel(),
-        settingsClient: SettingsClient? = nil
+        settingsClient: SettingsClient? = nil,
+        authDefaults: UserDefaults = .standard
     ) {
         self.connection = connection
         self.notifier = notifier
         self.daemonPersistence = daemonPersistence
         self.remoteMachines = remoteMachines
+        accountRoot = daemonPersistence.paths.dataDir
+        currentAccountID = AccountDirectory.readCurrentAccount(root: daemonPersistence.paths.dataDir)
         let settingsStore = SettingsStore(client: settingsClient ?? connection)
         self.settingsStore = settingsStore
-        let authGateCoordinator = AuthGateCoordinator(settings: settingsStore)
+        // `authDefaults` is where the signed-in mirror lives — the real
+        // app's domain in production, a throwaway suite in tests, which must
+        // never sign the developer's install in or out (`RealPreferencesGuard`).
+        let authGateCoordinator = AuthGateCoordinator(settings: settingsStore, defaults: authDefaults)
         self.authGateCoordinator = authGateCoordinator
         let authGateWindow = AuthGateWindowController(coordinator: authGateCoordinator)
         self.authGateWindow = authGateWindow
@@ -590,6 +634,31 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         window.minSize = window.contentMinSize
 
         super.init(window: window)
+        // The gate's account switch: the pointer, the daemon restart, then
+        // the persona the account's own data dir holds — read from the
+        // *new* daemon, so it waits for the reconnect.
+        authGateWindow.onSwitching = { [weak self] email, ready in
+            guard let self else {
+                ready(nil)
+                return
+            }
+            switchAccount(toEmail: email) { [weak self] in
+                guard let self else {
+                    ready(nil)
+                    return
+                }
+                runWhenConnected { [weak self] in
+                    guard let self else {
+                        ready(nil)
+                        return
+                    }
+                    settingsStore.get(SettingsKey.authPersona) { result in
+                        let persona = (try? result.get()) ?? nil
+                        ready((persona ?? "").isEmpty ? nil : persona)
+                    }
+                }
+            }
+        }
         installSplitView(on: window)
         restoreWindowFrame(window)
         window.delegate = self
@@ -1363,17 +1432,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             switch state {
             case .connected:
                 applyConnectionStatus(nil)
-                restoreWorkspaceIfNeeded()
-                restoreUsageAnalyticsIfNeeded()
-                restoreWorkspaceCustomizationsIfNeeded()
-                restoreClosedWorkspacesIfNeeded()
-                restoreRemoteControlIfNeeded()
+                // Nothing is restored while the login window is up: that
+                // daemon serves the empty root, and restoring "nothing" there
+                // would bootstrap a pane and write a layout row for the next
+                // sign-in to find as a running session to end. The gate
+                // resolving runs the same restore (`authGateDidResolve`).
+                if !awaitingSignIn {
+                    restoreAccountStateIfNeeded()
+                }
                 refreshProjectLabels()
                 // The launch read ran before the daemon was up and failed;
                 // this is the first time the rows can actually be read.
                 refreshAccountSection()
                 didConnect = true
                 presentOnboardingIfNeeded()
+                let work = pendingConnectedWork
+                pendingConnectedWork.removeAll()
+                for body in work {
+                    body()
+                }
             case .connecting:
                 applyConnectionStatus("Connecting")
             case .disconnected:
@@ -1472,6 +1549,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     func stop() {
         connection.disconnect()
         daemonPersistence.stop()
+    }
+
+    /// Everything the daemon's data dir holds for this account, read once
+    /// per connection — the once-flags inside each make a reconnect cheap.
+    private func restoreAccountStateIfNeeded() {
+        restoreWorkspaceIfNeeded()
+        restoreUsageAnalyticsIfNeeded()
+        restoreWorkspaceCustomizationsIfNeeded()
+        restoreClosedWorkspacesIfNeeded()
+        restoreRemoteControlIfNeeded()
+    }
+
+    /// Runs `body` now if the socket is up, else on the next `.connected`.
+    func runWhenConnected(_ body: @escaping () -> Void) {
+        if didConnect {
+            body()
+        } else {
+            pendingConnectedWork.append(body)
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -3097,6 +3193,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Same reasoning: the review panel row prunes against the restored
         // groups, and its apply re-opens the panel for the session on screen.
         restoreReviewPanelIfNeeded()
+        // The first launch over pre-account data: only now, with the panes
+        // back, can the sessions the switch would end be counted.
+        adoptLegacyAccountIfNeeded()
     }
 
     /// Kills daemon sessions this window no longer references.
@@ -4740,11 +4839,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// every path, including the one where nothing is shown.
     func presentLaunchGate(defaults: UserDefaults = .standard, completion: @escaping () -> Void) {
         guard AuthGate.needsSignIn(defaults) else {
+            // A pointer on disk means the daemon already serves this
+            // account's directory. None means the first launch of this
+            // build over pre-account data: the adoption runs once the layout
+            // is on screen (`adoptLegacyAccountIfNeeded`), the one case the
+            // "Move your workspace" ask exists for.
+            legacyAdoptionPending = currentAccountID == nil
             restoreServerSession()
             authGateDidResolve()
             completion()
             return
         }
+        awaitingSignIn = true
         // `over: nil` — a window of its own, centred, with nothing behind it.
         // A sheet needs a parent window on screen, and the whole point here is
         // that there isn't one yet.
@@ -4782,12 +4888,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
-    /// The gate is answered — signed in, or "continue without signing in".
+    /// The gate is answered — always signed in now.
     private func authGateDidResolve() {
+        awaitingSignIn = false
         authGateResolved = true
         seedAccountFromMirror()
         refreshAccountSection()
+        // The socket may have come up while the login window was up, with
+        // nothing restored on purpose; this account's rows are readable now.
+        if didConnect {
+            restoreAccountStateIfNeeded()
+        }
         presentOnboardingIfNeeded()
+        onSignedInStateChanged?(true)
     }
 
     // MARK: - Settings › Accounts
@@ -4820,6 +4933,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // name left standing over a signed-out account is worse than a
         // moment of "Not signed in" over a signed-in one.
         applyAccountRow(name: nil, pictureURL: "")
+        if !signedIn { accountDisplayLabel = "" }
     }
 
     /// The account chip's fetched pictures, keyed by the URL row they came
@@ -4880,27 +4994,34 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// told the user is signed out.
     func refreshAccountSection() {
         settingsStore.get(SettingsKey.authSignedIn) { [weak self] signedInResult in
-            guard let self, let signedInRaw = try? signedInResult.get() else { return }
+            // `try? result.get()` on a `Result<String?, Error>` flattens
+            // (SE-0230): a *successful* read of an unset row and a *failed*
+            // read both collapse to `nil`, which would silently stop this
+            // chain on every row nobody has written yet — exactly what "A
+            // failed read is not an empty row" below says must not happen.
+            // `case .success` keeps them apart.
+            guard let self, case .success(let signedInRaw) = signedInResult else { return }
             // Strictly `"true"`, unlike `AuthGate.resolveSignedIn`'s "unset
             // means signed in" default: that default exists for installs
             // predating the gate, and this section must never offer "Log
             // out" for an account nobody has signed into.
             let signedIn = signedInRaw == "true"
             settingsStore.get(SettingsKey.authAccountEmail) { [weak self] emailResult in
-                guard let self, let email = try? emailResult.get() else { return }
+                guard let self, case .success(let email) = emailResult else { return }
                 settingsStore.get(SettingsKey.authGithubLogin) { [weak self] githubResult in
-                    guard let self, let githubLogin = try? githubResult.get() else { return }
+                    guard let self, case .success(let githubLogin) = githubResult else { return }
                     settingsView.applyAccount(email: email, signedIn: signedIn, githubLogin: githubLogin)
                     settingsStore.get(SettingsKey.authAccountName) { [weak self] nameResult in
-                        guard let self, let name = try? nameResult.get() else { return }
+                        guard let self, case .success(let name) = nameResult else { return }
                         settingsStore.get(SettingsKey.authAccountPicture) { [weak self] pictureResult in
-                            guard let self, let picture = try? pictureResult.get() else { return }
+                            guard let self, case .success(let picture) = pictureResult else { return }
                             // The name if there is one, the email if not —
                             // and neither when nobody is signed in, which is
                             // the chip's "Not signed in" state.
                             let display = [name, email]
                                 .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                                 .first { !$0.isEmpty }
+                            accountDisplayLabel = signedIn ? (display ?? "") : ""
                             applyAccountRow(
                                 name: signedIn ? display : nil,
                                 pictureURL: signedIn ? (picture ?? "") : ""
@@ -5105,6 +5226,164 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard authGateResolved, didConnect, !onboardingDispatched else { return }
         onboardingDispatched = true
         presentFirstRunIfNeeded()
+    }
+
+    // MARK: - Account switch (2026-08-30 account-scoped workspace spec)
+
+    /// "1 running session" / "3 running sessions" — the asks' count.
+    static func runningSessionsPhrase(_ count: Int) -> String {
+        "\(count) running session\(count == 1 ? "" : "s")"
+    }
+
+    /// Moves the daemon onto `email`'s data directory. The pointer names
+    /// the account; the daemon reads it once at startup; so a change of
+    /// account is a daemon restart — and a restart ends every session the
+    /// daemon runs. That is the one thing this app never does on its own:
+    /// with sessions running, the house modal asks first, and **Not now**
+    /// leaves no pointer behind and completes as signed in on the current
+    /// daemon (asked again next launch). A signed-out daemon has no
+    /// sessions, so the ordinary post-logout sign-in never asks.
+    ///
+    /// The pointer is written on the decision rather than before the ask, so
+    /// there is never a moment where a pointer sits on disk with no restart
+    /// behind it — a crash-relaunched daemon would otherwise migrate the
+    /// data without anyone having agreed to it.
+    func switchAccount(toEmail email: String, completion: @escaping () -> Void) {
+        let id = AccountDirectory.accountID(forEmail: email)
+        guard currentAccountID != id else {
+            // The running daemon already serves this account's directory.
+            completion()
+            return
+        }
+        let sessions = menuBarSummary().sessionCount
+        guard sessions > 0 else {
+            commitAccountSwitch(to: id, completion: completion)
+            return
+        }
+        presentWindowAsk(
+            title: "Move your workspace to your account?",
+            message: "This restarts the daemon and ends \(Self.runningSessionsPhrase(sessions)).",
+            severity: .critical,
+            options: [
+                PaneAskOption("Not now") { _ in completion() },
+                PaneAskOption("Restart now", isPrimary: true) { [weak self] _ in
+                    self?.commitAccountSwitch(to: id, completion: completion)
+                },
+            ],
+            onCancel: { completion() }
+        )
+    }
+
+    /// The decided half: pointer, then the daemon, then this window.
+    private func commitAccountSwitch(to id: String, completion: @escaping () -> Void) {
+        do {
+            try AccountDirectory.writeCurrentAccount(id, root: accountRoot)
+        } catch {
+            applyConnectionStatus("Couldn't write the account pointer — \(error.localizedDescription)")
+            completion()
+            return
+        }
+        currentAccountID = id
+        // The pointer is on disk before SIGTERM, so whichever daemon comes
+        // up next — launchd's or ours — reads the new value.
+        terminateDaemon { [weak self] in
+            guard let self else {
+                completion()
+                return
+            }
+            resetForAccountSwitch()
+            completion()
+        }
+    }
+
+    /// `daemonPersistence.terminateDaemon` with the pid off the connected
+    /// socket, behind the test seam.
+    private func terminateDaemon(completion: @escaping () -> Void) {
+        if let daemonTerminator {
+            daemonTerminator(completion)
+            return
+        }
+        daemonPersistence.terminateDaemon(pid: connection.peerProcessID(), completion: completion)
+    }
+
+    /// Forgets the daemon that just went away: every pane, without
+    /// persisting (the account's own rows must not be overwritten with an
+    /// empty layout), every per-pane record, every restore once-flag, and
+    /// the connect/onboarding latches — so the next `.connected` restores
+    /// whatever the *new* daemon's directory holds. Terminal panes whose
+    /// sessions are gone come back through `handleReattachFailure →
+    /// ensureSession` as new terminals resuming their conversations.
+    func resetForAccountSwitch() {
+        // Write gates first, so nothing below persists anything.
+        layoutReadDispatched = false
+        layoutReadCompleted = false
+        notificationsReadDispatched = false
+        notificationsReadCompleted = false
+        browserPanesReadDispatched = false
+        browserPanesReadCompleted = false
+        editorPanesReadDispatched = false
+        editorPanesReadCompleted = false
+        customizationsReadDispatched = false
+        customizationsReadCompleted = false
+        closedWorkspacesReadDispatched = false
+        closedWorkspacesReadCompleted = false
+        sessionMetaReadDispatched = false
+        sessionMetaReadCompleted = false
+        reviewPanelReadDispatched = false
+        reviewPanelReadCompleted = false
+        remoteControlReadDispatched = false
+        usageReadDispatched = false
+        usageReadCompleted = false
+
+        for id in workspace.allPaneIDs {
+            homeLaunches[id]?.cancel()
+            resumeSpawns.removeValue(forKey: id)
+            readySessions.remove(id)
+            ensuringSessions.remove(id)
+            sessionStatus.removeValue(forKey: id)
+            lastStatus.removeValue(forKey: id)
+            lastStatusEventAt.removeValue(forKey: id)
+            activity.forget(paneID: id)
+            statusSeries.forget(paneID: id)
+            workspace.closePane(id)
+        }
+        homeLaunches.removeAll()
+        lastFocusedEditorPaneID = nil
+        recentSessionGroupIDs.removeAll()
+        sessionMeta = [:]
+        reviewPanelStates = [:]
+        workspaceCustomizations = [:]
+        closedWorkspaceIDs = []
+        remoteControlWorkspaceIDs = []
+        relayTokenState = .unknown
+        projectLabels = [:]
+        workspaces = []
+        selectedProjectID = nil
+        notifier.restore([])
+        usageRecorder.restore(UsageAnalyticsStore())
+
+        didConnect = false
+        onboardingDispatched = false
+        reloadOutline()
+        if destination == .home { refreshHomeChips() }
+    }
+
+    /// The first launch of this build over data written before accounts
+    /// existed (`presentLaunchGate` set the flag: mirror true, no pointer).
+    /// Reads the account's email from the rows — still at the root, where
+    /// the legacy daemon serves them — and runs the switch, which asks
+    /// whenever sessions are running. Rows the legacy fake-login build
+    /// wrote carry no email; those installs stay at the root until a real
+    /// sign-in. A read that fails leaves the flag armed for the next
+    /// connection.
+    private func adoptLegacyAccountIfNeeded() {
+        guard legacyAdoptionPending else { return }
+        settingsStore.get(SettingsKey.authAccountEmail) { [weak self] result in
+            guard let self, let email = try? result.get() else { return }
+            legacyAdoptionPending = false
+            guard !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            switchAccount(toEmail: email) {}
+        }
     }
 
     private func presentFirstRunIfNeeded() {
