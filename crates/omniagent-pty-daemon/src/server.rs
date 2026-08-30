@@ -388,18 +388,25 @@ where
     .await?;
 
     let mut attachments = HashMap::<String, Attachment>::new();
-    while let Ok(frame) = read_frame(&mut reader).await {
+    while let Ok(frame) = next_frame(
+        &mut reader,
+        trust,
+        &settings,
+        &settings_changed,
+        &mut attachments,
+    )
+    .await
+    {
         let request = frame.header.request_or_sequence;
         // The remote trust boundary: a point read of the projection per
         // frame (microseconds; nothing to cache or invalidate), then the
         // authorizer. `None` for local clients, so the dispatch below is
         // byte-for-byte the local path unless it consults `allowed`.
-        let allowed = (trust == ClientTrust::Remote).then(|| {
-            lock_store(&settings)
-                .map(|store| remote_session_ids(&store))
-                .unwrap_or_default()
-        });
+        let allowed = (trust == ClientTrust::Remote).then(|| shared_sessions(&settings));
         if let Some(allowed) = &allowed {
+            // A session un-shared since this client attached stops streaming
+            // here too, in case `next_frame`'s wake was consumed elsewhere.
+            attachments.retain(|id, _| allowed.contains(id));
             if let Err(reason) = authorize_remote(&frame, allowed) {
                 if send_error(&writer, request, reason).await.is_err() {
                     break;
@@ -597,6 +604,10 @@ where
                     });
                 match result {
                     Ok(()) => {
+                        // Every current waiter — the relay and each remote
+                        // client parked in `next_frame` — must see this,
+                        // plus one permit for a waiter between waits.
+                        settings_changed.notify_waiters();
                         settings_changed.notify_one();
                         send_response(&writer, request).await
                     }
@@ -838,6 +849,46 @@ where
     }
 
     Ok(())
+}
+
+/// The session ids the projection shares right now — empty when the store
+/// cannot be read, so a remote client is refused rather than let through.
+fn shared_sessions(settings: &std::sync::Mutex<Store>) -> HashSet<String> {
+    lock_store(settings)
+        .map(|store| remote_session_ids(&store))
+        .unwrap_or_default()
+}
+
+/// Reads the client's next frame.
+///
+/// A `Remote` client also wakes on `settings_changed`: the projection is
+/// re-read and every attachment whose session it no longer shares is
+/// dropped — closing its subscription and aborting its forwarding task —
+/// so a passive viewer that sends no frames stops receiving output the
+/// moment a workspace is un-shared (spec §2), not at its next `Detach`.
+/// The read future is polled across those wakes rather than recreated:
+/// `read_exact` is not cancel-safe, and dropping it mid-frame would
+/// desynchronise the stream. `Local` clients take the plain read.
+async fn next_frame<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    trust: ClientTrust,
+    settings: &std::sync::Mutex<Store>,
+    settings_changed: &Notify,
+    attachments: &mut HashMap<String, Attachment>,
+) -> io::Result<Frame> {
+    let mut read = std::pin::pin!(read_frame(reader));
+    if trust == ClientTrust::Local {
+        return read.await;
+    }
+    loop {
+        tokio::select! {
+            frame = &mut read => return frame,
+            _ = settings_changed.notified() => {
+                let allowed = shared_sessions(settings);
+                attachments.retain(|id, _| allowed.contains(id));
+            }
+        }
+    }
 }
 
 /// Decodes a control frame's JSON payload.

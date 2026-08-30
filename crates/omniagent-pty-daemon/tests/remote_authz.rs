@@ -8,14 +8,19 @@
 use omniagent_pty_daemon::protocol::{
     read_frame, write_frame, Frame, MessageKind, SessionListPayload, SettingKey,
 };
-use omniagent_pty_daemon::{serve_client, ClientTrust, CreateSession, DaemonServer};
+use omniagent_pty_daemon::{serve_client, ClientContext, ClientTrust, CreateSession, DaemonServer};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::time::Duration;
 use tokio::io::DuplexStream;
 use tokio::sync::oneshot;
 
 /// A `remote_control` projection sharing workspace `w1` with only session `s1`.
 const PROJECTION: &str = r#"{"workspaces":[{"id":"w1","name":"w1","sessions":[{"id":"s1","title":"one","engine":"shell","group":null}]}]}"#;
+/// The same machine after `w1` is toggled off while `w2` (session `s2`)
+/// stays shared — a non-empty projection, so the relay keeps every
+/// connection open and only `serve_client` can cut `s1` off.
+const PROJECTION_ONLY_S2: &str = r#"{"workspaces":[{"id":"w2","name":"w2","sessions":[{"id":"s2","title":"two","engine":"shell","group":null}]}]}"#;
 
 fn command_session(id: &str, script: &str) -> CreateSession {
     CreateSession {
@@ -53,19 +58,26 @@ impl Duplex {
     }
 
     async fn read(&mut self) -> Frame {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(4),
-            read_frame(&mut self.stream),
-        )
-        .await
-        .unwrap()
-        .unwrap()
+        self.try_read(Duration::from_secs(4)).await.unwrap()
+    }
+
+    /// `None` when nothing arrives within `wait`; a closed stream panics,
+    /// because no test here expects the daemon to hang up.
+    async fn try_read(&mut self, wait: Duration) -> Option<Frame> {
+        tokio::time::timeout(wait, read_frame(&mut self.stream))
+            .await
+            .ok()
+            .map(|frame| frame.unwrap())
     }
 }
 
-/// Boots a daemon with sessions `s1` and `s2`, shares only `s1` through the
-/// projection, and hands back a `Remote`-trust client already past `Hello`.
-async fn remote_client(root: &std::path::Path) -> (Duplex, oneshot::Sender<()>) {
+/// Boots a daemon with sessions `s1` (running `s1_script`) and `s2`, shares
+/// only `s1` through the projection, and hands back a `Remote`-trust client
+/// already past `Hello`, plus the context the test drives the store with.
+async fn remote_client(
+    root: &std::path::Path,
+    s1_script: &str,
+) -> (Duplex, ClientContext, oneshot::Sender<()>) {
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
         root.join("brain-data"),
@@ -76,7 +88,7 @@ async fn remote_client(root: &std::path::Path) -> (Duplex, oneshot::Sender<()>) 
     let (stop, stopped) = oneshot::channel();
     tokio::spawn(server.run_until(stopped));
     ctx.registry
-        .create_session(command_session("s1", "cat"))
+        .create_session(command_session("s1", s1_script))
         .unwrap();
     ctx.registry
         .create_session(command_session("s2", "cat"))
@@ -92,7 +104,7 @@ async fn remote_client(root: &std::path::Path) -> (Duplex, oneshot::Sender<()>) 
         .set_setting("auth_signed_in", "true")
         .unwrap();
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(serve_client(server_side, ctx, ClientTrust::Remote));
+    tokio::spawn(serve_client(server_side, ctx.clone(), ClientTrust::Remote));
     (
         Duplex {
             stream: client_side,
@@ -100,6 +112,7 @@ async fn remote_client(root: &std::path::Path) -> (Duplex, oneshot::Sender<()>) 
         }
         .hello()
         .await,
+        ctx,
         stop,
     )
 }
@@ -107,7 +120,7 @@ async fn remote_client(root: &std::path::Path) -> (Duplex, oneshot::Sender<()>) 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_clients_only_list_and_attach_projected_sessions() {
     let root = tempfile::tempdir().unwrap();
-    let (mut client, _stop) = remote_client(root.path()).await;
+    let (mut client, _ctx, _stop) = remote_client(root.path(), "cat").await;
 
     client
         .send(MessageKind::ListSessions, serde_json::json!({}))
@@ -140,7 +153,7 @@ async fn remote_clients_only_list_and_attach_projected_sessions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_clients_cannot_kill_create_or_read_other_settings() {
     let root = tempfile::tempdir().unwrap();
-    let (mut client, _stop) = remote_client(root.path()).await;
+    let (mut client, _ctx, _stop) = remote_client(root.path(), "cat").await;
     for (kind, payload) in [
         (MessageKind::Kill, serde_json::json!({"id": "s1"})),
         (
@@ -177,7 +190,64 @@ async fn remote_clients_cannot_kill_create_or_read_other_settings() {
         .await;
     let reply = client.read().await;
     assert_eq!(reply.header.message_kind, MessageKind::Response);
-    assert!(String::from_utf8_lossy(&reply.payload).contains("w1"));
+    let reply: serde_json::Value = serde_json::from_slice(&reply.payload).unwrap();
+    assert_eq!(reply["value"].as_str(), Some(PROJECTION));
+}
+
+/// Un-sharing a session while a remote viewer is attached to it must cut
+/// its output at once — even though the viewer sends nothing, and even
+/// though the projection stays non-empty (so the relay's close-everything
+/// rule does not fire). Before the fix the per-frame authorizer blocked new
+/// `Input`/`Resize`/`Interrupt`, but the forwarding task spawned by the
+/// earlier `Attach` kept streaming until `Detach` or disconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn un_sharing_an_attached_session_stops_its_output_without_a_frame_from_the_viewer() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut client, ctx, _stop) =
+        remote_client(root.path(), "while true; do echo tick; sleep 0.05; done").await;
+
+    client
+        .send(
+            MessageKind::Attach,
+            serde_json::json!({"id": "s1", "after_sequence": null}),
+        )
+        .await;
+    assert_eq!(
+        client.read().await.header.message_kind,
+        MessageKind::Snapshot
+    );
+    while client.read().await.header.message_kind != MessageKind::Output {}
+
+    ctx.settings
+        .lock()
+        .unwrap()
+        .set_setting("remote_control", PROJECTION_ONLY_S2)
+        .unwrap();
+    ctx.settings_changed.notify_one();
+
+    // Let the prune land and drain whatever was already in flight ...
+    let settled = tokio::time::Instant::now() + Duration::from_millis(250);
+    while client
+        .try_read(settled.saturating_duration_since(tokio::time::Instant::now()))
+        .await
+        .is_some()
+    {}
+    // ... after which nothing at all may arrive: the ticker would otherwise
+    // deliver about ten more `Output` frames in this window.
+    if let Some(frame) = client.try_read(Duration::from_millis(500)).await {
+        panic!(
+            "{:?} (sequence {}) leaked after s1 was un-shared",
+            frame.header.message_kind, frame.header.request_or_sequence
+        );
+    }
+
+    client
+        .send(
+            MessageKind::Attach,
+            serde_json::json!({"id": "s1", "after_sequence": null}),
+        )
+        .await;
+    assert_eq!(client.read().await.header.message_kind, MessageKind::Error);
 }
 
 #[test]
