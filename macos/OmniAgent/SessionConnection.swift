@@ -109,6 +109,21 @@ enum SessionConnectionError: Error, LocalizedError {
     }
 }
 
+/// Where a `SessionConnection` gets its bytes from. Everything above the
+/// transport — the frame codec, attachments, sequence cursors, reconnect and
+/// blind reattach, `ResyncRequired` handling — is shared; only how a
+/// connection is opened, read, written and closed differs.
+enum SessionTransport {
+    /// The local PTY daemon's unix socket (`DaemonPaths.socketURL`).
+    case unixSocket(URL)
+    /// A remote daemon reached through the relay: the URL is
+    /// `wss://relay.omni-agent.ai/v1/viewer/<device_id>` and one WebSocket
+    /// binary message carries protocol bytes. The bearer is read at every
+    /// (re)connect so a refreshed token is picked up without a new
+    /// `SessionConnection`.
+    case webSocket(URL, bearer: () -> String?)
+}
+
 final class SessionConnection {
     var onStateChange: ((ConnectionState) -> Void)?
     var onTerminalData: ((String, Data, UInt64, Bool) -> Void)?
@@ -129,7 +144,13 @@ final class SessionConnection {
         var sequence: UInt64?
     }
 
-    private let socketURL: URL
+    private let transport: SessionTransport
+    /// `true` when this connection reaches a daemon on another machine
+    /// through the relay (`.webSocket`), `false` for the local unix socket.
+    var isRemote: Bool {
+        if case .webSocket = transport { return true }
+        return false
+    }
     private let reconnectDelay: TimeInterval
     private let callbackQueue: DispatchQueue
     private let ioQueue = DispatchQueue(label: "digital.bruno.omniagent.session-connection")
@@ -138,6 +159,14 @@ final class SessionConnection {
     private var frameDecoder = FrameDecoder()
     private var descriptor: Int32 = -1
     private var readSource: DispatchSourceRead?
+    /// The live `.webSocket` connection; `nil` for `.unixSocket` and between
+    /// connections. Every WebSocket callback checks identity against this
+    /// before acting so a stale task's late failure can never close its
+    /// successor.
+    private var webSocketTask: URLSessionWebSocketTask?
+    /// Keeps a relay-routed WebSocket alive: Cloudflare drops idle
+    /// WebSockets at ~100 s, so both ends ping every 30 s (spec §1).
+    private var pingTimer: DispatchSourceTimer?
     private var nextRequest: UInt64 = 1
     private var helloRequest: UInt64?
     private var pending: [UInt64: (Result<SessionFrame, Error>) -> Void] = [:]
@@ -167,19 +196,34 @@ final class SessionConnection {
     private var connectSignpost: OSSignpostID?
 
     init(
+        transport: SessionTransport,
+        reconnectDelay: TimeInterval = 0.25,
+        callbackQueue: DispatchQueue = .main
+    ) {
+        self.transport = transport
+        self.reconnectDelay = reconnectDelay
+        self.callbackQueue = callbackQueue
+    }
+
+    /// The local daemon — every pre-existing call site, unchanged.
+    convenience init(
         socketURL: URL,
         reconnectDelay: TimeInterval = 0.25,
         callbackQueue: DispatchQueue = .main
     ) {
-        self.socketURL = socketURL
-        self.reconnectDelay = reconnectDelay
-        self.callbackQueue = callbackQueue
+        self.init(
+            transport: .unixSocket(socketURL),
+            reconnectDelay: reconnectDelay,
+            callbackQueue: callbackQueue
+        )
     }
 
     deinit {
         if descriptor >= 0 {
             Darwin.close(descriptor)
         }
+        pingTimer?.cancel()
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
     }
 
     func connect() {
@@ -566,7 +610,7 @@ final class SessionConnection {
     }
 
     private func openConnection() {
-        guard descriptor < 0, shouldReconnect else { return }
+        guard descriptor < 0, webSocketTask == nil, shouldReconnect else { return }
         transition(to: .connecting)
         let signpost = OSSignpostID(log: Instrumentation.log)
         connectSignpost = signpost
@@ -576,6 +620,15 @@ final class SessionConnection {
             name: "Daemon Connect",
             signpostID: signpost
         )
+        switch transport {
+        case let .unixSocket(url):
+            openUnixSocket(path: url.path)
+        case let .webSocket(url, bearer):
+            openWebSocket(url, bearer: bearer())
+        }
+    }
+
+    private func openUnixSocket(path: String) {
         let socketDescriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard socketDescriptor >= 0 else {
             connectionFailed(SessionConnectionError.posix("socket", errno))
@@ -592,7 +645,7 @@ final class SessionConnection {
 
         let connectionResult: Int32
         do {
-            connectionResult = try withUnixSocketAddress(path: socketURL.path) {
+            connectionResult = try withUnixSocketAddress(path: path) {
                 Darwin.connect(socketDescriptor, $0, $1)
             }
         } catch {
@@ -616,6 +669,64 @@ final class SessionConnection {
         source.setEventHandler { [weak self] in self?.readAvailable() }
         readSource = source
         source.resume()
+        sendHello()
+    }
+
+    /// One WebSocket binary message carries protocol bytes. The relay is a
+    /// dumb pipe and the daemon writes frames the same way it does to the
+    /// unix socket, so a frame may straddle messages: every received
+    /// message goes through `frameDecoder.append`, never a per-message
+    /// decode.
+    private func openWebSocket(_ url: URL, bearer: String?) {
+        var request = URLRequest(url: url)
+        if let bearer {
+            request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        }
+        let task = URLSession.shared.webSocketTask(with: request)
+        webSocketTask = task
+        frameDecoder = FrameDecoder()
+        task.resume()
+        receiveNextMessage(task)
+        let timer = DispatchSource.makeTimerSource(queue: ioQueue)
+        timer.schedule(deadline: .now() + 30, repeating: 30)
+        timer.setEventHandler { [weak task] in task?.sendPing { _ in } }
+        timer.resume()
+        pingTimer = timer
+        sendHello()
+    }
+
+    private func receiveNextMessage(_ task: URLSessionWebSocketTask) {
+        task.receive { [weak self] result in
+            guard let self else { return }
+            self.ioQueue.async {
+                guard self.webSocketTask === task else { return }
+                switch result {
+                case let .success(.data(data)):
+                    do {
+                        for frame in try self.frameDecoder.append(data) {
+                            self.handle(frame)
+                        }
+                    } catch {
+                        self.closeConnection(error: error)
+                        return
+                    }
+                case .success(.string):
+                    break
+                case .success:
+                    break
+                case let .failure(error):
+                    self.closeConnection(error: error)
+                    return
+                }
+                self.receiveNextMessage(task)
+            }
+        }
+    }
+
+    /// The first frame on every fresh connection, whichever transport
+    /// carried it; `handle(_:)` completes the handshake on the matching
+    /// `helloAck`.
+    private func sendHello() {
         let request = takeRequest()
         helloRequest = request
         do {
@@ -851,18 +962,30 @@ final class SessionConnection {
 
     private func send(_ frame: SessionFrame) throws {
         let data = try frame.encoded()
-        var written = 0
-        try data.withUnsafeBytes { bytes in
-            while written < data.count {
-                let count = Darwin.write(
-                    descriptor,
-                    bytes.baseAddress!.advanced(by: written),
-                    data.count - written
-                )
-                guard count > 0 else {
-                    throw SessionConnectionError.posix("write", errno)
+        if let task = webSocketTask {
+            task.send(.data(data)) { [weak self] error in
+                guard let self, let error else { return }
+                self.ioQueue.async {
+                    // A stale task's late failure must not close its
+                    // successor (the receive loop applies the same check).
+                    guard self.webSocketTask === task else { return }
+                    self.closeConnection(error: error)
                 }
-                written += count
+            }
+        } else {
+            var written = 0
+            try data.withUnsafeBytes { bytes in
+                while written < data.count {
+                    let count = Darwin.write(
+                        descriptor,
+                        bytes.baseAddress!.advanced(by: written),
+                        data.count - written
+                    )
+                    guard count > 0 else {
+                        throw SessionConnectionError.posix("write", errno)
+                    }
+                    written += count
+                }
             }
         }
         if frame.kind == .input {
@@ -893,6 +1016,10 @@ final class SessionConnection {
             Darwin.close(descriptor)
             descriptor = -1
         }
+        pingTimer?.cancel()
+        pingTimer = nil
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
         helloRequest = nil
         // Per-connection state: a reattach whose connection is gone can
         // never be answered on it.
