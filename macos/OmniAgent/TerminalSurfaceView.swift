@@ -163,6 +163,22 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     /// internal `colorsChanged()` clears that.
     let wash = TerminalWashOverlayView()
 
+    /// Mosh-style local echo for remote panes, whose real echo is a relay
+    /// round-trip away: keystrokes are predicted at the cursor and painted by
+    /// `echoOverlay` above the terminal — never written into its buffer —
+    /// until the real bytes confirm or contradict them. Off by default, so a
+    /// local pane does not change at all; a later task turns it on for
+    /// relayed connections.
+    var predictiveEchoEnabled = false {
+        didSet {
+            guard predictiveEchoEnabled != oldValue, !predictiveEchoEnabled else { return }
+            echo = PredictiveEchoModel()
+            renderPredictions()
+        }
+    }
+    private var echo = PredictiveEchoModel()
+    let echoOverlay = PredictiveEchoOverlayView()
+
     /// The blinking style deselection replaced, or `nil` when nothing is
     /// currently overridden.
     private var suppressedBlinkStyle: CursorStyle?
@@ -235,6 +251,8 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         terminalView.terminalDelegate = self
         addSubview(terminalView)
         terminalView.frame = bounds
+        addSubview(echoOverlay, positioned: .above, relativeTo: terminalView)
+        echoOverlay.frame = bounds
         addSubview(wash, positioned: .above, relativeTo: nil)
         wash.frame = bounds
         wash.isHidden = isSelected
@@ -281,6 +299,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         terminalView.frame = bounds
+        echoOverlay.frame = bounds
         wash.frame = bounds
     }
 
@@ -317,6 +336,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
             bytes.count
         )
         terminalView.feed(byteArray: Array(bytes)[...])
+        reconcilePredictions()
         pendingDrawSequence = sequence
         guard !suspendsDrawing, !drawMarkerScheduled else { return }
         drawMarkerScheduled = true
@@ -413,6 +433,59 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         trackTypedLine(data)
         os_signpost(.event, log: Instrumentation.log, name: "Terminal Input")
         connection.write(sessionID: sessionID, bytes: Data(data))
+        predictLocalEcho(data)
+    }
+
+    // MARK: Predictive echo
+
+    /// SwiftTerm scrolls the caret into view before it calls `send`
+    /// (`ensureCaretIsVisible` in `TerminalView.send(data:)`), so the buffer
+    /// cursor it reports here is the viewport cursor the overlay draws in.
+    private func predictLocalEcho(_ data: ArraySlice<UInt8>) {
+        guard predictiveEchoEnabled else { return }
+        let terminal: Terminal = terminalView.terminal
+        let cursor = terminal.getCursorLocation()
+        echo.syncCursor(row: cursor.y, col: cursor.x)
+        echo.predict(Array(data), now: CACurrentMediaTime(), cols: terminal.cols)
+        renderPredictions()
+    }
+
+    /// After every real feed: compare each prediction with the cell it was
+    /// made for. `getCharacter(col:row:)` is viewport-relative (it adds
+    /// `yDisp` itself); an empty cell is NUL in SwiftTerm, which the model
+    /// must see as "no echo yet" rather than as a character that disagrees.
+    private func reconcilePredictions() {
+        guard predictiveEchoEnabled else { return }
+        let terminal: Terminal = terminalView.terminal
+        echo.reconcile(now: CACurrentMediaTime()) { row, col in
+            guard let character = terminal.getCharacter(col: col, row: row), character != "\0" else { return nil }
+            return character
+        }
+        renderPredictions()
+    }
+
+    private func renderPredictions() {
+        let terminal: Terminal = terminalView.terminal
+        echoOverlay.render(
+            echo.drawn,
+            cols: terminal.cols,
+            rows: terminal.rows,
+            font: terminalView.font,
+            color: terminalView.nativeForegroundColor.withAlphaComponent(0.72),
+            cellSize: terminalCellSize
+        )
+    }
+
+    /// SwiftTerm's real cell geometry, in points. Its `cellSizeInPixels`
+    /// scales by the window's backing factor and rounds, and the cell it
+    /// computed was snapped to that same pixel grid, so dividing back is
+    /// exact — but only with a window; without one it rounds to whole points,
+    /// so the overlay falls back to dividing its bounds.
+    private var terminalCellSize: CGSize? {
+        guard let scale = terminalView.window?.backingScaleFactor,
+              let pixels = terminalView.cellSizeInPixels(source: terminalView.terminal)
+        else { return nil }
+        return CGSize(width: CGFloat(pixels.width) / scale, height: CGFloat(pixels.height) / scale)
     }
 
     /// Watches the keystroke stream for `/clear` and nothing else.
