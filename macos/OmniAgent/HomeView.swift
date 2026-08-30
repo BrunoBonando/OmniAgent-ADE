@@ -153,14 +153,17 @@ final class HomeHotspotView: HomeInteractiveView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+    func performPressForTesting() {
+        onPress?()
+    }
+
     override func applyHover() {
         layer?.backgroundColor = (isHovered ? hoverFill : baseFill).cgColor
     }
 }
 
-/// The composer's real text field: type into it and it takes the words; only
-/// sending them anywhere is still to come. Focus is surfaced so the card can
-/// wear its editing stroke.
+/// The composer's real text field: type into it and it takes the words. Focus
+/// is surfaced so the card can wear its editing stroke.
 final class HomeComposerField: NSTextField {
     var onFocusChange: ((Bool) -> Void)?
 
@@ -482,11 +485,14 @@ final class HomeSurfaceView: NSView {
     var onRequestProjectMenu: ((NSView) -> Void)?
     var onRequestSessionMenu: ((NSView) -> Void)?
     var onRequestBranchMenu: ((NSView) -> Void)?
+    var onSend: (() -> Void)?
     /// The suggestion cards' reveal-loop timer — one at a time; pressing a
     /// second card mid-type invalidates and restarts it.
     private var typingTimer: Timer?
     /// Test seam only, same convention as `PaneFocusGlowView.gradientForTesting`.
     var typingTimerForTesting: Timer? { typingTimer }
+    var selectedEngineForSession: Engine { selectedEngine }
+    var selectedModelForSession: ModelChoice? { selectedModel }
 
     private let column = NSStackView()
 
@@ -604,6 +610,17 @@ final class HomeSurfaceView: NSView {
     }
 
     static let setUpGitHubTitle = "Set up GitHub"
+
+    /// The branch dropdown's GitHub section, header and action title
+    /// together — real connection state (`SettingsSurfaceView`'s own
+    /// `accountGitHubConnected`/`githubLogin` reading) deciding which pair
+    /// shows, rather than a hardcoded "not connected" that never re-checked
+    /// itself once the account actually connected.
+    static func gitHubSectionText(connected: Bool, login: String) -> (header: String, action: String) {
+        connected
+            ? ("GitHub · Connected as @\(login)", "Manage GitHub…")
+            : ("GitHub · Not connected", "\(setUpGitHubTitle)…")
+    }
 
     /// A branch to be created off `base` when the session starts — shown as
     /// "base → name", the arrow being the whole point: it says "this does
@@ -860,7 +877,7 @@ final class HomeSurfaceView: NSView {
             hoverFill: ShellPalette.accentRail,
             accessibilityLabel: "Send"
         )
-        send.onPress = {}
+        send.onPress = { [weak self] in self?.onSend?() }
         sendControl = send
 
         let separator = NSView()

@@ -2,6 +2,28 @@ import AppKit
 import os.signpost
 import SwiftTerm
 
+struct SessionSetupRequest: Equatable {
+    var cwd: String
+    var project: String
+    var parent: String?
+    var repositoryRoot: String?
+    var currentBranch: String?
+    var branches: [String]
+    var selectedBranch: String?
+    var newBranchName: String?
+    var engine: Engine
+    var model: String?
+
+    var isGitReady: Bool { repositoryRoot != nil }
+}
+
+struct SessionSetupResult: Equatable {
+    var cwd: String
+    var branch: SessionBranch?
+    var engine: Engine
+    var model: String?
+}
+
 final class WorkspaceWindow: NSWindow {
     /// Click-to-focus: whichever pane ends up holding the first responder
     /// becomes the focused pane, without the panes having to fight SwiftTerm
@@ -181,6 +203,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// and clear this). Until then it lists in Home's picker like any
     /// other workspace, and lives as long as the app does.
     private var homePendingFolder: BrainProjectSummary?
+    var sessionSetupProvider: ((SessionSetupRequest) -> SessionSetupResult?)?
     let palette = CommandPaletteController()
     private var readySessions: Set<String> = []
     /// The `layout` read has been sent — a later reconnect must re-attach the
@@ -735,20 +758,51 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 from: anchor
             )
         }
+        homeView.onSend = { [weak self] in
+            guard let self else { return }
+            if homeSelectedProjectID == HomeChatWorkspace.id {
+                return
+            }
+            guard let directory = homeDirectory() else { return }
+            let project = homeSelectedProjectID
+                ?? homePendingFolder?.id
+                ?? (directory as NSString).lastPathComponent
+            if let pending = homePendingFolder, pending.id == project {
+                connection.addProject(path: directory, name: project) { [weak self] _ in
+                    self?.refreshProjectLabels()
+                }
+                homePendingFolder = nil
+            }
+            selectWorkspace(id: project, animated: false)
+            startSession(
+                inDirectory: directory,
+                project: project,
+                selectedBranch: homeView.selectedBranch,
+                newBranchName: homeView.newBranchName,
+                engine: homeView.selectedEngineForSession,
+                model: homeView.selectedModelForSession?.id
+            )
+        }
         // Every local branch, current one checked; typing a name no branch
         // has offers to create it off the one currently picked — so "from
         // any other branch" is: pick that branch first, then type the new
         // name. Creation itself is deferred to Send (nothing starts a
         // session from Home yet); the chip's "base → name" is the promise.
         //
-        // Above the local branches: GitHub. Until the user connects — an
-        // existing `gh` login or our GitHub App — the section says so and
-        // offers "Set up GitHub…", the one thing a user without git can do.
+        // Above the local branches: GitHub, reading the same connection
+        // state `showCommandPalette` already trusts (Settings › Accounts'
+        // own `accountGitHubConnected`/`githubLogin`) rather than always
+        // saying "not connected" — a user who already connected should
+        // never be told to set it up again.
         homeView.onRequestBranchMenu = { [weak self] anchor in
             guard let self else { return }
-            let gitHub = HomeDropdown.Section(header: "GitHub · Not connected", rows: [
+            let (header, action) = HomeSurfaceView.gitHubSectionText(
+                connected: settingsView.accountGitHubConnected,
+                login: settingsView.githubLogin
+            )
+            let gitHub = HomeDropdown.Section(header: header, rows: [
                 // GitHub lives under Accounts; the page itself is still to come.
-                HomeDropdown.Row(icon: HomeDropdown.symbol("link"), title: "\(HomeSurfaceView.setUpGitHubTitle)…") { [weak self] in
+                HomeDropdown.Row(icon: HomeDropdown.symbol("link"), title: action) { [weak self] in
                     self?.showSettings(section: .accounts)
                 },
             ])
@@ -1724,7 +1778,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// group, recorded in the session-meta row so the sidebar renders the
     /// new session indented under it.
     @discardableResult
-    func startSession(inDirectory cwd: String, project: String, parent: String? = nil) -> String? {
+    func startSession(
+        inDirectory cwd: String,
+        project: String,
+        parent: String? = nil,
+        selectedBranch: String? = nil,
+        newBranchName: String? = nil,
+        engine: Engine = EngineLauncher.defaultEngine(),
+        model: String? = nil
+    ) -> String? {
         guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return nil }
         // Starting a session in a closed workspace reopens it — the web
         // build's `reopenWorkspace` rule, so the row is back the moment the
@@ -1734,26 +1796,68 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             persistClosedWorkspaces()
         }
         let group = SessionOutline.newSessionGroupID()
-        if let parent {
-            sessionMeta[group] = SessionMeta(pinned: false, parent: parent)
-            persistSessionMeta()
-        }
         let name = SessionOutline.nextSessionName(
             workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
             project: project
         )
         let paneID = UUID().uuidString
+        let request = sessionSetupRequest(
+            cwd: cwd,
+            project: project,
+            parent: parent,
+            selectedBranch: selectedBranch,
+            newBranchName: newBranchName,
+            engine: engine,
+            model: model
+        )
+        guard let setup = resolveSessionSetup(request) else { return nil }
+        guard finishStartSession(
+            paneID: paneID,
+            group: group,
+            name: name,
+            cwd: setup.cwd,
+            project: project,
+            parent: parent,
+            engine: setup.engine,
+            model: setup.model,
+            branch: setup.branch
+        ) else {
+            return nil
+        }
+        return group
+    }
+
+    @discardableResult
+    private func finishStartSession(
+        paneID: String,
+        group: String,
+        name: String,
+        cwd: String,
+        project: String,
+        parent: String?,
+        engine: Engine,
+        model: String?,
+        branch: SessionBranch?
+    ) -> Bool {
+        if parent != nil || branch != nil {
+            var entry = sessionMeta[group] ?? SessionMeta()
+            entry.parent = parent ?? entry.parent
+            entry.branch = branch
+            sessionMeta[group] = entry
+            persistSessionMeta()
+        }
         let added = addPane(
             RestoredPane(
                 sessionID: paneID,
                 reattaches: false,
                 project: project,
-                engine: EngineLauncher.defaultEngine(),
+                engine: engine,
                 cwd: cwd,
                 label: nil,
                 themeId: nil,
                 group: group,
-                groupLabel: name
+                groupLabel: name,
+                pickedModel: model
             ),
             startSession: true
         )
@@ -1763,7 +1867,150 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // session would start behind the destination. `revealPane` is the
         // whole move: destination to the Desk, window front, focus, unzoom.
         if added { revealPane(paneID) }
+        return added
+    }
+
+    private func sessionSetupRequest(
+        cwd: String,
+        project: String,
+        parent: String?,
+        selectedBranch: String?,
+        newBranchName: String?,
+        engine: Engine,
+        model: String?
+    ) -> SessionSetupRequest {
+        let directory = cwd.isEmpty ? workspaceDirectory(for: project) ?? cwd : cwd
+        let repoRoot = GitStatus.repoRoot(for: URL(fileURLWithPath: directory, isDirectory: true))
+        let current = repoRoot.flatMap(GitBranch.current(repoRoot:))
+        return SessionSetupRequest(
+            cwd: directory,
+            project: project,
+            parent: parent,
+            repositoryRoot: repoRoot?.path,
+            currentBranch: current,
+            branches: repoRoot.map(GitBranch.all(repoRoot:)) ?? [],
+            selectedBranch: selectedBranch ?? current,
+            newBranchName: newBranchName,
+            engine: engine,
+            model: model
+        )
+    }
+
+    private func resolveSessionSetup(_ request: SessionSetupRequest) -> SessionSetupResult? {
+        guard request.isGitReady else {
+            return SessionSetupResult(cwd: request.cwd, branch: nil, engine: request.engine, model: request.model)
+        }
+        if let provider = sessionSetupProvider {
+            return provider(request).flatMap(materializeSessionSetup)
+        }
+        presentDefaultSessionSetup(request)
+        return nil
+    }
+
+    private func materializeSessionSetup(_ result: SessionSetupResult) -> SessionSetupResult? {
+        guard let branch = result.branch else { return result }
+        do {
+            let plan = try GitWorktree.plan(
+                directory: branch.repositoryRoot,
+                branch: branch.branch,
+                sourceRef: branch.sourceRef,
+                createsBranch: branch.sourceRef != nil
+            )
+            let cwd = try GitWorktree.ensure(plan)
+            var resolved = result
+            resolved.cwd = cwd.path
+            resolved.branch = SessionBranch(
+                repositoryRoot: plan.repositoryRoot.path,
+                branch: plan.branch,
+                worktreePath: cwd.path,
+                sourceRef: branch.sourceRef,
+                sourceCommit: branch.sourceCommit ?? branch.sourceRef.flatMap {
+                    GitWorktree.commit(of: $0, repoRoot: plan.repositoryRoot)
+                },
+                engine: result.engine,
+                model: result.model
+            )
+            return resolved
+        } catch {
+            presentWindowAsk(
+                title: "Could not create branch session",
+                message: error.localizedDescription,
+                icon: NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil),
+                severity: .critical,
+                options: [PaneAskOption("OK", isPrimary: true) { _ in }]
+            )
+            return nil
+        }
+    }
+
+    private func presentDefaultSessionSetup(_ request: SessionSetupRequest) {
+        let source = request.selectedBranch ?? request.currentBranch ?? request.branches.first ?? "main"
+        let suggested = request.newBranchName ?? (request.parent == nil
+            ? "session/\(Self.branchTimestamp())"
+            : "session/\(source)-child-\(Self.branchTimestamp())")
+        presentWindowAsk(
+            title: request.parent == nil ? "Create branch session" : "Create nested branch session",
+            message: "Branch from \(source). Choose the branch name for this session.",
+            icon: NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: nil),
+            input: suggested,
+            options: [
+                PaneAskOption("Cancel") { _ in },
+                PaneAskOption("Create", isPrimary: true) { [weak self] branchName in
+                    guard let self else { return }
+                    let branch = branchName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !branch.isEmpty else { return }
+                    var result = SessionSetupResult(
+                        cwd: request.cwd,
+                        branch: SessionBranch(
+                            repositoryRoot: request.repositoryRoot ?? request.cwd,
+                            branch: branch,
+                            worktreePath: "",
+                            sourceRef: source,
+                            sourceCommit: nil,
+                            engine: request.engine,
+                            model: request.model
+                        ),
+                        engine: request.engine,
+                        model: request.model
+                    )
+                    guard let materialized = self.materializeSessionSetup(result) else { return }
+                    result = materialized
+                    _ = self.startSessionAfterAsyncSetup(request: request, setup: result)
+                },
+            ]
+        )
+    }
+
+    @discardableResult
+    private func startSessionAfterAsyncSetup(request: SessionSetupRequest, setup: SessionSetupResult) -> String? {
+        guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return nil }
+        let group = SessionOutline.newSessionGroupID()
+        let name = SessionOutline.nextSessionName(
+            workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
+            project: request.project
+        )
+        let paneID = UUID().uuidString
+        guard finishStartSession(
+            paneID: paneID,
+            group: group,
+            name: name,
+            cwd: setup.cwd,
+            project: request.project,
+            parent: request.parent,
+            engine: setup.engine,
+            model: setup.model,
+            branch: setup.branch
+        ) else {
+            return nil
+        }
         return group
+    }
+
+    private static func branchTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.string(from: Date())
     }
 
     /// `startSession(inDirectory:project:)`'s browser twin: the same
@@ -2674,6 +2921,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             applyDestination(destination)
         case let .showSettingsSection(section):
             showSettings(section: section)
+        case .startBranchSession:
+            newSession(nil)
         case .signIn:
             signInToAccount()
         case .signOut:
@@ -3064,6 +3313,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         title: String,
         message: String = "",
         icon: NSImage? = nil,
+        input: String? = nil,
         severity: PaneAskOverlayView.Severity = .question,
         options: [PaneAskOption],
         onCancel: @escaping () -> Void = {}
@@ -3081,7 +3331,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             title: title,
             message: message,
             icon: icon,
-            input: nil,
+            input: input,
             options: options.map { option in
                 PaneAskOption(option.title, isPrimary: option.isPrimary) { [weak self] text in
                     self?.dismissWindowAsk()
@@ -3295,7 +3545,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             createNested: { [weak self] in
                 guard let self else { return }
                 startSession(
-                    inDirectory: workspaceDirectory(for: session.project) ?? session.cwd,
+                    inDirectory: session.cwd.isEmpty ? (workspaceDirectory(for: session.project) ?? "") : session.cwd,
                     project: session.project,
                     parent: session.id
                 )
@@ -3452,7 +3702,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         sessionMetaReadDispatched = true
         sessionMetaReadCompleted = true
         let stored = SessionMetaCodec.deserialize(raw)
-        sessionMeta = SessionMeta.pruned(stored, live: liveSessionGroups())
+        let inMemory = sessionMeta
+        var merged = stored
+        for (group, entry) in inMemory {
+            merged[group] = entry
+        }
+        sessionMeta = SessionMeta.pruned(merged, live: liveSessionGroups())
         if sessionMeta != stored { persistSessionMeta() }
         reloadOutline()
     }

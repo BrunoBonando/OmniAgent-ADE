@@ -1061,6 +1061,45 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    func testStartingAGitSessionCreatesBranchWorktreeBeforeSpawning() throws {
+        let repo = try makeTemporaryGitRepository()
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.sessionEnsurer = { _ in }
+        controller.sessionSetupProvider = { request in
+            XCTAssertTrue(request.isGitReady)
+            XCTAssertEqual(request.currentBranch, "main")
+            return SessionSetupResult(
+                cwd: request.cwd,
+                branch: SessionBranch(
+                    repositoryRoot: request.repositoryRoot ?? request.cwd,
+                    branch: "feature/session-one",
+                    worktreePath: "",
+                    sourceRef: "main",
+                    sourceCommit: nil,
+                    engine: .codex,
+                    model: "gpt-5"
+                ),
+                engine: .codex,
+                model: "gpt-5"
+            )
+        }
+
+        let group = try XCTUnwrap(controller.startSession(inDirectory: repo.path, project: "repo"))
+        let pane = try XCTUnwrap(controller.pane(inGroup: group))
+
+        XCTAssertEqual(
+            pane.cwd,
+            repo.appendingPathComponent(".omniagent/worktrees/feature-session-one").path
+        )
+        XCTAssertEqual(pane.engine, .codex)
+        XCTAssertEqual(pane.pickedModel, "gpt-5")
+        XCTAssertEqual(GitBranch.forDirectory(pane.cwd), "feature/session-one")
+        XCTAssertEqual(controller.sessionMeta[group]?.branch?.branch, "feature/session-one")
+        XCTAssertEqual(controller.sessionMeta[group]?.branch?.sourceRef, "main")
+    }
+
     /// A new session starts in the workspace's own folder and asks nothing.
     /// The chooser is reserved for opening a *different* folder as a new
     /// workspace — asking on every new session meant answering a question whose
@@ -2427,6 +2466,42 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             ),
             panes: []
         )
+    }
+
+    private func makeTemporaryGitRepository() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omniagent-branch-session-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        guard runGit(["init", "-q", "-b", "main", root.path]) == 0 else {
+            throw XCTSkip("git is not available or does not support init -b")
+        }
+        try "root\n".write(to: root.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(runGit(["-C", root.path, "add", "README.md"]), 0)
+        XCTAssertEqual(
+            runGit([
+                "-C", root.path,
+                "-c", "user.name=OmniAgent Test",
+                "-c", "user.email=omniagent@example.invalid",
+                "commit", "-q", "-m", "initial",
+            ]),
+            0
+        )
+        return root
+    }
+
+    private func runGit(_ arguments: [String]) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git"] + arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return -1
+        }
+        process.waitUntilExit()
+        return process.terminationStatus
     }
 
     func testOptionDeleteSendsMetaBackspaceSoTheShellKillsAWord() throws {

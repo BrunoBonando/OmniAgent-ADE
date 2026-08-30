@@ -25,6 +25,7 @@ final class CommandPaletteTests: XCTestCase {
             CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
                 .map(\.id),
             [
+                "session:new-branch",
                 "destination:home", "destination:todo", "destination:terminals", "destination:settings",
                 "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
@@ -131,9 +132,22 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(commands.first?.id, "workspace:alpha", "workspaces lead the places")
     }
 
-    /// The verbs are gone: the spotlight finds things, it does not list
-    /// commands.
-    func testTheSpotlightListsNoCommands() {
+    func testBranchSessionSetupIsASpotlightRow() {
+        let commands = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
+        let row = commands.first { $0.action == .startBranchSession }
+        XCTAssertEqual(row?.id, "session:new-branch")
+        XCTAssertEqual(row?.title, "New Branch Session…")
+        XCTAssertEqual(row?.subtitle, "Sessions")
+        XCTAssertEqual(row?.symbol, "arrow.triangle.branch")
+
+        var model = CommandPaletteModel(commands: commands)
+        model.update(query: "worktree")
+        XCTAssertEqual(model.matches.first?.action, .startBranchSession)
+    }
+
+    /// Destructive/control verbs are gone: the spotlight finds things and
+    /// setup entry points, it does not duplicate every menu command.
+    func testTheSpotlightListsNoControlCommands() {
         let commands = CommandPaletteModel.build(
             panes: [pane("a", project: "alpha", group: "g1")], paneOrder: ["a"], focusedPaneID: "a"
         )

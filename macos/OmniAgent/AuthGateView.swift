@@ -38,6 +38,21 @@ final class AuthGateCoordinator {
         )
     }
 
+    /// Marks the launch gate resolved the instant sign-in succeeds — before
+    /// the optional persona step, which used to be the only thing that wrote
+    /// `AuthGate.signedInDefaultsKey`. Without this, quitting between
+    /// "Continue with GitHub" (or Apple)'s browser round trip and picking a
+    /// persona left that key unset, so the *next* launch showed the "Welcome
+    /// back" gate again despite the account already being connected —
+    /// `AuthClient` had a token and Core's cookie jar had a session, but the
+    /// app's own local mirror of "am I signed in" did not. Idempotent and
+    /// safe alongside `resolve`, which writes the same key again once the
+    /// flow actually finishes; nothing else here is touched early, since the
+    /// account/persona rows `resolve` writes need the flow's actual outcome.
+    func markSignedIn() {
+        defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
+    }
+
     /// "Log out" / "Sign in" from the Settings screen's Account section —
     /// clears the persisted outcome (account identity included) so the gate
     /// shows again at the next launch, and offers the same view as a sheet
@@ -191,6 +206,13 @@ final class AuthGateViewModel: ObservableObject {
     /// attempt. `nil` while nothing has failed.
     @Published private(set) var errorMessage: String?
     var onResolved: ((AuthGateOutcome) -> Void)?
+    /// Fired once a sign-in succeeds — `.login` moving to `.personalize` —
+    /// rather than waiting for the persona step to also finish and resolve
+    /// the gate. `AuthGateWindowController` wires this straight to
+    /// `AuthGateCoordinator.markSignedIn()`, so the launch check the app
+    /// re-opens to already sees a real sign-in as one, whatever happens to
+    /// the persona screen after.
+    var onSignedIn: (() -> Void)?
     /// Where a `.linkGitHub` model reports instead of the reducer — exactly
     /// once per `connectGitHub()`/`disconnectGitHub()`, on every path.
     var onLinkOutcome: ((AuthLinkOutcome) -> Void)?
@@ -259,7 +281,13 @@ final class AuthGateViewModel: ObservableObject {
     }
 
     func send(_ action: AuthGateAction) {
+        let wasLogin = state.phase == .login
         state = AuthGateReducer.reduce(state, action)
+        // Only a successful `.signedIn` moves `.login` to `.personalize`
+        // (`.skipLogin` goes straight to `.resolved`) — see `markSignedIn`.
+        if wasLogin, state.phase == .personalize {
+            onSignedIn?()
+        }
         if state.phase == .resolved, let outcome = state.outcome {
             onResolved?(outcome)
         }
@@ -1052,6 +1080,7 @@ final class AuthGateWindowController {
     /// re-runs the same flow rather than a second one.
     func present(over window: NSWindow?, completion: (() -> Void)? = nil) {
         let model = AuthGateViewModel()
+        model.onSignedIn = { [weak self] in self?.coordinator.markSignedIn() }
         model.onResolved = { [weak self] outcome in
             guard let self else { return }
             coordinator.resolve(outcome) { [weak self] in

@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OmniAgent App Store Rejection Risk Map</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070910;
+      --panel: rgba(255, 255, 255, 0.055);
+      --panel-strong: rgba(255, 255, 255, 0.09);
+      --line: rgba(255, 255, 255, 0.14);
+      --text: #f2f3fb;
+      --muted: #a8adbd;
+      --faint: #747b90;
+      --accent: #8d99ff;
+      --critical: #ff5f6d;
+      --high: #ffb454;
+      --medium: #4cc9f0;
+      --low: #6ee7a8;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 15% 8%, rgba(141, 153, 255, 0.24), transparent 34rem),
+        radial-gradient(circle at 85% 0%, rgba(255, 95, 109, 0.16), transparent 30rem),
+        linear-gradient(180deg, #0b1020 0%, var(--bg) 48%);
+      color: var(--text);
+    }
+
+    header {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 44px 24px 26px;
+    }
+
+    h1 {
+      margin: 0 0 14px;
+      font-size: clamp(2rem, 5vw, 4.8rem);
+      line-height: 0.95;
+      letter-spacing: -0.07em;
+    }
+
+    .lede {
+      max-width: 840px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 1.05rem;
+      line-height: 1.55;
+    }
+
+    .shell {
+      max-width: 1180px;
+      margin: 0 auto 44px;
+      padding: 0 24px;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .card, .controls, .risk-card, .checklist {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(22px);
+    }
+
+    .card { padding: 24px; }
+
+    .verdict {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 18px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255, 95, 109, 0.13);
+      border: 1px solid rgba(255, 95, 109, 0.35);
+      color: #ffd4d9;
+      font-weight: 700;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .verdict-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--critical);
+      box-shadow: 0 0 24px var(--critical);
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 22px;
+    }
+
+    .stat {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.045);
+    }
+
+    .stat strong {
+      display: block;
+      font-size: 2rem;
+      line-height: 1;
+      letter-spacing: -0.04em;
+    }
+
+    .stat span {
+      display: block;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    .controls {
+      position: sticky;
+      top: 16px;
+      padding: 18px;
+      align-self: start;
+    }
+
+    label {
+      display: block;
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    input, select, button {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(0, 0, 0, 0.28);
+      color: var(--text);
+      font: inherit;
+      padding: 11px 12px;
+      outline: none;
+    }
+
+    input:focus, select:focus, button:focus-visible {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(141, 153, 255, 0.18);
+    }
+
+    .control-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    button {
+      cursor: pointer;
+      background: rgba(141, 153, 255, 0.14);
+      transition: transform 0.15s ease, background 0.15s ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      background: rgba(141, 153, 255, 0.24);
+    }
+
+    .timeline {
+      margin-top: 18px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .timeline-step {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+    }
+
+    .timeline-step b {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--accent);
+    }
+
+    .timeline-step p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .section-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 16px;
+      margin: 26px 0 12px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 1rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+    }
+
+    #visibleCount {
+      color: var(--faint);
+      font-size: 0.9rem;
+    }
+
+    .risk-list {
+      display: grid;
+      gap: 14px;
+    }
+
+    .risk-card {
+      overflow: hidden;
+    }
+
+    .risk-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: center;
+      width: 100%;
+      padding: 18px;
+      border: 0;
+      background: transparent;
+      text-align: left;
+    }
+
+    .risk-title {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .risk-title strong {
+      font-size: 1.13rem;
+      letter-spacing: -0.02em;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .severity-critical { background: rgba(255, 95, 109, 0.15); color: #ffd4d9; border: 1px solid rgba(255, 95, 109, 0.38); }
+    .severity-high { background: rgba(255, 180, 84, 0.14); color: #ffe0b5; border: 1px solid rgba(255, 180, 84, 0.36); }
+    .severity-medium { background: rgba(76, 201, 240, 0.13); color: #c8f4ff; border: 1px solid rgba(76, 201, 240, 0.32); }
+    .severity-low { background: rgba(110, 231, 168, 0.13); color: #d0ffe5; border: 1px solid rgba(110, 231, 168, 0.32); }
+
+    .category-pill {
+      background: rgba(255, 255, 255, 0.07);
+      color: var(--muted);
+      border: 1px solid var(--line);
+    }
+
+    .summary {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .chevron {
+      color: var(--muted);
+      font-size: 1.25rem;
+      transition: transform 0.2s ease;
+    }
+
+    .risk-card[open] .chevron {
+      transform: rotate(180deg);
+    }
+
+    details > summary {
+      list-style: none;
+    }
+
+    details > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .risk-body {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      padding: 0 18px 18px;
+    }
+
+    .detail {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(0, 0, 0, 0.23);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      min-height: 100%;
+    }
+
+    .detail h3 {
+      margin: 0 0 8px;
+      font-size: 0.78rem;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .detail p, .detail li {
+      color: var(--muted);
+      line-height: 1.5;
+      font-size: 0.93rem;
+    }
+
+    .detail p { margin: 0; }
+    .detail ul { margin: 0; padding-left: 18px; }
+    code {
+      color: #d9ddff;
+      background: rgba(255, 255, 255, 0.075);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 6px;
+      padding: 1px 5px;
+      font-family: "SF Mono", ui-monospace, Menlo, monospace;
+      font-size: 0.86em;
+    }
+
+    .checklist {
+      margin-top: 18px;
+      padding: 20px;
+    }
+
+    .check-item {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .check-item:last-child { border-bottom: 0; }
+    .check-item input { width: 18px; height: 18px; margin-top: 2px; }
+    .check-item span { color: var(--muted); line-height: 1.4; }
+    .check-item input:checked + span { color: var(--faint); text-decoration: line-through; }
+
+    .empty {
+      display: none;
+      padding: 24px;
+      border: 1px dashed var(--line);
+      border-radius: 20px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    footer {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 0 24px 44px;
+      color: var(--faint);
+      font-size: 0.86rem;
+    }
+
+    @media (max-width: 900px) {
+      .hero-grid, .risk-body { grid-template-columns: 1fr; }
+      .controls { position: static; }
+      .stats { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OmniAgent App Store rejection risk map</h1>
+    <p class="lede">Interactive audit of the likely Mac App Store rejection reasons for the current OmniAgent architecture, plus the concrete changes Apple would likely require before approval.</p>
+  </header>
+
+  <main class="shell">
+    <section class="hero-grid">
+      <article class="card">
+        <div class="verdict"><span class="verdict-dot"></span> Current artifact is not MAS-ready</div>
+        <p class="lede">The app is intentionally built as a direct-download Developer ID app. The biggest blocker is not polish; it is architecture: unsandboxed terminal execution, a persistent PTY daemon, broad local file access, and third-party agent launching.</p>
+        <div class="stats">
+          <div class="stat"><strong id="criticalCount">0</strong><span>critical blockers</span></div>
+          <div class="stat"><strong id="riskCount">0</strong><span>total risk areas</span></div>
+          <div class="stat"><strong>MAS fork</strong><span>likely safest strategy</span></div>
+        </div>
+      </article>
+
+      <aside class="controls" aria-label="Filters">
+        <label for="search">Search risks</label>
+        <input id="search" type="search" placeholder="sandbox, daemon, privacy…">
+        <div class="control-row">
+          <div>
+            <label for="severity">Severity</label>
+            <select id="severity">
+              <option value="all">All</option>
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </div>
+          <div>
+            <label for="category">Category</label>
+            <select id="category">
+              <option value="all">All</option>
+            </select>
+          </div>
+        </div>
+        <div class="control-row">
+          <button id="expandAll" type="button">Expand all</button>
+          <button id="collapseAll" type="button">Collapse all</button>
+        </div>
+      </aside>
+    </section>
+
+    <section class="card">
+      <h2>Likely approval path</h2>
+      <div class="timeline">
+        <div class="timeline-step"><b>1</b><p>Create a separate Mac App Store target/build configuration instead of submitting the current direct-download app.</p></div>
+        <div class="timeline-step"><b>2</b><p>Enable App Sandbox and redesign every feature that depends on unrestricted process, file, socket, or helper access.</p></div>
+        <div class="timeline-step"><b>3</b><p>Remove in-app installer scripts and arbitrary PATH-spawned agents from the MAS build, or move them behind a user-installed external companion with clear boundaries.</p></div>
+        <div class="timeline-step"><b>4</b><p>Add reviewer-facing disclosures: privacy policy, test account, account deletion, provider disclaimers, and exact data-flow explanations.</p></div>
+      </div>
+    </section>
+
+    <div class="section-title">
+      <h2>Rejection reasons and requested fixes</h2>
+      <span id="visibleCount"></span>
+    </div>
+    <section id="riskList" class="risk-list"></section>
+    <div id="empty" class="empty">No risks match the current filters.</div>
+
+    <section class="checklist">
+      <h2>Submission readiness checklist</h2>
+      <label class="check-item"><input type="checkbox"><span>MAS-specific target has <code>com.apple.security.app-sandbox</code> enabled and only justified entitlements.</span></label>
+      <label class="check-item"><input type="checkbox"><span>PTY daemon/helper strategy is App Store-safe: sandboxed helper, correct bundle location, matching signature, no hidden persistence.</span></label>
+      <label class="check-item"><input type="checkbox"><span>No <code>curl | bash</code>, <code>npm -g</code>, or external executable installation from inside the app.</span></label>
+      <label class="check-item"><input type="checkbox"><span>Project folder access uses Powerbox/security-scoped bookmarks with clear user consent and revocation UI.</span></label>
+      <label class="check-item"><input type="checkbox"><span>Privacy policy and App Privacy answers cover transcripts, memory, usage analytics, auth cookies, third-party AI tools, and API calls.</span></label>
+      <label class="check-item"><input type="checkbox"><span>Account deletion is available in-app if account creation/sign-in is available.</span></label>
+      <label class="check-item"><input type="checkbox"><span>Third-party brands/icons have license/disclaimer coverage and App Review notes explain the integrations.</span></label>
+      <label class="check-item"><input type="checkbox"><span>Release WebViews have inspectability disabled unless explicitly justified for a developer-tool build.</span></label>
+    </section>
+  </main>
+
+  <footer>
+    Generated from the 2026-08-30 repository audit. This is product/engineering risk guidance, not legal advice.
+  </footer>
+
+  <script>
+    const risks = [
+      {
+        title: "App Sandbox is intentionally absent",
+        severity: "critical",
+        category: "Sandbox",
+        summary: "Mac App Store apps must be sandboxed; the current entitlement file explicitly documents that OmniAgent is not.",
+        evidence: ["macos/OmniAgent/OmniAgent.entitlements:4-10", "docs/plans/native-macos-migration.md:24,64-65"],
+        appleAsk: "Enable App Sandbox, justify every entitlement, and prove the app works inside the container.",
+        solve: [
+          "Create a separate MAS target/configuration; do not mutate the direct-download target blindly.",
+          "Add com.apple.security.app-sandbox and only the smallest required entitlements.",
+          "Run a full MAS-style smoke test with a clean container and no developer shell environment."
+        ]
+      },
+      {
+        title: "Arbitrary PTY, terminal, and shell execution",
+        severity: "critical",
+        category: "Code execution",
+        summary: "The daemon opens PTYs and spawns requested commands or /bin/zsh, which is core product behavior but hard to reconcile with App Store sandboxing.",
+        evidence: ["README.md:3", "crates/omniagent-pty-daemon/src/session.rs:1042-1070"],
+        appleAsk: "Remove unrestricted command execution or constrain it to reviewed, sandboxed, user-controlled workflows.",
+        solve: [
+          "Ship a reduced MAS edition without generic terminal panes, or make terminal execution an external companion-app feature.",
+          "If keeping it, require explicit user initiation, clear warnings, no hidden automation, and sandbox-compatible execution boundaries.",
+          "Document exactly what can run and what cannot in App Review notes."
+        ]
+      },
+      {
+        title: "Persistent bundled PTY daemon / LaunchAgent behavior",
+        severity: "critical",
+        category: "Background services",
+        summary: "The app can register or spawn a long-lived PTY daemon that persists beyond the UI, which is likely to trigger background-process scrutiny.",
+        evidence: ["macos/OmniAgent/DaemonServiceRegistrar.swift:14-24,147-154", "docs/plans/native-macos-migration.md:64", "scripts/rebuild-app.sh:24-27,149-174"],
+        appleAsk: "Use approved ServiceManagement patterns, make persistence user-controlled, and ensure helpers are sandboxed and auditable.",
+        solve: [
+          "Move from degraded ad-hoc Process spawning to a MAS-safe helper/login-item design.",
+          "Expose a Settings toggle, status, explanation, and disable/remove flow for persistence.",
+          "Ensure the helper exits or idles safely when not needed and never performs surprise work."
+        ]
+      },
+      {
+        title: "Helper binaries are packaged as resources",
+        severity: "high",
+        category: "Packaging",
+        summary: "The current Tauri bundle copies helper executables into Resources; MAS helper executables usually need helper locations, inherited sandboxing, and strict signing.",
+        evidence: ["src-tauri/tauri.conf.json:38-40", "src-tauri/src/daemon.rs:425-435,921-932", "README.md:53"],
+        appleAsk: "Place helper executables in the expected app-bundle location, sign them correctly, and give them compatible sandbox entitlements.",
+        solve: [
+          "Package helpers under Contents/Helpers or an approved login-item helper bundle.",
+          "Sign every helper with the same Team ID and MAS distribution identity.",
+          "Use com.apple.security.inherit where appropriate and verify with codesign/spctl plus sandbox runtime tests."
+        ]
+      },
+      {
+        title: "In-app installation of external executable code",
+        severity: "critical",
+        category: "Code execution",
+        summary: "Agent installation commands download and execute third-party installers such as curl | bash and npm -g.",
+        evidence: ["src-tauri/src/commands/agents.rs:54-65", "src-tauri/src/commands/agents.rs:179-184"],
+        appleAsk: "Remove executable installers from the app; do not download or install code that changes capabilities after review.",
+        solve: [
+          "Replace install buttons with links to official provider pages or documentation.",
+          "Let users install CLIs outside the MAS app, then detect availability without running installers.",
+          "For any bundled executable capability, include it in the reviewed binary submitted to Apple."
+        ]
+      },
+      {
+        title: "Broad project file access, indexing, editing, and watching",
+        severity: "high",
+        category: "Files",
+        summary: "OmniAgent walks project roots, watches folders recursively, opens local files in browser/editor panes, and writes transcripts/memory.",
+        evidence: ["README.md:21,25", "crates/brain-ingest/src/watch.rs:32-46", "macos/OmniAgent/BrowserPaneView.swift:135-144,159-179", "macos/OmniAgent/EditorPaneView.swift:530,594,643"],
+        appleAsk: "Use user-selected file access, security-scoped bookmarks, and clear disclosure for indexing/persistence.",
+        solve: [
+          "Require NSOpenPanel folder selection for every project root.",
+          "Persist security-scoped bookmarks and expose revoke/remove controls.",
+          "Show onboarding copy explaining indexed files, transcripts, local memory, and rebuild/delete options."
+        ]
+      },
+      {
+        title: "Browser panes load arbitrary sites, local files, and downloads",
+        severity: "high",
+        category: "Network & WebView",
+        summary: "The browser pane accepts http/https/file URLs, searches Google, and writes downloads to Downloads.",
+        evidence: ["macos/OmniAgent/BrowserPaneView.swift:144,169-179,220-231"],
+        appleAsk: "Declare network/file entitlements and explain why this browser-like capability exists inside the app.",
+        solve: [
+          "Add com.apple.security.network.client for MAS if web browsing remains.",
+          "Remove arbitrary file:// loading or scope it to bookmarked project folders.",
+          "Route downloads through user-selected destinations or sandbox-safe save panels."
+        ]
+      },
+      {
+        title: "Release WebViews are inspectable",
+        severity: "medium",
+        category: "Security",
+        summary: "Both browser and editor WKWebViews enable isInspectable, which can look like a debug surface shipped in production.",
+        evidence: ["macos/OmniAgent/BrowserPaneView.swift:45", "macos/OmniAgent/EditorWebView.swift:63"],
+        appleAsk: "Disable debug inspection in release or provide a clear developer-tool justification.",
+        solve: [
+          "Gate isInspectable behind DEBUG or an internal defaults flag unavailable in App Store builds.",
+          "If retained, document why a developer tool needs it and how user data is protected.",
+          "Verify release builds do not expose inspector unless deliberately enabled."
+        ]
+      },
+      {
+        title: "Privacy disclosures may not match data behavior",
+        severity: "high",
+        category: "Privacy",
+        summary: "The app stores transcripts, memory, usage analytics, auth metadata, refresh cookies, and remote API traffic.",
+        evidence: ["README.md:21", "crates/brain-core/src/redact.rs:29-45", "macos/OmniAgent/UsageAnalytics.swift:1-18", "macos/OmniAgent/AuthClient.swift:191-224,382-391"],
+        appleAsk: "Provide App Privacy answers, a privacy policy, in-app disclosure, and controls that match actual storage/transmission.",
+        solve: [
+          "Add Privacy Policy and Settings links that explain local transcripts, memory, analytics, cookies, and API calls.",
+          "Provide clear delete/export controls for local data and transcripts.",
+          "Use opt-in or explicit disclosure for analytics, even if local-only, and document redaction limits."
+        ]
+      },
+      {
+        title: "External AI/service dependency disclosures",
+        severity: "high",
+        category: "AI & Services",
+        summary: "The app launches Claude, Codex, Copilot, and AntiGravity CLIs and authenticates against api.omni-agent.ai.",
+        evidence: ["macos/OmniAgent/EngineIcon.swift:50-66", "macos/OmniAgent/EngineLauncher.swift:573-684", "macos/OmniAgent/AuthClient.swift:236-239"],
+        appleAsk: "Disclose third-party processing, provide reviewer access, and clarify that external AI tools/accounts are required for some features.",
+        solve: [
+          "Add first-run consent before sending prompts/files to any third-party AI service or CLI.",
+          "Provide review notes with test accounts, disabled-feature behavior, and screenshots of consent screens.",
+          "Make offline/local-only behavior clear if the user has no provider CLIs installed."
+        ]
+      },
+      {
+        title: "Third-party trademarks and icons",
+        severity: "medium",
+        category: "IP / Branding",
+        summary: "The product UI and docs use provider names and branded icons for Claude, Codex/OpenAI, Copilot, and AntiGravity.",
+        evidence: ["macos/OmniAgent/EngineIcon.swift:21-25,50-66", "docs/superpowers/specs/2026-07-26-terminal-agent-picker-design.md:74-75"],
+        appleAsk: "Prove permission to use marks/icons or reduce branding to nominative text with clear disclaimers.",
+        solve: [
+          "Replace unlicensed logos with neutral icons unless licenses explicitly permit use.",
+          "Add not-affiliated/not-endorsed disclaimers in app metadata, settings, and review notes.",
+          "Avoid implying bundled official integrations unless contractually true."
+        ]
+      },
+      {
+        title: "Account deletion and reviewer access gaps",
+        severity: "high",
+        category: "Accounts",
+        summary: "Sign-in and logout exist, but an obvious in-app account deletion flow was not apparent in the audited surfaces.",
+        evidence: ["macos/OmniAgent/AuthClient.swift:249-256,382-391", "macos/OmniAgent/AuthGateView.swift:297-364"],
+        appleAsk: "If users can create accounts, provide in-app account deletion and review credentials/instructions.",
+        solve: [
+          "Add a Settings > Account > Delete Account flow that initiates real server-side deletion.",
+          "Provide App Review with a working demo account or a bypass path.",
+          "Ensure Sign in with Apple/GitHub flows are testable and cancellation/error states are clear."
+        ]
+      },
+      {
+        title: "Current release pipeline targets Developer ID DMG, not MAS",
+        severity: "medium",
+        category: "Distribution",
+        summary: "Scripts build, sign, notarize, staple, DMG, and install to /Applications; there is no separate MAS archive/export path.",
+        evidence: ["scripts/rebuild-app.sh:1-22,177-193", "README.md:53"],
+        appleAsk: "Submit a Mac App Store-signed archive with matching bundle IDs, entitlements, provisioning, metadata, and screenshots.",
+        solve: [
+          "Add a MAS build lane that archives with Mac App Store distribution signing and provisioning.",
+          "Keep Developer ID notarization separate from App Store export.",
+          "Add a preflight script that checks entitlements, helper signatures, privacy manifests, and App Store metadata readiness."
+        ]
+      }
+    ];
+
+    const severityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+    const list = document.getElementById("riskList");
+    const empty = document.getElementById("empty");
+    const search = document.getElementById("search");
+    const severity = document.getElementById("severity");
+    const category = document.getElementById("category");
+    const visibleCount = document.getElementById("visibleCount");
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function renderCategories() {
+      [...new Set(risks.map(risk => risk.category))].sort().forEach(name => {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        category.appendChild(option);
+      });
+    }
+
+    function riskText(risk) {
+      return [
+        risk.title,
+        risk.severity,
+        risk.category,
+        risk.summary,
+        risk.appleAsk,
+        ...risk.evidence,
+        ...risk.solve
+      ].join(" ").toLowerCase();
+    }
+
+    function render() {
+      const q = search.value.trim().toLowerCase();
+      const sev = severity.value;
+      const cat = category.value;
+      const filtered = risks
+        .filter(risk => sev === "all" || risk.severity === sev)
+        .filter(risk => cat === "all" || risk.category === cat)
+        .filter(risk => !q || riskText(risk).includes(q))
+        .sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity] || a.title.localeCompare(b.title));
+
+      list.innerHTML = filtered.map((risk, index) => `
+        <details class="risk-card" ${index === 0 ? "open" : ""} data-severity="${risk.severity}">
+          <summary class="risk-head">
+            <div>
+              <div class="risk-title">
+                <span class="pill severity-${risk.severity}">${risk.severity}</span>
+                <span class="pill category-pill">${escapeHtml(risk.category)}</span>
+                <strong>${escapeHtml(risk.title)}</strong>
+              </div>
+              <p class="summary">${escapeHtml(risk.summary)}</p>
+            </div>
+            <span class="chevron">⌄</span>
+          </summary>
+          <div class="risk-body">
+            <div class="detail">
+              <h3>Likely App Review request</h3>
+              <p>${escapeHtml(risk.appleAsk)}</p>
+            </div>
+            <div class="detail">
+              <h3>Suggested fix</h3>
+              <ul>${risk.solve.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+            </div>
+            <div class="detail">
+              <h3>Project evidence</h3>
+              <ul>${risk.evidence.map(item => `<li><code>${escapeHtml(item)}</code></li>`).join("")}</ul>
+            </div>
+          </div>
+        </details>
+      `).join("");
+
+      empty.style.display = filtered.length ? "none" : "block";
+      visibleCount.textContent = `${filtered.length} of ${risks.length} shown`;
+    }
+
+    document.getElementById("riskCount").textContent = risks.length;
+    document.getElementById("criticalCount").textContent = risks.filter(risk => risk.severity === "critical").length;
+    renderCategories();
+    render();
+
+    [search, severity, category].forEach(control => control.addEventListener("input", render));
+    document.getElementById("expandAll").addEventListener("click", () => {
+      document.querySelectorAll(".risk-card").forEach(card => { card.open = true; });
+    });
+    document.getElementById("collapseAll").addEventListener("click", () => {
+      document.querySelectorAll(".risk-card").forEach(card => { card.open = false; });
+    });
+  </script>
+</body>
+</html>

@@ -3,8 +3,8 @@ import XCTest
 
 /// The Home screen: the design's words, the interactive feel, and a layout
 /// pass that must not throw the constraint engine. The controls hover, focus
-/// and press like the real thing, and every press is deliberately inert
-/// (2026-08-24) — so these tests assert the feel, never an effect.
+/// and press like the real thing; Home now reports Send so the controller can
+/// run the branch/session setup flow.
 final class HomeViewTests: XCTestCase {
     private func makeHome() -> HomeSurfaceView {
         let home = HomeSurfaceView()
@@ -160,6 +160,30 @@ final class HomeViewTests: XCTestCase {
         home.updateBranchChip(existing: "develop")
         XCTAssertEqual(home.branchLabel.stringValue, "develop")
         XCTAssertNil(home.newBranchName, "an existing pick drops the pending new branch")
+    }
+
+    /// The branch dropdown's GitHub section must not keep saying "not
+    /// connected" once Settings › Accounts says otherwise — that was the bug:
+    /// a hardcoded string that never re-checked the real account state.
+    func testGitHubSectionTextReflectsConnectionState() throws {
+        let disconnected = HomeSurfaceView.gitHubSectionText(connected: false, login: "")
+        XCTAssertEqual(disconnected.header, "GitHub · Not connected")
+        XCTAssertEqual(disconnected.action, "Set up GitHub…")
+
+        let connected = HomeSurfaceView.gitHubSectionText(connected: true, login: "brunobonando")
+        XCTAssertEqual(connected.header, "GitHub · Connected as @brunobonando")
+        XCTAssertEqual(connected.action, "Manage GitHub…")
+    }
+
+    func testSendControlReportsPressToOwner() throws {
+        let home = makeHome()
+        var sends = 0
+        home.onSend = { sends += 1 }
+
+        let send = try XCTUnwrap(home.sendControl)
+        send.performPressForTesting()
+
+        XCTAssertEqual(sends, 1)
     }
 
     /// The Chat scratch workspace wears a speech bubble where a project
