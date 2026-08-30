@@ -188,25 +188,46 @@ private final class LiveDaemonProcessHandle: DaemonProcessHandle {
 /// "Do not kill the daemon on your choice. Just do it if I allow."
 protocol DaemonTerminating {
     /// SIGTERM `pid` (when known — the daemon's own handler shuts every PTY
-    /// down and unlinks its socket) and poll `socketURL` until nothing
-    /// answers, for at most `timeout`. Completes on the main queue with
-    /// whether the socket actually dropped.
+    /// down and unlinks its socket) and wait for it to be gone, for at most
+    /// `timeout`. Completes on the main queue with whether that daemon
+    /// actually died: `false` means it outlived the wait and is still
+    /// serving the directory it started on, which every caller has to treat
+    /// as a failed switch — see `DaemonPersistenceController.terminateDaemon`.
     func terminate(pid: pid_t?, socketURL: URL, timeout: TimeInterval, completion: @escaping (Bool) -> Void)
 }
 
 final class LiveDaemonTerminator: DaemonTerminating {
     func terminate(pid: pid_t?, socketURL: URL, timeout: TimeInterval, completion: @escaping (Bool) -> Void) {
-        if let pid, pid > 0 {
-            Darwin.kill(pid, SIGTERM)
+        let signalled: pid_t? = pid.flatMap { $0 > 0 ? $0 : nil }
+        if let signalled {
+            Darwin.kill(signalled, SIGTERM)
         }
         let deadline = Date().addingTimeInterval(timeout)
         DispatchQueue.global(qos: .userInitiated).async {
-            var gone = !DaemonSocketProbe.isReachable(at: socketURL)
+            var gone = Self.hasGoneAway(pid: signalled, socketURL: socketURL)
             while !gone, Date() < deadline {
                 Thread.sleep(forTimeInterval: 0.1)
-                gone = !DaemonSocketProbe.isReachable(at: socketURL)
+                gone = Self.hasGoneAway(pid: signalled, socketURL: socketURL)
             }
             DispatchQueue.main.async { completion(gone) }
         }
+    }
+
+    /// With a pid, death is asked of the *process*, not of the socket:
+    /// launchd's `KeepAlive` can have a replacement daemon listening on the
+    /// same path within milliseconds, so a reachable socket says nothing
+    /// about whether the daemon this app was attached to let go — and an
+    /// unreachable one is only true in the gap between the two. `kill(_, 0)`
+    /// sends no signal; it reports existence: `ESRCH` is gone for good, and
+    /// `EPERM` (alive under another user) is not. An app-owned daemon is a
+    /// `Process` child, which Foundation reaps itself, so there is no zombie
+    /// left behind to read as still alive.
+    ///
+    /// Without a pid — the app is not attached to a daemon — the socket is
+    /// all there is to go on, as before.
+    private static func hasGoneAway(pid: pid_t?, socketURL: URL) -> Bool {
+        guard let pid else { return !DaemonSocketProbe.isReachable(at: socketURL) }
+        if Darwin.kill(pid, 0) == 0 { return false }
+        return errno == ESRCH
     }
 }

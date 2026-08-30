@@ -125,17 +125,27 @@ final class DaemonPersistenceController {
     /// This is the only method in the daemon-persistence mechanism that
     /// touches the daemon process, and its callers ask the user first
     /// whenever sessions would end — see `DaemonTerminating`.
-    func terminateDaemon(pid: pid_t?, completion: @escaping () -> Void) {
-        terminator.terminate(pid: pid, socketURL: paths.socketURL, timeout: 5) { [weak self] _ in
+    ///
+    /// `completion` carries whether the daemon actually died inside the 5s
+    /// window. `false` is not cosmetic: the old daemon is still serving the
+    /// *old* account's directory, so a caller that treats it as a switch
+    /// writes the new account's work into the old account's store. Every
+    /// caller has to handle it — `WorkspaceWindowController.
+    /// commitAccountSwitch` undoes the pointer and says so.
+    func terminateDaemon(pid: pid_t?, completion: @escaping (Bool) -> Void) {
+        terminator.terminate(pid: pid, socketURL: paths.socketURL, timeout: 5) { [weak self] gone in
             guard let self else {
-                completion()
+                completion(gone)
                 return
             }
             ownedProcess = nil
+            // `start()` respawns only when nothing is listening
+            // (`shouldSpawn`), so a daemon that survived keeps its socket and
+            // no second one is stacked on top of it.
             if mode == .appOwned {
                 start()
             }
-            completion()
+            completion(gone)
         }
     }
 

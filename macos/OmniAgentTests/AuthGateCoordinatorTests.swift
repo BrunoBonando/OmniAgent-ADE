@@ -24,8 +24,10 @@ final class AuthGateCoordinatorTests: XCTestCase {
         ))
         XCTAssertFalse(AuthGate.needsSignIn(defaults), "a real sign-in is what puts the gate away")
 
-        // "Continue without signing in" is an answer for this launch only —
-        // the whole difference between a login screen and a first-run screen.
+        // Signing in is the only way past the gate, so a resolution that
+        // carries no sign-in — the flow was dismissed, or it failed — must
+        // leave the mirror false and the gate up again next launch. There is
+        // no "continue without signing in" answer to record.
         resolve(coordinator, AuthGateOutcome(signedIn: false, persona: nil, accountEmail: nil, accountName: nil))
         XCTAssertTrue(AuthGate.needsSignIn(defaults))
 

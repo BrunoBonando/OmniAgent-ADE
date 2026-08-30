@@ -46,8 +46,10 @@ private final class FakeDaemonProcessLauncher: DaemonProcessLaunching {
 }
 
 /// A scripted `DaemonTerminating`: records what it was asked to end and
-/// answers at once — the real one sends SIGTERM and polls a socket, which
-/// no test may do to the developer's live daemon.
+/// answers at once — the real one sends SIGTERM and polls the process with
+/// `kill(pid, 0)`, which no test may do to the developer's live daemon.
+/// `result` is the "did it actually die" answer; `false` is the daemon that
+/// outlived the wait.
 private final class FakeDaemonTerminator: DaemonTerminating {
     private(set) var calls: [(pid: pid_t?, socketURL: URL)] = []
     var result = true
@@ -298,13 +300,38 @@ final class DaemonPersistenceControllerTests: XCTestCase {
         controller.start()
         XCTAssertEqual(launcher.launchCallCount, 1)
 
-        var completed = 0
-        controller.terminateDaemon(pid: 4242) { completed += 1 }
+        var outcomes: [Bool] = []
+        controller.terminateDaemon(pid: 4242) { outcomes.append($0) }
 
         XCTAssertEqual(terminator.calls.map(\.pid), [4242])
         XCTAssertEqual(terminator.calls.map(\.socketURL), [paths.socketURL])
         XCTAssertEqual(launcher.launchCallCount, 2, "app-owned: nothing else will bring a daemon back")
-        XCTAssertEqual(completed, 1)
+        XCTAssertEqual(outcomes, [true], "the daemon died, and the caller is told so")
+    }
+
+    /// The daemon that would not die. `terminateDaemon` must hand that fact
+    /// on rather than swallowing it — a caller that reads a survivor as a
+    /// completed switch writes the new account's work into the old account's
+    /// store (`WorkspaceWindowController.commitAccountSwitch` is the caller
+    /// that acts on it).
+    func testTerminateDaemonReportsADaemonThatOutlivedTheWait() {
+        let registrar = FakeDaemonServiceRegistrar(status: .notRegistered, registerOutcome: .failed)
+        let launcher = FakeDaemonProcessLauncher()
+        let terminator = FakeDaemonTerminator()
+        terminator.result = false
+        let controller = makeController(
+            registrar: registrar, launcher: launcher, socketReachable: true, terminator: terminator
+        )
+        controller.start()
+
+        var outcomes: [Bool] = []
+        controller.terminateDaemon(pid: 4242) { outcomes.append($0) }
+
+        XCTAssertEqual(outcomes, [false], "the survivor is reported, not discarded")
+        XCTAssertEqual(
+            launcher.launchCallCount, 0,
+            "and nothing is stacked on top of it: its socket is still answering"
+        )
     }
 
     func testTerminateDaemonLeavesTheRespawnToLaunchdForARegisteredService() {
@@ -317,12 +344,12 @@ final class DaemonPersistenceControllerTests: XCTestCase {
         controller.start()
         XCTAssertEqual(launcher.launchCallCount, 0)
 
-        var completed = 0
-        controller.terminateDaemon(pid: nil) { completed += 1 }
+        var outcomes: [Bool] = []
+        controller.terminateDaemon(pid: nil) { outcomes.append($0) }
 
         XCTAssertEqual(terminator.calls.count, 1, "the wait for the socket to drop still runs")
         XCTAssertEqual(launcher.launchCallCount, 0, "launchd's KeepAlive owns the respawn")
-        XCTAssertEqual(completed, 1)
+        XCTAssertEqual(outcomes, [true])
     }
 
     // MARK: - SessionConnection.peerProcessID

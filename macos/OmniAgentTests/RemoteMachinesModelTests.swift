@@ -462,7 +462,7 @@ final class RemotePanesTests: XCTestCase {
         // `LiveDaemonTerminator` — the CRITICAL SAFETY RULE this suite
         // otherwise holds everywhere else `logOutOfAccount`/`switchAccount`
         // is exercised.
-        controller.daemonTerminator = { $0() }
+        controller.daemonTerminator = { $0(true) }
         controller.showWindow(nil)
         controller.applyRestoredPanes([])
         XCTAssertFalse(machines.isRunning, "the install-time seed must not start polling")

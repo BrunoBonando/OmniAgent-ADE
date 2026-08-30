@@ -1544,7 +1544,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         var terminated = 0
         controller.daemonTerminator = { done in
             terminated += 1
-            done()
+            done(true)
         }
 
         var completed = 0
@@ -1569,7 +1569,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         var terminated = 0
         controller.daemonTerminator = { done in
             terminated += 1
-            done()
+            done(true)
         }
 
         var completed = 0
@@ -1592,7 +1592,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         var terminated = 0
         controller.daemonTerminator = { done in
             terminated += 1
-            done()
+            done(true)
         }
 
         var completed = 0
@@ -1622,7 +1622,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         var terminated = 0
         controller.daemonTerminator = { done in
             terminated += 1
-            done()
+            done(true)
         }
 
         var completed = 0
@@ -1639,6 +1639,45 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             client.setCalls.contains { $0.key == SettingsKey.layout },
             "dropped without persisting: the account's own layout row must not be overwritten with an empty one"
         )
+    }
+
+    /// The daemon outlived the 5s wait: it is still serving the *old*
+    /// account's directory, so this is a failed switch, not a completed one.
+    /// Completing it would point this window's every later write — layout,
+    /// sessions, brain, transcripts — at the previous account's store. The
+    /// pointer is taken back off disk so pointer and daemon agree again, and
+    /// `currentAccountID` stays nil so the next launch simply asks again.
+    func testSwitchAccountFailsLoudlyAndUndoesThePointerWhenTheDaemonWillNotDie() throws {
+        let controller = makeController(settingsClient: FakeSettingsClient())
+        defer { controller.close() }
+        let root = try temporaryAccountRoot()
+        controller.accountRoot = root
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done(false)
+        }
+
+        var completed = 0
+        controller.switchAccount(toEmail: "bruno@bonando.com") { completed += 1 }
+        press("Restart now", on: try XCTUnwrap(controller.windowAskOverlay))
+
+        XCTAssertEqual(terminated, 1)
+        let failure = try XCTUnwrap(controller.windowAskOverlay, "a survivor is reported, not swallowed")
+        XCTAssertEqual(failure.options.map(\.title), ["Continue"])
+        XCTAssertNil(
+            AccountDirectory.readCurrentAccount(root: root),
+            "the pointer is undone: it must never name an account no daemon is serving"
+        )
+        XCTAssertNil(controller.currentAccountID, "left nil so the next launch retries the switch")
+        XCTAssertEqual(
+            controller.workspaceView.allPaneIDs.count, 1,
+            "the old daemon's sessions are still alive, so their panes stay"
+        )
+        XCTAssertEqual(completed, 0, "nothing completes until the failure is acknowledged")
+
+        press("Continue", on: failure)
+        XCTAssertEqual(completed, 1, "and then the caller is let go — the gate must never hang")
     }
 
     /// `notifier.restore([])` is a *merge*, not a replace — it would leave
@@ -1679,7 +1718,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.accountRoot = root
         controller.sessionRestorer = {}
         controller.sessionEnsurer = { _ in }
-        controller.daemonTerminator = { $0() }
+        controller.daemonTerminator = { $0(true) }
 
         var revealed = 0
         controller.presentLaunchGate(defaults: defaults) { revealed += 1 }
@@ -1708,7 +1747,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         var terminated = 0
         controller.daemonTerminator = { done in
             terminated += 1
-            done()
+            done(true)
         }
 
         controller.presentLaunchGate(defaults: defaults) {}
@@ -1763,7 +1802,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         var terminated = 0
         controller.daemonTerminator = { done in
             terminated += 1
-            done()
+            done(true)
         }
         var signedInStates: [Bool] = []
         controller.onSignedInStateChanged = { signedInStates.append($0) }
@@ -1793,9 +1832,15 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
     // MARK: - Logout teardown
 
-    /// Nothing running: no question. Revoke, reset, end the daemon, delete
-    /// the pointer, drop the workspace, hide the window, tell the app
+    /// Nothing running: no question. Revoke, reset, delete the pointer, end
+    /// the daemon, drop the workspace, hide the window, tell the app
     /// delegate, and put the login window up on its own.
+    ///
+    /// **The pointer goes before the SIGTERM**, and this test pins it by
+    /// reading the pointer from inside the terminator: a launchd `KeepAlive`
+    /// respawn can be up and reading it before the completion runs, and a
+    /// daemon that reads a pointer still naming the account being logged out
+    /// comes back serving that account's directory to a signed-out app.
     func testLogOutWithNothingRunningTearsTheWorkspaceDownAndOffersTheGateAlone() throws {
         let defaults = try throwawayDefaults()
         defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
@@ -1809,10 +1854,12 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.accountRoot = root
         var terminated = 0
         var order: [String] = []
+        var pointerAtSigterm: String??
         controller.daemonTerminator = { done in
             terminated += 1
             order.append("terminate")
-            done()
+            pointerAtSigterm = AccountDirectory.readCurrentAccount(root: root)
+            done(true)
         }
         controller.serverSessionRevoker = { order.append("revoke") }
         var signedInStates: [Bool] = []
@@ -1833,6 +1880,10 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertNil(controller.windowAskOverlay, "nothing to end, nothing to ask")
         XCTAssertEqual(order, ["revoke", "terminate", "signed-out", "gate"])
         XCTAssertEqual(terminated, 1)
+        XCTAssertEqual(
+            pointerAtSigterm, .some(nil),
+            "the pointer is already gone when the daemon is signalled, so a KeepAlive respawn cannot read it"
+        )
         XCTAssertNil(AccountDirectory.readCurrentAccount(root: root), "the pointer is gone: the next daemon serves the root")
         XCTAssertNil(controller.currentAccountID)
         XCTAssertEqual(client.rows["auth_signed_in"], "false")
@@ -1852,6 +1903,41 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(signedInStates, [false, true])
     }
 
+    /// The other side of `testSwitchAccountFailsLoudlyAndUndoesThePointer…`:
+    /// a daemon that would not die *fails* a switch, but never a log-out.
+    /// Everything the sign-out owns is local — the rows, the pointer, the
+    /// window — so the teardown finishes and the login window goes up; the
+    /// surviving daemon is reported on the status line (private state, so
+    /// what is pinned here is that nothing is left half-signed-out).
+    func testLogOutFinishesEvenWhenTheDaemonOutlivesTheWait() throws {
+        let defaults = try throwawayDefaults()
+        defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
+        let controller = makeEmptyController(
+            settingsClient: FakeSettingsClient(rows: ["auth_signed_in": "true"]), defaults: defaults
+        )
+        defer { controller.close() }
+        let root = try temporaryAccountRoot()
+        try AccountDirectory.writeCurrentAccount("fc44b18d5588b1d6", root: root)
+        controller.accountRoot = root
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done(false)
+        }
+        controller.serverSessionRevoker = {}
+        var presentedGate = 0
+        controller.authGatePresenter = { _ in presentedGate += 1 }
+
+        controller.logOutOfAccount()
+
+        XCTAssertEqual(terminated, 1)
+        XCTAssertNil(controller.windowAskOverlay, "a log-out is never blocked by the daemon")
+        XCTAssertNil(AccountDirectory.readCurrentAccount(root: root), "the pointer is gone all the same")
+        XCTAssertNil(controller.currentAccountID)
+        XCTAssertTrue(controller.awaitingSignIn)
+        XCTAssertEqual(presentedGate, 1, "and the login window is up: signing out always succeeds locally")
+    }
+
     func testLogOutWithSessionsRunningAsksFirstAndCancelChangesNothing() throws {
         let controller = makeController(settingsClient: FakeSettingsClient(rows: ["auth_signed_in": "true"]), defaults: try throwawayDefaults())
         defer { controller.close() }
@@ -1861,7 +1947,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         var terminated = 0
         controller.daemonTerminator = { done in
             terminated += 1
-            done()
+            done(true)
         }
         var revoked = 0
         controller.serverSessionRevoker = { revoked += 1 }
@@ -1912,7 +1998,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let root = try temporaryAccountRoot()
         try AccountDirectory.writeCurrentAccount("fc44b18d5588b1d6", root: root)
         controller.accountRoot = root
-        controller.daemonTerminator = { $0() }
+        controller.daemonTerminator = { $0(true) }
         controller.serverSessionRevoker = {}
         controller.authGatePresenter = { _ in }
 
@@ -1948,7 +2034,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         var terminated = 0
         controller.daemonTerminator = { done in
             terminated += 1
-            done()
+            done(true)
         }
         controller.serverSessionRevoker = {}
         controller.authGatePresenter = { _ in }
@@ -2176,7 +2262,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         var terminated = 0
         controller.daemonTerminator = { done in
             terminated += 1
-            done()
+            done(true)
         }
         let gateCameBack = expectation(description: "the login screen is offered after logging out")
         controller.authGatePresenter = { completion in

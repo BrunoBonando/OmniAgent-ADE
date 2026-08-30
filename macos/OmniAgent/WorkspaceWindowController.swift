@@ -440,8 +440,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Ends the running daemon for an account switch — `nil` is the real
     /// thing, `daemonPersistence.terminateDaemon` with the pid off the
     /// connected socket. A test substitutes a recorder: no test may signal
-    /// the developer's live daemon.
-    var daemonTerminator: ((@escaping () -> Void) -> Void)?
+    /// the developer's live daemon. The `Bool` the completion carries is
+    /// whether the daemon actually died; `false` fails the switch.
+    var daemonTerminator: ((@escaping (Bool) -> Void) -> Void)?
     /// Fires `true` when the gate resolves signed in and `false` when the
     /// account logs out — `AppDelegate` creates and releases the menu bar
     /// item on it (2026-08-30 spec, "Menu bar").
@@ -5116,7 +5117,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
-    /// Steps 4–6 of the spec's logout: daemon, pointer, workspace, window,
+    /// Steps 4–6 of the spec's logout: pointer, daemon, workspace, window,
     /// menu bar, login window. `awaitingSignIn` goes up first so a
     /// `.connected` from the restarted (signed-out) daemon restores nothing.
     ///
@@ -5131,15 +5132,31 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func tearDownForSignedOut() {
         awaitingSignIn = true
         authGateResolved = false
-        terminateDaemon { [weak self] in
+        // The pointer goes *before* the SIGTERM, the mirror of
+        // `commitAccountSwitch`'s reasoning: a launchd `KeepAlive` respawn can
+        // be up and reading the pointer before this completion runs, and a
+        // daemon that reads a pointer still naming the account being logged
+        // out comes back serving that account's directory to a signed-out
+        // app. Clear it first and the daemon that replaces this one serves
+        // the root, whichever order the two races finish in.
+        do {
+            try AccountDirectory.clearCurrentAccount(root: accountRoot)
+        } catch {
+            applyConnectionStatus("Couldn't remove the account pointer — \(error.localizedDescription)")
+        }
+        currentAccountID = nil
+        terminateDaemon { [weak self] gone in
             guard let self else { return }
-            do {
-                try AccountDirectory.clearCurrentAccount(root: accountRoot)
-            } catch {
-                applyConnectionStatus("Couldn't remove the account pointer — \(error.localizedDescription)")
-            }
-            currentAccountID = nil
             resetForAccountSwitch()
+            if !gone {
+                // Signing out always succeeds locally — the rows, the window
+                // and the pointer are this app's own — but the daemon that
+                // would not die still holds the account's sessions, so say so
+                // rather than pretending everything ended.
+                applyConnectionStatus(
+                    "Signed out, but the helper running your terminals didn't stop — quit and reopen OmniAgent."
+                )
+            }
             hideWorkspaceForSignIn()
             onSignedInStateChanged?(false)
             accountActionInFlight = false
@@ -5354,8 +5371,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// data without anyone having agreed to it.
     /// `isLegacyAdoption` is `true` only for `adoptLegacyAccountIfNeeded`'s
     /// call: if the ask cannot go up (one is already showing, or there is no
-    /// content view yet), that path re-arms itself for the next connection
-    /// instead of the adoption silently never happening.
+    /// content view yet), that path re-arms itself for the next **launch**
+    /// instead of the adoption silently never happening. Not the next
+    /// connection — the flag is consumed by `applyRestoredPanes`, and the
+    /// restore pass only runs again after a `resetForAccountSwitch` that a
+    /// dropped ask never performs. Next launch, `presentLaunchGate` arms it
+    /// again anyway (still no pointer), so this is belt and braces.
     func switchAccount(toEmail email: String, isLegacyAdoption: Bool = false, completion: @escaping () -> Void) {
         let id = AccountDirectory.accountID(forEmail: email)
         guard currentAccountID != id else {
@@ -5399,7 +5420,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
-    /// The decided half: pointer, then the daemon, then this window.
+    /// The decided half: pointer, then the daemon, then this window — and
+    /// nothing is a switch until the daemon is confirmed gone. Both failures
+    /// (the pointer could not be written; the daemon would not die) leave
+    /// `currentAccountID` nil against a pointer that names no new account, so
+    /// the next launch simply tries again.
     private func commitAccountSwitch(to id: String, completion: @escaping () -> Void) {
         do {
             try AccountDirectory.writeCurrentAccount(id, root: accountRoot)
@@ -5417,22 +5442,46 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             if !presented { completion() }
             return
         }
-        currentAccountID = id
         // The pointer is on disk before SIGTERM, so whichever daemon comes
         // up next — launchd's or ours — reads the new value.
-        terminateDaemon { [weak self] in
+        terminateDaemon { [weak self] gone in
             guard let self else {
                 completion()
                 return
             }
+            guard gone else {
+                // The daemon outlived the wait, so it is still serving the
+                // *old* account's directory — and everything this window
+                // would write from here (layout, sessions, brain,
+                // transcripts) would land in that account's store. Undo the
+                // pointer so pointer and daemon agree again, leave
+                // `currentAccountID` nil so the next launch retries the
+                // switch, keep the panes (their sessions are still alive),
+                // and say plainly that nothing moved.
+                try? AccountDirectory.clearCurrentAccount(root: accountRoot)
+                let presented = presentWindowAsk(
+                    title: "Could not move your workspace",
+                    message: "The helper running your terminals didn't stop, so your workspace stayed where it was. "
+                        + "Quit and reopen OmniAgent to try again.",
+                    severity: .critical,
+                    options: [PaneAskOption("Continue") { _ in completion() }]
+                )
+                if !presented { completion() }
+                return
+            }
+            // Only now: the daemon that served the old directory is gone, so
+            // the pointer this window believes in is the one the next daemon
+            // will read.
+            currentAccountID = id
             resetForAccountSwitch()
             completion()
         }
     }
 
     /// `daemonPersistence.terminateDaemon` with the pid off the connected
-    /// socket, behind the test seam.
-    private func terminateDaemon(completion: @escaping () -> Void) {
+    /// socket, behind the test seam. The `Bool` is whether the daemon
+    /// actually died — never discard it.
+    private func terminateDaemon(completion: @escaping (Bool) -> Void) {
         if let daemonTerminator {
             daemonTerminator(completion)
             return
