@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-  "src-tauri",
   "crates/brain-core",
   "crates/brain-ingest",
   "crates/mcp-server",

@@ -186,18 +186,6 @@ enum ShellPalette {
         (srgb(237, 129, 195), srgb(174, 71, 134)),
     ]
 
-    /// `Int32` arithmetic with explicit wrapping, matching the JS `| 0` the
-    /// TypeScript version relies on — plain `Int` would overflow-trap on a long
-    /// id instead of wrapping, and would pick a different colour.
-    static func avatarGradient(forID id: String) -> (NSColor, NSColor) {
-        var hash: Int32 = 0
-        for scalar in id.unicodeScalars {
-            hash = hash &* 31 &+ Int32(truncatingIfNeeded: scalar.value)
-        }
-        let index = Int(hash.magnitude % Int32.Magnitude(avatarGradients.count))
-        return avatarGradients[index]
-    }
-
     /// "OmniAgent ADE" -> "OA", "voice" -> "VO". One letter reads as an
     /// accident at the design's 34pt tile.
     static func initials(_ label: String) -> String {
@@ -206,14 +194,6 @@ enum ShellPalette {
             return "\(a)\(b)".uppercased()
         }
         return String(label.prefix(2)).uppercased()
-    }
-
-    static func sessionCountLabel(_ n: Int) -> String {
-        switch n {
-        case 0: return "no sessions"
-        case 1: return "1 session"
-        default: return "\(n) sessions"
-        }
     }
 }
 
@@ -231,14 +211,7 @@ enum ShellMetrics {
     /// any window this app opens at.
     static let sidebarMinimumWidth: CGFloat = 240
     static let sidebarMaximumWidth: CGFloat = 560
-    static let navRowInset = NSEdgeInsets(top: 8, left: 9, bottom: 8, right: 9)
-    static let navBarWidth: CGFloat = 3
-    static let navIconTile: CGFloat = 22
-    static let sessionRail: CGFloat = 18
-    static let sessionRailInset: CGFloat = 10
     static let fileRowHeight: CGFloat = 23
-    static let cardTile: CGFloat = 34
-    static let backTile: CGFloat = 28
     static let accountAvatar: CGFloat = 22
 }
 
@@ -301,19 +274,6 @@ enum ShellFont {
             )
         }
         return field
-    }
-
-    /// Re-applies text to a label built with `tracking:` — plain `stringValue`
-    /// would drop the kerning the section headers depend on.
-    static func setTracked(_ field: NSTextField, _ text: String, tracking: CGFloat) {
-        guard let font = field.font, let color = field.textColor else {
-            field.stringValue = text
-            return
-        }
-        field.attributedStringValue = NSAttributedString(
-            string: text,
-            attributes: [.font: font, .foregroundColor: color, .kern: tracking]
-        )
     }
 }
 
@@ -545,58 +505,6 @@ final class ShellGlyphView: NSView {
         spin.concat()
         glyph.draw(in: bounds, color: color, lineWidth: lineWidth)
         NSGraphicsContext.restoreGraphicsState()
-    }
-}
-
-/// The rounded gradient tile behind a workspace's initials.
-final class ShellTileView: NSView {
-    private let initialsField: NSTextField
-    private var colors: (NSColor, NSColor) = (ShellPalette.accent, ShellPalette.accent)
-    private let circular: Bool
-
-    init(size: CGFloat, radius: CGFloat, fontSize: CGFloat, circular: Bool = false) {
-        self.circular = circular
-        initialsField = ShellFont.label(
-            font: ShellFont.ui(fontSize, .bold),
-            color: .white
-        )
-        initialsField.alignment = .center
-        initialsField.setContentCompressionResistancePriority(.required, for: .horizontal)
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = circular ? size / 2 : radius
-        layer?.cornerCurve = .continuous
-        translatesAutoresizingMaskIntoConstraints = false
-        addSubview(initialsField)
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: size),
-            heightAnchor.constraint(equalToConstant: size),
-            initialsField.centerXAnchor.constraint(equalTo: centerXAnchor),
-            initialsField.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-
-    func apply(initials: String, gradient: (NSColor, NSColor)) {
-        initialsField.stringValue = initials
-        colors = gradient
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let path = circular
-            ? NSBezierPath(ovalIn: bounds)
-            : NSBezierPath(
-                roundedRect: bounds,
-                xRadius: layer?.cornerRadius ?? 10,
-                yRadius: layer?.cornerRadius ?? 10
-            )
-        path.addClip()
-        // 150° in CSS runs top-left to bottom-right; `NSGradient`'s angle is
-        // measured counter-clockwise from east, which puts the same ramp at -60.
-        NSGradient(starting: colors.0, ending: colors.1)?.draw(in: bounds, angle: -60)
     }
 }
 

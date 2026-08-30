@@ -237,19 +237,9 @@ final class SidebarPercentBarView: NSView {
     /// look the same. See `minimumFillWidth` for the other half of that.
     private(set) var fraction: Double?
 
-    /// What the fill currently reads, for a test that would otherwise have to
-    /// render the layer to find out.
-    var fillFraction: Double { fraction ?? 0 }
     var fillColor: NSColor? { fill.backgroundColor.map { NSColor(cgColor: $0) ?? .clear } }
     /// The fill's drawn width — the thing `minimumFillWidth` is about.
     var fillWidth: CGFloat { fill.frame.width }
-
-    /// The width the fill is being drawn at *right now*, mid-animation.
-    ///
-    /// `fillWidth` is the model value and jumps to its destination the moment
-    /// the animation is set up; this is the presentation, which is the only
-    /// place an overshoot — or an overshoot through zero — is observable.
-    var presentedFillWidth: CGFloat? { fill.presentation()?.bounds.width }
 
     /// Which animations are attached to the fill right now, and what curve
     /// they carry. The presentation layer does not advance under

@@ -153,20 +153,6 @@ impl<'a> Memory<'a> {
         let updated = contents.replacen("status: pending\n", "status: approved\n", 1);
         let _ = fs::write(path, updated);
     }
-
-    pub fn read_all(&self, project: &str) -> io::Result<Vec<PathBuf>> {
-        let project_dir = self.brain_dir.join(project);
-        if !project_dir.exists() {
-            return Ok(vec![]);
-        }
-        let mut paths: Vec<PathBuf> = fs::read_dir(&project_dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "md").unwrap_or(false))
-            .collect();
-        paths.sort();
-        Ok(paths)
-    }
 }
 
 #[cfg(test)]

@@ -10,30 +10,12 @@ set -eu
 #   sign        hardened-runtime codesign of the embedded daemon + the bundle
 #   notarize    submit to Apple, wait, staple
 #   verify      bundle structure + Gatekeeper assessment  <- the release gate
-#   verify-smoke  the packaged PTY smoke check, KNOWN BROKEN, opt-in only
-#
-# Why `verify-smoke` is a separate subcommand and not part of `verify`
-# (final whole-branch review, Important #3): the smoke check shells out to
-# scripts/native-macos-pty-harness.py, which still speaks Task 1's original
-# per-request JSON-over-a-newline protocol. Task 2 replaced the daemon's wire
-# format with the persistent 16-byte-envelope framing and the harness was
-# never updated, so it cannot get a response out of ANY current daemon build,
-# packaged or not (independently confirmed against the unmodified harness in
-# both the Task 6d and Task 7 reports). While it was wired into `verify`,
-# `verify` could never exit 0 -- which trains everyone to ignore the exit
-# code of the one command that is supposed to be the release gate, and
-# quietly voids the bundle-structure and Gatekeeper checks it also performs.
-# Rewriting the harness onto the current protocol is a real piece of work
-# that both prior tasks deliberately deferred; splitting it out here is not
-# that fix, it is what makes `verify`'s exit code mean something again in the
-# meantime. Run `verify-smoke` explicitly if you are working on the harness.
 action=${1:-}
 case "$action" in
-  sign|notarize|verify|verify-smoke) ;;
+  sign|notarize|verify) ;;
   *)
-    echo "usage: $0 sign|verify|verify-smoke <path-to-OmniAgent.app>" >&2
+    echo "usage: $0 sign|verify <path-to-OmniAgent.app>" >&2
     echo "       $0 notarize <path-to-OmniAgent.app|path-to.dmg>" >&2
-    echo "  (verify-smoke is a known-broken harness check, opt-in only -- see this script's comments)" >&2
     exit 2
     ;;
 esac
@@ -255,40 +237,7 @@ verify() {
   if [ "$status" -eq 0 ]; then
     echo "$0 verify: OK (bundle structure + Gatekeeper)." >&2
   fi
-  echo "$0 verify: note: the packaged PTY smoke check is NOT part of this gate -- run '$0 verify-smoke $app' for it (known broken, see this script's header)." >&2
   return $status
 }
 
-# --- verify-smoke: the packaged PTY smoke check, opt-in and known broken ---
-
-verify_smoke() {
-  echo "$0 verify-smoke: packaged PTY smoke ------------------------------" >&2
-  if python3 "$root/scripts/native-macos-pty-harness.py" smoke "$app"; then
-    echo "$0 verify-smoke: OK." >&2
-    return 0
-  fi
-  cat >&2 <<EOF
-$0 verify-smoke: FAIL packaged PTY smoke
-
-EXPECTED until the harness is rewritten. Known pre-existing issue, not a
-distribution defect: this harness (scripts/native-macos-pty-harness.py,
-added in Task 1) still speaks Task 1's original per-request
-JSON-over-a-newline protocol. Task 2 replaced the daemon's wire protocol
-with the persistent 16-byte-envelope framing
-(crates/omniagent-pty-daemon/src/server.rs's MessageKind-based Hello/
-HelloAck handshake) and the harness was never updated for that rewrite, so
-it fails to get a response from ANY current daemon build, packaged or not
--- confirmed against the unmodified, pre-Task-6d harness in both the Task
-6d and Task 7 reports.
-
-This is why the check is not part of '$0 verify': a permanently red gate is
-a gate nobody reads. Fixing it means porting the harness onto the current
-framing, which is its own piece of work.
-EOF
-  return 1
-}
-
-case "$action" in
-  verify-smoke) verify_smoke ;;
-  *) $action ;;
-esac
+$action

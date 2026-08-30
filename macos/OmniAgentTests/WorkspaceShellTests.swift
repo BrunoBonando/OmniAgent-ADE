@@ -95,37 +95,10 @@ final class WorkspaceShellTests: XCTestCase {
 
     // MARK: - Workspace identity
 
-    /// The tile colour has to survive a relaunch without being persisted, so
-    /// the hash must be stable and in range.
-    func testTheAvatarGradientIsStableAndInRange() {
-        let first = ShellPalette.avatarGradient(forID: "omniagent-ade")
-        let second = ShellPalette.avatarGradient(forID: "omniagent-ade")
-        XCTAssertEqual(first.0, second.0)
-        XCTAssertEqual(first.1, second.1)
-        XCTAssertTrue(ShellPalette.avatarGradients.contains { $0.0 == first.0 && $0.1 == first.1 })
-    }
-
-    /// A long id used to overflow-trap before the hash was made wrapping.
-    func testTheAvatarGradientSurvivesALongID() {
-        let long = String(repeating: "workspace-", count: 64)
-        XCTAssertTrue(
-            ShellPalette.avatarGradients.contains {
-                let picked = ShellPalette.avatarGradient(forID: long)
-                return $0.0 == picked.0 && $0.1 == picked.1
-            }
-        )
-    }
-
     func testInitialsTakeTwoWordsThenTwoLetters() {
         XCTAssertEqual(ShellPalette.initials("OmniAgent ADE"), "OA")
         XCTAssertEqual(ShellPalette.initials("voice"), "VO")
         XCTAssertEqual(ShellPalette.initials("bruno-studio"), "BS")
-    }
-
-    func testSessionCountLabelReadsAsProse() {
-        XCTAssertEqual(ShellPalette.sessionCountLabel(0), "no sessions")
-        XCTAssertEqual(ShellPalette.sessionCountLabel(1), "1 session")
-        XCTAssertEqual(ShellPalette.sessionCountLabel(4), "4 sessions")
     }
 
     // MARK: - Workspaces tree

@@ -50,7 +50,7 @@ path = "src/bin/brain.rs"
 # (`rename_project_survives_a_simulated_reingest_that_resets_the_nodes_own_label`)
 # asserting that a rename written by this crate is what
 # `mcp_server::tools::list_projects` actually renders; a dev-dependency does
-# not propagate to `omniagent-pty-daemon`/`src-tauri`, so the shipped
+# not propagate to `omniagent-pty-daemon`, so the shipped
 # dependency graph no longer has the inversion.
 mcp-server = { path = "../mcp-server" }
 assert_cmd = "2.2.2"

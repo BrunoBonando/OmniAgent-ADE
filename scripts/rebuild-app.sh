@@ -3,9 +3,7 @@
 # notarizes it, packages it as a DMG, and installs it to /Applications. The
 # legacy Tauri app is deliberately no longer built here (standing decision,
 # 2026-08-03): the native app is the only artifact Bruno builds and runs
-# day-to-day. The Tauri hot path's code stays in-tree until scripts/cutover.sh's
-# gate opens -- build it manually with
-# `cd src-tauri && ../ui/node_modules/.bin/tauri build` if ever needed.
+# day-to-day; the legacy Tauri/web app was deleted from the tree on 2026-08-30.
 #
 # Order matters here and is not obvious:
 #
