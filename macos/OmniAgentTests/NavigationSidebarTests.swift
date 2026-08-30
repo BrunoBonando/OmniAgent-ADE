@@ -818,6 +818,21 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(card.weekColumn.timeBar.segments, 7, "seven days")
     }
 
+    /// Each bar wears an icon on its left — a bolt for quota, a clock for the
+    /// window — without the two bars drifting out of alignment.
+    func testEachBarWearsItsIconOnTheLeft() {
+        let card = makeLimitsCard()
+        card.layoutSubtreeIfNeeded()
+        let column = card.sessionColumn
+        XCTAssertNotNil(column.barIcon.image, "bolt")
+        XCTAssertNotNil(column.timeIcon.image, "clock")
+        func x(_ view: NSView) -> CGFloat { view.convert(view.bounds, to: card).minX }
+        XCTAssertLessThan(x(column.barIcon), x(column.bar), "icon left of the usage bar")
+        XCTAssertLessThan(x(column.timeIcon), x(column.timeBar), "icon left of the window bar")
+        XCTAssertEqual(x(column.bar), x(column.timeBar), accuracy: 0.5, "bars still start together")
+        XCTAssertEqual(column.barIcon.frame.width, SidebarLimitColumnView.iconWidth)
+    }
+
     /// `/usage` reports only when a window ends, so how far through it we are
     /// is derived from the end: whatever is not still to come has gone.
     func testHowFarThroughAWindowIsDerivedFromItsEnd() throws {
