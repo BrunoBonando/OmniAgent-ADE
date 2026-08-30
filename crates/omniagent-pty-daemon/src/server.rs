@@ -161,6 +161,10 @@ pub struct DaemonServer {
     ingestion: IngestionState,
     /// See [`ClientContext::settings_changed`].
     settings_changed: Arc<Notify>,
+    /// Whether [`Self::serve`] spawns the relay client (`relay.rs`). Off
+    /// for [`Self::bind_with_data_dir`] so tests drive `run_relay` directly;
+    /// [`run_daemon`] turns it on with [`Self::with_relay`].
+    relay_enabled: bool,
 }
 
 impl DaemonServer {
@@ -229,7 +233,15 @@ impl DaemonServer {
             data_dir,
             ingestion: IngestionState::new(),
             settings_changed: Arc::new(Notify::new()),
+            relay_enabled: false,
         })
+    }
+
+    /// Makes [`Self::serve`] spawn the relay client alongside the unix
+    /// accept loop — the daemon's outbound side of remote session control.
+    pub fn with_relay(mut self) -> Self {
+        self.relay_enabled = true;
+        self
     }
 
     pub fn registry(&self) -> SessionRegistry {
@@ -262,6 +274,9 @@ impl DaemonServer {
 
     async fn serve(self, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
         tokio::pin!(shutdown);
+        let relay = self
+            .relay_enabled
+            .then(|| tokio::spawn(crate::relay::run_relay(self.client_context())));
         let mut clients = JoinSet::new();
         loop {
             tokio::select! {
@@ -295,6 +310,9 @@ impl DaemonServer {
             }
         }
         self.registry.shutdown();
+        if let Some(relay) = relay {
+            relay.abort();
+        }
         clients.abort_all();
         while clients.join_next().await.is_some() {}
         Ok(())
@@ -309,7 +327,7 @@ impl Drop for DaemonServer {
 }
 
 pub async fn run_daemon(socket_path: PathBuf) -> Result<()> {
-    let server = DaemonServer::bind(socket_path).await?;
+    let server = DaemonServer::bind(socket_path).await?.with_relay();
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("install SIGTERM handler")?;
     let (send_shutdown, receive_shutdown) = oneshot::channel();

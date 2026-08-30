@@ -1,0 +1,245 @@
+//! The relay client (`docs/superpowers/specs/2026-08-30-remote-session-control-design.md`
+//! §1 Topology, §3 Daemon changes): an in-test tungstenite server plays the
+//! relay. The daemon must dial the control socket with the device token, send
+//! its hello, dial a data socket for every `{"open": id}`, and run the real
+//! `serve_client(…, ClientTrust::Remote)` over that data socket — so a viewer
+//! gets `HelloAck`, an `Attach` on a shared session gets `Snapshot`, and a
+//! `Kill` is refused. Emptying the projection closes the control socket.
+
+use futures_util::{SinkExt, StreamExt};
+use omniagent_pty_daemon::protocol::{Frame, MessageKind};
+use omniagent_pty_daemon::{run_relay, ClientContext, CreateSession, DaemonServer};
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
+
+/// A `remote_control` projection sharing workspace `w` with session `s1`.
+const PROJECTION: &str = r#"{"workspaces":[{"id":"w","name":"w","sessions":[{"id":"s1","title":"t","engine":"shell","group":null}]}]}"#;
+
+fn command_session(id: &str, script: &str) -> CreateSession {
+    CreateSession {
+        id: id.into(),
+        command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+        cwd: None,
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        transcript_path: None,
+    }
+}
+
+/// Boots a daemon with shared session `s1`, writes the projection and a device
+/// token whose `relay_url` points at `port`, and starts the relay task.
+async fn start_daemon_with_relay(
+    root: &std::path::Path,
+    port: u16,
+) -> (ClientContext, oneshot::Sender<()>) {
+    let server = DaemonServer::bind_with_data_dir(
+        root.join("runtime").join("daemon.sock"),
+        root.join("brain-data"),
+    )
+    .await
+    .unwrap();
+    let ctx = server.client_context();
+    let (stop, stopped) = oneshot::channel::<()>();
+    tokio::spawn(server.run_until(stopped));
+    ctx.registry
+        .create_session(command_session("s1", "cat"))
+        .unwrap();
+    {
+        let store = ctx.settings.lock().unwrap();
+        store.set_setting("remote_control", PROJECTION).unwrap();
+        store
+            .set_setting(
+                "relay_device_token",
+                &format!(
+                    r#"{{"device_id":"dev1","token":"tok","name":"Test Mac","relay_url":"http://127.0.0.1:{port}"}}"#
+                ),
+            )
+            .unwrap();
+    }
+    ctx.settings_changed.notify_one();
+    tokio::spawn(run_relay(ctx.clone()));
+    (ctx, stop)
+}
+
+/// Accepts one WebSocket from the daemon, recording the request path and
+/// `Authorization` header it arrived with. (The callback's `Err` type is
+/// tungstenite's `ErrorResponse`; its size is not ours to choose.)
+#[allow(clippy::result_large_err)]
+async fn accept_ws(listener: &TcpListener) -> (WebSocketStream<TcpStream>, String, String) {
+    let (tcp, _) = tokio::time::timeout(Duration::from_secs(4), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut seen_path = String::new();
+    let mut seen_auth = String::new();
+    let ws = tokio_tungstenite::accept_hdr_async(tcp, |req: &Request, resp: Response| {
+        seen_path = req.uri().path().to_string();
+        seen_auth = req
+            .headers()
+            .get("authorization")
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        Ok(resp)
+    })
+    .await
+    .unwrap();
+    (ws, seen_path, seen_auth)
+}
+
+/// Accumulates binary messages until one whole frame decodes (frames may span messages).
+async fn read_frame_from_ws<S>(ws: &mut S) -> Frame
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        if buf.len() >= 16 {
+            let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+            if buf.len() >= 16 + len {
+                let frame = Frame::decode(&buf[..16 + len]).unwrap();
+                buf.drain(..16 + len);
+                return frame;
+            }
+        }
+        match tokio::time::timeout(Duration::from_secs(4), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+        {
+            Message::Binary(b) => buf.extend_from_slice(&b),
+            Message::Ping(_) | Message::Pong(_) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn daemon_dials_the_relay_and_serves_a_viewer_over_the_data_socket() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (_ctx, _stop) = start_daemon_with_relay(root.path(), port).await;
+
+    // --- play relay: control connection ---
+    let (mut control, seen_path, seen_auth) = accept_ws(&listener).await;
+    assert_eq!(seen_path, "/v1/device");
+    assert_eq!(seen_auth, "Bearer tok");
+    let hello = tokio::time::timeout(Duration::from_secs(4), control.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let hello_text = hello.to_text().unwrap();
+    assert!(hello_text.contains("Test Mac"), "hello was {hello_text}");
+    assert!(
+        hello_text.contains("daemon_version"),
+        "hello was {hello_text}"
+    );
+    control
+        .send(Message::Text(r#"{"open":"c1"}"#.into()))
+        .await
+        .unwrap();
+
+    // --- play relay: data connection, then act as the viewer ---
+    let (mut data, path, auth) = accept_ws(&listener).await;
+    assert_eq!(path, "/v1/device/conn/c1");
+    assert_eq!(auth, "Bearer tok");
+
+    let hello = Frame::new(
+        MessageKind::Hello,
+        1,
+        serde_json::to_vec(&serde_json::json!({"client": "relay-loopback"})).unwrap(),
+    );
+    data.send(Message::Binary(hello.encode().unwrap().into()))
+        .await
+        .unwrap();
+    let ack = read_frame_from_ws(&mut data).await;
+    assert_eq!(ack.header.message_kind, MessageKind::HelloAck);
+
+    let attach = Frame::new(
+        MessageKind::Attach,
+        2,
+        serde_json::to_vec(&serde_json::json!({"id": "s1", "after_sequence": null})).unwrap(),
+    );
+    data.send(Message::Binary(attach.encode().unwrap().into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_frame_from_ws(&mut data).await.header.message_kind,
+        MessageKind::Snapshot
+    );
+
+    let kill = Frame::new(
+        MessageKind::Kill,
+        3,
+        serde_json::to_vec(&serde_json::json!({"id": "s1"})).unwrap(),
+    );
+    data.send(Message::Binary(kill.encode().unwrap().into()))
+        .await
+        .unwrap();
+    // The attachment above streams pushes (`SessionStatus`, `Output`) on the
+    // same socket; the first *reply* after `Kill` must be the refusal.
+    let reply = loop {
+        let frame = read_frame_from_ws(&mut data).await;
+        if !matches!(
+            frame.header.message_kind,
+            MessageKind::SessionStatus | MessageKind::Output
+        ) {
+            break frame;
+        }
+    };
+    assert_eq!(reply.header.message_kind, MessageKind::Error);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relay_disconnects_when_the_projection_empties() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (ctx, _stop) = start_daemon_with_relay(root.path(), port).await;
+
+    let (mut control, seen_path, _) = accept_ws(&listener).await;
+    assert_eq!(seen_path, "/v1/device");
+    let hello = tokio::time::timeout(Duration::from_secs(4), control.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(hello.to_text().unwrap().contains("Test Mac"));
+
+    // An unrelated setting write must not disturb the control socket: the
+    // relay re-reads its config and compares rather than reconnecting.
+    ctx.settings
+        .lock()
+        .unwrap()
+        .set_setting("unrelated", "1")
+        .unwrap();
+    ctx.settings_changed.notify_one();
+    let quiet = tokio::time::timeout(Duration::from_millis(500), control.next()).await;
+    assert!(
+        quiet.is_err(),
+        "control socket reacted to an unrelated setting: {quiet:?}"
+    );
+
+    ctx.settings
+        .lock()
+        .unwrap()
+        .set_setting("remote_control", r#"{"workspaces":[]}"#)
+        .unwrap();
+    ctx.settings_changed.notify_one();
+
+    let closed = tokio::time::timeout(Duration::from_secs(4), control.next())
+        .await
+        .expect("control socket must close within 4 s of the projection emptying");
+    assert!(
+        matches!(closed, None | Some(Ok(Message::Close(_))) | Some(Err(_))),
+        "expected the control socket to close, got {closed:?}"
+    );
+}
