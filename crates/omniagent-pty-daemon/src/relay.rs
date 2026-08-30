@@ -123,7 +123,13 @@ pub async fn run_relay(ctx: ClientContext) {
             }
             Outcome::ConfigChanged => backoff = INITIAL_BACKOFF,
             Outcome::Dropped => {
-                tokio::time::sleep(backoff).await;
+                // A settings write (a re-pair, a workspace toggled) cuts the
+                // wait short — the next iteration re-reads the config anyway,
+                // so a stale credential is never dialled.
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = ctx.settings_changed.notified() => {}
+                }
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         }
