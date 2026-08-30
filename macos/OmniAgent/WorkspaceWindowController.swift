@@ -779,7 +779,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let branchesSection = HomeDropdown.Section(header: "Branches", rows: rows)
             let dropdown = HomeDropdown.show(
                 connected ? [branchesSection] : [setUpGitHub, branchesSection],
-                searchPlaceholder: "Search branches…", from: anchor
+                // "...or create": this is the one search field in the app
+                // where typing a name with no match is itself an action
+                // (`extraRows` below), not a dead end — the placeholder
+                // says so rather than reading like every other search box.
+                searchPlaceholder: "Search or create branch…", from: anchor
             )
             dropdown.extraRows = { [weak self] query in
                 guard !branches.contains(query) else { return [] }
