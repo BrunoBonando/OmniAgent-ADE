@@ -392,6 +392,36 @@ impl Store {
         Self::resolve_data_dir(&Self::data_root())
     }
 
+    /// One-time migration of a pre-account install: moves `root/brain.db`
+    /// (+ `-wal`, `-shm`), `root/brain/` and `root/transcripts/` into
+    /// `account_dir`, but only the very first time an account directory is
+    /// created (`root/accounts` did not exist yet) and only when there is a
+    /// `root/brain.db` to move. Every later account starts empty.
+    ///
+    /// Called by the daemon before it opens the store — the daemon is the
+    /// sole owner of these files, and at that moment nothing has them open.
+    /// The app never moves files itself. A `rename` within one root stays
+    /// on one filesystem, so this is atomic per artefact and never copies.
+    pub fn adopt_legacy_data(root: &Path, account_dir: &Path) -> std::io::Result<bool> {
+        if account_dir == root {
+            return Ok(false);
+        }
+        if root.join(ACCOUNTS_DIR).exists() {
+            return Ok(false);
+        }
+        if !root.join("brain.db").is_file() {
+            return Ok(false);
+        }
+        std::fs::create_dir_all(account_dir)?;
+        for name in ["brain.db", "brain.db-wal", "brain.db-shm", "brain", "transcripts"] {
+            let from = root.join(name);
+            if from.exists() {
+                std::fs::rename(&from, account_dir.join(name))?;
+            }
+        }
+        Ok(true)
+    }
+
     /// Opens (creating if absent) the brain database under `data_dir/brain.db`.
     ///
     /// Sets three connection-level pragmas *every* open, not just on first
@@ -1314,5 +1344,72 @@ mod account_scope_tests {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    /// Every legacy artefact the migration is responsible for, plus one
+    /// bystander it must leave alone.
+    fn seed_legacy_root(root: &Path) {
+        Store::open(root).unwrap().set_setting("layout", "legacy-layout").unwrap();
+        std::fs::write(root.join("brain.db-wal"), b"wal").unwrap();
+        std::fs::write(root.join("brain.db-shm"), b"shm").unwrap();
+        std::fs::create_dir_all(root.join("brain").join("proj")).unwrap();
+        std::fs::write(root.join("brain").join("proj").join("note.md"), "# note").unwrap();
+        std::fs::create_dir_all(root.join("transcripts")).unwrap();
+        std::fs::write(root.join("transcripts").join("s1.log"), "hello").unwrap();
+        std::fs::write(root.join("unrelated.txt"), "stays").unwrap();
+    }
+
+    #[test]
+    fn adopt_legacy_data_moves_the_three_artefacts_into_the_first_account_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        seed_legacy_root(root);
+        let account = root.join("accounts").join("fc44b18d5588b1d6");
+
+        assert!(Store::adopt_legacy_data(root, &account).unwrap());
+
+        for name in ["brain.db", "brain.db-wal", "brain.db-shm", "brain", "transcripts"] {
+            assert!(!root.join(name).exists(), "{name} left the root");
+            assert!(account.join(name).exists(), "{name} arrived in the account dir");
+        }
+        assert_eq!(
+            std::fs::read_to_string(account.join("brain").join("proj").join("note.md")).unwrap(),
+            "# note"
+        );
+        assert!(root.join("unrelated.txt").exists(), "only the three artefacts move");
+        let moved = Store::open(&account).unwrap();
+        assert_eq!(moved.get_setting("layout").unwrap().as_deref(), Some("legacy-layout"));
+    }
+
+    #[test]
+    fn adopt_legacy_data_is_a_no_op_once_any_account_dir_exists() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        seed_legacy_root(root);
+        let first = root.join("accounts").join("fc44b18d5588b1d6");
+        assert!(Store::adopt_legacy_data(root, &first).unwrap());
+        assert!(!Store::adopt_legacy_data(root, &first).unwrap(), "idempotent");
+
+        // A later account starts empty: the legacy data belongs to the first.
+        Store::open(root).unwrap().set_setting("layout", "written-later-at-root").unwrap();
+        let second = root.join("accounts").join("0123456789abcdef");
+        assert!(!Store::adopt_legacy_data(root, &second).unwrap());
+        assert!(root.join("brain.db").exists(), "nothing moved");
+        assert!(!second.join("brain.db").exists());
+    }
+
+    #[test]
+    fn adopt_legacy_data_does_nothing_without_a_root_brain_db_or_for_the_root_itself() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("transcripts")).unwrap();
+        let account = root.join("accounts").join("fc44b18d5588b1d6");
+        assert!(!Store::adopt_legacy_data(root, &account).unwrap(), "no brain.db: a fresh install");
+        assert!(!root.join("accounts").exists(), "and nothing was created either");
+        assert!(root.join("transcripts").exists());
+
+        seed_legacy_root(root);
+        assert!(!Store::adopt_legacy_data(root, root).unwrap(), "signed out: the root serves itself");
+        assert!(root.join("brain.db").exists());
     }
 }
