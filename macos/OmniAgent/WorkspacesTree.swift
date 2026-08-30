@@ -41,6 +41,16 @@ struct WorkspaceTreeEntry: Equatable {
     }
 }
 
+/// One online machine and what it shares — the input shape of the sidebar's
+/// remote sections (the remote-session-control spec's §4 "Viewer side").
+/// Assembled by `WorkspaceWindowController` from `RemoteMachinesModel`'s
+/// live device list; the tree renders it after the local rows.
+struct RemoteMachineTreeEntry: Equatable {
+    let deviceID: String
+    let name: String
+    let workspaces: [WorkspaceTreeEntry]
+}
+
 /// A workspace row: disclosure chevron, folder icon (the open variant while
 /// expanded), display name. Pressing it folds — selection belongs to the
 /// session rows underneath.
@@ -129,6 +139,58 @@ final class WorkspaceRowView: ShellRowView {
     override func menu(for event: NSEvent) -> NSMenu? {
         onContextMenu?() ?? super.menu(for: event)
     }
+}
+
+/// A remote machine's workspace row: the remote glyph in place of the
+/// folder, the projected name after it. No chevron and no fold — the
+/// section is as long as what the machine shares — and no selection: the
+/// session rows underneath are the doors.
+final class RemoteWorkspaceRowView: NSView {
+    private let glyph: NSImageView
+    private let titleField: NSTextField
+
+    var titleText: String { titleField.stringValue }
+
+    init(label: String) {
+        glyph = NSImageView(
+            image: NSImage(
+                systemSymbolName: "desktopcomputer.and.arrow.down",
+                accessibilityDescription: "Remote workspace"
+            ) ?? NSImage()
+        )
+        titleField = ShellFont.label(
+            label,
+            font: ShellFont.ui(13.5, .semibold),
+            color: ShellPalette.inkFolder
+        )
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        glyph.translatesAutoresizingMaskIntoConstraints = false
+        glyph.contentTintColor = ShellPalette.folderGlyph
+        addSubview(glyph)
+        addSubview(titleField)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 28),
+            // The folder column — past where a chevron would sit, so remote
+            // names line up with the local workspace names above them.
+            glyph.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 23),
+            glyph.centerYAnchor.constraint(equalTo: centerYAnchor),
+            glyph.widthAnchor.constraint(equalToConstant: 17),
+            glyph.heightAnchor.constraint(equalToConstant: 15),
+
+            titleField.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 6),
+            titleField.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
+            titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel("Remote workspace \(label)")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 }
 
 /// The dim placeholder under an expanded workspace that has nothing running.
@@ -236,6 +298,9 @@ final class WorkspacesTreeView: NSView {
     /// A session row's right-click, same contract: the menu reads live state
     /// (the pin, the installed apps) the row never holds.
     var sessionMenuProvider: ((SessionGroupNode) -> NSMenu?)?
+    /// A remote session row's click — the machine's device id, the daemon
+    /// session id and its title, for `openRemoteSession` on the controller.
+    var onOpenRemoteSession: ((_ deviceID: String, _ sessionID: String, _ title: String) -> Void)?
 
     /// Collapsed workspace ids, persisted so the fold survives a relaunch.
     /// Stored inverted — absent means expanded — so a brand new workspace
@@ -259,6 +324,9 @@ final class WorkspacesTreeView: NSView {
     /// The Status-mode bucket headers on screen, in order — empty in the
     /// other two modes.
     private(set) var renderedBucketTitles: [String] = []
+    /// The remote machines the last `reload` drew sections for, in order —
+    /// empty while no other Mac is sharing anything.
+    private(set) var renderedRemoteMachineNames: [String] = []
 
     /// What `reload` was last handed, so toggling a disclosure or switching
     /// the group mode can re-render without the controller having to push the
@@ -269,6 +337,7 @@ final class WorkspacesTreeView: NSView {
         var statuses: [String: RemoteSessionStatus] = [:]
         var eventTimes: [String: Double] = [:]
         var meta: [String: SessionMeta] = [:]
+        var remoteMachines: [RemoteMachineTreeEntry] = []
     }
 
     private var lastRender = Render()
@@ -302,14 +371,16 @@ final class WorkspacesTreeView: NSView {
         focusedPaneID: String?,
         statuses: [String: RemoteSessionStatus],
         eventTimes: [String: Double] = [:],
-        meta: [String: SessionMeta] = [:]
+        meta: [String: SessionMeta] = [:],
+        remoteMachines: [RemoteMachineTreeEntry] = []
     ) {
         lastRender = Render(
             entries: entries,
             focusedPaneID: focusedPaneID,
             statuses: statuses,
             eventTimes: eventTimes,
-            meta: meta
+            meta: meta,
+            remoteMachines: remoteMachines
         )
         renderedWorkspaceIDs = []
         renderedSessionIDs = []
@@ -325,6 +396,7 @@ final class WorkspacesTreeView: NSView {
         case .status: renderStatusBuckets(entries)
         case .lastUpdated: renderLastUpdated(entries)
         }
+        renderRemoteMachines(remoteMachines)
     }
 
     /// The header's group-by choice. Persists, then re-renders on the spot
@@ -381,6 +453,36 @@ final class WorkspacesTreeView: NSView {
         }
     }
 
+    /// The remote sections, after whichever local shape is chosen: one
+    /// bucket-voice header per machine — "<name> · remote" — then its
+    /// projected workspaces and their session rows. Rendered in every group
+    /// mode, because another Mac's sessions have no local status or event
+    /// times to bucket by; a click opens the session rather than selecting
+    /// it (the remote-session-control spec's §4 "Viewer side").
+    private func renderRemoteMachines(_ machines: [RemoteMachineTreeEntry]) {
+        renderedRemoteMachineNames = machines.map(\.name)
+        for machine in machines {
+            add(WorkspacesBucketHeaderView(title: "\(machine.name) · remote"))
+            for workspace in machine.workspaces {
+                add(RemoteWorkspaceRowView(label: workspace.label))
+                for session in workspace.sessions {
+                    let row = SessionRowView(
+                        session: session,
+                        statuses: session.paneIDs.map { _ -> RemoteSessionStatus? in nil }
+                    )
+                    row.onPress = { [weak self] in
+                        self?.onOpenRemoteSession?(
+                            machine.deviceID,
+                            session.paneIDs.first ?? session.id,
+                            session.label
+                        )
+                    }
+                    add(row)
+                }
+            }
+        }
+    }
+
     /// Last-updated mode: one flat list, most recent status event first.
     private func renderLastUpdated(_ entries: [WorkspaceTreeEntry]) {
         let sessions = WorkspacesGrouping.lastUpdatedFirst(
@@ -432,7 +534,8 @@ final class WorkspacesTreeView: NSView {
             focusedPaneID: lastRender.focusedPaneID,
             statuses: lastRender.statuses,
             eventTimes: lastRender.eventTimes,
-            meta: lastRender.meta
+            meta: lastRender.meta,
+            remoteMachines: lastRender.remoteMachines
         )
     }
 

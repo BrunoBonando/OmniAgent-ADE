@@ -35,6 +35,33 @@ final class CommandPaletteTests: XCTestCase {
         )
     }
 
+    /// The standing rule reaching across machines: every session another Mac
+    /// shares (the remote-session-control spec's §4 "Spotlight") is a row,
+    /// named by the machine and workspace it lives in — and the machine
+    /// itself is one too.
+    func testRemoteSessionsAreSpotlightRowsNamedByMachineAndWorkspace() throws {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil,
+            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Studio", workspaces: [
+                PaletteRemoteWorkspace(id: "/a", name: "Alpha", sessions: [.init(id: "s1", title: "migrate")])
+            ])])
+        let row = try XCTUnwrap(commands.first { $0.id == "remote:d1/s1" })
+        XCTAssertEqual(row.title, "migrate")
+        XCTAssertEqual(row.subtitle, "Studio · Alpha")
+        XCTAssertEqual(row.symbol, "desktopcomputer.and.arrow.down")
+        XCTAssertEqual(row.keywords, "remote Studio Alpha")
+        XCTAssertEqual(row.action, .openRemoteSession(deviceID: "d1", sessionID: "s1", title: "migrate"))
+        XCTAssertEqual(row.section, .sessions)
+        XCTAssertEqual(row.detail, "remote")
+        let machineRow = try XCTUnwrap(commands.first { $0.id == "remote-machine:d1" })
+        XCTAssertEqual(machineRow.title, "Studio")
+        XCTAssertEqual(machineRow.subtitle, "Remote machine")
+        XCTAssertEqual(
+            machineRow.action, .openRemoteSession(deviceID: "d1", sessionID: "s1", title: "migrate"),
+            "the machine row opens its first session"
+        )
+    }
+
     /// Settings › Accounts' one button is a spotlight row of its own — the
     /// standing rule reaching *inside* a section — and it is whichever
     /// button the page is showing, never both.
@@ -816,6 +843,28 @@ final class CommandPaletteTests: XCTestCase {
             "folding back to the bar is not closing — the bar and its cursor stay, the way Spotlight's do"
         )
         controller.dismiss()
+    }
+
+    /// "Resume remote session…" opens the spotlight with "remote" already
+    /// typed. Making a text field the first responder selects all of it, so
+    /// without collapsing that selection the very next keystroke would
+    /// *replace* the pre-filled word instead of continuing it — the caret
+    /// belongs at the end, the way it does when you type into Spotlight.
+    func testAPreFilledQueryLeavesTheCaretAfterItRatherThanSelectingIt() throws {
+        let controller = CommandPaletteController()
+        controller.present(commands: sample, initialQuery: "remote", over: nil)
+        defer { controller.dismiss() }
+
+        XCTAssertEqual(controller.model.query, "remote", "the query is applied, not just displayed")
+        let editor = try XCTUnwrap(
+            controller.window?.firstResponder as? NSTextView,
+            "the query field takes the keyboard on open"
+        )
+        XCTAssertEqual(editor.string, "remote")
+        XCTAssertEqual(
+            editor.selectedRange(), NSRange(location: 6, length: 0),
+            "select-all would have the first keystroke wipe the pre-filled query"
+        )
     }
 
     func testTheBarStaysPutWhileTheResultsGrowBeneathIt() {

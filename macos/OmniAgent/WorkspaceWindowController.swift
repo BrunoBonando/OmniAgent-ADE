@@ -548,6 +548,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // `authDefaults` is where the signed-in mirror lives — the real
         // app's domain in production, a throwaway suite in tests, which must
         // never sign the developer's install in or out (`RealPreferencesGuard`).
+        // It is `presentLaunchGate(defaults:)`'s parameter carried to the
+        // mirror's *writer* too, so a test's throwaway suite is the whole
+        // story — the coordinator never writes `auth.signedIn` into the real
+        // app's domain from a test.
         let authGateCoordinator = AuthGateCoordinator(settings: settingsStore, defaults: authDefaults)
         self.authGateCoordinator = authGateCoordinator
         let authGateWindow = AuthGateWindowController(coordinator: authGateCoordinator)
@@ -896,7 +900,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     HomeDropdown.Row(icon: HomeDropdown.symbol("desktopcomputer"), title: "Local folder or repository…") { [weak self] in
                         self?.pickHomeFolder()
                     },
-                    HomeDropdown.Row(icon: HomeDropdown.symbol("cloud"), title: "Resume remote session…", isEnabled: false) {},
+                    HomeDropdown.Row(
+                        icon: HomeDropdown.symbol("desktopcomputer.and.arrow.down"),
+                        title: "Resume remote session…"
+                    ) { [weak self] in self?.presentCommandPalette(initialQuery: "remote") },
                 ]),
             ], searchPlaceholder: "Search repositories…", from: anchor)
         }
@@ -1036,6 +1043,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // path.
         shellSidebar.sessionMenuProvider = { [weak self] session in
             self?.sessionContextMenu(for: session)
+        }
+        // A remote machine's session row — opened through the same path the
+        // spotlight's remote rows run.
+        shellSidebar.onOpenRemoteSession = { [weak self] deviceID, sessionID, title in
+            self?.openRemoteSession(deviceID: deviceID, sessionID: sessionID, title: title)
+        }
+        // The plus menu's "Resume remote session…": the spotlight, opened
+        // pre-filtered to the remote rows (spec §4 "Viewer side").
+        shellSidebar.onResumeRemoteSession = { [weak self] in
+            self?.presentCommandPalette(initialQuery: "remote")
         }
         // Asking the login shell for its PATH spawns a shell; do it now, off
         // the main thread, so the first terminal does not wait for it.
@@ -1787,7 +1804,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         } ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         // Seeded from a remote pane this would put a *local* shell into
         // another machine's session. A remote pane offers no siblings.
-        guard sibling?.remoteDeviceID == nil else { return false }
+        guard sibling?.isRemote != true else { return false }
         let template = WorkspaceRestoration.bootstrapPane()
         let group = session?.id ?? sibling?.group ?? template.group
         // The eight-terminal cap belongs to the session this pane is joining,
@@ -1840,7 +1857,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let sibling = session.map { seed in
             seed.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
         } ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
-        guard sibling?.remoteDeviceID == nil else { return false }
+        guard sibling?.isRemote != true else { return false }
         let template = WorkspaceRestoration.bootstrapPane()
         let group = session?.id ?? sibling?.group ?? template.group
         guard workspace.paneCount(inGroup: group) < PaneGrid.maxPanes else { return false }
@@ -1874,7 +1891,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let sibling = session.map { seed in
             seed.paneIDs.first.flatMap { workspace.descriptor(for: $0) }
         } ?? workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
-        guard sibling?.remoteDeviceID == nil else { return false }
+        guard sibling?.isRemote != true else { return false }
         let template = WorkspaceRestoration.bootstrapPane()
         let group = session?.id ?? sibling?.group ?? template.group
         guard workspace.paneCount(inGroup: group) < PaneGrid.maxPanes else { return false }
@@ -2409,7 +2426,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // A remote pane never asks: nothing ends with it but the view.
         if let descriptor = workspace.descriptor(for: focused),
            descriptor.kind == .terminal,
-           descriptor.remoteDeviceID == nil,
+           !descriptor.isRemote,
            workspace.terminalSurface(for: focused)?.hasUserInput == true,
            let container = workspace.container(for: focused) {
             container.presentAsk(
@@ -2438,7 +2455,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // …and a remote pane has none of *this* daemon's: closing it ends
         // the view, never the session running on the other machine.
         if let descriptor = workspace.descriptor(for: focused),
-           descriptor.kind == .terminal, descriptor.remoteDeviceID == nil {
+           descriptor.kind == .terminal, !descriptor.isRemote {
             killSession(focused)
         }
         readySessions.remove(focused)
@@ -2493,7 +2510,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let current = descriptor?.engine
         // A remote pane's process is another machine's to switch: the badge
         // still names the engine, its menu offers nothing.
-        let switchable = descriptor?.remoteDeviceID == nil
+        let switchable = descriptor?.isRemote != true
         for engine in EngineLauncher.selectable {
             let installed = EngineLauncher.isInstalled(engine)
             let item = NSMenuItem(
@@ -2541,7 +2558,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     func requestEngineSwitch(_ paneID: String, to engine: Engine) {
         guard let descriptor = workspace.descriptor(for: paneID),
               descriptor.kind == .terminal,
-              descriptor.remoteDeviceID == nil,
+              !descriptor.isRemote,
               descriptor.engine != engine
         else { return }
         let typed = workspace.terminalSurface(for: paneID)?.hasUserInput ?? false
@@ -2576,7 +2593,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @discardableResult
     func replaceEngine(_ paneID: String, with engine: Engine) -> Bool {
         guard let old = workspace.descriptor(for: paneID), old.kind == .terminal,
-              old.remoteDeviceID == nil
+              !old.isRemote
         else { return false }
         let order = workspace.paneIDs
         killSession(paneID)
@@ -2643,7 +2660,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// thing, so its `/resume` list reads like the sidebar does.
     func syncConversationName(_ paneID: String, to title: String) {
         guard let descriptor = workspace.descriptor(for: paneID),
-              descriptor.remoteDeviceID == nil, // never type into another machine's agent
+              !descriptor.isRemote, // never type into another machine's agent
               descriptor.engine != .shell,   // no `/rename` to type at a plain shell
               descriptor.label == nil,       // a hand-typed name is already the agreed one
               lastSyncedName[paneID] != title
@@ -2996,11 +3013,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func localPaneDescriptors() -> [PaneDescriptor] {
         workspace.allPaneIDs
             .compactMap { workspace.descriptor(for: $0) }
-            .filter { $0.remoteDeviceID == nil }
+            .filter { !$0.isRemote }
     }
 
     private var focusedPaneIsLocal: Bool {
-        workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }?.remoteDeviceID == nil
+        workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }?.isRemote != true
     }
 
     private func remotePaneIDs(for deviceID: String) -> [String] {
@@ -3011,6 +3028,56 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// machine has since dropped off the list.
     private func remoteMachineName(for deviceID: String) -> String {
         remoteMachines.machine(for: deviceID)?.name ?? deviceID
+    }
+
+    /// The relay's machines as the sidebar tree renders them: each projected
+    /// workspace as a tree entry whose session rows carry the projection's
+    /// ids and titles — what a click hands `openRemoteSession`.
+    private func remoteTreeEntries() -> [RemoteMachineTreeEntry] {
+        remoteMachines.machines.map { machine in
+            RemoteMachineTreeEntry(
+                deviceID: machine.deviceID,
+                name: machine.name,
+                workspaces: machine.projection.workspaces.map { workspace in
+                    WorkspaceTreeEntry(
+                        // Prefixed so a workspace shared by another Mac can
+                        // never collide with the same folder open locally.
+                        id: "remote:\(machine.deviceID)/\(workspace.id)",
+                        label: workspace.name,
+                        sessions: workspace.sessions.map { session in
+                            SessionGroupNode(
+                                id: session.id,
+                                project: "remote:\(machine.deviceID)",
+                                name: session.title,
+                                label: session.title,
+                                cwd: "",
+                                paneIDs: [session.id],
+                                isCurrent: false
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    }
+
+    /// The same list, flattened to the names the spotlight's rows print.
+    private func paletteRemoteMachines() -> [PaletteRemoteMachine] {
+        remoteMachines.machines.map { machine in
+            PaletteRemoteMachine(
+                deviceID: machine.deviceID,
+                name: machine.name,
+                workspaces: machine.projection.workspaces.map { workspace in
+                    PaletteRemoteWorkspace(
+                        id: workspace.id,
+                        name: workspace.name,
+                        sessions: workspace.sessions.map {
+                            PaletteRemoteSession(id: $0.id, title: $0.title)
+                        }
+                    )
+                }
+            )
+        }
     }
 
     /// The daemon connection a pane's session lives on: its machine's for a
@@ -3070,7 +3137,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             remoteMachines.start()
         } else {
             remoteMachines.stop()
-            for paneID in workspace.allPaneIDs where workspace.descriptor(for: paneID)?.remoteDeviceID != nil {
+            for paneID in workspace.allPaneIDs where workspace.descriptor(for: paneID)?.isRemote == true {
                 destroyPane(paneID)
             }
         }
@@ -3179,7 +3246,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // still in flight has its session on another machine entirely.
         for id in workspace.allPaneIDs {
             guard let descriptor = workspace.descriptor(for: id),
-                  descriptor.kind == .terminal, descriptor.remoteDeviceID == nil
+                  descriptor.kind == .terminal, !descriptor.isRemote
             else { continue }
             ensureSession(id)
         }
@@ -3274,11 +3341,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// (fade: 0), not the card's usual 0.09s goodbye: this is a defensive
     /// clear-the-deck, not a UX-driven dismiss.
     @objc func showCommandPalette(_ sender: Any?) {
+        presentCommandPalette()
+    }
+
+    /// The body of ⌘K, callable with a query already in the field — how
+    /// "Resume remote session…" opens the spotlight pre-filtered to the
+    /// remote rows rather than growing a picker of its own.
+    func presentCommandPalette(initialQuery: String? = nil) {
         hoverCard.dismiss(fade: 0)
         palette.onRun = { [weak self] action in self?.run(action) }
         palette.present(
             commands: CommandPaletteModel.build(
-                panes: workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) },
+                // Local panes only: a remote pane already has its own row,
+                // built from the relay's projection, and listing it here as
+                // well would offer the same session twice — once named by
+                // its machine, once subtitled with the raw `remote:<uuid>`
+                // project string that is not a place a user can go.
+                panes: localPaneDescriptors(),
                 paneOrder: workspace.allPaneIDs,
                 focusedPaneID: workspace.focusedPaneID,
                 projectLabels: projectLabels,
@@ -3288,10 +3367,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // The page's own reading of the account rows, so the rows
                 // the spotlight offers are the buttons the page shows.
                 signedIn: settingsView.accountSignedIn,
-                githubConnected: settingsView.accountGitHubConnected
+                githubConnected: settingsView.accountGitHubConnected,
+                remoteMachines: paletteRemoteMachines()
             ),
             files: repoFiles,
             filesRoot: latestGitStatus?.root,
+            initialQuery: initialQuery,
             over: window
         )
     }
@@ -3332,6 +3413,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             if let focused = workspace.focusedPaneID { _ = revealPane(focused) }
         case let .enterSession(group):
             enterDeskSession(group)
+        case let .openRemoteSession(deviceID, sessionID, title):
+            openRemoteSession(deviceID: deviceID, sessionID: sessionID, title: title)
         case let .searchBrain(query):
             connection.search(query: query, scope: nil) { [weak self] result in
                 guard let self else { return }
@@ -3551,7 +3634,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             eventTimes: lastStatusEventAt,
             customizations: sidebarCustomizations(),
             sessionMeta: sessionMeta,
-            remoteControlWorkspaceIDs: remoteControlWorkspaceIDs
+            remoteControlWorkspaceIDs: remoteControlWorkspaceIDs,
+            // The other Macs' sections, after the local tree — built from
+            // the relay's live device list (`RemoteMachinesModel`).
+            remoteMachines: remoteTreeEntries()
         )
     }
 
@@ -3956,6 +4042,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// the daemon alone.
     func applyRestoredRelayDeviceToken(_ raw: String?) {
         relayTokenState = (raw ?? "").isEmpty ? .absent : .present
+        // The row also names this Mac's own relay device — the one machine
+        // the viewer side must never list or dial.
+        if let deviceID = RemoteMachinesModel.deviceID(inTokenRow: raw) {
+            remoteMachines.localDeviceID = deviceID
+        }
     }
 
     /// The workspace context menu's Enable Remote Control. Flips the id,
@@ -4077,6 +4168,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // developer's real `brain.db`.
                 write(RelayClient.shared.deviceTokenRow(registration, name: name), to: SettingsKey.relayDeviceToken)
                 relayTokenState = .present
+                remoteMachines.localDeviceID = registration.deviceID
             } catch {
                 // Back to `absent`, not `unknown`: the read succeeded, the
                 // registration is what failed, so the retry the card promises
@@ -6016,7 +6108,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// running, and nothing here may create, claim or meter it.
     private func addDescriptor(_ seed: PaneDescriptor, reattaches: Bool, startSession: Bool) -> Bool {
         let sessionID = seed.sessionID
-        let isRemote = seed.remoteDeviceID != nil
+        let isRemote = seed.isRemote
         var descriptor = seed
         // The one place a terminal gets its placeholder number, so a restored
         // pane and a brand-new one are numbered by the same rule. Panes arrive
@@ -6549,7 +6641,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // A remote pane's session is another daemon's: listing it here would
         // find nothing and `createSession` would spawn a local shell under a
         // remote id. Every caller filters already; this is the backstop.
-        guard workspace.descriptor(for: sessionID)?.remoteDeviceID == nil else { return }
+        guard workspace.descriptor(for: sessionID)?.isRemote != true else { return }
         if let sessionEnsurer { sessionEnsurer(sessionID); return }
         guard !readySessions.contains(sessionID) else {
             attach(sessionID)

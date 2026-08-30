@@ -240,15 +240,21 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
     }
 
     /// Opens over `parent`, rebuilt from scratch so the list can never offer a
-    /// pane that closed while the palette was shut.
+    /// pane that closed while the palette was shut. `initialQuery` arrives
+    /// already typed — how "Resume remote session…" opens the spotlight
+    /// pre-filtered to the remote rows.
     func present(
         commands: [PaletteCommand],
         files: [String] = [],
         filesRoot: URL? = nil,
+        initialQuery: String? = nil,
         over parent: NSWindow?
     ) {
         model.reset(commands: commands, files: files, filesRoot: filesRoot)
-        field.stringValue = ""
+        field.stringValue = initialQuery ?? ""
+        if let initialQuery, !initialQuery.isEmpty {
+            model.update(query: initialQuery)
+        }
         reloadResults()
         // Strict stacking without fighting window levels: the scrim is a child
         // of the workspace and the panel a child of the scrim, and a child
@@ -279,6 +285,14 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(field)
+        // Focusing a text field selects all of it, so the first keystroke
+        // would wipe a pre-filled query instead of narrowing it. Collapse the
+        // selection to the end: "Resume remote session…" opens on "remote"
+        // and typing continues the phrase, the way Spotlight behaves.
+        field.currentEditor()?.selectedRange = NSRange(
+            location: (field.stringValue as NSString).length,
+            length: 0
+        )
         animateOpen()
     }
 

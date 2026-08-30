@@ -61,6 +61,10 @@ enum PaletteAction: Equatable {
     /// project, the closest real "go look at this" action available without
     /// a map/graph view.
     case revealProjectContext(project: String)
+    /// One of another machine's shared sessions (the remote-session-control
+    /// spec's §4 "Spotlight"), opened — or re-focused — on this Desk through
+    /// `WorkspaceWindowController.openRemoteSession`.
+    case openRemoteSession(deviceID: String, sessionID: String, title: String)
     /// A Help page — the privacy policy or the third-party notices — opened
     /// in the default browser.
     case openLegal(LegalDocument)
@@ -192,6 +196,30 @@ struct PaletteWorkspace: Equatable {
     let path: String?
 }
 
+/// A session another machine shares, as the palette sees it — a small
+/// struct rather than a tuple because rows are compared in tests, and
+/// tuples are not `Equatable`.
+struct PaletteRemoteSession: Equatable {
+    let id: String
+    let title: String
+}
+
+/// One projected workspace on a remote machine.
+struct PaletteRemoteWorkspace: Equatable {
+    let id: String
+    let name: String
+    let sessions: [PaletteRemoteSession]
+}
+
+/// One online machine from the relay's device list with what it shares —
+/// the spotlight's own copy of `RemoteMachine`, flattened to the names its
+/// rows print and match.
+struct PaletteRemoteMachine: Equatable {
+    let deviceID: String
+    let name: String
+    let workspaces: [PaletteRemoteWorkspace]
+}
+
 struct PaletteCommand: Equatable {
     let id: String
     let title: String
@@ -317,7 +345,11 @@ struct CommandPaletteModel: Equatable {
         /// the account row logs out or signs in.
         signedIn: Bool = false,
         /// The same, for the GitHub row: connected offers Disconnect.
-        githubConnected: Bool = false
+        githubConnected: Bool = false,
+        /// What the relay reports online right now — every machine and each
+        /// of its shared sessions becomes a row (the remote-session-control
+        /// spec's §4 "Spotlight").
+        remoteMachines: [PaletteRemoteMachine] = []
     ) -> [PaletteCommand] {
         // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
         // the already-fixed call site in `WorkspaceWindowController`'s
@@ -347,6 +379,54 @@ struct CommandPaletteModel: Equatable {
                         keywords: projectLabel,
                         section: .sessions,
                         subtitle: projectLabel
+                    )
+                )
+            }
+        }
+        // Another machine's shared sessions, under the same Sessions heading:
+        // one row per machine, then one per session, each saying which
+        // machine and workspace it lives on (spec §4 "Spotlight").
+        for machine in remoteMachines {
+            let sessions = machine.workspaces.flatMap { workspace in
+                workspace.sessions.map { (workspace: workspace, session: $0) }
+            }
+            commands.append(
+                PaletteCommand(
+                    id: "remote-machine:\(machine.deviceID)",
+                    title: machine.name,
+                    detail: "remote",
+                    // The machine row opens its first session — the closest
+                    // thing to "go to that Mac" a pane-shaped app has. A
+                    // machine sharing nothing is still findable; it just has
+                    // nowhere to go yet.
+                    action: sessions.first.map { first in
+                        PaletteAction.openRemoteSession(
+                            deviceID: machine.deviceID,
+                            sessionID: first.session.id,
+                            title: first.session.title
+                        )
+                    } ?? PaletteAction.noop,
+                    keywords: "remote \(machine.name)",
+                    section: .sessions,
+                    subtitle: "Remote machine",
+                    symbol: "desktopcomputer.and.arrow.down"
+                )
+            )
+            for entry in sessions {
+                commands.append(
+                    PaletteCommand(
+                        id: "remote:\(machine.deviceID)/\(entry.session.id)",
+                        title: entry.session.title,
+                        detail: "remote",
+                        action: .openRemoteSession(
+                            deviceID: machine.deviceID,
+                            sessionID: entry.session.id,
+                            title: entry.session.title
+                        ),
+                        keywords: "remote \(machine.name) \(entry.workspace.name)",
+                        section: .sessions,
+                        subtitle: "\(machine.name) · \(entry.workspace.name)",
+                        symbol: "desktopcomputer.and.arrow.down"
                     )
                 )
             }

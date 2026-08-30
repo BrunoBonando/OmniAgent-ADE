@@ -89,6 +89,25 @@ pub fn remote_session_ids(store: &Store) -> HashSet<String> {
         .collect()
 }
 
+/// Whether the projection shares at least one **workspace** — the daemon's
+/// half of "the tunnel should be up" (spec §2: the control channel is open
+/// *iff* `remote_control` lists ≥ 1 workspace **and** `relay_device_token`
+/// exists). Deliberately not `!remote_session_ids(store).is_empty()`: the app
+/// emits an enabled workspace with an empty `sessions` array on purpose, so a
+/// Mac with nothing running is still reachable — a viewer has to be able to
+/// see an idle machine *before* there is a session on it to open.
+pub fn remote_control_active(store: &Store) -> bool {
+    let Some(raw) = store.get_setting(REMOTE_CONTROL_KEY).ok().flatten() else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    value["workspaces"]
+        .as_array()
+        .is_some_and(|workspaces| !workspaces.is_empty())
+}
+
 /// The one field every session-bound control payload (`AttachPayload`,
 /// `ResizePayload`, `SessionIdPayload`) has in common.
 #[derive(serde::Deserialize)]

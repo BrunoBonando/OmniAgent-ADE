@@ -60,6 +60,9 @@ struct PaneDescriptor: Equatable {
     /// (the layout row is this Mac's, and the session belongs to another),
     /// and is never killed, spawned or given local siblings.
     var remoteDeviceID: String? = nil
+    /// `remoteDeviceID != nil`, named — the question every affordance gate
+    /// asks, spelled one way.
+    var isRemote: Bool { remoteDeviceID != nil }
 
     init(
         sessionID: String,

@@ -71,12 +71,26 @@ final class RemoteMachinesModel {
 
     private(set) var isRunning = false
 
+    /// This Mac's own relay device id — the one device on the account this
+    /// viewer must never list or dial: it would be a WebSocket to its own
+    /// daemon by way of Cloudflare, showing the sessions already on screen.
+    /// Set by the window from the `relay_device_token` row (and straight
+    /// after a registration); a device already connected when the id
+    /// arrives is dropped on the spot.
+    var localDeviceID: String? {
+        didSet {
+            guard localDeviceID != oldValue, let deviceID = localDeviceID else { return }
+            drop(deviceID)
+        }
+    }
+
     private let relay: RelayClient
     private let pollInterval: TimeInterval
     private let makeConnection: (URL) -> RemoteConnection
     private let isSignedIn: () -> Bool
     private let refreshSession: () async -> Void
     private let projectionReader: ProjectionReader
+    private let currentBearer: () -> String?
     /// Every connection ever made, online or not — see the type comment.
     private var connections: [String: RemoteConnection] = [:]
     /// Devices the relay's last successful answer listed as online.
@@ -84,11 +98,28 @@ final class RemoteMachinesModel {
     private var names: [String: String] = [:]
     private var projections: [String: RemoteControlProjection.Payload] = [:]
     /// Devices whose connection reported `.unauthorized` and stopped
-    /// retrying. The next poll that gets through the relay carries a bearer
-    /// the relay accepts, and `connect()`s them again with it.
-    private var unauthorized: Set<String> = []
+    /// retrying, with the bearer the relay refused. Re-dialled only once the
+    /// bearer has *changed* — a REST call succeeding proves nothing about a
+    /// WebSocket upgrade the same relay just refused, and re-dialling on it
+    /// would be the four-times-a-second loop `.unauthorized` exists to end.
+    private var unauthorized: [String: String?] = [:]
     private var timer: Timer?
     private var refreshInFlight = false
+    /// A poke that arrived while a poll was in flight. Honoured once that
+    /// poll finishes rather than dropped: the poke usually means "the bearer
+    /// just landed", and the poll it overlapped went out without one.
+    private var refreshRequested = false
+    /// Bumped by every `clearAll()`. A poll captures it on the way out and
+    /// applies its answer only if nothing cleared the model meanwhile —
+    /// otherwise a log-out that raced a poll would have its sockets rebuilt
+    /// and dialled, with a bearer that is very likely still valid, by a
+    /// model nobody will ever `stop()` again.
+    private var generation = 0
+    private var lastSessionRefreshAt: Date?
+    /// Two polls that both meet a 401 inside this window share one session
+    /// refresh: the refresh cookie rotates on every use, and two concurrent
+    /// refreshes would spend the same cookie twice.
+    static let sessionRefreshCoalesce: TimeInterval = 10
 
     init(
         relay: RelayClient = .shared,
@@ -102,7 +133,8 @@ final class RemoteMachinesModel {
         refreshSession: @escaping () async -> Void = { _ = try? await AuthClient.shared.restoreSession() },
         projectionReader: @escaping ProjectionReader = { connection, completion in
             connection.getSetting(key: SettingsKey.remoteControl, completion: completion)
-        }
+        },
+        currentBearer: @escaping () -> String? = { AuthClient.shared.accessToken }
     ) {
         self.relay = relay
         self.pollInterval = pollInterval
@@ -110,6 +142,7 @@ final class RemoteMachinesModel {
         self.isSignedIn = isSignedIn
         self.refreshSession = refreshSession
         self.projectionReader = projectionReader
+        self.currentBearer = currentBearer
     }
 
     /// How a machine's `remote_control` row is read through its connection.
@@ -155,11 +188,21 @@ final class RemoteMachinesModel {
     }
 
     private func refreshSoon() {
-        guard !refreshInFlight else { return }
+        guard !refreshInFlight else {
+            refreshRequested = true
+            return
+        }
         refreshInFlight = true
         Task { [weak self] in
             await self?.refresh()
-            await MainActor.run { [weak self] in self?.refreshInFlight = false }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                refreshInFlight = false
+                if refreshRequested, isRunning {
+                    refreshRequested = false
+                    refreshSoon()
+                }
+            }
         }
     }
 
@@ -168,13 +211,18 @@ final class RemoteMachinesModel {
     /// One poll: list → connect new online devices → re-read every online
     /// projection → drop offline ones.
     func refresh() async {
-        let signedIn = await MainActor.run { isSignedIn() }
+        let (signedIn, captured) = await MainActor.run { (isSignedIn(), generation) }
         guard signedIn else {
             await MainActor.run { clearAll() }
             return
         }
         guard let devices = await listDevices() else { return }
-        await MainActor.run { apply(devices) }
+        await MainActor.run {
+            // Cleared while the relay was answering — signed out, or
+            // stopped. The answer is for a model that no longer exists.
+            guard generation == captured else { return }
+            apply(devices)
+        }
     }
 
     /// `listDevices()` with one retry behind a session refresh when the relay
@@ -185,15 +233,31 @@ final class RemoteMachinesModel {
         do {
             return try await relay.listDevices()
         } catch let RelayError.server(status, _) where status == 401 || status == 403 {
-            await refreshSession()
+            await refreshSessionIfStale()
             return try? await relay.listDevices()
         } catch {
             return nil
         }
     }
 
+    /// One session refresh per `sessionRefreshCoalesce` window, whichever
+    /// poll asks. A poll that finds one just ran still gets its retry: the
+    /// token that refresh produced is the one it needs.
+    private func refreshSessionIfStale() async {
+        let stale = await MainActor.run { () -> Bool in
+            let now = Date()
+            if let last = lastSessionRefreshAt, now.timeIntervalSince(last) < Self.sessionRefreshCoalesce {
+                return false
+            }
+            lastSessionRefreshAt = now
+            return true
+        }
+        guard stale else { return }
+        await refreshSession()
+    }
+
     private func apply(_ devices: [RelayClient.Device]) {
-        let online = devices.filter(\.online)
+        let online = devices.filter { $0.online && $0.deviceID != localDeviceID }
         let nowOnline = Set(online.map(\.deviceID))
         for device in online {
             names[device.deviceID] = device.name
@@ -203,15 +267,20 @@ final class RemoteMachinesModel {
         for deviceID in onlineIDs.subtracting(nowOnline) {
             connections[deviceID]?.disconnect()
             projections.removeValue(forKey: deviceID)
-            unauthorized.remove(deviceID)
+            unauthorized.removeValue(forKey: deviceID)
         }
         for device in online {
             let deviceID = device.deviceID
             if let existing = connections[deviceID] {
-                // Back online, or refused last time: `connect()` starts over
-                // with the bearer as it is now.
-                if !onlineIDs.contains(deviceID) || unauthorized.contains(deviceID) {
-                    unauthorized.remove(deviceID)
+                if !onlineIDs.contains(deviceID) {
+                    // Back online: `connect()` starts over with the bearer
+                    // as it is now.
+                    unauthorized.removeValue(forKey: deviceID)
+                    existing.connect()
+                } else if let refused = unauthorized[deviceID], refused != currentBearer() {
+                    // Refused before, and there is a different bearer to
+                    // offer now. The same one would only be refused again.
+                    unauthorized.removeValue(forKey: deviceID)
                     existing.connect()
                 }
             } else {
@@ -240,7 +309,7 @@ final class RemoteMachinesModel {
         connection.onError = { [weak self] error in
             guard let self else { return }
             if case SessionConnectionError.unauthorized = error {
-                unauthorized.insert(deviceID)
+                unauthorized[deviceID] = currentBearer()
             }
             onConnectionError?(deviceID, error)
         }
@@ -269,6 +338,7 @@ final class RemoteMachinesModel {
     }
 
     private func clearAll() {
+        generation += 1
         for connection in connections.values {
             connection.disconnect()
         }
@@ -277,6 +347,31 @@ final class RemoteMachinesModel {
         projections.removeAll()
         unauthorized.removeAll()
         rebuildMachines()
+    }
+
+    /// Forgets one device entirely — `localDeviceID` arriving for a device
+    /// this model had already dialled.
+    private func drop(_ deviceID: String) {
+        guard connections[deviceID] != nil || onlineIDs.contains(deviceID) else { return }
+        connections[deviceID]?.disconnect()
+        connections.removeValue(forKey: deviceID)
+        onlineIDs.remove(deviceID)
+        projections.removeValue(forKey: deviceID)
+        unauthorized.removeValue(forKey: deviceID)
+        rebuildMachines()
+    }
+
+    /// The `device_id` inside a `relay_device_token` row
+    /// (`RelayClient.deviceTokenRow`'s shape) — the only field of that row
+    /// the app ever reads back; the token itself stays the daemon's.
+    static func deviceID(inTokenRow raw: String?) -> String? {
+        guard
+            let raw, !raw.isEmpty,
+            let data = raw.data(using: .utf8),
+            let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let deviceID = row["device_id"] as? String, !deviceID.isEmpty
+        else { return nil }
+        return deviceID
     }
 
     // MARK: - Lookup

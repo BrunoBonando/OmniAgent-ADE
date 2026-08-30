@@ -42,6 +42,18 @@ async fn start_daemon_with_relay(
     port: u16,
     ping_every: Option<Duration>,
 ) -> (ClientContext, oneshot::Sender<()>) {
+    start_daemon_with_projection(root, port, ping_every, PROJECTION).await
+}
+
+/// [`start_daemon_with_relay`] with the `remote_control` row spelled out — the
+/// seam the "idle workspace" cases need, since what the projection *lists* is
+/// the whole question there.
+async fn start_daemon_with_projection(
+    root: &std::path::Path,
+    port: u16,
+    ping_every: Option<Duration>,
+    projection: &str,
+) -> (ClientContext, oneshot::Sender<()>) {
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
         root.join("brain-data"),
@@ -56,7 +68,7 @@ async fn start_daemon_with_relay(
         .unwrap();
     {
         let store = ctx.settings.lock().unwrap();
-        store.set_setting("remote_control", PROJECTION).unwrap();
+        store.set_setting("remote_control", projection).unwrap();
         store
             .set_setting(
                 "relay_device_token",
@@ -343,4 +355,48 @@ async fn a_silent_relay_is_dropped_and_redialled() {
         connected.elapsed()
     );
     drop(control);
+}
+
+/// Spec §2: the control channel is up *iff* the projection lists ≥ 1
+/// **workspace**. An enabled workspace with nothing running in it is emitted
+/// with an empty `sessions` array on purpose — that idle Mac is precisely the
+/// one a viewer wants to reach — so the daemon must dial the relay for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_enabled_workspace_with_no_sessions_still_dials_the_relay() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (_ctx, _stop) = start_daemon_with_projection(
+        root.path(),
+        port,
+        None,
+        r#"{"workspaces":[{"id":"/a","name":"Alpha","sessions":[]}]}"#,
+    )
+    .await;
+
+    let (mut control, seen_path, seen_auth) = accept_ws(&listener).await;
+    assert_eq!(seen_path, "/v1/device");
+    assert_eq!(seen_auth, "Bearer tok");
+    let hello = tokio::time::timeout(Duration::from_secs(4), control.next())
+        .await
+        .expect("an idle-but-enabled machine must still reach the relay")
+        .unwrap()
+        .unwrap();
+    assert!(hello.to_text().unwrap().contains("Test Mac"));
+}
+
+/// The other half of the same rule: no enabled workspace, no tunnel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_workspace_list_never_dials_the_relay() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (_ctx, _stop) =
+        start_daemon_with_projection(root.path(), port, None, r#"{"workspaces":[]}"#).await;
+
+    let dialled = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+    assert!(
+        dialled.is_err(),
+        "the daemon dialled the relay with nothing shared"
+    );
 }

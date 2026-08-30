@@ -118,7 +118,7 @@ final class NativeTerminalView: TerminalView {
 
 }
 
-final class TerminalSurfaceView: NSView, TerminalViewDelegate {
+final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidation {
     let terminalView = NativeTerminalView(
         frame: .zero,
         font: .monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -904,7 +904,14 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
         connection.interrupt(sessionID: sessionID)
     }
 
+    /// Session › Kill Session (⌃⌘K). Never for a remote pane: the session
+    /// belongs to the other Mac and `Kill` is off the remote allowlist
+    /// (spec §2/§4, "remote panes hide Kill"). The host daemon refuses it
+    /// anyway, but a menu item that silently does nothing is worse than a
+    /// greyed-out one — hence the guard *and* `validateMenuItem` below.
+    /// Interrupt is deliberately not gated: it is on the allowlist.
     @objc func killSession(_ sender: Any?) {
+        guard !connection.isRemote else { return }
         connection.kill(sessionID: sessionID)
     }
 
@@ -914,6 +921,17 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate {
 
     @objc func focusTerminal(_ sender: Any?) {
         focus()
+    }
+
+    /// The one item this surface has an opinion about. Everything else the
+    /// responder chain routes through here keeps AppKit's default answer.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(killSession(_:)):
+            return !connection.isRemote
+        default:
+            return true
+        }
     }
 }
 
