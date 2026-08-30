@@ -1931,6 +1931,39 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertFalse(remoteMachines.isRunning, "logout stops the poller and drops every connection")
     }
 
+    /// Fix-round-2 regression: an editor pane has no process for a daemon
+    /// restart to kill, and the ask's count (`localTerminalSessionCount`)
+    /// must not count it — only a session group with a *local terminal*
+    /// pane in it counts (the controller ruling: same fix for the log-out
+    /// confirm and the account-switch confirm; a remote-viewer variant of
+    /// this same scenario lives in `RemotePanesTests.
+    /// testRemotePollingFollowsTheAccount`, which exercises the daemon-tied
+    /// remote-connection seams this file does not have).
+    func testLogOutWithOnlyAnEditorPaneOpenTearsDownWithoutAsking() throws {
+        let controller = makeEmptyController(settingsClient: FakeSettingsClient(rows: ["auth_signed_in": "true"]), defaults: try throwawayDefaults())
+        defer { controller.close() }
+        let root = try temporaryAccountRoot()
+        try AccountDirectory.writeCurrentAccount("fc44b18d5588b1d6", root: root)
+        controller.accountRoot = root
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done()
+        }
+        controller.serverSessionRevoker = {}
+        controller.authGatePresenter = { _ in }
+
+        XCTAssertTrue(controller.newEditor(in: nil))
+        let paneID = try XCTUnwrap(controller.workspaceView.allPaneIDs.first)
+        XCTAssertEqual(controller.workspaceView.descriptor(for: paneID)?.kind, .editor)
+
+        controller.logOutOfAccount()
+
+        XCTAssertNil(controller.windowAskOverlay, "an editor-only group has no local terminal session to end")
+        XCTAssertEqual(terminated, 1)
+        XCTAssertTrue(controller.awaitingSignIn)
+    }
+
     func testTheAccountLabelIsTheNameFallingBackToTheEmail() throws {
         let named = makeEmptyController(
             settingsClient: FakeSettingsClient(rows: [

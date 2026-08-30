@@ -4701,6 +4701,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         )
     }
 
+    /// What "N running session(s)" means in the logout and account-switch
+    /// asks: session groups holding at least one **local** terminal pane —
+    /// the only panes a daemon restart actually kills. `menuBarSummary`'s
+    /// `sessionCount` is the wrong count for this: it is every session group
+    /// touching *any* pane, so a group that is only a remote viewer (that
+    /// session runs on the other Mac; ending this daemon touches nothing
+    /// there) or only editor/browser panes (no process at all) would inflate
+    /// the number and, worse, trip the ask over a workspace a restart cannot
+    /// actually disturb.
+    private func localTerminalSessionCount() -> Int {
+        let localTerminals = workspace.allPaneIDs
+            .compactMap { workspace.descriptor(for: $0) }
+            .filter { $0.kind == .terminal && $0.remoteDeviceID == nil }
+        return Set(localTerminals.map(\.group)).count
+    }
+
     /// What the sidebar's hover card shows for one row, assembled fresh every
     /// tick. The window is the only place that holds all four sources at once
     /// — the descriptor, the status, the activity ledger and the live pane —
@@ -5062,7 +5078,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// (2026-08-30 spec, "Logout").
     func logOutOfAccount() {
         guard !accountActionInFlight else { return }
-        let sessions = menuBarSummary().sessionCount
+        let sessions = localTerminalSessionCount()
         guard sessions > 0 else {
             performLogout()
             return
@@ -5347,7 +5363,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             completion()
             return
         }
-        let sessions = menuBarSummary().sessionCount
+        let sessions = localTerminalSessionCount()
         guard sessions > 0 else {
             commitAccountSwitch(to: id, completion: completion)
             return

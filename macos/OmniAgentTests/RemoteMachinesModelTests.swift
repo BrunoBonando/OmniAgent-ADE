@@ -456,9 +456,22 @@ final class RemotePanesTests: XCTestCase {
         controller.sessionEnsurer = { _ in }
         controller.serverSessionRevoker = {}
         controller.authGatePresenter = { _ in }
+        // `logOutOfAccount` (2026-08-30 logout teardown) ends the daemon;
+        // unstubbed that falls through to the real, production-pointed
+        // `DaemonPersistenceController()` default and its live, async
+        // `LiveDaemonTerminator` — the CRITICAL SAFETY RULE this suite
+        // otherwise holds everywhere else `logOutOfAccount`/`switchAccount`
+        // is exercised.
+        controller.daemonTerminator = { $0() }
         controller.showWindow(nil)
         controller.applyRestoredPanes([])
         XCTAssertFalse(machines.isRunning, "the install-time seed must not start polling")
+        // `applyRestoredPanes([])` plants a local terminal bootstrap pane
+        // (there was nothing to restore) — closed here, unused and on the
+        // spot, no ask, so what follows is genuinely "only a remote viewer
+        // pane is open", the scenario this test is named for.
+        controller.closePane(nil)
+        XCTAssertTrue(controller.workspaceView.allPaneIDs.isEmpty)
 
         controller.presentLaunchGate(defaults: .standard) {}
         XCTAssertTrue(machines.isRunning, "signed in: polling starts as the gate resolves")
@@ -466,6 +479,9 @@ final class RemotePanesTests: XCTestCase {
         controller.openRemoteSession(deviceID: "d1", sessionID: "s1", title: "Build")
         XCTAssertNotNil(controller.workspaceView.descriptor(for: "s1"))
 
+        // Only a remote viewer pane is open — no local terminal session for
+        // ending the daemon to kill — so this goes straight through with no
+        // confirmation ask (the fix-round-2 `localTerminalSessionCount` count).
         controller.logOutOfAccount()
 
         XCTAssertFalse(machines.isRunning, "signed out: polling stops")
