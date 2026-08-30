@@ -42,7 +42,7 @@ final class BrowserPaneView: NSView, PaneContentView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = PaneContainerView.paneBackgroundColor.cgColor
-        if #available(macOS 13.3, *) { webView.isInspectable = true }
+        if #available(macOS 13.3, *) { webView.isInspectable = WebInspectorPolicy.isEnabled() }
         webView.navigationDelegate = self
         webView.uiDelegate = self
 

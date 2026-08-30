@@ -60,7 +60,7 @@ final class EditorWebView: NSView, WKScriptMessageHandler, WKNavigationDelegate 
 
         wantsLayer = true
         layer?.backgroundColor = PaneContainerView.paneBackgroundColor.cgColor
-        webView.isInspectable = true
+        webView.isInspectable = WebInspectorPolicy.isEnabled()
         webView.navigationDelegate = self
         // The page paints #0c0c0f itself; this is what WebKit paints *under* it,
         // so there is no white flash between attach and first paint. (The public

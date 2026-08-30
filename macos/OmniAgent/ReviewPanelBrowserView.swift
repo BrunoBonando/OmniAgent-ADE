@@ -323,7 +323,7 @@ final class ReviewPanelBrowserView: NSView {
         configuration.processPool = BrowserPaneView.sharedProcessPool
         let web = WKWebView(frame: contentContainer.bounds, configuration: configuration)
         web.autoresizingMask = [.width, .height]
-        if #available(macOS 13.3, *) { web.isInspectable = true }
+        if #available(macOS 13.3, *) { web.isInspectable = WebInspectorPolicy.isEnabled() }
         contentContainer.addSubview(web)
         observations = [
             web.observe(\.url) { [weak self] web, _ in
