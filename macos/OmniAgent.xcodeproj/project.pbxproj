@@ -147,6 +147,8 @@
 		10000000000000000000999 /* RealPreferencesGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000999 /* RealPreferencesGuard.swift */; };
 		10000000000000000000037 /* WorkspaceWindowControllerTask6b2Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000038 /* WorkspaceWindowControllerTask6b2Tests.swift */; };
 		10000000000000000000038 /* DaemonPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000039 /* DaemonPersistence.swift */; };
+		10000000000000000000108 /* AccountDirectory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000108 /* AccountDirectory.swift */; };
+		10000000000000000000109 /* AccountDirectoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000109 /* AccountDirectoryTests.swift */; };
 		1000000000000000000003A /* DaemonServiceRegistrar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000003B /* DaemonServiceRegistrar.swift */; };
 		1000000000000000000003C /* DaemonPersistenceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000003D /* DaemonPersistenceController.swift */; };
 		1000000000000000000003E /* DaemonPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000003F /* DaemonPersistenceTests.swift */; };
@@ -349,6 +351,8 @@
 		20000000000000000000999 /* RealPreferencesGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealPreferencesGuard.swift; sourceTree = "<group>"; };
 		20000000000000000000038 /* WorkspaceWindowControllerTask6b2Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWindowControllerTask6b2Tests.swift; sourceTree = "<group>"; };
 		20000000000000000000039 /* DaemonPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistence.swift; sourceTree = "<group>"; };
+		20000000000000000000108 /* AccountDirectory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDirectory.swift; sourceTree = "<group>"; };
+		20000000000000000000109 /* AccountDirectoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDirectoryTests.swift; sourceTree = "<group>"; };
 		2000000000000000000003B /* DaemonServiceRegistrar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonServiceRegistrar.swift; sourceTree = "<group>"; };
 		2000000000000000000003D /* DaemonPersistenceController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistenceController.swift; sourceTree = "<group>"; };
 		2000000000000000000003F /* DaemonPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonPersistenceTests.swift; sourceTree = "<group>"; };
@@ -491,6 +495,7 @@
 				2000000000000000000002B /* InspectorView.swift */,
 				2000000000000000000002C /* SettingsView.swift */,
 				20000000000000000000039 /* DaemonPersistence.swift */,
+				20000000000000000000108 /* AccountDirectory.swift */,
 				2000000000000000000003B /* DaemonServiceRegistrar.swift */,
 				2000000000000000000003D /* DaemonPersistenceController.swift */,
 				20000000000000000000060 /* WorkspaceFiles.swift */,
@@ -578,6 +583,7 @@
 				20000000000000000000999 /* RealPreferencesGuard.swift */,
 				20000000000000000000038 /* WorkspaceWindowControllerTask6b2Tests.swift */,
 				2000000000000000000003F /* DaemonPersistenceTests.swift */,
+				20000000000000000000109 /* AccountDirectoryTests.swift */,
 				20000000000000000000041 /* DaemonPersistenceControllerTests.swift */,
 				20000000000000000000043 /* DaemonServiceRegistrarTests.swift */,
 				20000000000000000000051 /* WorkspaceShellTests.swift */,
@@ -792,6 +798,7 @@
 				1000000000000000000002A /* InspectorView.swift in Sources */,
 				1000000000000000000002B /* SettingsView.swift in Sources */,
 				10000000000000000000038 /* DaemonPersistence.swift in Sources */,
+				10000000000000000000108 /* AccountDirectory.swift in Sources */,
 				1000000000000000000003A /* DaemonServiceRegistrar.swift in Sources */,
 				1000000000000000000003C /* DaemonPersistenceController.swift in Sources */,
 				10000000000000000000060 /* WorkspaceFiles.swift in Sources */,
@@ -872,6 +879,7 @@
 				10000000000000000000999 /* RealPreferencesGuard.swift in Sources */,
 				10000000000000000000037 /* WorkspaceWindowControllerTask6b2Tests.swift in Sources */,
 				1000000000000000000003E /* DaemonPersistenceTests.swift in Sources */,
+				10000000000000000000109 /* AccountDirectoryTests.swift in Sources */,
 				10000000000000000000040 /* DaemonPersistenceControllerTests.swift in Sources */,
 				10000000000000000000042 /* DaemonServiceRegistrarTests.swift in Sources */,
 				10000000000000000000051 /* WorkspaceShellTests.swift in Sources */,

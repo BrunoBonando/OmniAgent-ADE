@@ -38,6 +38,11 @@ enum DaemonBuildChannel: String, Equatable {
 /// an explicit override always wins over either channel's default.
 struct DaemonPaths: Equatable {
     let channel: DaemonBuildChannel
+    /// `dataDir` is the data **root** — where `current-account` and
+    /// `accounts/` live, and what the LaunchAgent plist hands the daemon as
+    /// `OMNIAGENT_ADE_DATA_DIR`. The directory user data actually lives in
+    /// is `AccountDirectory.dataDir(root:)`; the daemon resolves it the same
+    /// way at startup.
     let dataDir: URL
     let socketURL: URL
     let launchAgentLabel: String
