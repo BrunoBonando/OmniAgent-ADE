@@ -11,6 +11,10 @@ set -eu
 #   notarize    submit to Apple, wait, staple
 #   verify      bundle structure + Gatekeeper assessment  <- the release gate
 #   verify-smoke  the packaged PTY smoke check, KNOWN BROKEN, opt-in only
+#   preflight   store-readiness gate: signature/entitlement/bundle-metadata
+#               checks App Review and notarization look at. Add --mas to
+#               also fail the MAS-only gaps (app sandbox, sandboxed socket
+#               path, MAS build lane), which otherwise only report.
 #
 # Why `verify-smoke` is a separate subcommand and not part of `verify`
 # (final whole-branch review, Important #3): the smoke check shells out to
@@ -29,9 +33,10 @@ set -eu
 # meantime. Run `verify-smoke` explicitly if you are working on the harness.
 action=${1:-}
 case "$action" in
-  sign|notarize|verify|verify-smoke) ;;
+  sign|notarize|verify|verify-smoke|preflight) ;;
   *)
-    echo "usage: $0 sign|verify|verify-smoke <path-to-OmniAgent.app>" >&2
+    echo "usage: $0 sign|verify|verify-smoke|preflight <path-to-OmniAgent.app>" >&2
+    echo "       $0 preflight <path-to-OmniAgent.app> [--mas]" >&2
     echo "       $0 notarize <path-to-OmniAgent.app|path-to.dmg>" >&2
     echo "  (verify-smoke is a known-broken harness check, opt-in only -- see this script's comments)" >&2
     exit 2
@@ -259,6 +264,55 @@ verify() {
   return $status
 }
 
+# --- preflight: what App Review / notarisation looks at before anything runs ---
+# Developer-ID facts fail the run. The "MAS gate" section only reports (the
+# sandbox is absent by decision -- docs/appstore-rejection-risks.html) unless
+# `--mas` is given, which turns those lines into failures too.
+#
+# Called via `preflight "$@"` from the dispatch case below (not bare, unlike
+# sign/notarize/verify) specifically so $3 here is the script's own third
+# argument -- a bare call clears a function's positional parameters even
+# though $app etc. remain visible as ordinary globals.
+preflight() {
+  want_mas=0; [ "${3:-}" = "--mas" ] && want_mas=1
+  status=0
+  fail() { echo "$0 preflight: FAIL $*" >&2; status=1; }
+  mas()  { if [ "$want_mas" = 1 ]; then fail "[MAS] $*"; else echo "$0 preflight: MAS-GATE $*" >&2; fi; }
+  info="$app/Contents/Info.plist"
+
+  echo "$0 preflight: signatures ------------------------------------------" >&2
+  app_team=$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+  daemon_team=$(codesign -dv "$daemon" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+  [ -n "$app_team" ] || fail "app is not signed with a Team ID"
+  [ "$app_team" = "$daemon_team" ] || fail "daemon Team ID ($daemon_team) != app Team ID ($app_team)"
+  codesign -dv "$daemon" 2>&1 | grep -q 'flags=.*runtime' || fail "daemon lacks hardened runtime"
+
+  echo "$0 preflight: entitlements ----------------------------------------" >&2
+  ents=$(codesign -d --entitlements :- "$app" 2>/dev/null || true)
+  echo "$ents" | grep -q 'get-task-allow' && fail "com.apple.security.get-task-allow present (debug entitlement)"
+  echo "$ents" | grep -q 'com.apple.security.app-sandbox' || mas "App Sandbox entitlement absent"
+
+  echo "$0 preflight: bundle metadata -------------------------------------" >&2
+  [ -f "$app/Contents/Resources/PrivacyInfo.xcprivacy" ] || fail "PrivacyInfo.xcprivacy missing"
+  for key in LSApplicationCategoryType NSHumanReadableCopyright ITSAppUsesNonExemptEncryption \
+             NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription NSDownloadsFolderUsageDescription; do
+    /usr/libexec/PlistBuddy -c "Print :$key" "$info" >/dev/null 2>&1 || fail "Info.plist lacks $key"
+  done
+  plist=$(find "$app/Contents/Library/LaunchAgents" -name '*.plist' | head -1)
+  [ -n "$plist" ] || fail "no LaunchAgent plist"
+  [ -n "$plist" ] && { /usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" | grep -q '^Contents/MacOS/' \
+    || fail "LaunchAgent Program is not bundle-relative"; }
+  [ -f "$app/Contents/Resources/Legal/privacy-policy.html" ] || fail "bundled privacy policy missing (Task B1)"
+  [ -f "$app/Contents/Resources/Legal/third-party-notices.html" ] || fail "bundled third-party notices missing (Task B1)"
+
+  echo "$0 preflight: MAS gate (informational unless --mas) -----------------" >&2
+  mas "socket path ~/.omniagent-ade is outside any sandbox container (D1)"
+  mas "no Mac App Store build configuration / archive lane (D1)"
+
+  [ "$status" = 0 ] && echo "$0 preflight: OK" >&2
+  return $status
+}
+
 # --- verify-smoke: the packaged PTY smoke check, opt-in and known broken ---
 
 verify_smoke() {
@@ -290,5 +344,6 @@ EOF
 
 case "$action" in
   verify-smoke) verify_smoke ;;
+  preflight) preflight "$@" ;;
   *) $action ;;
 esac
