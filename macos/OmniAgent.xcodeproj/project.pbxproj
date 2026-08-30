@@ -114,6 +114,11 @@
 		10000000000000000000025 /* OnboardingState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000026 /* OnboardingState.swift */; };
 		10000000000000000000026 /* FirstRunView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000027 /* FirstRunView.swift */; };
 		10000000000000000000027 /* UsageAnalytics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000028 /* UsageAnalytics.swift */; };
+		3C79DAE2B6784E89B68B9852 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 72D867AAA65744B6AC1DEF5F /* PrivacyInfo.xcprivacy */; };
+		F14F7EAC88714C078186E91F /* Legal in Resources */ = {isa = PBXBuildFile; fileRef = 77CF5C0FD5C94551B0417D0C /* Legal */; };
+		C3024C087D6F4DADA9845AB1 /* WebInspectorPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81B5B5348C434CA695944307 /* WebInspectorPolicy.swift */; };
+		90B4703DEB494EDAB13B6C95 /* BundleComplianceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A1747AC3E564C5695E2A6CA /* BundleComplianceTests.swift */; };
+		3EBCCF1D18484408B3FD3D10 /* WebInspectorPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DB576BDDDFE4FE891EC5B0E /* WebInspectorPolicyTests.swift */; };
 		10000000000000000000028 /* UsageAnalyticsRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000029 /* UsageAnalyticsRecorder.swift */; };
 		10000000000000000000029 /* UsageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000002A /* UsageView.swift */; };
 		1000000000000000000002A /* InspectorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000002B /* InspectorView.swift */; };
@@ -300,6 +305,11 @@
 		20000000000000000000026 /* OnboardingState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingState.swift; sourceTree = "<group>"; };
 		20000000000000000000027 /* FirstRunView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstRunView.swift; sourceTree = "<group>"; };
 		20000000000000000000028 /* UsageAnalytics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageAnalytics.swift; sourceTree = "<group>"; };
+		72D867AAA65744B6AC1DEF5F /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		77CF5C0FD5C94551B0417D0C /* Legal */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Legal; path = Resources/Legal; sourceTree = "<group>"; };
+		81B5B5348C434CA695944307 /* WebInspectorPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebInspectorPolicy.swift; sourceTree = "<group>"; };
+		9A1747AC3E564C5695E2A6CA /* BundleComplianceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleComplianceTests.swift; sourceTree = "<group>"; };
+		7DB576BDDDFE4FE891EC5B0E /* WebInspectorPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebInspectorPolicyTests.swift; sourceTree = "<group>"; };
 		20000000000000000000029 /* UsageAnalyticsRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageAnalyticsRecorder.swift; sourceTree = "<group>"; };
 		2000000000000000000002A /* UsageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageView.swift; sourceTree = "<group>"; };
 		2000000000000000000002B /* InspectorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorView.swift; sourceTree = "<group>"; };
@@ -446,6 +456,9 @@
 				20000000000000000000026 /* OnboardingState.swift */,
 				20000000000000000000027 /* FirstRunView.swift */,
 				20000000000000000000028 /* UsageAnalytics.swift */,
+				72D867AAA65744B6AC1DEF5F /* PrivacyInfo.xcprivacy */,
+				77CF5C0FD5C94551B0417D0C /* Legal */,
+				81B5B5348C434CA695944307 /* WebInspectorPolicy.swift */,
 				20000000000000000000029 /* UsageAnalyticsRecorder.swift */,
 				2000000000000000000002A /* UsageView.swift */,
 				2000000000000000000002B /* InspectorView.swift */,
@@ -502,6 +515,8 @@
 				20000000000000000000001A /* SessionNotifierTests.swift */,
 				20000000000000000000001D /* SessionOutlineTests.swift */,
 				200000000000000000000021 /* CommandPaletteTests.swift */,
+				9A1747AC3E564C5695E2A6CA /* BundleComplianceTests.swift */,
+				7DB576BDDDFE4FE891EC5B0E /* WebInspectorPolicyTests.swift */,
 				3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */,
 				4C7A2E5FB9D14038A220260C /* WorkspacesHeaderMenusTests.swift */,
 				4C7A2E5FB9D14038A2202612 /* WorkspaceCustomizationsTests.swift */,
@@ -645,6 +660,8 @@
 			files = (
 				10000000000000000000049 /* Assets.xcassets in Resources */,
 				4448686B93364960B97876AB /* monaco in Resources */,
+				3C79DAE2B6784E89B68B9852 /* PrivacyInfo.xcprivacy in Resources */,
+				F14F7EAC88714C078186E91F /* Legal in Resources */,
 				464E94D28332A4BAF9719F5B /* home-suggestions.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -731,6 +748,7 @@
 				10000000000000000000025 /* OnboardingState.swift in Sources */,
 				10000000000000000000026 /* FirstRunView.swift in Sources */,
 				10000000000000000000027 /* UsageAnalytics.swift in Sources */,
+				C3024C087D6F4DADA9845AB1 /* WebInspectorPolicy.swift in Sources */,
 				10000000000000000000028 /* UsageAnalyticsRecorder.swift in Sources */,
 				10000000000000000000029 /* UsageView.swift in Sources */,
 				1000000000000000000002A /* InspectorView.swift in Sources */,
@@ -780,6 +798,8 @@
 				100000000000000000000019 /* SessionNotifierTests.swift in Sources */,
 				10000000000000000000001C /* SessionOutlineTests.swift in Sources */,
 				100000000000000000000020 /* CommandPaletteTests.swift in Sources */,
+				90B4703DEB494EDAB13B6C95 /* BundleComplianceTests.swift in Sources */,
+				3EBCCF1D18484408B3FD3D10 /* WebInspectorPolicyTests.swift in Sources */,
 				3A7E4B21D95C4F6E8A102028 /* NavigationSidebarTests.swift in Sources */,
 				4C7A2E5FB9D14038A220260D /* WorkspacesHeaderMenusTests.swift in Sources */,
 				4C7A2E5FB9D14038A2202613 /* WorkspaceCustomizationsTests.swift in Sources */,
