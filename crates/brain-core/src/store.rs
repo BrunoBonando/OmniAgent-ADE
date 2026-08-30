@@ -319,12 +319,23 @@ pub fn project_label_key(project_id: &str) -> String {
     format!("project_label:{project_id}")
 }
 
+/// The pointer file at the data root naming the signed-in account —
+/// written and removed by the native app (`AccountDirectory.swift`), read
+/// once at startup by every process that opens the store through
+/// [`Store::default_data_dir`]. Absent or blank means signed out.
+pub const CURRENT_ACCOUNT_FILE: &str = "current-account";
+/// Where the per-account data directories live under the root.
+pub const ACCOUNTS_DIR: &str = "accounts";
+
 impl Store {
-    /// Resolves the local-first data directory: honors the `OMNIAGENT_ADE_DATA_DIR`
-    /// env var override (used by tests and by `OMNIAGENT_ADE_DATA_DIR=... brain ingest`
-    /// manual runs) and otherwise falls back to
-    /// `~/Library/Application Support/OmniAgent-ADE` per the Global Constraints.
-    pub fn default_data_dir() -> PathBuf {
+    /// The data **root**: honors the `OMNIAGENT_ADE_DATA_DIR` env var
+    /// override (used by tests and by `OMNIAGENT_ADE_DATA_DIR=... brain
+    /// ingest` manual runs) and otherwise falls back to
+    /// `~/Library/Application Support/OmniAgent-ADE` per the Global
+    /// Constraints. The root holds [`CURRENT_ACCOUNT_FILE`] and the
+    /// [`ACCOUNTS_DIR`]; user data lives in whichever directory
+    /// [`Self::default_data_dir`] resolves to.
+    pub fn data_root() -> PathBuf {
         if let Ok(dir) = std::env::var("OMNIAGENT_ADE_DATA_DIR") {
             if !dir.trim().is_empty() {
                 return PathBuf::from(dir);
@@ -332,6 +343,53 @@ impl Store {
         }
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         PathBuf::from(home).join("Library/Application Support/OmniAgent-ADE")
+    }
+
+    /// `root/current-account`.
+    pub fn current_account_file(root: &Path) -> PathBuf {
+        root.join(CURRENT_ACCOUNT_FILE)
+    }
+
+    /// The account's directory name: the first 16 hex characters of the
+    /// SHA-256 of the lower-cased, trimmed email. Stable, filesystem-safe,
+    /// and no PII in the path. `AccountDirectory.accountID(forEmail:)` is
+    /// the Swift twin and both pin the same test vector.
+    pub fn account_dir_id(email: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let normalized = email.trim().to_lowercase();
+        let digest = Sha256::digest(normalized.as_bytes());
+        digest[..8].iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// The id the pointer names, or `None` when signed out (no file, or a
+    /// blank one). Anything but hex digits is treated as absent rather than
+    /// joined onto the root: the file is user-writable, and `../` in it must
+    /// never move the store out of the root.
+    pub fn read_current_account(root: &Path) -> Option<String> {
+        let raw = std::fs::read_to_string(Self::current_account_file(root)).ok()?;
+        let id = raw.trim();
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(id.to_string())
+    }
+
+    /// `root/accounts/<id>` while the pointer names an account, else the
+    /// root itself — the one indirection every crate and the app share.
+    pub fn resolve_data_dir(root: &Path) -> PathBuf {
+        match Self::read_current_account(root) {
+            Some(id) => root.join(ACCOUNTS_DIR).join(id),
+            None => root.to_path_buf(),
+        }
+    }
+
+    /// Resolves the local-first data directory: [`Self::data_root`] with the
+    /// account pointer applied. Existing callers (the daemon, `brain`,
+    /// `omniagent-mcp`) keep calling this and gain account scoping for
+    /// free; tests that set `OMNIAGENT_ADE_DATA_DIR` to a temp dir with no
+    /// pointer see exactly what they saw before.
+    pub fn default_data_dir() -> PathBuf {
+        Self::resolve_data_dir(&Self::data_root())
     }
 
     /// Opens (creating if absent) the brain database under `data_dir/brain.db`.
@@ -1144,6 +1202,117 @@ mod dedup_race_tests {
                 matching, 1,
                 "round {round}: expected exactly 1 pending job for {kind}/{payload}, found {matching}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod account_scope_tests {
+    // The per-account data directory (docs/superpowers/specs/
+    // 2026-08-30-account-scoped-workspace-design.md, "Approach A"): one
+    // pointer file at the root selects `root/accounts/<id>`.
+    use super::*;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    /// `default_data_dir` reads the process-global `OMNIAGENT_ADE_DATA_DIR`,
+    /// and `cargo test` runs test functions on parallel threads — every test
+    /// here that touches the env var holds this for its whole body. The
+    /// pure-function tests below take an explicit root and need no lock.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env_root<T>(root: &Path, body: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var("OMNIAGENT_ADE_DATA_DIR", root);
+        let out = body();
+        std::env::remove_var("OMNIAGENT_ADE_DATA_DIR");
+        out
+    }
+
+    #[test]
+    fn account_dir_id_is_the_first_16_hex_of_sha256_of_the_normalized_email() {
+        // The same vector is pinned in AccountDirectoryTests.swift — the two
+        // sides must agree byte for byte or the app and the daemon would
+        // pick different directories for one account.
+        assert_eq!(Store::account_dir_id("Bruno@Bonando.com "), "fc44b18d5588b1d6");
+        assert_eq!(Store::account_dir_id("bruno@bonando.com"), "fc44b18d5588b1d6");
+        assert_eq!(Store::account_dir_id("bruno@bonando.com").len(), 16);
+        assert_ne!(Store::account_dir_id("other@bonando.com"), "fc44b18d5588b1d6");
+    }
+
+    #[test]
+    fn current_account_file_lives_at_the_root() {
+        assert_eq!(
+            Store::current_account_file(Path::new("/x/root")),
+            PathBuf::from("/x/root/current-account")
+        );
+    }
+
+    #[test]
+    fn read_current_account_trims_and_rejects_blank_or_unsafe_ids() {
+        let dir = tempdir().unwrap();
+        assert_eq!(Store::read_current_account(dir.path()), None, "no file");
+
+        std::fs::write(Store::current_account_file(dir.path()), "  fc44b18d5588b1d6\n").unwrap();
+        assert_eq!(Store::read_current_account(dir.path()).as_deref(), Some("fc44b18d5588b1d6"));
+
+        std::fs::write(Store::current_account_file(dir.path()), "   \n").unwrap();
+        assert_eq!(Store::read_current_account(dir.path()), None, "blank means signed out");
+
+        std::fs::write(Store::current_account_file(dir.path()), "../../etc").unwrap();
+        assert_eq!(
+            Store::read_current_account(dir.path()),
+            None,
+            "only hex ids are ever joined onto the root"
+        );
+    }
+
+    #[test]
+    fn resolve_data_dir_follows_the_pointer_and_falls_back_to_the_root() {
+        let dir = tempdir().unwrap();
+        assert_eq!(Store::resolve_data_dir(dir.path()), dir.path());
+
+        std::fs::write(Store::current_account_file(dir.path()), "fc44b18d5588b1d6").unwrap();
+        assert_eq!(
+            Store::resolve_data_dir(dir.path()),
+            dir.path().join("accounts").join("fc44b18d5588b1d6")
+        );
+    }
+
+    #[test]
+    fn default_data_dir_honors_the_env_root_with_and_without_a_pointer() {
+        let dir = tempdir().unwrap();
+        with_env_root(dir.path(), || {
+            assert_eq!(Store::data_root(), dir.path());
+            assert_eq!(Store::default_data_dir(), dir.path(), "no pointer: the root, as before");
+
+            std::fs::write(Store::current_account_file(dir.path()), "fc44b18d5588b1d6\n").unwrap();
+            assert_eq!(
+                Store::default_data_dir(),
+                dir.path().join("accounts").join("fc44b18d5588b1d6")
+            );
+            assert_eq!(Store::data_root(), dir.path(), "the env override is the root, never the account dir");
+
+            std::fs::write(Store::current_account_file(dir.path()), "\n").unwrap();
+            assert_eq!(Store::default_data_dir(), dir.path(), "a blank pointer is signed out");
+        });
+    }
+
+    #[test]
+    fn default_data_dir_without_the_env_override_is_under_home() {
+        let dir = tempdir().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::remove_var("OMNIAGENT_ADE_DATA_DIR");
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir.path());
+
+        let root = Store::data_root();
+        assert_eq!(root, dir.path().join("Library/Application Support/OmniAgent-ADE"));
+        assert_eq!(Store::default_data_dir(), root);
+
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
         }
     }
 }
