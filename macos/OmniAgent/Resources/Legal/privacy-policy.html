@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniAgent — Privacy Policy</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --ink: #1c1c1e;
+    --dim: #5c5c62;
+    --rule: #dcdce1;
+    --paper: #ffffff;
+    --tint: #f4f4f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #ececf0;
+      --dim: #a0a0a8;
+      --rule: #3a3a40;
+      --paper: #1a1a1c;
+      --tint: #242428;
+    }
+  }
+  body {
+    margin: 0;
+    padding: 3rem 1.5rem 5rem;
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  }
+  main { max-width: 42rem; margin: 0 auto; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 .35rem; letter-spacing: -0.02em; }
+  h2 { font-size: 1.15rem; margin: 2.4rem 0 .6rem; letter-spacing: -0.01em; }
+  .updated { color: var(--dim); font-size: .9rem; margin: 0 0 2rem; }
+  .lede { font-size: 1.05rem; }
+  ul { padding-left: 1.15rem; }
+  li { margin: .35rem 0; }
+  code {
+    background: var(--tint);
+    border-radius: 4px;
+    padding: .1em .35em;
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow-wrap: anywhere;
+  }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 2.5rem 0 1.5rem; }
+  footer { color: var(--dim); font-size: .9rem; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>OmniAgent Privacy Policy</h1>
+<p class="updated">Last updated 30 August 2026</p>
+
+<p class="lede">OmniAgent is a developer tool that runs on your Mac. Your code, your
+conversations with coding agents and the index built from them stay on your Mac. The
+only thing the app sends anywhere is your account profile, and only if you choose to
+sign in.</p>
+
+<h2>What stays on this Mac</h2>
+<p>All of the following is written to
+<code>~/Library/Application Support/OmniAgent-ADE</code> and is never transmitted by
+OmniAgent:</p>
+<ul>
+  <li><strong>Your project files.</strong> OmniAgent reads the folders you open. It
+      does not copy them anywhere.</li>
+  <li><strong>The brain index</strong> (<code>brain.db</code>) — a local SQLite
+      database of file paths, symbols and text extracted from the folders you open, so
+      that search works. It is rebuildable from your files at any time.</li>
+  <li><strong>Markdown memory</strong> (<code>brain/</code>) — the durable notes the
+      app keeps per project. Plain files you can read, edit or delete yourself.</li>
+  <li><strong>Terminal transcripts</strong> (<code>transcripts/</code>) — what your
+      agent sessions printed, kept so a session can be reviewed after it ends.</li>
+  <li><strong>Usage analytics</strong> — counts and durations the app derives from its
+      own activity (sessions started, time active per hour) for the readout in
+      Settings. Computed on this Mac, stored in <code>brain.db</code>, sent nowhere.</li>
+</ul>
+
+<p>Secret redaction runs before anything is written to transcripts or memory: text
+matching common credential shapes is replaced with <code>[redacted]</code>. It covers
+<code>api_key</code>/<code>token</code>/<code>secret</code>/<code>password</code>
+assignments, HTTP <code>Bearer</code> values, AWS access key ids
+(<code>AKIA…</code>) and <code>sk-</code>-prefixed API keys. That is a safety net, not
+a guarantee — a secret in a shape it does not recognise will be written as it appeared.
+Treat this folder as you would treat your shell history.</p>
+
+<h2>What the OmniAgent account sends</h2>
+<p>Signing in is optional. If you do sign in, the app talks to the OmniAgent API at
+<code>api.omni-agent.ai</code> and the following is involved:</p>
+<ul>
+  <li>Your <strong>email address, name and profile picture URL</strong>, as supplied by
+      the sign-in provider you chose, are held on your OmniAgent account and returned to
+      the app so it can show who is signed in.</li>
+  <li>A <strong>refresh cookie</strong>, set by the server and stored by the system
+      cookie store, so you stay signed in across restarts. A short-lived access token is
+      held in memory only.</li>
+  <li>Your <strong>GitHub handle</strong>, if you connect GitHub in Settings ›
+      Accounts.</li>
+</ul>
+<p>Nothing else leaves the app: no source code, no terminal output, no transcripts, no
+memory, no search queries, no analytics. If you choose <em>Continue without signing
+in</em>, the app makes no account requests at all.</p>
+
+<h2>Third-party tools you run</h2>
+<p>OmniAgent starts coding agents that you install yourself — Claude Code, Codex,
+GitHub Copilot, AntiGravity and any shell command you type. The moment you start one,
+that tool talks to its own provider over its own connection, under that provider's
+terms and privacy policy, using your own credentials for it. Whatever you send it is
+between you and that provider. OmniAgent only launches the process and shows you its
+terminal; it does not proxy, inspect or forward the traffic.</p>
+
+<h2>Browser panes</h2>
+<p>A browser pane loads the URLs you ask it to and behaves like a browser: cookies and
+site data belong to the sites you visit, and files you download land in
+<code>~/Downloads</code>. OmniAgent does not track your browsing or send it anywhere.</p>
+
+<h2>Your choices</h2>
+<ul>
+  <li><strong>Do not sign in.</strong> Choose <em>Continue without signing in</em> at
+      launch and the app never contacts the OmniAgent API.</li>
+  <li><strong>Log out.</strong> Settings › Accounts. This clears the local session and
+      revokes the server-side one.</li>
+  <li><strong>Delete your account.</strong> Settings › Accounts. This permanently
+      removes your account and its data from the OmniAgent API.</li>
+  <li><strong>Delete the local data.</strong> Removing
+      <code>~/Library/Application Support/OmniAgent-ADE</code> deletes the index,
+      memory and transcripts. The index rebuilds itself from your files; nothing there
+      is needed to run the app.</li>
+  <li><strong>Stop the background helper.</strong> The terminal daemon that keeps your
+      sessions alive between launches is registered as a login item, and can be turned
+      off in System Settings › General › Login Items &amp; Extensions.</li>
+</ul>
+
+<h2>Children</h2>
+<p>OmniAgent is a developer tool and is not directed at children under 13.</p>
+
+<h2>Changes</h2>
+<p>If this policy changes, the updated version ships with the app release it applies to
+and is dated at the top of this page.</p>
+
+<h2>Contact</h2>
+<p>Questions, or a request about your account data: <a
+href="mailto:bruno@bonando.com">bruno@bonando.com</a>.</p>
+
+<hr>
+<footer>© 2026 Bruno Bonando. All rights reserved.</footer>
+
+</main>
+</body>
+</html>

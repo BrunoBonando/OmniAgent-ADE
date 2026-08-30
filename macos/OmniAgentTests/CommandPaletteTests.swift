@@ -29,6 +29,7 @@ final class CommandPaletteTests: XCTestCase {
                 "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
                 "settings:accounts:signin", "settings:accounts:github:connect",
+                "help:privacy-policy", "help:third-party-notices",
             ]
         )
     }
@@ -305,6 +306,19 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(rows.map(\.symbol), SettingsSection.allCases.map(\.symbol))
         XCTAssertTrue(rows.allSatisfy { $0.subtitle == "Settings" && $0.keywords == "settings" })
         XCTAssertEqual(rows.first?.action, .showSettingsSection(.general))
+    }
+
+    /// The two Help pages are spotlight rows too (standing rule: everything
+    /// navigable is findable), each under "Help" and reachable by typing
+    /// "legal", "privacy" or "licence".
+    func testTheLegalPagesAreSpotlightRows() {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil
+        )
+        let rows = commands.filter { if case .openLegal = $0.action { return true } else { return false } }
+        XCTAssertEqual(rows.map(\.title), ["Privacy Policy", "Third-Party Notices"])
+        XCTAssertTrue(rows.allSatisfy { $0.subtitle == "Help" && $0.keywords?.contains("legal") == true })
+        XCTAssertEqual(rows.first?.action, .openLegal(.privacyPolicy))
     }
 
     func testTheSidebarsThreeDestinationsAreRowsWithTheirOwnIcons() {

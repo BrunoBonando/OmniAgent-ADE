@@ -352,6 +352,24 @@ enum ApplicationMenus {
         window.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
         window.addItem(item("Zoom", #selector(NSWindow.performZoom(_:))))
         NSApp.windowsMenu = window
+
+        // The bundled Help pages. `NSApp.helpMenu` names it as *the* Help
+        // menu — that is what puts the system's own menu-search field in it
+        // — rather than leaving AppKit to find one by its localized title,
+        // which these hand-built English menus would not match.
+        let help = NSMenu(title: "Help")
+        main.addItem(withSubmenu: help)
+        for doc in LegalDocument.allCases {
+            help.addItem(
+                item(
+                    doc.title,
+                    doc == .privacyPolicy
+                        ? Selector(("showPrivacyPolicy:"))
+                        : Selector(("showThirdPartyNotices:"))
+                )
+            )
+        }
+        NSApp.helpMenu = help
     }
 
     private static func arrowKey(_ functionKey: Int) -> String {

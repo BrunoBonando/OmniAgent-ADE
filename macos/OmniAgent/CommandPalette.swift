@@ -1,5 +1,20 @@
 import Foundation
 
+/// The two pages under Help, bundled under `Resources/Legal` and opened in
+/// the default browser — a reviewer's first question, and a licence
+/// obligation: SwiftTerm, Monaco and lobe-icons are MIT, so attribution is
+/// not optional.
+enum LegalDocument: String, CaseIterable {
+    case privacyPolicy = "privacy-policy"
+    case thirdPartyNotices = "third-party-notices"
+
+    var title: String { self == .privacyPolicy ? "Privacy Policy" : "Third-Party Notices" }
+
+    /// `nil` only if the page failed to make it into the bundle —
+    /// `BundleComplianceTests` is what keeps that from shipping.
+    var url: URL? { Bundle.main.url(forResource: rawValue, withExtension: "html", subdirectory: "Legal") }
+}
+
 /// What running a palette row does. A closed set rather than a closure, so
 /// the list is comparable in a test and the window controller stays the only
 /// thing that knows how to perform any of it.
@@ -40,6 +55,9 @@ enum PaletteAction: Equatable {
     /// project, the closest real "go look at this" action available without
     /// a map/graph view.
     case revealProjectContext(project: String)
+    /// A Help page — the privacy policy or the third-party notices — opened
+    /// in the default browser.
+    case openLegal(LegalDocument)
     /// An informational row with nothing to run ("No matches…") — a
     /// no-op rather than reusing an unrelated action for "does nothing".
     case noop
@@ -532,6 +550,22 @@ struct CommandPaletteModel: Equatable {
                     symbol: "link.badge.plus"
                 )
         )
+        // The Help menu's two pages. Everything navigable is findable, and a
+        // privacy policy nobody can locate is the same as not having one.
+        for doc in LegalDocument.allCases {
+            commands.append(
+                PaletteCommand(
+                    id: "help:\(doc.rawValue)",
+                    title: doc.title,
+                    detail: nil,
+                    action: .openLegal(doc),
+                    keywords: "help legal privacy licence license trademark",
+                    section: .places,
+                    subtitle: "Help",
+                    symbol: doc == .privacyPolicy ? "hand.raised" : "doc.text"
+                )
+            )
+        }
         // In section order whatever the order above emitted them in, so a
         // heading is a walk over consecutive rows — and Files really is last.
         return PaletteSection.allCases.flatMap { section in commands.filter { $0.section == section } }
