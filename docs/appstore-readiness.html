@@ -1,0 +1,595 @@
+<title>OmniAgent Store Preflight</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #f4f5f2;
+    --panel: #ffffff;
+    --panel-2: #eceeea;
+    --line: #d7dbd6;
+    --text: #1b2027;
+    --muted: #5c6672;
+    --faint: #8a939e;
+    --accent: #2f5d8a;
+    --accent-ink: #ffffff;
+    --pass: #2a7f56;
+    --pass-bg: #e2f2e9;
+    --fix: #a86a12;
+    --fix-bg: #fbeed6;
+    --blocked: #b3374a;
+    --blocked-bg: #f9e1e5;
+    --external: #5f4fa3;
+    --external-bg: #e9e4f7;
+    --stale: #6b7480;
+    --stale-bg: #e6e9ec;
+    --code-bg: #eef0ec;
+    --shadow: 0 1px 2px rgba(20, 30, 40, .06), 0 8px 24px rgba(20, 30, 40, .05);
+    --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1317; --panel: #161b21; --panel-2: #1d232a; --line: #2a323b;
+      --text: #e6eaee; --muted: #9aa4ae; --faint: #6f7883;
+      --accent: #7fb0e0; --accent-ink: #0f1317;
+      --pass: #6fcf97; --pass-bg: #163526;
+      --fix: #f0b85a; --fix-bg: #3a2a10;
+      --blocked: #ef6f82; --blocked-bg: #3e1a22;
+      --external: #b7a6f2; --external-bg: #2a2440;
+      --stale: #9aa4ae; --stale-bg: #262c33;
+      --code-bg: #0c1014;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1317; --panel: #161b21; --panel-2: #1d232a; --line: #2a323b;
+    --text: #e6eaee; --muted: #9aa4ae; --faint: #6f7883;
+    --accent: #7fb0e0; --accent-ink: #0f1317;
+    --pass: #6fcf97; --pass-bg: #163526;
+    --fix: #f0b85a; --fix-bg: #3a2a10;
+    --blocked: #ef6f82; --blocked-bg: #3e1a22;
+    --external: #b7a6f2; --external-bg: #2a2440;
+    --stale: #9aa4ae; --stale-bg: #262c33;
+    --code-bg: #0c1014;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 15px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  code, .mono { font-family: var(--mono); font-size: .86em; }
+  code { background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .page { max-width: 1240px; margin: 0 auto; padding: 32px 24px 64px; }
+  header.top { display: grid; gap: 8px; margin-bottom: 24px; }
+  .eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  h1 { margin: 0; font-size: clamp(28px, 4vw, 40px); line-height: 1.1; letter-spacing: -.02em; text-wrap: balance; }
+  .lede { margin: 0; max-width: 68ch; color: var(--muted); }
+  .lede strong { color: var(--text); font-weight: 600; }
+
+  .grid { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 24px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } .rail { position: static !important; } }
+
+  .rail { position: sticky; top: 16px; display: grid; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
+  .card > .hd { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .card > .hd h2 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .card > .bd { padding: 14px; }
+
+  .verdict { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+  .verdict .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--blocked); box-shadow: 0 0 0 4px var(--blocked-bg); }
+  .bar { display: flex; height: 10px; border-radius: 6px; overflow: hidden; margin: 12px 0 8px; background: var(--panel-2); }
+  .bar span { display: block; height: 100%; }
+  .legend { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; font-size: 13px; }
+  .legend button { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: none; border: 0; padding: 4px 6px; border-radius: 6px; color: var(--text); text-align: left; }
+  .legend button:hover, .legend button[aria-pressed="true"] { background: var(--panel-2); }
+  .legend b { font-variant-numeric: tabular-nums; }
+  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: 1px; }
+
+  .filters { display: grid; gap: 8px; }
+  .filters input, .filters select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-2); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .btn { padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-2); font-size: 13px; }
+  .btn:hover { border-color: var(--accent); }
+
+  .ledger { display: grid; gap: 2px; }
+  .ledger label { display: grid; grid-template-columns: 18px 44px minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 6px 6px; border-radius: 6px; font-size: 13px; }
+  .ledger label:hover { background: var(--panel-2); }
+  .ledger input { margin: 0; accent-color: var(--accent); }
+  .ledger .tid { font-family: var(--mono); font-size: 12px; color: var(--accent); font-weight: 500; }
+  .ledger .eff { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .ledger input:checked ~ .tt { text-decoration: line-through; color: var(--faint); }
+  .ledger-sum { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; }
+  .ledger-sum b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  .group { margin-bottom: 26px; }
+  .group-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 0 10px; }
+  .group-hd h2 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+  .group-hd .count { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .check { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px; overflow: hidden; }
+  .check[hidden] { display: none; }
+  .check > summary { list-style: none; display: grid; grid-template-columns: 92px minmax(0,1fr) auto; gap: 12px; align-items: center; padding: 12px 14px; cursor: pointer; }
+  .check > summary::-webkit-details-marker { display: none; }
+  .check > summary:hover { background: var(--panel-2); }
+  .state { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 3px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .state.pass { color: var(--pass); background: var(--pass-bg); }
+  .state.fix { color: var(--fix); background: var(--fix-bg); }
+  .state.blocked { color: var(--blocked); background: var(--blocked-bg); }
+  .state.external { color: var(--external); background: var(--external-bg); }
+  .state.stale { color: var(--stale); background: var(--stale-bg); }
+  .check .t { font-weight: 600; }
+  .check .sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .meta { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .tag { font-family: var(--mono); padding: 2px 7px; border-radius: 5px; background: var(--panel-2); border: 1px solid var(--line); color: var(--text); font-size: 12px; }
+  .tag.task { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+  .chev { color: var(--faint); transition: transform .15s ease; }
+  .check[open] .chev { transform: rotate(90deg); }
+  @media (prefers-reduced-motion: reduce) { .chev { transition: none; } }
+
+  .detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 4px 14px 14px; border-top: 1px solid var(--line); background: var(--panel-2); }
+  @media (max-width: 700px) { .detail { grid-template-columns: 1fr; } .check > summary { grid-template-columns: 1fr; } }
+  .cell { padding: 12px 0 0; }
+  .cell h3 { margin: 0 0 6px; font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .cell p { margin: 0; font-size: 14px; }
+  .cell.wide { grid-column: 1 / -1; }
+  .ev { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+  .ev li { font-family: var(--mono); font-size: 12.5px; padding: 8px 10px; background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; white-space: pre; }
+  .ev li .loc { color: var(--accent); }
+  .impact { font-size: 13px; }
+  .impact.none { color: var(--pass); }
+  .impact.dev { color: var(--fix); }
+  .impact.add { color: var(--accent); }
+
+  .decisions { display: grid; gap: 8px; }
+  .decision { display: grid; grid-template-columns: 44px minmax(0,1fr) auto; gap: 12px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; align-items: start; }
+  .decision .did { font-family: var(--mono); color: var(--blocked); font-weight: 500; }
+  .decision .size { font-size: 12px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .decision p { margin: 4px 0 0; font-size: 14px; color: var(--muted); }
+  .empty { padding: 24px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; }
+  .progress { display: grid; gap: 8px; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
+  .progress .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; color: var(--muted); }
+  .progress .row b { color: var(--text); font-variant-numeric: tabular-nums; font-size: 15px; }
+  .progress .track { height: 12px; border-radius: 7px; background: var(--panel-2); overflow: hidden; }
+  .progress .fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--pass)); border-radius: 7px; transition: width .4s ease; }
+  @media (prefers-reduced-motion: reduce) { .progress .fill { transition: none; } }
+  .progress .now { font-size: 13px; color: var(--muted); }
+  .progress .now b { color: var(--accent); font-family: var(--mono); font-weight: 500; }
+  .ledger label.done .tid { color: var(--pass); }
+  .ledger label.running .tid { color: var(--fix); }
+  .ledger label.done .tt { text-decoration: line-through; color: var(--faint); }
+  footer { margin-top: 32px; font-size: 13px; color: var(--faint); }
+</style>
+
+<div class="page">
+  <header class="top">
+    <div class="eyebrow">OmniAgent · native macOS app · 2026-08-30</div>
+    <h1>Store preflight — every check, what it sees, what fixes it</h1>
+    <p class="lede">Each row is one thing App Review or notarisation looks at, verified against the <strong>native app that ships</strong> (<code>macos/</code>), not the retired Tauri bundle the original risk map cited. <strong>FIX</strong> rows close without changing how the app behaves; <strong>BLOCKED</strong> rows need a product decision because the fix <em>is</em> a behaviour change.</p>
+  </header>
+
+  <section class="progress" aria-label="Execution progress">
+    <div class="row"><span>Execution — tasks landed on <code>main</code></span><b id="progText">0 / 9 tasks · 0 / 12.9 h</b></div>
+    <div class="track" aria-hidden="true"><div class="fill" id="progFill"></div></div>
+    <div class="now" id="progNow">Not started.</div>
+  </section>
+
+  <div class="grid">
+    <aside class="rail">
+      <section class="card">
+        <div class="hd"><h2>Status</h2><span class="mono" id="stamp"></span></div>
+        <div class="bd">
+          <div class="verdict"><span class="dot"></span><span id="verdictText">Not store-ready</span></div>
+          <div class="bar" id="bar" aria-hidden="true"></div>
+          <div class="legend" id="legend"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="hd"><h2>Find</h2><button class="btn" id="reset" type="button">Reset</button></div>
+        <div class="bd filters">
+          <input id="q" type="search" placeholder="sandbox, plist, lobe-icons…" aria-label="Search checks">
+          <select id="group" aria-label="Group"><option value="all">All groups</option></select>
+          <div class="row2">
+            <button class="btn" id="expand" type="button">Expand all</button>
+            <button class="btn" id="collapse" type="button">Collapse all</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="hd"><h2>Task ledger</h2><span class="mono" id="ledgerHours"></span></div>
+        <div class="bd">
+          <div class="ledger" id="ledger"></div>
+          <div class="ledger-sum"><span>Done</span><b id="ledgerDone">0 / 0</b></div>
+        </div>
+      </section>
+    </aside>
+
+    <main>
+      <div id="groups"></div>
+      <div class="empty" id="empty" hidden>No checks match.</div>
+
+      <section class="group">
+        <div class="group-hd"><h2>Decisions — behaviour changes, not tasks</h2><span class="count">need Bruno's call</span></div>
+        <div class="decisions" id="decisions"></div>
+      </section>
+    </main>
+  </div>
+
+  <footer>Verified by reading the source on 2026-08-30 (<code>macos/</code>, <code>crates/omniagent-pty-daemon</code>, <code>macos/dist.sh</code>, <code>OmniAgent-Core/omniagent/api/routers/auth.py</code>). Product/engineering guidance, not legal advice. The ledger and progress bar are updated by the executing session as tasks land.</footer>
+</div>
+
+<script>
+const STATES = {
+  pass:     { label: "Pass",     sub: "true today" },
+  fix:      { label: "Fix",      sub: "closes without behaviour change" },
+  blocked:  { label: "Blocked",  sub: "fix is a behaviour change" },
+  external: { label: "External", sub: "outside this repo" },
+  stale:    { label: "Stale",    sub: "report cited Tauri; native passes" },
+};
+
+const EXECUTION = { updated: "2026-08-30 16:40", now: "All nine tasks landed on main (branch appstore-readiness: 18 commits, final whole-branch review + fix wave clean; 1373 tests, only the pre-existing divider failure). Installed via scripts/rebuild-app.sh. Release gate still open: Core’s DELETE /v1/auth/me must be rolled out to prod (image 1737f27 built; push + set image are a human step) before any DMG goes to users." };
+const TASKS = [
+  { id: "A0", status: "done", title: "File the plan (docs/ + My-Brain) and this page as docs/appstore-readiness.html", hours: 0.25, tier: "Easy" },
+  { id: "A1", status: "done", title: "Bundle PrivacyInfo.xcprivacy (UserDefaults CA92.1, file timestamps C617.1; email+name collected, no tracking)", hours: 0.5, tier: "Easy" },
+  { id: "A2", status: "done", title: "Info.plist: NSDownloadsFolderUsageDescription, NSHumanReadableCopyright, ITSAppUsesNonExemptEncryption=false", hours: 0.35, tier: "Easy" },
+  { id: "A3", status: "done", title: "WebInspectorPolicy: isInspectable on in Debug, opt-in in Release via defaults OMNIAGENT_WEB_INSPECTOR", hours: 0.75, tier: "Easy" },
+  { id: "A4", status: "done", title: "DaemonBinaryLocator: $PATH / env-var daemon candidates only in Debug builds", hours: 0.5, tier: "Easy" },
+  { id: "A5", status: "done", title: "dist.sh preflight: team IDs, hardened runtime, entitlements, manifest, plist keys, LaunchAgent path, legal pages; --mas flips the gate", hours: 2, tier: "Medium" },
+  { id: "B1", status: "done", title: "Help menu → bundled Privacy Policy + Third-Party Notices (MIT texts for lobe-icons, SwiftTerm, Monaco; not-affiliated disclaimer) + spotlight rows", hours: 2.5, tier: "Medium" },
+  { id: "B2", status: "done", title: "docs/appstore/review-notes.md + correct the risk map's Tauri evidence and severities", hours: 1, tier: "Easy" },
+  { id: "C1", status: "done", title: "Account deletion: Core DELETE /v1/auth/me (+ prod deploy) and Settings › Accounts “Delete account…” behind a critical ask + spotlight row", hours: 5, tier: "Complex" },
+];
+
+const DECISIONS = [
+  { id: "D1", title: "Is the Mac App Store a target at all?", size: "3–5 weeks or 0",
+    body: "Sandboxing means terminals cannot spawn the user’s shell with their environment, the daemon inherits the container, and ~/.omniagent-ade is unreachable. Options: (a) a MAS edition without terminal/daemon — brain, editor, browser, chat — as a second target with an App Group socket, a MAS archive lane and native Sign in with Apple; or (b) stay Developer ID and treat this page as hardening. Decide this first." },
+  { id: "D2", title: "Downloads through a save panel; file:// limited to workspace roots", size: "1 day",
+    body: "BrowserPaneView.swift:161-179 turns a typed / or ~ into a file URL with no scope check; :220-231 writes downloads straight to ~/Downloads. Both are user-visible behaviour." },
+  { id: "D3", title: "First-run consent before launching a third-party CLI", size: "1 day",
+    body: "A consent step before the first claude/codex/copilot/agy launch. Adds a gate in front of the core workflow — Bruno’s call." },
+  { id: "D4", title: "Replace provider logos with neutral glyphs", size: "0.5 day",
+    body: "Four lobe-icons SVGs in Assets.xcassets/Engine*.imageset carry Anthropic/OpenAI/GitHub/Google brand colours. The B1 disclaimer covers nominative use; replacement is a visual change." },
+];
+
+const CHECKS = [
+  // ── Bundle metadata ─────────────────────────────────────────────
+  { g: "Bundle metadata", state: "pass", task: "A1", effort: "landed", impact: "none",
+    t: "Privacy manifest is bundled", sub: "Contents/Resources/PrivacyInfo.xcprivacy exists and declares the required-reason APIs the app uses",
+    checks: "The bundle carries a PrivacyInfo.xcprivacy with NSPrivacyTracking=false, accessed-API reasons for UserDefaults and file timestamps, and the account data the app sends (email, name).",
+    today: "No .xcprivacy anywhere in the repo or the built product. The app does use both required-reason APIs.",
+    ev: ["<span class='loc'>find . -name '*.xcprivacy'</span> → (nothing)",
+         "<span class='loc'>AuthGateState.swift:173</span>  static func needsSignIn(_ defaults: UserDefaults = .standard)",
+         "<span class='loc'>EditorPaneView.swift:560</span>  attributesOfItem(atPath:)[.modificationDate]"],
+    fix: "Add the manifest as a resource of the OmniAgent target (same pbxproj pattern as the monaco folder) and a BundleComplianceTests case that reads it from Bundle.main." },
+  { g: "Bundle metadata", state: "pass", task: "A2", effort: "landed", impact: "none",
+    t: "Info.plist carries the store-facing keys", sub: "Downloads usage string, copyright, encryption exemption",
+    checks: "NSDownloadsFolderUsageDescription, NSHumanReadableCopyright and ITSAppUsesNonExemptEncryption=false are present in the merged Info.plist.",
+    today: "All three are absent. Documents/Desktop usage strings and the category are already set (see the next row). The browser pane writes to ~/Downloads, so macOS may prompt for Downloads with no explanation text.",
+    ev: ["<span class='loc'>macos/OmniAgent/Info.plist</span>  only CFBundleURLTypes (omniagent://)",
+         "<span class='loc'>project.pbxproj:870-873</span>  INFOPLIST_KEY_CFBundleDisplayName, LSApplicationCategoryType, NSDesktop/NSDocumentsFolderUsageDescription"],
+    fix: "Add the three keys to the on-disk Info.plist (it merges into the generated one for Debug/Release/Preview — one edit, not three). Test asserts them via Bundle.main.infoDictionary." },
+  { g: "Bundle metadata", state: "pass", task: "", effort: "", impact: "none",
+    t: "App category and folder usage descriptions", sub: "developer-tools category; Documents and Desktop strings",
+    checks: "LSApplicationCategoryType is set and the TCC folder prompts have explanatory text.",
+    today: "Set in every configuration.",
+    ev: ["<span class='loc'>project.pbxproj:871</span>  INFOPLIST_KEY_LSApplicationCategoryType = \"public.app-category.developer-tools\"",
+         "<span class='loc'>project.pbxproj:872-873</span>  \"OmniAgent opens your projects as workspaces and reads their files to build the brain index.\""],
+    fix: "Nothing. The A5 preflight keeps asserting it." },
+
+  // ── Signing & helpers ───────────────────────────────────────────
+  { g: "Signing & helpers", state: "pass", task: "A5", effort: "", impact: "none",
+    t: "App and daemon signed by the same Team ID with hardened runtime", sub: "Developer ID Application, --options runtime on both",
+    checks: "codesign -dv reports the same TeamIdentifier for OmniAgent and Contents/MacOS/omniagent-pty-daemon and flags=…(runtime) on both.",
+    today: "dist.sh signs the daemon first, then the app with the entitlements file; verify --deep --strict passes. Built product shows TeamIdentifier=86JZ74B6NT.",
+    ev: ["<span class='loc'>macos/dist.sh:147</span>  codesign --force --options runtime --timestamp --sign \"$identity\" \"$daemon\"",
+         "<span class='loc'>macos/dist.sh:150-151</span>  codesign --force --options runtime --timestamp --entitlements \"$entitlements\" --sign \"$identity\" \"$app\""],
+    fix: "Nothing to change; A5 makes the Team-ID match an explicit preflight assertion instead of an assumption." },
+  { g: "Signing & helpers", state: "pass", task: "", effort: "", impact: "none",
+    t: "No debug entitlement in the shipped signature", sub: "get-task-allow absent",
+    checks: "codesign -d --entitlements shows no com.apple.security.get-task-allow.",
+    today: "The entitlements payload is an empty <dict/>; the comment block documents get-task-allow must stay absent.",
+    ev: ["<span class='loc'>OmniAgent.entitlements:63-65</span>  &lt;plist version=\"1.0\"&gt;&lt;dict/&gt;&lt;/plist&gt;"],
+    fix: "Nothing. A5 asserts it." },
+  { g: "Signing & helpers", state: "stale", task: "B2", effort: "", impact: "none",
+    t: "Helper lives in the right place with an approved launcher", sub: "Contents/MacOS + Contents/Library/LaunchAgents + SMAppService.agent",
+    checks: "The helper executable is in Contents/MacOS, its launchd plist in Contents/Library/LaunchAgents with a bundle-relative Program, registered through SMAppService.agent (per-user login item, never .daemon).",
+    today: "All true for the native app. The risk map cited src-tauri/tauri.conf.json copying helpers into Resources — that bundle is not built or shipped.",
+    ev: ["<span class='loc'>project.pbxproj:193</span>  cp -f \"$STAGE/omniagent-pty-daemon\" \"$DEST_MACOS/omniagent-pty-daemon\"  …  cp -f \"$STAGE/$PLIST\" \"$DEST_LAUNCH_AGENTS/$PLIST\"",
+         "<span class='loc'>DaemonServiceRegistrar.swift:25</span>  service = SMAppService.agent(plistName: plistName)",
+         "<span class='loc'>embed-daemon.sh:102</span>  &lt;string&gt;Contents/MacOS/omniagent-pty-daemon&lt;/string&gt;"],
+    fix: "Re-score the row in the risk map (B2). A5 asserts the plist Program is bundle-relative." },
+  { g: "Signing & helpers", state: "pass", task: "A4", effort: "landed", impact: "none",
+    t: "Release builds only launch the bundled daemon", sub: "No $PATH or env-var binaries in the candidate list",
+    checks: "DaemonBinaryLocator.candidates never includes an OMNIAGENT_PTY_DAEMON_BIN override or a $PATH lookup outside Debug builds.",
+    today: "Candidates are: env override → Contents/MacOS → Contents/Resources → every $PATH dir. In Release the bundled copy always exists (the embed phase hard-fails otherwise), so the fallbacks are never reached — but a reviewer reading the code sees ‘exec whatever is on PATH’.",
+    ev: ["<span class='loc'>DaemonServiceRegistrar.swift:111-113</span>  if let override = environment[\"OMNIAGENT_PTY_DAEMON_BIN\"] { … }",
+         "<span class='loc'>DaemonServiceRegistrar.swift:120-125</span>  for dir in PATH … \"\\(dir)/omniagent-pty-daemon\"",
+         "<span class='loc'>project.pbxproj:193</span>  if [ ! -x \"$STAGE/omniagent-pty-daemon\" ]; then … exit 1"],
+    fix: "Add debugBuild: Bool = isDebugBuild to candidates(…) and wrap the two fallbacks in it. New DaemonPersistenceTests case pins the Release list to the two bundle paths; existing tests pass debugBuild: true." },
+  { g: "Signing & helpers", state: "pass", task: "A5", effort: "landed", impact: "none",
+    t: "A preflight gate exists", sub: "dist.sh has no entitlement / Team-ID / manifest / plist-key checks",
+    checks: "One command prints every store-facing fact about a built .app and exits non-zero when a Developer-ID fact is wrong; MAS-only facts are reported, and become failures with --mas.",
+    today: "dist.sh verify checks bundle structure (daemon executable, ≥1 plist) and Gatekeeper only. Nothing dumps effective entitlements or compares Team IDs.",
+    ev: ["<span class='loc'>macos/dist.sh:232-260</span>  verify(): find Contents/MacOS … spctl --assess --type execute",
+         "<span class='loc'>grep -rn 'entitlements :-' macos scripts</span> → (nothing)"],
+    fix: "New preflight() subcommand: Team IDs match, runtime flag on daemon, no get-task-allow, sandbox reported as MAS-GATE, PrivacyInfo present, six Info.plist keys, LaunchAgent Program bundle-relative, both Legal pages bundled. CLAUDE.md bullet + sync-instructions." },
+
+  // ── Debug surfaces ──────────────────────────────────────────────
+  { g: "Debug surfaces", state: "pass", task: "A3", effort: "landed", impact: "dev",
+    t: "Web Inspector is off in Release", sub: "Three WKWebViews set isInspectable = true unconditionally — the report counted two",
+    checks: "No shipped WKWebView is inspectable unless a developer opts in.",
+    today: "Browser pane, editor pane and the review-panel browser all enable it; there is no #if DEBUG anywhere in the target (grep count: 0).",
+    ev: ["<span class='loc'>BrowserPaneView.swift:45</span>  if #available(macOS 13.3, *) { webView.isInspectable = true }",
+         "<span class='loc'>EditorWebView.swift:63</span>  webView.isInspectable = true",
+         "<span class='loc'>ReviewPanelBrowserView.swift:326</span>  if #available(macOS 13.3, *) { web.isInspectable = true }"],
+    fix: "WebInspectorPolicy.isEnabled(defaults:debugBuild:) — true in Debug, else UserDefaults bool OMNIAGENT_WEB_INSPECTOR. Three one-line call-site edits + WebInspectorPolicyTests. Dev opt-in: defaults write digital.bruno.omniagent OMNIAGENT_WEB_INSPECTOR -bool YES." },
+
+  // ── Code execution ──────────────────────────────────────────────
+  { g: "Code execution", state: "stale", task: "B2", effort: "", impact: "none",
+    t: "The app installs no executable code", sub: "No curl | bash, npm -g, brew or pip anywhere in macos/",
+    checks: "Nothing in the shipped app downloads or runs an installer; CLIs are detected on PATH and greyed out when absent.",
+    today: "True. The only ‘curl | sh’ in macos/ is a comment. The risk map’s evidence (src-tauri/src/commands/agents.rs:57-176) is the retired Tauri app, gated by cutover.sh.",
+    ev: ["<span class='loc'>EngineLauncher.swift:610-615</span>  static func isInstalled(_ engine: Engine …) -> Bool { resolve(binaryName(for: engine)) != nil }",
+         "<span class='loc'>HomeView.swift:642-645</span>  title: installed ? engine.badgeTitle : \"\\(engine.badgeTitle) — not installed\"",
+         "<span class='loc'>src-tauri/src/commands/agents.rs:57</span>  Install::Command(\"curl -fsSL https://claude.ai/install.sh | bash\")   ← not shipped"],
+    fix: "Re-score to low in the risk map and say so in the review notes (B2)." },
+  { g: "Code execution", state: "blocked", task: "D1", effort: "", impact: "change",
+    t: "App Sandbox", sub: "The one check the whole Mac App Store gate hangs on",
+    checks: "com.apple.security.app-sandbox is present and the app works inside its container.",
+    today: "Deliberately absent (documented in the entitlements file and the migration plan). The socket, data dir and user shell all live outside any container.",
+    ev: ["<span class='loc'>OmniAgent.entitlements:8-10</span>  omits com.apple.security.app-sandbox entirely — its absence is the intentional statement",
+         "<span class='loc'>docs/plans/native-macos-migration.md:24</span>  The initial direct-download build is not App Sandbox enabled."],
+    fix: "Not fixable without changing behaviour. See D1." },
+  { g: "Code execution", state: "blocked", task: "D1", effort: "", impact: "change",
+    t: "Arbitrary command execution in PTYs", sub: "The daemon runs whatever argv the client sends, or /bin/zsh",
+    checks: "Command execution is constrained to reviewed, user-initiated workflows.",
+    today: "This is the product. The client chooses argv, cwd and env; empty argv means /bin/zsh. Socket is 0600 with a peer-UID check (good for review notes).",
+    ev: ["<span class='loc'>session.rs:1050-1056</span>  CommandBuilder::new(program) … else { CommandBuilder::new(\"/bin/zsh\") }",
+         "<span class='loc'>server.rs:115-116</span>  set_permissions(&socket_path, Permissions::from_mode(0o600))"],
+    fix: "Not fixable without changing behaviour. See D1 (MAS edition without terminals, or stay Developer ID)." },
+  { g: "Code execution", state: "blocked", task: "D1", effort: "", impact: "change",
+    t: "Daemon socket and data inside a container", sub: "~/.omniagent-ade/omniagent-pty.sock and ~/Library/Application Support/OmniAgent-ADE",
+    checks: "IPC and storage paths resolve inside the app container or an App Group.",
+    today: "Both are real-home paths. Moving them is a daemon + app + migration change; App Group paths also fight the 104-byte sun_path limit the client already guards against.",
+    ev: ["<span class='loc'>main.rs:8-16</span>  HOME/.omniagent-ade/omniagent-pty.sock",
+         "<span class='loc'>DaemonPersistence.swift:79-81</span>  ~/.omniagent-ade/omniagent-pty.sock",
+         "<span class='loc'>SessionConnection.swift:90</span>  case socketPathTooLong"],
+    fix: "Part of D1(a)." },
+  { g: "Code execution", state: "pass", task: "B2", effort: "", impact: "none",
+    t: "Login item persistence is user-controlled", sub: "SMAppService puts the switch in System Settings › Login Items",
+    checks: "The user can see and disable the background helper without the app’s help; the app explains it.",
+    today: "Settings › Daemon shows the status and deep-links to System Settings; SMAppService itself surfaces the toggle. No in-app unregister exists — that is acceptable, the OS owns the switch. KeepAlive=true with no idle exit is the only soft spot.",
+    ev: ["<span class='loc'>DaemonServiceRegistrar.swift:58-62</span>  SMAppService.openSystemSettingsLoginItems()",
+         "<span class='loc'>embed-daemon.sh:104-108</span>  RunAtLoad true · KeepAlive true"],
+    fix: "Explain it in the review notes (B2). Idle-exit would be a daemon behaviour change — out of scope." },
+
+  // ── Privacy & legal ─────────────────────────────────────────────
+  { g: "Privacy & legal", state: "pass", task: "B1", effort: "landed", impact: "add",
+    t: "A privacy policy is reachable from the app", sub: "Nothing today beyond one sentence on the sign-in screen",
+    checks: "Help › Privacy Policy opens a page that matches what the app actually stores and sends; ⌘K finds it.",
+    today: "No policy text exists anywhere. The sign-in footer says ‘Code, transcripts and the brain never leave this Mac’ — true, but not a policy. The app has no Help menu at all.",
+    ev: ["<span class='loc'>AuthGateView.swift:967-969</span>  Text(\"Your account only syncs settings and license. Code, transcripts and the brain never leave this Mac.\")",
+         "<span class='loc'>AppDelegate.swift:165-355</span>  menus: OmniAgent, File, Edit, View, Session, Panes, Desk, Window — no Help"],
+    fix: "Bundle Resources/Legal/privacy-policy.html (what stays local, what the account sends, third-party CLIs, browser panes, your choices, contact). Help menu + NSApp.helpMenu, PaletteAction.openLegal rows, opened with NSWorkspace.open — one line, no viewer." },
+  { g: "Privacy & legal", state: "external", task: "", effort: "", impact: "none",
+    t: "A hosted privacy-policy URL for App Store Connect", sub: "The SaaS sign-up already links /privacy and /terms — both 404",
+    checks: "https://www.omni-agent.ai/privacy resolves to the same text the app bundles.",
+    today: "OmniAgent-App’s Signup page links href=\"/privacy\" and href=\"/terms\"; neither route exists in OmniAgent-App or OmniAgent-Website.",
+    ev: ["<span class='loc'>OmniAgent-App/src/pages/auth/Signup.tsx:286-296</span>  href=\"/terms\" … href=\"/privacy\"",
+         "<span class='loc'>grep -rn '\"/privacy\"' OmniAgent-App/src OmniAgent-Website/src</span> → no route"],
+    fix: "Publish the B1 text on the marketing site (OmniAgent-Website repo). Filed in My-Brain by A0; not blocking." },
+  { g: "Privacy & legal", state: "pass", task: "B1", effort: "landed", impact: "add",
+    t: "Third-party licences are attributed", sub: "lobe-icons, SwiftTerm and Monaco are MIT — attribution is mandatory, not optional",
+    checks: "A Third-Party Notices page carries the MIT text and an attribution line for every bundled dependency.",
+    today: "Monaco ships its LICENSE file but nothing displays it. The four engine SVGs carry lobe-icons element IDs and are unattributed. SwiftTerm (SPM, pinned by revision) is unattributed.",
+    ev: ["<span class='loc'>Assets.xcassets/EngineCodex.imageset/codex-logo.svg</span>  id=\"lobe-icons-codex-_R_0_\"",
+         "<span class='loc'>macos/OmniAgent/Resources/monaco/LICENSE-monaco.txt</span>  (bundled, never shown)",
+         "<span class='loc'>project.pbxproj:1028-1032</span>  SwiftTerm revision 6918d74…"],
+    fix: "Resources/Legal/third-party-notices.html with the three attributions + full MIT text, linked from Help and ⌘K (B1)." },
+  { g: "Privacy & legal", state: "pass", task: "B1", effort: "landed", impact: "add",
+    t: "Trademark disclaimer for Claude, Codex, Copilot, AntiGravity", sub: "Brand names and brand-colour marks appear in menus, badges and pane titles",
+    checks: "A not-affiliated / not-endorsed statement exists in the app and in the review notes.",
+    today: "No ‘not affiliated’, ‘trademark’, ™ or ® anywhere in macos/ or docs/. Badges print ‘Claude Code’, ‘Codex’, ‘Copilot’, ‘AntiGravity’ next to their colour marks.",
+    ev: ["<span class='loc'>EngineIcon.swift:50-66</span>  case .claude: return \"Claude Code\" …",
+         "<span class='loc'>EngineIcon.swift:10-15</span>  Claude, Codex and AntiGravity are colour brand marks and must keep their own palettes."],
+    fix: "The disclaimer paragraph opens third-party-notices.html (B1). Replacing the marks themselves is D4." },
+  { g: "Privacy & legal", state: "pass", task: "B1", effort: "", impact: "none",
+    t: "Usage analytics never leave the Mac", sub: "Counts and durations in brain.db, no network path",
+    checks: "The analytics module has no URLSession/URLRequest; storage is the local SQLite settings row.",
+    today: "True. Keyed by project path; input/output byte recorders are ported but deliberately unwired.",
+    ev: ["<span class='loc'>UsageAnalytics.swift:8-12</span>  activity telemetry the app derives from its own event stream … never billing or a quota",
+         "<span class='loc'>WorkspaceWindowController.swift:4230</span>  write(UsageAnalyticsCodec.serialize(store), to: SettingsKey.usageAnalytics)",
+         "<span class='loc'>UsageAnalyticsRecorder.swift:14-18</span>  recordInput/recordOutput/recordTokens … deliberately not wired"],
+    fix: "State it plainly in the privacy policy (B1) and the App Privacy questionnaire." },
+  { g: "Privacy & legal", state: "pass", task: "B1", effort: "", impact: "none",
+    t: "Secrets are redacted before transcripts and memory are written", sub: "With known limits worth disclosing",
+    checks: "A redaction pass runs before persistence; its coverage is documented.",
+    today: "Four shapes: key/token/secret/password assignments, Bearer values, AWS AKIA…, sk-… keys. Not covered: ghp_/gho_, xox…, JWTs by shape, PEM blocks.",
+    ev: ["<span class='loc'>crates/brain-core/src/redact.rs:19-27</span>  KV_SECRET · AWS_KEY · OPENAI_ANTHROPIC_KEY",
+         "<span class='loc'>redact.rs:29-30</span>  Redacts common secret shapes before content is persisted to transcripts or memory."],
+    fix: "Name the limits in the privacy policy (B1). Widening the patterns is a separate, behaviour-neutral improvement — not in this plan." },
+  { g: "Privacy & legal", state: "pass", task: "B2", effort: "landed", impact: "none",
+    t: "Notes for App Review exist", sub: "What the app is, what the daemon is, which hosts it talks to, how to review without a CLI",
+    checks: "docs/appstore/review-notes.md holds paste-ready text: no CLI bundled or installed; SMAppService helper with 0600 socket + peer-UID check; hosts api.omni-agent.ai, appleid.apple.com, avatar CDN, user-typed URLs; ‘Continue without signing in’ as the reviewer path; a reviewer account line Bruno fills in.",
+    today: "Nothing of the kind exists in docs/.",
+    ev: ["<span class='loc'>grep -rli 'app review' docs</span> → only appstore-rejection-risks.html"],
+    fix: "Write it (B2). The reviewer credential is the one line only Bruno can supply." },
+  { g: "Privacy & legal", state: "pass", task: "B2", effort: "landed", impact: "none",
+    t: "The risk map’s evidence points at the shipped app", sub: "Four rows cite Tauri files; one misses a third isInspectable site",
+    checks: "Every evidence path in docs/appstore-rejection-risks.html is a macos/ or crates/ file; each row carries a status.",
+    today: "Rows 4 (helpers in Resources), 5 (installers), 7 (browser line numbers) and 8 (two of three inspectable sites) are stale or incomplete; EditorPaneView line numbers point at reads, not writes (the only write is :831).",
+    ev: ["<span class='loc'>appstore-rejection-risks.html:525</span>  evidence: [\"src-tauri/tauri.conf.json:38-40\", …]",
+         "<span class='loc'>appstore-rejection-risks.html:538</span>  evidence: [\"src-tauri/src/commands/agents.rs:54-65\", …]"],
+    fix: "Edit the risks array: native evidence, re-scored severities, a status card per row (B2)." },
+
+  // ── Accounts ────────────────────────────────────────────────────
+  { g: "Accounts", state: "pass", task: "C1", effort: "landed · prod rollout pending", impact: "add",
+    t: "Users can delete their account in-app", sub: "Guideline 5.1.1(v): mandatory wherever an account can be created",
+    checks: "Settings › Accounts offers ‘Delete account…’ while signed in; confirming it deletes the account server-side and returns to the sign-in gate; ⌘K finds the row.",
+    today: "Core: DELETE /v1/auth/me merged (OmniAgent-Core PR #20); api image 1737f27 built, rollout to prod is a human step (registry push + kubectl set image). App: Settings › Accounts › Delete account… behind a critical ask, with refresh-then-retry on an expired token; spotlight row while signed in.",
+    ev: ["<span class='loc'>OmniAgent-Core …/routers/auth.py:1558</span>  @router.delete(\"/github\", status_code=204)   ← the only DELETE",
+         "<span class='loc'>auth.py:2077-2085</span>  GET /me · PATCH /me · (no DELETE /me)",
+         "<span class='loc'>SettingsSurfaceView.swift:453</span>  accountButton.title = signedIn ? \"Log out\" : \"Sign in…\""],
+    fix: "Core: DELETE /v1/auth/me (hard delete; refresh_tokens cascade, other FKs SET NULL) + pytest + prod deploy. App: AuthClient.deleteAccount(), a third button in the Accounts block, presentWindowAsk(severity: .critical), then the same local teardown as logout; PaletteAction.deleteAccount row only while signed in." },
+  { g: "Accounts", state: "pass", task: "B2", effort: "", impact: "none",
+    t: "A reviewer can get past sign-in", sub: "Apple web flow, GitHub, or ‘Continue without signing in’",
+    checks: "The gate offers a no-account path and both providers are testable.",
+    today: "True; both providers E2E-verified on prod 2026-08-29. A dedicated reviewer account still has to be minted.",
+    ev: ["<span class='loc'>AuthGateView.swift:840-880</span>  appleButton · githubButton · skipLink · privacyFooter",
+         "<span class='loc'>AuthGateView.swift:290-296</span>  \"Continue without signing in\""],
+    fix: "Document the skip path in the review notes; Bruno creates the reviewer account (B2)." },
+  { g: "Accounts", state: "blocked", task: "D1", effort: "", impact: "change",
+    t: "Native Sign in with Apple (MAS only)", sub: "Required under MAS when a third-party login is offered; impossible under Developer ID",
+    checks: "com.apple.developer.applesignin + ASAuthorizationController when distributed through the store.",
+    today: "The entitlement is forbidden for Developer ID (Apple DTS); the app uses Apple’s web flow via ASWebAuthenticationSession and the omniagent:// callback. Under MAS this flips.",
+    ev: ["<span class='loc'>OmniAgent.entitlements:40-42</span>  com.apple.developer.applesignin must NEVER be added … for as long as OmniAgent ships as a Developer ID app",
+         "<span class='loc'>AuthClient.swift:308</span>  https://appleid.apple.com/auth/authorize"],
+    fix: "Only if D1(a). Otherwise nothing." },
+
+  // ── Files & network ─────────────────────────────────────────────
+  { g: "Files & network", state: "pass", task: "", effort: "", impact: "none",
+    t: "Project roots come from the user", sub: "NSOpenPanel at first run, new session, and attachments",
+    checks: "Every folder the app indexes was picked in a panel.",
+    today: "True. Roots are sent to the daemon (rootsAddProject) and stored in brain.db.",
+    ev: ["<span class='loc'>FirstRunView.swift:244-250</span>  panel.message = \"Where do your projects live?\"",
+         "<span class='loc'>WorkspaceWindowController.swift:2116-2123</span>  \"Where should this session's terminals start?\"",
+         "<span class='loc'>SessionConnection.swift:449</span>  sendCodable(kind: .rootsAddProject …)"],
+    fix: "Nothing." },
+  { g: "Files & network", state: "blocked", task: "D1", effort: "", impact: "change",
+    t: "Security-scoped bookmarks", sub: "Only meaningful inside a sandbox",
+    checks: "Persisted roots carry security-scoped bookmarks with revoke controls.",
+    today: "Zero bookmark APIs in macos/ — by design, the app is not sandboxed and uses plain FileManager on real paths.",
+    ev: ["<span class='loc'>WorkspaceFiles.swift:63-66</span>  plain FileManager against real paths — no daemon round-trip, no security-scoped bookmarks",
+         "<span class='loc'>grep -rn bookmarkData macos/</span> → (nothing)"],
+    fix: "Part of D1(a)." },
+  { g: "Files & network", state: "blocked", task: "D2", effort: "", impact: "change",
+    t: "Downloads and file:// loads ask the user", sub: "Browser pane writes to ~/Downloads and opens any local path typed into the bar",
+    checks: "Downloads go through a save panel; file:// is limited to workspace roots.",
+    today: "decidePolicyFor → .download for non-showable MIME types, saved straight to Downloads; a leading / or ~ becomes a file URL with no scope check.",
+    ev: ["<span class='loc'>BrowserPaneView.swift:161-164</span>  if trimmed.hasPrefix(\"/\") || trimmed.hasPrefix(\"~\") { return URL(fileURLWithPath: …) }",
+         "<span class='loc'>BrowserPaneView.swift:220-231</span>  FileManager.default.urls(for: .downloadsDirectory …) → completionHandler(destination)"],
+    fix: "Behaviour change — D2. A2 at least gives the Downloads TCC prompt an explanation." },
+  { g: "Files & network", state: "pass", task: "B2", effort: "", impact: "none",
+    t: "Every network host is known", sub: "Four fixed hosts plus whatever the user types",
+    checks: "The review notes list every host the app contacts and why.",
+    today: "api.omni-agent.ai (auth), appleid.apple.com (Apple web sign-in), the provider avatar CDN (sidebar picture), www.google.com (search fallback in a browser pane), github.com (‘Open on GitHub’), and user-typed URLs in browser panes. No updater, no telemetry endpoint.",
+    ev: ["<span class='loc'>AuthClient.swift:239</span>  URL(string: \"https://api.omni-agent.ai\")!",
+         "<span class='loc'>WorkspaceWindowController.swift:4337</span>  URLSession.shared.dataTask(with: parsed)   ← avatar",
+         "<span class='loc'>BrowserPaneView.swift:179</span>  www.google.com/search"],
+    fix: "Enumerate in review notes and privacy policy (B1/B2). com.apple.security.network.client only matters under D1(a)." },
+
+  // ── Distribution ────────────────────────────────────────────────
+  { g: "Distribution", state: "pass", task: "", effort: "", impact: "none",
+    t: "Developer ID pipeline: sign → notarize → staple → DMG → verify", sub: "The way the app ships today",
+    checks: "A built app is notarised and Gatekeeper-accepted, and the DMG is signed as well as notarised.",
+    today: "scripts/rebuild-app.sh runs the whole chain in the right order and asks spctl rather than trusting stapler.",
+    ev: ["<span class='loc'>scripts/rebuild-app.sh:12</span>  build -> sign app -> notarize+staple app -> DMG -> sign+notarize+staple DMG",
+         "<span class='loc'>macos/dist.sh:215-226</span>  notarytool submit --wait · stapler staple · spctl -a -t open --context context:primary-signature"],
+    fix: "Nothing." },
+  { g: "Distribution", state: "blocked", task: "D1", effort: "", impact: "change",
+    t: "A Mac App Store archive lane", sub: "No AppStore configuration, no xcodebuild archive / -exportArchive, no 3rd-party-Mac-Developer identity path",
+    checks: "An archive signed for App Store distribution with a provisioning profile and matching entitlements can be produced.",
+    today: "Configurations are Debug / Release / Preview (Preview is a second direct-download channel). build.sh uses xcodebuild build with CODE_SIGNING_ALLOWED=NO; dist.sh only knows ‘Developer ID Application’.",
+    ev: ["<span class='loc'>project.pbxproj:994-1003</span>  Debug · Release · Preview",
+         "<span class='loc'>macos/build.sh:22-31</span>  xcodebuild build … CODE_SIGNING_ALLOWED=NO",
+         "<span class='loc'>macos/dist.sh:75-83</span>  default_identity(): \"Developer ID Application\" only"],
+    fix: "Pointless until D1 is decided; a lane that archives a sandbox-broken app is waste. A5’s --mas mode is the piece that does not depend on it." },
+];
+
+// ── render ────────────────────────────────────────────────────────
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+const groups = [...new Set(CHECKS.map(c => c.g))];
+const stateFilter = new Set();
+
+for (const g of groups) { const o = document.createElement("option"); o.value = g; o.textContent = g; $("#group").appendChild(o); }
+$("#stamp").textContent = "2026-08-30";
+
+function impactText(i) {
+  return { none: "No behaviour change", dev: "Developer-only: inspector opt-in", add: "Additive UI/feature only", change: "Behaviour change — decision" }[i] || "";
+}
+
+function renderStatus(list) {
+  const counts = Object.fromEntries(Object.keys(STATES).map(k => [k, 0]));
+  for (const c of list) counts[c.state]++;
+  $("#bar").innerHTML = Object.keys(STATES).map(k => `<span style="width:${(counts[k] / list.length) * 100}%;background:var(--${k})"></span>`).join("");
+  $("#legend").innerHTML = Object.keys(STATES).map(k =>
+    `<button type="button" data-state="${k}" aria-pressed="${stateFilter.has(k)}" title="${STATES[k].sub}"><span><span class="swatch" style="background:var(--${k})"></span>${STATES[k].label}</span><b>${counts[k]}</b></button>`).join("");
+  const blocked = counts.blocked, fixable = counts.fix;
+  $("#verdictText").textContent = blocked ? `Not store-ready — ${blocked} blocked, ${fixable} fixable now` : `Store-ready pending ${fixable} fixes`;
+}
+
+function renderChecks() {
+  const q = $("#q").value.trim().toLowerCase();
+  const g = $("#group").value;
+  let shown = 0;
+  $("#groups").innerHTML = groups.map(group => {
+    const rows = CHECKS.filter(c => c.g === group)
+      .filter(c => g === "all" || c.g === g)
+      .filter(c => !stateFilter.size || stateFilter.has(c.state))
+      .filter(c => !q || [c.t, c.sub, c.checks, c.today, c.fix, c.task, ...c.ev].join(" ").toLowerCase().includes(q));
+    if (!rows.length) return "";
+    shown += rows.length;
+    return `<section class="group"><div class="group-hd"><h2>${esc(group)}</h2><span class="count">${rows.length} check${rows.length === 1 ? "" : "s"}</span></div>` +
+      rows.map(c => `
+      <details class="check" data-state="${c.state}">
+        <summary>
+          <span class="state ${c.state}">${STATES[c.state].label}</span>
+          <div><div class="t">${esc(c.t)}</div><div class="sub">${esc(c.sub)}</div></div>
+          <div class="meta">${c.task ? `<span class="tag task">${esc(c.task)}</span>` : ""}${c.effort ? `<span class="tag">${esc(c.effort)}</span>` : ""}<span class="chev">›</span></div>
+        </summary>
+        <div class="detail">
+          <div class="cell"><h3>What is verified</h3><p>${esc(c.checks)}</p></div>
+          <div class="cell"><h3>What happens today</h3><p>${esc(c.today)}</p></div>
+          <div class="cell wide"><h3>Evidence</h3><ul class="ev">${c.ev.map(e => `<li>${e}</li>`).join("")}</ul></div>
+          <div class="cell"><h3>What the fix does</h3><p>${esc(c.fix)}</p></div>
+          <div class="cell"><h3>Behaviour impact</h3><p class="impact ${c.impact}">${impactText(c.impact)}</p></div>
+        </div>
+      </details>`).join("") + `</section>`;
+  }).join("");
+  $("#empty").hidden = shown > 0;
+}
+
+function renderLedger() {
+  $("#ledger").innerHTML = TASKS.map(t => `
+    <label class="${t.status}"><input type="checkbox" disabled ${t.status === "done" ? "checked" : ""}><span class="tid">${t.id}</span><span class="tt">${esc(t.title)}</span><span class="eff">${t.hours}h</span></label>`).join("");
+  const total = TASKS.reduce((a, t) => a + t.hours, 0);
+  const doneT = TASKS.filter(t => t.status === "done");
+  const doneH = doneT.reduce((a, t) => a + t.hours, 0);
+  $("#ledgerHours").textContent = `${doneH}/${total}h`;
+  $("#ledgerDone").textContent = `${doneT.length} / ${TASKS.length}`;
+  $("#progText").textContent = `${doneT.length} / ${TASKS.length} tasks · ${doneH} / ${total} h`;
+  $("#progFill").style.width = `${(doneH / total) * 100}%`;
+  const running = TASKS.filter(t => t.status === "running").map(t => t.id);
+  $("#progNow").innerHTML = `${esc(EXECUTION.now)}${running.length ? ` — running now: <b>${running.join(", ")}</b>` : ""} <span class="mono">· updated ${EXECUTION.updated}</span>`;
+}
+
+function renderDecisions() {
+  $("#decisions").innerHTML = DECISIONS.map(d => `
+    <div class="decision"><span class="did">${d.id}</span><div><div class="t"><strong>${esc(d.title)}</strong></div><p>${esc(d.body)}</p></div><span class="size">${esc(d.size)}</span></div>`).join("");
+}
+
+renderStatus(CHECKS); renderChecks(); renderLedger(); renderDecisions();
+
+$("#legend").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-state]"); if (!b) return;
+  const k = b.dataset.state; stateFilter.has(k) ? stateFilter.delete(k) : stateFilter.add(k);
+  renderStatus(CHECKS); renderChecks();
+});
+$("#q").addEventListener("input", renderChecks);
+$("#group").addEventListener("input", renderChecks);
+$("#reset").addEventListener("click", () => { $("#q").value = ""; $("#group").value = "all"; stateFilter.clear(); renderStatus(CHECKS); renderChecks(); });
+$("#expand").addEventListener("click", () => document.querySelectorAll(".check").forEach(d => d.open = true));
+$("#collapse").addEventListener("click", () => document.querySelectorAll(".check").forEach(d => d.open = false));
+</script>
