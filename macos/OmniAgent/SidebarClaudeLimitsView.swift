@@ -664,7 +664,7 @@ final class SidebarLimitColumnView: NSView {
         let bars = NSStackView(views: [Self.row(barIcon, bar), Self.row(timeIcon, timeBar)])
         bars.orientation = .vertical
         bars.alignment = .centerX
-        bars.spacing = 3
+        bars.spacing = 7
         bars.translatesAutoresizingMaskIntoConstraints = false
         barsBox.translatesAutoresizingMaskIntoConstraints = false
         barsBox.addSubview(bars)
@@ -706,12 +706,12 @@ final class SidebarLimitColumnView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
-    static let iconWidth: CGFloat = 10
+    static let iconWidth: CGFloat = 14
 
     private static func icon(_ name: String) -> NSImageView {
         let view = NSImageView()
         view.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 8, weight: .semibold))
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
         view.contentTintColor = SidebarPercentBarView.colour(for: nil)
         view.translatesAutoresizingMaskIntoConstraints = false
         view.widthAnchor.constraint(equalToConstant: iconWidth).isActive = true
@@ -872,7 +872,7 @@ final class SidebarLimitColumnView: NSView {
 /// would otherwise render the identical two numbers, which is what the pane's
 /// old stats bar did.
 final class SidebarClaudeLimitsView: NSView {
-    static let height: CGFloat = 70
+    static let height: CGFloat = 78
 
     /// Five hours in five blocks, seven days in seven — the units each window
     /// is actually counted in, so a block means something you can name.

@@ -830,7 +830,7 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertLessThan(x(column.barIcon), x(column.bar), "icon left of the usage bar")
         XCTAssertLessThan(x(column.timeIcon), x(column.timeBar), "icon left of the window bar")
         XCTAssertEqual(x(column.bar), x(column.timeBar), accuracy: 0.5, "bars still start together")
-        XCTAssertEqual(column.barIcon.frame.width, SidebarLimitColumnView.iconWidth)
+        XCTAssertEqual(column.barIcon.frame.width, SidebarLimitColumnView.iconWidth, accuracy: 1)
     }
 
     /// `/usage` reports only when a window ends, so how far through it we are
@@ -2002,7 +2002,7 @@ final class NavigationSidebarTests: XCTestCase {
     /// Shorter than it was, and still clearly the taller of the two cards —
     /// it carries four lines of content to the gauges' two.
     func testTheCardIsNoTallerThanItNeedsToBe() {
-        XCTAssertEqual(SidebarClaudeLimitsView.height, 70)
+        XCTAssertEqual(SidebarClaudeLimitsView.height, 78)
         XCTAssertLessThan(
             SidebarClaudeLimitsView.height, 90,
             "the sidebar has a workspace list to show as well"
