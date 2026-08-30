@@ -1641,6 +1641,28 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    /// `notifier.restore([])` is a *merge*, not a replace — it would leave
+    /// the outgoing account's entries standing for the new account's own
+    /// restore pass to then merge into its `notifications` row and persist
+    /// them there (a cross-account leak). `resetForAccountSwitch` must
+    /// actually clear the feed.
+    func testResetForAccountSwitchClearsTheNotificationFeed() throws {
+        let controller = makeEmptyController(settingsClient: FakeSettingsClient(), defaults: try throwawayDefaults())
+        defer { controller.close() }
+        controller.notifier.restore([
+            NotificationEntry(
+                id: "n1", sessionID: "s", project: "p", projectLabel: "P", cwd: "/",
+                engine: "shell", status: .awaitingApproval, title: "t", sessionLabel: nil,
+                createdAt: 1, read: false
+            ),
+        ])
+        XCTAssertFalse(controller.notifier.entries.isEmpty, "seeded")
+
+        controller.resetForAccountSwitch()
+
+        XCTAssertTrue(controller.notifier.entries.isEmpty, "the outgoing account's notifications must not survive the switch")
+    }
+
     /// The first launch of this build over data written before accounts
     /// existed: the mirror says signed in but no pointer is on disk. The
     /// adoption waits until the layout is back on screen — so the running
@@ -1694,6 +1716,31 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
         XCTAssertNil(controller.windowAskOverlay)
         XCTAssertEqual(terminated, 0, "the daemon is already on the account's directory")
+    }
+
+    /// The login window's daemon serves the empty root: restoring "nothing"
+    /// there would bootstrap a pane and write a layout row the next sign-in
+    /// would find as a running session to end. Checked directly — no pane
+    /// appears — rather than through the persona-question side effect.
+    func testAConnectedEventWhileAwaitingSignInSkipsTheRestorePass() throws {
+        let strangers = Set(NSApp.windows.map(ObjectIdentifier.init))
+        addTeardownBlock {
+            for window in NSApp.windows where !strangers.contains(ObjectIdentifier(window)) {
+                window.orderOut(nil)
+            }
+        }
+        let controller = makeEmptyController(settingsClient: FakeSettingsClient(), defaults: try throwawayDefaults())
+        defer { controller.close() }
+        controller.start()
+        controller.presentLaunchGate(defaults: try throwawayDefaults()) {}
+        XCTAssertTrue(controller.awaitingSignIn, "signed out: the login window is up")
+
+        controller.connection.onStateChange?(.connected)
+
+        XCTAssertEqual(
+            controller.workspaceView.allPaneIDs, [],
+            "the restore pass — which would bootstrap a pane — is skipped while the login window is up"
+        )
     }
 
     /// Signing in end to end without a browser: the gate hands the email to

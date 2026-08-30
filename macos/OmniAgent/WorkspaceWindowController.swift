@@ -3704,6 +3704,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// (`PaneAskOverlayView`) with `presentCustomizeWorkspace`'s mount point.
     /// Pass `severity: .critical` for a destructive question — deleting a
     /// session, say — and the card tints red instead of navy.
+    /// Returns whether the ask actually went up — `false` when one is
+    /// already showing, or there is no content view yet. A caller whose
+    /// completion must run on every path (`switchAccount`'s gate hand-off)
+    /// needs that: a dropped ask must not be a dropped completion.
+    @discardableResult
     func presentWindowAsk(
         title: String,
         message: String = "",
@@ -3712,8 +3717,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         severity: PaneAskOverlayView.Severity = .question,
         options: [PaneAskOption],
         onCancel: @escaping () -> Void = {}
-    ) {
-        guard windowAskOverlay == nil, let content = window?.contentView else { return }
+    ) -> Bool {
+        guard windowAskOverlay == nil, let content = window?.contentView else { return false }
         // The window and app come forward exactly as the `NSAlert` this
         // replaces would have — `PaneContainerView.presentAsk`'s reasoning:
         // a custom overlay does not get that for free.
@@ -3745,6 +3750,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         content.addSubview(overlay, positioned: .above, relativeTo: nil)
         windowAskOverlay = overlay
         window?.makeFirstResponder(overlay.firstResponderView)
+        return true
     }
 
     private func dismissWindowAsk() {
@@ -5248,7 +5254,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// there is never a moment where a pointer sits on disk with no restart
     /// behind it — a crash-relaunched daemon would otherwise migrate the
     /// data without anyone having agreed to it.
-    func switchAccount(toEmail email: String, completion: @escaping () -> Void) {
+    /// `isLegacyAdoption` is `true` only for `adoptLegacyAccountIfNeeded`'s
+    /// call: if the ask cannot go up (one is already showing, or there is no
+    /// content view yet), that path re-arms itself for the next connection
+    /// instead of the adoption silently never happening.
+    func switchAccount(toEmail email: String, isLegacyAdoption: Bool = false, completion: @escaping () -> Void) {
         let id = AccountDirectory.accountID(forEmail: email)
         guard currentAccountID != id else {
             // The running daemon already serves this account's directory.
@@ -5260,18 +5270,35 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             commitAccountSwitch(to: id, completion: completion)
             return
         }
-        presentWindowAsk(
+        let presented = presentWindowAsk(
             title: "Move your workspace to your account?",
             message: "This restarts the daemon and ends \(Self.runningSessionsPhrase(sessions)).",
             severity: .critical,
             options: [
                 PaneAskOption("Not now") { _ in completion() },
                 PaneAskOption("Restart now", isPrimary: true) { [weak self] _ in
-                    self?.commitAccountSwitch(to: id, completion: completion)
+                    guard let self else {
+                        // `self` is gone, so nothing can be switched — but
+                        // the caller (the gate's `ready`) still needs to
+                        // hear back, or it waits forever.
+                        completion()
+                        return
+                    }
+                    commitAccountSwitch(to: id, completion: completion)
                 },
             ],
             onCancel: { completion() }
         )
+        guard presented else {
+            // `presentWindowAsk` dropped the ask (one already showing, or no
+            // content view yet) — nothing was decided, so the daemon and the
+            // pointer stay exactly as they were. `completion` still has to
+            // run: on the gate's sign-in path, that is what stops the login
+            // card from waiting on a persona read that will never arrive.
+            if isLegacyAdoption { legacyAdoptionPending = true }
+            completion()
+            return
+        }
     }
 
     /// The decided half: pointer, then the daemon, then this window.
@@ -5279,8 +5306,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         do {
             try AccountDirectory.writeCurrentAccount(id, root: accountRoot)
         } catch {
-            applyConnectionStatus("Couldn't write the account pointer — \(error.localizedDescription)")
-            completion()
+            // Self-healing: `currentAccountID` was never set to `id`, so the
+            // daemon — still serving the old directory — is exactly what the
+            // running state agrees with. This must not complete silently:
+            // the user asked for a switch and nothing happened.
+            let presented = presentWindowAsk(
+                title: "Could not move your workspace",
+                message: "Couldn't write the account pointer — \(error.localizedDescription)",
+                severity: .critical,
+                options: [PaneAskOption("Continue") { _ in completion() }]
+            )
+            if !presented { completion() }
             return
         }
         currentAccountID = id
@@ -5359,7 +5395,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         projectLabels = [:]
         workspaces = []
         selectedProjectID = nil
-        notifier.restore([])
+        // `restore([])` is a *merge* — it would leave the outgoing account's
+        // entries standing, for `authGateDidResolve`'s restore pass to then
+        // merge into the new account's `notifications` row and persist them
+        // there. `clear()` empties the feed and withdraws its banners.
+        notifier.clear()
         usageRecorder.restore(UsageAnalyticsStore())
 
         didConnect = false
@@ -5379,10 +5419,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func adoptLegacyAccountIfNeeded() {
         guard legacyAdoptionPending else { return }
         settingsStore.get(SettingsKey.authAccountEmail) { [weak self] result in
-            guard let self, let email = try? result.get() else { return }
+            // `case .success` rather than `try? result.get()`: the latter
+            // flattens (SE-0230) a *successful* read of an unset row and a
+            // *failed* read to the same `nil`, which would leave
+            // `legacyAdoptionPending` armed forever for a row that is simply
+            // empty — the fake-login-build case this method's own doc
+            // comment describes — retrying on every reconnect for no reason.
+            guard let self, case .success(let email) = result else { return }
             legacyAdoptionPending = false
-            guard !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            switchAccount(toEmail: email) {}
+            guard let email, !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            switchAccount(toEmail: email, isLegacyAdoption: true) {}
         }
     }
 
