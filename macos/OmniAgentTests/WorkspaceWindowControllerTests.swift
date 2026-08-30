@@ -1791,6 +1791,96 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.awaitingSignIn)
     }
 
+    // MARK: - Logout teardown
+
+    /// Nothing running: no question. Revoke, reset, end the daemon, delete
+    /// the pointer, drop the workspace, hide the window, tell the app
+    /// delegate, and put the login window up on its own.
+    func testLogOutWithNothingRunningTearsTheWorkspaceDownAndOffersTheGateAlone() throws {
+        let defaults = try throwawayDefaults()
+        defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
+        let client = FakeSettingsClient(rows: [
+            "auth_signed_in": "true", "auth_persona": "research", "auth_account_email": "bruno@bonando.com",
+        ])
+        let controller = makeEmptyController(settingsClient: client, defaults: defaults)
+        defer { controller.close() }
+        let root = try temporaryAccountRoot()
+        try AccountDirectory.writeCurrentAccount("fc44b18d5588b1d6", root: root)
+        controller.accountRoot = root
+        var terminated = 0
+        var order: [String] = []
+        controller.daemonTerminator = { done in
+            terminated += 1
+            order.append("terminate")
+            done()
+        }
+        controller.serverSessionRevoker = { order.append("revoke") }
+        var signedInStates: [Bool] = []
+        controller.onSignedInStateChanged = { state in
+            signedInStates.append(state)
+            order.append(state ? "signed-in" : "signed-out")
+        }
+        var resolveGate: (() -> Void)?
+        controller.authGatePresenter = { completion in
+            order.append("gate")
+            resolveGate = completion
+        }
+        controller.showWindow(nil)
+        XCTAssertTrue(try XCTUnwrap(controller.window).isVisible)
+
+        controller.logOutOfAccount()
+
+        XCTAssertNil(controller.windowAskOverlay, "nothing to end, nothing to ask")
+        XCTAssertEqual(order, ["revoke", "terminate", "signed-out", "gate"])
+        XCTAssertEqual(terminated, 1)
+        XCTAssertNil(AccountDirectory.readCurrentAccount(root: root), "the pointer is gone: the next daemon serves the root")
+        XCTAssertNil(controller.currentAccountID)
+        XCTAssertEqual(client.rows["auth_signed_in"], "false")
+        XCTAssertEqual(client.rows["auth_persona"], "research", "the persona belongs to the account and stays with it")
+        XCTAssertFalse(try XCTUnwrap(controller.window).isVisible, "only the login window is on screen")
+        XCTAssertTrue(controller.awaitingSignIn)
+        XCTAssertEqual(signedInStates, [false])
+
+        // Reopen while signed out raises the gate, not the workspace.
+        controller.showWindow(nil)
+        XCTAssertFalse(try XCTUnwrap(controller.window).isVisible, "the workspace stays hidden until someone signs in")
+
+        // Sign in again: the workspace comes back.
+        resolveGate?()
+        XCTAssertFalse(controller.awaitingSignIn)
+        XCTAssertTrue(try XCTUnwrap(controller.window).isVisible)
+        XCTAssertEqual(signedInStates, [false, true])
+    }
+
+    func testLogOutWithSessionsRunningAsksFirstAndCancelChangesNothing() throws {
+        let controller = makeController(settingsClient: FakeSettingsClient(rows: ["auth_signed_in": "true"]), defaults: try throwawayDefaults())
+        defer { controller.close() }
+        let root = try temporaryAccountRoot()
+        try AccountDirectory.writeCurrentAccount("fc44b18d5588b1d6", root: root)
+        controller.accountRoot = root
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done()
+        }
+        var revoked = 0
+        controller.serverSessionRevoker = { revoked += 1 }
+        controller.authGatePresenter = { _ in XCTFail("nothing was logged out") }
+
+        controller.logOutOfAccount()
+
+        let ask = try XCTUnwrap(controller.windowAskOverlay)
+        XCTAssertEqual(ask.options.map(\.title), ["Cancel", "Log out"])
+        press("Cancel", on: ask)
+
+        XCTAssertNil(controller.windowAskOverlay)
+        XCTAssertEqual(revoked, 0)
+        XCTAssertEqual(terminated, 0)
+        XCTAssertEqual(AccountDirectory.readCurrentAccount(root: root), "fc44b18d5588b1d6")
+        XCTAssertEqual(controller.workspaceView.allPaneIDs.count, 1)
+        XCTAssertFalse(controller.awaitingSignIn)
+    }
+
     func testTheAccountLabelIsTheNameFallingBackToTheEmail() throws {
         let named = makeEmptyController(
             settingsClient: FakeSettingsClient(rows: [
@@ -1950,7 +2040,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
     }
 
     func testEveryPaletteActionRunsTheSameCodeTheMenuItemDoes() throws {
-        let controller = makeEmptyController()
+        let controller = makeEmptyController(settingsClient: FakeSettingsClient(), defaults: try throwawayDefaults())
         defer { controller.close() }
         controller.showWindow(nil)
         controller.applyRestoredPanes(
@@ -1997,19 +2087,14 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         deleteCard.subviews.compactMap { $0 as? PaneApprovalButton }.first { $0.title == "Cancel" }?.onClick?()
         XCTAssertNil(controller.windowAskOverlay)
 
-        // `AuthGateCoordinator` mirrors the flag into the *app's* defaults,
-        // so the suite must put back whatever the developer's install had.
-        let defaults = UserDefaults.standard
-        let mirrored = defaults.object(forKey: AuthGate.signedInDefaultsKey)
-        defer {
-            if let mirrored {
-                defaults.set(mirrored, forKey: AuthGate.signedInDefaultsKey)
-            } else {
-                defaults.removeObject(forKey: AuthGate.signedInDefaultsKey)
-            }
+        // A log-out ends the daemon and the pointer; both go through seams
+        // so the developer's real daemon and data root are never touched.
+        controller.accountRoot = try temporaryAccountRoot()
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done()
         }
-        defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
-
         let gateCameBack = expectation(description: "the login screen is offered after logging out")
         controller.authGatePresenter = { completion in
             presented += 1
@@ -2017,13 +2102,19 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             completion()
         }
         controller.run(.signOut)
+        // One session is on screen, so the row asks before ending it.
+        let logoutAsk = try XCTUnwrap(controller.windowAskOverlay, "a running session means asking first")
+        XCTAssertEqual(logoutAsk.options.map(\.title), ["Cancel", "Log out"])
+        XCTAssertEqual(revoked, 0, "nothing happens until the question is answered")
+        press("Log out", on: logoutAsk)
         XCTAssertEqual(revoked, 1, "the server session is revoked, not only the local rows")
         XCTAssertFalse(
-            defaults.bool(forKey: AuthGate.signedInDefaultsKey),
+            controller.authGateCoordinator.defaults.bool(forKey: AuthGate.signedInDefaultsKey),
             "the launch gate's mirror is cleared, so the next launch asks again"
         )
         wait(for: [gateCameBack], timeout: 5)
         XCTAssertEqual(presented, 2)
+        XCTAssertEqual(terminated, 1)
         XCTAssertFalse(controller.settingsView.accountSignedIn)
         XCTAssertEqual(
             controller.settingsView.accountField.stringValue,
@@ -2813,6 +2904,17 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             ),
             panes: [WorkspaceRestoration.bootstrapPane(sessionID: "native-terminal")],
             settingsClient: settingsClient
+        )
+    }
+
+    private func makeController(settingsClient: SettingsClient, defaults: UserDefaults) -> WorkspaceWindowController {
+        WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-controller-test.sock")
+            ),
+            panes: [WorkspaceRestoration.bootstrapPane(sessionID: "native-terminal")],
+            settingsClient: settingsClient,
+            authDefaults: defaults
         )
     }
 

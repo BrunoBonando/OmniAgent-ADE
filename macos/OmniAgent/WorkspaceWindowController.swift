@@ -1419,7 +1419,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         fatalError("init(coder:) is unavailable")
     }
 
+    /// The workspace never shows while nobody is signed in: the Dock's
+    /// reopen, the menu bar and every other route through here raise the
+    /// login window instead (2026-08-30 spec, "Sign-in is mandatory").
     override func showWindow(_ sender: Any?) {
+        guard !awaitingSignIn else {
+            authGateWindow.raise()
+            return
+        }
         super.showWindow(sender)
         window?.center()
         window?.makeKeyAndOrderFront(sender)
@@ -5046,17 +5053,35 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         presentAccountGate()
     }
 
-    /// "Log out": revoke the session server-side, clear the persisted
-    /// outcome (the account rows included, so the launch gate latches off
-    /// again), then offer the login screen right away — the exact sequence
-    /// `SettingsViewModel.signOut` performs, since there is only one right
-    /// order to do these in.
-    ///
-    /// The rows are re-read before the gate goes up, so the page stops
-    /// saying "Signed in as …" over a "Log out" button the moment the
-    /// clearing lands rather than at the end of whatever the user does with
-    /// the login screen.
+    /// "Log out": ask if it ends sessions; revoke the session server-side;
+    /// clear the persisted outcome (account rows included, persona kept —
+    /// it is the account's); end the daemon and delete the pointer, so the
+    /// next daemon serves the empty root; drop the workspace; order this
+    /// window and its sheets out; tell `AppDelegate` (the menu bar item
+    /// goes); and put the login window up on its own, exactly like launch
+    /// (2026-08-30 spec, "Logout").
     func logOutOfAccount() {
+        guard !accountActionInFlight else { return }
+        let sessions = menuBarSummary().sessionCount
+        guard sessions > 0 else {
+            performLogout()
+            return
+        }
+        presentWindowAsk(
+            title: "Log out and end \(Self.runningSessionsPhrase(sessions))?",
+            message: "Your workspace comes back the next time this account signs in, with new terminals.",
+            severity: .critical,
+            options: [
+                PaneAskOption("Cancel") { _ in },
+                PaneAskOption("Log out", isPrimary: true) { [weak self] _ in self?.performLogout() },
+            ]
+        )
+    }
+
+    /// The confirmed half of `logOutOfAccount`, and what account deletion
+    /// ends in: after the account is gone the app is in exactly the state a
+    /// sign-out leaves it.
+    private func performLogout() {
         guard !accountActionInFlight else { return }
         accountActionInFlight = true
         if let serverSessionRevoker {
@@ -5071,8 +5096,61 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // read back.
             seedAccountFromMirror()
             refreshAccountSection()
+            tearDownForSignedOut()
+        }
+    }
+
+    /// Steps 4–6 of the spec's logout: daemon, pointer, workspace, window,
+    /// menu bar, login window. `awaitingSignIn` goes up first so a
+    /// `.connected` from the restarted (signed-out) daemon restores nothing.
+    private func tearDownForSignedOut() {
+        awaitingSignIn = true
+        authGateResolved = false
+        terminateDaemon { [weak self] in
+            guard let self else { return }
+            do {
+                try AccountDirectory.clearCurrentAccount(root: accountRoot)
+            } catch {
+                applyConnectionStatus("Couldn't remove the account pointer — \(error.localizedDescription)")
+            }
+            currentAccountID = nil
+            resetForAccountSwitch()
+            hideWorkspaceForSignIn()
+            onSignedInStateChanged?(false)
             accountActionInFlight = false
-            presentAccountGate()
+            presentSignInAfterLogout()
+        }
+    }
+
+    /// This window and everything hanging off it, off screen — the login
+    /// window is the only thing on screen while nobody is signed in.
+    private func hideWorkspaceForSignIn() {
+        dismissWindowAsk()
+        dismissCustomizeCard()
+        if let window {
+            if let sheet = window.attachedSheet {
+                window.endSheet(sheet)
+            }
+            window.orderOut(nil)
+        }
+        settingsWindowController.window?.orderOut(nil)
+        inspector.window?.orderOut(nil)
+    }
+
+    /// The launch gate again, over nothing. Its resolution runs the sign-in
+    /// flow (`AuthGateWindowController.onSwitching` → `switchAccount`) and
+    /// brings the workspace window back.
+    private func presentSignInAfterLogout() {
+        let resolved: () -> Void = { [weak self] in
+            guard let self else { return }
+            authGateDidResolve()
+            showWindow(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        if let authGatePresenter {
+            authGatePresenter(resolved)
+        } else {
+            authGateWindow.present(over: nil, completion: resolved)
         }
     }
 
@@ -5106,13 +5184,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let self else { return }
             do {
                 try await AuthClient.shared.deleteAccount()
-                authGateCoordinator.reset { [weak self] in
-                    guard let self else { return }
-                    seedAccountFromMirror()
-                    refreshAccountSection()
-                    accountActionInFlight = false
-                    presentAccountGate()
-                }
+                accountActionInFlight = false
+                performLogout()
             } catch {
                 // The account is still there; say so and change nothing.
                 accountActionInFlight = false
