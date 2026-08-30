@@ -99,16 +99,33 @@ enum DaemonBinaryLocator {
         candidates.first(where: fileExists)
     }
 
+    /// Whether this is a Debug build. Kept independent of `WebInspectorPolicy`
+    /// (owned by a different task) even though the `#if DEBUG` body matches.
+    static var isDebugBuild: Bool {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
+    }
+
     /// This build's real candidate list: an explicit override (matching
     /// `daemon.rs`'s `OMNIAGENT_PTY_DAEMON_BIN` env var name), the two
     /// locations Task 6d may embed the binary at once it wires the
     /// bundling, then every `PATH` directory.
+    ///
+    /// The override and `PATH` fallbacks are gated on `debugBuild`: in every
+    /// non-Debug configuration, the "Embed PTY Daemon" build phase hard-fails
+    /// if the daemon is missing, so the bundled path always exists and wins —
+    /// those fallbacks are only ever reached in Debug builds, so restricting
+    /// them there removes attack surface without changing behavior.
     static func candidates(
         bundleURL: URL,
-        environment: [String: String]
+        environment: [String: String],
+        debugBuild: Bool = isDebugBuild
     ) -> [String] {
         var result: [String] = []
-        if let override = environment["OMNIAGENT_PTY_DAEMON_BIN"] {
+        if debugBuild, let override = environment["OMNIAGENT_PTY_DAEMON_BIN"] {
             result.append(override)
         }
         result.append(
@@ -117,7 +134,7 @@ enum DaemonBinaryLocator {
         result.append(
             bundleURL.appendingPathComponent("Contents/Resources/omniagent-pty-daemon").path
         )
-        if let path = environment["PATH"] {
+        if debugBuild, let path = environment["PATH"] {
             for dir in path.split(separator: ":") {
                 result.append("\(dir)/omniagent-pty-daemon")
             }

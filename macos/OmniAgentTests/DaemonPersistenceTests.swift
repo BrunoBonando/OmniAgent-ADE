@@ -198,7 +198,8 @@ final class DaemonPersistenceTests: XCTestCase {
     func testBinaryLocatorCandidatesPutsTheEnvironmentOverrideFirst() {
         let candidates = DaemonBinaryLocator.candidates(
             bundleURL: URL(fileURLWithPath: "/Applications/OmniAgent.app"),
-            environment: ["OMNIAGENT_PTY_DAEMON_BIN": "/custom/daemon", "PATH": "/usr/bin:/usr/local/bin"]
+            environment: ["OMNIAGENT_PTY_DAEMON_BIN": "/custom/daemon", "PATH": "/usr/bin:/usr/local/bin"],
+            debugBuild: true
         )
         XCTAssertEqual(candidates.first, "/custom/daemon")
         XCTAssertTrue(candidates.contains("/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon"))
@@ -212,9 +213,22 @@ final class DaemonPersistenceTests: XCTestCase {
     func testBinaryLocatorCandidatesWithoutAnOverrideStillOffersBundleAndPathLocations() {
         let candidates = DaemonBinaryLocator.candidates(
             bundleURL: URL(fileURLWithPath: "/Applications/OmniAgent.app"),
-            environment: ["PATH": "/usr/bin"]
+            environment: ["PATH": "/usr/bin"],
+            debugBuild: true
         )
         XCTAssertFalse(candidates.isEmpty)
         XCTAssertFalse(candidates.contains(where: { $0 == "/custom/daemon" }))
+    }
+
+    func testReleaseBuildsOnlyLaunchTheBundledDaemon() {
+        let candidates = DaemonBinaryLocator.candidates(
+            bundleURL: URL(fileURLWithPath: "/Applications/OmniAgent.app"),
+            environment: ["OMNIAGENT_PTY_DAEMON_BIN": "/custom/daemon", "PATH": "/usr/bin:/usr/local/bin"],
+            debugBuild: false
+        )
+        XCTAssertEqual(candidates, [
+            "/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon",
+            "/Applications/OmniAgent.app/Contents/Resources/omniagent-pty-daemon",
+        ])
     }
 }
