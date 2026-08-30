@@ -73,9 +73,9 @@ final class AuthGateCoordinatorTests: XCTestCase {
         return defaults
     }
 
-    func testResolvingASignedInOutcomeWritesAllSevenKeys() {
+    func testResolvingASignedInOutcomeWritesAllSevenKeys() throws {
         let client = FakeSettingsClient()
-        let coordinator = AuthGateCoordinator(settings: SettingsStore(client: client))
+        let coordinator = AuthGateCoordinator(settings: SettingsStore(client: client), defaults: try throwawayDefaults())
 
         let expectation = expectation(description: "resolve")
         coordinator.resolve(AuthGateOutcome(
@@ -99,9 +99,14 @@ final class AuthGateCoordinatorTests: XCTestCase {
         XCTAssertEqual(client.rows["auth_account_picture"], "https://cdn.test.invalid/bruno.png")
     }
 
-    func testResolvingASkipWritesEmptyStringsForPersonaAndAccount() {
+    /// `resolve` persists whatever `AuthGateOutcome` it is handed — nil
+    /// fields become empty strings, not unwritten rows. This exact
+    /// signed-out shape no longer comes out of the reducer (the mandatory
+    /// sign-in gate has no skip path), but `resolve`'s own nil-to-""
+    /// contract is worth pinning independently of what can reach it.
+    func testResolvingAnOutcomeWithNilFieldsWritesEmptyStringsForPersonaAndAccount() throws {
         let client = FakeSettingsClient()
-        let coordinator = AuthGateCoordinator(settings: SettingsStore(client: client))
+        let coordinator = AuthGateCoordinator(settings: SettingsStore(client: client), defaults: try throwawayDefaults())
 
         let expectation = expectation(description: "resolve")
         coordinator.resolve(AuthGateOutcome(signedIn: false, persona: nil, accountEmail: nil, accountName: nil)) {
@@ -121,13 +126,13 @@ final class AuthGateCoordinatorTests: XCTestCase {
     /// but **not** the persona: it belongs to the account and comes back
     /// with the account's data dir the next time it signs in (2026-08-30
     /// spec, "Logout" step 3).
-    func testResetClearsTheAccountRowsButKeepsThePersona() {
+    func testResetClearsTheAccountRowsButKeepsThePersona() throws {
         let client = FakeSettingsClient(rows: [
             "auth_gate_resolved": "true", "auth_signed_in": "true", "auth_persona": "student",
             "auth_account_email": "bruno@bonando.com", "auth_account_name": "Bruno Bonando",
             "auth_github_login": "brunobonando", "auth_account_picture": "https://cdn.test.invalid/bruno.png",
         ])
-        let coordinator = AuthGateCoordinator(settings: SettingsStore(client: client))
+        let coordinator = AuthGateCoordinator(settings: SettingsStore(client: client), defaults: try throwawayDefaults())
 
         let expectation = expectation(description: "reset")
         coordinator.reset { expectation.fulfill() }
@@ -400,7 +405,7 @@ final class AuthGateViewModelTests: XCTestCase {
     /// `AuthGateWindowController` wires straight to
     /// `AuthGateCoordinator.markSignedIn()` — must fire the moment sign-in
     /// succeeds, not wait for the persona step, and must not fire again on
-    /// the persona answer or on "Continue without signing in".
+    /// the persona answer.
     @MainActor
     func testOnSignedInFiresOnceRightAwayNotAfterThePersonaStep() async {
         let stub = StubAuthSigning(result: .success(user()))
