@@ -508,7 +508,7 @@
       },
       {
         title: "Persistent bundled PTY daemon / LaunchAgent behavior",
-        severity: "critical",
+        severity: "medium",
         category: "Background services",
         summary: "The app can register or spawn a long-lived PTY daemon that persists beyond the UI, which is likely to trigger background-process scrutiny.",
         evidence: ["macos/OmniAgent/DaemonServiceRegistrar.swift:14-24,147-154", "docs/plans/native-macos-migration.md:64", "scripts/rebuild-app.sh:24-27,149-174"],
@@ -518,7 +518,7 @@
           "Expose a Settings toggle, status, explanation, and disable/remove flow for persistence.",
           "Ensure the helper exits or idles safely when not needed and never performs surprise work."
         ],
-        status: "re-scored: high → medium (SMAppService.agent is the Apple-approved pattern; user toggle already lives in System Settings › Login Items); fixed: Task A4 (binary locator) · decision D1 for the rest"
+        status: "(SMAppService.agent is the Apple-approved pattern; user toggle already lives in System Settings › Login Items); fixed: Task A4 (binary locator) · decision D1 for the rest"
       },
       {
         title: "Helper binaries are packaged as resources",
@@ -539,7 +539,7 @@
         severity: "low",
         category: "Code execution",
         summary: "Native app has no installer code (Tauri-only, gated by cutover.sh). EngineLauncher.isInstalled only greys a menu row for a CLI that isn't on PATH; nothing in macos/ downloads or executes an installer.",
-        evidence: ["macos/OmniAgent/EngineLauncher.swift:609-615 (isInstalled only greys the menu row)", "scripts/cutover.sh:13-15 (retires legacy src-tauri/ code only once the release gate opens, 0/2 CLOSED)"],
+        evidence: ["macos/OmniAgent/EngineLauncher.swift:609-615 (isInstalled only greys the menu row)", "scripts/cutover.sh:13-15 (retires the legacy Tauri-only code only once the release gate opens, 0/2 CLOSED)"],
         appleAsk: "Remove executable installers from the app; do not download or install code that changes capabilities after review.",
         solve: [
           "Replace install buttons with links to official provider pages or documentation.",
@@ -550,7 +550,7 @@
       },
       {
         title: "Broad project file access, indexing, editing, and watching",
-        severity: "high",
+        severity: "medium",
         category: "Files",
         summary: "OmniAgent walks project roots, watches folders recursively, opens local files in browser/editor panes, and writes transcripts/memory.",
         evidence: ["README.md:21,25", "crates/brain-ingest/src/watch.rs:32-46", "macos/OmniAgent/BrowserPaneView.swift:135-144,159-179", "macos/OmniAgent/EditorPaneView.swift:831"],
@@ -560,11 +560,11 @@
           "Persist security-scoped bookmarks and expose revoke/remove controls.",
           "Show onboarding copy explaining indexed files, transcripts, local memory, and rebuild/delete options."
         ],
-        status: "re-scored: high → medium (only matters under sandbox); fixed: Task A2 (usage strings) · decision D1"
+        status: "(only matters under sandbox); fixed: Task A2 (usage strings) · decision D1"
       },
       {
         title: "Browser panes load arbitrary sites, local files, and downloads",
-        severity: "high",
+        severity: "medium",
         category: "Network & WebView",
         summary: "The browser pane accepts http/https/file URLs, searches Google, and writes downloads to Downloads.",
         evidence: ["macos/OmniAgent/BrowserPaneView.swift:144,169-179,220-231"],
@@ -574,7 +574,7 @@
           "Remove arbitrary file:// loading or scope it to bookmarked project folders.",
           "Route downloads through user-selected destinations or sandbox-safe save panels."
         ],
-        status: "re-scored: high → medium; decision D2"
+        status: "decision D2"
       },
       {
         title: "Release WebViews are inspectable",
@@ -606,7 +606,7 @@
       },
       {
         title: "External AI/service dependency disclosures",
-        severity: "high",
+        severity: "medium",
         category: "AI & Services",
         summary: "The app launches Claude, Codex, Copilot, and AntiGravity CLIs and authenticates against api.omni-agent.ai.",
         evidence: ["macos/OmniAgent/EngineIcon.swift:50-66", "macos/OmniAgent/EngineLauncher.swift:573-684", "macos/OmniAgent/AuthClient.swift:236-239"],
@@ -616,7 +616,7 @@
           "Provide review notes with test accounts, disabled-feature behavior, and screenshots of consent screens.",
           "Make offline/local-only behavior clear if the user has no provider CLIs installed."
         ],
-        status: "re-scored: high → medium; fixed: Task B1 (policy text) + B2 (these review notes) · decision D3"
+        status: "fixed: Task B1 (policy text) + B2 (these review notes) · decision D3"
       },
       {
         title: "Third-party trademarks and icons",
