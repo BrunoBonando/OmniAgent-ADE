@@ -45,6 +45,19 @@ private final class FakeDaemonProcessLauncher: DaemonProcessLaunching {
     }
 }
 
+/// A scripted `DaemonTerminating`: records what it was asked to end and
+/// answers at once — the real one sends SIGTERM and polls a socket, which
+/// no test may do to the developer's live daemon.
+private final class FakeDaemonTerminator: DaemonTerminating {
+    private(set) var calls: [(pid: pid_t?, socketURL: URL)] = []
+    var result = true
+
+    func terminate(pid: pid_t?, socketURL: URL, timeout: TimeInterval, completion: @escaping (Bool) -> Void) {
+        calls.append((pid, socketURL))
+        completion(result)
+    }
+}
+
 final class DaemonPersistenceControllerTests: XCTestCase {
     private let paths = DaemonPaths.resolve(
         channel: .production,
@@ -56,14 +69,16 @@ final class DaemonPersistenceControllerTests: XCTestCase {
         registrar: FakeDaemonServiceRegistrar,
         launcher: FakeDaemonProcessLauncher = FakeDaemonProcessLauncher(),
         binaryPath: String? = "/Applications/OmniAgent.app/Contents/MacOS/omniagent-pty-daemon",
-        socketReachable: Bool = false
+        socketReachable: Bool = false,
+        terminator: FakeDaemonTerminator = FakeDaemonTerminator()
     ) -> DaemonPersistenceController {
         DaemonPersistenceController(
             paths: paths,
             registrar: registrar,
             processLauncher: launcher,
             resolveBinaryPath: { binaryPath },
-            socketReachable: { socketReachable }
+            socketReachable: { socketReachable },
+            terminator: terminator
         )
     }
 
@@ -271,5 +286,72 @@ final class DaemonPersistenceControllerTests: XCTestCase {
         XCTAssertEqual(controller.mode, .appOwned)
         XCTAssertEqual(controller.lostSessions, ["s1", "s2"], "stop() is bookkeeping-only, not a reset")
         XCTAssertEqual(launcher.launchCallCount, 1, "stop() never terminates the daemon process")
+    }
+
+    // MARK: - Account switch: terminate + respawn
+
+    func testTerminateDaemonSignalsThePidAndRespawnsInAppOwnedMode() {
+        let registrar = FakeDaemonServiceRegistrar(status: .notRegistered, registerOutcome: .failed)
+        let launcher = FakeDaemonProcessLauncher()
+        let terminator = FakeDaemonTerminator()
+        let controller = makeController(registrar: registrar, launcher: launcher, terminator: terminator)
+        controller.start()
+        XCTAssertEqual(launcher.launchCallCount, 1)
+
+        var completed = 0
+        controller.terminateDaemon(pid: 4242) { completed += 1 }
+
+        XCTAssertEqual(terminator.calls.map(\.pid), [4242])
+        XCTAssertEqual(terminator.calls.map(\.socketURL), [paths.socketURL])
+        XCTAssertEqual(launcher.launchCallCount, 2, "app-owned: nothing else will bring a daemon back")
+        XCTAssertEqual(completed, 1)
+    }
+
+    func testTerminateDaemonLeavesTheRespawnToLaunchdForARegisteredService() {
+        let registrar = FakeDaemonServiceRegistrar(status: .enabled, registerOutcome: .registered(.enabled))
+        let launcher = FakeDaemonProcessLauncher()
+        let terminator = FakeDaemonTerminator()
+        let controller = makeController(
+            registrar: registrar, launcher: launcher, socketReachable: true, terminator: terminator
+        )
+        controller.start()
+        XCTAssertEqual(launcher.launchCallCount, 0)
+
+        var completed = 0
+        controller.terminateDaemon(pid: nil) { completed += 1 }
+
+        XCTAssertEqual(terminator.calls.count, 1, "the wait for the socket to drop still runs")
+        XCTAssertEqual(launcher.launchCallCount, 0, "launchd's KeepAlive owns the respawn")
+        XCTAssertEqual(completed, 1)
+    }
+
+    // MARK: - SessionConnection.peerProcessID
+
+    /// The pid the terminator signals comes off the connected AF_UNIX
+    /// descriptor (`LOCAL_PEERPID`), so it is always the daemon this app is
+    /// actually talking to — never a pid file that could be stale. Exercised
+    /// against a real listening socket owned by this very process.
+    func testPeerProcessIDReadsTheListeningProcessOffTheConnectedDescriptor() throws {
+        let path = "/tmp/omniagent-peerpid-\(UUID().uuidString.prefix(8)).sock"
+        let listener = try bindAndListenTestSocket(at: path)
+        defer {
+            Darwin.close(listener)
+            unlink(path)
+        }
+        let connection = SessionConnection(socketURL: URL(fileURLWithPath: path))
+        XCTAssertNil(connection.peerProcessID(), "nothing connected yet")
+
+        connection.connect()
+        let connected = expectation(description: "the descriptor is connected")
+        DispatchQueue.global().async {
+            for _ in 0..<100 where connection.peerProcessID() == nil {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            connected.fulfill()
+        }
+        wait(for: [connected], timeout: 5)
+
+        XCTAssertEqual(connection.peerProcessID(), getpid(), "the listener is this very process")
+        connection.disconnect()
     }
 }

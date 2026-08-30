@@ -178,3 +178,35 @@ private final class LiveDaemonProcessHandle: DaemonProcessHandle {
     init(process: Process) { self.process = process }
     var isRunning: Bool { process.isRunning }
 }
+
+// MARK: - Account switch: ending the running daemon
+
+/// Ends the daemon on the other side of the socket and waits for it to be
+/// gone. The one place the app is allowed to end a daemon — and it is only
+/// ever reached after the user agreed to (`WorkspaceWindowController.
+/// switchAccount`/`logOutOfAccount` ask first whenever sessions would end):
+/// "Do not kill the daemon on your choice. Just do it if I allow."
+protocol DaemonTerminating {
+    /// SIGTERM `pid` (when known — the daemon's own handler shuts every PTY
+    /// down and unlinks its socket) and poll `socketURL` until nothing
+    /// answers, for at most `timeout`. Completes on the main queue with
+    /// whether the socket actually dropped.
+    func terminate(pid: pid_t?, socketURL: URL, timeout: TimeInterval, completion: @escaping (Bool) -> Void)
+}
+
+final class LiveDaemonTerminator: DaemonTerminating {
+    func terminate(pid: pid_t?, socketURL: URL, timeout: TimeInterval, completion: @escaping (Bool) -> Void) {
+        if let pid, pid > 0 {
+            Darwin.kill(pid, SIGTERM)
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        DispatchQueue.global(qos: .userInitiated).async {
+            var gone = !DaemonSocketProbe.isReachable(at: socketURL)
+            while !gone, Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.1)
+                gone = !DaemonSocketProbe.isReachable(at: socketURL)
+            }
+            DispatchQueue.main.async { completion(gone) }
+        }
+    }
+}

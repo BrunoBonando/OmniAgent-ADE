@@ -265,6 +265,27 @@ final class SessionConnection {
         }
     }
 
+    /// The pid on the other end of the connected unix-socket descriptor —
+    /// `getsockopt(SOL_LOCAL, LOCAL_PEERPID)` — i.e. the daemon this
+    /// connection is actually attached to, which is the only daemon
+    /// `DaemonPersistenceController.terminateDaemon` may ever signal. `nil`
+    /// while disconnected and for the relay transport, where the peer is a
+    /// WebSocket on another machine. Read on `ioQueue`, where the descriptor
+    /// is owned, so it can never race a connect or a close.
+    func peerProcessID() -> pid_t? {
+        ioQueue.sync {
+            guard descriptor >= 0 else { return nil }
+            var pid: pid_t = 0
+            var length = socklen_t(MemoryLayout<pid_t>.size)
+            // <sys/un.h>: SOL_LOCAL is 0, LOCAL_PEERPID is 0x002; both are
+            // plain integer macros and import into Swift as-is.
+            guard getsockopt(descriptor, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0, pid > 0 else {
+                return nil
+            }
+            return pid
+        }
+    }
+
     func listSessions(completion: @escaping (Result<[String], Error>) -> Void) {
         request(kind: .listSessions, payload: Data("{}".utf8)) { result in
             completion(

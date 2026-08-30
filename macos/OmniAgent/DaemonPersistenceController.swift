@@ -38,6 +38,9 @@ final class DaemonPersistenceController {
     /// A real liveness probe result, not file existence — see
     /// `DaemonSocketProbe`'s doc comment for why the distinction matters.
     private let socketReachable: () -> Bool
+    /// How a daemon is ended for an account switch — the real SIGTERM +
+    /// socket poll in production, a recorder in tests.
+    private let terminator: DaemonTerminating
     /// Retained for as long as the app runs so the child process stays
     /// tracked — never used to terminate it (see `LiveDaemonProcessLauncher`'s
     /// doc comment).
@@ -51,13 +54,15 @@ final class DaemonPersistenceController {
         registrar: DaemonServiceRegistrar,
         processLauncher: DaemonProcessLaunching,
         resolveBinaryPath: @escaping () -> String?,
-        socketReachable: @escaping () -> Bool
+        socketReachable: @escaping () -> Bool,
+        terminator: DaemonTerminating = LiveDaemonTerminator()
     ) {
         self.paths = paths
         self.registrar = registrar
         self.processLauncher = processLauncher
         self.resolveBinaryPath = resolveBinaryPath
         self.socketReachable = socketReachable
+        self.terminator = terminator
     }
 
     /// The real, production-shaped construction: a genuine `SMAppService`
@@ -106,6 +111,32 @@ final class DaemonPersistenceController {
             socketURL: paths.socketURL,
             dataDir: paths.dataDir
         )
+    }
+
+    /// Ends the running daemon so the next one reads the account pointer
+    /// afresh (2026-08-30 account-scoped-workspace spec, "Account switch"
+    /// step 4). `pid` is `SessionConnection.peerProcessID()` — the daemon
+    /// this app is attached to, or `nil` when it is not attached to one, in
+    /// which case only the wait runs. Once the socket has dropped, launchd's
+    /// `KeepAlive` brings a registered service back by itself; in app-owned
+    /// mode nothing else would, so `start()` respawns it. The existing
+    /// `SessionConnection` reconnect then attaches to whichever came up.
+    ///
+    /// This is the only method in the daemon-persistence mechanism that
+    /// touches the daemon process, and its callers ask the user first
+    /// whenever sessions would end — see `DaemonTerminating`.
+    func terminateDaemon(pid: pid_t?, completion: @escaping () -> Void) {
+        terminator.terminate(pid: pid, socketURL: paths.socketURL, timeout: 5) { [weak self] _ in
+            guard let self else {
+                completion()
+                return
+            }
+            ownedProcess = nil
+            if mode == .appOwned {
+                start()
+            }
+            completion()
+        }
     }
 
     /// Wired to `SessionConnection.onReattachFailed`. Deliberately never
