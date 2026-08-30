@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
+  <key>ITSAppUsesNonExemptEncryption</key><false/>
+  <key>NSHumanReadableCopyright</key><string>© 2026 Bruno Bonando. All rights reserved.</string>
+  <key>NSDownloadsFolderUsageDescription</key><string>OmniAgent saves files you download in a browser pane to your Downloads folder.</string>
   <key>CFBundleURLTypes</key>
   <array><dict>
     <key>CFBundleURLName</key><string>digital.bruno.omniagent.auth</string>
