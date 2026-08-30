@@ -3590,8 +3590,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // pane mutation.
                 persistRemoteControlProjection()
                 connection.getSetting(key: SettingsKey.relayDeviceToken) { [weak self] tokenResult in
-                    guard let self, case let .success(raw) = tokenResult else { return }
-                    hasRelayDeviceToken = !(raw ?? "").isEmpty
+                    guard let self else { return }
+                    switch tokenResult {
+                    case let .success(raw):
+                        hasRelayDeviceToken = !(raw ?? "").isEmpty
+                    case .failure:
+                        // A row that could not be read is not an absent one.
+                        // Believing it absent would register this Mac a
+                        // *second* time on the next enable — a duplicate
+                        // `relay_devices` row, and the token row overwritten
+                        // with the new one. Re-arm the pair instead.
+                        remoteControlReadDispatched = false
+                    }
                 }
             case .failure:
                 remoteControlReadDispatched = false
