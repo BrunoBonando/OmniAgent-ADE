@@ -2716,6 +2716,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     )
                 }
             }
+        case let .openLegal(doc):
+            // The default browser rather than a pane of our own: a static
+            // page needs no viewer, and Safari already prints and shares it.
+            if let url = doc.url { NSWorkspace.shared.open(url) }
         case let .revealProjectContext(project):
             showInspector(for: project)
         case .noop:
@@ -4321,6 +4325,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard destination != .settings else { return }
         showSettings(section: .general)
     }
+
+    /// The Help menu's two items, on the responder chain like every other
+    /// command here — the palette rows run the very same arm.
+    @objc func showPrivacyPolicy(_ sender: Any?) { run(.openLegal(.privacyPolicy)) }
+
+    @objc func showThirdPartyNotices(_ sender: Any?) { run(.openLegal(.thirdPartyNotices)) }
 
     /// Settings, opened on a particular section.
     func showSettings(section: SettingsSection) {
