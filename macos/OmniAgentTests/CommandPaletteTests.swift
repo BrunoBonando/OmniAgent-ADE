@@ -78,6 +78,38 @@ final class CommandPaletteTests: XCTestCase {
         )
     }
 
+    /// "Delete account…" is the third Accounts button, and unlike the pair
+    /// above it has only one honest state: a row while signed in, and no row
+    /// at all while signed out — there is no account to delete, so offering
+    /// it would be offering a dead end.
+    func testDeleteAccountIsASpotlightRowOnlyWhileSignedIn() {
+        let whenSignedIn = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil, signedIn: true
+        )
+        let deleteRows = whenSignedIn.filter { $0.action == .deleteAccount }
+        XCTAssertEqual(deleteRows.map(\.id), ["settings:accounts:delete"])
+        XCTAssertEqual(deleteRows.first?.title, "Delete account…")
+        XCTAssertEqual(deleteRows.first?.subtitle, "Settings › Accounts", "the row says where it lives")
+        XCTAssertEqual(deleteRows.first?.section, .places)
+        XCTAssertEqual(deleteRows.first?.symbol, "person.crop.circle.badge.minus")
+
+        let whenSignedOut = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
+        XCTAssertFalse(
+            whenSignedOut.contains { $0.action == .deleteAccount },
+            "nothing to delete, so nothing to offer"
+        )
+
+        // Found by what someone reaching for it would type, none of which is
+        // the word the button prints.
+        var model = CommandPaletteModel(commands: whenSignedIn)
+        // (Whole phrases only where the keyword order allows it — the
+        // matcher wants the query's characters *in order*.)
+        for query in ["delete account", "remove", "erase"] {
+            model.update(query: query)
+            XCTAssertEqual(model.matches.first?.id, "settings:accounts:delete", "typing \(query)")
+        }
+    }
+
     /// Settings › Accounts' GitHub button is a row of its own too, and the
     /// same rule applies: whichever half the account makes true, never both.
     func testTheGitHubButtonIsASpotlightRowInWhicheverStateItIsIn() {

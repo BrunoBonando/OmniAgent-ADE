@@ -1658,6 +1658,13 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.run(.signIn)
         XCTAssertEqual(presented, 1, "signing in is the launch gate, over the workspace window")
 
+        // The delete row's action, which is an ask and nothing else until it
+        // is answered — so running it here reaches no network at all.
+        controller.run(.deleteAccount)
+        let deleteCard = try XCTUnwrap(controller.windowAskOverlay, "the spotlight's row asks first")
+        deleteCard.subviews.compactMap { $0 as? PaneApprovalButton }.first { $0.title == "Cancel" }?.onClick?()
+        XCTAssertNil(controller.windowAskOverlay)
+
         // `AuthGateCoordinator` mirrors the flag into the *app's* defaults,
         // so the suite must put back whatever the developer's install had.
         let defaults = UserDefaults.standard
@@ -1758,6 +1765,40 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
         XCTAssertFalse(controller.palette.model.commands.contains { $0.id == "settings:accounts:signin" })
         controller.palette.dismiss()
+    }
+
+    /// Deleting the account asks first, in the house card — critical, over
+    /// the whole window, never an `NSAlert` — and backing out changes
+    /// nothing, in particular not the in-flight flag the other account
+    /// buttons share. Only Cancel is pressed here: the other button is a
+    /// live `DELETE` to Core, which a test has no business sending.
+    func testDeletingTheAccountAsksInACriticalCardAndCancellingChangesNothing() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        controller.run(.deleteAccount)
+        let card = try XCTUnwrap(controller.windowAskOverlay, "the real card, not an NSAlert")
+        XCTAssertEqual(card.frame, controller.window?.contentView?.bounds, "over the whole window")
+        let buttons = card.subviews.compactMap { $0 as? PaneApprovalButton }
+        XCTAssertEqual(buttons.map(\.title), ["Cancel", "Delete account"])
+        XCTAssertEqual(buttons.last?.isPrimary, true, "the destructive one is the one Return takes")
+        XCTAssertTrue(
+            buttons.allSatisfy { $0.tint == ShellPalette.red },
+            "critical severity, which is what the red tint is"
+        )
+
+        buttons[0].onClick?()
+        XCTAssertNil(controller.windowAskOverlay, "answering takes the card down")
+
+        // And the flag was never latched by merely asking: the page's own
+        // button opens a second card, which an in-flight action would refuse.
+        controller.settingsView.onDeleteAccount?()
+        XCTAssertNotNil(controller.windowAskOverlay, "backing out left the button usable")
+        controller.windowAskOverlay?.subviews
+            .compactMap { $0 as? PaneApprovalButton }
+            .first { $0.title == "Cancel" }?.onClick?()
+        XCTAssertNil(controller.windowAskOverlay)
     }
 
     /// One login screen at a time. `AuthGateWindowController.present` builds

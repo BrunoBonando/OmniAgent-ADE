@@ -45,6 +45,10 @@ enum PaletteAction: Equatable {
     /// one-row-not-both rule as the pair above.
     case connectGitHub
     case disconnectGitHub
+    /// Settings › Accounts' destructive third button. A row only while
+    /// signed in: deleting nothing is a dead end, not an offer — which is
+    /// why this one is not half of a pair like the two above.
+    case deleteAccount
     /// A file open in some editor pane, chosen from the spotlight — reveals
     /// the pane holding it and brings that tab forward.
     case openFile(path: String)
@@ -550,6 +554,21 @@ struct CommandPaletteModel: Equatable {
                     symbol: "link.badge.plus"
                 )
         )
+        // The destructive third button, offered only where it can be taken.
+        if signedIn {
+            commands.append(
+                PaletteCommand(
+                    id: "settings:accounts:delete",
+                    title: "Delete account…",
+                    detail: nil,
+                    action: .deleteAccount,
+                    keywords: accountKeywords + " delete remove erase",
+                    section: .places,
+                    subtitle: "Settings › Accounts",
+                    symbol: "person.crop.circle.badge.minus"
+                )
+            )
+        }
         // The Help menu's two pages. Everything navigable is findable, and a
         // privacy policy nobody can locate is the same as not having one.
         for doc in LegalDocument.allCases {

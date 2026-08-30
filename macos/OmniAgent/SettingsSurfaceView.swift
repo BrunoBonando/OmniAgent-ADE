@@ -319,6 +319,10 @@ final class SettingsSurfaceView: NSView {
     /// is linked, and the one button that links or unlinks it.
     let githubField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
     let githubButton = NSButton(title: "", target: nil, action: nil)
+    /// The destructive third button, under both. Shown only on Accounts and
+    /// only while signed in — there is no account to delete otherwise, and
+    /// the spotlight's row obeys the same rule.
+    let deleteAccountButton = NSButton(title: "Delete account…", target: nil, action: nil)
     /// What the block currently says about the account — the one reading of
     /// it, so the label and the button can never disagree, and so the
     /// spotlight's row (which offers "Log out" or "Sign in with Apple…" off
@@ -334,6 +338,7 @@ final class SettingsSurfaceView: NSView {
     var onLogOut: (() -> Void)?
     var onConnectGitHub: (() -> Void)?
     var onDisconnectGitHub: (() -> Void)?
+    var onDeleteAccount: (() -> Void)?
     /// The section on screen. Sticks for as long as the app lives, like
     /// Home's own picks.
     private(set) var section: SettingsSection = .general
@@ -354,10 +359,17 @@ final class SettingsSurfaceView: NSView {
         githubButton.target = self
         githubButton.action = #selector(githubButtonPressed)
         githubButton.translatesAutoresizingMaskIntoConstraints = false
+        deleteAccountButton.bezelStyle = .rounded
+        deleteAccountButton.controlSize = .regular
+        deleteAccountButton.font = ShellFont.ui(13)
+        deleteAccountButton.target = self
+        deleteAccountButton.action = #selector(deleteAccountPressed)
+        deleteAccountButton.translatesAutoresizingMaskIntoConstraints = false
         applyAccount(email: nil, signedIn: false)
 
         let column = NSStackView(views: [
             titleField, subtitleField, accountField, accountButton, githubField, githubButton,
+            deleteAccountButton,
         ])
         column.orientation = .vertical
         column.alignment = .leading
@@ -367,6 +379,9 @@ final class SettingsSurfaceView: NSView {
         // about the account above it rather than a second caption on it.
         column.setCustomSpacing(22, after: accountButton)
         column.setCustomSpacing(14, after: githubField)
+        // Its own gap again: deleting the account is not a third line of the
+        // GitHub block.
+        column.setCustomSpacing(22, after: githubButton)
         column.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
@@ -414,6 +429,7 @@ final class SettingsSurfaceView: NSView {
         accountButton.isHidden = !isAccounts
         githubField.isHidden = !isAccounts
         githubButton.isHidden = !isAccounts
+        deleteAccountButton.isHidden = !(isAccounts && accountSignedIn)
     }
 
     /// The account as the page shows it, handed in by the controller — this
@@ -452,6 +468,7 @@ final class SettingsSurfaceView: NSView {
         accountGitHubConnected = !login.isEmpty
         githubField.stringValue = login.isEmpty ? "GitHub: not connected" : "GitHub: @\(login)"
         githubButton.title = login.isEmpty ? "Connect GitHub…" : "Disconnect"
+        deleteAccountButton.isHidden = !(section == .accounts && signedIn)
     }
 
     @objc private func accountButtonPressed() {
@@ -461,4 +478,6 @@ final class SettingsSurfaceView: NSView {
     @objc private func githubButtonPressed() {
         if accountGitHubConnected { onDisconnectGitHub?() } else { onConnectGitHub?() }
     }
+
+    @objc private func deleteAccountPressed() { onDeleteAccount?() }
 }

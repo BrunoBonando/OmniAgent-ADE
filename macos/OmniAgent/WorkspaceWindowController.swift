@@ -874,6 +874,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         settingsView.onLogOut = { [weak self] in self?.logOutOfAccount() }
         settingsView.onConnectGitHub = { [weak self] in self?.connectGitHub() }
         settingsView.onDisconnectGitHub = { [weak self] in self?.disconnectGitHub() }
+        settingsView.onDeleteAccount = { [weak self] in self?.deleteAccount() }
         seedAccountFromMirror()
         settingsPanel.onHeightChange = { [weak self] in
             guard let self, settingsPanelPlace != .hidden else { return }
@@ -2695,6 +2696,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             connectGitHub()
         case .disconnectGitHub:
             disconnectGitHub()
+        case .deleteAccount:
+            deleteAccount()
         case let .openFile(path):
             openFileInEditor(URL(fileURLWithPath: path), pinned: true)
             // `openFileInEditor` focuses the pane it landed in but knows
@@ -4195,6 +4198,56 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             refreshAccountSection()
             accountActionInFlight = false
             presentAccountGate()
+        }
+    }
+
+    /// "Delete account…", and its spotlight row: one critical ask — the
+    /// house modal, never an `NSAlert` — then Core's `DELETE /v1/auth/me`,
+    /// then the same local teardown logging out performs, because after the
+    /// account is gone the app is in exactly the state a sign-out leaves it.
+    func deleteAccount() {
+        guard !accountActionInFlight else { return }
+        presentWindowAsk(
+            title: "Delete your OmniAgent account?",
+            message: "This removes your account and its sign-in sessions from omni-agent.ai. "
+                + "Nothing on this Mac — projects, brain, transcripts — is touched.",
+            severity: .critical,
+            options: [
+                PaneAskOption("Cancel") { _ in },
+                PaneAskOption("Delete account", isPrimary: true) { [weak self] _ in
+                    self?.performAccountDeletion()
+                },
+            ]
+        )
+    }
+
+    /// The confirmed half. The in-flight flag is taken here rather than in
+    /// `deleteAccount` so that backing out of the question leaves the other
+    /// account buttons usable.
+    private func performAccountDeletion() {
+        guard !accountActionInFlight else { return }
+        accountActionInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await AuthClient.shared.deleteAccount()
+                authGateCoordinator.reset { [weak self] in
+                    guard let self else { return }
+                    seedAccountFromMirror()
+                    refreshAccountSection()
+                    accountActionInFlight = false
+                    presentAccountGate()
+                }
+            } catch {
+                // The account is still there; say so and change nothing.
+                accountActionInFlight = false
+                presentWindowAsk(
+                    title: "Could not delete the account",
+                    message: AuthGateViewModel.message(for: error),
+                    severity: .critical,
+                    options: [PaneAskOption("OK", isPrimary: true) { _ in }]
+                )
+            }
         }
     }
 
