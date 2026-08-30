@@ -462,6 +462,10 @@ final class HomeSurfaceView: NSView {
     /// connect for them.
     let branchLabel = ShellFont.label(font: ShellFont.ui(12.5, .medium), color: ShellPalette.inkSecondary)
     private(set) var branchChip: HomeHotspotView?
+    private(set) var sessionChip: HomeHotspotView?
+    /// An existing session's branch is a fact, not a choice: the chip shows
+    /// it and takes no press. Only "New session" leaves it pickable.
+    private(set) var isBranchLocked = false
     /// The existing branch the session would use — or, when `newBranchName`
     /// is set, the one it would branch *from*.
     private(set) var selectedBranch: String?
@@ -576,7 +580,8 @@ final class HomeSurfaceView: NSView {
         workspaceName: String?,
         tint: NSColor? = nil,
         sessionLabel: String = "New session",
-        branch: String? = nil
+        branch: String? = nil,
+        sessionLocked: Bool = false
     ) {
         workspaceChipName.stringValue = workspaceName ?? "Select workspace"
         // The Chat scratch workspace wears a speech bubble, not a folder —
@@ -587,27 +592,47 @@ final class HomeSurfaceView: NSView {
         workspaceChipFolder.color = tint ?? ShellPalette.folderGlyph
         sessionChipLabel.stringValue = sessionLabel
         updateBranchChip(existing: branch)
-        // Chat is not a project: no branch, and nothing to set up either.
-        branchChip?.isHidden = isChat
+        setBranchLocked(sessionLocked)
+        // No workspace, nothing to pick a session or branch *for*; and Chat
+        // is not a project, so it has no branch either.
+        sessionChip?.isHidden = workspaceID == nil
+        if isChat || workspaceID == nil { branchChip?.isHidden = true }
     }
 
     /// The session chip after a pick from `onRequestSessionMenu`'s menu — the
     /// owner calls this directly rather than routing back through `refresh`,
     /// which would also re-derive the workspace chip for no reason.
-    func updateSessionChip(label: String, branch: String?) {
+    func updateSessionChip(label: String, branch: String?, locked: Bool = false) {
         sessionChipLabel.stringValue = label
         updateBranchChip(existing: branch)
+        setBranchLocked(locked)
     }
 
     /// An existing branch picked (or the workspace's current one on
     /// refresh) — clears any pending new-branch name. `nil` means no git:
-    /// the chip offers to set up GitHub instead.
+    /// there is no branch to show, so the chip goes (GitHub setup lives in
+    /// the dropdown's own section and in Settings › Accounts).
     func updateBranchChip(existing branch: String?) {
         selectedBranch = branch
         newBranchName = nil
-        branchLabel.stringValue = branch ?? Self.setUpGitHubTitle
-        branchChip?.isHidden = false
+        branchLabel.stringValue = branch ?? ""
+        branchChip?.isHidden = branch == nil
     }
+
+    private func setBranchLocked(_ locked: Bool) {
+        isBranchLocked = locked
+        branchChip?.setHovered(false)
+        branchChip?.onPress = locked ? nil : { [weak self] in
+            guard let self, let branchChip else { return }
+            onRequestBranchMenu?(branchChip)
+        }
+        branchLabel.textColor = locked ? ShellPalette.inkTertiary : ShellPalette.inkSecondary
+    }
+
+    /// What is in the composer, and the way Send empties it once the words
+    /// have gone to a terminal.
+    var composerText: String { composerPrompt.stringValue }
+    func clearComposer() { composerPrompt.stringValue = "" }
 
     static let setUpGitHubTitle = "Set up GitHub"
 
@@ -809,6 +834,7 @@ final class HomeSurfaceView: NSView {
     }
 
     private func buildComposer() -> NSView {
+        composerPrompt.delegate = self
         composerPrompt.onFocusChange = { [weak self] focused in
             guard let self else { return }
             self.composerCard.setFocused(focused)
@@ -974,12 +1000,10 @@ final class HomeSurfaceView: NSView {
         branchStack.orientation = .horizontal
         branchStack.spacing = 6
         let branch = HomeHotspotView(wrapping: branchStack, accessibilityLabel: "Branch")
-        branch.onPress = { [weak self, weak branch] in
-            guard let self, let branch else { return }
-            self.onRequestBranchMenu?(branch)
-        }
         branch.isHidden = true
         branchChip = branch
+        setBranchLocked(false)
+        sessionChip = session
 
         let row = NSStackView(views: [project, divider, session, branch, NSView()])
         row.orientation = .horizontal
@@ -1280,5 +1304,276 @@ final class HomeSurfaceView: NSView {
         field.isSelectable = false
         field.translatesAutoresizingMaskIntoConstraints = false
         return field
+    }
+}
+
+/// Return in the composer is Send; Option-Return still breaks the line, the
+/// field editor's own way.
+extension HomeSurfaceView: NSTextFieldDelegate {
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        onSend?()
+        return true
+    }
+}
+
+// MARK: - Launch
+
+/// One Home send, from the new pane's first byte to the message landing —
+/// the order the steps run in, and the one heuristic that paces them.
+///
+/// "Loaded" is output followed by `quiet` seconds of silence: the daemon's
+/// own Ready rule (700ms of quiet), with room for a slow TUI's last redraw.
+/// The same rule paces `/model`: its confirmation prints, the prompt goes
+/// quiet, the message goes in. No engine-specific prompt sniffing.
+///
+/// ponytail: if `/model` asks to confirm the switch, the quiet after that
+/// question sends the message into it — the pane is on screen, so the user
+/// sees what happened; reading the confirm off the screen is the upgrade.
+final class HomeLaunch {
+    enum Step: String, CaseIterable {
+        case preparing = "Preparing terminal"
+        case loading = "Loading engine"
+        case model = "Setting model"
+        case conversation = "Starting conversation"
+    }
+
+    private(set) var step: Step = .preparing
+    private let modelCommand: String?
+    private let message: String
+    private let quiet: TimeInterval
+    private let show: (Step) -> Void
+    private let send: (String) -> Void
+    private let finish: () -> Void
+    private var settle: DispatchWorkItem?
+    private var timeout: DispatchWorkItem?
+    private var finished = false
+
+    init(
+        modelCommand: String?,
+        message: String,
+        quiet: TimeInterval = 1.2,
+        timeout: TimeInterval = 30,
+        show: @escaping (Step) -> Void,
+        send: @escaping (String) -> Void,
+        finish: @escaping () -> Void
+    ) {
+        self.modelCommand = modelCommand
+        self.message = message
+        self.quiet = quiet
+        self.show = show
+        self.send = send
+        self.finish = finish
+        show(.preparing)
+        // An engine that never prints — not installed, a hung spawn — must
+        // not leave the glass over the pane forever.
+        let item = DispatchWorkItem { [weak self] in self?.cancel() }
+        self.timeout = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: item)
+    }
+
+    /// The pane printed something. The first byte is "the engine is up and
+    /// drawing"; every byte restarts the quiet clock.
+    func noteOutput() {
+        guard !finished else { return }
+        if step == .preparing { move(to: .loading) }
+        settle?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.settled() }
+        settle = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + quiet, execute: item)
+    }
+
+    /// The pane exited, or nothing happened for `timeout` — take the glass
+    /// down without sending anything more.
+    func cancel() { end() }
+
+    private func settled() {
+        switch step {
+        case .preparing, .conversation:
+            return
+        case .loading:
+            if let modelCommand {
+                move(to: .model)
+                send(modelCommand)
+            } else {
+                startConversation()
+            }
+        case .model:
+            startConversation()
+        }
+    }
+
+    private func startConversation() {
+        move(to: .conversation)
+        if !message.isEmpty { send(message) }
+        // A beat for the last line to finish typing before the glass lifts.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in self?.end() }
+    }
+
+    private func move(to next: Step) {
+        step = next
+        show(next)
+    }
+
+    private func end() {
+        guard !finished else { return }
+        finished = true
+        settle?.cancel()
+        timeout?.cancel()
+        finish()
+    }
+}
+
+/// The glass a Home send puts over its new pane while `HomeLaunch` runs:
+/// `PaneAskOverlayView`'s scrim and card (same glass, same navy), the Home
+/// mark on the card, and the steps typed under it one line at a time with a
+/// block caret — a terminal telling you what it is doing, on top of the
+/// terminal that is doing it. Swallows clicks, as any covering view does.
+final class HomeLaunchOverlayView: NSView {
+    private static let cardSize = NSSize(width: 340, height: 196)
+    private static let cardRadius: CGFloat = 16
+    private static let markSize: CGFloat = 34
+
+    private let scrim: NSView?
+    private let cardGlass: NSView?
+    private let cardTint = NSView()
+    private let mark = NSImageView()
+    private let text = NSTextField(wrappingLabelWithString: "")
+    /// Every line shown so far, complete — what the tests read; the typing
+    /// is only how the display catches up with it.
+    private(set) var lines: [String] = []
+    private var revealed = 0
+    private var typing: Timer?
+
+    init() {
+        if #available(macOS 26.0, *) {
+            let pane = NSGlassEffectView()
+            pane.style = .regular
+            pane.tintColor = nil
+            scrim = pane
+            let card = NSGlassEffectView()
+            card.style = .regular
+            card.cornerRadius = Self.cardRadius
+            card.tintColor = nil
+            cardGlass = card
+        } else {
+            scrim = nil
+            cardGlass = nil
+        }
+        super.init(frame: .zero)
+        wantsLayer = true
+        // Pre-26: an honest flat navy instead of glass, `PaneAskOverlayView`'s
+        // own fallback.
+        if scrim == nil { layer?.backgroundColor = NSColor(srgbRed: 0.05, green: 0.07, blue: 0.16, alpha: 0.72).cgColor }
+        let tint = CAGradientLayer()
+        tint.colors = [
+            NSColor(srgbRed: 0.11, green: 0.16, blue: 0.38, alpha: cardGlass == nil ? 0.96 : 0.40).cgColor,
+            NSColor(srgbRed: 0.05, green: 0.08, blue: 0.22, alpha: cardGlass == nil ? 0.96 : 0.14).cgColor,
+        ]
+        tint.startPoint = CGPoint(x: 0.5, y: 1)
+        tint.endPoint = CGPoint(x: 0.5, y: 0)
+        cardTint.wantsLayer = true
+        cardTint.layer?.addSublayer(tint)
+        cardTint.layer?.cornerRadius = Self.cardRadius
+        cardTint.layer?.cornerCurve = .continuous
+        cardTint.layer?.masksToBounds = true
+        cardTint.layer?.borderWidth = 1
+        cardTint.layer?.borderColor = NSColor(white: 1, alpha: 0.16).cgColor
+        cardTint.layer?.sublayers?.first?.frame = CGRect(origin: .zero, size: Self.cardSize)
+
+        // The hero's mark, glow and all, at a card's scale.
+        mark.image = OmniAgentMark.image
+        mark.contentTintColor = .white
+        mark.imageScaling = .scaleProportionallyUpOrDown
+        mark.wantsLayer = true
+        mark.layer?.shadowColor = ShellPalette.accent.cgColor
+        mark.layer?.shadowOpacity = 0.55
+        mark.layer?.shadowRadius = 14
+        mark.layer?.shadowOffset = .zero
+
+        text.font = ShellFont.mono(12.5)
+        text.textColor = NSColor(srgbRed: 240 / 255, green: 240 / 255, blue: 244 / 255, alpha: 1)
+        text.isSelectable = false
+        text.maximumNumberOfLines = Step.allCases.count
+
+        for view in [scrim, cardGlass, cardTint, mark, text].compactMap({ $0 }) { addSubview(view) }
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Starting session")
+    }
+
+    private typealias Step = HomeLaunch.Step
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    deinit { typing?.invalidate() }
+
+    /// Adds `line` under the ones before it and types it out, 18ms a
+    /// character, with a block caret riding the end. A line still typing
+    /// when the next arrives finishes at once — the sequence never lags the
+    /// work by more than one line.
+    func type(_ line: String) {
+        typing?.invalidate()
+        lines.append(line)
+        revealed = 0
+        let characters = Array(line)
+        let timer = Timer(timeInterval: 0.018, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            revealed += 1
+            render()
+            if revealed >= characters.count {
+                timer.invalidate()
+                typing = nil
+            }
+        }
+        timer.tolerance = 0.004
+        RunLoop.main.add(timer, forMode: .common)
+        typing = timer
+        render()
+    }
+
+    private func render() {
+        guard let current = lines.last else { return }
+        let done = lines.dropLast().map { "✓ \($0)" }
+        let typed = String(Array(current).prefix(revealed))
+        let shown = done + ["› \(typed)…▌"]
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 4
+        let result = NSMutableAttributedString()
+        for (index, line) in shown.enumerated() {
+            let isCurrent = index == shown.count - 1
+            result.append(NSAttributedString(
+                string: line + (isCurrent ? "" : "\n"),
+                attributes: [
+                    .font: ShellFont.mono(12.5),
+                    .paragraphStyle: paragraph,
+                    .foregroundColor: isCurrent
+                        ? NSColor(srgbRed: 240 / 255, green: 240 / 255, blue: 244 / 255, alpha: 1)
+                        : NSColor(srgbRed: 176 / 255, green: 180 / 255, blue: 198 / 255, alpha: 1),
+                ]
+            ))
+        }
+        text.attributedStringValue = result
+    }
+
+    override func layout() {
+        super.layout()
+        scrim?.frame = bounds
+        let card = NSRect(
+            x: (bounds.width - Self.cardSize.width) / 2,
+            y: (bounds.height - Self.cardSize.height) / 2,
+            width: Self.cardSize.width,
+            height: Self.cardSize.height
+        ).integral
+        cardGlass?.frame = card
+        cardTint.frame = card
+        mark.frame = NSRect(
+            x: card.midX - Self.markSize / 2,
+            y: card.maxY - 22 - Self.markSize,
+            width: Self.markSize,
+            height: Self.markSize
+        )
+        text.frame = NSRect(x: card.minX + 24, y: card.minY + 20, width: card.width - 48, height: mark.frame.minY - 18 - card.minY - 20)
     }
 }

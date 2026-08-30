@@ -2438,6 +2438,29 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(C.homeWorkspaces(open: [], pending: pending).map(\.id), ["p"])
     }
 
+    /// Home's branch chip answers the git question itself: the current
+    /// branch is a plain session, another existing branch a worktree on it,
+    /// a new name a branch created off the chip's base.
+    func testHomeSessionSetupHonoursTheBranchChip() {
+        typealias C = WorkspaceWindowController
+        var request = SessionSetupRequest(
+            cwd: "/r", project: "r", parent: nil, repositoryRoot: "/r", currentBranch: "main",
+            branches: ["main", "dev"], selectedBranch: "main", newBranchName: nil, engine: .claude, model: "opus"
+        )
+        XCTAssertNil(C.homeSessionSetup(request).branch, "the branch you are on: no worktree")
+        XCTAssertEqual(C.homeSessionSetup(request).model, "opus")
+
+        request.selectedBranch = "dev"
+        let existing = C.homeSessionSetup(request).branch
+        XCTAssertEqual(existing?.branch, "dev")
+        XCTAssertNil(existing?.sourceRef, "an existing branch is checked out, not created")
+
+        request.newBranchName = "feature/x"
+        let created = C.homeSessionSetup(request).branch
+        XCTAssertEqual(created?.branch, "feature/x")
+        XCTAssertEqual(created?.sourceRef, "dev", "created off the chip's base")
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(

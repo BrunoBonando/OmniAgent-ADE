@@ -203,6 +203,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// and clear this). Until then it lists in Home's picker like any
     /// other workspace, and lives as long as the app does.
     private var homePendingFolder: BrainProjectSummary?
+    /// Home's session chip: an existing session's group id, or `nil` for
+    /// "New session". Defaults to the workspace's first session on a visit.
+    private var homeSelectedSessionID: String?
+    /// The Home sends still under glass, by the new pane's id — fed from
+    /// `onTerminalData`, dropped by `onExit` or when they finish.
+    private var homeLaunches: [String: HomeLaunch] = [:]
     var sessionSetupProvider: ((SessionSetupRequest) -> SessionSetupResult?)?
     let palette = CommandPaletteController()
     private var readySessions: Set<String> = []
@@ -744,12 +750,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let project = homeSelectedProjectID
             let sessions = homeSessions(for: project)
             let sessionRows = sessions.map { session in
-                HomeDropdown.Row(icon: HomeDropdown.symbol("terminal"), title: session.label) { [weak self] in
-                    self?.homeView.updateSessionChip(label: session.label, branch: GitBranch.forDirectory(session.cwd))
+                HomeDropdown.Row(
+                    icon: HomeDropdown.symbol("terminal"), title: session.label, isCurrent: session.id == self.homeSelectedSessionID
+                ) { [weak self] in
+                    self?.homeSelectedSessionID = session.id
+                    self?.homeView.updateSessionChip(
+                        label: session.label, branch: GitBranch.forDirectory(session.cwd), locked: true
+                    )
                 }
             }
-            let newSessionRow = HomeDropdown.Row(icon: HomeDropdown.symbol("plus"), title: "Create new session") { [weak self] in
+            let newSessionRow = HomeDropdown.Row(
+                icon: HomeDropdown.symbol("plus"), title: "Create new session", isCurrent: self.homeSelectedSessionID == nil
+            ) { [weak self] in
                 guard let self else { return }
+                homeSelectedSessionID = nil
                 homeView.updateSessionChip(label: "New session", branch: homeDirectory().flatMap(GitBranch.forDirectory))
             }
             HomeDropdown.show(
@@ -758,12 +772,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 from: anchor
             )
         }
+        // Send: the words go to a terminal. An existing session gets them
+        // typed in where it is; a new one is started on the chips' engine,
+        // model and branch, and `launchFromHome` covers it in glass until
+        // the engine is up, the model set and the message in.
         homeView.onSend = { [weak self] in
             guard let self else { return }
             if homeSelectedProjectID == HomeChatWorkspace.id {
                 return
             }
             guard let directory = homeDirectory() else { return }
+            let message = homeView.composerText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let group = homeSelectedSessionID,
+               let paneID = homeSessions(for: homeSelectedProjectID).first(where: { $0.id == group })?.paneIDs.first {
+                revealPane(paneID)
+                if !message.isEmpty { workspace.terminalSurface(for: paneID)?.sendCommandClearingInput(message) }
+                homeView.clearComposer()
+                return
+            }
             let project = homeSelectedProjectID
                 ?? homePendingFolder?.id
                 ?? (directory as NSString).lastPathComponent
@@ -774,14 +800,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 homePendingFolder = nil
             }
             selectWorkspace(id: project, animated: false)
-            startSession(
+            let engine = homeView.selectedEngineForSession
+            let model = homeView.selectedModelForSession?.id
+            guard let group = startSession(
                 inDirectory: directory,
                 project: project,
                 selectedBranch: homeView.selectedBranch,
                 newBranchName: homeView.newBranchName,
-                engine: homeView.selectedEngineForSession,
-                model: homeView.selectedModelForSession?.id
-            )
+                engine: engine,
+                model: model,
+                setup: Self.homeSessionSetup
+            ), let paneID = homeSessions(for: project).first(where: { $0.id == group })?.paneIDs.first
+            else { return }
+            homeView.clearComposer()
+            launchFromHome(paneID: paneID, engine: engine, model: model, message: message)
         }
         // Every local branch, current one checked; typing a name no branch
         // has offers to create it off the one currently picked — so "from
@@ -1267,6 +1299,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 os_signpost(.event, log: Instrumentation.log, name: "First Terminal Output")
             }
             surface.feed(bytes, isSnapshot: isSnapshot, sequence: sequence)
+            homeLaunches[id]?.noteOutput()
             // A hand-typed `/model` changes the model without an API call or a
             // status event; its printed confirmation is the only signal. The
             // pane re-reads its transcript when the output settles.
@@ -1301,6 +1334,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         connection.onExit = { [weak self] event in
             guard let self, workspace.container(for: event.id) != nil else { return }
+            homeLaunches[event.id]?.cancel()
             // The `--resume` fallback: a conversation that no longer exists
             // makes `claude` exit non-zero almost immediately, which would
             // otherwise leave a dead pane where a working agent belongs.
@@ -1785,7 +1819,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         selectedBranch: String? = nil,
         newBranchName: String? = nil,
         engine: Engine = EngineLauncher.defaultEngine(),
-        model: String? = nil
+        model: String? = nil,
+        setup: ((SessionSetupRequest) -> SessionSetupResult?)? = nil
     ) -> String? {
         guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return nil }
         // Starting a session in a closed workspace reopens it — the web
@@ -1810,7 +1845,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             engine: engine,
             model: model
         )
-        guard let setup = resolveSessionSetup(request) else { return nil }
+        guard let setup = resolveSessionSetup(request, setup: setup) else { return nil }
         guard finishStartSession(
             paneID: paneID,
             group: group,
@@ -1896,11 +1931,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         )
     }
 
-    private func resolveSessionSetup(_ request: SessionSetupRequest) -> SessionSetupResult? {
+    /// `setup` answers the git question for a caller that already knows —
+    /// Home's branch chip — ahead of the test seam and the card.
+    private func resolveSessionSetup(
+        _ request: SessionSetupRequest,
+        setup: ((SessionSetupRequest) -> SessionSetupResult?)? = nil
+    ) -> SessionSetupResult? {
         guard request.isGitReady else {
             return SessionSetupResult(cwd: request.cwd, branch: nil, engine: request.engine, model: request.model)
         }
-        if let provider = sessionSetupProvider {
+        if let provider = setup ?? sessionSetupProvider {
             return provider(request).flatMap(materializeSessionSetup)
         }
         presentDefaultSessionSetup(request)
@@ -5722,13 +5762,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func refreshHomeChips() {
         homeSelectedProjectID = Self.homeWorkspace(keeping: homeSelectedProjectID, open: homeOpenWorkspaces())
         let sessions = homeSessions(for: homeSelectedProjectID)
+        homeSelectedSessionID = sessions.first?.id
         let branchDirectory = sessions.first?.cwd ?? homeDirectory()
         homeView.refresh(
             workspaceID: homeSelectedProjectID,
             workspaceName: homeSelectedProjectID.map(homeWorkspaceLabel),
             tint: homeSelectedProjectID.flatMap(sidebarTint),
             sessionLabel: sessions.first?.label ?? "New session",
-            branch: branchDirectory.flatMap(GitBranch.forDirectory)
+            branch: branchDirectory.flatMap(GitBranch.forDirectory),
+            sessionLocked: sessions.first != nil
         )
     }
 
@@ -5747,6 +5789,51 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     private func homeOpenWorkspaces() -> [BrainProjectSummary] {
         Self.homeWorkspaces(open: Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs), pending: homePendingFolder)
+    }
+
+    /// Home's branch chip, honoured instead of asked about: the "Create
+    /// branch session" card is for a session started blind from the
+    /// sidebar, and Home already said which branch. A new name is created
+    /// off its base; another existing branch gets a worktree on it; the
+    /// current branch — the default — is a plain session in the folder, no
+    /// worktree for the branch you are already on.
+    static func homeSessionSetup(_ request: SessionSetupRequest) -> SessionSetupResult {
+        var result = SessionSetupResult(cwd: request.cwd, branch: nil, engine: request.engine, model: request.model)
+        let root = request.repositoryRoot ?? request.cwd
+        if let name = request.newBranchName {
+            result.branch = SessionBranch(
+                repositoryRoot: root, branch: name, worktreePath: "",
+                sourceRef: request.selectedBranch ?? request.currentBranch, sourceCommit: nil,
+                engine: request.engine, model: request.model
+            )
+        } else if let picked = request.selectedBranch, picked != request.currentBranch {
+            result.branch = SessionBranch(
+                repositoryRoot: root, branch: picked, worktreePath: "", sourceRef: nil, sourceCommit: nil,
+                engine: request.engine, model: request.model
+            )
+        }
+        return result
+    }
+
+    /// Glass over the pane a Home send just made, lifted once the engine is
+    /// up, the model (if one was picked) set and the message typed in — the
+    /// `HomeLaunch` sequence, driven by the pane's own output.
+    private func launchFromHome(paneID: String, engine: Engine, model: String?, message: String) {
+        guard let container = workspace.container(for: paneID) else { return }
+        let overlay = HomeLaunchOverlayView()
+        overlay.frame = container.bounds
+        overlay.autoresizingMask = [.width, .height]
+        container.addSubview(overlay, positioned: .above, relativeTo: nil)
+        homeLaunches[paneID] = HomeLaunch(
+            modelCommand: model.flatMap { EngineModel.switchCommand(engine: engine, model: $0) },
+            message: message,
+            show: { [weak overlay] step in overlay?.type(step.rawValue) },
+            send: { [weak self] text in self?.workspace.terminalSurface(for: paneID)?.sendCommandClearingInput(text) },
+            finish: { [weak self, weak overlay] in
+                overlay?.removeFromSuperview()
+                self?.homeLaunches[paneID] = nil
+            }
+        )
     }
 
     /// Where Home's chosen workspace lives — `nil` when none is chosen.
@@ -5776,13 +5863,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func selectHomeWorkspace(_ id: String) {
         homeSelectedProjectID = id
         let sessions = homeSessions(for: id)
+        homeSelectedSessionID = sessions.first?.id
         let branchDirectory = sessions.first?.cwd ?? workspaceDirectory(for: id)
         homeView.refresh(
             workspaceID: id,
             workspaceName: homeWorkspaceLabel(id),
             tint: sidebarTint(for: id),
             sessionLabel: sessions.first?.label ?? "New session",
-            branch: branchDirectory.flatMap(GitBranch.forDirectory)
+            branch: branchDirectory.flatMap(GitBranch.forDirectory),
+            sessionLocked: sessions.first != nil
         )
     }
 
