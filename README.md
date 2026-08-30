@@ -18,7 +18,7 @@ docs/                 # DESIGN.md, PLAN.md, visual reference (g-brain, logo)
 
 ## Data
 
-Everything lives under `~/Library/Application Support/OmniAgent-ADE/` by default: `brain.db` (the derived, rebuildable graph — see the sidebar's "About" panel for "Rebuild brain"), `brain/<project>/*.md` (durable Markdown memory — never deleted by a rebuild), and `transcripts/` (per-session PTY logs). Override with `OMNIAGENT_ADE_DATA_DIR` (every crate honors it) — useful for a scratch/test data dir instead of your real one.
+Everything lives under `~/Library/Application Support/OmniAgent-ADE/` by default — the data **root**. It holds a pointer file, `current-account`, naming the signed-in account; while it exists, the data dir is `accounts/<id>/` under the root (one directory per account, so only the signed-in account sees its brain, workspaces and transcripts), otherwise the root itself. Inside the data dir: `brain.db` (the derived, rebuildable graph — see the sidebar's "About" panel for "Rebuild brain"), `brain/<project>/*.md` (durable Markdown memory — never deleted by a rebuild), and `transcripts/` (per-session PTY logs). Override the root with `OMNIAGENT_ADE_DATA_DIR` (every crate honors it) — useful for a scratch/test data dir instead of your real one. The daemon reads the pointer once at startup; the app restarts it to switch accounts, asking first whenever that would end running sessions.
 
 ## First run
 
