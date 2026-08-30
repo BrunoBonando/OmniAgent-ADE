@@ -54,6 +54,12 @@ struct PaneDescriptor: Equatable {
     /// second bookkeeping collection.
     var editorTabs: [PersistedEditorTab]
     var editorActiveIndex: Int
+    /// The relay device this terminal is a *viewer* of, `nil` for every pane
+    /// on this Mac. A remote pane attaches through that machine's
+    /// `SessionConnection` rather than the local daemon's, is never persisted
+    /// (the layout row is this Mac's, and the session belongs to another),
+    /// and is never killed, spawned or given local siblings.
+    var remoteDeviceID: String? = nil
 
     init(
         sessionID: String,
@@ -71,7 +77,8 @@ struct PaneDescriptor: Equatable {
         kind: PaneKind = .terminal,
         browserURL: String = "",
         editorTabs: [PersistedEditorTab] = [],
-        editorActiveIndex: Int = 0
+        editorActiveIndex: Int = 0,
+        remoteDeviceID: String? = nil
     ) {
         self.sessionID = sessionID
         self.group = group
@@ -89,6 +96,7 @@ struct PaneDescriptor: Equatable {
         self.browserURL = browserURL
         self.editorTabs = editorTabs
         self.editorActiveIndex = editorActiveIndex
+        self.remoteDeviceID = remoteDeviceID
     }
 
     /// The pane's own restored shape, so a plan can be applied without the

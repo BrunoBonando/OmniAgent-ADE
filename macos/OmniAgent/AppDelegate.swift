@@ -25,6 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let daemonPersistence = DaemonPersistenceController(paths: paths)
         daemonPersistence.start()
         let connection = SessionConnection(socketURL: paths.socketURL)
+        // The viewer side of remote session control: one connection per
+        // online machine on the account, polled while signed in. Constructed
+        // idle; the window starts it once the launch gate says signed in.
+        let remoteMachines = RemoteMachinesModel()
         let delivery = UserNotificationDelivery()
         // No panes yet: the window opens immediately, and `start()` fills it
         // from the shared `layout` row the moment the socket comes up. The
@@ -34,7 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             connection: connection,
             panes: [],
             notifier: SessionNotifier(delivery: delivery),
-            daemonPersistence: daemonPersistence
+            daemonPersistence: daemonPersistence,
+            remoteMachines: remoteMachines
         )
         delivery.onActivate = { [weak workspace] sessionID in
             workspace?.revealPane(sessionID)
