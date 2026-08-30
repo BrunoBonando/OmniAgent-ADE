@@ -62,6 +62,15 @@ final class NativeAppVersionTests: XCTestCase {
 }
 
 final class SettingsViewModelTests: XCTestCase {
+    /// Never `UserDefaults.standard` here: the test host is the app itself,
+    /// so a coordinator on the standard domain writes the developer's real
+    /// `auth.signedIn` (see `RealPreferencesGuard`).
+    private func throwawayDefaults() -> UserDefaults {
+        let name = "digital.bruno.omniagent.tests.\(UUID().uuidString)"
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
+        return UserDefaults(suiteName: name)!
+    }
+
     private func makeModel(
         settingsRows: [String: String] = [:],
         brainAdmin: FakeBrainAdminClient = FakeBrainAdminClient(),
@@ -73,7 +82,7 @@ final class SettingsViewModelTests: XCTestCase {
         let settings = SettingsStore(client: client)
         let model = SettingsViewModel(
             settings: settings,
-            authGate: AuthGateCoordinator(settings: settings),
+            authGate: AuthGateCoordinator(settings: settings, defaults: throwawayDefaults()),
             brainAdmin: brainAdmin,
             notifier: notifier,
             version: "2026.7.30",
@@ -132,7 +141,7 @@ final class SettingsViewModelTests: XCTestCase {
         let settings = SettingsStore(client: client)
         let model = SettingsViewModel(
             settings: settings,
-            authGate: AuthGateCoordinator(settings: settings),
+            authGate: AuthGateCoordinator(settings: settings, defaults: throwawayDefaults()),
             brainAdmin: FakeBrainAdminClient(),
             notifier: SessionNotifier(delivery: RecordingDelivery()),
             version: "2026.8.3+001",
@@ -166,7 +175,7 @@ final class SettingsViewModelTests: XCTestCase {
         let settings = SettingsStore(client: client)
         let model = SettingsViewModel(
             settings: settings,
-            authGate: AuthGateCoordinator(settings: settings),
+            authGate: AuthGateCoordinator(settings: settings, defaults: throwawayDefaults()),
             brainAdmin: FakeBrainAdminClient(),
             notifier: SessionNotifier(delivery: RecordingDelivery()),
             version: "2026.8.3+001",
@@ -200,6 +209,17 @@ final class SettingsViewModelTests: XCTestCase {
     }
 
     func testSignOutResetsTheAuthGateAndRefreshesTheSummary() {
+        // The test host *is* the app (same bundle id), so a coordinator left
+        // on `UserDefaults.standard` signs the developer's real install out
+        // every time the suite runs. Pin that the real mirror is untouched.
+        let real = UserDefaults.standard
+        let mirrored = real.object(forKey: AuthGate.signedInDefaultsKey)
+        defer {
+            if let mirrored { real.set(mirrored, forKey: AuthGate.signedInDefaultsKey) }
+            else { real.removeObject(forKey: AuthGate.signedInDefaultsKey) }
+        }
+        real.set(true, forKey: AuthGate.signedInDefaultsKey)
+
         var revokeCallCount = 0
         let (model, client) = makeModel(
             settingsRows: ["auth_signed_in": "true", "auth_persona": "student"],
@@ -208,6 +228,11 @@ final class SettingsViewModelTests: XCTestCase {
         XCTAssertTrue(model.authSignedIn)
 
         model.signOut()
+
+        XCTAssertTrue(
+            real.bool(forKey: AuthGate.signedInDefaultsKey),
+            "signing out a test model must not sign the developer's real install out"
+        )
 
         XCTAssertEqual(client.rows["auth_gate_resolved"], "false")
         XCTAssertEqual(client.rows["auth_signed_in"], "false")
@@ -306,7 +331,7 @@ final class SettingsViewModelTests: XCTestCase {
         let settings = SettingsStore(client: client)
         let model = SettingsViewModel(
             settings: settings,
-            authGate: AuthGateCoordinator(settings: settings),
+            authGate: AuthGateCoordinator(settings: settings, defaults: throwawayDefaults()),
             brainAdmin: FakeBrainAdminClient(),
             notifier: SessionNotifier(delivery: RecordingDelivery()),
             version: nil,
