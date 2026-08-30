@@ -402,30 +402,47 @@ impl Store {
     /// sole owner of these files, and at that moment nothing has them open.
     /// The app never moves files itself. A `rename` within one root stays
     /// on one filesystem, so this is atomic per artefact and never copies.
+    ///
+    /// Uses a staging directory (`root/accounts.partial/<id>/`) for safety:
+    /// if any rename fails, the incomplete state is isolated and the next run
+    /// cleans it up and retries (self-healing on interrupted migrations).
     pub fn adopt_legacy_data(root: &Path, account_dir: &Path) -> std::io::Result<bool> {
         if account_dir == root {
             return Ok(false);
         }
+        
+        // Clean up any leftover staging directory from a prior interrupted run
+        let partial_accounts = root.join("accounts.partial");
+        if partial_accounts.exists() {
+            std::fs::remove_dir_all(&partial_accounts)?;
+        }
+        
         if root.join(ACCOUNTS_DIR).exists() {
             return Ok(false);
         }
         if !root.join("brain.db").is_file() {
             return Ok(false);
         }
-        std::fs::create_dir_all(account_dir)?;
+        
+        // Stage the migration: move artifacts into accounts.partial/<id> first
+        let partial_account_dir = partial_accounts.join(account_dir.file_name().unwrap());
+        std::fs::create_dir_all(&partial_account_dir)?;
+        
         for name in ["brain.db", "brain.db-wal", "brain.db-shm", "brain", "transcripts"] {
             let from = root.join(name);
             if from.exists() {
-                std::fs::rename(&from, account_dir.join(name))?;
+                std::fs::rename(&from, partial_account_dir.join(name))?;
             }
         }
+        
+        // All renames succeeded; commit the migration by promoting the staging dir
+        std::fs::rename(&partial_accounts, root.join(ACCOUNTS_DIR))?;
         Ok(true)
     }
 
     /// Opens (creating if absent) the brain database under `data_dir/brain.db`.
     ///
     /// Sets three connection-level pragmas *every* open, not just on first
-    /// creation, because the app runs several independent connections
     /// against the same on-disk file concurrently (`BrainState`'s
     /// UI-facing connection, the ingestion background thread's own
     /// connection, and the 60s enrichment drain loop's own connection — see
@@ -1413,3 +1430,27 @@ mod account_scope_tests {
         assert!(root.join("brain.db").exists());
     }
 }
+
+    #[test]
+    fn adopt_legacy_data_cleans_up_leftover_accounts_partial_and_retries() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        seed_legacy_root(root);
+        let account = root.join("accounts").join("fc44b18d5588b1d6");
+
+        // Simulate an interrupted migration: create accounts.partial with a
+        // partial state that should be cleaned up before retry
+        let partial = root.join("accounts.partial");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join("stale.txt"), "leftover").unwrap();
+
+        // The migration should clean up accounts.partial and succeed
+        assert!(Store::adopt_legacy_data(root, &account).unwrap());
+        assert!(!partial.exists(), "accounts.partial was cleaned up");
+
+        // Verify the full migration completed
+        for name in ["brain.db", "brain.db-wal", "brain.db-shm", "brain", "transcripts"] {
+            assert!(!root.join(name).exists(), "{name} left the root");
+            assert!(account.join(name).exists(), "{name} arrived in the account dir");
+        }
+    }

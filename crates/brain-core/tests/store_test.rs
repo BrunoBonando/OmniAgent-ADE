@@ -203,6 +203,7 @@ fn default_data_dir_honors_env_override_and_falls_back() {
         None => std::env::remove_var("HOME"),
     }
 }
+
 #[test]
 fn enqueue_job_round_trips_through_pending_jobs() {
     let store = Store::open_in_memory().unwrap();
