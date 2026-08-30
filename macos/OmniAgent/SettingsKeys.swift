@@ -141,13 +141,4 @@ enum SettingsKey {
     /// `{"sessions":{"<group id>":{open,tabs,activeTab,width?,openFile?,treePosition?,showHidden?}}}`
     /// — see `ReviewPanelStateCodec`. No TypeScript twin, by design.
     static let reviewPanel = "review_panel_native"
-
-    /// Native-only — `browserPanes`'s reasoning a third time: the web build
-    /// rewrites the shared `layout` row and strips the fields it does not
-    /// know, and it knows nothing about a canvas. The Desk canvas's pinned
-    /// node positions and last camera; unpinned nodes are recomputed by
-    /// `DeskCanvas.layout` every launch and are not stored. One JSON object,
-    /// `{"version":1,"pinned":{<node id>:{x,y}},"camera":{scale,x,y}}` — see
-    /// `DeskCanvasCodec`. No TypeScript twin, by design.
-    static let deskCanvas = "desk_canvas_native"
 }

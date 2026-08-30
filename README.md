@@ -10,9 +10,9 @@ A local-first macOS Agentic Development Environment: parallel agent-CLI terminal
 crates/brain-core/    # SQLite + FTS5 store, Markdown memory, redaction
 crates/brain-ingest/  # walker, tree-sitter parsing, git mining, communities, CLI + watcher
 crates/mcp-server/    # omniagent-mcp — the frozen MCP tool contract over stdio
-src-tauri/            # Tauri 2 desktop shell (Rust core: PTY sessions, commands, onboarding)
-ui/                   # React 18 + TypeScript + Vite frontend
-fixtures/              # golden test fixture repo used by brain-ingest tests
+crates/omniagent-pty-daemon/  # persistent PTY daemon the app talks to over a local socket
+macos/                # the native macOS app (OmniAgent.xcodeproj: AppKit/SwiftUI/SwiftTerm)
+fixtures/             # golden test fixture repo used by brain-ingest tests
 docs/                 # DESIGN.md, PLAN.md, visual reference (g-brain, logo)
 ```
 
@@ -30,27 +30,24 @@ The app has no separate setup step. Launch it with no project roots configured y
 # Rust toolchain
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Frontend deps
-npm --prefix ui install
-
-# Run the whole workspace's tests
+# Rust workspace tests (brain, ingest, MCP server, PTY daemon)
 cargo test --workspace
-npm --prefix ui test
 
-# Launch the desktop app in dev mode (tauri.conf.json lives in src-tauri/,
-# so the CLI must run from there — it shells out to `npm --prefix ../ui`)
-cd src-tauri && ../ui/node_modules/.bin/tauri dev
+# Native app tests / Debug build (Xcode only)
+./macos/build.sh test
+./macos/build.sh build
 ```
 
 ## Build
 
 ```bash
-cd src-tauri && ../ui/node_modules/.bin/tauri build
+./scripts/rebuild-app.sh              # build → sign → notarize → DMG → install to /Applications
+./scripts/rebuild-app.sh --no-notarize
 ```
 
-**Standing rule (Bruno, 2026-07-26): every code change ends with a fresh build** — "always generate a new app when coding the omniagent-ade". A green test suite he can't launch isn't a shipped change, so the packaged app is the deliverable, not an optional extra step. (`cargo` must be on `PATH` — a non-login shell won't have `~/.cargo/bin` and the CLI fails with `failed to run 'cargo metadata'`.)
+**Standing rule (Bruno, 2026-07-26): every code change ends with a fresh build** — "always generate a new app when coding the omniagent-ade". A green test suite he can't launch isn't a shipped change, so the packaged app is the deliverable, not an optional extra step. (`cargo` must be on `PATH` — the universal build embeds the daemon binary, so it needs the Rust workspace.)
 
-Produces an ad-hoc-signed `.app` / `.dmg` under **`target/release/bundle/`** at the repo root — this is a cargo *workspace*, so the shared target dir is not inside `src-tauri/` — fine for local dogfooding; real Developer-ID signing and notarization are explicitly deferred until a wider private beta ships (see `docs/PLAN.md`). The build's `beforeBuildCommand` also builds `omniagent-mcp` in release mode and `tauri.conf.json`'s `bundle.resources` copies it into `OmniAgent.app/Contents/Resources/omniagent-mcp`, so Claude sessions launched from the packaged app (not just `cargo tauri dev`) get the same zero-config MCP wiring (`src-tauri/src/sessions.rs`'s `resolve_mcp_server_binary` checks that exact path).
+The legacy Tauri/React app that preceded the native app was removed from the tree on 2026-08-30; see `docs/plans/native-macos-migration.md` for the history.
 
 ## macOS / Xcode major-upgrade sanity check
 

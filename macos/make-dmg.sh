@@ -1,7 +1,7 @@
 #!/bin/sh
 # Package a built OmniAgent.app as the styled drag-to-install DMG the Tauri
 # bundler used to produce: navy background with the DRAG TO INSTALL arrow
-# (src-tauri/dmg/), app icon at (172,205), Applications at (528,205), 700x400
+# (macos/dmg/), app icon at (172,205), Applications at (528,205), 700x400
 # window, 128pt icons, volume icon. Finder does the .DS_Store styling, so this
 # needs a GUI session with Automation permission for Finder.
 set -eu
@@ -14,7 +14,7 @@ if [ -z "$app" ] || [ -z "$out" ]; then
 fi
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-bg_dir="$root/src-tauri/dmg"
+bg_dir="$root/macos/dmg"
 volname="OmniAgent"
 
 # A leftover mounted OmniAgent volume makes the fresh one mount as
