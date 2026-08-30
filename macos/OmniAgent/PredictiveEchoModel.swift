@@ -51,8 +51,8 @@ struct PredictiveEchoModel: Equatable {
     mutating func predict(_ bytes: [UInt8], now: TimeInterval, cols: Int) {
         if bytes == [0x7f] || bytes == [0x08] {
             guard let last = pending.last,
-                  last.row == cursorRow,
-                  last.col == cursorCol - 1 || (cursorCol == 0 && last.col == cols - 1)
+                  (last.row == cursorRow && last.col == cursorCol - 1)
+                      || (cursorCol == 0 && last.row == cursorRow - 1 && last.col == cols - 1)
             else { reset(); return }
             pending.removeLast()
             cursorRow = last.row
@@ -75,18 +75,22 @@ struct PredictiveEchoModel: Equatable {
     }
 
     /// After every real `feed`: `cellAt(row, col)` is the real character in
-    /// a viewport cell, `nil` when out of range. A still-blank cell means the
+    /// a viewport cell, or `nil` for a cell that is out of range or still
+    /// empty (the caller maps the terminal's empty-cell value to `nil`; a
+    /// real space is a real echo and confirms a typed space). `nil` means the
     /// echo has not arrived — keep waiting; the right character confirms the
     /// prediction (and the model); a different one means the program did
-    /// something else with the keystroke, so every prediction goes.
+    /// something else with the keystroke, so every prediction goes. The
+    /// timeout is judged after the cells, so an echo that arrives late still
+    /// confirms; only what is *still* unconfirmed past it resets the model.
     mutating func reconcile(now: TimeInterval, cellAt: (Int, Int) -> Character?) {
-        if pending.contains(where: { now - $0.madeAt > timeout }) { reset(); return }
         while let first = pending.first {
-            guard let real = cellAt(first.row, first.col), real != " " else { return }
+            guard let real = cellAt(first.row, first.col) else { break }
             guard real == first.character else { reset(); return }
             pending.removeFirst()
             confidence = .confirmed
         }
+        if pending.contains(where: { now - $0.madeAt > timeout }) { reset() }
     }
 
     private mutating func reset() {

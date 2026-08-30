@@ -51,6 +51,43 @@ final class PredictiveEchoModelTests: XCTestCase {
         m.predict([UInt8(ascii: "x")], now: 1, cols: 80); m.predict([UInt8(ascii: "y")], now: 1, cols: 80)
         XCTAssertEqual(m.pending.map { [$0.row, $0.col] }, [[3, 79], [4, 0]])
     }
+    /// A space is a keystroke like any other: its real echo is a real space,
+    /// which must confirm it — treating it as "not echoed yet" would leave
+    /// every later prediction stuck behind it until the timeout.
+    func testTypedSpaceConfirms() {
+        var m = confirmedModel()
+        m.predict([0x20], now: 1, cols: 80)
+        XCTAssertEqual(m.pending.map(\.character), [" "])
+        m.reconcile(now: 1.1) { _, _ in " " }
+        XCTAssertTrue(m.pending.isEmpty); XCTAssertEqual(m.confidence, .confirmed)
+    }
+    func testBackspaceAfterWrapUndoesTheWrappedPrediction() {
+        var m = confirmedModel(); m.syncCursor(row: 3, col: 79)
+        m.predict([UInt8(ascii: "x")], now: 1, cols: 80)   // wraps the cursor to (4, 0)
+        m.predict([0x7f], now: 1.1, cols: 80)
+        XCTAssertTrue(m.pending.isEmpty); XCTAssertEqual(m.confidence, .confirmed)
+        m.predict([UInt8(ascii: "y")], now: 1.2, cols: 80)   // the cursor is back at (3, 79)
+        XCTAssertEqual(m.pending.map { [$0.row, $0.col] }, [[3, 79]])
+    }
+    /// The timeout applies to what is still unconfirmed after the cells have
+    /// been checked — a slow link's echo that matches is a confirmation, not
+    /// a reset; only silence past the timeout resets.
+    func testALateEchoStillConfirmsButLateSilenceResets() {
+        var m = confirmedModel()
+        m.predict([UInt8(ascii: "x")], now: 1, cols: 80)
+        m.reconcile(now: 2.2) { _, _ in "x" }
+        XCTAssertTrue(m.pending.isEmpty); XCTAssertEqual(m.confidence, .confirmed)
+        m.predict([UInt8(ascii: "y")], now: 3, cols: 80)
+        m.reconcile(now: 4.2) { _, _ in nil }
+        XCTAssertTrue(m.pending.isEmpty); XCTAssertEqual(m.confidence, .unknown)
+    }
+    func testMultiByteCharacterIsOnePredictionAndAFragmentResets() {
+        var m = confirmedModel()
+        m.predict(Array("é".utf8), now: 1, cols: 80)
+        XCTAssertEqual(m.pending.map(\.character), ["é"])
+        m.predict([0xC3], now: 1.1, cols: 80)   // half of a UTF-8 sequence
+        XCTAssertTrue(m.pending.isEmpty); XCTAssertEqual(m.confidence, .unknown)
+    }
     private func confirmedModel() -> PredictiveEchoModel {
         var m = PredictiveEchoModel(); m.syncCursor(row: 0, col: 0)
         m.predict([UInt8(ascii: "a")], now: 0, cols: 80)
@@ -67,9 +104,11 @@ final class PredictiveEchoModelTests: XCTestCase {
         let overlay = PredictiveEchoOverlayView(frame: NSRect(x: 0, y: 0, width: 160, height: 80))
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         XCTAssertTrue(overlay.isHidden, "nothing to draw yet")
+        // The real cell geometry, as the surface passes it with a window.
+        let cellSize = CGSize(width: 8, height: 20)
         overlay.render(
             [.init(row: 1, col: 3, character: "W", madeAt: 0)],
-            cols: 20, rows: 4, font: font, color: .white
+            cols: 20, rows: 4, font: font, color: .white, cellSize: cellSize
         )
         XCTAssertFalse(overlay.isHidden)
 
@@ -89,7 +128,7 @@ final class PredictiveEchoModelTests: XCTestCase {
         XCTAssertGreaterThan(inside, 0, "the glyph was drawn")
         XCTAssertEqual(outside, 0, "and only inside its cell")
 
-        overlay.render([], cols: 20, rows: 4, font: font, color: .white)
+        overlay.render([], cols: 20, rows: 4, font: font, color: .white, cellSize: cellSize)
         XCTAssertTrue(overlay.isHidden, "an empty prediction set hides the overlay")
     }
 
