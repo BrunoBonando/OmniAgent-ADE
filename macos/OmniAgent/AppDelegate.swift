@@ -4,7 +4,8 @@ import os.signpost
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let launchSignpost = OSSignpostID(log: Instrumentation.log)
     private var workspace: WorkspaceWindowController?
-    private var menuBar: MenuBarController?
+    /// The status item — alive only while signed in (`signedInStateChanged`).
+    private(set) var menuBar: MenuBarController?
 
     override init() {
         super.init()
@@ -45,7 +46,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             workspace?.revealPane(sessionID)
         }
         self.workspace = workspace
-        menuBar = MenuBarController(workspace: workspace)
+        // The menu bar item follows the account: created when the gate
+        // resolves signed in, gone on log-out.
+        workspace.onSignedInStateChanged = { [weak self, weak workspace] signedIn in
+            guard let self, let workspace else { return }
+            signedInStateChanged(signedIn, workspace: workspace)
+        }
         // `start()` before anything is shown: the socket comes up behind the
         // login window, so signing in costs no wait for the daemon.
         workspace.start()
@@ -83,11 +89,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The Dock icon's standard reopen gesture, now that the window can be
     /// hidden without the app quitting — the same "bring it to the front"
-    /// the menu bar icon's own items do.
+    /// the menu bar icon's own items do. While nobody is signed in,
+    /// `WorkspaceWindowController.showWindow` raises the login window instead.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         workspace?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         return true
+    }
+
+    /// `WorkspaceWindowController.onSignedInStateChanged`'s target — internal
+    /// so `MenuBarControllerTests` can drive it without a launch.
+    func signedInStateChanged(_ signedIn: Bool, workspace: WorkspaceWindowController) {
+        if signedIn {
+            if menuBar == nil {
+                menuBar = MenuBarController(workspace: workspace)
+            }
+        } else {
+            menuBar = nil
+        }
     }
 
     /// How the deferred answer gets back to AppKit. A seam because

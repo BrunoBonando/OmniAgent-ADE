@@ -21,6 +21,7 @@ final class MenuBarControllerTests: XCTestCase {
         MenuBarMenu.build(
             into: menu,
             summary: MenuBarSummary(),
+            accountLabel: "Bruno Bonando",
             revealSession: { _ in XCTFail("nothing to reveal") },
             createInWorkspace: { _ in },
             chooseFolder: {},
@@ -28,9 +29,11 @@ final class MenuBarControllerTests: XCTestCase {
             quit: {}
         )
 
-        // Headline, separator, Create Session…, separator, Settings…,
-        // separator, Quit — nothing about sessions when there are none.
+        // Account line, headline, separator, Create Session…, separator,
+        // Settings…, separator, Quit — nothing about sessions when there
+        // are none.
         XCTAssertEqual(menu.items.map(\.title), [
+            "Logged in as Bruno Bonando",
             "0 sessions · 0 terminals · 0 working agents",
             "",
             "Create Session…",
@@ -39,8 +42,9 @@ final class MenuBarControllerTests: XCTestCase {
             "",
             "Quit",
         ])
-        XCTAssertTrue(menu.items[1].isSeparatorItem)
-        XCTAssertFalse(menu.items[0].isEnabled, "the headline is a label, not a choice")
+        XCTAssertTrue(menu.items[2].isSeparatorItem)
+        XCTAssertFalse(menu.items[0].isEnabled, "the account line is a label, not a choice")
+        XCTAssertFalse(menu.items[1].isEnabled, "and so is the headline")
     }
 
     func testRecentSessionsGroupByProjectAndIndent() {
@@ -58,6 +62,7 @@ final class MenuBarControllerTests: XCTestCase {
         MenuBarMenu.build(
             into: menu,
             summary: summary,
+            accountLabel: "Bruno Bonando",
             revealSession: { _ in },
             createInWorkspace: { _ in },
             chooseFolder: {},
@@ -82,6 +87,7 @@ final class MenuBarControllerTests: XCTestCase {
         MenuBarMenu.build(
             into: menu,
             summary: summary,
+            accountLabel: "Bruno Bonando",
             revealSession: { revealed = $0 },
             createInWorkspace: { _ in },
             chooseFolder: {},
@@ -102,6 +108,7 @@ final class MenuBarControllerTests: XCTestCase {
         MenuBarMenu.build(
             into: menu,
             summary: summary,
+            accountLabel: "Bruno Bonando",
             revealSession: { _ in },
             createInWorkspace: { startedIn = $0 },
             chooseFolder: { choseFolder = true },
@@ -128,6 +135,7 @@ final class MenuBarControllerTests: XCTestCase {
         MenuBarMenu.build(
             into: menu,
             summary: MenuBarSummary(),
+            accountLabel: "Bruno Bonando",
             revealSession: { _ in },
             createInWorkspace: { _ in },
             chooseFolder: {},
@@ -139,5 +147,35 @@ final class MenuBarControllerTests: XCTestCase {
         (try! XCTUnwrap(menu.items.first { $0.title == "Quit" } as? ShellMenuItem)).performForTesting()
         XCTAssertTrue(openedSettings)
         XCTAssertTrue(quit)
+    }
+
+    // MARK: - Account (2026-08-30 account-scoped workspace spec)
+
+    func testTheFirstLineSaysWhoIsLoggedIn() {
+        XCTAssertEqual(MenuBarMenu.accountLine("Bruno Bonando"), "Logged in as Bruno Bonando")
+        XCTAssertEqual(MenuBarMenu.accountLine("bruno@bonando.com"), "Logged in as bruno@bonando.com")
+        XCTAssertEqual(MenuBarMenu.accountLine(""), "Logged in", "rows not read yet: no invented name")
+    }
+
+    /// The status item exists only between the gate resolving signed in and
+    /// a log-out: `AppDelegate` creates and releases the controller on the
+    /// window's `onSignedInStateChanged`.
+    func testTheStatusItemExistsOnlyWhileSignedIn() {
+        let delegate = AppDelegate()
+        let workspace = WorkspaceWindowController(
+            connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-menubar-test.sock")),
+            panes: []
+        )
+        defer { workspace.close() }
+        XCTAssertNil(delegate.menuBar, "nothing in the menu bar before anyone signs in")
+
+        delegate.signedInStateChanged(true, workspace: workspace)
+        XCTAssertNotNil(delegate.menuBar)
+        let first = delegate.menuBar
+        delegate.signedInStateChanged(true, workspace: workspace)
+        XCTAssertTrue(delegate.menuBar === first, "a second sign-in keeps the one item")
+
+        delegate.signedInStateChanged(false, workspace: workspace)
+        XCTAssertNil(delegate.menuBar, "logging out takes the item down")
     }
 }

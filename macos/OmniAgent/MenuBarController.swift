@@ -40,6 +40,7 @@ enum MenuBarMenu {
     static func build(
         into menu: NSMenu,
         summary: MenuBarSummary,
+        accountLabel: String,
         revealSession: @escaping (String) -> Void,
         createInWorkspace: @escaping (String) -> Void,
         chooseFolder: @escaping () -> Void,
@@ -49,6 +50,9 @@ enum MenuBarMenu {
         menu.removeAllItems()
         menu.autoenablesItems = false
 
+        // The item exists only while signed in, and its first line says for
+        // whom (2026-08-30 spec: "logged in as {name}").
+        menu.addItem(disabledItem(accountLine(accountLabel)))
         menu.addItem(disabledItem(headline(summary)))
 
         if !summary.recentSessions.isEmpty {
@@ -90,6 +94,13 @@ enum MenuBarMenu {
         ].joined(separator: " · ")
     }
 
+    /// "Logged in as Bruno Bonando" — `auth_account_name`, falling back to
+    /// the email (`WorkspaceWindowController.accountDisplayLabel`); just
+    /// "Logged in" until the rows have been read.
+    static func accountLine(_ label: String) -> String {
+        label.isEmpty ? "Logged in" : "Logged in as \(label)"
+    }
+
     private static func plural(_ count: Int, _ noun: String) -> String {
         "\(count) \(noun)\(count == 1 ? "" : "s")"
     }
@@ -127,6 +138,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         statusItem.menu = menu
     }
 
+    /// Released by `AppDelegate` on log-out: the item leaves the menu bar
+    /// with the controller, not at the app's exit.
+    deinit {
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
+
     /// Rebuilt right before it opens rather than kept live — the same reason
     /// `hoverCardModel` is pull, not push: cheap to assemble, and never
     /// stale by however long the icon has been sitting there.
@@ -135,6 +152,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         MenuBarMenu.build(
             into: menu,
             summary: workspace.menuBarSummary(),
+            accountLabel: workspace.accountDisplayLabel,
             revealSession: { [weak workspace] paneID in workspace?.revealPane(paneID) },
             createInWorkspace: { [weak workspace] projectID in
                 guard let workspace else { return }
