@@ -403,17 +403,28 @@ impl Store {
     ///
     /// Stages the move under `root/accounts.partial/<id>` first and commits
     /// with a single final `rename` onto `root/accounts`, so a crash or kill
-    /// mid-migration never leaves `root/accounts` half-populated; any
-    /// leftover `accounts.partial` from an interrupted prior run is removed
-    /// before staging begins, so a retry always starts clean.
+    /// mid-migration never leaves `root/accounts` half-populated.
+    ///
+    /// A leftover `accounts.partial` from an interrupted prior run holds
+    /// **the only copy** of everything the loop below had already renamed out
+    /// of the root — `brain/` is durable Markdown memory, not a rebuildable
+    /// cache, and `transcripts/` is not rebuildable at all. So recovery
+    /// *restores* those artifacts to the root (see
+    /// [`Self::restore_staged_legacy_data`]) before the staging directory is
+    /// dropped, and the normal logic below then re-stages them if the
+    /// migration is still warranted. Deleting the staging directory outright
+    /// would destroy the install's data, and the `root/brain.db` guard would
+    /// then quietly report "nothing to migrate".
     pub fn adopt_legacy_data(root: &Path, account_dir: &Path) -> std::io::Result<bool> {
         if account_dir == root {
             return Ok(false);
         }
 
-        // Clean up any leftover staging directory from a prior interrupted run
+        // A leftover staging directory from a prior interrupted run: put what
+        // it holds back at the root first, *then* drop it.
         let partial_accounts = root.join("accounts.partial");
         if partial_accounts.exists() {
+            Self::restore_staged_legacy_data(root, &partial_accounts)?;
             std::fs::remove_dir_all(&partial_accounts)?;
         }
 
@@ -447,6 +458,31 @@ impl Store {
         // All renames succeeded; commit the migration by promoting the staging dir
         std::fs::rename(&partial_accounts, root.join(ACCOUNTS_DIR))?;
         Ok(true)
+    }
+
+    /// Undoes an interrupted [`Self::adopt_legacy_data`]: every entry inside
+    /// each staged `accounts.partial/<id>` directory is renamed back to
+    /// `root`, so a run that died between the first artifact rename and the
+    /// final promote loses nothing. A name the root already has is left
+    /// alone — the root's copy is the live one, and the staged twin (which
+    /// can only exist if something re-created the name after the rename)
+    /// goes with the staging directory.
+    fn restore_staged_legacy_data(root: &Path, partial_accounts: &Path) -> std::io::Result<()> {
+        for staged_account in std::fs::read_dir(partial_accounts)? {
+            let staged_account = staged_account?.path();
+            if !staged_account.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&staged_account)? {
+                let entry = entry?;
+                let destination = root.join(entry.file_name());
+                if destination.exists() {
+                    continue;
+                }
+                std::fs::rename(entry.path(), destination)?;
+            }
+        }
+        Ok(())
     }
 
     /// Opens (creating if absent) the brain database under `data_dir/brain.db`.
@@ -1527,8 +1563,9 @@ mod account_scope_tests {
         seed_legacy_root(root);
         let account = root.join("accounts").join("fc44b18d5588b1d6");
 
-        // Simulate an interrupted migration: create accounts.partial with a
-        // partial state that should be cleaned up before retry
+        // Simulate an interrupted migration that had staged nothing yet: a
+        // stray file directly under accounts.partial is no staged artifact,
+        // so it goes with the staging directory.
         let partial = root.join("accounts.partial");
         std::fs::create_dir_all(&partial).unwrap();
         std::fs::write(partial.join("stale.txt"), "leftover").unwrap();
@@ -1551,5 +1588,69 @@ mod account_scope_tests {
                 "{name} arrived in the account dir"
             );
         }
+    }
+
+    /// The dangerous interruption: a run killed *between* the first artifact
+    /// rename and the final promote. `accounts.partial/<id>` then holds the
+    /// only copy of `brain.db`/`brain/`/`transcripts/` — none of it
+    /// rebuildable from the root, which no longer has them. The next run must
+    /// restore them, never delete them.
+    #[test]
+    fn adopt_legacy_data_restores_a_half_staged_run_instead_of_deleting_it() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let account = root.join("accounts").join("fc44b18d5588b1d6");
+
+        // Half-staged: brain.db and brain/ were already renamed out of the
+        // root, transcripts/ had not been reached yet.
+        let staged = root.join("accounts.partial").join("fc44b18d5588b1d6");
+        std::fs::create_dir_all(&staged).unwrap();
+        Store::open(&staged)
+            .unwrap()
+            .set_setting("layout", "staged-and-nearly-lost")
+            .unwrap();
+        std::fs::create_dir_all(staged.join("brain").join("proj")).unwrap();
+        std::fs::write(
+            staged.join("brain").join("proj").join("note.md"),
+            "# durable markdown memory",
+        )
+        .unwrap();
+        // The root kept transcripts/ — and its copy wins over the staged
+        // twin, which is only there because the crash beat the rename.
+        std::fs::create_dir_all(root.join("transcripts")).unwrap();
+        std::fs::write(root.join("transcripts").join("s1.log"), "the live one").unwrap();
+        std::fs::create_dir_all(staged.join("transcripts")).unwrap();
+        std::fs::write(staged.join("transcripts").join("s1.log"), "the stale one").unwrap();
+        assert!(!root.join("brain.db").exists(), "the root has no brain.db");
+
+        // Restored to the root, then re-staged and promoted in the same call.
+        assert!(Store::adopt_legacy_data(root, &account).unwrap());
+        assert!(
+            !root.join("accounts.partial").exists(),
+            "the staging directory is gone once its contents are safe"
+        );
+        for name in ["brain.db", "brain", "transcripts"] {
+            assert!(!root.join(name).exists(), "{name} left the root");
+            assert!(
+                account.join(name).exists(),
+                "{name} survived, in the account dir"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(account.join("brain").join("proj").join("note.md")).unwrap(),
+            "# durable markdown memory",
+            "the non-rebuildable Markdown memory is intact"
+        );
+        assert_eq!(
+            std::fs::read_to_string(account.join("transcripts").join("s1.log")).unwrap(),
+            "the live one",
+            "the root's own copy is the one that survives a name collision"
+        );
+        let migrated = Store::open(&account).unwrap();
+        assert_eq!(
+            migrated.get_setting("layout").unwrap().as_deref(),
+            Some("staged-and-nearly-lost"),
+            "the staged brain.db is the very file that ended up migrated"
+        );
     }
 }
