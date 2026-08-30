@@ -56,8 +56,8 @@
 
 <p class="lede">OmniAgent is a developer tool that runs on your Mac. Your code, your
 conversations with coding agents and the index built from them stay on your Mac. The
-only thing the app sends anywhere is your account profile, and only if you choose to
-sign in.</p>
+only things the app sends anywhere are your account profile, and a request for your
+profile picture to the provider that hosts it — and only if you choose to sign in.</p>
 
 <h2>What stays on this Mac</h2>
 <p>All of the following is written to
@@ -98,6 +98,10 @@ Treat this folder as you would treat your shell history.</p>
       held in memory only.</li>
   <li>Your <strong>GitHub handle</strong>, if you connect GitHub in Settings ›
       Accounts.</li>
+  <li>The <strong>profile picture</strong> itself is fetched by your Mac directly from
+      whichever host that URL points at — Apple's or GitHub's image CDN — which is the
+      only request OmniAgent makes to a host other than
+      <code>api.omni-agent.ai</code>.</li>
 </ul>
 <p>Nothing else leaves the app: no source code, no terminal output, no transcripts, no
 memory, no search queries, no analytics. If you choose <em>Continue without signing

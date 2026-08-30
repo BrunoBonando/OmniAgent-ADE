@@ -26,8 +26,16 @@
       <key>NSPrivacyAccessedAPITypeReasons</key><array><string>CA92.1</string></array>
     </dict>
     <dict>
+      <!-- 3B52.1: timestamps of files the user specifically granted access to
+           (project files opened through the open panel), not the app container. -->
       <key>NSPrivacyAccessedAPIType</key><string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
-      <key>NSPrivacyAccessedAPITypeReasons</key><array><string>C617.1</string></array>
+      <key>NSPrivacyAccessedAPITypeReasons</key><array><string>3B52.1</string></array>
+    </dict>
+    <dict>
+      <!-- 35F9.1: ProcessInfo.systemUptime measures elapsed time between
+           in-app events (the review panel's double-press to pin a file). -->
+      <key>NSPrivacyAccessedAPIType</key><string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+      <key>NSPrivacyAccessedAPITypeReasons</key><array><string>35F9.1</string></array>
     </dict>
   </array>
 </dict>

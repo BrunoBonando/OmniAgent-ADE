@@ -440,7 +440,6 @@ final class AuthClientTests: XCTestCase {
     }
 
     /// No token in hand is `.sessionExpired` without a request: the caller's
-    /// No token in hand is `.sessionExpired` without a request: the caller's
     /// answer to that is to refresh and try again, and a request that cannot
     /// possibly succeed is a round trip spent proving it.
     func testABearerCallWithNoTokenFailsAsSessionExpiredWithoutReachingTheServer() async {

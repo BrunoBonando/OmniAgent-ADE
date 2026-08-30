@@ -29,7 +29,7 @@ Sign-in:
 The app offers three choices on first launch:
 1. Sign in with Apple — the web-based flow (Apple's `appleid.apple.com`, opened in the system browser/web view), used because this app is Developer ID/non-MAS and native Sign in with Apple isn't available to it.
 2. Sign in with GitHub — GitHub's own OAuth device/web flow.
-3. **Continue without signing in** — the app is fully usable with no account at all; sign-in only unlocks optional cloud sync/account features layered on top of the local-first terminal workspace.
+3. **Continue without signing in** — the app is fully usable with no account at all; signing in only adds the account chip in the sidebar (your name and picture) and lets you link a GitHub account so the app can open pull requests for you. There is no cloud sync: nothing you do in the workspace is uploaded either way.
 For App Review, please use option 3, "Continue without signing in" — it requires no credentials and exercises the full terminal/editor/browser workspace exactly as any user would experience it without an account.
 
 Test account:

@@ -15,4 +15,12 @@ final class WebInspectorPolicyTests: XCTestCase {
         XCTAssertFalse(WebInspectorPolicy.isEnabled(defaults: defaults(nil), debugBuild: false))
         XCTAssertTrue(WebInspectorPolicy.isEnabled(defaults: defaults(true), debugBuild: false))
     }
+
+    /// The tests build under the Debug configuration, so `#if DEBUG` must be
+    /// true here. It silently was not: the project defined no
+    /// `SWIFT_ACTIVE_COMPILATION_CONDITIONS`, which made every `isDebugBuild`
+    /// in the app permanently false. This asserts the setting stays.
+    func testTheTestHostIsADebugBuild() {
+        XCTAssertTrue(WebInspectorPolicy.isDebugBuild)
+    }
 }

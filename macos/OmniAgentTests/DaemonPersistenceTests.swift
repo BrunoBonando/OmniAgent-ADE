@@ -231,4 +231,14 @@ final class DaemonPersistenceTests: XCTestCase {
             "/Applications/OmniAgent.app/Contents/Resources/omniagent-pty-daemon",
         ])
     }
+
+    /// The tests build under the Debug configuration, so `#if DEBUG` must be
+    /// true here. It silently was not: the project defined no
+    /// `SWIFT_ACTIVE_COMPILATION_CONDITIONS`, so `isDebugBuild` was always
+    /// false and a Debug-built app had *zero* daemon candidates — the embed
+    /// phase skips Debug, and the env/`PATH` fallbacks meant to cover that
+    /// were gated off. This asserts the setting stays.
+    func testTheTestHostIsADebugBuild() {
+        XCTAssertTrue(DaemonBinaryLocator.isDebugBuild)
+    }
 }
