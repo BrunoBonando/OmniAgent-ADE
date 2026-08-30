@@ -831,7 +831,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     HomeDropdown.Row(icon: HomeDropdown.symbol("desktopcomputer"), title: "Local folder or repository…") { [weak self] in
                         self?.pickHomeFolder()
                     },
-                    HomeDropdown.Row(icon: HomeDropdown.symbol("cloud"), title: "Resume remote session…", isEnabled: false) {},
+                    HomeDropdown.Row(
+                        icon: HomeDropdown.symbol("desktopcomputer.and.arrow.down"),
+                        title: "Resume remote session…"
+                    ) { [weak self] in self?.presentCommandPalette(initialQuery: "remote") },
                 ]),
             ], searchPlaceholder: "Search repositories…", from: anchor)
         }
@@ -971,6 +974,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // path.
         shellSidebar.sessionMenuProvider = { [weak self] session in
             self?.sessionContextMenu(for: session)
+        }
+        // A remote machine's session row — opened through the same path the
+        // spotlight's remote rows run.
+        shellSidebar.onOpenRemoteSession = { [weak self] deviceID, sessionID, title in
+            self?.openRemoteSession(deviceID: deviceID, sessionID: sessionID, title: title)
+        }
+        // The plus menu's "Resume remote session…": the spotlight, opened
+        // pre-filtered to the remote rows (spec §4 "Viewer side").
+        shellSidebar.onResumeRemoteSession = { [weak self] in
+            self?.presentCommandPalette(initialQuery: "remote")
         }
         // Asking the login shell for its PATH spawns a shell; do it now, off
         // the main thread, so the first terminal does not wait for it.
@@ -2914,6 +2927,56 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         remoteMachines.machine(for: deviceID)?.name ?? deviceID
     }
 
+    /// The relay's machines as the sidebar tree renders them: each projected
+    /// workspace as a tree entry whose session rows carry the projection's
+    /// ids and titles — what a click hands `openRemoteSession`.
+    private func remoteTreeEntries() -> [RemoteMachineTreeEntry] {
+        remoteMachines.machines.map { machine in
+            RemoteMachineTreeEntry(
+                deviceID: machine.deviceID,
+                name: machine.name,
+                workspaces: machine.projection.workspaces.map { workspace in
+                    WorkspaceTreeEntry(
+                        // Prefixed so a workspace shared by another Mac can
+                        // never collide with the same folder open locally.
+                        id: "remote:\(machine.deviceID)/\(workspace.id)",
+                        label: workspace.name,
+                        sessions: workspace.sessions.map { session in
+                            SessionGroupNode(
+                                id: session.id,
+                                project: "remote:\(machine.deviceID)",
+                                name: session.title,
+                                label: session.title,
+                                cwd: "",
+                                paneIDs: [session.id],
+                                isCurrent: false
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    }
+
+    /// The same list, flattened to the names the spotlight's rows print.
+    private func paletteRemoteMachines() -> [PaletteRemoteMachine] {
+        remoteMachines.machines.map { machine in
+            PaletteRemoteMachine(
+                deviceID: machine.deviceID,
+                name: machine.name,
+                workspaces: machine.projection.workspaces.map { workspace in
+                    PaletteRemoteWorkspace(
+                        id: workspace.id,
+                        name: workspace.name,
+                        sessions: workspace.sessions.map {
+                            PaletteRemoteSession(id: $0.id, title: $0.title)
+                        }
+                    )
+                }
+            )
+        }
+    }
+
     /// The daemon connection a pane's session lives on: its machine's for a
     /// remote pane — the retained object, so a pane whose machine is offline
     /// keeps addressing the connection that will come back — and the local
@@ -3172,6 +3235,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// (fade: 0), not the card's usual 0.09s goodbye: this is a defensive
     /// clear-the-deck, not a UX-driven dismiss.
     @objc func showCommandPalette(_ sender: Any?) {
+        presentCommandPalette()
+    }
+
+    /// The body of ⌘K, callable with a query already in the field — how
+    /// "Resume remote session…" opens the spotlight pre-filtered to the
+    /// remote rows rather than growing a picker of its own.
+    func presentCommandPalette(initialQuery: String? = nil) {
         hoverCard.dismiss(fade: 0)
         palette.onRun = { [weak self] action in self?.run(action) }
         palette.present(
@@ -3186,10 +3256,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // The page's own reading of the account rows, so the rows
                 // the spotlight offers are the buttons the page shows.
                 signedIn: settingsView.accountSignedIn,
-                githubConnected: settingsView.accountGitHubConnected
+                githubConnected: settingsView.accountGitHubConnected,
+                remoteMachines: paletteRemoteMachines()
             ),
             files: repoFiles,
             filesRoot: latestGitStatus?.root,
+            initialQuery: initialQuery,
             over: window
         )
     }
@@ -3230,6 +3302,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             if let focused = workspace.focusedPaneID { _ = revealPane(focused) }
         case let .enterSession(group):
             enterDeskSession(group)
+        case let .openRemoteSession(deviceID, sessionID, title):
+            openRemoteSession(deviceID: deviceID, sessionID: sessionID, title: title)
         case let .searchBrain(query):
             connection.search(query: query, scope: nil) { [weak self] result in
                 guard let self else { return }
@@ -3449,7 +3523,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             eventTimes: lastStatusEventAt,
             customizations: sidebarCustomizations(),
             sessionMeta: sessionMeta,
-            remoteControlWorkspaceIDs: remoteControlWorkspaceIDs
+            remoteControlWorkspaceIDs: remoteControlWorkspaceIDs,
+            // The other Macs' sections, after the local tree — built from
+            // the relay's live device list (`RemoteMachinesModel`).
+            remoteMachines: remoteTreeEntries()
         )
     }
 

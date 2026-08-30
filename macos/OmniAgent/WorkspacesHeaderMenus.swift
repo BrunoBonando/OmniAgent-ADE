@@ -144,12 +144,16 @@ enum WorkspacesHeaderMenus {
     }
 
     /// "Start session in" over one item per workspace, "Add project from"
-    /// over the local-folder chooser, then the visible-but-disabled remote
-    /// future behind a separator.
+    /// over the local-folder chooser, then Resume remote session… behind a
+    /// separator — alive when the caller can open the spotlight on the
+    /// remote rows (the remote-session-control spec's §4 "Viewer side"),
+    /// the announced-but-disabled future for callers that cannot (the menu
+    /// bar's copy).
     static func plus(
         workspaces: [(id: String, label: String)],
         startSession: @escaping (String) -> Void,
-        addLocalFolder: @escaping () -> Void
+        addLocalFolder: @escaping () -> Void,
+        resumeRemoteSession: (() -> Void)? = nil
     ) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -160,9 +164,20 @@ enum WorkspacesHeaderMenus {
         menu.addItem(sectionTitle("Add project from"))
         menu.addItem(ShellMenuItem("Local folder or repository…", handler: addLocalFolder))
         menu.addItem(.separator())
-        let remote = NSMenuItem(title: "Resume remote session…", action: nil, keyEquivalent: "")
-        remote.isEnabled = false
-        menu.addItem(remote)
+        let remoteImage = NSImage(
+            systemSymbolName: "desktopcomputer.and.arrow.down",
+            accessibilityDescription: "Resume remote session"
+        )
+        if let resumeRemoteSession {
+            let remote = ShellMenuItem("Resume remote session…", handler: resumeRemoteSession)
+            remote.image = remoteImage
+            menu.addItem(remote)
+        } else {
+            let remote = NSMenuItem(title: "Resume remote session…", action: nil, keyEquivalent: "")
+            remote.isEnabled = false
+            remote.image = remoteImage
+            menu.addItem(remote)
+        }
         return menu
     }
 

@@ -764,6 +764,73 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(sidebar.accountRow.frame.minY, 10, accuracy: 0.5)
     }
 
+    // MARK: - Remote machines
+
+    /// One section per online machine (the remote-session-control spec's §4
+    /// "Viewer side"): a header naming the machine, its projected workspaces
+    /// under the remote glyph, and session rows that hand the click — device,
+    /// session, title — to whoever can open a remote pane.
+    func testRemoteMachinesRenderTheirOwnSectionAndOpenOnClick() throws {
+        let sidebar = makeSidebar()
+        var opened: [String] = []
+        sidebar.onOpenRemoteSession = { deviceID, sessionID, title in
+            opened.append("\(deviceID)/\(sessionID)/\(title)")
+        }
+        sidebar.reloadWorkspaces(
+            workspaces: [BrainProjectSummary(id: "p1", label: "Alpha", path: nil)],
+            panes: [],
+            focusedPaneID: nil,
+            statuses: [:],
+            projectLabels: [:],
+            remoteMachines: [
+                RemoteMachineTreeEntry(deviceID: "d1", name: "Studio", workspaces: [
+                    WorkspaceTreeEntry(id: "remote:d1//a", label: "Beta", sessions: [
+                        SessionGroupNode(
+                            id: "s1", project: "remote:d1", name: "migrate",
+                            label: "migrate", cwd: "", paneIDs: ["s1"], isCurrent: false
+                        )
+                    ])
+                ])
+            ]
+        )
+
+        XCTAssertEqual(sidebar.workspacesTree.renderedRemoteMachineNames, ["Studio"])
+        XCTAssertNotNil(
+            descendants(WorkspacesBucketHeaderView.self, under: sidebar)
+                .first { $0.title == "Studio · remote" },
+            "the machine's section header names the machine and says remote"
+        )
+        let workspaceRow = try XCTUnwrap(
+            descendants(RemoteWorkspaceRowView.self, under: sidebar).first,
+            "the projected workspace renders under the machine's header"
+        )
+        XCTAssertEqual(workspaceRow.titleText, "Beta")
+
+        let sessionRow = try XCTUnwrap(
+            sidebar.workspacesTree.rowView(for: .session("s1")) as? SessionRowView
+        )
+        sessionRow.onPress?()
+        XCTAssertEqual(opened, ["d1/s1/migrate"], "clicking a remote session opens it, not a local select")
+    }
+
+    /// The plus menu's remote future comes alive: with the sidebar's seam
+    /// wired, Resume remote session… is enabled, wears the remote glyph, and
+    /// fires the seam — the controller's side opens the spotlight on "remote".
+    func testThePlusMenusResumeRemoteSessionFiresTheSeam() throws {
+        let sidebar = makeSidebar()
+        var resumed = 0
+        sidebar.onResumeRemoteSession = { resumed += 1 }
+
+        let menu = sidebar.makePlusMenu()
+        let item = try XCTUnwrap(menu.items.last)
+        XCTAssertEqual(item.title, "Resume remote session…")
+        XCTAssertTrue(item.isEnabled, "no longer the announced-but-disabled future")
+        XCTAssertNotNil(item.image, "the remote glyph the spec names")
+
+        try XCTUnwrap(item as? ShellMenuItem).performForTesting()
+        XCTAssertEqual(resumed, 1)
+    }
+
     // MARK: - Helpers
 
     private func pane(_ id: String, group: String, project: String) -> PaneDescriptor {

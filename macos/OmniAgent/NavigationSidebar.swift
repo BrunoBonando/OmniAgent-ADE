@@ -986,6 +986,12 @@ final class NavigationSidebarView: NSView {
     /// A session row's right-click, same contract: the pin state, the
     /// installed apps and the delete path all live on the controller.
     var sessionMenuProvider: ((SessionGroupNode) -> NSMenu?)?
+    /// A remote machine's session row was clicked — device id, session id,
+    /// title — forwarded to the controller, which owns the remote panes.
+    var onOpenRemoteSession: ((String, String, String) -> Void)?
+    /// The plus menu's "Resume remote session…" — the controller opens the
+    /// spotlight pre-filtered to the remote rows.
+    var onResumeRemoteSession: (() -> Void)?
 
     private(set) var navRows: [SidebarNavRowView] = []
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
@@ -1063,6 +1069,9 @@ final class NavigationSidebarView: NSView {
         workspacesTree.workspaceMenuProvider = { [weak self] id in self?.workspaceMenuProvider?(id) }
         workspacesTree.sessionMenuProvider = { [weak self] session in
             self?.sessionMenuProvider?(session)
+        }
+        workspacesTree.onOpenRemoteSession = { [weak self] deviceID, sessionID, title in
+            self?.onOpenRemoteSession?(deviceID, sessionID, title)
         }
 
         // The ground first, so every row above sits on it. Sized in `layout`
@@ -1170,7 +1179,8 @@ final class NavigationSidebarView: NSView {
         eventTimes: [String: Double] = [:],
         customizations: [String: WorkspaceCustomization] = [:],
         sessionMeta: [String: SessionMeta] = [:],
-        remoteControlWorkspaceIDs: Set<String> = []
+        remoteControlWorkspaceIDs: Set<String> = [],
+        remoteMachines: [RemoteMachineTreeEntry] = []
     ) {
         let grouped = SessionOutline.group(panes, focusedPaneID: focusedPaneID)
         var entries: [WorkspaceTreeEntry] = []
@@ -1207,7 +1217,8 @@ final class NavigationSidebarView: NSView {
             focusedPaneID: focusedPaneID,
             statuses: statuses,
             eventTimes: eventTimes,
-            meta: sessionMeta
+            meta: sessionMeta,
+            remoteMachines: remoteMachines
         )
     }
 
@@ -1227,7 +1238,8 @@ final class NavigationSidebarView: NSView {
         WorkspacesHeaderMenus.plus(
             workspaces: workspaceMenuEntries,
             startSession: { [weak self] id in self?.onStartSession?(id) },
-            addLocalFolder: { [weak self] in self?.onAddLocalFolder?() }
+            addLocalFolder: { [weak self] in self?.onAddLocalFolder?() },
+            resumeRemoteSession: { [weak self] in self?.onResumeRemoteSession?() }
         )
     }
 

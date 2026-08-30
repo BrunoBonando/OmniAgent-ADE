@@ -35,6 +35,33 @@ final class CommandPaletteTests: XCTestCase {
         )
     }
 
+    /// The standing rule reaching across machines: every session another Mac
+    /// shares (the remote-session-control spec's §4 "Spotlight") is a row,
+    /// named by the machine and workspace it lives in — and the machine
+    /// itself is one too.
+    func testRemoteSessionsAreSpotlightRowsNamedByMachineAndWorkspace() throws {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil,
+            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Studio", workspaces: [
+                PaletteRemoteWorkspace(id: "/a", name: "Alpha", sessions: [.init(id: "s1", title: "migrate")])
+            ])])
+        let row = try XCTUnwrap(commands.first { $0.id == "remote:d1/s1" })
+        XCTAssertEqual(row.title, "migrate")
+        XCTAssertEqual(row.subtitle, "Studio · Alpha")
+        XCTAssertEqual(row.symbol, "desktopcomputer.and.arrow.down")
+        XCTAssertEqual(row.keywords, "remote Studio Alpha")
+        XCTAssertEqual(row.action, .openRemoteSession(deviceID: "d1", sessionID: "s1", title: "migrate"))
+        XCTAssertEqual(row.section, .sessions)
+        XCTAssertEqual(row.detail, "remote")
+        let machineRow = try XCTUnwrap(commands.first { $0.id == "remote-machine:d1" })
+        XCTAssertEqual(machineRow.title, "Studio")
+        XCTAssertEqual(machineRow.subtitle, "Remote machine")
+        XCTAssertEqual(
+            machineRow.action, .openRemoteSession(deviceID: "d1", sessionID: "s1", title: "migrate"),
+            "the machine row opens its first session"
+        )
+    }
+
     /// Settings › Accounts' one button is a spotlight row of its own — the
     /// standing rule reaching *inside* a section — and it is whichever
     /// button the page is showing, never both.

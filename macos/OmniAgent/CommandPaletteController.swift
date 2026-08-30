@@ -240,15 +240,21 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
     }
 
     /// Opens over `parent`, rebuilt from scratch so the list can never offer a
-    /// pane that closed while the palette was shut.
+    /// pane that closed while the palette was shut. `initialQuery` arrives
+    /// already typed — how "Resume remote session…" opens the spotlight
+    /// pre-filtered to the remote rows.
     func present(
         commands: [PaletteCommand],
         files: [String] = [],
         filesRoot: URL? = nil,
+        initialQuery: String? = nil,
         over parent: NSWindow?
     ) {
         model.reset(commands: commands, files: files, filesRoot: filesRoot)
-        field.stringValue = ""
+        field.stringValue = initialQuery ?? ""
+        if let initialQuery, !initialQuery.isEmpty {
+            model.update(query: initialQuery)
+        }
         reloadResults()
         // Strict stacking without fighting window levels: the scrim is a child
         // of the workspace and the panel a child of the scrim, and a child
