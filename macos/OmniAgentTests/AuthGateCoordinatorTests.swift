@@ -117,7 +117,11 @@ final class AuthGateCoordinatorTests: XCTestCase {
         XCTAssertEqual(client.rows["auth_account_picture"], "", "an outcome with no picture writes no picture")
     }
 
-    func testResetClearsAllSevenKeysToTheSignedOutUnresolvedShape() {
+    /// Log-out clears the mirror, the gate flags and the account identity —
+    /// but **not** the persona: it belongs to the account and comes back
+    /// with the account's data dir the next time it signs in (2026-08-30
+    /// spec, "Logout" step 3).
+    func testResetClearsTheAccountRowsButKeepsThePersona() {
         let client = FakeSettingsClient(rows: [
             "auth_gate_resolved": "true", "auth_signed_in": "true", "auth_persona": "student",
             "auth_account_email": "bruno@bonando.com", "auth_account_name": "Bruno Bonando",
@@ -131,7 +135,8 @@ final class AuthGateCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(client.rows["auth_gate_resolved"], "false")
         XCTAssertEqual(client.rows["auth_signed_in"], "false")
-        XCTAssertEqual(client.rows["auth_persona"], "")
+        XCTAssertEqual(client.rows["auth_persona"], "student", "the persona is the account's, not the session's")
+        XCTAssertFalse(client.setCalls.contains { $0.key == "auth_persona" }, "and is not even rewritten")
         XCTAssertEqual(client.rows["auth_account_email"], "")
         XCTAssertEqual(client.rows["auth_account_name"], "")
         XCTAssertEqual(client.rows["auth_github_login"], "", "a log-out unlinks GitHub locally too")
@@ -333,17 +338,6 @@ final class AuthGateViewModelTests: XCTestCase {
         return components.url!
     }
 
-    func testSendingSkipLoginResolvesAndInvokesOnResolvedExactlyOnce() {
-        let model = AuthGateViewModel(signer: StubAuthSigning(result: .failure(.sessionExpired)))
-        var outcomes: [AuthGateOutcome] = []
-        model.onResolved = { outcomes.append($0) }
-
-        model.send(.skipLogin)
-
-        XCTAssertEqual(model.state.phase, .resolved)
-        XCTAssertEqual(outcomes, [AuthGateOutcome(signedIn: false, persona: nil, accountEmail: nil, accountName: nil)])
-    }
-
     /// PKCE's whole job is that the exchange call can prove it belongs to
     /// the same attempt that opened the browser — so the challenge has to be
     /// the real S256 one Core will recompute, pinned here to RFC 7636's
@@ -420,20 +414,54 @@ final class AuthGateViewModelTests: XCTestCase {
         await model.handleCallback(callback(code: "one-time-code", state: pkce.state))
         XCTAssertEqual(signedInFired, 1, "the gate must be marked signed-in right away")
         XCTAssertTrue(outcomes.isEmpty, "onResolved still waits for the persona step")
+        XCTAssertEqual(model.state.phase, .personalize, "no switch hook wired: the account has no persona on record, so the question is asked")
 
         model.send(.answerSelected(persona: "research"))
         XCTAssertEqual(signedInFired, 1, "answering the persona question does not fire it a second time")
         XCTAssertEqual(outcomes.count, 1)
     }
 
+    /// The window controller wires `onSwitching` to the account switch: the
+    /// hook gets the account's email, does its work (the pointer write, the
+    /// daemon restart), and answers with the persona the account's own data
+    /// dir holds. A persona means no question; the gate resolves on it.
     @MainActor
-    func testOnSignedInNeverFiresForSkipLogin() {
-        let model = AuthGateViewModel(signer: StubAuthSigning(result: .failure(.sessionExpired)))
+    func testTheSwitchHookGetsTheEmailAndAPersonaItReportsSkipsTheQuestion() async {
+        let stub = StubAuthSigning(result: .success(user()))
+        let model = AuthGateViewModel(signer: stub)
+        let pkce = model.pkce
+        var handedEmail: String?
         var signedInFired = 0
+        var outcomes: [AuthGateOutcome] = []
         model.onSignedIn = { signedInFired += 1 }
+        model.onResolved = { outcomes.append($0) }
+        model.onSwitching = { email, ready in
+            handedEmail = email
+            ready("research")
+        }
 
-        model.send(.skipLogin)
-        XCTAssertEqual(signedInFired, 0, "\"Continue without signing in\" is not a sign-in")
+        await model.handleCallback(callback(code: "one-time-code", state: pkce.state))
+
+        XCTAssertEqual(handedEmail, "bruno@bonando.com")
+        XCTAssertEqual(signedInFired, 1, "marked signed in before the switch, so a quit mid-switch does not ask again")
+        XCTAssertEqual(model.state.phase, .resolved)
+        XCTAssertEqual(outcomes.map(\.persona), ["research"])
+    }
+
+    /// The card between sign-in and the workspace: a hook that answers later
+    /// leaves the model in `.switching` until it does.
+    @MainActor
+    func testTheGateStaysOnTheSwitchingCardUntilTheHookAnswers() async {
+        let model = AuthGateViewModel(signer: StubAuthSigning(result: .success(user())))
+        let pkce = model.pkce
+        var answer: ((String?) -> Void)?
+        model.onSwitching = { _, ready in answer = ready }
+
+        await model.handleCallback(callback(code: "one-time-code", state: pkce.state))
+        XCTAssertEqual(model.state.phase, .switching)
+
+        answer?(nil)
+        XCTAssertEqual(model.state.phase, .personalize, "no persona on record: ask")
     }
 
     @MainActor
@@ -929,6 +957,43 @@ final class AuthGateWindowTests: XCTestCase {
                 ?? (NSTemporaryDirectory() as NSString).appendingPathComponent("auth-gate-window.png")
             try png.write(to: URL(fileURLWithPath: path))
         }
+    }
+
+    /// The controller passes the hook through to the model it builds and
+    /// exposes that model, so the window's switch can be driven end to end
+    /// without a browser: sign in → hook → persona → resolved → dismissed.
+    @MainActor
+    func testPresentHandsTheSwitchHookTheEmailAndResolvesOnItsAnswer() throws {
+        let client = FakeSettingsClient()
+        let controller = AuthGateWindowController(
+            coordinator: AuthGateCoordinator(settings: SettingsStore(client: client), defaults: try throwawayDefaults())
+        )
+        var handedEmail: String?
+        controller.onSwitching = { email, ready in
+            handedEmail = email
+            ready("research")
+        }
+        var completed = 0
+        controller.present(over: nil) { completed += 1 }
+        let window = try XCTUnwrap(controller.sheetWindow)
+        addTeardownBlock { @MainActor in window.orderOut(nil) }
+        let model = try XCTUnwrap(controller.activeModel)
+
+        model.send(.signedIn(email: "bruno@bonando.com", displayName: "Bruno Bonando", githubLogin: nil, picture: nil))
+
+        XCTAssertEqual(handedEmail, "bruno@bonando.com")
+        XCTAssertEqual(completed, 1)
+        XCTAssertNil(controller.activeModel, "resolved and dismissed")
+        XCTAssertNil(controller.sheetWindow)
+        XCTAssertEqual(client.rows["auth_signed_in"], "true")
+        XCTAssertEqual(client.rows["auth_persona"], "research")
+    }
+
+    private func throwawayDefaults() throws -> UserDefaults {
+        let name = "digital.bruno.omniagent.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
+        return defaults
     }
 
     /// The real controller, presented the way the launch presents it. The

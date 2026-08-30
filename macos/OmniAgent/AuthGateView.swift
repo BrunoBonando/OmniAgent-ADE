@@ -53,15 +53,16 @@ final class AuthGateCoordinator {
         defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
     }
 
-    /// "Log out" / "Sign in" from the Settings screen's Account section —
-    /// clears the persisted outcome (account identity included) so the gate
-    /// shows again at the next launch, and offers the same view as a sheet
-    /// right now without needing one.
+    /// "Log out" from the Settings screen's Account section — clears the
+    /// mirror, the gate flags and the account identity rows so the gate
+    /// shows again. **`auth_persona` is deliberately left alone**: it is the
+    /// account's answer, lives in the account's own data dir, and comes back
+    /// with it (2026-08-30 spec, "Logout" step 3).
     func reset(completion: @escaping () -> Void) {
         persist(
             resolved: "false",
             signedIn: "false",
-            persona: "",
+            persona: nil,
             accountEmail: "",
             accountName: "",
             githubLogin: "",
@@ -103,11 +104,12 @@ final class AuthGateCoordinator {
     /// always hops a queue turn, even against a synchronous fake client,
     /// which would make `completion` land a run-loop turn later than every
     /// write actually finished. Seven tiny writes in sequence costs nothing
-    /// a user would notice.
+    /// a user would notice. `persona: nil` leaves that row untouched — the
+    /// log-out path.
     private func persist(
         resolved: String,
         signedIn: String,
-        persona: String,
+        persona: String?,
         accountEmail: String,
         accountName: String,
         githubLogin: String,
@@ -119,9 +121,10 @@ final class AuthGateCoordinator {
         // it gates is allowed on screen. The rows below stay the source of
         // truth for everything the Settings screen shows.
         defaults.set(signedIn == "true", forKey: AuthGate.signedInDefaultsKey)
-        settings.set(SettingsKey.authGateResolved, resolved) { [settings] _ in
+        let settings = settings
+        settings.set(SettingsKey.authGateResolved, resolved) { _ in
             settings.set(SettingsKey.authSignedIn, signedIn) { _ in
-                settings.set(SettingsKey.authPersona, persona) { _ in
+                let afterPersona = {
                     settings.set(SettingsKey.authAccountEmail, accountEmail) { _ in
                         settings.set(SettingsKey.authAccountName, accountName) { _ in
                             settings.set(SettingsKey.authGithubLogin, githubLogin) { _ in
@@ -131,6 +134,11 @@ final class AuthGateCoordinator {
                             }
                         }
                     }
+                }
+                if let persona {
+                    settings.set(SettingsKey.authPersona, persona) { _ in afterPersona() }
+                } else {
+                    afterPersona()
                 }
             }
         }
@@ -213,6 +221,14 @@ final class AuthGateViewModel: ObservableObject {
     /// re-opens to already sees a real sign-in as one, whatever happens to
     /// the persona screen after.
     var onSignedIn: (() -> Void)?
+    /// The account switch. Fired once when a sign-in succeeds — `.login`
+    /// moving to `.switching` — with the account's email; the hook does the
+    /// switch and answers with the persona the account's own data dir holds
+    /// (`auth_persona`, or `nil`), which this model dispatches as
+    /// `.accountReady`. `AuthGateWindowController` wires it to
+    /// `WorkspaceWindowController.switchAccount`. Unset, the switch is a
+    /// no-op and the persona question is asked, as it always was.
+    var onSwitching: ((String, @escaping (String?) -> Void) -> Void)?
     /// Where a `.linkGitHub` model reports instead of the reducer — exactly
     /// once per `connectGitHub()`/`disconnectGitHub()`, on every path.
     var onLinkOutcome: ((AuthLinkOutcome) -> Void)?
@@ -283,13 +299,22 @@ final class AuthGateViewModel: ObservableObject {
     func send(_ action: AuthGateAction) {
         let wasLogin = state.phase == .login
         state = AuthGateReducer.reduce(state, action)
-        // Only a successful `.signedIn` moves `.login` to `.personalize`
-        // (`.skipLogin` goes straight to `.resolved`) — see `markSignedIn`.
-        if wasLogin, state.phase == .personalize {
-            onSignedIn?()
-        }
         if state.phase == .resolved, let outcome = state.outcome {
             onResolved?(outcome)
+            return
+        }
+        // Only a successful `.signedIn` moves `.login` to `.switching` —
+        // see `markSignedIn`. The hook's answer comes back through `send`
+        // again, so it is called last: nothing here runs after it.
+        guard wasLogin, state.phase == .switching else { return }
+        onSignedIn?()
+        let ready: (String?) -> Void = { [weak self] persona in
+            self?.send(.accountReady(persona: persona))
+        }
+        if let onSwitching {
+            onSwitching(state.accountEmail ?? "", ready)
+        } else {
+            ready(nil)
         }
     }
 
@@ -625,6 +650,8 @@ struct AuthGateContentView: View {
             switch model.state.phase {
             case .login:
                 signInScreen
+            case .switching:
+                switchingScreen
             case .personalize:
                 personalizeScreen
                     .frame(width: 420)
@@ -870,9 +897,6 @@ struct AuthGateContentView: View {
                         .padding(.top, 12)
                 }
 
-                skipLink
-                    .padding(.top, 16)
-
                 privacyFooter
                     .padding(.top, 22)
             }
@@ -952,17 +976,6 @@ struct AuthGateContentView: View {
         .disabled(model.isBusy)
     }
 
-    /// Founder direction: the dev escape hatch stays — the API may be
-    /// unreachable, and the app is useful without an account.
-    private var skipLink: some View {
-        Button("Continue without signing in") { model.send(.skipLogin) }
-            .buttonStyle(.plain)
-            .font(.system(size: 12.5))
-            .foregroundStyle(SignInPalette.faintText)
-            .frame(maxWidth: .infinity)
-            .disabled(model.isBusy)
-    }
-
     private var privacyFooter: some View {
         HStack(alignment: .top, spacing: 7) {
             Image(systemName: "checkmark.shield")
@@ -1023,6 +1036,24 @@ struct AuthGateContentView: View {
             }
         }
     }
+
+    // MARK: - Switching (between sign-in and the workspace)
+
+    /// While `WorkspaceWindowController.switchAccount` moves the daemon onto
+    /// the account's data directory. Static on purpose — see the type
+    /// comment's animation policy.
+    private var switchingScreen: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .controlSize(.large)
+                .tint(SignInPalette.periwinkle)
+            Text("Opening your workspace…")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(SignInPalette.titleText)
+        }
+        .frame(width: Self.sheetSize.width, height: Self.sheetSize.height)
+        .background(SignInPalette.screenBackground)
+    }
 }
 
 /// Shared SwiftUI palette values matching the AppKit workspace's own colors
@@ -1074,6 +1105,13 @@ final class AuthGateWindowController {
     /// The gate's window. Readable so a test can measure the real thing —
     /// where it opens and how big it is *is* the launch shape.
     private(set) var sheetWindow: NSWindow?
+    /// The model behind the window while one is up — readable so a test can
+    /// drive the gate without a browser (`AuthGateWindowTests`).
+    private(set) var activeModel: AuthGateViewModel?
+    /// The account switch, passed through to every model this presents —
+    /// `AuthGateViewModel.onSwitching`'s contract. Set once by
+    /// `WorkspaceWindowController`.
+    var onSwitching: ((String, @escaping (String?) -> Void) -> Void)?
 
     init(coordinator: AuthGateCoordinator) {
         self.coordinator = coordinator
@@ -1084,6 +1122,13 @@ final class AuthGateWindowController {
     func present(over window: NSWindow?, completion: (() -> Void)? = nil) {
         let model = AuthGateViewModel()
         model.onSignedIn = { [weak self] in self?.coordinator.markSignedIn() }
+        model.onSwitching = { [weak self] email, ready in
+            guard let self, let onSwitching else {
+                ready(nil)
+                return
+            }
+            onSwitching(email, ready)
+        }
         model.onResolved = { [weak self] outcome in
             guard let self else { return }
             coordinator.resolve(outcome) { [weak self] in
@@ -1117,12 +1162,22 @@ final class AuthGateWindowController {
         // Apple's web sign-in browser sheet anchors to this window itself.
         model.presentationWindow = { [weak sheet] in sheet }
         sheetWindow = sheet
+        activeModel = model
         if let window {
             window.beginSheet(sheet)
         } else {
             centerOnScreen(sheet)
             sheet.makeKeyAndOrderFront(nil)
         }
+    }
+
+    /// Brings a standing login window back to the front — what the Dock's
+    /// reopen and `WorkspaceWindowController.showWindow` do while nobody is
+    /// signed in, instead of showing the workspace.
+    func raise() {
+        guard let sheetWindow, sheetWindow.sheetParent == nil else { return }
+        sheetWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// Puts the launch window at the middle of the screen — and does it
@@ -1149,5 +1204,6 @@ final class AuthGateWindowController {
             sheet.orderOut(nil)
         }
         sheetWindow = nil
+        activeModel = nil
     }
 }

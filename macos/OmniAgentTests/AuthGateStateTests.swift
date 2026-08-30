@@ -9,18 +9,13 @@ final class AuthGateStateTests: XCTestCase {
         picture: "https://cdn.test.invalid/bruno.png"
     )
 
-    func testSkippingLoginResolvesSignedOutWithNoPersonaAndNoAccount() {
-        let resolved = AuthGateReducer.reduce(AuthGateReducer.initial, .skipLogin)
-        XCTAssertEqual(resolved, AuthGateState(
-            phase: .resolved,
-            outcome: AuthGateOutcome(signedIn: false, persona: nil, accountEmail: nil, accountName: nil)
-        ))
+    private var switching: AuthGateState {
+        AuthGateReducer.reduce(AuthGateReducer.initial, signedIn)
     }
 
-    func testSigningInMovesToPersonalizeCarryingTheAccountWithNoOutcomeYet() {
-        let state = AuthGateReducer.reduce(AuthGateReducer.initial, signedIn)
-        XCTAssertEqual(state, AuthGateState(
-            phase: .personalize,
+    func testSigningInMovesToSwitchingCarryingTheAccountWithNoOutcomeYet() {
+        XCTAssertEqual(switching, AuthGateState(
+            phase: .switching,
             outcome: nil,
             accountEmail: "bruno@bonando.com",
             accountName: "Bruno Bonando",
@@ -29,19 +24,45 @@ final class AuthGateStateTests: XCTestCase {
         ))
     }
 
-    func testANilDisplayNameSurvivesIntoThePersonalizePhase() {
+    func testANilDisplayNameSurvivesIntoTheSwitchingPhase() {
         let state = AuthGateReducer.reduce(
             AuthGateReducer.initial,
             .signedIn(email: "a@b.com", displayName: nil, githubLogin: nil, picture: nil)
         )
+        XCTAssertEqual(state.phase, .switching)
         XCTAssertEqual(state.accountEmail, "a@b.com")
         XCTAssertNil(state.accountName)
         XCTAssertNil(state.githubLogin, "an account with nothing linked carries nothing")
         XCTAssertNil(state.accountPicture, "nor a picture it does not have")
     }
 
+    /// The account already answered the persona question once: it comes back
+    /// with the account's data dir, and the gate resolves without asking.
+    func testAccountReadyWithAPersonaResolvesSignedInWithoutAskingTheQuestion() {
+        let resolved = AuthGateReducer.reduce(switching, .accountReady(persona: "research"))
+        XCTAssertEqual(resolved.phase, .resolved)
+        XCTAssertEqual(resolved.outcome, AuthGateOutcome(
+            signedIn: true,
+            persona: "research",
+            accountEmail: "bruno@bonando.com",
+            accountName: "Bruno Bonando",
+            githubLogin: "brunobonando",
+            accountPicture: "https://cdn.test.invalid/bruno.png"
+        ))
+    }
+
+    func testAccountReadyWithoutAPersonaAsksTheQuestion() {
+        for persona in [nil, ""] {
+            let personalizing = AuthGateReducer.reduce(switching, .accountReady(persona: persona))
+            XCTAssertEqual(personalizing.phase, .personalize)
+            XCTAssertNil(personalizing.outcome)
+            XCTAssertEqual(personalizing.accountEmail, "bruno@bonando.com", "the account rides along")
+            XCTAssertEqual(personalizing.accountName, "Bruno Bonando")
+        }
+    }
+
     func testAnsweringThePersonaQuestionResolvesSignedInWithThatPersonaAndTheAccount() {
-        let personalizing = AuthGateReducer.reduce(AuthGateReducer.initial, signedIn)
+        let personalizing = AuthGateReducer.reduce(switching, .accountReady(persona: nil))
         let resolved = AuthGateReducer.reduce(personalizing, .answerSelected(persona: "student"))
         XCTAssertEqual(resolved.phase, .resolved)
         XCTAssertEqual(resolved.outcome, AuthGateOutcome(
@@ -55,7 +76,7 @@ final class AuthGateStateTests: XCTestCase {
     }
 
     func testSkippingThePersonaQuestionStillResolvesSignedInWithTheAccountAndNoPersona() {
-        let personalizing = AuthGateReducer.reduce(AuthGateReducer.initial, signedIn)
+        let personalizing = AuthGateReducer.reduce(switching, .accountReady(persona: nil))
         let resolved = AuthGateReducer.reduce(personalizing, .skipPersonalize)
         XCTAssertEqual(resolved.phase, .resolved)
         XCTAssertEqual(resolved.outcome, AuthGateOutcome(
@@ -69,15 +90,32 @@ final class AuthGateStateTests: XCTestCase {
     }
 
     func testActionsThatDoNotMatchThePhaseAreIgnored() {
-        // Can't skip-login from personalize, can't answer/skip-personalize from login.
-        let personalizing = AuthGateReducer.reduce(AuthGateReducer.initial, signedIn)
-        XCTAssertEqual(AuthGateReducer.reduce(personalizing, .skipLogin), personalizing)
-        XCTAssertEqual(AuthGateReducer.reduce(AuthGateReducer.initial, .answerSelected(persona: "student")), AuthGateReducer.initial)
-        XCTAssertEqual(AuthGateReducer.reduce(AuthGateReducer.initial, .skipPersonalize), AuthGateReducer.initial)
+        let initial = AuthGateReducer.initial
+        XCTAssertEqual(AuthGateReducer.reduce(initial, .accountReady(persona: "student")), initial, "no account to be ready")
+        XCTAssertEqual(AuthGateReducer.reduce(initial, .answerSelected(persona: "student")), initial)
+        XCTAssertEqual(AuthGateReducer.reduce(initial, .skipPersonalize), initial)
 
-        let resolved = AuthGateReducer.reduce(AuthGateReducer.initial, .skipLogin)
+        let switching = self.switching
+        XCTAssertEqual(AuthGateReducer.reduce(switching, .answerSelected(persona: "student")), switching, "not asked yet")
+        XCTAssertEqual(AuthGateReducer.reduce(switching, .skipPersonalize), switching)
+        XCTAssertEqual(AuthGateReducer.reduce(switching, signedIn), switching, "a second sign-in while switching is ignored")
+
+        let personalizing = AuthGateReducer.reduce(switching, .accountReady(persona: nil))
+        XCTAssertEqual(AuthGateReducer.reduce(personalizing, .accountReady(persona: "x")), personalizing)
+        XCTAssertEqual(AuthGateReducer.reduce(personalizing, signedIn), personalizing)
+
+        let resolved = AuthGateReducer.reduce(switching, .accountReady(persona: "research"))
         XCTAssertEqual(AuthGateReducer.reduce(resolved, signedIn), resolved, "a resolved gate cannot be reopened by another action")
-        XCTAssertEqual(AuthGateReducer.reduce(personalizing, signedIn), personalizing, "a second sign-in while personalizing is ignored")
+    }
+
+    func testThereIsNoWayThroughTheGateWithoutSigningIn() {
+        // Every action that is not `.signedIn` leaves the login phase alone.
+        for action: AuthGateAction in [
+            .accountReady(persona: nil), .accountReady(persona: "research"),
+            .answerSelected(persona: "research"), .skipPersonalize,
+        ] {
+            XCTAssertEqual(AuthGateReducer.reduce(AuthGateReducer.initial, action).phase, .login)
+        }
     }
 
     // MARK: - Persistence conventions

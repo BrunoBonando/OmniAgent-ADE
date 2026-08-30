@@ -5,42 +5,45 @@ import Foundation
 /// reducer so the phase transitions are unit-testable without
 /// `AuthGateView`/`NSHostingController`/a socket/a network.
 ///
-/// The login itself is real now: `AuthGateViewModel` runs Apple's or
-/// GitHub's web sign-in and redeems the result at Core's
-/// `/v1/auth/<provider>/exchange` through `AuthClient`, and only dispatches
-/// `.signedIn` after the server said yes. What survives from the
-/// fake era, by founder direction, is the escape hatch: "Continue without
-/// signing in" (`.skipLogin`) stays a first-class exit while the product is
-/// in development, because the API may be unreachable and the app is
-/// local-first anyway.
+/// The login is real: `AuthGateViewModel` runs Apple's or GitHub's web
+/// sign-in and redeems the result at Core's `/v1/auth/<provider>/exchange`
+/// through `AuthClient`, and only dispatches `.signedIn` after the server
+/// said yes. There is no way through without it (2026-08-30 account-scoped
+/// workspace spec: "It's not allowed anymore to use the app without being
+/// logged on") — the "Continue without signing in" escape hatch is gone.
+///
+/// Between sign-in and the persona question sits `.switching`: the window
+/// controller moves the daemon onto the account's own data directory, then
+/// reports what that directory already knows (`.accountReady`). An account
+/// that answered the persona question before is not asked again.
 enum AuthGatePhase: Equatable {
     case login
+    /// "Opening your workspace…" — the account switch is running.
+    case switching
     case personalize
     case resolved
 }
 
 struct AuthGateOutcome: Equatable {
-    /// Whether the user actually signed in (true) or picked
-    /// "Continue without signing in" (false).
+    /// Always `true` for an outcome the gate produces now; kept because the
+    /// Settings screen and `AuthGateCoordinator.persist` read it, and it is
+    /// the field a log-out writes `false` through.
     let signedIn: Bool
-    /// The selected `PersonaOption.id`, or `nil` if never signed in, or
-    /// signed in but the personalization question was skipped.
+    /// The selected `PersonaOption.id`, or `nil` if the personalization
+    /// question was skipped.
     let persona: String?
-    /// The Core account's email address, or `nil` when sign-in was skipped.
+    /// The Core account's email address.
     let accountEmail: String?
     /// The account's display name ("Bruno Bonando"), or `nil` when the
-    /// server has none for it — or when sign-in was skipped.
+    /// server has none for it.
     let accountName: String?
-    /// The GitHub handle linked to the account, or `nil` when none is (and
-    /// on the skip path). Defaulted, and the one `var` here, so the three
-    /// constructions that have nothing to say about GitHub — the skip
-    /// outcome and every test that predates it — stay about what they are
-    /// testing; `AuthGateState.accountEmail` below sets the same precedent.
+    /// The GitHub handle linked to the account, or `nil` when none is.
+    /// Defaulted, and the one `var` here, so the constructions that have
+    /// nothing to say about GitHub stay about what they are testing;
+    /// `AuthGateState.accountEmail` below sets the same precedent.
     var githubLogin: String? = nil
-    /// The account's profile-picture URL, or `nil` when it has none (and on
-    /// the skip path). Defaulted for `githubLogin`'s reason: the
-    /// constructions that have nothing to say about a picture stay about
-    /// what they are testing.
+    /// The account's profile-picture URL, or `nil` when it has none.
+    /// Defaulted for `githubLogin`'s reason.
     var accountPicture: String? = nil
 }
 
@@ -49,8 +52,7 @@ struct AuthGateState: Equatable {
     /// Non-nil exactly when `phase == .resolved`.
     var outcome: AuthGateOutcome?
     /// The signed-in identity, carried from `.signedIn` through the
-    /// personalize phase into the outcome. All four stay `nil` on the skip
-    /// path.
+    /// switching and personalize phases into the outcome.
     var accountEmail: String? = nil
     var accountName: String? = nil
     var githubLogin: String? = nil
@@ -58,11 +60,15 @@ struct AuthGateState: Equatable {
 }
 
 enum AuthGateAction: Equatable {
-    case skipLogin
     /// A *successful* real login — `AuthGateViewModel` dispatches this only
     /// after `AuthClient` returned a user; the reducer never sees a failed
     /// attempt (that stays view-model state as `errorMessage`).
     case signedIn(email: String, displayName: String?, githubLogin: String?, picture: String?)
+    /// The account switch finished and the account's data dir was read:
+    /// `persona` is its `auth_persona` row, `nil`/empty when it never
+    /// answered. Dispatched by `AuthGateViewModel` from the `onSwitching`
+    /// hook's answer.
+    case accountReady(persona: String?)
     case answerSelected(persona: String)
     case skipPersonalize
 }
@@ -72,17 +78,10 @@ enum AuthGateReducer {
 
     static func reduce(_ state: AuthGateState, _ action: AuthGateAction) -> AuthGateState {
         switch action {
-        case .skipLogin:
-            guard state.phase == .login else { return state }
-            return AuthGateState(
-                phase: .resolved,
-                outcome: AuthGateOutcome(signedIn: false, persona: nil, accountEmail: nil, accountName: nil)
-            )
-
         case let .signedIn(email, displayName, githubLogin, picture):
             guard state.phase == .login else { return state }
             return AuthGateState(
-                phase: .personalize,
+                phase: .switching,
                 outcome: nil,
                 accountEmail: email,
                 accountName: displayName,
@@ -90,42 +89,46 @@ enum AuthGateReducer {
                 accountPicture: picture
             )
 
-        case let .answerSelected(persona):
-            guard state.phase == .personalize else { return state }
+        case let .accountReady(persona):
+            guard state.phase == .switching else { return state }
+            if let persona, !persona.isEmpty {
+                return resolved(state, persona: persona)
+            }
             return AuthGateState(
-                phase: .resolved,
-                outcome: AuthGateOutcome(
-                    signedIn: true,
-                    persona: persona,
-                    accountEmail: state.accountEmail,
-                    accountName: state.accountName,
-                    githubLogin: state.githubLogin,
-                    accountPicture: state.accountPicture
-                ),
+                phase: .personalize,
+                outcome: nil,
                 accountEmail: state.accountEmail,
                 accountName: state.accountName,
                 githubLogin: state.githubLogin,
                 accountPicture: state.accountPicture
             )
 
+        case let .answerSelected(persona):
+            guard state.phase == .personalize else { return state }
+            return resolved(state, persona: persona)
+
         case .skipPersonalize:
             guard state.phase == .personalize else { return state }
-            return AuthGateState(
-                phase: .resolved,
-                outcome: AuthGateOutcome(
-                    signedIn: true,
-                    persona: nil,
-                    accountEmail: state.accountEmail,
-                    accountName: state.accountName,
-                    githubLogin: state.githubLogin,
-                    accountPicture: state.accountPicture
-                ),
+            return resolved(state, persona: nil)
+        }
+    }
+
+    private static func resolved(_ state: AuthGateState, persona: String?) -> AuthGateState {
+        AuthGateState(
+            phase: .resolved,
+            outcome: AuthGateOutcome(
+                signedIn: true,
+                persona: persona,
                 accountEmail: state.accountEmail,
                 accountName: state.accountName,
                 githubLogin: state.githubLogin,
                 accountPicture: state.accountPicture
-            )
-        }
+            ),
+            accountEmail: state.accountEmail,
+            accountName: state.accountName,
+            githubLogin: state.githubLogin,
+            accountPicture: state.accountPicture
+        )
     }
 }
 
@@ -165,11 +168,8 @@ enum AuthGate {
     /// on screen. The mirror is a `UserDefaults` bool, read synchronously, so
     /// a slow or dead daemon delays nothing.
     ///
-    /// The gate latches on *signed in*, not on "resolved once": clicking
-    /// "Continue without signing in" is an answer for that launch, not
-    /// forever. That is the whole difference between a login screen and a
-    /// first-run screen, and it is why an install that has already resolved
-    /// the old gate starts asking again.
+    /// The gate latches on *signed in*: only a real sign-in puts it away,
+    /// and a log-out brings it back — a login screen, not a first-run one.
     static func needsSignIn(_ defaults: UserDefaults = .standard) -> Bool {
         !defaults.bool(forKey: signedInDefaultsKey)
     }

@@ -236,7 +236,7 @@ final class SettingsViewModelTests: XCTestCase {
 
         XCTAssertEqual(client.rows["auth_gate_resolved"], "false")
         XCTAssertEqual(client.rows["auth_signed_in"], "false")
-        XCTAssertEqual(client.rows["auth_persona"], "")
+        XCTAssertEqual(client.rows["auth_persona"], "student", "the persona is the account's, not the session's — it survives log-out")
         XCTAssertFalse(model.authSignedIn)
         XCTAssertEqual(model.authSummary, "Not signed in (dev mode).")
         // Log out is not only local: the server session (refresh token +
