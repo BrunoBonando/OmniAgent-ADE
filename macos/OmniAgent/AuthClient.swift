@@ -366,8 +366,21 @@ final class AuthClient {
     /// refresh token with the row and clears its cookie, so the local token
     /// is forgotten here and the caller then does exactly what logging out
     /// does locally. Nothing on this Mac is touched.
+    ///
+    /// Refresh-then-retry once on `.sessionExpired`, which the GitHub calls
+    /// get from `AuthGateViewModel.authorized` and this one would otherwise
+    /// go without: the access token lives in memory only and expires in
+    /// fifteen minutes, while the refresh cookie in the jar outlives the
+    /// session. Without this, a Delete pressed any distance into a session
+    /// dead-ends in "your session has expired" on a page still reading
+    /// "Signed in as …".
     func deleteAccount() async throws {
-        try await authorized(path: "v1/auth/me", method: "DELETE", body: nil)
+        do {
+            try await authorized(path: "v1/auth/me", method: "DELETE", body: nil)
+        } catch AuthError.sessionExpired {
+            _ = try await restoreSession()
+            try await authorized(path: "v1/auth/me", method: "DELETE", body: nil)
+        }
         accessToken = nil
     }
 

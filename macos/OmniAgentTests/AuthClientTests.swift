@@ -385,6 +385,61 @@ final class AuthClientTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer tok-123")
     }
 
+    func testDeleteAccountSendsADeleteToMeWithTheBearerTokenAndForgetsIt() async throws {
+        AuthClientStubProtocol.handler = { request in
+            request.httpMethod == "DELETE" ? (204, Data()) : (200, self.loginResponse(token: "tok-123"))
+        }
+        let client = makeClient()
+        _ = try await client.login(email: "ada@example.com", password: "hunter2")
+
+        try await client.deleteAccount()
+
+        let request = try XCTUnwrap(AuthClientStubProtocol.recorded.last?.request)
+        XCTAssertEqual(request.url?.path, "/v1/auth/me")
+        XCTAssertEqual(request.httpMethod, "DELETE")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer tok-123")
+        XCTAssertNil(client.accessToken, "the account is gone, and so is the token for it")
+    }
+
+    /// Access tokens live in memory only and expire in fifteen minutes, so a
+    /// "Delete account…" pressed an hour into a session meets a 401 — while
+    /// the refresh cookie in the jar is still perfectly good. Refresh once
+    /// and send it again, rather than telling a signed-in user their session
+    /// expired and leaving them on a page that still says "Signed in as …".
+    func testDeleteAccountRefreshesAndRetriesWhenTheAccessTokenHasExpired() async throws {
+        AuthClientStubProtocol.handler = { request in
+            switch (request.url?.path, request.httpMethod) {
+            case ("/v1/auth/refresh", _):
+                return (200, Data("""
+                {"access_token":"tok-fresh","user":\(self.userJSON)}
+                """.utf8))
+            case ("/v1/auth/me", "DELETE"):
+                // Only the refreshed token is accepted; the stale one 401s.
+                return request.value(forHTTPHeaderField: "Authorization") == "Bearer tok-fresh"
+                    ? (204, Data())
+                    : (401, Data(#"{"detail":"Token expired"}"#.utf8))
+            default:
+                return (200, self.loginResponse(token: "tok-stale"))
+            }
+        }
+        let client = makeClient()
+        _ = try await client.login(email: "ada@example.com", password: "hunter2")
+
+        try await client.deleteAccount()
+
+        XCTAssertEqual(
+            AuthClientStubProtocol.recorded.suffix(3).map { $0.request.url?.path },
+            ["/v1/auth/me", "/v1/auth/refresh", "/v1/auth/me"],
+            "the 401 is answered by a refresh and one retry, not by giving up"
+        )
+        XCTAssertEqual(
+            AuthClientStubProtocol.recorded.last?.request.value(forHTTPHeaderField: "Authorization"),
+            "Bearer tok-fresh"
+        )
+        XCTAssertNil(client.accessToken)
+    }
+
+    /// No token in hand is `.sessionExpired` without a request: the caller's
     /// No token in hand is `.sessionExpired` without a request: the caller's
     /// answer to that is to refresh and try again, and a request that cannot
     /// possibly succeed is a round trip spent proving it.

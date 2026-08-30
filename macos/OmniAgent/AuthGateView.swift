@@ -548,7 +548,10 @@ final class AuthGateViewModel: ObservableObject {
         return joined.isEmpty ? nil : joined
     }
 
-    private static func message(for error: Error) -> String {
+    /// The house wording for an auth failure: `AuthError`'s own sentence
+    /// where there is one. Not private — "Could not delete the account"
+    /// reports through the same convention rather than a second one.
+    static func message(for error: Error) -> String {
         (error as? AuthError)?.errorDescription ?? error.localizedDescription
     }
 

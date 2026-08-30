@@ -4243,7 +4243,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 accountActionInFlight = false
                 presentWindowAsk(
                     title: "Could not delete the account",
-                    message: error.localizedDescription,
+                    message: AuthGateViewModel.message(for: error),
                     severity: .critical,
                     options: [PaneAskOption("OK", isPrimary: true) { _ in }]
                 )
