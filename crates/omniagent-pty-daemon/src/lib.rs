@@ -4,7 +4,10 @@ pub mod protocol;
 mod server;
 mod session;
 
-pub use server::{peer_uid_allowed, run_daemon, DaemonServer};
+pub use server::{
+    authorize_remote, peer_uid_allowed, remote_session_ids, run_daemon, serve_client,
+    ClientContext, ClientTrust, DaemonServer, SharedWriter, REMOTE_CONTROL_KEY,
+};
 pub use session::{
     AttachState, CreateSession, ManagedSession, SessionEvent, SessionRegistry, SessionSubscription,
     MAX_SESSIONS, SCROLLBACK_LINES,

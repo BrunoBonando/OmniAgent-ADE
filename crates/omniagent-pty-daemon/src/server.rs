@@ -12,21 +12,125 @@ use brain_core::Store;
 use brain_ingest::roots::{self, IngestionState};
 use mcp_server::tools::{self, ToolContext};
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::unix::OwnedWriteHalf;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, Notify};
 use tokio::task::{JoinHandle, JoinSet};
 
 const CLIENT_QUEUE_CAPACITY: usize = 64;
 
 pub fn peer_uid_allowed(peer_uid: u32, runtime_owner_uid: u32) -> bool {
     peer_uid == runtime_owner_uid
+}
+
+/// How much a client connection is trusted.
+///
+/// `Local` is the unix-socket path: the accept loop has already checked
+/// the peer UID, and the client may do everything the protocol offers.
+/// `Remote` is a connection relayed from another device
+/// (`docs/superpowers/specs/2026-08-30-remote-session-control-design.md`
+/// §2): it never took the peer-UID path, so every frame passes
+/// [`authorize_remote`] before dispatch and is confined to the sessions
+/// the `remote_control` projection row shares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientTrust {
+    Local,
+    Remote,
+}
+
+/// Everything one client connection needs from the daemon — cloned out of
+/// [`DaemonServer`] per connection by [`DaemonServer::client_context`] so
+/// [`serve_client`] can run over any byte stream, not only the unix socket.
+#[derive(Clone)]
+pub struct ClientContext {
+    pub registry: SessionRegistry,
+    pub settings: Arc<std::sync::Mutex<Store>>,
+    pub data_dir: PathBuf,
+    pub ingestion: IngestionState,
+    /// Poked after every successful `SetSetting`; the relay task watches it
+    /// to notice `remote_control` / device-token changes without polling.
+    pub settings_changed: Arc<Notify>,
+}
+
+/// The write half of a client connection, shared between the dispatch loop
+/// and every attachment's forwarding task.
+pub type SharedWriter = Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>;
+
+/// The settings row holding the remote-control projection — the only
+/// workspaces (and their sessions) a remote client may ever see.
+pub const REMOTE_CONTROL_KEY: &str = "remote_control";
+
+/// The session ids the `remote_control` projection currently shares.
+/// Missing row, unparsable JSON or an unexpected shape all mean "nothing".
+pub fn remote_session_ids(store: &Store) -> HashSet<String> {
+    let Some(raw) = store.get_setting(REMOTE_CONTROL_KEY).ok().flatten() else {
+        return HashSet::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return HashSet::new();
+    };
+    value["workspaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|workspace| {
+            workspace["sessions"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|session| session["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// The one field every session-bound control payload (`AttachPayload`,
+/// `ResizePayload`, `SessionIdPayload`) has in common.
+#[derive(serde::Deserialize)]
+struct SessionRef {
+    id: String,
+}
+
+/// The trust boundary for relayed clients (spec §2). `Err(reason)` means
+/// "answer with `Error`, skip dispatch". Allowed: `Hello`, `ListSessions`
+/// (the dispatch arm filters the list), `Detach`, and `Attach`/`Input`/
+/// `Resize`/`Interrupt` whose session id is in `allowed`; `GetSetting`
+/// only for the projection row itself. Everything else — `Kill`,
+/// `CreateSession`, `SetSetting`, every Brain/Roots RPC — is refused.
+pub fn authorize_remote(frame: &Frame, allowed: &HashSet<String>) -> Result<(), String> {
+    let shared = |id: &str| {
+        allowed
+            .contains(id)
+            .then_some(())
+            .ok_or_else(|| format!("session {id} is not shared"))
+    };
+    match frame.header.message_kind {
+        MessageKind::Hello | MessageKind::ListSessions | MessageKind::Detach => Ok(()),
+        MessageKind::Attach | MessageKind::Resize | MessageKind::Interrupt => shared(
+            &parse_json::<SessionRef>(&frame.payload)
+                .map_err(|error| error.to_string())?
+                .id,
+        ),
+        MessageKind::Input => shared(
+            decode_raw_payload(&frame.payload)
+                .map_err(|error| error.to_string())?
+                .0,
+        ),
+        MessageKind::GetSetting => {
+            let key = parse_json::<SettingKey>(&frame.payload)
+                .map_err(|error| error.to_string())?
+                .key;
+            (key == REMOTE_CONTROL_KEY)
+                .then_some(())
+                .ok_or_else(|| format!("setting {key} is not readable remotely"))
+        }
+        other => Err(format!("{other:?} is not allowed for remote clients")),
+    }
 }
 
 pub struct DaemonServer {
@@ -55,6 +159,8 @@ pub struct DaemonServer {
     /// scope per the brief — same reasoning as both processes already
     /// holding independent `Store` connections to one WAL-mode file).
     ingestion: IngestionState,
+    /// See [`ClientContext::settings_changed`].
+    settings_changed: Arc<Notify>,
 }
 
 impl DaemonServer {
@@ -122,11 +228,25 @@ impl DaemonServer {
             settings: Arc::new(std::sync::Mutex::new(settings)),
             data_dir,
             ingestion: IngestionState::new(),
+            settings_changed: Arc::new(Notify::new()),
         })
     }
 
     pub fn registry(&self) -> SessionRegistry {
         self.registry.clone()
+    }
+
+    /// The per-connection handle [`serve_client`] needs — what the unix
+    /// accept loop hands every local client, and what the relay hands
+    /// every remote one.
+    pub fn client_context(&self) -> ClientContext {
+        ClientContext {
+            registry: self.registry.clone(),
+            settings: Arc::clone(&self.settings),
+            data_dir: self.data_dir.clone(),
+            ingestion: self.ingestion.clone(),
+            settings_changed: Arc::clone(&self.settings_changed),
+        }
     }
 
     pub async fn run_until(self, shutdown: oneshot::Receiver<()>) -> Result<()> {
@@ -147,16 +267,27 @@ impl DaemonServer {
             tokio::select! {
                 accepted = self.listener.accept() => {
                     let (stream, _) = accepted.context("accept daemon client")?;
-                    let registry = self.registry.clone();
-                    let settings = Arc::clone(&self.settings);
-                    let owner_uid = self.runtime_owner_uid;
-                    let data_dir = self.data_dir.clone();
-                    let ingestion = self.ingestion.clone();
+                    // The peer-UID check is the unix socket's own gate and
+                    // lives here, not in `serve_client`: a relayed stream
+                    // has no peer credentials, it has `ClientTrust::Remote`.
+                    let peer_uid = match stream.peer_cred() {
+                        Ok(credentials) => credentials.uid(),
+                        Err(error) => {
+                            tracing::warn!(
+                                "rejecting daemon client: read peer credentials: {error}"
+                            );
+                            continue;
+                        }
+                    };
+                    if !peer_uid_allowed(peer_uid, self.runtime_owner_uid) {
+                        tracing::warn!(
+                            "rejecting daemon client: peer UID {peer_uid} does not own daemon runtime"
+                        );
+                        continue;
+                    }
+                    let ctx = self.client_context();
                     clients.spawn(async move {
-                        let _ = handle_client(
-                            stream, registry, settings, owner_uid, data_dir, ingestion,
-                        )
-                        .await;
+                        let _ = serve_client(stream, ctx, ClientTrust::Local).await;
                     });
                 }
                 _ = &mut shutdown => break,
@@ -204,21 +335,25 @@ impl Drop for Attachment {
     }
 }
 
-async fn handle_client(
-    stream: UnixStream,
-    registry: SessionRegistry,
-    settings: Arc<std::sync::Mutex<Store>>,
-    runtime_owner_uid: u32,
-    data_dir: PathBuf,
-    ingestion: IngestionState,
-) -> Result<()> {
-    let peer_uid = stream.peer_cred().context("read peer credentials")?.uid();
-    if !peer_uid_allowed(peer_uid, runtime_owner_uid) {
-        return Err(anyhow!("peer UID {peer_uid} does not own daemon runtime"));
-    }
-
-    let (mut reader, writer) = stream.into_split();
-    let writer = Arc::new(Mutex::new(writer));
+/// Serves one client connection over any byte stream until it closes.
+///
+/// The unix accept loop calls this with [`ClientTrust::Local`] after its
+/// peer-UID check; the relay calls it with [`ClientTrust::Remote`] over a
+/// WebSocket adapted to a byte stream, in which case every frame after
+/// `Hello` passes [`authorize_remote`] before the dispatch below sees it.
+pub async fn serve_client<S>(stream: S, ctx: ClientContext, trust: ClientTrust) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let ClientContext {
+        registry,
+        settings,
+        data_dir,
+        ingestion,
+        settings_changed,
+    } = ctx;
+    let (mut reader, writer) = tokio::io::split(stream);
+    let writer: SharedWriter = Arc::new(Mutex::new(Box::new(writer)));
     let hello = read_frame(&mut reader).await.context("read hello")?;
     if hello.header.message_kind != MessageKind::Hello {
         return Err(anyhow!("first client frame must be Hello"));
@@ -237,6 +372,23 @@ async fn handle_client(
     let mut attachments = HashMap::<String, Attachment>::new();
     while let Ok(frame) = read_frame(&mut reader).await {
         let request = frame.header.request_or_sequence;
+        // The remote trust boundary: a point read of the projection per
+        // frame (microseconds; nothing to cache or invalidate), then the
+        // authorizer. `None` for local clients, so the dispatch below is
+        // byte-for-byte the local path unless it consults `allowed`.
+        let allowed = (trust == ClientTrust::Remote).then(|| {
+            lock_store(&settings)
+                .map(|store| remote_session_ids(&store))
+                .unwrap_or_default()
+        });
+        if let Some(allowed) = &allowed {
+            if let Err(reason) = authorize_remote(&frame, allowed) {
+                if send_error(&writer, request, reason).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+        }
         /// Decodes this frame's JSON payload, or answers with an `Error`
         /// frame and moves on to the next frame.
         ///
@@ -272,13 +424,15 @@ async fn handle_client(
         let result = match frame.header.message_kind {
             MessageKind::ListSessions => {
                 decode_payload!(serde_json::Value);
+                let mut sessions = registry.list();
+                if let Some(allowed) = &allowed {
+                    sessions.retain(|id| allowed.contains(id));
+                }
                 send_json(
                     &writer,
                     MessageKind::SessionList,
                     request,
-                    &SessionListPayload {
-                        sessions: registry.list(),
-                    },
+                    &SessionListPayload { sessions },
                 )
                 .await
             }
@@ -424,7 +578,10 @@ async fn handle_client(
                             .map_err(Into::into)
                     });
                 match result {
-                    Ok(()) => send_response(&writer, request).await,
+                    Ok(()) => {
+                        settings_changed.notify_one();
+                        send_response(&writer, request).await
+                    }
                     Err(error) => send_error(&writer, request, error).await,
                 }
             }
@@ -724,11 +881,7 @@ fn tool_context<'a>(store: &'a Store, data_dir: &'a Path) -> ToolContext<'a> {
     ToolContext { store, data_dir }
 }
 
-async fn send_attach_state(
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
-    id: &str,
-    state: AttachState,
-) -> Result<()> {
+async fn send_attach_state(writer: &SharedWriter, id: &str, state: AttachState) -> Result<()> {
     match state {
         AttachState::Snapshot { sequence, bytes } => {
             send_frame(
@@ -750,11 +903,7 @@ async fn send_attach_state(
     }
 }
 
-async fn forward_events(
-    writer: Arc<Mutex<OwnedWriteHalf>>,
-    id: String,
-    subscription: SessionSubscription,
-) {
+async fn forward_events(writer: SharedWriter, id: String, subscription: SessionSubscription) {
     loop {
         let receiver = subscription.clone();
         let event =
@@ -773,11 +922,7 @@ async fn forward_events(
     }
 }
 
-async fn send_event(
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
-    id: &str,
-    event: SessionEvent,
-) -> Result<()> {
+async fn send_event(writer: &SharedWriter, id: &str, event: SessionEvent) -> Result<()> {
     let frame = match event {
         SessionEvent::Output { sequence, bytes } => Frame::new(
             MessageKind::Output,
@@ -823,7 +968,7 @@ async fn send_event(
     send_frame(writer, frame).await
 }
 
-async fn send_response(writer: &Arc<Mutex<OwnedWriteHalf>>, request: u64) -> Result<()> {
+async fn send_response(writer: &SharedWriter, request: u64) -> Result<()> {
     send_json(
         writer,
         MessageKind::Response,
@@ -834,7 +979,7 @@ async fn send_response(writer: &Arc<Mutex<OwnedWriteHalf>>, request: u64) -> Res
 }
 
 async fn send_error(
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    writer: &SharedWriter,
     request: u64,
     error: impl std::fmt::Display,
 ) -> Result<()> {
@@ -850,7 +995,7 @@ async fn send_error(
 }
 
 async fn send_json(
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    writer: &SharedWriter,
     kind: MessageKind,
     request_or_sequence: u64,
     value: &impl serde::Serialize,
@@ -862,7 +1007,7 @@ async fn send_json(
     .await
 }
 
-async fn send_frame(writer: &Arc<Mutex<OwnedWriteHalf>>, frame: Frame) -> Result<()> {
+async fn send_frame(writer: &SharedWriter, frame: Frame) -> Result<()> {
     write_frame(&mut *writer.lock().await, &frame)
         .await
         .context("write daemon frame")
