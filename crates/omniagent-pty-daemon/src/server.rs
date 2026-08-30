@@ -173,8 +173,27 @@ impl DaemonServer {
     /// `OMNIAGENT_ADE_DATA_DIR` exactly like every other crate in this
     /// workspace does (PLAN.md's Local-first constraint: "Env override
     /// `OMNIAGENT_ADE_DATA_DIR` for tests — every crate must honor it").
+    ///
+    /// The directory is account-scoped: `root/current-account` selects
+    /// `root/accounts/<id>` (2026-08-30 account-scoped-workspace spec). The
+    /// pointer is read exactly once, here — the app restarts the daemon to
+    /// move it between accounts. Before the store is opened, and so before
+    /// any file is held open, a pre-account install's data is moved into
+    /// the first account directory (`Store::adopt_legacy_data`).
     pub async fn bind(socket_path: PathBuf) -> Result<Self> {
-        Self::bind_with_data_dir(socket_path, Store::default_data_dir()).await
+        let root = Store::data_root();
+        let data_dir = Store::default_data_dir();
+        if data_dir != root
+            && Store::adopt_legacy_data(&root, &data_dir)
+                .context("move the pre-account brain data into the account directory")?
+        {
+            tracing::info!(
+                root = %root.display(),
+                account_dir = %data_dir.display(),
+                "adopted the pre-account brain data into the account directory"
+            );
+        }
+        Self::bind_with_data_dir(socket_path, data_dir).await
     }
 
     /// Same as [`Self::bind`], but takes the brain-store data directory
@@ -1086,25 +1105,26 @@ async fn send_frame(writer: &SharedWriter, frame: Frame) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Both tests below mutate the process-global `OMNIAGENT_ADE_DATA_DIR`.
+    /// They live here (this unit-test binary) rather than in
+    /// `tests/server_protocol.rs`, which runs many concurrent tests that
+    /// would race the env var — and they serialize against each other
+    /// through this lock, held across the awaits (a tokio mutex, so no
+    /// `await_holding_lock` lint).
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Task 6a regression: `bind()` — the real entry point `run_daemon`/
     /// `main.rs` use in production — must resolve the shared brain-store
     /// data directory via `brain_core::Store::default_data_dir()`, honoring
-    /// `OMNIAGENT_ADE_DATA_DIR` exactly like `src-tauri`'s `BrainState`
-    /// does, and NOT derive it from the socket path's own parent directory.
-    /// The bug this catches: `bind()` used to open `Store::open(runtime_dir)`
-    /// (the socket's directory), which silently pointed every brain read —
-    /// and the `layout` setting — at an unshared, essentially-empty
-    /// `brain.db` instead of the one the app/web UI actually read and write.
-    ///
-    /// This is the only test in this crate that mutates the process-global
-    /// `OMNIAGENT_ADE_DATA_DIR` env var. It lives here (a unit test inside
-    /// `src/server.rs`, its own separate test binary) rather than in
-    /// `tests/server_protocol.rs`, which runs many concurrent
-    /// multi-threaded tests that would otherwise race a global env var
-    /// mutation — `brain-core/tests/store_test.rs` documents the same
-    /// concern for its own env-var test.
+    /// `OMNIAGENT_ADE_DATA_DIR` exactly like every other crate does, and
+    /// NOT derive it from the socket path's own parent directory. The bug
+    /// this catches: `bind()` used to open `Store::open(runtime_dir)` (the
+    /// socket's directory), which silently pointed every brain read — and
+    /// the `layout` setting — at an unshared, essentially-empty `brain.db`
+    /// instead of the one the app actually reads and writes.
     #[tokio::test]
     async fn bind_resolves_the_shared_data_dir_via_default_data_dir_not_the_socket_path() {
+        let _env = ENV_LOCK.lock().await;
         let scratch = tempfile::tempdir().unwrap();
         let data_dir = scratch.path().join("shared-brain-data");
         std::env::set_var("OMNIAGENT_ADE_DATA_DIR", &data_dir);
@@ -1117,6 +1137,37 @@ mod tests {
         // Proves the socket's own directory played no part in the result.
         assert_ne!(server.data_dir, scratch.path().join("elsewhere-entirely"));
         assert!(data_dir.join("brain.db").exists());
+
+        drop(server);
+        std::env::remove_var("OMNIAGENT_ADE_DATA_DIR");
+    }
+
+    /// The account-scoped workspace (2026-08-30 spec): with a pointer at the
+    /// root, `bind()` opens `root/accounts/<id>` — and on the first such
+    /// start moves the pre-account `brain.db` there, so the developer's
+    /// existing layout, roots and transcripts come back under the account
+    /// instead of being left behind at the root.
+    #[tokio::test]
+    async fn bind_follows_the_current_account_pointer_and_adopts_legacy_data_once() {
+        let _env = ENV_LOCK.lock().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("root");
+        // The pre-account install: a brain.db at the root with a row in it.
+        Store::open(&root).unwrap().set_setting("layout", "legacy-layout").unwrap();
+        std::fs::write(Store::current_account_file(&root), "fc44b18d5588b1d6\n").unwrap();
+        std::env::set_var("OMNIAGENT_ADE_DATA_DIR", &root);
+
+        let socket_path = scratch.path().join("run").join("daemon.sock");
+        let server = DaemonServer::bind(socket_path).await.unwrap();
+
+        let account_dir = root.join("accounts").join("fc44b18d5588b1d6");
+        assert_eq!(server.data_dir, account_dir);
+        assert!(!root.join("brain.db").exists(), "the legacy brain.db moved");
+        assert_eq!(
+            server.settings.lock().unwrap().get_setting("layout").unwrap().as_deref(),
+            Some("legacy-layout"),
+            "and the daemon is serving it from the account dir"
+        );
 
         drop(server);
         std::env::remove_var("OMNIAGENT_ADE_DATA_DIR");
