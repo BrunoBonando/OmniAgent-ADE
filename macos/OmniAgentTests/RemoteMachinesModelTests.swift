@@ -329,23 +329,178 @@ final class RemoteMachinesModelTests: XCTestCase {
     }
 
     /// A 401/403 on the WebSocket upgrade stops that connection's own
-    /// retries (`SessionConnectionError.unauthorized`). The next poll that
-    /// gets through the relay has a bearer the relay accepts, so the model
-    /// re-`connect()`s the same object with it rather than minting a twin.
-    func testAnUnauthorizedConnectionIsReconnectedOnTheNextSuccessfulPoll() async throws {
+    /// retries (`SessionConnectionError.unauthorized`). The model re-dials
+    /// the same object only once the bearer has *changed* — a REST poll
+    /// succeeding proves nothing about the upgrade the relay just refused.
+    func testAnUnauthorizedConnectionIsReconnectedOnceTheBearerChanges() async throws {
         answer(Self.studioOnline)
         var made = 0
+        var bearer: String? = "tok1"
         let fake = FakeRemoteConnection()
-        let model = RemoteMachinesModel(relay: makeRelay(), makeConnection: { _ in made += 1; return fake }, isSignedIn: { true })
+        let model = RemoteMachinesModel(
+            relay: makeRelay(),
+            makeConnection: { _ in made += 1; return fake },
+            isSignedIn: { true },
+            currentBearer: { bearer }
+        )
         await model.refresh()
         XCTAssertEqual(fake.connectCalls, 1)
 
         fake.onError?(SessionConnectionError.unauthorized)
         await Task.yield()
+        bearer = "tok2"
         await model.refresh()
 
         XCTAssertEqual(made, 1)
         XCTAssertEqual(fake.connectCalls, 2)
+    }
+
+    /// The negative twin: the same bearer would only be refused again, so a
+    /// poll that finds it unchanged leaves the connection alone.
+    func testAnUnauthorizedConnectionIsNotReDialledWhileTheBearerIsUnchanged() async throws {
+        answer(Self.studioOnline)
+        let fake = FakeRemoteConnection()
+        let model = RemoteMachinesModel(
+            relay: makeRelay(),
+            makeConnection: { _ in fake },
+            isSignedIn: { true },
+            currentBearer: { "tok1" }
+        )
+        await model.refresh()
+        fake.onError?(SessionConnectionError.unauthorized)
+        await Task.yield()
+
+        await model.refresh()
+        await model.refresh()
+
+        XCTAssertEqual(fake.connectCalls, 1, "same bearer, same refusal — do not dial")
+    }
+
+    /// `stop()` (or a log-out) while a poll's relay request is in flight:
+    /// the answer that lands afterwards is for a model that no longer
+    /// exists, and must not rebuild connections nobody will ever stop again.
+    func testStopMidPollDropsThePollsAnswer() async throws {
+        let gate = DispatchSemaphore(value: 0)
+        RemoteRelayStubProtocol.handler = { _ in
+            gate.wait()
+            return (200, "[\(Self.studioOnline)]")
+        }
+        let fake = FakeRemoteConnection()
+        let model = RemoteMachinesModel(relay: makeRelay(), makeConnection: { _ in fake }, isSignedIn: { true })
+
+        let poll = Task { await model.refresh() }
+        for _ in 0..<500 where RemoteRelayStubProtocol.requests.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertFalse(RemoteRelayStubProtocol.requests.isEmpty, "the poll never reached the relay")
+        await MainActor.run { model.stop() }
+        gate.signal()
+        await poll.value
+
+        XCTAssertNil(model.retainedConnection(for: "d1"), "the parked poll's answer must be dropped")
+        XCTAssertEqual(fake.connectCalls, 0, "no socket may be opened after stop()")
+        XCTAssertTrue(model.machines.isEmpty)
+    }
+
+    /// This Mac's own relay device is on the account's list too; dialling it
+    /// would be a WebSocket to the daemon already behind this very window.
+    func testThisMacsOwnDeviceIsNeverListedOrDialled() async throws {
+        answer(Self.studioOnline, Self.airOnline)
+        var made: [URL] = []
+        let model = RemoteMachinesModel(
+            relay: makeRelay(),
+            makeConnection: { url in made.append(url); return FakeRemoteConnection() },
+            isSignedIn: { true }
+        )
+        model.localDeviceID = "d1"
+
+        await model.refresh()
+
+        XCTAssertEqual(model.machines.map(\.name), ["Air"])
+        XCTAssertNil(model.connection(for: "d1"))
+        XCTAssertEqual(made.map(\.absoluteString), ["wss://relay.test/v1/viewer/d2"])
+    }
+
+    /// The token row can land after the first poll (it is read over the
+    /// daemon socket); a connection already dialled to ourselves is dropped
+    /// the moment the id arrives.
+    func testLocalDeviceIDArrivingLateDropsAnAlreadyDialledConnection() async throws {
+        answer(Self.studioOnline)
+        let fake = FakeRemoteConnection()
+        let model = RemoteMachinesModel(relay: makeRelay(), makeConnection: { _ in fake }, isSignedIn: { true })
+        await model.refresh()
+        XCTAssertNotNil(model.connection(for: "d1"))
+
+        model.localDeviceID = "d1"
+
+        XCTAssertEqual(fake.disconnectCalls, 1)
+        XCTAssertNil(model.retainedConnection(for: "d1"))
+        XCTAssertTrue(model.machines.isEmpty)
+    }
+
+    /// The window reads the id out of the daemon's `relay_device_token` row;
+    /// only that one field — the token itself stays the daemon's.
+    func testDeviceIDInTokenRow() {
+        XCTAssertEqual(
+            RemoteMachinesModel.deviceID(
+                inTokenRow: #"{"device_id":"d9","name":"Mac","relay_url":"https://r","token":"secret"}"#
+            ),
+            "d9"
+        )
+        XCTAssertNil(RemoteMachinesModel.deviceID(inTokenRow: nil))
+        XCTAssertNil(RemoteMachinesModel.deviceID(inTokenRow: ""))
+        XCTAssertNil(RemoteMachinesModel.deviceID(inTokenRow: "not json"))
+        XCTAssertNil(RemoteMachinesModel.deviceID(inTokenRow: "{}"))
+    }
+
+    /// A `start()` poke that lands while a poll is in flight — "the bearer
+    /// just arrived" — is honoured once that poll finishes, not dropped.
+    func testAPokeDuringAnInFlightPollIsHonouredAfterIt() async throws {
+        let gate = DispatchSemaphore(value: 0)
+        RemoteRelayStubProtocol.handler = { _ in
+            if RemoteRelayStubProtocol.requests.count == 1 { gate.wait() }
+            return (200, "[]")
+        }
+        let model = RemoteMachinesModel(
+            relay: makeRelay(),
+            pollInterval: 3600,
+            makeConnection: { _ in FakeRemoteConnection() },
+            isSignedIn: { true }
+        )
+
+        await MainActor.run { model.start() }
+        for _ in 0..<500 where RemoteRelayStubProtocol.requests.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(RemoteRelayStubProtocol.requests.count, 1)
+        await MainActor.run { model.start() }
+        gate.signal()
+        for _ in 0..<500 where RemoteRelayStubProtocol.requests.count < 2 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        await MainActor.run { model.stop() }
+
+        XCTAssertGreaterThanOrEqual(RemoteRelayStubProtocol.requests.count, 2, "the poke's poll must follow")
+    }
+
+    /// Two polls that both meet a 401 inside the coalesce window share one
+    /// session refresh — the refresh cookie rotates on every use, and two
+    /// concurrent refreshes would spend the same cookie twice.
+    func testConcurrentUnauthorizedPollsShareOneSessionRefresh() async throws {
+        RemoteRelayStubProtocol.handler = { _ in (401, #"{"detail":"expired"}"#) }
+        var refreshes = 0
+        let model = RemoteMachinesModel(
+            relay: makeRelay(),
+            makeConnection: { _ in FakeRemoteConnection() },
+            isSignedIn: { true },
+            refreshSession: { refreshes += 1 }
+        )
+
+        await model.refresh()
+        await model.refresh()
+
+        XCTAssertEqual(refreshes, 1, "the second poll inside the window reuses the first refresh")
+        XCTAssertEqual(RemoteRelayStubProtocol.requests.count, 4, "both polls still retry once")
     }
 
     func testStartPollsAtOnceAndAgainOnTheInterval() async throws {
@@ -416,7 +571,8 @@ final class RemotePanesTests: XCTestCase {
 
     private func makeController(
         remoteMachines: RemoteMachinesModel,
-        settingsClient: SettingsClient? = nil
+        settingsClient: SettingsClient? = nil,
+        defaults: UserDefaults = .standard
     ) -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(
@@ -424,7 +580,8 @@ final class RemotePanesTests: XCTestCase {
             ),
             panes: [],
             remoteMachines: remoteMachines,
-            settingsClient: settingsClient
+            settingsClient: settingsClient,
+            defaults: defaults
         )
     }
 
@@ -433,24 +590,22 @@ final class RemotePanesTests: XCTestCase {
     /// guess), on when it answers signed in, off — with every remote pane
     /// closed and the model cleared — on log out.
     ///
-    /// The mirror is `UserDefaults.standard`'s `auth.signedIn`, the key the
-    /// real launch decision reads; saved and put back, and the suite-level
-    /// `RealPreferencesGuard` stands behind that.
+    /// The mirror is a throwaway suite, threaded through the controller's
+    /// `defaults:` seam so neither the read (`presentLaunchGate`) nor the
+    /// coordinator's own writes ever touch the real app's domain.
     @MainActor
     func testRemotePollingFollowsTheAccount() async throws {
-        let key = AuthGate.signedInDefaultsKey
-        let previous = UserDefaults.standard.object(forKey: key)
-        addTeardownBlock {
-            if let previous {
-                UserDefaults.standard.set(previous, forKey: key)
-            } else {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
-        }
-        UserDefaults.standard.set(true, forKey: key)
+        let suite = "digital.bruno.omniagent.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
 
         let machines = await makeMachines()
-        let controller = makeController(remoteMachines: machines, settingsClient: FakeSettingsClient())
+        let controller = makeController(
+            remoteMachines: machines,
+            settingsClient: FakeSettingsClient(),
+            defaults: defaults
+        )
         defer { controller.close() }
         controller.sessionRestorer = {}
         controller.sessionEnsurer = { _ in }
@@ -460,7 +615,7 @@ final class RemotePanesTests: XCTestCase {
         controller.applyRestoredPanes([])
         XCTAssertFalse(machines.isRunning, "the install-time seed must not start polling")
 
-        controller.presentLaunchGate(defaults: .standard) {}
+        controller.presentLaunchGate(defaults: defaults) {}
         XCTAssertTrue(machines.isRunning, "signed in: polling starts as the gate resolves")
 
         controller.openRemoteSession(deviceID: "d1", sessionID: "s1", title: "Build")
