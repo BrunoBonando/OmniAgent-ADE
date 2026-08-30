@@ -1881,6 +1881,56 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.awaitingSignIn)
     }
 
+    /// Fix-round regression: `tearDownForSignedOut` only reaches
+    /// `syncRemoteMachines(signedIn: false)` because `seedAccountFromMirror`
+    /// runs (inside `performLogout`) while `authGateResolved` is still
+    /// `true` — `authGateResolved` only goes `false` afterwards, inside
+    /// `tearDownForSignedOut` itself. Reordering those two adjacent-looking
+    /// lines would leave every remote-machine viewer connection (and its
+    /// panes) alive after logout with no other test catching it, since
+    /// `authGateResolved` defaults to `false` and none of the other logout
+    /// tests ever resolve the launch gate.
+    func testLogOutStopsTheRemoteMachinesPollerAndItsConnections() throws {
+        let defaults = try throwawayDefaults()
+        defaults.set(true, forKey: AuthGate.signedInDefaultsKey)
+        let client = FakeSettingsClient(rows: ["auth_signed_in": "true"])
+        // `isSignedIn: { false }` keeps `start()`'s background poll from
+        // ever reaching the relay: nothing here may touch a real network
+        // call or a real daemon.
+        let remoteMachines = RemoteMachinesModel(isSignedIn: { false })
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-controller-test.sock")
+            ),
+            panes: [],
+            remoteMachines: remoteMachines,
+            settingsClient: client,
+            authDefaults: defaults
+        )
+        defer { controller.close() }
+        controller.sessionRestorer = {}
+        let root = try temporaryAccountRoot()
+        try AccountDirectory.writeCurrentAccount("fc44b18d5588b1d6", root: root)
+        controller.accountRoot = root
+        controller.daemonTerminator = { $0() }
+        controller.serverSessionRevoker = {}
+        controller.authGatePresenter = { _ in }
+
+        // Resolve the launch gate — the mirror already says signed in, so
+        // this is the same-daemon straight-through path — so
+        // `authGateResolved` is `true` going into the log-out below.
+        var revealed = 0
+        controller.presentLaunchGate(defaults: defaults) { revealed += 1 }
+        XCTAssertEqual(revealed, 1)
+
+        remoteMachines.start()
+        XCTAssertTrue(remoteMachines.isRunning, "the poller is running before logout")
+
+        controller.logOutOfAccount()
+
+        XCTAssertFalse(remoteMachines.isRunning, "logout stops the poller and drops every connection")
+    }
+
     func testTheAccountLabelIsTheNameFallingBackToTheEmail() throws {
         let named = makeEmptyController(
             settingsClient: FakeSettingsClient(rows: [

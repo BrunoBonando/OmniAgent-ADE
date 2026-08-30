@@ -5103,6 +5103,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Steps 4–6 of the spec's logout: daemon, pointer, workspace, window,
     /// menu bar, login window. `awaitingSignIn` goes up first so a
     /// `.connected` from the restarted (signed-out) daemon restores nothing.
+    ///
+    /// **Ordering this depends on:** `performLogout`'s `seedAccountFromMirror()`
+    /// call must run — and does, just before this — while `authGateResolved`
+    /// is still `true`. `seedAccountFromMirror` only calls
+    /// `syncRemoteMachines(signedIn: false)` when `authGateResolved` is
+    /// `true`; setting `authGateResolved = false` here happens *after* that
+    /// call for exactly this reason. Flip the order — or move the
+    /// `authGateResolved = false` earlier — and every remote-machine viewer
+    /// connection and its panes silently survive a log-out.
     private func tearDownForSignedOut() {
         awaitingSignIn = true
         authGateResolved = false
