@@ -394,18 +394,6 @@ impl Store {
 
     /// One-time migration of a pre-account install: moves `root/brain.db`
     /// (+ `-wal`, `-shm`), `root/brain/` and `root/transcripts/` into
-    /// `account_dir`, but only the very first time an account directory is
-    /// created (`root/accounts` did not exist yet) and only when there is a
-    /// `root/brain.db` to move. Every later account starts empty.
-    ///
-    /// Called by the daemon before it opens the store — the daemon is the
-    /// sole owner of these files, and at that moment nothing has them open.
-    /// The app never moves files itself. A `rename` within one root stays
-    /// on one filesystem, so this is atomic per artefact and never copies.
-    ///
-    /// Uses a staging directory (`root/accounts.partial/<id>/`) for safety:
-    /// if any rename fails, the incomplete state is isolated and the next run
-    /// cleans it up and retries (self-healing on interrupted migrations).
     pub fn adopt_legacy_data(root: &Path, account_dir: &Path) -> std::io::Result<bool> {
         if account_dir == root {
             return Ok(false);
@@ -425,7 +413,10 @@ impl Store {
         }
         
         // Stage the migration: move artifacts into accounts.partial/<id> first
-        let partial_account_dir = partial_accounts.join(account_dir.file_name().unwrap());
+        let Some(dir_name) = account_dir.file_name() else {
+            return Ok(false);
+        };
+        let partial_account_dir = partial_accounts.join(dir_name);
         std::fs::create_dir_all(&partial_account_dir)?;
         
         for name in ["brain.db", "brain.db-wal", "brain.db-shm", "brain", "transcripts"] {
@@ -438,6 +429,7 @@ impl Store {
         // All renames succeeded; commit the migration by promoting the staging dir
         std::fs::rename(&partial_accounts, root.join(ACCOUNTS_DIR))?;
         Ok(true)
+    }
     }
 
     /// Opens (creating if absent) the brain database under `data_dir/brain.db`.
@@ -1429,7 +1421,6 @@ mod account_scope_tests {
         assert!(!Store::adopt_legacy_data(root, root).unwrap(), "signed out: the root serves itself");
         assert!(root.join("brain.db").exists());
     }
-}
 
     #[test]
     fn adopt_legacy_data_cleans_up_leftover_accounts_partial_and_retries() {
@@ -1454,3 +1445,4 @@ mod account_scope_tests {
             assert!(account.join(name).exists(), "{name} arrived in the account dir");
         }
     }
+}
